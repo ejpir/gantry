@@ -95,9 +95,9 @@ func mknod(path string, major, minor uint32) {
 
 func poweroff() {
 	const (
-		sysReboot       = 142 // aarch64
-		rebootMagic1    = 0xfee1dead
-		rebootMagic2    = 672274793
+		sysReboot         = 142 // aarch64
+		rebootMagic1      = 0xfee1dead
+		rebootMagic2      = 672274793
 		rebootCmdPowerOff = 0x4321fedc
 	)
 	_, _, errno := syscall.Syscall(sysReboot, rebootMagic1, rebootMagic2, rebootCmdPowerOff)

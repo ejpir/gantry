@@ -6,20 +6,28 @@ package main
 // registers from the host's UTC time. Everything else reads as benign
 // defaults (register D with the VRT "battery good" bit set).
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 const (
 	cmosIndexPort = 0x70
 	cmosDataPort  = 0x71
 )
 
+// mu guards the index register: ioRead/ioWrite run on every vCPU thread
+// (machine.handleIO), so -cpus 2 would race it otherwise.
 type cmosRTC struct {
+	mu    sync.Mutex
 	index byte
 }
 
 func bcd(v int) byte { return byte((v/10)<<4 | (v % 10)) }
 
 func (c *cmosRTC) ioRead(port uint16) byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if port == cmosIndexPort {
 		return c.index
 	}
@@ -58,6 +66,8 @@ func (c *cmosRTC) ioRead(port uint16) byte {
 }
 
 func (c *cmosRTC) ioWrite(port uint16, val byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if port == cmosIndexPort {
 		c.index = val
 	}

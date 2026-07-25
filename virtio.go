@@ -45,22 +45,37 @@ const (
 type guestMem interface {
 	readAt(addr uint64, p []byte) error
 	writeAt(addr uint64, p []byte) error
+	size() uint64
+	contains(addr, n uint64) bool
 }
 
 // ramMem implements guestMem over the VM's RAM slice. base is the guest
 // physical address of ram[0] (0x40000000 on arm64, 0 on x86-64).
 type ramMem struct {
+	mu   sync.RWMutex
 	ram  []byte
 	base uint64
 }
 
-func (m ramMem) off(addr uint64) (uint64, error) {
+func (m *ramMem) size() uint64 { return uint64(len(m.ram)) }
+
+// contains reports whether [addr, addr+n) lies fully inside guest RAM.
+func (m *ramMem) contains(addr, n uint64) bool {
+	return addr >= m.base && n <= uint64(len(m.ram)) && addr-m.base <= uint64(len(m.ram))-n
+}
+
+func (m *ramMem) off(addr uint64) (uint64, error) {
 	if addr < m.base || addr >= m.base+uint64(len(m.ram)) {
 		return 0, fmt.Errorf("guest addr %#x outside RAM", addr)
 	}
 	return addr - m.base, nil
 }
-func (m ramMem) readAt(addr uint64, p []byte) error {
+
+// Guest RAM is shared between vCPU exit handlers and every device goroutine.
+// The RWMutex serializes access so the race detector (and future SMP device
+// paths) see a coherent memory instead of raw slice races; it is leaf-level
+// (held only for the copy), so it can't deadlock against device locks.
+func (m *ramMem) readAt(addr uint64, p []byte) error {
 	o, err := m.off(addr)
 	if err != nil {
 		return err
@@ -68,10 +83,12 @@ func (m ramMem) readAt(addr uint64, p []byte) error {
 	if o+uint64(len(p)) > uint64(len(m.ram)) {
 		return fmt.Errorf("guest read %#x+%d overflows RAM", addr, len(p))
 	}
+	m.mu.RLock()
 	copy(p, m.ram[o:o+uint64(len(p))])
+	m.mu.RUnlock()
 	return nil
 }
-func (m ramMem) writeAt(addr uint64, p []byte) error {
+func (m *ramMem) writeAt(addr uint64, p []byte) error {
 	o, err := m.off(addr)
 	if err != nil {
 		return err
@@ -79,7 +96,9 @@ func (m ramMem) writeAt(addr uint64, p []byte) error {
 	if o+uint64(len(p)) > uint64(len(m.ram)) {
 		return fmt.Errorf("guest write %#x+%d overflows RAM", addr, len(p))
 	}
+	m.mu.Lock()
 	copy(m.ram[o:o+uint64(len(p))], p)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -92,6 +111,10 @@ type virtq struct {
 	usedAddr  uint64
 	lastAvail uint16 // next avail index to consume
 }
+
+// numValid reports whether the guest programmed a usable ring size.
+// Ring index math does % uint16(q.num); num==0 would divide by zero.
+func (q *virtq) numValid() bool { return q.num >= 1 && q.num <= virtqSize }
 
 type desc struct {
 	addr  uint64
@@ -222,10 +245,13 @@ func (c *virtioMMIOCore) mmioWrite(off uint64, val uint32) {
 		if int(val) < len(c.queues) {
 			c.queueSel = int(val)
 		}
-	case off == 0x038: // QueueNum
-		c.queues[c.queueSel].num = val
-	case off == 0x044: // QueueReady
-		c.queues[c.queueSel].ready = val == 1
+	case off == 0x038: // QueueNum — clamp: an untrusted guest could write
+		// 0 (divide-by-zero in the ring index math) or >QueueNumMax.
+		if val >= 1 && val <= virtqSize {
+			c.queues[c.queueSel].num = val
+		}
+	case off == 0x044: // QueueReady — refuse to arm a queue with no valid size
+		c.queues[c.queueSel].ready = val == 1 && c.queues[c.queueSel].numValid()
 	case off == 0x050: // QueueNotify
 		if int(val) < len(c.queues) && c.queues[val].ready {
 			c.dev.handleQueue(int(val))
@@ -285,12 +311,22 @@ func (c *virtioMMIOCore) descAt(q *virtq, i uint16) (desc, error) {
 	d.len = binary.LittleEndian.Uint32(buf[8:])
 	d.flags = binary.LittleEndian.Uint16(buf[12:])
 	d.next = binary.LittleEndian.Uint16(buf[14:])
+	// A descriptor is guest-RAM-backed by definition: anything pointing
+	// outside RAM is malformed, and consumers allocate make([]byte, d.len)
+	// before touching the address, so the guest must not control host
+	// allocation size either.
+	if !c.mem.contains(d.addr, uint64(d.len)) {
+		return desc{}, fmt.Errorf("descriptor @ %#x+%#x outside guest RAM", d.addr, d.len)
+	}
 	return d, nil
 }
 
 // availChain pops the next available descriptor chain.
 // Returns head index and the flattened descriptor list.
 func (c *virtioMMIOCore) availChain(q *virtq) (uint16, []desc, bool) {
+	if !q.numValid() {
+		return 0, nil, false
+	}
 	var availIdx uint16
 	var buf [4]byte
 	if err := c.mem.readAt(q.availAddr, buf[:2]); err != nil {
@@ -312,12 +348,19 @@ func (c *virtioMMIOCore) availChain(q *virtq) (uint16, []desc, bool) {
 	q.lastAvail++
 
 	var chain []desc
+	var total uint64
 	d, err := c.descAt(q, head)
 	if err != nil {
 		return 0, nil, false
 	}
 	for {
 		chain = append(chain, d)
+		total += uint64(d.len)
+		// per-chain byte cap: ~65 max-length descriptors must not sum to
+		// more than RAM (a legitimate chain never does)
+		if total > c.mem.size() {
+			return 0, nil, false
+		}
 		if d.flags&vringDescFNext == 0 {
 			break
 		}
@@ -334,6 +377,9 @@ var pushUsedProbe func(q *virtq, head uint16, written uint32)
 
 // pushUsed appends a used element and raises an interrupt.
 func (c *virtioMMIOCore) pushUsed(q *virtq, head uint16, written uint32) {
+	if !q.numValid() {
+		return
+	}
 	if pushUsedProbe != nil {
 		pushUsedProbe(q, head, written)
 	}

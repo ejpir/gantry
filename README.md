@@ -197,6 +197,9 @@ sockets.
 # 3b) one-shot: fresh VM + session in a single command, torn down on exit:
 ./run-macos.sh exec                        # debian + rw rwlayer + bash
 ./run-macos.sh exec -share code=$HOME/repos,ro -- /bin/sh
+# `,ro` is enforced host-side (mutating FUSE opcodes get EROFS), and the
+# share is contained: FUSE names with `..`/`/` are rejected and symlinks
+# can't lead out of the exported root.
 
 # 3b) same thing, two terminals (debug flow):
 #    Terminal 1:
@@ -243,6 +246,15 @@ sockets.
 | `virtio_test.go` | driver-simulation tests (no KVM needed) |
 
 ## Honest gaps
+
+**Threat model.** The device model treats the guest as hostile at the
+register/descriptor level (queue sizes clamped, descriptor addresses and
+lengths validated against RAM, no host allocation sized by the guest) and
+virtio-fs is contained to the exported root (no `..`/`/` in FUSE names, no
+symlink escape, `,ro` enforced host-side). What it does NOT give you yet:
+per-device I/O sandboxing of the VMM process itself (seccomp/pledge), and
+blk/fs device work runs on the vCPU thread, so a slow host filesystem
+stalls that vCPU. The VMM process still runs with your full uid privileges.
 
 - no virtio-fs DAX window/pmem, no snapshotting, no CPU throttling (only vCPU count)
 - networking currently relies on external gvproxy; no built-in TSI/netstack

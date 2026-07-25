@@ -99,7 +99,7 @@ func TestVirtioBlkRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(blk, mem, virtioMMIOBase+0*virtioMMIOStride, virtioMMIOIRQ+0, irqs.line, "blk")
 	blk.core = core
@@ -237,7 +237,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 		t.Fatalf("writable features = %#x (want FLUSH, no RO)", f)
 	}
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(blk, mem, virtioMMIOBase+0*virtioMMIOStride, virtioMMIOIRQ+0, irqs.line, "blk")
 	blk.core = core
@@ -304,7 +304,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 func TestVirtioRNG(t *testing.T) {
 	dev := newVirtioRNG()
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(dev, mem, virtioMMIOBase+0*virtioMMIOStride, virtioMMIOIRQ+0, irqs.line, "rng")
 	dev.core = core
@@ -338,7 +338,7 @@ func TestVirtioRTC(t *testing.T) {
 		t.Fatalf("id=%d queues=%d", dev.deviceID(), dev.numQueues())
 	}
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(dev, mem, virtioMMIOBase+0*virtioMMIOStride, virtioMMIOIRQ+0, irqs.line, "rtc")
 	dev.core = core
@@ -407,7 +407,7 @@ func TestVirtioFSTransport(t *testing.T) {
 	handler := &testFuseHandler{t: t}
 	dev := &virtioFS{tag: "hostshare", handler: handler}
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(dev, mem, virtioMMIOBase+0*virtioMMIOStride, virtioMMIOIRQ+0, irqs.line, "fs")
 	dev.core = core
@@ -506,7 +506,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 	mac := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	nic := &virtioNet{mac: mac, conn: backend}
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(nic, mem, virtioMMIOBase+0*virtioMMIOStride, virtioMMIOIRQ+0, irqs.line, "net")
 	nic.core = core
@@ -557,9 +557,17 @@ func TestVirtioNetTxRx(t *testing.T) {
 	rxFrame := []byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee, 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02, 0x08, 0x00, 5, 6, 7, 8}
 	backend.rx <- rxFrame
 	deadline := time.Now().Add(2 * time.Second)
+	got := make([]byte, virtioNetHdrLen+len(rxFrame))
 	for {
-		if e, ok := usedPop(mem, virtioNetRxQ); ok {
-			if e.id != 0 || e.len != uint32(virtioNetHdrLen+len(rxFrame)) {
+		// readLoop delivers RX frames from its own goroutine under core.mu
+		core.mu.Lock()
+		e, ok := usedPop(mem, virtioNetRxQ)
+		if ok {
+			mem.readAt(rxAddr, got)
+		}
+		core.mu.Unlock()
+		if ok {
+			if e.id != 0 || e.len != uint32(len(got)) {
 				t.Fatalf("bad RX used elem: %+v", e)
 			}
 			break
@@ -569,8 +577,6 @@ func TestVirtioNetTxRx(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	got := make([]byte, virtioNetHdrLen+len(rxFrame))
-	mem.readAt(rxAddr, got)
 	if string(got[virtioNetHdrLen:]) != string(rxFrame) {
 		t.Fatalf("guest RX = %x, want %x", got[virtioNetHdrLen:], rxFrame)
 	}
@@ -611,7 +617,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 		return guestSide, nil
 	}
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(vs, mem, virtioMMIOBase+1*virtioMMIOStride, virtioMMIOIRQ+1, irqs.line, "vsock")
 	vs.core = core
@@ -668,17 +674,29 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	}
 
 	// host -> guest RW "world"
-	// (the CREDIT_UPDATE we send after the guest's "hello" RW legitimately
-	// consumes one rx buffer first — post two)
+	// (credit updates — from the guest's "hello" RW and from pumpOut's
+	// post-write accounting — legitimately consume rx buffers first, and
+	// their number/timing is async, so post plenty and pick the used elem
+	// that actually carries a payload rather than a fixed head id)
 	postRxBuf(2)
 	postRxBuf(4)
+	postRxBuf(6)
 	if _, err := hostSide.Write([]byte("world")); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
+	payload := make([]byte, 5)
+	hdrBuf := make([]byte, vsockHdrLen)
 	for {
+		// pumpHost delivers host->guest data from its own goroutine (core.mu)
+		core.mu.Lock()
 		e, ok := usedPop(mem, vsockQueueRx)
-		if ok && e.id == 4 {
+		if ok && e.len > vsockHdrLen {
+			mem.readAt(ramBase+testDataAddr+0x800+uint64(e.id)*0x100, payload)
+			mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, hdrBuf)
+		}
+		core.mu.Unlock()
+		if ok && e.len > vsockHdrLen {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -686,14 +704,10 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	payload := make([]byte, 5)
-	mem.readAt(ramBase+testDataAddr+0x800+uint64(4)*0x100, payload)
 	if string(payload) != "world" {
 		t.Fatalf("guest got %q", payload)
 	}
 	// header of that packet must be an RW op addressed to the guest
-	hdrBuf := make([]byte, vsockHdrLen)
-	mem.readAt(ramBase+testDataAddr+uint64(4)*0x100, hdrBuf)
 	rw := parseVsockHdr(hdrBuf)
 	if rw.op != vsockOpRW || rw.dstCID != 3 || rw.dstPort != 1111 {
 		t.Fatalf("bad RW header: %+v", rw)
@@ -707,7 +721,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	dir := t.TempDir()
 	vs := newVirtioVsock(3, dir)
 	ram := make([]byte, 2<<20)
-	mem := ramMem{ram: ram, base: ramBase}
+	mem := &ramMem{ram: ram, base: ramBase}
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := newVirtioMMIOAt(vs, mem, virtioMMIOBase+1*virtioMMIOStride, virtioMMIOIRQ+1, irqs.line, "vsock")
 	vs.core = core
@@ -737,10 +751,21 @@ func TestVirtioVsockHostListen(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	var e usedElem
+	var req vsockHdr
 	for {
+		// the device writes the used ring and rx buffer from its own
+		// goroutine (under core.mu); take the same lock when peeking.
+		core.mu.Lock()
 		var ok bool
+		var hdrBuf []byte
 		e, ok = usedPop(mem, vsockQueueRx)
 		if ok {
+			hdrBuf = make([]byte, vsockHdrLen)
+			mem.readAt(ramBase+testDataAddr, hdrBuf)
+		}
+		core.mu.Unlock()
+		if ok {
+			req = parseVsockHdr(hdrBuf)
 			break
 		}
 		if time.Now().After(deadline) {
@@ -749,9 +774,6 @@ func TestVirtioVsockHostListen(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	_ = e
-	hdrBuf := make([]byte, vsockHdrLen)
-	mem.readAt(ramBase+testDataAddr, hdrBuf)
-	req := parseVsockHdr(hdrBuf)
 	if req.op != vsockOpRequest || req.srcCID != 2 || req.dstCID != 3 || req.dstPort != 1026 {
 		t.Fatalf("bad host-originated REQUEST: %+v", req)
 	}

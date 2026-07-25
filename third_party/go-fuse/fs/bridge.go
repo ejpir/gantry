@@ -8,6 +8,7 @@ import (
 	"context"
 	"log"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -355,7 +356,19 @@ func (b *rawBridge) inode(id uint64, fh uint64) (*Inode, *fileEntry) {
 	return n, f
 }
 
+// validGuestName rejects FUSE request names that could escape the exported
+// root when a node op joins the name onto a host path. Upstream only ever
+// sees names from the kernel's FUSE client (which never emits these);
+// gantry's virtio-fs server consumes a wire written by an untrusted guest.
+func validGuestName(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		!strings.ContainsRune(name, '/') && !strings.ContainsRune(name, 0)
+}
+
 func (b *rawBridge) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(header.NodeId, 0)
 	ctx := &fuse.Context{Caller: header.Caller, Cancel: cancel}
 	child, errno := b.lookup(ctx, parent, name, out)
@@ -396,6 +409,9 @@ func (b *rawBridge) lookup(ctx *fuse.Context, parent *Inode, name string, out *f
 }
 
 func (b *rawBridge) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(header.NodeId, 0)
 	var errno syscall.Errno
 	if mops, ok := parent.ops.(NodeRmdirer); ok {
@@ -411,6 +427,9 @@ func (b *rawBridge) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name st
 }
 
 func (b *rawBridge) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name string) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(header.NodeId, 0)
 	var errno syscall.Errno
 	if mops, ok := parent.ops.(NodeUnlinker); ok {
@@ -426,6 +445,9 @@ func (b *rawBridge) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name s
 }
 
 func (b *rawBridge) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name string, out *fuse.EntryOut) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(input.NodeId, 0)
 
 	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
@@ -454,6 +476,9 @@ func (b *rawBridge) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name stri
 }
 
 func (b *rawBridge) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name string, out *fuse.EntryOut) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(input.NodeId, 0)
 
 	mops, ok := parent.ops.(NodeMknoder)
@@ -473,6 +498,9 @@ func (b *rawBridge) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name stri
 }
 
 func (b *rawBridge) Create(cancel <-chan struct{}, input *fuse.CreateIn, name string, out *fuse.CreateOut) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(input.NodeId, 0)
 
 	mops, ok := parent.ops.(NodeCreater)
@@ -608,6 +636,9 @@ func (b *rawBridge) SetAttr(cancel <-chan struct{}, in *fuse.SetAttrIn, out *fus
 }
 
 func (b *rawBridge) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName string, newName string) fuse.Status {
+	if !validGuestName(oldName) || !validGuestName(newName) {
+		return fuse.EINVAL
+	}
 	p1, _ := b.inode(input.NodeId, 0)
 	p2, _ := b.inode(input.Newdir, 0)
 
@@ -627,6 +658,9 @@ func (b *rawBridge) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName
 }
 
 func (b *rawBridge) Link(cancel <-chan struct{}, input *fuse.LinkIn, name string, out *fuse.EntryOut) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(input.NodeId, 0)
 	target, _ := b.inode(input.Oldnodeid, 0)
 
@@ -648,6 +682,9 @@ func (b *rawBridge) Link(cancel <-chan struct{}, input *fuse.LinkIn, name string
 }
 
 func (b *rawBridge) Symlink(cancel <-chan struct{}, header *fuse.InHeader, target string, name string, out *fuse.EntryOut) fuse.Status {
+	if !validGuestName(name) {
+		return fuse.EINVAL
+	}
 	parent, _ := b.inode(header.NodeId, 0)
 
 	mops, ok := parent.ops.(NodeSymlinker)
