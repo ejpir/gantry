@@ -3,12 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"net"
+	"gantry/internal/gutil"
+	"gantry/internal/sandbox"
+	"gantry/internal/vmm"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"gantry/internal/client"
 )
@@ -28,15 +28,15 @@ func cmdExec(argv []string) { os.Exit(runExec(argv)) }
 
 func runExec(argv []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
-	kernel := fs.String("kernel", defaultKernelImage(), "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)")
-	rootfs := fs.String("rootfs", defaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)")
+	kernel := fs.String("kernel", vmm.DefaultKernelImage(), "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)")
+	rootfs := fs.String("rootfs", vmm.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)")
 	image := fs.String("image", "", "container rootfs disk, /dev/vdb (default: debian-bookworm.erofs if present, else shell-rootfs.erofs)")
 	rwlayer := fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: rwlayer.ext4 if present)")
 	rwFlag := fs.Bool("rw", false, "writable overlay container root (default: on when a rwlayer is available)")
-	var shares strList
+	var shares gutil.StrList
 	fs.Var(&shares, "share", "host directory exported through virtio-fs as TAG=PATH[,ro] (repeatable)")
 	netEnabled := fs.Bool("net", true, "start gvproxy and attach virtio-net")
-	gvproxy := fs.String("gvproxy", defaultGvproxy(), "path to the gvproxy binary (with -net)")
+	gvproxy := fs.String("gvproxy", vmm.DefaultGvproxy(), "path to the gvproxy binary (with -net)")
 	console := fs.Bool("console", false, "stream the guest serial console to stderr (default: log file in the work dir)")
 	memMB := fs.Uint("mem", 512, "guest RAM in MiB")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
@@ -54,14 +54,14 @@ func runExec(argv []string) int {
 	// --- resolve defaults -------------------------------------------------
 	img := *image
 	if img == "" {
-		if fileExists("debian-bookworm.erofs") {
+		if gutil.FileExists("debian-bookworm.erofs") {
 			img = "debian-bookworm.erofs"
 		} else {
 			img = "shell-rootfs.erofs"
 		}
 	}
 	rwl := *rwlayer
-	if rwl == "" && fileExists("rwlayer.ext4") {
+	if rwl == "" && gutil.FileExists("rwlayer.ext4") {
 		rwl = "rwlayer.ext4"
 	}
 	rwSet := false
@@ -85,25 +85,25 @@ func runExec(argv []string) int {
 		}
 	}
 
-	var hostShares []hostShare
+	var hostShares []vmm.Share
 	seenTags := map[string]bool{}
 	for _, spec := range shares {
-		share, err := parseShareSpec(spec, seenTags)
+		share, err := vmm.ParseShareSpec(spec, seenTags)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gantry exec: invalid -share %q: %v\n", spec, err)
 			return 2
 		}
-		seenTags[share.tag] = true
+		seenTags[share.Tag] = true
 		hostShares = append(hostShares, share)
 	}
 
 	for _, req := range []string{*kernel, *rootfs, img} {
-		if !fileExists(req) {
+		if !gutil.FileExists(req) {
 			fmt.Fprintf(os.Stderr, "gantry exec: missing %s\n", req)
 			return 1
 		}
 	}
-	if rw && !fileExists(rwl) {
+	if rw && !gutil.FileExists(rwl) {
 		fmt.Fprintf(os.Stderr, "gantry exec: missing %s\n", rwl)
 		return 1
 	}
@@ -134,7 +134,7 @@ func runExec(argv []string) int {
 
 	// --- guest console: log file by default, stderr with -console ---------
 	if *console {
-		consoleWriter = os.Stderr
+		vmm.SetConsoleWriter(os.Stderr)
 	} else {
 		logf, err := os.Create(filepath.Join(tmp, "console.log"))
 		if err != nil {
@@ -142,14 +142,14 @@ func runExec(argv []string) int {
 			return 1
 		}
 		defer logf.Close()
-		consoleWriter = logf
+		vmm.SetConsoleWriter(logf)
 		fmt.Printf("gantry exec: guest console → %s (use -console to watch it live)\n", logf.Name())
 	}
 
 	// --- gvproxy ----------------------------------------------------------
 	netSock := ""
 	if *netEnabled {
-		gv, sock, err := startGVProxy(*gvproxy, tmp)
+		gv, sock, err := sandbox.StartGVProxy(*gvproxy, tmp)
 		if err != nil {
 			keepTmp = true
 			fmt.Fprintf(os.Stderr, "gantry exec: %v (use -net=false to skip)\n", err)
@@ -167,36 +167,36 @@ func runExec(argv []string) int {
 	if rw {
 		disks = append(disks, rwl)
 	}
-	arch, err := kernelArch(*kernel)
+	arch, err := vmm.KernelArch(*kernel)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
 		return 1
 	}
-	m, err := prepareMachine(machineOpts{
-		memSize:     uint64(*memMB) << 20,
-		kernelPath:  *kernel,
-		rootfsPath:  *rootfs,
-		disks:       disks,
-		shares:      hostShares,
-		netEndpoint: netSock,
-		netMAC:      netMAC,
-		netVFKIT:    true,
-		vsockFwd:    tmp,
-		vcpus:       min(*vcpus, 8),
-		guestCID:    3,
-		vsockListen: []uint32{1026},
-		cmdline:     defaultCmdline(arch, *rootfs, "", 3, netSock, netMAC, true),
+	m, err := vmm.Prepare(vmm.Opts{
+		MemSize:     uint64(*memMB) << 20,
+		KernelPath:  *kernel,
+		RootfsPath:  *rootfs,
+		Disks:       disks,
+		Shares:      hostShares,
+		NetEndpoint: netSock,
+		NetMAC:      netMAC,
+		NetVFKIT:    true,
+		VsockFwd:    tmp,
+		VCPUs:       min(*vcpus, 8),
+		GuestCID:    3,
+		VsockListen: []uint32{1026},
+		Cmdline:     vmm.DefaultCmdline(arch, *rootfs, "", 3, netSock, netMAC, true),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
 		return 1
 	}
-	if err := writeShareManifest(filepath.Join(tmp, "shares.json"), hostShares); err != nil {
+	if err := vmm.WriteShareManifest(filepath.Join(tmp, "shares.json"), hostShares); err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: write share manifest: %v\n", err)
 	}
 
 	guestErr := make(chan error, 1)
-	go func() { guestErr <- runGuest(m) }()
+	go func() { guestErr <- vmm.Run(m) }()
 
 	// --- session ------------------------------------------------------------
 	shellErr := make(chan error, 1)
@@ -225,67 +225,4 @@ func runExec(argv []string) int {
 		return 1
 	}
 	return 0
-}
-
-func fileExists(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && !st.IsDir()
-}
-
-// freeTCPPort returns a currently-unused localhost TCP port.
-func freeTCPPort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
-}
-
-// startGVProxy launches gvproxy with its API and vfkit unixgram sockets in
-// dir and waits for the vfkit socket. The caller kills the process.
-func startGVProxy(binPath, dir string) (*exec.Cmd, string, error) {
-	netSock := filepath.Join(dir, "net.sock")
-	apiSock := filepath.Join(dir, "gvproxy-api.sock")
-	netLog, err := os.Create(filepath.Join(dir, "gvproxy.log"))
-	if err != nil {
-		return nil, "", err
-	}
-	gvPath := binPath
-	if !strings.ContainsRune(gvPath, os.PathSeparator) && fileExists(gvPath) {
-		// exec.Command only searches $PATH for bare names; prefer the
-		// binary next to gantry (what run-macos.sh does with ./gvproxy).
-		if abs, err := filepath.Abs(gvPath); err == nil {
-			gvPath = abs
-		}
-	}
-	// gvproxy's SSH-forward listener defaults to tcp/2222, so every second
-	// instance (stale process or a concurrent sandbox) dies with "address
-	// already in use". gvproxy rejects -ssh-port 0 ("must be between 1024
-	// and 65535"), so grab a free port ourselves; we never use the SSH
-	// forward anyway.
-	sshPort, err := freeTCPPort()
-	if err != nil {
-		netLog.Close()
-		return nil, "", fmt.Errorf("allocate gvproxy ssh port: %w", err)
-	}
-	cmd := exec.Command(gvPath, "-debug", "-ssh-port", fmt.Sprint(sshPort), "-listen", "unix://"+apiSock, "-listen-vfkit", "unixgram://"+netSock)
-	cmd.Stdout, cmd.Stderr = netLog, netLog
-	if err := cmd.Start(); err != nil {
-		netLog.Close()
-		return nil, "", fmt.Errorf("start gvproxy: %w", err)
-	}
-	// Record the pid so `gantry stop` can clean up even if the daemon was
-	// SIGKILLed (defers don't run then, orphaning gvproxy on port 2222...).
-	os.WriteFile(filepath.Join(dir, "gvproxy.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644)
-	for i := 0; i < 300 && !fileExists(netSock); i++ {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !fileExists(netSock) {
-		netLog.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
-		return nil, "", fmt.Errorf("gvproxy did not create %s", netSock)
-	}
-	return cmd, netSock, nil
 }
