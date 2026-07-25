@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,7 +71,7 @@ func sandboxRoot() string {
 		if _, err := os.Stat(oldRoot); err == nil {
 			os.MkdirAll(filepath.Dir(newRoot), 0o755)
 			if err := os.Rename(oldRoot, newRoot); err == nil {
-				fmt.Println("gantry: migrated sandboxes ~/.gantry -> ~/.gantry")
+				fmt.Println("gantry: migrated sandboxes ~/.minivm -> ~/.gantry")
 			}
 		}
 	}
@@ -82,6 +84,11 @@ func validSandboxName(name string) bool {
 	if name == "" || len(name) > 64 {
 		return false
 	}
+	// pure dots are path traversal (filepath.Join(root, "..") escapes the
+	// sandbox root — and `delete` feeds the result to os.RemoveAll).
+	if name == "." || name == ".." {
+		return false
+	}
 	for _, r := range name {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
 			continue
@@ -89,6 +96,16 @@ func validSandboxName(name string) bool {
 		return false
 	}
 	return true
+}
+
+// checkedSandboxName validates a sandbox name at the CLI dispatch layer so
+// every name-taking subcommand (exec/start/daemon/stop/delete) is covered.
+func checkedSandboxName(name string) string {
+	if !validSandboxName(name) {
+		fmt.Fprintf(os.Stderr, "gantry: invalid sandbox name %q (letters, digits, ._-; not . or ..)\n", name)
+		os.Exit(2)
+	}
+	return name
 }
 
 func sandboxPID(name string) (int, bool) {
@@ -472,6 +489,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 			args = []string{"/bin/sh"}
 		}
 	}
+	var status int
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock: br.streamSock,
 		Shares:     client.LoadShares(filepath.Join(br.dir, "1025.sock")),
@@ -481,10 +499,15 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		Cols:       req.Cols,
 		Rows:       req.Rows,
 		KillCh:     killCh,
+		ExitStatus: &status,
 	}, c, c)
 	if err != nil {
 		fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
 	}
+	// trailer for the attach client (cmdSandboxExec): the stream is raw at
+	// this point, so frame the exit status between NULs — impossible to
+	// confuse with terminal output.
+	fmt.Fprintf(c, "\x00GANTRY-EXIT %d\x00", status)
 }
 
 // ---------------- gantry exec <name> [-- CMD] -------------------------------
@@ -562,12 +585,56 @@ func cmdSandboxExec(name string, argv []string) int {
 
 	done := make(chan struct{})
 	go func() { io.Copy(c, os.Stdin) }()
+	statusCh := make(chan int, 1)
 	go func() {
-		io.Copy(os.Stdout, r) // r (not c): the handshake line came through the bufio reader
+		// r (not c): the handshake line came through the bufio reader.
+		// Hold back a trailer's worth of tail bytes so the broker's
+		// "\x00GANTRY-EXIT <n>\x00" marker can be stripped and parsed.
+		statusCh <- copyStrippingExitTrailer(os.Stdout, r)
 		close(done)
 	}()
 	<-done
-	return 0
+	return <-statusCh
+}
+
+// exitTrailer frames the task's exit status at the end of a broker session
+// stream (see broker.session). NULs can't appear in terminal output.
+const exitTrailerPrefix = "\x00GANTRY-EXIT "
+
+// copyStrippingExitTrailer copies r to w, stripping the broker's exit-status
+// trailer at EOF and returning the status (0 if absent).
+func copyStrippingExitTrailer(w io.Writer, r io.Reader) int {
+	const holdback = 32 // len(prefix) + max digits + NUL
+	var tail []byte
+	buf := make([]byte, 32*1024)
+	flush := func(keep int) {
+		if len(tail) > keep {
+			w.Write(tail[:len(tail)-keep])
+			tail = tail[len(tail)-keep:]
+		}
+	}
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			tail = append(tail, buf[:n]...)
+			flush(holdback)
+		}
+		if err != nil {
+			break
+		}
+	}
+	status := 0
+	if i := bytes.LastIndex(tail, []byte(exitTrailerPrefix)); i >= 0 {
+		rest := tail[i+len(exitTrailerPrefix):]
+		if j := bytes.IndexByte(rest, 0); j >= 0 {
+			if v, err := strconv.Atoi(string(rest[:j])); err == nil {
+				status = v
+				tail = tail[:i]
+			}
+		}
+	}
+	w.Write(tail)
+	return status
 }
 
 // ---------------- gantry ls / stop / delete ---------------------------------
@@ -628,7 +695,8 @@ func cmdStop(name string) int {
 			procKill(gpid)
 		}
 	}
-	// clean runtime files, keep sandbox.json so `start` can recreate
+	// clean runtime files; sandbox.json stays (only cmdDaemon reads it, to
+	// boot the VM, and cmdLs reads it for the image column)
 	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", "ctl.sock", "1025.sock", "listen-1026.sock", "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
 		os.Remove(filepath.Join(dir, f))
 	}

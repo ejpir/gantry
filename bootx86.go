@@ -135,9 +135,9 @@ func writeMPS(ram []byte, ncpus int) {
 	ct := ram[x86MPSConfigTable:]
 	copy(ct[0:], "PCMP")
 	binary.LittleEndian.PutUint16(ct[4:], uint16(baseLen))
-	ct[6] = 4                              // spec rev 1.4
-	copy(ct[8:], "GANTRY  ")               // OEM ID (8)
-	copy(ct[16:], "NERDBOX GUEST")         // product ID (12)
+	ct[6] = 4                     // spec rev 1.4
+	copy(ct[8:], "GANTRY  ")      // OEM ID (8)
+	copy(ct[16:], "NERDBOX VM  ") // product ID (exactly 12 bytes)
 	// @28 OEM table ptr = 0, @32 OEM table size = 0
 	binary.LittleEndian.PutUint16(ct[34:], uint16(nEntries))
 	binary.LittleEndian.PutUint32(ct[36:], 0xfee00000) // LAPIC address
@@ -184,8 +184,8 @@ func writeMPS(ram []byte, ncpus int) {
 
 	// --- LINT0: ISA IRQ0 -> BSP LAPIC LINT0 as ExtINT (virtual wire) ---
 	e = ct[p:]
-	e[0] = 4 // entry type: local interrupt
-	e[1] = 3 // interrupt type: ExtINT
+	e[0] = 4                                // entry type: local interrupt
+	e[1] = 3                                // interrupt type: ExtINT
 	binary.LittleEndian.PutUint16(e[2:], 0) // po/trig: bus default
 	e[4] = 1                                // source bus id 1 (ISA)
 	e[5] = 0                                // source bus IRQ 0
@@ -238,6 +238,11 @@ func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {
 	if phnum == 0 || phentsize < 56 {
 		return 0, fmt.Errorf("kernel ELF has no usable program headers")
 	}
+	// Validate the header table before indexing (truncated/crafted files
+	// must produce errors, not panics); all arithmetic is overflow-safe.
+	if phoff >= uint64(len(img)) || uint64(phnum) > (uint64(len(img))-phoff)/uint64(phentsize) {
+		return 0, fmt.Errorf("kernel ELF program headers outside file (phoff %#x, phnum %d, size %d)", phoff, phnum, len(img))
+	}
 	loaded := 0
 	for i := 0; i < phnum; i++ {
 		ph := img[phoff+uint64(i*phentsize):]
@@ -248,7 +253,13 @@ func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {
 		paddr := binary.LittleEndian.Uint64(ph[24:])
 		filesz := binary.LittleEndian.Uint64(ph[32:])
 		memsz := binary.LittleEndian.Uint64(ph[40:])
-		if paddr+memsz > uint64(len(ram)) {
+		if off > uint64(len(img)) || filesz > uint64(len(img))-off {
+			return 0, fmt.Errorf("kernel segment file range %#x+%#x outside file (%d bytes)", off, filesz, len(img))
+		}
+		if memsz < filesz {
+			return 0, fmt.Errorf("kernel segment memsz %#x < filesz %#x", memsz, filesz)
+		}
+		if memsz > uint64(len(ram)) || paddr > uint64(len(ram))-memsz {
 			return 0, fmt.Errorf("kernel segment @ %#x (%d bytes) exceeds guest RAM", paddr, memsz)
 		}
 		copy(ram[paddr:], img[off:off+filesz]) // memsz>filesz tail stays zero (BSS)

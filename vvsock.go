@@ -89,9 +89,10 @@ type vsockConn struct {
 	txCnt        uint32 // payload bytes we sent to guest
 	rxCnt        uint32 // payload bytes we consumed from guest (our fwd_cnt)
 	closed       bool
-	established  bool // host-originated conns wait for the guest's RESPONSE
-	outQ         [][]byte     // guest->host payloads awaiting socket write
+	established  bool          // host-originated conns wait for the guest's RESPONSE
+	outQ         [][]byte      // guest->host payloads awaiting socket write
 	outSig       chan struct{} // 1-cap; signals pumpOut
+	done         chan struct{} // closed on conn teardown; stops pumpOut
 }
 
 func connKey(srcPort, dstPort uint32) uint64 { return uint64(srcPort)<<32 | uint64(dstPort) }
@@ -144,7 +145,7 @@ func (v *virtioVsock) AddListen(guestPort uint32) (string, error) {
 			srcPort := v.nextHostPort
 			v.nextHostPort++
 			key := connKey(guestPort, srcPort)
-			c := &vsockConn{key: key, nc: nc, peerBufAlloc: vsockBufAlloc, outSig: make(chan struct{}, 1)}
+			c := &vsockConn{key: key, nc: nc, peerBufAlloc: vsockBufAlloc, outSig: make(chan struct{}, 1), done: make(chan struct{})}
 			v.conns[key] = c
 			go v.pumpOut(c)
 			v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
@@ -166,7 +167,9 @@ func (v *virtioVsock) features() uint64 { return 0 }
 func (v *virtioVsock) numQueues() int   { return 3 }
 func (v *virtioVsock) reset() {
 	for k, c := range v.conns {
+		c.closed = true
 		c.nc.Close()
+		close(c.done) // wake pumpOut so it doesn't leak on the socket
 		delete(v.conns, k)
 	}
 	v.pending = nil
@@ -243,7 +246,7 @@ func (v *virtioVsock) handleTx() {
 				v.enqueueCtrl(hdr, vsockOpRST, 0)
 				break
 			}
-			c = &vsockConn{key: key, nc: nc, peerBufAlloc: hdr.bufAlloc, peerFwdCnt: hdr.fwdCnt, established: true, outSig: make(chan struct{}, 1)}
+			c = &vsockConn{key: key, nc: nc, peerBufAlloc: hdr.bufAlloc, peerFwdCnt: hdr.fwdCnt, established: true, outSig: make(chan struct{}, 1), done: make(chan struct{})}
 			v.conns[key] = c
 			v.enqueueCtrl(hdr, vsockOpResponse, 0)
 			go v.pumpHost(c, hdr.srcPort, hdr.dstPort)
@@ -300,12 +303,12 @@ func (v *virtioVsock) pumpOut(c *vsockConn) {
 	for {
 		v.core.mu.Lock()
 		if len(c.outQ) == 0 {
-			done := c.closed
 			v.core.mu.Unlock()
-			if done {
+			select {
+			case <-c.done: // conn torn down (closeConn/reset)
 				return
+			case <-c.outSig:
 			}
-			<-c.outSig
 			continue
 		}
 		payload := c.outQ[0]
@@ -361,6 +364,7 @@ func (v *virtioVsock) closeConn(c *vsockConn, trigger vsockHdr, sendRST bool) {
 	}
 	c.closed = true
 	c.nc.Close()
+	close(c.done) // release pumpOut; sending on outSig after this is a no-op
 	delete(v.conns, c.key)
 	if sendRST {
 		v.logf("closeConn: sending RST (op trigger=%d ports %d->%d)", trigger.op, trigger.srcPort, trigger.dstPort)
@@ -396,6 +400,7 @@ func (v *virtioVsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 			if !c.closed {
 				v.logf("pumpHost: host socket read: %v -> RST", err)
 				c.closed = true
+				close(c.done)
 				delete(v.conns, c.key)
 				v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
 					srcCID: vsockHostCID, dstCID: v.guestCID,
@@ -439,7 +444,11 @@ func (v *virtioVsock) tryFlush() {
 		v.logf("tryFlush: delivering op=%d len=%d", pkt.hdr.op, len(pkt.payload))
 		_, in := splitChain(chain)
 		if len(in) == 0 {
+			// a chain with no guest-writable descriptor can never carry a
+			// frame; return the descriptor and drop the packet rather than
+			// spinning on it forever.
 			v.core.pushUsed(q, head, 0)
+			v.pending = v.pending[1:]
 			continue
 		}
 		hdr := pkt.hdr
@@ -453,6 +462,10 @@ func (v *virtioVsock) tryFlush() {
 		total, err := v.core.writeChains(in, frame)
 		if err != nil || total < vsockHdrLen {
 			v.logf("tryFlush: write failed (%v, %d)", err, total)
+			// return the rx descriptor to the guest (otherwise it leaks)
+			// and drop the packet; the peer's next send resets the conn.
+			v.core.pushUsed(q, head, total)
+			v.pending = v.pending[1:]
 			continue
 		}
 		if c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]; c != nil && total > vsockHdrLen {

@@ -18,6 +18,14 @@ import (
 // the same high-level path used by nerdbox/libkrun for host bind mounts:
 // the VMM exports a host directory under a tag, vminitd mounts that tag in
 // the guest, and crun bind-mounts the guest path into the container.
+//
+// TRUST BOUNDARY: the request virtqueue is written by the guest, not by the
+// Linux FUSE client, so the vendored go-fuse carries two gantry patches —
+// validGuestName (bridge.go: rejects ".", "..", "/", NUL in names) and
+// LoopbackNode.securePath (loopback.go: refuses paths that escape the share
+// root through an intermediate symlink swap). Re-vendoring upstream go-fuse
+// must re-apply both; TestVirtioFSShareEscape/TestVirtioFSSymlinkEscapeBlocked
+// fail without them. `,ro` is enforced here too (roFuseHandler).
 const (
 	virtioFSDeviceID = 26
 	virtioFSHiprioQ  = 0
@@ -33,11 +41,12 @@ type virtioFS struct {
 	core    *virtioMMIOCore
 	tag     string
 	root    string
+	ro      bool // -share ...,ro: enforced HERE (host side), see roFuseHandler
 	handler fuseRequestHandler
 	verbose bool
 }
 
-func newVirtioFS(tag, root string) (*virtioFS, error) {
+func newVirtioFS(tag, root string, ro ...bool) (*virtioFS, error) {
 	if tag == "" || len([]byte(tag)) > virtioFSTagLen {
 		return nil, fmt.Errorf("tag must be 1..%d bytes", virtioFSTagLen)
 	}
@@ -57,6 +66,7 @@ func newVirtioFS(tag, root string) (*virtioFS, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create loopback filesystem: %w", err)
 	}
+	roFlag := len(ro) > 0 && ro[0]
 	debug := envOr("GANTRY_DEBUG_FS", "MINIVM_DEBUG_FS") != ""
 	logger := log.New(io.Discard, "", 0)
 	if debug {
@@ -71,12 +81,91 @@ func newVirtioFS(tag, root string) (*virtioFS, error) {
 		MaxWrite:             128 << 10,
 		IgnoreSecurityLabels: true,
 	})
+	var handler fuseRequestHandler = protocol
+	if roFlag {
+		handler = &roFuseHandler{inner: protocol}
+	}
 	return &virtioFS{
 		tag:     tag,
 		root:    abs,
-		handler: protocol,
+		ro:      roFlag,
+		handler: handler,
 		verbose: debug,
 	}, nil
+}
+
+// roFuseHandler enforces `-share ...,ro` on the HOST side: the guest-side
+// MS_RDONLY mount is only a convention, and a hostile guest is precisely
+// what the flag is meant to defend against. Mutating opcodes and writable
+// OPENs get EROFS before they reach the loopback filesystem.
+type roFuseHandler struct{ inner fuseRequestHandler }
+
+func (h *roFuseHandler) HandleRequest(in, out [][]byte) (int, fuse.Status) {
+	if status := roGate(in); status != fuse.OK {
+		if len(out) == 0 || len(out[0]) < 16 {
+			return 0, status
+		}
+		h := out[0][:16]
+		binary.LittleEndian.PutUint32(h[0:4], 16)
+		binary.LittleEndian.PutUint32(h[4:8], uint32(-int32(status)))
+		if len(in) > 0 && len(in[0]) >= 16 {
+			copy(h[8:16], in[0][8:16]) // request unique ID
+		}
+		return 16, fuse.OK
+	}
+	return h.inner.HandleRequest(in, out)
+}
+
+// FUSE opcodes that mutate host state (linux/fuse.h). On a `,ro` share the
+// host rejects them — the guest-side MS_RDONLY mount is only a convention,
+// and a sandboxed guest is precisely what `,ro` is meant to defend against.
+var roMutatingOps = map[uint32]bool{
+	4:  true, // SETATTR
+	6:  true, // SYMLINK
+	8:  true, // MKNOD
+	9:  true, // MKDIR
+	10: true, // UNLINK
+	11: true, // RMDIR
+	12: true, // RENAME
+	13: true, // LINK
+	16: true, // WRITE
+	20: true, // SETXATTR
+	23: true, // REMOVEXATTR
+	35: true, // CREATE
+	39: true, // IOCTL
+	43: true, // FALLOCATE
+	45: true, // RENAME2
+	47: true, // COPY_FILE_RANGE
+}
+
+const fuseOpOpen = 14
+
+// roGate inspects a raw FUSE request and returns EROFS for operations that
+// would mutate the host share. The header is 40 bytes (opcode @4); OPEN's
+// flags word is the first 4 payload bytes.
+func roGate(in [][]byte) fuse.Status {
+	var hdr [44]byte
+	n := 0
+	for _, b := range in {
+		n += copy(hdr[n:], b)
+		if n >= len(hdr) {
+			break
+		}
+	}
+	if n < 40 {
+		return fuse.OK // malformed; let the protocol server complain
+	}
+	op := binary.LittleEndian.Uint32(hdr[4:8])
+	if roMutatingOps[op] {
+		return fuse.EROFS
+	}
+	if op == fuseOpOpen && n >= 44 {
+		flags := binary.LittleEndian.Uint32(hdr[40:44])
+		if flags&0x3 != 0 { // O_WRONLY / O_RDWR (O_RDONLY == 0)
+			return fuse.EROFS
+		}
+	}
+	return fuse.OK
 }
 
 func (v *virtioFS) deviceID() uint32 { return virtioFSDeviceID }

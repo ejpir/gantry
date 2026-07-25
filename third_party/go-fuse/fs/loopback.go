@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -93,7 +94,11 @@ var _ = (NodeStatfser)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	s := syscall.Statfs_t{}
-	err := syscall.Statfs(n.path(), &s)
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return errno
+	}
+	err := syscall.Statfs(p, &s)
 	if err != nil {
 		return ToErrno(err)
 	}
@@ -124,10 +129,45 @@ func (n *LoopbackNode) path() string {
 	return filepath.Join(n.RootData.Path, n.relativePath())
 }
 
+// securePath resolves n's directory through any symlinks and refuses to
+// operate once the node has escaped the exported root through an
+// intermediate symlink swap (a guest can rename a directory aside and plant
+// a symlink at its old name, then descend through it). If name is non-empty
+// it is appended WITHOUT resolving it, so final-component semantics (Lstat,
+// Readlink, Unlink on a symlink) are preserved. gantry serializes FUSE
+// requests on the virtio transport lock, so resolve-then-act cannot be
+// raced from the guest side.
+func (n *LoopbackNode) securePath(name string) (string, syscall.Errno) {
+	root := n.RootData.Path
+	dir := n.path()
+	base := ""
+	if name != "" {
+		base = name
+	} else if dir == root {
+		return root, OK // the root itself: nothing above it to verify
+	} else {
+		dir, base = filepath.Dir(dir), filepath.Base(dir)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", ToErrno(err)
+	}
+	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return "", syscall.EACCES
+	}
+	if base == "" {
+		return resolved, OK
+	}
+	return filepath.Join(resolved, base), OK
+}
+
 var _ = (NodeLookuper)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return nil, errno
+	}
 
 	st := syscall.Stat_t{}
 	err := syscall.Lstat(p, &st)
@@ -157,7 +197,10 @@ func (n *LoopbackNode) preserveOwner(ctx context.Context, path string) error {
 var _ = (NodeMknoder)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Mknod(ctx context.Context, name string, mode, rdev uint32, out *fuse.EntryOut) (*Inode, syscall.Errno) {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return nil, errno
+	}
 	err := syscall.Mknod(p, mode, intDev(rdev))
 	if err != nil {
 		return nil, ToErrno(err)
@@ -180,7 +223,10 @@ func (n *LoopbackNode) Mknod(ctx context.Context, name string, mode, rdev uint32
 var _ = (NodeMkdirer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*Inode, syscall.Errno) {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return nil, errno
+	}
 	err := os.Mkdir(p, os.FileMode(mode))
 	if err != nil {
 		return nil, ToErrno(err)
@@ -203,7 +249,10 @@ func (n *LoopbackNode) Mkdir(ctx context.Context, name string, mode uint32, out 
 var _ = (NodeRmdirer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return errno
+	}
 	err := syscall.Rmdir(p)
 	return ToErrno(err)
 }
@@ -211,7 +260,10 @@ func (n *LoopbackNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 var _ = (NodeUnlinker)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return errno
+	}
 	err := syscall.Unlink(p)
 	return ToErrno(err)
 }
@@ -232,8 +284,14 @@ func (n *LoopbackNode) Rename(ctx context.Context, name string, newParent InodeE
 		return n.rename2(name, e2.loopbackNode(), newName, flags)
 	}
 
-	p1 := filepath.Join(n.path(), name)
-	p2 := filepath.Join(e2.loopbackNode().path(), newName)
+	p1, errno := n.securePath(name)
+	if errno != 0 {
+		return errno
+	}
+	p2, errno := e2.loopbackNode().securePath(newName)
+	if errno != 0 {
+		return errno
+	}
 
 	err := syscall.Rename(p1, p2)
 	return ToErrno(err)
@@ -242,7 +300,10 @@ func (n *LoopbackNode) Rename(ctx context.Context, name string, newParent InodeE
 var _ = (NodeCreater)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *Inode, fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return nil, nil, 0, errno
+	}
 	hostFlags := openFlagsToHost(flags) &^ syscall.O_APPEND
 	f, err := os.OpenFile(p, hostFlags|os.O_CREATE, os.FileMode(mode))
 	if err != nil {
@@ -264,12 +325,19 @@ func (n *LoopbackNode) Create(ctx context.Context, name string, flags uint32, mo
 }
 
 func (n *LoopbackNode) rename2(name string, newParent *LoopbackNode, newName string, flags uint32) syscall.Errno {
-	fd1, err := syscall.Open(n.path(), syscall.O_DIRECTORY, 0)
+	p1, errno := n.securePath("")
+	if errno != 0 {
+		return errno
+	}
+	fd1, err := syscall.Open(p1, syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return ToErrno(err)
 	}
 	defer syscall.Close(fd1)
-	p2 := newParent.path()
+	p2, errno := newParent.securePath("")
+	if errno != 0 {
+		return errno
+	}
 	fd2, err := syscall.Open(p2, syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return ToErrno(err)
@@ -303,7 +371,13 @@ func (n *LoopbackNode) rename2(name string, newParent *LoopbackNode, newName str
 var _ = (NodeSymlinker)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
-	p := filepath.Join(n.path(), name)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return nil, errno
+	}
+	// NOTE: target is intentionally NOT validated — a symlink may point
+	// anywhere; what matters is that gantry never FOLLOWS one out of the
+	// share (securePath on every path-based op, O_NOFOLLOW openat on Open).
 	err := syscall.Symlink(target, p)
 	if err != nil {
 		return nil, ToErrno(err)
@@ -333,8 +407,15 @@ func (n *LoopbackNode) Link(ctx context.Context, target InodeEmbedder, name stri
 		return nil, syscall.EXDEV
 	}
 
-	p := filepath.Join(n.path(), name)
-	err := syscall.Link(e2.loopbackNode().path(), p)
+	p, errno := n.securePath(name)
+	if errno != 0 {
+		return nil, errno
+	}
+	oldPath, errno := e2.loopbackNode().securePath("")
+	if errno != 0 {
+		return nil, errno
+	}
+	err := syscall.Link(oldPath, p)
 	if err != nil {
 		return nil, ToErrno(err)
 	}
@@ -353,7 +434,10 @@ func (n *LoopbackNode) Link(ctx context.Context, target InodeEmbedder, name stri
 var _ = (NodeReadlinker)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	p := n.path()
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return nil, errno
+	}
 
 	for l := 256; ; l *= 2 {
 		buf := make([]byte, l)
@@ -386,7 +470,11 @@ func (n *LoopbackNode) Open(ctx context.Context, flags uint32) (fh FileHandle, f
 var _ = (NodeOpendirHandler)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) OpendirHandle(ctx context.Context, flags uint32) (FileHandle, uint32, syscall.Errno) {
-	ds, errno := NewLoopbackDirStream(n.path())
+	p, gerrno := n.securePath("")
+	if gerrno != 0 {
+		return nil, 0, gerrno
+	}
+	ds, errno := NewLoopbackDirStream(p)
 	if errno != 0 {
 		return nil, 0, errno
 	}
@@ -396,7 +484,11 @@ func (n *LoopbackNode) OpendirHandle(ctx context.Context, flags uint32) (FileHan
 var _ = (NodeReaddirer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Readdir(ctx context.Context) (DirStream, syscall.Errno) {
-	return NewLoopbackDirStream(n.path())
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return nil, errno
+	}
+	return NewLoopbackDirStream(p)
 }
 
 var _ = (NodeGetattrer)((*LoopbackNode)(nil))
@@ -408,7 +500,10 @@ func (n *LoopbackNode) Getattr(ctx context.Context, f FileHandle, out *fuse.Attr
 		}
 	}
 
-	p := n.path()
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return errno
+	}
 
 	var err error
 	st := syscall.Stat_t{}
@@ -428,7 +523,10 @@ func (n *LoopbackNode) Getattr(ctx context.Context, f FileHandle, out *fuse.Attr
 var _ = (NodeSetattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Setattr(ctx context.Context, f FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	p := n.path()
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return errno
+	}
 	fsa, ok := f.(FileSetattrer)
 	if ok && fsa != nil {
 		if errno := fsa.Setattr(ctx, in, out); errno != 0 {
@@ -508,21 +606,33 @@ func (n *LoopbackNode) Setattr(ctx context.Context, f FileHandle, in *fuse.SetAt
 var _ = (NodeGetxattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
-	sz, err := unix.Lgetxattr(n.path(), attr, dest)
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return 0, errno
+	}
+	sz, err := unix.Lgetxattr(p, attr, dest)
 	return uint32(sz), ToErrno(err)
 }
 
 var _ = (NodeSetxattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
-	err := unix.Lsetxattr(n.path(), attr, data, xattrFlagsToHost(flags))
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return errno
+	}
+	err := unix.Lsetxattr(p, attr, data, xattrFlagsToHost(flags))
 	return ToErrno(err)
 }
 
 var _ = (NodeRemovexattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
-	err := unix.Lremovexattr(n.path(), attr)
+	p, errno := n.securePath("")
+	if errno != 0 {
+		return errno
+	}
+	err := unix.Lremovexattr(p, attr)
 	return ToErrno(err)
 }
 
@@ -560,8 +670,14 @@ func NewLoopbackRoot(rootPath string) (InodeEmbedder, error) {
 		return nil, err
 	}
 
+	// Canonicalize once: securePath containment checks compare against this.
+	resolved, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return nil, err
+	}
+
 	root := &LoopbackRoot{
-		Path: rootPath,
+		Path: resolved,
 		Dev:  uint64(st.Dev),
 	}
 

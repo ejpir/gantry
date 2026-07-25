@@ -92,10 +92,14 @@ func (b *virtioBlk) handleQueue(qn int) {
 		b.logf("notify: head=%d chainlen=%d", head, len(chain))
 		out, in := splitChain(chain)
 		if len(out) == 0 || len(in) == 0 {
+			// a malformed chain must still be returned to the guest —
+			// dropping it leaks the descriptor and wedges the driver
+			b.core.pushUsed(q, head, 0)
 			continue
 		}
 		hdr, err := b.core.readChains(out[:1])
 		if err != nil || len(hdr) < 16 {
+			b.core.pushUsed(q, head, 0)
 			continue
 		}
 		reqType := binary.LittleEndian.Uint32(hdr[0:])
@@ -111,8 +115,10 @@ func (b *virtioBlk) handleQueue(qn int) {
 				dataLen += d.len
 			}
 			buf := make([]byte, dataLen)
-			off := int64(sector * 512)
-			if off+int64(dataLen) <= int64(b.size) {
+			// guard sector before the *512 to rule out uint64 overflow
+			if sector > uint64(b.size)>>9 {
+				status = virtioBlkSIOErr
+			} else if off := int64(sector * 512); off+int64(dataLen) <= int64(b.size) {
 				if _, err := b.file.ReadAt(buf, off); err != nil {
 					status = virtioBlkSIOErr
 				}
@@ -140,8 +146,9 @@ func (b *virtioBlk) handleQueue(qn int) {
 				status = virtioBlkSIOErr
 				break
 			}
-			off := int64(sector * 512)
-			if off < 0 || off+int64(dataLen) > int64(b.size) {
+			if sector > uint64(b.size)>>9 {
+				status = virtioBlkSIOErr // also rules out *512 overflow
+			} else if off := int64(sector * 512); off+int64(dataLen) > int64(b.size) {
 				status = virtioBlkSIOErr // fixed-size image, no growth
 			} else if _, err := b.file.WriteAt(buf, off); err != nil {
 				status = virtioBlkSIOErr
@@ -166,7 +173,9 @@ func (b *virtioBlk) handleQueue(qn int) {
 		b.logf("req type=%d sector=%d -> status=%d written=%d", reqType, sector, status, written)
 		// status byte lives in the last descriptor of the chain
 		st := in[len(in)-1]
-		b.core.mem.writeAt(st.addr, []byte{status})
+		if err := b.core.mem.writeAt(st.addr, []byte{status}); err != nil {
+			b.logf("status write: %v", err)
+		}
 		written++
 		b.core.pushUsed(q, head, written)
 	}

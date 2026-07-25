@@ -5,7 +5,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"time"
 )
 
 // virtio-net device (virtio device ID 1), backed by an AF_UNIX datagram
@@ -164,10 +163,9 @@ func (v *virtioNet) readLoop() {
 			v.core.mu.Unlock()
 		}
 		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				time.Sleep(time.Millisecond)
-				continue
-			}
+			// Any read error from the unixgram backend is terminal (the
+			// gvproxy socket going away can't be retried); net.Error.
+			// Temporary() is deprecated and never true for packet conns.
 			v.logf("packet backend stopped: %v", err)
 			return
 		}

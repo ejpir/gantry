@@ -170,13 +170,13 @@ const (
 var x86MMIOIRQs = []int{3, 5, 6, 7, 9, 10, 11, 12}
 
 // addVirtio attaches one virtio-mmio device at the next free slot.
-func (m *machine) addVirtio(dev virtioDevice, name string) *virtioMMIOCore {
+func (m *machine) addVirtio(dev virtioDevice, name string) (*virtioMMIOCore, error) {
 	idx := len(m.virtios)
 	var base uint64
 	var irq int
 	if m.arch == "amd64" {
 		if idx >= len(x86MMIOIRQs) {
-			panic("too many virtio devices for x86 IRQ list")
+			return nil, fmt.Errorf("virtio-%s: x86-64 supports at most %d virtio-mmio devices (%d legacy IRQ lines)", name, len(x86MMIOIRQs), len(x86MMIOIRQs))
 		}
 		base = x86MMIOBase + uint64(idx)*x86MMIOStride
 		irq = x86MMIOIRQs[idx]
@@ -186,7 +186,7 @@ func (m *machine) addVirtio(dev virtioDevice, name string) *virtioMMIOCore {
 	}
 	core := newVirtioMMIOAt(dev, m.mem, base, irq, m.raise, name)
 	m.virtios = append(m.virtios, core)
-	return core
+	return core, nil
 }
 
 // raise routes a device interrupt to the backend's irq line (if installed).
@@ -199,9 +199,9 @@ func (m *machine) raise(irq int, level bool) {
 var dbgMMIO = envOr("GANTRY_DEBUG_UART", "MINIVM_DEBUG_UART") != ""
 
 // handleMMIO routes one guest MMIO access. Returns the read value (reads).
+// A flat sequence of range checks; unassigned space reads-as-zero.
 func (m *machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint32) uint32 {
-	switch {
-	case m.uart != nil && phys >= uartBase && phys < uartBase+uartSize:
+	if m.uart != nil && phys >= uartBase && phys < uartBase+uartSize {
 		if dbgMMIO {
 			op := "R"
 			if isWrite {
@@ -210,16 +210,15 @@ func (m *machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint
 			fmt.Printf("[mmio] %s %#x len=%d data=%x\n", op, phys, length, data[:min(int(length), 4)])
 		}
 		return m.uart.mmio(isWrite, phys-uartBase, data, length)
-	default:
-		for _, vc := range m.virtios {
-			if phys >= vc.base && phys < vc.base+virtioMMIOSize {
-				off := phys - vc.base
-				if isWrite {
-					vc.mmioWrite(off, le32(data))
-					return 0
-				}
-				return vc.mmioRead(off, length)
+	}
+	for _, vc := range m.virtios {
+		if phys >= vc.base && phys < vc.base+virtioMMIOSize {
+			off := phys - vc.base
+			if isWrite {
+				vc.mmioWrite(off, le32(data))
+				return 0
 			}
+			return vc.mmioRead(off, length)
 		}
 	}
 	if m.ioapic != nil && phys >= ioApicMMIOBase && phys < ioApicMMIOBase+ioApicMMIOSize {
@@ -305,10 +304,10 @@ func prepareMachine(o machineOpts) (*machine, error) {
 	m.entry = entry
 	m.arch = arch
 	if arch == "amd64" {
-		m.mem = ramMem{ram: ram, base: 0}
+		m.mem = &ramMem{ram: ram, base: 0}
 		m.devBase, m.devStride = x86MMIOBase, x86MMIOStride
 	} else {
-		m.mem = ramMem{ram: ram, base: ramBase}
+		m.mem = &ramMem{ram: ram, base: ramBase}
 		m.devBase, m.devStride = virtioMMIOBase, virtioMMIOStride
 	}
 
@@ -342,7 +341,10 @@ func prepareMachine(o machineOpts) (*machine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("disk %s: %w", path, err)
 		}
-		core := m.addVirtio(blk, "blk")
+		core, err := m.addVirtio(blk, "blk")
+		if err != nil {
+			return nil, err
+		}
 		blk.core = core
 		mode := "rw"
 		if !writable {
@@ -361,7 +363,10 @@ func prepareMachine(o machineOpts) (*machine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("virtio-net: %w", err)
 		}
-		core := m.addVirtio(nic, "net")
+		core, err := m.addVirtio(nic, "net")
+		if err != nil {
+			return nil, err
+		}
 		nic.core = core
 		nic.start()
 		fmt.Printf("virtio-net: mac %02x:%02x:%02x:%02x:%02x:%02x @ %#x irq %d, unixgram %s\n",
@@ -370,7 +375,10 @@ func prepareMachine(o machineOpts) (*machine, error) {
 	}
 	if o.vsockFwd != "" {
 		vs := newVirtioVsock(o.guestCID, o.vsockFwd)
-		core := m.addVirtio(vs, "vsock")
+		core, err := m.addVirtio(vs, "vsock")
+		if err != nil {
+			return nil, err
+		}
 		vs.core = core
 		for _, p := range o.vsockListen {
 			if _, err := vs.AddListen(p); err != nil {
@@ -385,11 +393,17 @@ func prepareMachine(o machineOpts) (*machine, error) {
 	// it, boot entropy is a coin flip and vminitd's DHCP can time out in
 	// getrandom(), killing PID 1. The rtc gives hctosys + PTP time sync.
 	rng := newVirtioRNG()
-	rngCore := m.addVirtio(rng, "rng")
+	rngCore, err := m.addVirtio(rng, "rng")
+	if err != nil {
+		return nil, err
+	}
 	rng.core = rngCore
 	fmt.Printf("virtio-rng: entropy @ %#x irq %d\n", rngCore.base, rngCore.irq)
 	rtc := newVirtioRTC()
-	rtcCore := m.addVirtio(rtc, "rtc")
+	rtcCore, err := m.addVirtio(rtc, "rtc")
+	if err != nil {
+		return nil, err
+	}
 	rtc.core = rtcCore
 	fmt.Printf("virtio-rtc: UTC (host time) @ %#x irq %d\n", rtcCore.base, rtcCore.irq)
 

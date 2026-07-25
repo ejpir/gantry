@@ -49,7 +49,7 @@ usage:
 	switch os.Args[1] {
 	case "exec":
 		if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-			os.Exit(cmdSandboxExec(os.Args[2], os.Args[3:]))
+			os.Exit(cmdSandboxExec(checkedSandboxName(os.Args[2]), os.Args[3:]))
 		}
 		cmdExec(os.Args[2:])
 		return
@@ -59,7 +59,7 @@ usage:
 		if len(os.Args) != 3 {
 			os.Exit(2)
 		}
-		os.Exit(cmdDaemon(os.Args[2]))
+		os.Exit(cmdDaemon(checkedSandboxName(os.Args[2])))
 	case "ls":
 		os.Exit(cmdLs())
 	case "stop", "delete":
@@ -67,10 +67,11 @@ usage:
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])
 			os.Exit(2)
 		}
+		name := checkedSandboxName(os.Args[2])
 		if os.Args[1] == "stop" {
-			os.Exit(cmdStop(os.Args[2]))
+			os.Exit(cmdStop(name))
 		}
-		os.Exit(cmdDelete(os.Args[2]))
+		os.Exit(cmdDelete(name))
 	case "run":
 		// fall through below
 	default:

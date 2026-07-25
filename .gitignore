@@ -1,6 +1,7 @@
 # build artifacts (regenerate: go build ./ build.sh run-macos.sh)
 /gantry
 /hostctl
+/cmd/hostctl/hostctl
 /minivm
 /gantry-*
 /hostctl-*

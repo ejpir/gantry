@@ -152,6 +152,7 @@ type SessionOptions struct {
 	Cols, Rows uint32          // initial pty size; 0 skips ResizePty
 	KillCh     <-chan struct{} // optional: first receive SIGKILLs the task
 	Quiet      bool            // suppress progress messages
+	ExitStatus *int            // optional: set to the task's exit status
 }
 
 // Session runs one container session to completion over an existing ttrpc
@@ -303,6 +304,9 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		fmt.Fprintf(stdout, "\nclient: Wait: %v\n", werr)
 	} else {
 		fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", resp.ExitStatus)
+		if opts.ExitStatus != nil {
+			*opts.ExitStatus = int(resp.ExitStatus)
+		}
 	}
 	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dcancel()
