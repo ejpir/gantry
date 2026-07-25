@@ -1,0 +1,16 @@
+#!/bin/sh
+# Guest boot script — runs non-interactively, then init powers off.
+echo
+echo "=========================================="
+echo " HELLO FROM OUR OWN MICROVM GUEST"
+echo "=========================================="
+echo "uname:   $(uname -a)"
+echo "cmdline: $(cat /proc/cmdline)"
+echo "memory:  $(grep MemTotal /proc/meminfo)"
+echo "model:   $(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')"
+echo "uptime:  $(cat /proc/uptime)"
+echo
+echo "files at /:"
+ls /
+echo
+echo "GUEST_SCRIPT_DONE"
