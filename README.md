@@ -216,34 +216,21 @@ sockets.
 ./run-qemu-rootfs-test.sh   # boots the real nerdbox EROFS rootfs
 ```
 
-## Files
+## Layout
 
-| file | purpose |
+| package | purpose |
 |---|---|
-| `kvm.go` / `vm_linux.go` / `kvm_arm64.go` | KVM UAPI (shared) + arm64 backend (GICv3, vCPU, run loop) |
-| `kvm_amd64.go` | x86-64 KVM backend (irqchip+PIT, CPUID, long-mode entry, port-I/O exits, INIT/SIPI SMP) |
-| `whpx_windows.go` | Windows Hypervisor Platform backend (partition/VP setup, register file, exit loop) |
-| `ioapic.go` / `pit.go` / `pic.go` | userspace irqchip for WHPX (IO-APIC RTE delivery, i8254 ticks, i8259 stub) |
-| `x86emul.go` | minimal x86-64 mov decoder for WHPX MMIO exits (ModRM/SIB/REX/imm/movzx/movsx) |
-| `bootx86.go` | x86-64 boot assets: vmlinux ELF loader, zero page, e820, page tables, GDT, MPS table |
-| `uart16550.go` / `cmos.go` | x86 console UART (port 0x3f8, IRQ 4) + MC146818 RTC |
-| `hv_darwin.go` / `vm_darwin.go` | Hypervisor.framework bindings + backend (hv_gic, ESR decode, PSCI handler) |
-| `machine.go` | OS-independent VM assembly (RAM, kernel/initrd, devices, FDT) |
-| `fdt.go` | DTB writer (memory/cpu/psci/gic/timer/pl011/virtio-mmio) |
-| `uart.go` | PL011 emulation + IRQ injection |
-| `virtio.go` | virtio-mmio v2 transport + split virtqueues |
-| `vblk.go` | virtio-blk: ro boot rootfs; writable `-disk` (WRITE+FLUSH) |
-| `vnet.go` | two-queue virtio-net + libkrun-compatible Unix datagram backend |
-| `vvsock.go` | virtio-vsock: dial-back forwarding + host listen forwarding |
-| `vfs.go` / `share.go` | virtio-fs over go-fuse loopback; `-share TAG=PATH[,ro]` + shares.json manifest |
+| `internal/virtio/` | the device model and the guest/host trust boundary: virtio-mmio v2 transport + split virtqueues (`virtio.go`), blk (`vblk.go`), net (`vnet.go`), vsock (`vvsock.go`), fs (`vfs.go`, `-share TAG=PATH[,ro]` + shares.json), rng, rtc. Guests are untrusted: queue sizes clamped, descriptor addr/len validated against RAM, FUSE names + symlink containment + host-side `,ro` |
+| `internal/vmm/` | machine assembly + boot + hypervisor backends: `machine.go` (RAM, kernel/initrd, devices, `Opts`/`Prepare`/`Run`), `fdt.go`, `bootx86.go` (vmlinux ELF, zero page, MPS), chipset (PL011, 16550, CMOS, PIC/PIT/IO-APIC), `x86emul.go` (WHPX MMIO decode), and the `backend` interface — one `platformBackend()` per target: `vm_linux.go`/`kvm_arm64.go` (KVM arm64), `kvm_amd64.go` (KVM x86-64), `vm_darwin.go`/`hv_darwin.go` (HVF), `whpx_windows.go` (WHPX) |
+| `internal/sandbox/` | sandbox lifecycle: start/daemon/exec-attach/ls/stop/delete, the session broker, gvproxy launcher |
 | `internal/client/` | shared ttrpc control plane: bundle.v1, task.v3, mount API, stream:// stdio |
-| `vrtc.go` | virtio-rtc: host UTC clock (hctosys + PTP sync) |
+| `internal/gutil/` | env helpers (`GANTRY_*`/`MINIVM_*`), cmdline insertion, LE decode |
+| root (`main.go`, `exec.go`) | CLI dispatch + one-shot `gantry exec` (VM + gvproxy + session) |
 | `cmd/hostctl/` | thin two-terminal CLI over internal/client |
-| `exec.go` | one-shot `gantry exec`: VM + gvproxy + session in one command |
-| `sandbox.go` | sandbox lifecycle: start/daemon/exec-attach/ls/stop/delete + session broker |
-| `gvproxy-darwin-arm64` | user-mode NAT/DHCP/DNS packet provider |
 | `guest/init/main.go` | guest PID 1 |
-| `virtio_test.go` | driver-simulation tests (no KVM needed) |
+
+Tests are driver-simulation style (no KVM needed) and live next to the
+code they cover; `go test -race ./...` is clean.
 
 ## Honest gaps
 
