@@ -30,8 +30,7 @@ for a in $ASSETS; do
 		# ETXTBSY (curl 23), which previously left a stale binary
 		# testing the wrong code
 		DL="$DL
-./gantry-linux-amd64 ls 2>/dev/null | awk '\''$2==\"running\" {print $1}'\'' | while read -r s; do ./gantry-linux-amd64 stop \"$s\" >/dev/null 2>&1; done
-pkill -f 'gantry-linux-amd64 daemon' 2>/dev/null; sleep 1
+pkill -f gantry-linux-amd64 2>/dev/null || true; sleep 1
 for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o gantry-new '$U' && break; sleep 3; done
 mv -f gantry-new '$a' && chmod +x '$a'"
 	else
