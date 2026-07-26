@@ -277,7 +277,8 @@ type Opts struct {
 	KernelPath  string
 	InitrdPath  string   // optional when Disks are set
 	RootfsPath  string   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
-	Disks       []string // extra virtio-blk images (/dev/vdb, /dev/vdc, ...)
+	DisksRO     []string // extra virtio-blk images attached READ-ONLY (container images: vdb...)
+	Disks       []string // extra virtio-blk images, writable (rwlayers, scratch disks)
 	Shares      []Share
 	NetEndpoint string         // Unix datagram raw-Ethernet endpoint; "" disables NIC
 	NetConn     net.Conn       // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
@@ -341,13 +342,25 @@ func Prepare(o Opts) (*Machine, error) {
 		m.uart = newPL011(m.raise, func(b byte) { m.stdoutWrite(b) })
 	}
 
-	// virtio devices (MMIO slots 0..n)
-	allDisks := append([]string{}, o.Disks...)
-	if o.RootfsPath != "" {
-		allDisks = append([]string{o.RootfsPath}, allDisks...) // /dev/vda first
+	// virtio devices (MMIO slots 0..n). Read-only images (container
+	// rootfs) must NOT take the writable-disk flock: cached images are
+	// shared across sandboxes by design.
+	type disk struct {
+		path string
+		rw   bool
 	}
-	for i, path := range allDisks {
-		writable := !(o.RootfsPath != "" && i == 0) // boot rootfs stays read-only
+	var allDisks []disk
+	if o.RootfsPath != "" {
+		allDisks = append(allDisks, disk{o.RootfsPath, false}) // /dev/vda first
+	}
+	for _, p := range o.DisksRO {
+		allDisks = append(allDisks, disk{p, false})
+	}
+	for _, p := range o.Disks {
+		allDisks = append(allDisks, disk{p, true})
+	}
+	for i, dsk := range allDisks {
+		path, writable := dsk.path, dsk.rw
 		blk, err := virtio.NewBlk(path, writable)
 		if err != nil {
 			return nil, fmt.Errorf("disk %s: %w", path, err)
