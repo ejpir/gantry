@@ -609,7 +609,10 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 		Terminal: true,
 		User:     specs.User{UID: uid, GID: gid},
 		Args:     opts.Args,
-		Env:      opts.ImgCfg.EnvWith("TERM=xterm", "PS1=exec# "),
+		// No PS1 override: the image's own shell setup (or the shell's
+		// compiled default) produces the familiar prompt; an injected
+		// spartan PS1 read as "bash didn't start" to users.
+		Env:      opts.ImgCfg.EnvWith("TERM=xterm"),
 		Cwd:      opts.ImgCfg.WorkdirOr(),
 	}
 	specAny, err := typeurl.MarshalAny(proc)
@@ -800,7 +803,7 @@ func ConfigJSON(shares []ShareEntry, rw bool, args []string, img *image.Config) 
 		UID uint32 `json:"uid"`
 		GID uint32 `json:"gid"`
 	}{uid, gid})
-	envJSON, _ := json.Marshal(img.EnvWith("TERM=xterm", "PS1=container# "))
+	envJSON, _ := json.Marshal(img.EnvWith("TERM=xterm"))
 	cwdJSON, _ := json.Marshal(img.WorkdirOr())
 	rootRO := "true"
 	if rw {
