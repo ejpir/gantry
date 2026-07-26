@@ -479,3 +479,28 @@ func (p *Policy) domainAllowed(name string) bool {
 	}
 	return false
 }
+
+// Summarize describes a frame's destination for drop logging:
+// "tcp 10.1.2.3:443", "udp 192.168.1.1:53", "icmp 8.8.8.8", ...
+func Summarize(frame []byte) string {
+	pp, arp, ok := parseFrame(frame)
+	if arp {
+		return "arp"
+	}
+	if !ok {
+		return "non-ipv4"
+	}
+	proto := "ip"
+	switch pp.proto {
+	case protoTCP:
+		proto = "tcp"
+	case protoUDP:
+		proto = "udp"
+	case protoICMP:
+		proto = "icmp"
+	}
+	if pp.proto == protoTCP || pp.proto == protoUDP {
+		return fmt.Sprintf("%s %s:%d", proto, net.IP(pp.dst[:]), pp.dport)
+	}
+	return fmt.Sprintf("%s %s", proto, net.IP(pp.dst[:]))
+}

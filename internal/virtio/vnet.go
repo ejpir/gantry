@@ -87,8 +87,9 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 // filtered (guest can't bypass it — we are the wire), RX is snooped for
 // DNS answers that feed the policy's dynamic allow table.
 type qemuFrameConn struct {
-	conn net.Conn
-	pol  *netpol.Policy
+	conn    net.Conn
+	pol     *netpol.Policy
+	verbose bool
 }
 
 func (q qemuFrameConn) Read(p []byte) (int, error) {
@@ -109,6 +110,9 @@ func (q qemuFrameConn) Read(p []byte) (int, error) {
 
 func (q qemuFrameConn) Write(p []byte) (int, error) {
 	if q.pol != nil && !q.pol.MatchTX(p) {
+		if q.verbose {
+			fmt.Printf("[net] policy drop: %s\n", netpol.Summarize(p))
+		}
 		return len(p), nil // silently dropped, like any ethernet drop
 	}
 	var hdr [4]byte
@@ -133,10 +137,11 @@ func NewNetConn(conn net.Conn, mac [6]byte) *Net {
 // NewNetConnPolicy is NewNetConn with an egress network policy enforced on
 // the link (see internal/netpol).
 func NewNetConnPolicy(conn net.Conn, mac [6]byte, pol *netpol.Policy) *Net {
+	verbose := gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != ""
 	return &Net{
 		mac:     mac,
-		conn:    qemuFrameConn{conn: conn, pol: pol},
-		verbose: gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != "",
+		conn:    qemuFrameConn{conn: conn, pol: pol, verbose: verbose},
+		verbose: verbose,
 	}
 }
 
