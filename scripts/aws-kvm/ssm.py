@@ -28,8 +28,13 @@ def main():
     if not args:
         sys.exit("usage: ssm.py [i-xxx] <script.sh|-c 'cmd'> [timeout]")
     src = args[0]
-    timeout = int(args[1]) if len(args) > 1 else 300
-    script = args[2] if src == "-c" else open(src).read()
+    rest = args[1:]
+    if src == "-c":
+        script = rest[0]
+        rest = rest[1:]
+    else:
+        script = open(src).read()
+    timeout = int(rest[0]) if rest else 300
 
     ssm = boto3.client("ssm", region_name=REGION)
     resp = ssm.send_command(
