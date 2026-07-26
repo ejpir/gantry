@@ -27,10 +27,10 @@ import (
 // RunConfig is the fully-resolved description of one gantry VM run.
 // sandbox.json is this struct.
 type RunConfig struct {
-	Kernel  string   `json:"kernel"`
-	Rootfs  string   `json:"rootfs"`
-	Runtime string   `json:"runtime,omitempty"`
-	Image   string   `json:"image"`
+	Kernel  string `json:"kernel"`
+	Rootfs  string `json:"rootfs"`
+	Runtime string `json:"runtime,omitempty"`
+	Image   string `json:"image"`
 	// ImageRef/ImageDigest/ImageCfg record an OCI image resolution
 	// (-image given a reference, OCI layout, or docker save tar instead
 	// of a plain .erofs file). The daemon uses the already-built EROFS at
@@ -39,14 +39,14 @@ type RunConfig struct {
 	ImageDigest string        `json:"image_digest,omitempty"`
 	ImageCfg    *image.Config `json:"image_config,omitempty"`
 	RWLayer     string        `json:"rwlayer,omitempty"`
-	RW      bool     `json:"rw"`
-	Shares  []string `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
-	Net     bool     `json:"net"`
-	GVProxy string   `json:"gvproxy,omitempty"`
-	NetPol  string   `json:"net_policy,omitempty"`
-	AllowLN bool     `json:"allow_local_net,omitempty"`
-	MemMB   uint     `json:"memMB"`
-	VCPUs   int      `json:"vcpus,omitempty"`
+	RW          bool          `json:"rw"`
+	Shares      []string      `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
+	Net         bool          `json:"net"`
+	GVProxy     string        `json:"gvproxy,omitempty"`
+	NetPol      string        `json:"net_policy,omitempty"`
+	AllowLN     bool          `json:"allow_local_net,omitempty"`
+	MemMB       uint          `json:"memMB"`
+	VCPUs       int           `json:"vcpus,omitempty"`
 }
 
 // RunFlags holds the CLI flag pointers shared by `gantry exec` and

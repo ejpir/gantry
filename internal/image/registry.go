@@ -26,11 +26,11 @@ import (
 
 // registryClient pulls from one registry with one credential resolver.
 type registryClient struct {
-	reg   string
-	cred  *auth.Credential // nil = anonymous
-	hc    *http.Client
-	logf  func(string, ...any)
-	mu    sync.Mutex
+	reg    string
+	cred   *auth.Credential // nil = anonymous
+	hc     *http.Client
+	logf   func(string, ...any)
+	mu     sync.Mutex
 	tokens map[string]*bearerToken // scope -> token (memory only, never disk)
 }
 
@@ -336,8 +336,8 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 	}
 
 	var head struct {
-		MediaType string      `json:"mediaType"`
-		Config    descriptor  `json:"config"`
+		MediaType string       `json:"mediaType"`
+		Config    descriptor   `json:"config"`
 		Layers    []descriptor `json:"layers"`
 		Manifests []struct {
 			Digest   string `json:"digest"`
@@ -373,8 +373,8 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 			return nil, fmt.Errorf("platform manifest digest mismatch")
 		}
 		head = struct {
-			MediaType string      `json:"mediaType"`
-			Config    descriptor  `json:"config"`
+			MediaType string       `json:"mediaType"`
+			Config    descriptor   `json:"config"`
 			Layers    []descriptor `json:"layers"`
 			Manifests []struct {
 				Digest   string `json:"digest"`
