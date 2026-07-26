@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,9 +92,14 @@ func indexLayers(layers []*os.File) (*mergeIndex, error) {
 			base := path.Base(name)
 			if strings.HasPrefix(base, whPrefix) {
 				if base == whOpaque {
-					idx.removeChildren(path.Dir(name))
+					// opaque dir: clear strictly-below; the directory's
+					// own entry (mode/owner) survives
+					idx.removeBelow(path.Dir(name))
 				} else {
-					delete(idx.entries, path.Join(path.Dir(name), base[len(whPrefix):]))
+					// plain whiteout: remove the victim AND, when it is
+					// a directory, everything beneath it — a layer that
+					// rm -rf's a tree must not leave the children live
+					idx.removeAtOrBelow(path.Join(path.Dir(name), base[len(whPrefix):]))
 				}
 				continue
 			}
@@ -107,10 +113,23 @@ func indexLayers(layers []*os.File) (*mergeIndex, error) {
 	return idx, nil
 }
 
-// removeChildren drops every accumulated entry under dir (opaque dir).
-func (idx *mergeIndex) removeChildren(dir string) {
+// removeBelow drops accumulated entries strictly beneath dir (opaque
+// dir marker): the directory entry itself keeps its mode/ownership.
+func (idx *mergeIndex) removeBelow(dir string) {
 	for p := range idx.entries {
-		if p == dir || strings.HasPrefix(p, dir+"/") {
+		if strings.HasPrefix(p, dir+"/") {
+			delete(idx.entries, p)
+		}
+	}
+}
+
+// removeAtOrBelow drops victim and everything beneath it (plain
+// whiteout). removeBelow is not enough here: a deleted directory's
+// children must not survive into the flattened image — image authors
+// rely on the deletion to remove build tooling and credentials.
+func (idx *mergeIndex) removeAtOrBelow(victim string) {
+	for p := range idx.entries {
+		if p == victim || strings.HasPrefix(p, victim+"/") {
 			delete(idx.entries, p)
 		}
 	}
@@ -298,15 +317,16 @@ func flattenLayers(w *erofs.Writer, layers []*os.File, logf func(string, ...any)
 	// duplicate paths — so every explicit directory must be created
 	// before any entry beneath it, or a later explicit Mkdir on an
 	// auto-created parent would fail with "duplicate path".
+	// parents strictly before children, first-seen order within a depth:
+	// stable sort over the insertion order with a precomputed key (the
+	// old exchange sort was O(n^2) and unstable — seconds of pure CPU on
+	// a 25k-entry image)
 	order := append([]string{}, idx.order...)
-	depth := func(s string) int { return strings.Count(s, "/") }
-	for i := 0; i < len(order); i++ {
-		for j := i + 1; j < len(order); j++ {
-			if depth(order[j]) < depth(order[i]) {
-				order[i], order[j] = order[j], order[i]
-			}
-		}
+	depths := make(map[string]int, len(order))
+	for _, p := range order {
+		depths[p] = strings.Count(p, "/")
 	}
+	sort.SliceStable(order, func(i, j int) bool { return depths[order[i]] < depths[order[j]] })
 	for _, name := range order {
 		l, ok := idx.entries[name]
 		if !ok {

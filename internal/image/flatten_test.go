@@ -3,6 +3,7 @@ package image
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -329,4 +330,57 @@ func TestBuildAndVerify(t *testing.T) {
 		t.Errorf("hello.txt = %q", got)
 	}
 	var _ = bytes.MinRead // silence unused import if assertions change
+}
+
+// review4 #1: a plain whiteout of a directory must remove the whole
+// subtree — image authors rely on deletion to strip build tooling and
+// credentials.
+func TestWhiteoutRemovesSubtree(t *testing.T) {
+	l1 := writeLayer(t,
+		tarEntry{"opt", tar.TypeDir, 0o755, 0, 0, "", "", 0, 0},
+		tarEntry{"opt/keep.txt", tar.TypeReg, 0o644, 0, 0, "old", "", 0, 0},
+		tarEntry{"opt/sub", tar.TypeDir, 0o755, 0, 0, "", "", 0, 0},
+		tarEntry{"opt/sub/deep.txt", tar.TypeReg, 0o644, 0, 0, "deep", "", 0, 0},
+	)
+	l2 := writeLayer(t, tarEntry{".wh.opt", tar.TypeReg, 0o644, 0, 0, "", "", 0, 0})
+
+	img, idx := flattenInto(t, l1, l2)
+	for _, p := range []string{"opt", "opt/keep.txt", "opt/sub", "opt/sub/deep.txt"} {
+		if _, ok := idx.entries[p]; ok {
+			t.Errorf("%s survived a directory whiteout", p)
+		}
+		if _, err := fs.Stat(img, p); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: err = %v, want not-exist", p, err)
+		}
+	}
+}
+
+// review4 #2: an opaque marker clears the directory's children but must
+// keep the directory entry itself — its mode and ownership come from the
+// layer that declared it.
+func TestOpaquePreservesDirEntry(t *testing.T) {
+	l1 := writeLayer(t,
+		tarEntry{"opt", tar.TypeDir, 0o700, 42, 43, "", "", 0, 0},
+		tarEntry{"opt/stale.txt", tar.TypeReg, 0o644, 0, 0, "x", "", 0, 0},
+	)
+	l2 := writeLayer(t,
+		tarEntry{"opt/.wh..wh..opq", tar.TypeReg, 0o644, 0, 0, "", "", 0, 0},
+		tarEntry{"opt/fresh.txt", tar.TypeReg, 0o644, 0, 0, "y", "", 0, 0},
+	)
+
+	img, idx := flattenInto(t, l1, l2)
+	e, ok := idx.entries["opt"]
+	if !ok {
+		t.Fatal("opt must survive the opaque marker")
+	}
+	if e.hdr.Mode != 0o700 || e.hdr.Uid != 42 || e.hdr.Gid != 43 {
+		t.Errorf("opt = mode %o uid %d gid %d, want 700 42:43 (ensureParent would have made root 755)",
+			e.hdr.Mode, e.hdr.Uid, e.hdr.Gid)
+	}
+	if _, err := fs.Stat(img, "opt/stale.txt"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("opt/stale.txt: err = %v, want cleared", err)
+	}
+	if got := readBack(t, img, "opt/fresh.txt"); got != "y" {
+		t.Errorf("opt/fresh.txt = %q, want y", got)
+	}
 }

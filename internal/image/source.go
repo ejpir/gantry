@@ -20,11 +20,12 @@ import (
 // match, and its layers as decompressed tar files (temp dir, caller
 // cleans up via Close).
 type pulled struct {
-	digest string // cache key: manifest digest (oci layout) or derived (docker save)
-	ref    string
-	config *Config
-	layers []*os.File
-	tmpDir string
+	digest    string // cache key: manifest digest (oci layout) or derived (docker save)
+	refDigest string // digest the ref resolved to (registry index digest); "" = same as digest
+	ref       string
+	config    *Config
+	layers    []*os.File
+	tmpDir    string
 }
 
 // Close releases the decompressed layer temp files.

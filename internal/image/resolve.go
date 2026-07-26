@@ -45,13 +45,36 @@ func cachedRef(ref, arch string, st *Store, res *auth.Resolver, say func(string,
 		if err != nil || !gutil.FileExists(st.ErofsPath(digest)) {
 			return nil, false
 		}
+		if m.Arch != arch {
+			return nil, false // a cached image for the wrong arch must not boot
+		}
 		return &Resolved{Digest: digest, Path: st.ErofsPath(digest), Config: m.Config, Ref: ref, Cached: true}, true
 	}
+	// refDigest is what lookups compare against: the index digest for a
+	// multi-arch pull, the manifest digest for a single-arch one (legacy
+	// metas predate RefDigest — fall back to Digest, correct for the
+	// single-arch case they all are)
+	refDigest := func(m *Meta) string {
+		if m.RefDigest != "" {
+			return m.RefDigest
+		}
+		return m.Digest
+	}
 	if parsed.Digest != "" {
+		// a pinned digest may name the platform manifest OR the index
+		if d, ok := st.LookupRef(ref, arch); ok {
+			if m, err := st.ReadMeta(d); err == nil && (d == parsed.Digest || refDigest(m) == parsed.Digest) {
+				return hit(d)
+			}
+		}
 		return hit(parsed.Digest)
 	}
-	cached, ok := st.LookupRef(ref)
+	cached, ok := st.LookupRef(ref, arch)
 	if !ok {
+		return nil, false
+	}
+	m, err := st.ReadMeta(cached)
+	if err != nil || m.Arch != arch {
 		return nil, false
 	}
 	c := newRegistryClient(parsed.Registry, res.For(parsed.Registry), nil)
@@ -60,7 +83,7 @@ func cachedRef(ref, arch string, st *Store, res *auth.Resolver, say func(string,
 		say("registry unreachable (%v); using cached %s", err, cached[:19])
 		return hit(cached)
 	}
-	if current == cached {
+	if current == refDigest(m) {
 		return hit(cached)
 	}
 	return nil, false // tag moved: full pull
@@ -119,6 +142,9 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		if res == nil {
 			res = auth.Resolve()
 		}
+		for _, err := range res.ParseErrors() {
+			say("warning: skipping unparseable credentials file: %v", err)
+		}
 		if r, ok := cachedRef(ref, arch, st, res, say); ok {
 			return r, nil
 		}
@@ -133,7 +159,9 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 
 	// fast path: exact digest already cached (index lookup is for refs;
 	// the digest check covers re-pulls of the same content under any ref)
-	if m, err := st.ensure(p.digest, func(outPath string) (*Meta, error) {
+	built := false
+	m, err := st.ensure(p.digest, func(outPath string) (*Meta, error) {
+		built = true
 		say("building %s → %s (linux/%s)", ref, p.digest[:19], arch)
 		if _, err := Build(outPath, p.layers, p.config, logf); err != nil {
 			return nil, err
@@ -144,18 +172,21 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 			size = fi.Size()
 		}
 		return &Meta{
-			Ref: ref, Digest: p.digest, Arch: arch,
+			Ref: ref, Digest: p.digest, RefDigest: p.refDigest, Arch: arch,
 			Created: nowRFC(), Size: size, Config: p.config,
 		}, nil
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
-	} else {
-		return &Resolved{
-			Digest: p.digest,
-			Path:   st.ErofsPath(p.digest),
-			Config: m.Config,
-			Ref:    ref,
-			Cached: true,
-		}, nil
 	}
+	if p.refDigest != "" && m.RefDigest == "" {
+		st.SetRefDigest(p.digest, p.refDigest) // heal pre-RefDigest metas
+	}
+	return &Resolved{
+		Digest: p.digest,
+		Path:   st.ErofsPath(p.digest),
+		Config: m.Config,
+		Ref:    ref,
+		Cached: !built,
+	}, nil
 }

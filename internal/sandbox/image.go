@@ -114,7 +114,11 @@ func CmdImage(argv []string) int {
 			regs = []string{"docker.io", "ghcr.io", "quay.io", "gcr.io"}
 		}
 		fmt.Printf("%-24s %-12s %-40s %s\n", "REGISTRY", "USERNAME", "SOURCE", "SECRET")
-		for _, row := range auth.Resolve().Table(regs) {
+		res := auth.Resolve()
+		for _, err := range res.ParseErrors() {
+			fmt.Fprintln(os.Stderr, "gantry image: warning: skipping unparseable credentials file:", err)
+		}
+		for _, row := range res.Table(regs) {
 			secret := "no"
 			if row.Secret.Raw() != "" {
 				secret = "yes"
@@ -237,5 +241,3 @@ func trunc(s string, n int) string {
 	}
 	return s
 }
-
-

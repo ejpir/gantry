@@ -71,8 +71,8 @@ type RunFlags struct {
 // RegisterRunFlags adds the shared run flags to fs.
 func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 	f := &RunFlags{
-		Kernel:  fs.String("kernel", vmm.DefaultKernelImage(), "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)"),
-		Rootfs:  fs.String("rootfs", vmm.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)"),
+		Kernel: fs.String("kernel", vmm.DefaultKernelImage(), "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)"),
+		Rootfs: fs.String("rootfs", vmm.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)"),
 		Image: fs.String("image", "", `container image: a reference to pull ("debian:bookworm-slim",
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: debian-bookworm.erofs if present)`),
