@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"bytes"
+	"io"
 	"testing"
+	"time"
 )
 
 // Sandbox names feed filepath.Join + os.RemoveAll: path traversal out of the
@@ -38,5 +40,52 @@ func TestExitTrailer(t *testing.T) {
 	status = copyStrippingExitTrailer(&out, bytes.NewReader([]byte("plain")))
 	if status != 0 || out.String() != "plain" {
 		t.Fatalf("plain stream: status=%d out=%q", status, out.String())
+	}
+}
+
+// Interactive pty echo dribbles in byte-at-a-time: it must reach the
+// terminal IMMEDIATELY (the fixed-size holdback this replaces showed
+// nothing until 32 bytes accumulated — i.e. until you hit Enter).
+func TestExitTrailerInteractiveEcho(t *testing.T) {
+	pr, pw := io.Pipe()
+	var out bytes.Buffer
+	statusCh := make(chan int, 1)
+	go func() { statusCh <- copyStrippingExitTrailer(&out, pr) }()
+
+	// per-character echo: visible before EOF, one byte at a time
+	if _, err := pw.Write([]byte("l")); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for out.Len() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if out.Len() != 1 {
+		t.Fatal("echo byte held back instead of written through")
+	}
+	if _, err := pw.Write([]byte("s -la\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for out.Len() < 7 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := out.String(); got != "ls -la\r\n" {
+		t.Fatalf("echo = %q", got)
+	}
+
+	// then the trailer (possibly split) is stripped and yields the status
+	if _, err := pw.Write([]byte(exitTrailerPrefix + "7")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.Write([]byte("\x00")); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	if status := <-statusCh; status != 7 {
+		t.Fatalf("status = %d, want 7", status)
+	}
+	if got := out.String(); got != "ls -la\r\n" {
+		t.Fatalf("output = %q, trailer leaked", got)
 	}
 }

@@ -626,39 +626,81 @@ func CmdSandboxExec(name string, argv []string) int {
 const exitTrailerPrefix = "\x00GANTRY-EXIT "
 
 // copyStrippingExitTrailer copies r to w, stripping the broker's exit-status
-// trailer at EOF and returning the status (0 if absent).
+// trailer and returning the status (0 if absent). Bytes pass through
+// UNHELD until a NUL arrives — NULs never appear in terminal output, so
+// interactive per-character echo is not delayed (an earlier version held
+// back 32 bytes unconditionally and broke exactly that).
 func copyStrippingExitTrailer(w io.Writer, r io.Reader) int {
-	const holdback = 32 // len(prefix) + max digits + NUL
-	var tail []byte
+	var hold []byte // bytes since an undecided NUL; empty in the common case
+	status := 0
 	buf := make([]byte, 32*1024)
-	flush := func(keep int) {
-		if len(tail) > keep {
-			w.Write(tail[:len(tail)-keep])
-			tail = tail[len(tail)-keep:]
-		}
-	}
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			tail = append(tail, buf[:n]...)
-			flush(holdback)
+			data := append(hold, buf[:n]...)
+			hold = nil
+			if i := bytes.IndexByte(data, 0); i < 0 {
+				w.Write(data)
+			} else {
+				w.Write(data[:i])
+				hold = append([]byte(nil), data[i:]...)
+				if st, ok, undecided := parseExitTrailer(hold); !undecided {
+					if ok {
+						status = st
+					} else {
+						w.Write(hold) // NUL turned out to be data
+					}
+					hold = nil
+				}
+			}
 		}
 		if err != nil {
 			break
 		}
 	}
-	status := 0
-	if i := bytes.LastIndex(tail, []byte(exitTrailerPrefix)); i >= 0 {
-		rest := tail[i+len(exitTrailerPrefix):]
-		if j := bytes.IndexByte(rest, 0); j >= 0 {
-			if v, err := strconv.Atoi(string(rest[:j])); err == nil {
-				status = v
-				tail = tail[:i]
-			}
+	// EOF: decide any remaining held bytes
+	if len(hold) > 0 {
+		if st, ok, _ := parseExitTrailer(hold); ok {
+			status = st
+		} else {
+			w.Write(hold)
 		}
 	}
-	w.Write(tail)
 	return status
+}
+
+// parseExitTrailer inspects bytes starting with NUL: it returns (status,
+// true, false) for a complete "\x00GANTRY-EXIT <n>\x00" trailer, (_, false,
+// true) while b could still be a prefix of one, and (_, false, false) once
+// b provably isn't one.
+func parseExitTrailer(b []byte) (int, bool, bool) {
+	magic := exitTrailerPrefix
+	if len(b) < len(magic) {
+		if string(b) == magic[:len(b)] {
+			return 0, false, true // could still become the trailer
+		}
+		return 0, false, false
+	}
+	if string(b[:len(magic)]) != magic {
+		return 0, false, false
+	}
+	rest := b[len(magic):]
+	for i, c := range rest {
+		if c == 0 {
+			if i == 0 {
+				return 0, false, false // "GANTRY-EXIT \x00" is not a status
+			}
+			v, err := strconv.Atoi(string(rest[:i]))
+			if err != nil {
+				return 0, false, false
+			}
+			return v, true, false
+		}
+		if c < '0' || c > '9' {
+			return 0, false, false
+		}
+	}
+	return 0, false, true // digits so far, terminator not seen yet
 }
 
 // ---------------- gantry ls / stop / delete ---------------------------------
