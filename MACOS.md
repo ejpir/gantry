@@ -55,7 +55,7 @@ architecturally correct shell is a container task:
 3. `task.v3.Create` mounts `/dev/vdb` (`shell-rootfs.erofs`) as the OCI rootfs.
 4. `task.v3.Start` invokes the guest's `/sbin/crun`.
 5. Separate host→guest vsock connections on port 1026 carry `stream://` stdin/stdout.
-6. The launcher starts gvproxy and connects a two-queue virtio-net device to
+6. The launcher brings up the embedded netstack (gvisor-tap-vsock, in-process) and connects a two-queue virtio-net device to
    its Unix-datagram vfkit endpoint; vminitd obtains an address using DHCP.
 
 The result is a networked `container#` prompt inside a real OCI container,
@@ -151,7 +151,7 @@ libkrun's mmio transport.
 | `hv_gic_create: HV_UNSUPPORTED` | macOS < 13, or running under a VM without nested virt |
 | `unhandled exception EC=...` | my HVF exit decoder hit a case I didn't implement — paste the line, it's a 5-minute fix |
 | guest prints garbage | terminal raw mode — `reset` your terminal after |
-| DHCP or DNS fails | inspect `/tmp/gantry-gvproxy.log` and rerun with `GANTRY_DEBUG_NET=1` |
+| DHCP or DNS fails | rerun with `GANTRY_DEBUG_NET=1`; capture traffic with `GANTRY_NET_PCAP=/tmp/net.pcap` |
 | `virtio-fs: tag <hostshare> not found` | VM started without the share — set `GANTRY_SHARE=...` on the `run-macos.sh` line (it is not a script argument) |
 | `could not reserve region addr=0x0 len=0x0` | old binary: MMIO SHM length must read `~0`, rebuild with `go build` |
 
@@ -167,5 +167,5 @@ Silicon.
 - `nerdbox-rootfs-arm64.erofs` — the real nerdbox guest rootfs
 - `shell-rootfs.erofs` — tiny busybox OCI rootfs attached as `/dev/vdb`
 - `hostctl-darwin-arm64` — ttrpc task client + stream relay
-- `gvproxy-darwin-arm64` — bundled user-mode NAT/DHCP/DNS provider
+- no external gvproxy needed — NAT/DHCP/DNS is embedded in the VMM (`internal/vnet`)
 - `entitlements.plist`, `run-macos.sh`

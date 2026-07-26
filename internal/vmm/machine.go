@@ -6,6 +6,7 @@ import (
 	"gantry/internal/gutil"
 	"gantry/internal/virtio"
 	"io"
+	"net"
 	"os"
 	"strings"
 )
@@ -277,7 +278,8 @@ type Opts struct {
 	RootfsPath  string   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
 	Disks       []string // extra virtio-blk images (/dev/vdb, /dev/vdc, ...)
 	Shares      []Share
-	NetEndpoint string // Unix datagram raw-Ethernet endpoint; "" disables NIC
+	NetEndpoint string   // Unix datagram raw-Ethernet endpoint; "" disables NIC
+	NetConn     net.Conn // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
 	NetMAC      [6]byte
 	NetVFKIT    bool
 	VsockFwd    string // host dir for vsock forwarding; "" disables vsock
@@ -359,18 +361,27 @@ func Prepare(o Opts) (*Machine, error) {
 			return nil, err
 		}
 	}
-	if o.NetEndpoint != "" {
-		nic, err := virtio.NewNetUnixgram(o.NetEndpoint, o.NetMAC, o.NetVFKIT)
-		if err != nil {
-			return nil, fmt.Errorf("virtio-net: %w", err)
+	if o.NetConn != nil || o.NetEndpoint != "" {
+		var nic *virtio.Net
+		var err error
+		var how string
+		if o.NetConn != nil {
+			nic = virtio.NewNetConn(o.NetConn, o.NetMAC)
+			how = "embedded netstack"
+		} else {
+			nic, err = virtio.NewNetUnixgram(o.NetEndpoint, o.NetMAC, o.NetVFKIT)
+			if err != nil {
+				return nil, fmt.Errorf("virtio-net: %w", err)
+			}
+			how = "unixgram " + o.NetEndpoint
 		}
 		core, err := m.addVirtio(nic, "net")
 		if err != nil {
 			return nil, err
 		}
-		fmt.Printf("virtio-net: mac %02x:%02x:%02x:%02x:%02x:%02x @ %#x irq %d, unixgram %s\n",
+		fmt.Printf("virtio-net: mac %02x:%02x:%02x:%02x:%02x:%02x @ %#x irq %d, %s\n",
 			o.NetMAC[0], o.NetMAC[1], o.NetMAC[2], o.NetMAC[3], o.NetMAC[4], o.NetMAC[5],
-			core.Base(), core.IRQ(), o.NetEndpoint)
+			core.Base(), core.IRQ(), how)
 	}
 	if o.VsockFwd != "" {
 		vs := virtio.NewVsock(o.GuestCID, o.VsockFwd)

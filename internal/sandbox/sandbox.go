@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"gantry/internal/gutil"
 	"gantry/internal/vmm"
+	"gantry/internal/vnet"
 	"io"
 	"net"
 	"os"
@@ -144,7 +145,7 @@ func CmdStart(argv []string) int {
 	var shares gutil.StrList
 	fs.Var(&shares, "share", "TAG=PATH[,ro] (repeatable)")
 	netEnabled := fs.Bool("net", true, "")
-	gvproxy := fs.String("gvproxy", vmm.DefaultGvproxy(), "")
+	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
 	memMB := fs.Uint("mem", 512, "")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
 	fs.Parse(fargv)
@@ -156,7 +157,7 @@ func CmdStart(argv []string) int {
 
 	// The daemon runs with cwd=/, so resolve everything to absolute paths.
 	gvPath := *gvproxy
-	if !strings.ContainsRune(gvPath, os.PathSeparator) && gutil.FileExists(gvPath) {
+	if gvPath != "" && !strings.ContainsRune(gvPath, os.PathSeparator) && gutil.FileExists(gvPath) {
 		gvPath = absPath(gvPath)
 	}
 	cfg := sandboxConfig{
@@ -303,15 +304,34 @@ func CmdDaemon(name string) int {
 	defer console.Close()
 	vmm.SetConsoleWriter(console)
 
+	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	netSock := ""
+	var netConn net.Conn
 	if cfg.Net {
-		gv, sock, err := StartGVProxy(cfg.GVProxy, dir)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "daemon:", err)
-			return 1
+		if cfg.GVProxy != "" {
+			// explicit external gvproxy (debug/interop); the default path
+			// below needs no shipped binary
+			gv, sock, err := StartGVProxy(cfg.GVProxy, dir)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "daemon:", err)
+				return 1
+			}
+			defer func() { gv.Process.Kill(); gv.Wait() }()
+			netSock = sock
+		} else {
+			stack, err := vnet.Start(netMAC)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "daemon:", err)
+				return 1
+			}
+			defer stack.Close()
+			netConn, err = stack.Dial()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "daemon:", err)
+				return 1
+			}
+			defer netConn.Close()
 		}
-		defer func() { gv.Process.Kill(); gv.Wait() }()
-		netSock = sock
 	}
 
 	var hostShares []vmm.Share
@@ -326,7 +346,6 @@ func CmdDaemon(name string) int {
 		hostShares = append(hostShares, s)
 	}
 
-	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	disks := []string{cfg.Image}
 	if cfg.RW && cfg.RWLayer != "" {
 		disks = append(disks, cfg.RWLayer)
@@ -343,13 +362,16 @@ func CmdDaemon(name string) int {
 		Disks:       disks,
 		Shares:      hostShares,
 		NetEndpoint: netSock,
+		NetConn:     netConn,
 		NetMAC:      netMAC,
 		NetVFKIT:    true,
 		VsockFwd:    dir,
 		VCPUs:       cfg.VCPUs,
 		GuestCID:    3,
 		VsockListen: []uint32{1026},
-		Cmdline:     gutil.InsertExtraCmdline(vmm.DefaultCmdline(arch, cfg.Rootfs, "", 3, netSock, netMAC, true)),
+		// netSock is only a "networking enabled" marker for the cmdline
+		// builder; with the embedded stack the endpoint is in-process
+		Cmdline: gutil.InsertExtraCmdline(vmm.DefaultCmdline(arch, cfg.Rootfs, "", 3, netMarker(netSock, netConn), netMAC, true)),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
@@ -738,4 +760,11 @@ func dumpTail(path string) {
 		b = b[len(b)-4096:]
 	}
 	fmt.Fprintf(os.Stderr, "---- last bytes of %s ----\n%s\n----\n", filepath.Base(path), b)
+}
+
+func netMarker(endpoint string, conn net.Conn) string {
+	if endpoint != "" || conn != nil {
+		return "enabled"
+	}
+	return ""
 }

@@ -1,8 +1,10 @@
 package virtio
 
 import (
+	"encoding/binary"
 	"fmt"
 	"gantry/internal/gutil"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -74,6 +76,49 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 		localPath: localPath,
 		verbose:   gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != "",
 	}, nil
+}
+
+// qemuFrameConn adapts a stream connection to the frame-at-a-time
+// packetConn interface using QEMU protocol framing (4-byte big-endian
+// length + raw Ethernet frame). This is what gvisor-tap-vsock's
+// AcceptQemu — and therefore our embedded netstack (internal/vnet) —
+// expects on the other end.
+type qemuFrameConn struct{ conn net.Conn }
+
+func (q qemuFrameConn) Read(p []byte) (int, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(q.conn, hdr[:]); err != nil {
+		return 0, err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	if n > uint32(len(p)) {
+		return 0, fmt.Errorf("qemu frame %d bytes > buffer %d", n, len(p))
+	}
+	return io.ReadFull(q.conn, p[:n])
+}
+
+func (q qemuFrameConn) Write(p []byte) (int, error) {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(p)))
+	buf := append(hdr[:], p...)
+	if _, err := q.conn.Write(buf); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (q qemuFrameConn) Close() error { return q.conn.Close() }
+
+// NewNetConn attaches the device to a QEMU-framed stream endpoint —
+// typically Stack.Dial() from the embedded netstack (no external gvproxy
+// needed). The connection is unbuffered, so a busy guest TX serializes
+// frame-by-frame against the netstack's read loop; fine at sandbox scale.
+func NewNetConn(conn net.Conn, mac [6]byte) *Net {
+	return &Net{
+		mac:     mac,
+		conn:    qemuFrameConn{conn},
+		verbose: gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != "",
+	}
 }
 
 func (v *Net) deviceID() uint32 { return virtioNetDeviceID }
