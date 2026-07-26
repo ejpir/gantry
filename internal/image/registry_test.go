@@ -29,10 +29,10 @@ type fakeRegistry struct {
 func newFakeRegistry(t *testing.T, wantUser string) *fakeRegistry {
 	t.Helper()
 	r := &fakeRegistry{
-		manifest:  []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:PLACEHOLDER","size":2},"layers":[]}`),
-		blobs:     map[string][]byte{},
-		wantUser:  wantUser,
-		token:     "test-bearer-token",
+		manifest: []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:PLACEHOLDER","size":2},"layers":[]}`),
+		blobs:    map[string][]byte{},
+		wantUser: wantUser,
+		token:    "test-bearer-token",
 	}
 	r.manDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(r.manifest))
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

@@ -42,7 +42,7 @@ type Credential struct {
 // dockerConfig mirrors the pieces of ~/.docker/config.json and the
 // podman/skopeo auth files (same schema for auths).
 type dockerConfig struct {
-	Auths       map[string]struct {
+	Auths map[string]struct {
 		Auth          string `json:"auth"`
 		IdentityToken string `json:"identitytoken"`
 	} `json:"auths"`

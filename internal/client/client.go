@@ -45,7 +45,7 @@ type ShellOptions struct {
 	Share      bool   // mount every share from the VMM's shares.json
 	RW         bool   // writable overlay root: erofs /dev/vdb + ext4 /dev/vdc
 	Args       []string
-	ID         string      // bundle/task id; default "shell"
+	ID         string        // bundle/task id; default "shell"
 	ImgCfg     *image.Config // resolved image config (nil = defaults)
 }
 
