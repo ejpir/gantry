@@ -429,7 +429,11 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 // containerInitArgs is the long-lived stub a sandbox container runs as
 // init (ExecIntoExisting mode). User sessions never touch it: they Exec
 // their own processes in. It only dies when the sandbox (VM) stops.
-var containerInitArgs = []string{"/bin/sh", "-c", "while :; do sleep 86400; done"}
+// nohup + stdio detach: when the guest's console relay ends, the pty
+// master closes and the kernel SIGHUPs the foreground pgrp — a plain
+// dash init dies instantly (seen under runsc; crun's pty setup masks
+// it). SIGHUP must be ignored and the ctty fds dropped.
+var containerInitArgs = []string{"/usr/bin/nohup", "/bin/sh", "-c", "exec </dev/null >/dev/null 2>&1; while :; do sleep 86400; done"}
 
 // ensureSandboxContainer makes sure the sandbox's long-lived container
 // exists and is RUNNING, creating it (stub init) if not.
@@ -542,8 +546,9 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		outC.Close()
 		return fmt.Errorf("task Start: %w", err)
 	}
-	inC.Close()
-	outC.Close()
+	// NOTE: inC/outC are deliberately NOT closed: closing them ends the
+	// guest's console relay, which closes the pty master and SIGHUPs the
+	// stub init. They are reclaimed when the daemon (VM) exits.
 	logf("sandbox container %s is up (long-lived init; sessions attach as exec)", id)
 	return nil
 }
