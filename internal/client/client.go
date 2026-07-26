@@ -729,13 +729,17 @@ func RootfsMounts(rw bool) []*types.Mount {
 			"lowerdir={{mount 0}}",
 			"upperdir={{mount 1}}/upper",
 			"workdir={{mount 1}}/work",
-			// cross-fs overlay (erofs lower + ext4 upper) makes the kernel
-			// auto-enable "xino", which verifies the upper root's origin
-			// file handle — on a damaged rwlayer (unclean VM stops) that
-			// verification fails the whole mount with ESTALE. We don't
-			// need cross-layer inode uniqueness; xino=off skips the
-			// check. gVisor's sentry ignores unknown overlay options
-			// (logs them), so this is safe under -runtime runsc.
+			// The nerdbox arm64 kernel builds with
+			// CONFIG_OVERLAY_FS_INDEX=y, which makes "index" default
+			// ON for every overlay mount — and index's origin
+			// verification (exportfs fh decode of the upper root)
+			// fails the whole mount with ESTALE when the rwlayer is
+			// damaged or carries xattrs from a previous image pairing.
+			// We need neither the inode index nor NFS export; pin
+			// both index and xino off explicitly (x86_64 kernels
+			// default them off already). gVisor's sentry ignores
+			// unknown overlay options, so runsc is unaffected.
+			"index=off",
 			"xino=off",
 		}},
 	}
