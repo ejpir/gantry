@@ -151,6 +151,20 @@ const (
 	errTextMountInUse   = "in-use"         // overlay upperdir still referenced
 )
 
+// rwlayerHint appends actionable guidance when a Create failure smells
+// like rwlayer corruption: ESTALE ("stale file handle") and EBADMSG
+// ("bad message") are the mount errors a damaged ext4 produces (unclean
+// VM shutdown — gantry stop is a power cut).
+func rwlayerHint(err error, rw bool) string {
+	if !rw || err == nil {
+		return ""
+	}
+	if strings.Contains(err.Error(), "stale file handle") || strings.Contains(err.Error(), "bad message") {
+		return "\n(the rwlayer looks corrupted — recreate it with ./mkrwlayer.sh rwlayer.ext4 512, or e2fsck it)"
+	}
+	return ""
+}
+
 func errHas(err error, subs ...string) bool {
 	for _, s := range subs {
 		if strings.Contains(err.Error(), s) {
@@ -410,7 +424,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		defer dcancel()
 		tc.Delete(dctx, &task.DeleteRequest{ID: id})
 		unmountStack(dctx, mountClient, bundlePath)
-		return fmt.Errorf("task Create: %w\n(see the VM console for vminitd logs)", err)
+		return fmt.Errorf("task Create: %w%s\n(see the VM console for vminitd logs)", err, rwlayerHint(err, opts.RW))
 	}
 	logf("task created")
 	if _, err := tc.Start(ctx, &task.StartRequest{ID: id}); err != nil {
@@ -544,7 +558,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		if errHas(err, errTextMountBusy, errTextMountInUse) && awaitRunning(ctx, tc, id) {
 			return nil // lost the race; the winner's container is up
 		}
-		return fmt.Errorf("task Create: %w\n(see the VM console for vminitd logs)", err)
+		return fmt.Errorf("task Create: %w%s\n(see the VM console for vminitd logs)", err, rwlayerHint(err, opts.RW))
 	}
 	if _, err := tc.Start(ctx, &task.StartRequest{ID: id}); err != nil {
 		inC.Close()
@@ -715,6 +729,14 @@ func RootfsMounts(rw bool) []*types.Mount {
 			"lowerdir={{mount 0}}",
 			"upperdir={{mount 1}}/upper",
 			"workdir={{mount 1}}/work",
+			// cross-fs overlay (erofs lower + ext4 upper) makes the kernel
+			// auto-enable "xino", which verifies the upper root's origin
+			// file handle — on a damaged rwlayer (unclean VM stops) that
+			// verification fails the whole mount with ESTALE. We don't
+			// need cross-layer inode uniqueness; xino=off skips the
+			// check. gVisor's sentry ignores unknown overlay options
+			// (logs them), so this is safe under -runtime runsc.
+			"xino=off",
 		}},
 	}
 }
