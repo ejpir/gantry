@@ -164,6 +164,13 @@ type SessionOptions struct {
 	ExecIntoExisting bool
 }
 
+func init() {
+	// typeurl.MarshalAny refuses unregistered types; register the OCI
+	// process spec the same way containerd's client does (the TypeUrl is
+	// cosmetic here — vminitd only json-unmarshals the Value).
+	typeurl.Register(&specs.Process{}, "types.containerd.io", "opencontainers/runtime-spec", "1", "Process")
+}
+
 // Session runs one container session to completion over an existing ttrpc
 // connection: bundle upload, optional virtio-fs mounts, task create/start,
 // stdio relay, wait, cleanup. Callers own the connection, the terminal, and
