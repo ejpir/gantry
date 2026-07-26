@@ -195,25 +195,19 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	id := opts.ID
 	shares := opts.Shares
 
-	// Concurrent sessions must not each Create a container: the rw rootfs
-	// stack (ext4 + overlay upperdir) can be mounted only once, so the
-	// second Create dies with "upperdir is in-use"/EBUSY. Docker
-	// semantics instead: if the task already runs in this VM, Exec a new
-	// process into the SAME container (task.v3 Exec).
 	tc := task.NewTTRPCTaskClient(client)
 	if opts.ExecIntoExisting {
-		if st, err := tc.State(ctx, &task.StateRequest{ID: id}); err == nil {
-			if st.Status == tasktypes.Status_RUNNING {
-				logf("task %s already running; attaching a new exec process", id)
-				return sessionExec(client, tc, opts, id, stdin, stdout)
-			}
-			// Stale task left by a session that died without cleanup:
-			// delete it so the Create below succeeds.
-			logf("task %s exists but is %s; removing stale task", id, st.Status)
-			dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
-			tc.Delete(dctx, &task.DeleteRequest{ID: id})
-			dcancel()
+		// Docker-sandbox semantics: the VM runs ONE long-lived container
+		// (stub init) and every session is a task.v3 Exec into it.
+		// Create happens exactly once per sandbox, so the single-instance
+		// erofs rootfs stack is mounted exactly once and never needs
+		// unmounting — vminitd's task Delete unmounts only the overlay,
+		// leaving mounts/0,1 behind with no RPC able to remove them,
+		// which made every re-Create fail EBUSY.
+		if err := ensureSandboxContainer(client, tc, ctx, opts, logf); err != nil {
+			return err
 		}
+		return sessionExec(client, tc, opts, id, stdin, stdout)
 	}
 
 	cfg, err := ConfigJSON(shares, opts.RW, opts.Args)
@@ -432,10 +426,132 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	return werr
 }
 
+// containerInitArgs is the long-lived stub a sandbox container runs as
+// init (ExecIntoExisting mode). User sessions never touch it: they Exec
+// their own processes in. It only dies when the sandbox (VM) stops.
+var containerInitArgs = []string{"/bin/sh", "-c", "while :; do sleep 86400; done"}
+
+// ensureSandboxContainer makes sure the sandbox's long-lived container
+// exists and is RUNNING, creating it (stub init) if not.
+func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx context.Context, opts SessionOptions, logf func(string, ...any)) error {
+	id := opts.ID
+	st, err := tc.State(ctx, &task.StateRequest{ID: id})
+	if err == nil && st.Status == tasktypes.Status_RUNNING {
+		return nil
+	}
+	if err == nil {
+		// Stale task (e.g. its init was killed): remove and recreate.
+		logf("task %s exists but is %s; recreating the sandbox container", id, st.Status)
+		dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
+		tc.Delete(dctx, &task.DeleteRequest{ID: id})
+		for range 50 {
+			if _, err := tc.State(dctx, &task.StateRequest{ID: id}); err != nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		dcancel()
+	}
+
+	cfg, err := ConfigJSON(opts.Shares, opts.RW, containerInitArgs)
+	if err != nil {
+		return err
+	}
+	bresp, err := bundle.NewTTRPCBundleClient(client).Create(ctx, &bundle.CreateRequest{
+		ID: id,
+		Files: map[string][]byte{
+			"config.json":    []byte(cfg),
+			"nw-config.json": []byte(`{"Networks":[]}`),
+		},
+	})
+	if err != nil {
+		// The bundle API is Create-only and vminitd never removes
+		// /run/bundles/<id>; reuse the dir after a recreate.
+		if !strings.Contains(err.Error(), "file exists") && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("bundle Create: %w", err)
+		}
+		bresp = &bundle.CreateResponse{Bundle: "/run/bundles/" + id}
+		logf("reusing existing bundle at %s", bresp.Bundle)
+	} else {
+		logf("container bundle created at %s", bresp.Bundle)
+	}
+
+	mountClient := mountapi.NewTTRPCMountClient(client)
+	if len(opts.Shares) > 0 {
+		specs := make([]*mountapi.MountSpec, 0, len(opts.Shares))
+		for _, s := range opts.Shares {
+			spec := &mountapi.MountSpec{Type: "virtiofs", Source: s.Tag, Target: s.VMPath}
+			if s.RO {
+				spec.Options = []string{"ro"}
+			}
+			specs = append(specs, spec)
+		}
+		if _, err := mountClient.MountAll(ctx, &mountapi.MountAllRequest{Mounts: specs}); err != nil {
+			return fmt.Errorf("mount virtio-fs shares: %w", err)
+		}
+		for _, s := range opts.Shares {
+			mode := "rw"
+			if s.RO {
+				mode = "ro"
+			}
+			logf("share %-12s %-30s -> %s -> container %s (%s)", s.Tag, s.Path, s.VMPath, s.CtrPath, mode)
+		}
+	}
+
+	// Stub-init stdio: throwaway streams. Terminal tasks use the console
+	// socket, so these are never claimed; close them right after Start.
+	inID, outID := streamID("init-stdin"), streamID("init-stdout")
+	inC, err := startStream(opts.StreamSock, inID)
+	if err != nil {
+		return fmt.Errorf("init stdin stream: %w", err)
+	}
+	outC, err := startStream(opts.StreamSock, outID)
+	if err != nil {
+		inC.Close()
+		return fmt.Errorf("init stdout stream: %w", err)
+	}
+
+	_, err = tc.Create(ctx, &task.CreateTaskRequest{
+		ID:       id,
+		Bundle:   bresp.Bundle,
+		Rootfs:   RootfsMounts(opts.RW),
+		Terminal: true,
+		Stdin:    "stream://" + inID,
+		Stdout:   "stream://" + outID,
+	})
+	if err != nil {
+		inC.Close()
+		outC.Close()
+		if strings.Contains(err.Error(), "already exists") {
+			return nil // someone else won the create race
+		}
+		if strings.Contains(err.Error(), "busy") || strings.Contains(err.Error(), "in-use") {
+			// Lost the create race; the winner's container comes up shortly.
+			for range 50 {
+				st, serr := tc.State(ctx, &task.StateRequest{ID: id})
+				if serr == nil && st.Status == tasktypes.Status_RUNNING {
+					return nil
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		return fmt.Errorf("task Create: %w\n(see the VM console for vminitd logs)", err)
+	}
+	if _, err := tc.Start(ctx, &task.StartRequest{ID: id}); err != nil {
+		inC.Close()
+		outC.Close()
+		return fmt.Errorf("task Start: %w", err)
+	}
+	inC.Close()
+	outC.Close()
+	logf("sandbox container %s is up (long-lived init; sessions attach as exec)", id)
+	return nil
+}
+
 // sessionExec runs a session as a new process inside an already-running
-// container (task.v3 Exec) — the second-and-later `gantry exec <name>`
-// path. No bundle, no mounts, no Delete: the container and its lifecycle
-// belong to the session that created it.
+// container (task.v3 Exec) — every `gantry exec <name>` takes this path.
+// No bundle, no mounts, no Delete: the container and its lifecycle
+// belong to the sandbox, not to any one session.
 func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOptions, id string, stdin io.Reader, stdout io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
