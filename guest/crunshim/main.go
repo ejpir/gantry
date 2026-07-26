@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 const realRuntime = "/sbin/crun.runsc"
@@ -95,6 +96,20 @@ func supervise(args []string) int {
 			}
 		}
 	}()
+	// a hung runsc (deadlock waiting on gofer/sandbox sync) is otherwise
+	// invisible: after 25s send SIGQUIT - the Go runtime prints all
+	// goroutine stacks to stderr, which our tail captures - then dump
+	timed := time.AfterFunc(25*time.Second, func() {
+		if cmd.Process != nil {
+			cmd.Process.Signal(syscall.SIGQUIT)
+		}
+		time.Sleep(2 * time.Second)
+		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
+			fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", tail.String())
+			c.Close()
+		}
+	})
+	defer timed.Stop()
 	err := cmd.Wait()
 	signal.Stop(sigc)
 	if err != nil {
