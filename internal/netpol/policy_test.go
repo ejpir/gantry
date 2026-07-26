@@ -232,3 +232,77 @@ func TestDomainAllowlistTCPDNS(t *testing.T) {
 		t.Fatal("unlisted TCP DNS query should be dropped")
 	}
 }
+
+func TestLocalNetWall(t *testing.T) {
+	// DefaultPolicy posture: internet yes, local net no
+	p := DefaultPolicy()
+	public := ipFrame(t, "93.184.216.34", protoTCP, 443, nil)
+	if !p.MatchTX(public) {
+		t.Fatal("public internet should be allowed by DefaultPolicy")
+	}
+	for name, dst := range map[string]string{
+		"rfc1918/10":     "10.1.2.3",
+		"rfc1918/172":    "172.16.5.4",
+		"rfc1918/192":    "192.168.1.1",
+		"host NAT alias": "192.168.127.254",
+		"metadata":       "169.254.169.254",
+		"link-local":     "169.254.1.1",
+		"loopback":       "127.0.0.1",
+		"cgnat":          "100.64.0.1",
+		"multicast":      "224.0.0.251",
+	} {
+		if p.MatchTX(ipFrame(t, dst, protoTCP, 443, nil)) {
+			t.Errorf("%s (%s) should be denied", name, dst)
+		}
+	}
+
+	// allowLocal relaxes it
+	p2 := DefaultPolicy()
+	p2.AllowLocal = true
+	if !p2.MatchTX(ipFrame(t, "192.168.1.1", protoTCP, 443, nil)) {
+		t.Fatal("AllowLocal should permit LAN")
+	}
+	if !p2.MatchTX(ipFrame(t, "192.168.127.254", protoTCP, 445, nil)) {
+		t.Fatal("AllowLocal should permit the host alias")
+	}
+
+	// explicit rule carves out one LAN subnet while the rest stays walled
+	p3 := mustParse(t, `{"default": "allow", "rules": [
+		{"action": "allow", "cidr": "10.9.0.0/16"}]}`)
+	if !p3.MatchTX(ipFrame(t, "10.9.1.2", protoTCP, 22, nil)) {
+		t.Fatal("explicit allow rule for a LAN subnet should win over the wall")
+	}
+	if p3.MatchTX(ipFrame(t, "10.8.1.2", protoTCP, 22, nil)) {
+		t.Fatal("other LAN ranges must stay walled")
+	}
+	// and an explicit deny can wall a public IP even with default allow
+	if p3.MatchTX(ipFrame(t, "93.184.216.34", protoTCP, 443, nil)) {
+		// 93.184.216.34 not covered by any rule and not local: default allow
+	} else {
+		t.Fatal("public IP should still be allowed (default allow)")
+	}
+}
+
+func TestLocalWallBeatsDNSSnoop(t *testing.T) {
+	// rebinding: an allowlisted domain resolving to a LAN IP must NOT
+	// punch through the local wall
+	p := mustParse(t, `{"default": "deny", "allowDomains": ["deb.debian.org"]}`)
+	f := ipFrame(t, "192.168.127.2", protoUDP, 12345, dnsAnswer(t, "deb.debian.org", "192.168.1.50"))
+	binary.BigEndian.PutUint16(f[14+20:14+22], 53)
+	p.ObserveRX(f)
+	if p.DynamicSize() == 0 {
+		t.Fatal("snoop should still record the answer")
+	}
+	var k [4]byte
+	copy(k[:], net.ParseIP("192.168.1.50").To4())
+	if p.Allows(k, protoTCP, 443) {
+		t.Fatal("DNS-rebinded LAN IP must stay blocked by the wall")
+	}
+
+	// with allowLocal the same snooped IP is reachable
+	p2 := mustParse(t, `{"default": "deny", "allowLocal": true, "allowDomains": ["deb.debian.org"]}`)
+	p2.ObserveRX(f)
+	if !p2.Allows(k, protoTCP, 443) {
+		t.Fatal("allowLocal should admit snooped LAN IPs")
+	}
+}

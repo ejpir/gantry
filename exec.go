@@ -41,6 +41,7 @@ func runExec(argv []string) int {
 	netEnabled := fs.Bool("net", true, "attach virtio-net via the embedded netstack")
 	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
 	netpolFlag := fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)")
+	allowLocal := fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)")
 	console := fs.Bool("console", false, "stream the guest serial console to stderr (default: log file in the work dir)")
 	memMB := fs.Uint("mem", 512, "guest RAM in MiB")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
@@ -155,6 +156,10 @@ func runExec(argv []string) int {
 	netSock := ""
 	var netConn net.Conn
 	var policy *netpol.Policy
+	if *allowLocal && *gvproxy != "" {
+		fmt.Fprintln(os.Stderr, "gantry exec: -allow-local-net requires the embedded netstack (drop -gvproxy)")
+		return 1
+	}
 	if *netpolFlag != "" {
 		if *gvproxy != "" {
 			fmt.Fprintln(os.Stderr, "gantry exec: -net-policy requires the embedded netstack (drop -gvproxy)")
@@ -166,6 +171,17 @@ func runExec(argv []string) int {
 			fmt.Fprintln(os.Stderr, "gantry exec:", err)
 			return 1
 		}
+	}
+	if *allowLocal {
+		if policy == nil {
+			policy = netpol.DefaultPolicy()
+		}
+		policy.AllowLocal = true
+	}
+	if policy == nil && *netEnabled {
+		policy = netpol.DefaultPolicy() // internet yes, local net no
+	}
+	if policy != nil {
 		fmt.Println("gantry exec: network policy:", policy.Describe())
 	}
 	if *netEnabled {

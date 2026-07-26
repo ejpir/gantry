@@ -57,6 +57,7 @@ type sandboxConfig struct {
 	Net     bool     `json:"net"`
 	GVProxy string   `json:"gvproxy,omitempty"`
 	NetPol  string   `json:"net_policy,omitempty"`
+	AllowLN bool     `json:"allow_local_net,omitempty"`
 	MemMB   uint     `json:"memMB"`
 	VCPUs   int      `json:"vcpus,omitempty"`
 }
@@ -149,6 +150,7 @@ func CmdStart(argv []string) int {
 	netEnabled := fs.Bool("net", true, "")
 	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
 	netpolFlag := fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)")
+	allowLocal := fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)")
 	memMB := fs.Uint("mem", 512, "")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
 	fs.Parse(fargv)
@@ -172,6 +174,7 @@ func CmdStart(argv []string) int {
 		Net:     *netEnabled,
 		GVProxy: gvPath,
 		NetPol:  *netpolFlag,
+		AllowLN: *allowLocal,
 		MemMB:   *memMB,
 		VCPUs:   min(*vcpus, 8),
 	}
@@ -319,10 +322,21 @@ func CmdDaemon(name string) int {
 			fmt.Fprintln(os.Stderr, "daemon:", err)
 			return 1
 		}
+	}
+	if cfg.AllowLN {
+		if policy == nil {
+			policy = netpol.DefaultPolicy()
+		}
+		policy.AllowLocal = true
+	}
+	if policy == nil && cfg.Net {
+		policy = netpol.DefaultPolicy() // internet yes, local net no
+	}
+	if policy != nil {
 		fmt.Fprintln(os.Stderr, "daemon: network policy:", policy.Describe())
 	}
-	if cfg.NetPol != "" && cfg.GVProxy != "" {
-		fmt.Fprintln(os.Stderr, "daemon: -net-policy requires the embedded netstack (drop -gvproxy)")
+	if (cfg.NetPol != "" || cfg.AllowLN) && cfg.GVProxy != "" {
+		fmt.Fprintln(os.Stderr, "daemon: -net-policy/-allow-local-net require the embedded netstack (drop -gvproxy)")
 		return 1
 	}
 	if cfg.Net {

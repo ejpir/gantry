@@ -139,3 +139,107 @@ func dnsResponsePayload(frame []byte) []byte {
 	l4 := frame[14+ihl:]
 	return l4[8:]
 }
+
+// The question that matters: with the DEFAULT policy (local net walled
+// off), can the guest still reach the internet? Proven at TCP level: a SYN
+// to a public IP:443 gets a SYN-ACK through policy + netstack NAT, while a
+// SYN to a LAN address is dropped by the policy before the netstack sees
+// it. DNS via the gateway resolver must also keep working.
+func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
+	pol := netpol.DefaultPolicy()
+	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stack.Close()
+	raw, err := stack.Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	conn := qemuFrameConn{conn: raw, pol: pol}
+	buf := make([]byte, 4096)
+
+	// 1) LAN destination: SYN to a private IP is dropped (silence)
+	if _, err := conn.Write(tcpSYNFrame(t, "192.168.1.1", 443)); err != nil {
+		t.Fatal(err)
+	}
+	conn.conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	if n, err := conn.Read(buf); err == nil {
+		t.Fatalf("LAN SYN got %d bytes back — policy did not drop it", n)
+	}
+
+	// 2) public destination: SYN to 1.1.1.1:443 → SYN-ACK = internet egress
+	if _, err := conn.Write(tcpSYNFrame(t, "1.1.1.1", 443)); err != nil {
+		t.Fatal(err)
+	}
+	conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	gotSynAck := false
+	for i := 0; i < 8 && !gotSynAck; i++ {
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Skipf("no outbound internet in this environment: %v", err)
+		}
+		f := buf[:n]
+		if binary.BigEndian.Uint16(f[12:14]) == 0x0806 {
+			conn.Write(arpReply(f))
+			continue
+		}
+		if f[14+9] == 6 && f[14+20+13]&0x12 == 0x12 { // TCP SYN|ACK
+			gotSynAck = true
+		}
+	}
+	if !gotSynAck {
+		t.Fatal("no SYN-ACK from public internet — egress broken by default policy?")
+	}
+
+	// 3) gateway DNS still resolves (the apt/curl path starts here)
+	if _, err := conn.Write(dnsQueryFrame(t, "debian.org")); err != nil {
+		t.Fatal(err)
+	}
+	conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for i := 0; i < 8; i++ {
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Skipf("no upstream DNS in this environment: %v", err)
+		}
+		f := buf[:n]
+		if binary.BigEndian.Uint16(f[12:14]) == 0x0806 {
+			conn.Write(arpReply(f))
+			continue
+		}
+		if f[14+9] == 17 && binary.BigEndian.Uint16(f[14+20:14+22]) == 53 {
+			return // DNS answer arrived
+		}
+	}
+	t.Fatal("gateway DNS did not answer under the default policy")
+}
+
+// tcpSYNFrame crafts an Ethernet/IPv4/TCP SYN with valid checksums.
+func tcpSYNFrame(t *testing.T, dstIP string, dport uint16) []byte {
+	t.Helper()
+	src := net.ParseIP("192.168.127.2").To4()
+	dst := net.ParseIP(dstIP).To4()
+	tcp := make([]byte, 20)
+	binary.BigEndian.PutUint16(tcp[0:2], 40000)
+	binary.BigEndian.PutUint16(tcp[2:4], dport)
+	binary.BigEndian.PutUint32(tcp[4:8], 1000) // seq
+	tcp[12] = 5 << 4                           // data offset
+	tcp[13] = 0x02                             // SYN
+	binary.BigEndian.PutUint16(tcp[14:16], 64240)
+	// TCP checksum over pseudo-header + segment
+	pseudo := append(append(append([]byte{}, src...), dst...), 0, 6, 0, 20)
+	binary.BigEndian.PutUint16(tcp[16:18], ipChecksum(append(pseudo, tcp...)))
+
+	ip := make([]byte, 20)
+	ip[0] = 0x45
+	binary.BigEndian.PutUint16(ip[2:4], uint16(20+len(tcp)))
+	ip[8] = 64
+	ip[9] = 6
+	copy(ip[12:16], src)
+	copy(ip[16:20], dst)
+	binary.BigEndian.PutUint16(ip[10:12], ipChecksum(ip))
+
+	frame := []byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd, 0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee, 0x08, 0x00}
+	return append(append(frame, ip...), tcp...)
+}
