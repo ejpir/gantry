@@ -37,8 +37,10 @@ scripts/config --disable ARM64_16K_PAGES --disable ARM64_64K_PAGES --enable ARM6
 yes "" | make olddefconfig >/dev/null
 grep -q "^CONFIG_ARM64_4K_PAGES=y" .config || { echo "config flip failed" >&2; exit 1; }
 
-echo "== building vmlinux (this takes a while)"
-make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" vmlinux
-cp vmlinux "$OLDPWD/$OUT"
+echo "== building (this takes a while)"
+# gantry's arm64 boot path wants the raw Image (ARM\x64 magic at 0x38),
+# not the vmlinux ELF (that one is the x86-64 format)
+make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" Image
+cp arch/arm64/boot/Image "$OLDPWD/$OUT"
 ls -lh "$OLDPWD/$OUT"
 echo "done: gantry start <name> -runtime runsc   (auto-picks $OUT)"
