@@ -69,7 +69,12 @@ func insertFlags(args []string, debug bool) []string {
 	// (--TESTONLY-unsafe-nonroot is history: the sentry runs in runsc's
 	// minimal chroot again — it was never the problem; the 16K page size
 	// and the pty stderr buffer were.)
-	inject := []string{"--network=host"}
+	// --directfs=false: under directfs the SENTRY (which runs with no
+	// capabilities, doing host syscalls itself) cannot write virtio-fs
+	// shares owned by a non-root host uid -> container writes fail with
+	// EPERM. The gofer keeps CAP_DAC_OVERRIDE/FOWNER, so route all fs
+	// access through it.
+	inject := []string{"--network=host", "--directfs=false"}
 	if debug {
 		inject = append(inject, "--debug")
 	}
