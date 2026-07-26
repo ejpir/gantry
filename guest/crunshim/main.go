@@ -1,16 +1,25 @@
 // crunshim is installed as /sbin/crun in the gVisor rootfs variant
-// (mkrootfs-gvisor.sh). It prepares the VM's /dev — nerdbox's vminitd
-// mounts none and the EROFS root's /dev is an empty read-only dir — so
-// that runsc can allocate the container console pty parent-side (kr/pty
-// opens /dev/ptmx, then /dev/pts/N), then execs the real runtime.
+// (mkrootfs-gvisor.sh). Two jobs:
 //
-// crun never needed this because it allocates the pty inside the
-// container's mount namespace; runsc does it before starting the sandbox.
+//  1. fixDev — nerdbox's vminitd leaves /dev bare in the namespace the
+//     runtime runs in; runsc allocates the console pty parent-side
+//     (kr/pty opens /dev/ptmx, then /dev/pts/N) and spawns its gofer with
+//     /dev/null stdio, so install a proper device set first.
+//  2. supervise — run runsc as a child, mirroring its output and, on
+//     failure, dumping the captured tail to /dev/console (the VM kernel
+//     console → the gantry daemon log). runsc writes its diagnostics to
+//     a --log file inside the VM and the sentry's stderr is /dev/null,
+//     so without this a dying sentry surfaces only as "waiting for
+//     sandbox to start: EOF".
 package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"os/signal"
+	"sync"
 	"syscall"
 )
 
@@ -18,22 +27,14 @@ const realRuntime = "/sbin/crun.runsc"
 
 func main() {
 	fixDev()
-	args := insertFlags(os.Args)
-	if err := syscall.Exec(realRuntime, args, os.Environ()); err != nil {
-		fmt.Fprintf(os.Stderr, "crunshim: exec %s: %v\n", realRuntime, err)
-		os.Exit(127)
-	}
+	os.Exit(supervise(insertFlags(os.Args)))
 }
 
-// insertFlags adds runsc global flags (before the subcommand) so sentry
-// boot failures are visible: --debug gives the full boot log and
-// --alsologtostderr mirrors it onto stderr, which the containerd client
-// (and therefore vminitd's Create error) captures. Without this a dying
-// sentry surfaces only as "waiting for sandbox to start: EOF".
+// insertFlags adds runsc global flags (before the subcommand): --debug
+// maximizes what the sentry reports (it lands in our captured stderr).
 func insertFlags(args []string) []string {
-	extra := []string{"--debug", "--alsologtostderr"}
 	out := []string{args[0]}
-	for _, f := range extra {
+	for _, f := range []string{"--debug", "--alsologtostderr"} {
 		present := false
 		for _, a := range args[1:] {
 			if a == f {
@@ -46,6 +47,71 @@ func insertFlags(args []string) []string {
 		}
 	}
 	return append(out, args[1:]...)
+}
+
+// supervise runs runsc as a child, passing stdio through while teeing a
+// tail buffer; on failure the tail goes to /dev/console. Exit status is
+// propagated exactly (containerd maps runtime exit codes).
+func supervise(args []string) int {
+	cmd := exec.Command(realRuntime, args[1:]...)
+	cmd.Args[0] = args[0]
+	tail := &tailBuf{limit: 32 << 10}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = io.MultiWriter(os.Stdout, tail)
+	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "crunshim: start %s: %v\n", realRuntime, err)
+		return 127
+	}
+	// forward termination signals (containerd cancels the runtime on
+	// timeouts) to the child
+	sigc := make(chan os.Signal, 4)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		for s := range sigc {
+			if cmd.Process != nil {
+				cmd.Process.Signal(s)
+			}
+		}
+	}()
+	err := cmd.Wait()
+	signal.Stop(sigc)
+	if err != nil {
+		if c, cerr := os.OpenFile("/dev/console", os.O_WRONLY, 0); cerr == nil {
+			fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, tail.String())
+			c.Close()
+		}
+		if cmd.ProcessState != nil {
+			if code := cmd.ProcessState.ExitCode(); code >= 0 {
+				return code
+			}
+		}
+		return 1
+	}
+	return 0
+}
+
+// tailBuf keeps the last `limit` bytes written.
+type tailBuf struct {
+	mu    sync.Mutex
+	buf   []byte
+	limit int
+}
+
+func (t *tailBuf) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.limit {
+		t.buf = t.buf[len(t.buf)-t.limit:]
+	}
+	t.mu.Unlock()
+	return len(p), nil
+}
+
+func (t *tailBuf) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
 }
 
 func fixDev() {
