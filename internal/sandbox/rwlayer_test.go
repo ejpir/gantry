@@ -110,7 +110,7 @@ func TestResolveUsesPerSandboxRWLayer(t *testing.T) {
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := rf.Resolve(fs)
+	cfg, _, err := rf.Resolve(fs, nil)
 	if err != nil {
 		// acceptable on hosts without e2fsprogs and no template
 		if strings.Contains(err.Error(), "mkrwlayer.sh") {

@@ -31,7 +31,7 @@ func resolveSandbox(t *testing.T, args ...string) (RunConfig, []string, error) {
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
-	return rf.Resolve(fs)
+	return rf.Resolve(fs, nil)
 }
 
 func TestResolveRWRules(t *testing.T) {
@@ -72,7 +72,7 @@ func TestResolveRWWithLayer(t *testing.T) {
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		return rf.Resolve(fs)
+		return rf.Resolve(fs, nil)
 	}
 
 	// a rwlayer existing defaults RW on

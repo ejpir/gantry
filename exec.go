@@ -40,7 +40,9 @@ func runExec(argv []string) int {
 	}
 	fs.Parse(argv)
 
-	cfg, warnings, err := rf.Resolve(fs)
+	cfg, warnings, err := rf.Resolve(fs, func(format string, a ...any) {
+		fmt.Printf("gantry exec: "+format+"\n", a...)
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
 		return 1

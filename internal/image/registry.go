@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"gantry/internal/gutil"
 	"gantry/internal/image/auth"
 )
 
@@ -30,6 +31,7 @@ type registryClient struct {
 	cred   *auth.Credential // nil = anonymous
 	hc     *http.Client
 	logf   func(string, ...any)
+	debug  bool // GANTRY_DEBUG_REGISTRY: wire-level GET lines
 	mu     sync.Mutex
 	tokens map[string]*bearerToken // scope -> token (memory only, never disk)
 }
@@ -48,6 +50,7 @@ const manifestAccept = "application/vnd.oci.image.manifest.v1+json, " +
 func newRegistryClient(reg string, cred *auth.Credential, logf func(string, ...any)) *registryClient {
 	c := &registryClient{
 		reg: reg, cred: cred, logf: logf,
+		debug:  gutil.EnvOr("GANTRY_DEBUG_REGISTRY") != "",
 		tokens: map[string]*bearerToken{},
 	}
 	c.hc = &http.Client{
@@ -82,7 +85,7 @@ func (c *registryClient) scheme() string {
 }
 
 func (c *registryClient) log(format string, a ...any) {
-	if c.logf != nil {
+	if c.logf != nil && c.debug {
 		c.logf("registry: "+format, a...)
 	}
 }
@@ -428,7 +431,17 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		return fail(err)
 	}
 
+	if logf != nil && len(head.Layers) > 0 {
+		var total int64
+		for _, l := range head.Layers {
+			total += l.Size
+		}
+		logf("pulling %s (%d layers, %s)", ref.String(), len(head.Layers), gutil.HumanSize(total))
+	}
 	for i, l := range head.Layers {
+		if logf != nil {
+			logf("layer %d/%d: %s (%s)", i+1, len(head.Layers), gutil.HumanSize(l.Size), l.Digest[:19])
+		}
 		blobPath := filepath.Join(tmp, itoa(i)+".blob")
 		if _, err := c.fetchBlob(ctx, ref.Repo, l.Digest, blobPath); err != nil {
 			return fail(err)
@@ -439,9 +452,6 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		}
 		os.Remove(blobPath)
 		p.layers = append(p.layers, f)
-		if logf != nil {
-			logf("layer %d/%d fetched (%s)", i+1, len(head.Layers), l.Digest[:19])
-		}
 	}
 	p.config = &Config{
 		Env:        oc.Config.Env,

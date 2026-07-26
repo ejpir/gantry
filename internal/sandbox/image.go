@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"gantry/internal/gutil"
 	"gantry/internal/image"
 	"gantry/internal/image/auth"
 
@@ -34,7 +35,7 @@ func CmdImage(argv []string) int {
 		fmt.Printf("%-40s %-21s %-7s %-9s %s\n", "REF", "DIGEST", "ARCH", "SIZE", "CREATED")
 		for _, m := range metas {
 			fmt.Printf("%-40s %-21s %-7s %-9s %s\n",
-				trunc(m.Ref, 40), trunc(m.Digest, 21), m.Arch, humanSize(m.Size), m.Created)
+				trunc(m.Ref, 40), trunc(m.Digest, 21), m.Arch, gutil.HumanSize(m.Size), m.Created)
 		}
 		if len(metas) == 0 {
 			fmt.Println("(no cached images — `gantry image pull REF` or -image with a reference builds one)")
@@ -237,15 +238,4 @@ func trunc(s string, n int) string {
 	return s
 }
 
-func humanSize(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%dB", n)
-	}
-	div, exp := int64(unit), 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f%c", float64(n)/float64(div), "KMGTPE"[exp])
-}
+
