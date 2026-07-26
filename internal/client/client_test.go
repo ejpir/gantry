@@ -103,7 +103,7 @@ func TestConfigJSONRWAndArgs(t *testing.T) {
 }
 
 func TestLoadSharesMissing(t *testing.T) {
-	if got := LoadShares("/nonexistent-dir/1025.sock"); len(got) != 0 {
+	if got := LoadShares("/nonexistent-dir"); len(got) != 0 {
 		t.Fatalf("LoadShares = %v, want none", got)
 	}
 }

@@ -375,6 +375,12 @@ func (v *Vsock) closeConn(c *vsockConn, trigger vsockHdr, sendRST bool) {
 
 // ---------------- host -> guest (rx queue) -----------------------------------
 
+// vsockMaxPending caps the outbound FIFO (same bound as virtio-net).
+// tryFlush can stall indefinitely when the guest stops posting rx
+// buffers or granting credit; without a cap a stuck or hostile guest
+// grows host memory without limit just by holding a stream open.
+const vsockMaxPending = virtioNetMaxQueue
+
 // pumpHost reads from the host unix socket and forwards to the guest.
 func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 	buf := make([]byte, 32*1024)
@@ -384,6 +390,15 @@ func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 			v.logf("host->guest %d bytes", n)
 			payload := append([]byte(nil), buf[:n]...)
 			v.core.mu.Lock()
+			if len(v.pending) >= vsockMaxPending {
+				// queue full: drop the connection with RST rather than
+				// buffer without bound for a non-draining guest.
+				v.logf("pumpHost: %d pending -> RST", len(v.pending))
+				v.closeConn(c, vsockHdr{op: vsockOpRW, srcPort: srcPort, dstPort: dstPort}, true)
+				v.tryFlush()
+				v.core.mu.Unlock()
+				return
+			}
 			v.pending = append(v.pending, vsockPkt{
 				hdr: vsockHdr{
 					srcCID: vsockHostCID, dstCID: v.guestCID,

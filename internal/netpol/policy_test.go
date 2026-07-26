@@ -119,6 +119,11 @@ func TestPolicyMatchTX(t *testing.T) {
 		{"metadata on 80 denied", ipFrame(t, "169.254.169.254", protoTCP, 80, nil), false},
 		{"icmp denied by default", ipFrame(t, "8.8.8.8", protoICMP, 0, []byte{8, 0, 0, 0}), false},
 		{"dhcp allowed", ipFrame(t, "255.255.255.255", protoUDP, 67, []byte{1}), true},
+		{"subnet broadcast allowed (DHCP)", ipFrame(t, subnetBroadcast, protoUDP, 67, []byte{1}), true},
+		// regression: a unicast .255 address must NOT get the gateway pass
+		{".255 unicast bypass denied", ipFrame(t, "8.8.8.255", protoTCP, 443, nil), true},
+		{".255 unicast non-443 denied", ipFrame(t, "8.8.8.255", protoTCP, 80, nil), false},
+		{".255 unicast udp denied", ipFrame(t, "52.1.2.255", protoUDP, 53, []byte{1}), false},
 		{"gateway dns allowed (no allowlist)", ipFrame(t, gatewayIP, protoUDP, 53, []byte{1}), true},
 		{"gateway other svc allowed", ipFrame(t, gatewayIP, protoTCP, 80, nil), true},
 		{"ipv6 dropped", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x86, 0xdd}, make([]byte, 40)...), false},

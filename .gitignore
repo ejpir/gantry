@@ -26,3 +26,6 @@
 /.gantry/
 *.sock
 *.log
+
+# guest build artifacts (built by mkrootfs-gvisor.sh)
+/crunshim
