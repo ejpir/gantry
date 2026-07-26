@@ -119,32 +119,53 @@ enabled: `dism /online /enable-feature /featurename:HypervisorPlatform`).
 
 ## Network policy
 
-`gantry start`/`gantry exec` accept `-net-policy policy.json`, enforced on
-the virtio-net ↔ embedded-netstack link — every guest frame crosses it, so
-the sandbox cannot bypass it (and it works identically on KVM/HVF/WHPX):
+Every sandbox boots with an egress policy enforced on the virtio-net ↔
+embedded-netstack link — every guest frame crosses it, so the sandbox
+cannot bypass it (works identically on KVM/HVF/WHPX).
+
+**Default posture: internet yes, local network no.** Out of the box the
+sandbox can reach the public internet, but not your LAN — RFC1918,
+link-local (incl. the `169.254.169.254` cloud metadata endpoint),
+loopback, CGNAT, multicast, and the host's own NAT alias are all dropped.
+DHCP/DNS via the sandbox's own gateway always work (that's its link, not
+the LAN). Relax with `-allow-local-net` or a policy file:
+
+```
+gantry start dev -allow-local-net          # internet + LAN
+gantry start dev -net-policy policy.json   # custom
+```
 
 ```json
 {
   "default": "deny",
+  "allowLocal": false,
   "rules": [
     { "action": "allow", "proto": "tcp", "ports": "443" },
-    { "action": "deny",  "cidr": "169.254.169.254/32" }
+    { "action": "allow", "cidr": "10.9.0.0/16" }
   ],
   "allowDomains": ["deb.debian.org", "*.docker.io"]
 }
 ```
 
 - `default`: `allow` (default) or `deny`; `rules` match in order on
-  `cidr` / `proto` (tcp|udp|icmp) / `ports` ("53", "443", "8000-9000").
+  `cidr` / `proto` (tcp|udp|icmp) / `ports` ("53", "443", "8000-9000")
+  BEFORE the local wall, so you can carve out one LAN subnet while the
+  rest stays blocked.
+- `allowLocal`: master switch for LAN/link-local/host reachability
+  (default false).
 - `allowDomains`: DNS queries to the gateway resolver are filtered by name
   (wildcards match the bare domain too); answers to allowed names are
   snooped and the resolved IPs allowed for the record TTL (capped 5 min).
   This is how you get "only package registries" sandboxes — see
   `examples/netpol-debian-only.json`.
-- ARP/DHCP/gateway services always stay up; policy needs the embedded
-  netstack (mutually exclusive with `-gvproxy`). Caveat, inherent to
-  DNS-based filtering: a guest can still hit IPs it already knows without
-  asking DNS — use `rules` for hard guarantees.
+- Evaluation order: rules → local wall → DNS-learned → default. The wall
+  precedes DNS-learned entries on purpose: an allowlisted domain that
+  resolves to a local address (DNS rebinding) stays blocked unless local
+  access was explicitly granted.
+- Caveats, inherent to DNS-based filtering: a guest can still hit
+  non-local IPs it already knows without asking DNS — use `default: deny`
+  + `rules` for hard guarantees. Policy needs the embedded netstack
+  (mutually exclusive with `-gvproxy`).
 
 ## Layout vs. the real thing
 
@@ -248,32 +269,53 @@ sockets.
 
 ## Network policy
 
-`gantry start`/`gantry exec` accept `-net-policy policy.json`, enforced on
-the virtio-net ↔ embedded-netstack link — every guest frame crosses it, so
-the sandbox cannot bypass it (and it works identically on KVM/HVF/WHPX):
+Every sandbox boots with an egress policy enforced on the virtio-net ↔
+embedded-netstack link — every guest frame crosses it, so the sandbox
+cannot bypass it (works identically on KVM/HVF/WHPX).
+
+**Default posture: internet yes, local network no.** Out of the box the
+sandbox can reach the public internet, but not your LAN — RFC1918,
+link-local (incl. the `169.254.169.254` cloud metadata endpoint),
+loopback, CGNAT, multicast, and the host's own NAT alias are all dropped.
+DHCP/DNS via the sandbox's own gateway always work (that's its link, not
+the LAN). Relax with `-allow-local-net` or a policy file:
+
+```
+gantry start dev -allow-local-net          # internet + LAN
+gantry start dev -net-policy policy.json   # custom
+```
 
 ```json
 {
   "default": "deny",
+  "allowLocal": false,
   "rules": [
     { "action": "allow", "proto": "tcp", "ports": "443" },
-    { "action": "deny",  "cidr": "169.254.169.254/32" }
+    { "action": "allow", "cidr": "10.9.0.0/16" }
   ],
   "allowDomains": ["deb.debian.org", "*.docker.io"]
 }
 ```
 
 - `default`: `allow` (default) or `deny`; `rules` match in order on
-  `cidr` / `proto` (tcp|udp|icmp) / `ports` ("53", "443", "8000-9000").
+  `cidr` / `proto` (tcp|udp|icmp) / `ports` ("53", "443", "8000-9000")
+  BEFORE the local wall, so you can carve out one LAN subnet while the
+  rest stays blocked.
+- `allowLocal`: master switch for LAN/link-local/host reachability
+  (default false).
 - `allowDomains`: DNS queries to the gateway resolver are filtered by name
   (wildcards match the bare domain too); answers to allowed names are
   snooped and the resolved IPs allowed for the record TTL (capped 5 min).
   This is how you get "only package registries" sandboxes — see
   `examples/netpol-debian-only.json`.
-- ARP/DHCP/gateway services always stay up; policy needs the embedded
-  netstack (mutually exclusive with `-gvproxy`). Caveat, inherent to
-  DNS-based filtering: a guest can still hit IPs it already knows without
-  asking DNS — use `rules` for hard guarantees.
+- Evaluation order: rules → local wall → DNS-learned → default. The wall
+  precedes DNS-learned entries on purpose: an allowlisted domain that
+  resolves to a local address (DNS rebinding) stays blocked unless local
+  access was explicitly granted.
+- Caveats, inherent to DNS-based filtering: a guest can still hit
+  non-local IPs it already knows without asking DNS — use `default: deny`
+  + `rules` for hard guarantees. Policy needs the embedded netstack
+  (mutually exclusive with `-gvproxy`).
 
 ## Layout
 

@@ -55,9 +55,55 @@ type Policy struct {
 	DefaultAllow bool     `json:"-"`
 	Rules        []Rule   `json:"-"`
 	AllowDomains []string `json:"-"` // normalized: lower-case, no trailing dot
+	// AllowLocal permits destinations on the local network: RFC1918,
+	// loopback, link-local (incl. the cloud metadata endpoint), CGNAT,
+	// multicast, and the host itself (the .254 NAT alias). It is false by
+	// default — including for DefaultPolicy — so sandboxes get internet
+	// but cannot poke the LAN/host unless the owner opts in (flag or file).
+	AllowLocal bool `json:"-"`
 
 	mu      sync.Mutex
 	dynamic map[[4]byte]time.Time // DNS-learned allowances: IPv4 -> expiry
+}
+
+// localCIDRs is "the local network" the sandbox is walled off from unless
+// AllowLocal (or an explicit rule covering them) says otherwise.
+var localCIDRs = []*net.IPNet{
+	mustCIDR("10.0.0.0/8"),     // RFC1918
+	mustCIDR("172.16.0.0/12"),  // RFC1918
+	mustCIDR("192.168.0.0/16"), // RFC1918 (incl. the host's .254 NAT alias)
+	mustCIDR("169.254.0.0/16"), // link-local + cloud metadata 169.254.169.254
+	mustCIDR("127.0.0.0/8"),    // loopback
+	mustCIDR("100.64.0.0/10"),  // CGNAT (often LAN-adjacent)
+	mustCIDR("224.0.0.0/4"),    // multicast (mDNS/SSDP LAN discovery)
+	mustCIDR("240.0.0.0/4"),    // reserved; no business leaving a sandbox
+	mustCIDR("0.0.0.0/8"),      // "this host" source block
+}
+
+func mustCIDR(s string) *net.IPNet {
+	_, cidr, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return cidr
+}
+
+func isLocal(dst [4]byte) bool {
+	ip := net.IP(dst[:])
+	for _, c := range localCIDRs {
+		if c.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultPolicy is the posture when no policy file is supplied: the
+// internet is reachable, the local network (LAN, link-local, the host's
+// NAT alias) is not. Equivalent to {"default": "allow"} with AllowLocal
+// left false — relax with the -allow-local-net flag or a policy file.
+func DefaultPolicy() *Policy {
+	return &Policy{DefaultAllow: true, dynamic: map[[4]byte]time.Time{}}
 }
 
 // Rule matches destination IP (CIDR, default all), protocol (tcp/udp/icmp,
@@ -82,6 +128,7 @@ type fileRule struct {
 
 type filePolicy struct {
 	Default      string     `json:"default"` // "allow" (default) | "deny"
+	AllowLocal   *bool      `json:"allowLocal,omitempty"`
 	Rules        []fileRule `json:"rules"`
 	AllowDomains []string   `json:"allowDomains"`
 }
@@ -147,6 +194,9 @@ func Parse(data []byte) (*Policy, error) {
 		}
 		p.Rules = append(p.Rules, r)
 	}
+	if fp.AllowLocal != nil {
+		p.AllowLocal = *fp.AllowLocal
+	}
 	for _, d := range fp.AllowDomains {
 		d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
 		if d == "" {
@@ -180,6 +230,11 @@ func (p *Policy) Describe() string {
 		def = "allow"
 	}
 	s := fmt.Sprintf("default %s", def)
+	if p.AllowLocal {
+		s += ", local net allowed"
+	} else {
+		s += ", local net denied"
+	}
 	if len(p.Rules) > 0 {
 		s += fmt.Sprintf(", %d rules", len(p.Rules))
 	}
@@ -243,7 +298,10 @@ func (p *Policy) MatchTX(frame []byte) bool {
 		return false // policy active: no IPv6, no exotic ethertypes
 	}
 	dst := net.IP(pp.dst[:])
-	if dst.Equal(net.ParseIP(gatewayIP)) || dst.IsLinkLocalMulticast() ||
+	// Only the sandbox's own gateway and broadcast (DHCP) get the
+	// link-services pass; multicast is NOT exempt — mDNS/SSDP probes are
+	// LAN discovery and belong behind the local-network wall.
+	if dst.Equal(net.ParseIP(gatewayIP)) ||
 		dst.Equal(net.IPv4bcast) || strings.HasSuffix(dst.String(), ".255") {
 		return p.matchGatewayService(pp)
 	}
@@ -299,19 +357,13 @@ func dnsPayload(pp parsedPacket) []byte {
 	return nil
 }
 
-// Allows reports whether traffic to dst/proto/dport is permitted: dynamic
-// DNS-learned allowances first, then ordered rules, then the default.
+// Allows reports whether traffic to dst/proto/dport is permitted, in
+// order: explicit rules (they can carve LAN subnets in or public IPs out),
+// then the local-network wall, then DNS-learned allowances, then the
+// default. The wall sits BEFORE the dynamic table on purpose: an
+// allowlisted domain that resolves to a local address (DNS rebinding) is
+// still blocked unless local access was explicitly granted.
 func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
-	p.mu.Lock()
-	if exp, ok := p.dynamic[dst]; ok {
-		if time.Now().Before(exp) {
-			p.mu.Unlock()
-			return true
-		}
-		delete(p.dynamic, dst)
-	}
-	p.mu.Unlock()
-
 	dstIP := net.IP(dst[:])
 	for _, r := range p.Rules {
 		if r.CIDR != nil && !r.CIDR.Contains(dstIP) {
@@ -334,6 +386,18 @@ func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
 		}
 		return !r.Deny
 	}
+	if !p.AllowLocal && isLocal(dst) {
+		return false
+	}
+	p.mu.Lock()
+	if exp, ok := p.dynamic[dst]; ok {
+		if time.Now().Before(exp) {
+			p.mu.Unlock()
+			return true
+		}
+		delete(p.dynamic, dst)
+	}
+	p.mu.Unlock()
 	return p.DefaultAllow
 }
 
