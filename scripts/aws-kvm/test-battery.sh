@@ -17,8 +17,12 @@ xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 echo "== environment =="
 uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
 
-for s in t1 t2 t3; do $G stop "$s" >/dev/null 2>&1; done
-rm -rf /tmp/.gantry/sandboxes/t* /root/.gantry/sandboxes/t*
+for s in t1 t2 t3 t4; do $G stop "$s" >/dev/null 2>&1; done
+rm -rf /tmp/.gantry/sandboxes/t* /root/.gantry/sandboxes/t* /tmp/.gantry/images
+# fresh rwlayer every run: a hard instance stop can leave the journal
+# unrecoverable, and a corrupt rwlayer fails every first Create (EBADMSG)
+dd if=/dev/zero of=rwlayer-amd64.ext4 bs=1M count=512 status=none
+mkfs.ext4 -q -F -L rwlayer rwlayer-amd64.ext4
 
 echo "===== crun (t1) ====="
 $G start t1 -kernel nerdbox-kernel-x86_64 -rootfs nerdbox-rootfs-x86_64.erofs \
@@ -66,6 +70,20 @@ R=$(xe t3 'ls /host/code');                             chk "share: read"   "exi
 R=$(xe t3 'mkdir /host/code/d2 && echo MK-OK');         chk "share: mkdir"  "MK-OK" "$R"
 R=$(xe t3 'echo x > /host/code/f2 && echo WR-OK');      chk "share: write"  "WR-OK" "$R"
 [ -f /tmp/sharetest/f2 ] && [ -d /tmp/sharetest/d2 ] && ok "share: visible on host" || bad "share: visible on host"
+
+echo "===== OCI image (t4: alpine, offline cache hit) ====="
+# the corporate network blocks registry-1.docker.io from the instance;
+# the store is pre-seeded from S3 and Resolve must hit it offline
+mkdir -p /tmp/.gantry/images
+for _ in 1 2 3; do curl -fSL --retry 3 -o /tmp/alpine-store.tar.gz "$GANTRY_STORE_URL" && break; sleep 3; done
+tar xzf /tmp/alpine-store.tar.gz -C /tmp/.gantry/images
+$G image ls
+$G start t4 -image alpine:latest -rwlayer rwlayer-amd64.ext4 >/dev/null 2>&1
+sleep 1
+R=$(xe t4 'head -1 /etc/os-release');             chk "image: alpine runs"     "Alpine" "$R"
+R=$(xe t4 'echo PATH=$PATH');                     chk "image: config env"     "PATH=/usr/local/sbin" "$R"
+R=$(xe t4 'busybox | head -1');                   chk "image: busybox links"  "BusyBox" "$R"
+R=$($G image ls 2>&1);                            chk "image: ls shows pull"  "alpine" "$R"
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"

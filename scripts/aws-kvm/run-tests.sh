@@ -33,5 +33,6 @@ chmod +x '$a'"
 [ -s '$a' ] || { for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done; }"
 	fi
 done
-{ echo "$DL"; echo "ls -la /opt/gantry"; cat "$HERE/test-battery.sh"; } > /tmp/gantry-battery-run.sh
+SU=$(aws s3 presign "s3://$BUCKET/alpine-store.tar.gz" --expires_in 7200 2>/dev/null || aws s3 presign "s3://$BUCKET/alpine-store.tar.gz" --expires-in 7200)
+{ echo "$DL"; echo "export GANTRY_STORE_URL='$SU'"; echo "ls -la /opt/gantry"; cat "$HERE/test-battery.sh"; } > /tmp/gantry-battery-run.sh
 python3 "$HERE/ssm.py" /tmp/gantry-battery-run.sh "${1:-1200}"

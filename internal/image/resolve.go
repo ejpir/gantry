@@ -30,6 +30,42 @@ type Resolved struct {
 	Cached bool // false when built during this call
 }
 
+// cachedRef resolves a reference from the cache without a pull when
+// possible: a digest-pinned ref is a pure cache lookup; a tagged ref
+// costs one HEAD (the doc's "re-pull of an unchanged tag is a no-op"),
+// and an unreachable registry with a cached image degrades to an
+// offline cache hit with a warning rather than a failure.
+func cachedRef(ref, arch string, st *Store, res *auth.Resolver, say func(string, ...any)) (*Resolved, bool) {
+	parsed, err := ParseRef(ref)
+	if err != nil {
+		return nil, false
+	}
+	hit := func(digest string) (*Resolved, bool) {
+		m, err := st.ReadMeta(digest)
+		if err != nil || !gutil.FileExists(st.ErofsPath(digest)) {
+			return nil, false
+		}
+		return &Resolved{Digest: digest, Path: st.ErofsPath(digest), Config: m.Config, Ref: ref, Cached: true}, true
+	}
+	if parsed.Digest != "" {
+		return hit(parsed.Digest)
+	}
+	cached, ok := st.LookupRef(ref)
+	if !ok {
+		return nil, false
+	}
+	c := newRegistryClient(parsed.Registry, res.For(parsed.Registry), nil)
+	current, err := c.headManifest(context.Background(), parsed.Repo, parsed.Tag)
+	if err != nil {
+		say("registry unreachable (%v); using cached %s", err, cached[:19])
+		return hit(cached)
+	}
+	if current == cached {
+		return hit(cached)
+	}
+	return nil, false // tag moved: full pull
+}
+
 // LooksLikeRef reports whether value should be parsed as an image
 // reference rather than a path: no path separator start, no .erofs
 // suffix, and it matches the familiar name[:tag] / name@digest shapes.
@@ -82,6 +118,9 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		// 4. image reference → registry pull (cached by manifest digest)
 		if res == nil {
 			res = auth.Resolve()
+		}
+		if r, ok := cachedRef(ref, arch, st, res, say); ok {
+			return r, nil
 		}
 		load = func() (*pulled, error) { return loadRegistry(context.Background(), ref, arch, res, logf) }
 	}

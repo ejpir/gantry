@@ -41,13 +41,26 @@ func CmdImage(argv []string) int {
 		}
 		return 0
 	case "pull":
-		if len(argv) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: gantry image pull REF|OCI-LAYOUT-DIR|DOCKER-SAVE-TAR")
+		arch := hostGuestArch()
+		var ref string
+		for i := 1; i < len(argv); i++ {
+			if argv[i] == "-platform" || argv[i] == "--platform" {
+				i++
+				if i >= len(argv) {
+					fmt.Fprintln(os.Stderr, "pull: -platform needs a value (e.g. linux/amd64)")
+					return 2
+				}
+				arch = strings.TrimPrefix(argv[i], "linux/")
+			} else {
+				ref = argv[i]
+			}
+		}
+		if ref == "" {
+			fmt.Fprintln(os.Stderr, "usage: gantry image pull [-platform linux/ARCH] REF|OCI-LAYOUT-DIR|DOCKER-SAVE-TAR")
 			return 2
 		}
-		arch := hostGuestArch()
 		logf := func(format string, a ...any) { fmt.Printf("gantry image: "+format+"\n", a...) }
-		r, err := image.Resolve(argv[1], arch, st, logf)
+		r, err := image.Resolve(ref, arch, st, logf)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "gantry image pull:", err)
 			return 1
