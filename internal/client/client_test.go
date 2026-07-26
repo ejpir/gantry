@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"gantry/internal/image"
 	"strings"
 	"testing"
 )
@@ -105,5 +106,75 @@ func TestConfigJSONRWAndArgs(t *testing.T) {
 func TestLoadSharesMissing(t *testing.T) {
 	if got := LoadShares("/nonexistent-dir"); len(got) != 0 {
 		t.Fatalf("LoadShares = %v, want none", got)
+	}
+}
+
+// ConfigJSON must always emit valid JSON, with the image config driving
+// user/env/cwd exactly per the precedence table (regression: the
+// placeholder rewrite could have produced malformed config.json, which
+// crun reports as the unhelpful "bad message").
+func TestConfigJSONValidAndImageDriven(t *testing.T) {
+	// nil image config: historical defaults
+	cfg, err := ConfigJSON(nil, true, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Process struct {
+			User struct {
+				UID, GID uint32
+			} `json:"user"`
+			Args []string `json:"args"`
+			Env  []string `json:"env"`
+			Cwd  string   `json:"cwd"`
+		} `json:"process"`
+	}
+	if err := json.Unmarshal([]byte(cfg), &v); err != nil {
+		t.Fatalf("invalid JSON (nil config): %v", err)
+	}
+	if v.Process.User.UID != 0 || v.Process.Cwd != "/" {
+		t.Errorf("defaults: user=%d cwd=%q", v.Process.User.UID, v.Process.Cwd)
+	}
+
+	// full image config: image env wins, user/cwd from the image
+	img := &image.Config{
+		Env:        []string{"PATH=/custom/bin", "NGINX_ENTRYPOINT_QUIET_LOGS=1"},
+		Entrypoint: []string{"/entry"},
+		User:       "nginx",
+		UID:        101, GID: 102,
+		WorkingDir: "/app",
+	}
+	cfg, err = ConfigJSON(nil, false, img.Command(nil), img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v = struct {
+		Process struct {
+			User struct {
+				UID, GID uint32
+			} `json:"user"`
+			Args []string `json:"args"`
+			Env  []string `json:"env"`
+			Cwd  string   `json:"cwd"`
+		} `json:"process"`
+	}{}
+	if err := json.Unmarshal([]byte(cfg), &v); err != nil {
+		t.Fatalf("invalid JSON (image config): %v", err)
+	}
+	if v.Process.User.UID != 101 || v.Process.User.GID != 102 {
+		t.Errorf("user = %d:%d, want 101:102", v.Process.User.UID, v.Process.User.GID)
+	}
+	if v.Process.Cwd != "/app" {
+		t.Errorf("cwd = %q, want /app", v.Process.Cwd)
+	}
+	if len(v.Process.Args) != 1 || v.Process.Args[0] != "/entry" {
+		t.Errorf("args = %v, want [/entry]", v.Process.Args)
+	}
+	joined := strings.Join(v.Process.Env, " ")
+	if !strings.Contains(joined, "PATH=/custom/bin") || strings.Contains(joined, "PATH=/usr/local/sbin") {
+		t.Errorf("env must keep the image PATH only: %v", v.Process.Env)
+	}
+	if !strings.Contains(joined, "HOME=/") { // non-root user: HOME=/
+		t.Errorf("env = %v", v.Process.Env)
 	}
 }
