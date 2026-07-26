@@ -43,14 +43,15 @@ func ProbeExt4(path string) (*Ext4Info, error) {
 	if magic := binary.LittleEndian.Uint16(sb[56:58]); magic != 0xef53 {
 		return nil, fmt.Errorf("%s is not ext2/3/4 (magic %#x)", path, magic)
 	}
+	// field offsets from fs/ext4/ext4.h (struct ext4_super_block)
 	info := &Ext4Info{
 		State:        binary.LittleEndian.Uint16(sb[58:60]),
 		MountCount:   binary.LittleEndian.Uint16(sb[52:54]),
 		ErrorCount:   binary.LittleEndian.Uint32(sb[0x170:0x174]),
-		FirstErrFunc: cstr(sb[0x190:0x1B0]),
+		FirstErrFunc: cstr(sb[0x184:0x1A4]),
 		LastErrFunc:  cstr(sb[0x1BC:0x1DC]),
 	}
-	if ts := binary.LittleEndian.Uint32(sb[0x180:0x184]); ts != 0 {
+	if ts := binary.LittleEndian.Uint32(sb[0x1A8:0x1AC]); ts != 0 {
 		info.LastErrTime = time.Unix(int64(ts), 0)
 	}
 	return info, nil

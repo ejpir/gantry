@@ -12,14 +12,25 @@ package sandbox
 // per-sandbox, and the pairing is recorded and enforced.
 
 import (
+	"bytes"
+	"compress/gzip"
+	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"gantry/internal/gutil"
 )
+
+// blankRWLayer is a 512 MiB ext4 with /upper + /work, gzipped (~0.5 MB).
+// Deterministic, built by mkblankrwlayer.sh; embedded so per-sandbox
+// layers need no host e2fsprogs (stock macOS has none).
+//
+//go:embed assets/blank.ext4.gz
+var blankRWLayer []byte
 
 // rwlayersRoot is ~/.gantry/rwlayers (sibling of the sandboxes dir so a
 // `gantry start` state wipe never deletes user data).
@@ -55,9 +66,11 @@ func defaultRWLayer(name, imageID string) (string, []string, error) {
 
 // createRWLayer makes a 512 MiB sparse ext4 with the /upper and /work
 // directories overlayfs needs — without root. Strategy: host e2fsprogs
-// when present (mkfs.ext4 + debugfs); otherwise clone the legacy
-// ./rwlayer.ext4 template if one exists (it is itself a valid blank
-// layer for a fresh sandbox).
+// when present (mkfs.ext4 + debugfs); otherwise inflate the embedded
+// blank template. (An earlier revision cloned ./rwlayer.ext4 instead —
+// that cloned whatever damage the shared layer already had, and
+// SEEK_HOLE is unreliable on shared-repo filesystems. Deterministic or
+// nothing.)
 func createRWLayer(path string) ([]string, error) {
 	mkfs, err1 := exec.LookPath("mkfs.ext4")
 	debugfs, err2 := exec.LookPath("debugfs")
@@ -83,14 +96,62 @@ func createRWLayer(path string) ([]string, error) {
 		}
 		return nil, nil
 	}
-	// no e2fsprogs (stock macOS): clone the legacy template
-	if gutil.FileExists("rwlayer.ext4") {
-		if err := copySparse("rwlayer.ext4", path); err != nil {
-			return nil, err
-		}
-		return []string{"created " + path + " from the ./rwlayer.ext4 template (install e2fsprogs to build fresh layers)"}, nil
+	if err := inflateBlankRWLayer(path); err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("mkfs.ext4/debugfs not found and no ./rwlayer.ext4 template to clone")
+	return nil, nil
+}
+
+// inflateBlankRWLayer writes the embedded blank ext4 to path, sparsely
+// (zero 1 MiB chunks are skipped, so the 512 MiB layer costs only its
+// real metadata).
+func inflateBlankRWLayer(path string) error {
+	gz, err := gzip.NewReader(bytes.NewReader(blankRWLayer))
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 1<<20)
+	var off int64
+	for {
+		n, err := io.ReadFull(gz, buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil && err != io.ErrUnexpectedEOF {
+			out.Close()
+			os.Remove(path)
+			return err
+		}
+		chunk := buf[:n]
+		if !allZero(chunk) {
+			if _, werr := out.WriteAt(chunk, off); werr != nil {
+				out.Close()
+				os.Remove(path)
+				return werr
+			}
+		}
+		off += int64(n)
+	}
+	if err := out.Truncate(off); err != nil {
+		out.Close()
+		os.Remove(path)
+		return err
+	}
+	return out.Close()
+}
+
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // checkRWLayerPairing refuses to attach a layer whose recorded image
@@ -134,12 +195,14 @@ func writeRWLayerPairing(layer, imageID string) {
 
 // rwlayerHealthWarning reads the ext4 superblock and reports recorded
 // filesystem errors — the honest version of the "looks corrupted" hint.
+// Only a nonzero error count warns: the state bit alone lingers after
+// repairs and means nothing without recorded errors.
 func rwlayerHealthWarning(path string) string {
 	info, err := gutil.ProbeExt4(path)
 	if err != nil {
 		return "" // not ext4 (or unreadable): the guest mount will say so
 	}
-	if info.ErrorCount == 0 && info.State&gutil.Ext4StateError == 0 {
+	if info.ErrorCount == 0 {
 		return ""
 	}
 	return fmt.Sprintf("rwlayer %s: %s\nit mounts, but consider recreating it: ./mkrwlayer.sh %s 512", path, info.Diagnosis(), path)
