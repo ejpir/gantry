@@ -117,6 +117,34 @@ Status: cross-compiles, decoder/APIC/PIT unit-tested, **untested on real
 Windows yet** (needs Windows 10 1809+ with "Windows Hypervisor Platform"
 enabled: `dism /online /enable-feature /featurename:HypervisorPlatform`).
 
+## gVisor-in-guest (defense in depth)
+
+`-runtime runsc` runs the workload container under **gVisor** inside the
+VM instead of plain crun:
+
+```
+app → gVisor sentry (Go userspace kernel) → guest Linux → gantry VMM → host
+```
+
+A container escape then lands in gVisor's small syscall surface rather
+than the guest kernel — another wall in front of the device-model trust
+boundary. It works because vminitd's runtime path is hardcoded to
+`/sbin/crun` and runsc is deliberately runc-CLI-compatible (the same
+mechanism containerd shims use); the gVisor rootfs variant just puts
+runsc there, real crun kept at `/sbin/crun.runc`:
+
+```
+./mkrootfs-gvisor.sh nerdbox-rootfs-arm64.erofs   # → nerdbox-rootfs-gvisor-arm64.erofs
+gantry start dev -runtime runsc                    # picks the variant automatically
+gantry exec -runtime runsc -- /bin/sh              # one-shot
+```
+
+Honest limitations: runsc uses its ptrace platform in the guest (no
+nested /dev/kvm — our VMM doesn't emulate one), so syscall-heavy
+workloads are slower; the rootfs grows ~100 MB (static runsc binary);
+esoteric syscalls/devices may be unimplemented in the sentry. crun
+stays the default.
+
 ## Network policy
 
 Every sandbox boots with an egress policy enforced on the virtio-net ↔
@@ -266,6 +294,34 @@ sockets.
 ./run-qemu-shell.sh         # interactive busybox shell
 ./run-qemu-rootfs-test.sh   # boots the real nerdbox EROFS rootfs
 ```
+
+## gVisor-in-guest (defense in depth)
+
+`-runtime runsc` runs the workload container under **gVisor** inside the
+VM instead of plain crun:
+
+```
+app → gVisor sentry (Go userspace kernel) → guest Linux → gantry VMM → host
+```
+
+A container escape then lands in gVisor's small syscall surface rather
+than the guest kernel — another wall in front of the device-model trust
+boundary. It works because vminitd's runtime path is hardcoded to
+`/sbin/crun` and runsc is deliberately runc-CLI-compatible (the same
+mechanism containerd shims use); the gVisor rootfs variant just puts
+runsc there, real crun kept at `/sbin/crun.runc`:
+
+```
+./mkrootfs-gvisor.sh nerdbox-rootfs-arm64.erofs   # → nerdbox-rootfs-gvisor-arm64.erofs
+gantry start dev -runtime runsc                    # picks the variant automatically
+gantry exec -runtime runsc -- /bin/sh              # one-shot
+```
+
+Honest limitations: runsc uses its ptrace platform in the guest (no
+nested /dev/kvm — our VMM doesn't emulate one), so syscall-heavy
+workloads are slower; the rootfs grows ~100 MB (static runsc binary);
+esoteric syscalls/devices may be unimplemented in the sentry. crun
+stays the default.
 
 ## Network policy
 

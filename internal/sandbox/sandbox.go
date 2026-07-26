@@ -142,6 +142,12 @@ func CmdStart(argv []string) int {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	kernel := fs.String("kernel", vmm.DefaultKernelImage(), "")
 	rootfs := fs.String("rootfs", vmm.DefaultRootfs(), "")
+	rt := fs.String("runtime", func() string {
+		if v := gutil.EnvOr("GANTRY_RUNTIME", "MINIVM_RUNTIME"); v != "" {
+			return v
+		}
+		return "crun"
+	}(), "container runtime in the guest: crun | runsc (gVisor)")
 	image := fs.String("image", "", "container rootfs (default: debian-bookworm.erofs if present, else shell-rootfs.erofs)")
 	rwlayer := fs.String("rwlayer", "", "ext4 writable layer (default: rwlayer.ext4 if present)")
 	rw := fs.Bool("rw", false, "writable overlay container root (default: on when a rwlayer exists)")
@@ -154,6 +160,27 @@ func CmdStart(argv []string) int {
 	memMB := fs.Uint("mem", 512, "")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
 	fs.Parse(fargv)
+
+	rootfsSet := false
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "rootfs" {
+			rootfsSet = true
+		}
+	})
+	switch *rt {
+	case "crun":
+	case "runsc":
+		if !rootfsSet {
+			*rootfs = vmm.GvisorRootfs(*rootfs)
+		}
+		if !gutil.FileExists(*rootfs) {
+			fmt.Fprintf(os.Stderr, "gantry start: %s not found - build it with ./mkrootfs-gvisor.sh %s\n", *rootfs, vmm.DefaultRootfs())
+			return 1
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "gantry start: -runtime must be crun or runsc, got %q\n", *rt)
+		return 1
+	}
 
 	if _, alive := sandboxPID(name); alive {
 		fmt.Fprintf(os.Stderr, "gantry start: sandbox %q is already running\n", name)

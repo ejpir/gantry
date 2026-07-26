@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"strings"
 )
 
 // defaultKernelImage/defaultRootfs pick the nerdbox assets matching the
@@ -23,6 +24,15 @@ func DefaultRootfs() string {
 		return "nerdbox-rootfs-x86_64.erofs"
 	}
 	return "nerdbox-rootfs-arm64.erofs"
+}
+
+// GvisorRootfs maps a rootfs image name to its gVisor variant (built by
+// mkrootfs-gvisor.sh: /sbin/crun is runsc, real crun at /sbin/crun.runc).
+func GvisorRootfs(p string) string {
+	if strings.Contains(p, "rootfs-gvisor-") {
+		return p
+	}
+	return strings.Replace(p, "rootfs-", "rootfs-gvisor-", 1)
 }
 
 // defaultGvproxy names the gvproxy binary for this platform (upstream
