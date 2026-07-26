@@ -427,6 +427,12 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	}); err != nil {
 		return fmt.Errorf("task Exec: %w", err)
 	}
+	// task.v3 is two-phase: Exec only registers the process; Start with
+	// the ExecID is what actually spawns it. (Skipping Start was the
+	// concurrent-exec hang: Wait blocked on a process that never ran.)
+	if _, err := tc.Start(ctx, &task.StartRequest{ID: id, ExecID: execID}); err != nil {
+		return fmt.Errorf("task Start(exec): %w", err)
+	}
 	logf("exec process started in container %s (type 'exit' to leave)", id)
 
 	if opts.Cols > 0 && opts.Rows > 0 {
