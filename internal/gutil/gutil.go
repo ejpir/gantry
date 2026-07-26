@@ -57,3 +57,17 @@ func FileExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
 }
+
+// HumanSize renders bytes for progress output.
+func HumanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%c", float64(n)/float64(div), "KMGTPE"[exp])
+}

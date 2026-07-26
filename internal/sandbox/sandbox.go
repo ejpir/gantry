@@ -138,7 +138,9 @@ func CmdStart(argv []string) int {
 	rf := RegisterRunFlags(fs)
 	rf.Name = name
 	fs.Parse(fargv)
-	cfg, warnings, err := rf.Resolve(fs)
+	cfg, warnings, err := rf.Resolve(fs, func(format string, a ...any) {
+		fmt.Printf("gantry start: "+format+"\n", a...)
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1

@@ -95,9 +95,16 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 }
 
 // Resolve turns parsed flags into an absolute, fully-defaulted RunConfig.
-// warnings are non-fatal degradations the caller should surface to the
-// user (e.g. -rw silently dropped because no rwlayer exists).
-func (f *RunFlags) Resolve(fs *flag.FlagSet) (cfg RunConfig, warnings []string, err error) {
+// warnings are non-fatal degradations the caller surfaces at the end;
+// progress (may be nil) fires in real time — registry pulls and image
+// builds take seconds, and the user should watch them happen, not read
+// them flushed at the end.
+func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg RunConfig, warnings []string, err error) {
+	say := func(format string, a ...any) {
+		if progress != nil {
+			progress(format, a...)
+		}
+	}
 	set := map[string]bool{}
 	fs.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
 
@@ -138,8 +145,7 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet) (cfg RunConfig, warnings []string, 
 		if err != nil {
 			return cfg, nil, err
 		}
-		logf := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
-		r, err := image.Resolve(cfg.Image, arch, nil, logf)
+		r, err := image.Resolve(cfg.Image, arch, nil, say)
 		if err != nil {
 			return cfg, nil, err
 		}
