@@ -161,9 +161,10 @@ syscall-heavy workloads are slower than crun; the rootfs grows ~110 MB
 (static runsc binary); esoteric
 syscalls/devices may be unimplemented in the sentry; networking runs in
 --network=host mode (the container shares the VM netns like crun —
-isolation stays with the VM + netpol). Untested so far: virtio-fs
-shares through the gofer, exec sessions, x86_64. crun stays the
-default. Debug the guest side with
+isolation stays with the VM + netpol). Concurrent `gantry exec` works
+(docker semantics: the second session Execs a process into the same
+container). Untested so far: virtio-fs shares through the gofer,
+x86_64. crun stays the default. Debug the guest side with
 GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
 console + hang watchdog).
 
@@ -361,9 +362,10 @@ syscall-heavy workloads are slower than crun; the rootfs grows ~110 MB
 (static runsc binary); esoteric
 syscalls/devices may be unimplemented in the sentry; networking runs in
 --network=host mode (the container shares the VM netns like crun —
-isolation stays with the VM + netpol). Untested so far: virtio-fs
-shares through the gofer, exec sessions, x86_64. crun stays the
-default. Debug the guest side with
+isolation stays with the VM + netpol). Concurrent `gantry exec` works
+(docker semantics: the second session Execs a process into the same
+container). Untested so far: virtio-fs shares through the gofer,
+x86_64. crun stays the default. Debug the guest side with
 GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
 console + hang watchdog).
 

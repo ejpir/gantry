@@ -38,9 +38,11 @@ func debugMode() bool {
 
 func main() {
 	debug := debugMode()
-	if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
-		fmt.Fprintf(c, "crunshim: start debug=%v args=%v\n", debug, os.Args[1:])
-		c.Close()
+	if debug {
+		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
+			fmt.Fprintf(c, "crunshim: start args=%v\n", os.Args[1:])
+			c.Close()
+		}
 	}
 	fixDev(debug)
 	os.Exit(supervise(insertFlags(os.Args, debug), debug))
