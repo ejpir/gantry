@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -30,14 +31,17 @@ func main() {
 	os.Exit(supervise(insertFlags(os.Args)))
 }
 
-// insertFlags adds runsc global flags (before the subcommand): --debug
-// maximizes what the sentry reports (it lands in our captured stderr).
+// insertFlags adds runsc global flags (before the subcommand) and
+// rewrites --log to /dev/console. runsc propagates --log to the gofer
+// and boot children, so this puts the SENTRY's own boot log — which
+// otherwise dies with the process inside the VM — onto the VM kernel
+// console (→ the gantry daemon log). --debug maximizes what it says.
 func insertFlags(args []string) []string {
 	out := []string{args[0]}
 	for _, f := range []string{"--debug", "--alsologtostderr"} {
 		present := false
 		for _, a := range args[1:] {
-			if a == f {
+			if a == f || strings.HasPrefix(a, f+"=") {
 				present = true
 				break
 			}
@@ -46,7 +50,20 @@ func insertFlags(args []string) []string {
 			out = append(out, f)
 		}
 	}
-	return append(out, args[1:]...)
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if a == "--log" && i+1 < len(args) {
+			out = append(out, a, "/dev/console")
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "--log=") {
+			out = append(out, "--log=/dev/console")
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // supervise runs runsc as a child, passing stdio through while teeing a
