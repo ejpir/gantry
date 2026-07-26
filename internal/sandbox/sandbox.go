@@ -136,6 +136,7 @@ func CmdStart(argv []string) int {
 
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	rf := RegisterRunFlags(fs)
+	rf.Name = name
 	fs.Parse(fargv)
 	cfg, warnings, err := rf.Resolve(fs)
 	if err != nil {
@@ -685,6 +686,7 @@ func CmdDelete(name string) int {
 		fmt.Fprintln(os.Stderr, "gantry delete:", err)
 		return 1
 	}
+	forgetRWLayer(name)
 	fmt.Printf("gantry delete: sandbox %q deleted\n", name)
 	return 0
 }

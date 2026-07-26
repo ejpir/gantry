@@ -52,6 +52,12 @@ type RunConfig struct {
 // RunFlags holds the CLI flag pointers shared by `gantry exec` and
 // `gantry start`. Register them on the FlagSet, parse, then Resolve.
 type RunFlags struct {
+	// Name is the sandbox name (set by `gantry start` before Resolve;
+	// empty for one-shot exec). It selects the per-sandbox rwlayer
+	// default: ~/.gantry/rwlayers/<name>.ext4 instead of the shared
+	// ./rwlayer.ext4 — a shared writable default was the corruption
+	// vector behind the ESTALE saga (two live VMs on one ext4).
+	Name                                    string
 	Kernel, Rootfs, Runtime, Image, RWLayer *string
 	RW                                      *bool
 	Shares                                  *gutil.StrList
@@ -143,15 +149,38 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet) (cfg RunConfig, warnings []string, 
 		cfg.Image = r.Path
 	}
 	cfg.RWLayer = *f.RWLayer
-	if cfg.RWLayer == "" && gutil.FileExists("rwlayer.ext4") {
+	explicitRWLayer := cfg.RWLayer != ""
+	if cfg.RWLayer == "" && f.Name != "" {
+		// per-sandbox default, created on demand (see rwlayer.go);
+		// an empty/absent file just means read-only below
+		p, w, err := defaultRWLayer(f.Name, cfg.imageIdentity())
+		if err != nil {
+			return cfg, nil, err
+		}
+		warnings = append(warnings, w...)
+		cfg.RWLayer = p
+	} else if cfg.RWLayer == "" && gutil.FileExists("rwlayer.ext4") {
+		// one-shot exec: legacy shared default, flock-guarded by the
+		// blk device and pairing-checked like everything else
 		cfg.RWLayer = "rwlayer.ext4"
+		explicitRWLayer = true // user-owned file: no pairing enforcement
 	}
 	// -rw rules: default on when a writable layer exists, forced off when
 	// none does — never hand the guest RW=true for a disk we didn't attach.
 	cfg.RW = *f.RW || (!set["rw"] && cfg.RWLayer != "")
 	if cfg.RWLayer == "" && cfg.RW {
 		cfg.RW = false
-		warnings = append(warnings, "-rw: no writable layer (rwlayer.ext4) found; running read-only. Create one with ./mkrwlayer.sh rwlayer.ext4 512")
+		warnings = append(warnings, "-rw: no writable layer found; running read-only. Create one with ./mkrwlayer.sh rwlayer.ext4 512")
+	}
+	if cfg.RWLayer != "" {
+		if w := rwlayerHealthWarning(cfg.RWLayer); w != "" {
+			warnings = append(warnings, w)
+		}
+		if !explicitRWLayer {
+			if err := checkRWLayerPairing(cfg.RWLayer, cfg.imageIdentity()); err != nil {
+				return cfg, nil, err
+			}
+		}
 	}
 
 	cfg.Shares = *f.Shares
@@ -289,6 +318,15 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	n.Conn = conn
 	n.close = func() { conn.Close(); stack.Close() }
 	return n, nil
+}
+
+// imageIdentity is the stable identity used for rwlayer pairing: the
+// OCI digest when the image came through the store, else the file path.
+func (c RunConfig) imageIdentity() string {
+	if c.ImageDigest != "" {
+		return c.ImageDigest
+	}
+	return c.Image
 }
 
 // guestNetMAC is the fixed MAC the embedded netstack expects the guest to

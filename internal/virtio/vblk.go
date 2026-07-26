@@ -28,6 +28,7 @@ const (
 
 type Blk struct {
 	file     *os.File
+	lock     *os.File // held for the VM's lifetime on writable images
 	core     *Core
 	size     uint64
 	writable bool
@@ -40,22 +41,53 @@ func (b *Blk) logf(format string, a ...any) {
 	}
 }
 
+// NewBlk opens a disk image. Writable images are flock'd for the caller's
+// lifetime: two live VMs sharing one ext4 means two guest kernels with
+// independent page caches and allocators writing the same block bitmaps —
+// the silent corruption behind "stale file handle" overlay failures.
+// The lock turns that into an immediate, honest error.
 func NewBlk(path string, writable bool) (*Blk, error) {
+	b := &Blk{debugLog: gutil.EnvOr("GANTRY_DEBUG_BLK", "MINIVM_DEBUG_BLK") != ""}
+	if writable {
+		lock, err := gutil.TryLockFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s is already attached to another gantry VM (a writable disk cannot be shared)", path)
+		}
+		b.lock = lock
+	}
 	flag := os.O_RDONLY
 	if writable {
 		flag = os.O_RDWR
 	}
 	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
+		if b.lock != nil {
+			b.lock.Close()
+		}
 		return nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
 		f.Close()
+		if b.lock != nil {
+			b.lock.Close()
+		}
 		return nil, err
 	}
-	return &Blk{file: f, size: uint64(fi.Size()), writable: writable,
-		debugLog: gutil.EnvOr("GANTRY_DEBUG_BLK", "MINIVM_DEBUG_BLK") != ""}, nil
+	b.file = f
+	b.size = uint64(fi.Size())
+	b.writable = writable
+	return b, nil
+}
+
+// Close releases the image and the write lock.
+func (b *Blk) Close() {
+	if b.file != nil {
+		b.file.Close()
+	}
+	if b.lock != nil {
+		b.lock.Close()
+	}
 }
 
 func (b *Blk) deviceID() uint32 { return BlkDeviceID }
