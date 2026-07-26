@@ -244,13 +244,24 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		}
 		bresp = &bundle.CreateResponse{Bundle: "/run/bundles/" + id}
 		logf("reusing existing bundle at %s", bresp.Bundle)
+		// A leftover rootfs stack can also survive (daemon crash,
+		// killed session): erofs is single-instance, so a stale mount
+		// makes the next Create fail EBUSY. Best-effort clear first.
+		uctx, ucancel := context.WithTimeout(ctx, 5*time.Second)
+		for _, target := range []string{
+			"/run/bundles/" + id + "/rootfs",
+			"/run/bundles/" + id + "/mounts/1",
+			"/run/bundles/" + id + "/mounts/0",
+		} {
+			mountapi.NewTTRPCMountClient(client).Unmount(uctx, &mountapi.UnmountRequest{Target: target})
+		}
+		ucancel()
 	} else {
 		logf("bundle created at %s", bresp.Bundle)
 	}
 
-	var mountClient mountapi.TTRPCMountService
+	mountClient := mountapi.NewTTRPCMountClient(client)
 	if len(shares) > 0 {
-		mountClient = mountapi.NewTTRPCMountClient(client)
 		specs := make([]*mountapi.MountSpec, 0, len(shares))
 		for _, s := range shares {
 			spec := &mountapi.MountSpec{Type: "virtiofs", Source: s.Tag, Target: s.VMPath}
@@ -316,6 +327,20 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		if opts.ExecIntoExisting && strings.Contains(err.Error(), "already exists") {
 			return sessionExec(client, tc, opts, id, stdin, stdout)
 		}
+		// Two sessions can both miss the State probe and race into
+		// Create; the loser gets EBUSY from the rootfs stack (its own
+		// attempt mounted nothing — the failure is at the first mount).
+		// Poll briefly: if the winner's task is up, Exec into it.
+		if opts.ExecIntoExisting && (strings.Contains(err.Error(), "busy") || strings.Contains(err.Error(), "in-use")) {
+			for range 50 {
+				st, serr := tc.State(ctx, &task.StateRequest{ID: id})
+				if serr == nil && st.Status == tasktypes.Status_RUNNING {
+					logf("lost create race; attaching to the running container")
+					return sessionExec(client, tc, opts, id, stdin, stdout)
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
 		// A failed Create leaves the bundle's rootfs stack mounted in the
 		// VM; without cleanup the NEXT exec on this sandbox dies with
 		// "upperdir is in-use"/busy. Best-effort teardown so a retry
@@ -378,15 +403,30 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 			*opts.ExitStatus = int(resp.ExitStatus)
 		}
 	}
-	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dctx, dcancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer dcancel()
 	tc.Delete(dctx, &task.DeleteRequest{ID: id})
-	if mountClient != nil {
-		for i := len(shares) - 1; i >= 0; i-- {
-			if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: shares[i].VMPath}); err != nil {
-				fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
-			}
+	// Delete is asynchronous; the rootfs stack is only safe to unmount
+	// once the task is really gone, and it MUST be unmounted: erofs is
+	// single-instance, so a leftover mount makes the next Create fail
+	// EBUSY ("device or resource busy" at mounts/0).
+	for range 50 {
+		if _, err := tc.State(dctx, &task.StateRequest{ID: id}); err != nil {
+			break
 		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	for i := len(shares) - 1; i >= 0; i-- {
+		if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: shares[i].VMPath}); err != nil {
+			fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
+		}
+	}
+	for _, target := range []string{
+		bresp.Bundle + "/rootfs",
+		bresp.Bundle + "/mounts/1",
+		bresp.Bundle + "/mounts/0",
+	} {
+		mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: target})
 	}
 	logf("done")
 	return werr
