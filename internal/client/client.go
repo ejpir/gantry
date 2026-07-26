@@ -203,6 +203,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	tc := task.NewTTRPCTaskClient(client)
 	if opts.ExecIntoExisting {
 		if st, err := tc.State(ctx, &task.StateRequest{ID: id}); err == nil && st.Status == tasktypes.Status_RUNNING {
+			logf("task %s already running; attaching a new exec process", id)
 			return sessionExec(client, tc, opts, id, stdin, stdout)
 		}
 	}
@@ -401,6 +402,7 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 		return fmt.Errorf("stdout stream: %w", err)
 	}
 	defer stdoutConn.Close()
+	logf("exec: stdio streams open, sending Exec")
 
 	execID := fmt.Sprintf("%s-exec-%d", id, time.Now().UnixNano())
 	proc := &specs.Process{
