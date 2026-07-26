@@ -6,6 +6,8 @@ import (
 	"gantry/internal/gutil"
 	"gantry/internal/sandbox"
 	"gantry/internal/vmm"
+	"gantry/internal/vnet"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,8 +37,8 @@ func runExec(argv []string) int {
 	rwFlag := fs.Bool("rw", false, "writable overlay container root (default: on when a rwlayer is available)")
 	var shares gutil.StrList
 	fs.Var(&shares, "share", "host directory exported through virtio-fs as TAG=PATH[,ro] (repeatable)")
-	netEnabled := fs.Bool("net", true, "start gvproxy and attach virtio-net")
-	gvproxy := fs.String("gvproxy", vmm.DefaultGvproxy(), "path to the gvproxy binary (with -net)")
+	netEnabled := fs.Bool("net", true, "attach virtio-net via the embedded netstack")
+	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
 	console := fs.Bool("console", false, "stream the guest serial console to stderr (default: log file in the work dir)")
 	memMB := fs.Uint("mem", 512, "guest RAM in MiB")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
@@ -146,23 +148,40 @@ func runExec(argv []string) int {
 		fmt.Printf("gantry exec: guest console → %s (use -console to watch it live)\n", logf.Name())
 	}
 
-	// --- gvproxy ----------------------------------------------------------
+	// --- networking (embedded netstack; external gvproxy is an override) ---
+	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	netSock := ""
+	var netConn net.Conn
 	if *netEnabled {
-		gv, sock, err := sandbox.StartGVProxy(*gvproxy, tmp)
-		if err != nil {
-			keepTmp = true
-			fmt.Fprintf(os.Stderr, "gantry exec: %v (use -net=false to skip)\n", err)
-			dumpLog("gvproxy.log")
-			return 1
+		if *gvproxy != "" {
+			gv, sock, err := sandbox.StartGVProxy(*gvproxy, tmp)
+			if err != nil {
+				keepTmp = true
+				fmt.Fprintf(os.Stderr, "gantry exec: %v (use -net=false to skip)\n", err)
+				dumpLog("gvproxy.log")
+				return 1
+			}
+			defer func() { gv.Process.Kill(); gv.Wait() }()
+			netSock = sock
+			fmt.Println("gantry exec: gvproxy network ready")
+		} else {
+			stack, err := vnet.Start(netMAC)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "gantry exec:", err)
+				return 1
+			}
+			defer stack.Close()
+			netConn, err = stack.Dial()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "gantry exec:", err)
+				return 1
+			}
+			defer netConn.Close()
+			fmt.Println("gantry exec: embedded netstack ready")
 		}
-		defer func() { gv.Process.Kill(); gv.Wait() }()
-		netSock = sock
-		fmt.Println("gantry exec: gvproxy network ready")
 	}
 
 	// --- machine ------------------------------------------------------------
-	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	disks := []string{img}
 	if rw {
 		disks = append(disks, rwl)
@@ -179,13 +198,14 @@ func runExec(argv []string) int {
 		Disks:       disks,
 		Shares:      hostShares,
 		NetEndpoint: netSock,
+		NetConn:     netConn,
 		NetMAC:      netMAC,
 		NetVFKIT:    true,
 		VsockFwd:    tmp,
 		VCPUs:       min(*vcpus, 8),
 		GuestCID:    3,
 		VsockListen: []uint32{1026},
-		Cmdline:     vmm.DefaultCmdline(arch, *rootfs, "", 3, netSock, netMAC, true),
+		Cmdline:     vmm.DefaultCmdline(arch, *rootfs, "", 3, netMarkerExec(netSock, netConn), netMAC, true),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
@@ -225,4 +245,11 @@ func runExec(argv []string) int {
 		return 1
 	}
 	return 0
+}
+
+func netMarkerExec(endpoint string, conn net.Conn) string {
+	if endpoint != "" || conn != nil {
+		return "enabled"
+	}
+	return ""
 }

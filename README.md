@@ -24,7 +24,7 @@ as fallbacks)*
 | virtio-mmio transport v2 + split virtqueues | ✅ unit-tested |
 | virtio-blk (multi-disk) | ✅ ro boot rootfs; rw `-disk` (WRITE+FLUSH) for the ext4 rwlayer |
 | virtio-vsock (guest dial-back + host listen) | ✅ ttrpc control + raw stdio streams work end-to-end |
-| virtio-net (2 queues, Unix datagram backend) | ✅ HVF end-to-end: DHCP, gvproxy NAT, ICMP, RX/TX |
+| virtio-net (2 queues) | ✅ end-to-end via **embedded gvisor-tap-vsock netstack** (no gvproxy binary): DHCP, NAT, DNS, ICMP; external gvproxy over unixgram still supported (`-gvproxy`) |
 | virtio-fs (go-fuse loopback, no DAX) | ✅ HVF end-to-end: multi-share + `,ro`; host dir live in container at `/host` |
 | virtio-rtc (UTC, spec device ID 17) | ✅ hctosys at boot + vminitd PTP sync; apt/TLS see real time |
 | virtio-rng | ✅ crng seeded at probe; no more getrandom boot timeouts |
@@ -71,7 +71,7 @@ host with `/dev/kvm`:
 
 Validated on **EC2 m6i.metal** (Ice Lake, VMX): kernel 7.0.12 boots,
 `smp: Brought up 1 node, 2 CPUs`, EROFS root + image + ext4 rwlayer mount,
-vminitd runs, back-to-back `exec` sessions work, gvproxy DHCP/NAT gives
+vminitd runs, back-to-back `exec` sessions work, embedded netstack DHCP/NAT gives
 the container outbound TCP+DNS, virtio-fs shares mount at `/host`, and the
 rwlayer persists across stop/start. Debug bring-up also covered
 `KVM_EXIT_FAIL_ENTRY` from a zeroed TR/LDTR (GET→modify→SET SREGS instead)
@@ -110,7 +110,8 @@ machine model:
   handlers as KVM x86.
 - Not yet on Windows: **virtio-fs shares** (needs a WinFsp port instead of
   go-fuse) — `-share` fails with a clear error; everything else (blk, net
-  via gvproxy-windows-amd64, vsock, rng, rtc) is platform-neutral Go.
+  vsock, rng, rtc) is platform-neutral Go — the embedded netstack
+  gives WHPX networking with no gvproxy-windows.exe either.
 
 Status: cross-compiles, decoder/APIC/PIT unit-tested, **untested on real
 Windows yet** (needs Windows 10 1809+ with "Windows Hypervisor Platform"
@@ -152,7 +153,7 @@ sockets.
 │  ├─ machine.go / fdt.go        machine model, device tree       │
 │  ├─ virtio.go                  virtio-mmio transport core       │
 │  │   ├─ vblk.go                disks (ro rootfs + rw rwlayer)   │
-│  │   ├─ vnet.go    ──────────► gvproxy (data-plane peer only)   │
+│  │   ├─ vnet.go    ──────────► internal/vnet (embedded netstack)│
 │  │   ├─ vvsock.go  ◄────────── hostctl (control-plane client)   │
 │  │   └─ vfs.go                 virtio-fs → host directories     │
 │  └─ uart.go                    PL011 serial console             │
@@ -165,7 +166,7 @@ sockets.
 |---|---|
 | `libsailor.so/.dylib` — the VMM | **`gantry` binary/process** |
 | containerd shim / sbx CLI (control plane) | `hostctl` |
-| vpnkit/vfkit (network data plane) | `gvproxy-darwin-arm64` |
+| vpnkit/vfkit (network data plane) | **built into the VMM** (`internal/vnet`, embedded gvisor-tap-vsock) |
 | sailor's virtio-fs passthrough server | built into the VMM (`vfs.go`) |
 
 ## Run it
@@ -206,7 +207,7 @@ sockets.
 ./hostctl-darwin-arm64 shell
 #    Terminal 2:
 ./run-macos.sh container
-# This starts gvproxy, attaches virtio-net, configures DHCP/DNS, uploads
+# This uses the embedded netstack (DHCP/DNS/NAT), attaches virtio-net,
 # config.json with bundle.v1, calls task.v3 Create/Start, mounts
 # shell-rootfs.erofs from /dev/vdb, and relays stream:// stdio.
 
@@ -222,10 +223,10 @@ sockets.
 |---|---|
 | `internal/virtio/` | the device model and the guest/host trust boundary: virtio-mmio v2 transport + split virtqueues (`virtio.go`), blk (`vblk.go`), net (`vnet.go`), vsock (`vvsock.go`), fs (`vfs.go`, `-share TAG=PATH[,ro]` + shares.json), rng, rtc. Guests are untrusted: queue sizes clamped, descriptor addr/len validated against RAM, FUSE names + symlink containment + host-side `,ro` |
 | `internal/vmm/` | machine assembly + boot + hypervisor backends: `machine.go` (RAM, kernel/initrd, devices, `Opts`/`Prepare`/`Run`), `fdt.go`, `bootx86.go` (vmlinux ELF, zero page, MPS), chipset (PL011, 16550, CMOS, PIC/PIT/IO-APIC), `x86emul.go` (WHPX MMIO decode), and the `backend` interface — one `platformBackend()` per target: `vm_linux.go`/`kvm_arm64.go` (KVM arm64), `kvm_amd64.go` (KVM x86-64), `vm_darwin.go`/`hv_darwin.go` (HVF), `whpx_windows.go` (WHPX) |
-| `internal/sandbox/` | sandbox lifecycle: start/daemon/exec-attach/ls/stop/delete, the session broker, gvproxy launcher |
+| `internal/sandbox/` | sandbox lifecycle: start/daemon/exec-attach/ls/stop/delete, the session broker, optional external gvproxy launcher |
 | `internal/client/` | shared ttrpc control plane: bundle.v1, task.v3, mount API, stream:// stdio |
 | `internal/gutil/` | env helpers (`GANTRY_*`/`MINIVM_*`), cmdline insertion, LE decode |
-| root (`main.go`, `exec.go`) | CLI dispatch + one-shot `gantry exec` (VM + gvproxy + session) |
+| root (`main.go`, `exec.go`) | CLI dispatch + one-shot `gantry exec` (VM + net + session) |
 | `cmd/hostctl/` | thin two-terminal CLI over internal/client |
 | `guest/init/main.go` | guest PID 1 |
 
@@ -244,7 +245,7 @@ blk/fs device work runs on the vCPU thread, so a slow host filesystem
 stalls that vCPU. The VMM process still runs with your full uid privileges.
 
 - no virtio-fs DAX window/pmem, no snapshotting, no CPU throttling (only vCPU count)
-- networking currently relies on external gvproxy; no built-in TSI/netstack
+- networking is the embedded gvisor-tap-vsock stack (in-process, pure Go); no TSI, no port publishing yet (vminitd socketforward not wired)
 - `hv_gic_*` needs macOS 13+
 - KVM ioctls are exercised only through unit tests here (this container's
   cgroup blocks `/dev/kvm`); the QEMU boots validate everything guest-side

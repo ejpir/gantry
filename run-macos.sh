@@ -3,7 +3,7 @@
 #
 #   ./run-macos.sh            # our guest init + busybox shell (interactive)
 #   ./run-macos.sh rootfs     # the real nerdbox rootfs + vminitd
-#   ./run-macos.sh container  # real OCI task with gvproxy networking
+#   ./run-macos.sh container  # two-terminal hostctl debug (external gvproxy)
 #   ./run-macos.sh exec ...   # sbx-style: build+sign, then `gantry exec`
 #
 # Requirements: macOS 13+ (hv_gic_* APIs), Apple Silicon.
