@@ -135,9 +135,20 @@ runsc there, real crun kept at `/sbin/crun.runc`:
 
 ```
 ./mkrootfs-gvisor.sh nerdbox-rootfs-arm64.erofs   # → nerdbox-rootfs-gvisor-arm64.erofs
-gantry start dev -runtime runsc                    # picks the variant automatically
+./mkkernel-4k.sh                                   # → nerdbox-kernel-arm64-4k (arm64 only!)
+gantry start dev -runtime runsc                    # picks both variants automatically
 gantry exec -runtime runsc -- /bin/sh              # one-shot
 ```
+
+**arm64 needs the 4K kernel**: stock nerdbox arm64 kernels run 16K
+pages, and gVisor's release runsc hard-fails in `runsc boot` on a page
+size it wasn't compiled for (4K; upstream offers 4K/64K builds, no 16K).
+`mkkernel-4k.sh` rebuilds the identical 7.0.12 config with
+`CONFIG_ARM64_4K_PAGES=y` — Apple Silicon and KVM both run 4K guests
+fine. x86_64 needs nothing (always 4K). The rootfs also installs a tiny
+`/sbin/crun` shim (guest/crunshim): it sets up `/dev` (vminitd leaves it
+bare and runsc allocates the console pty VM-side), supervises runsc, and
+mirrors runsc's logs onto the VM console for debuggability.
 
 Honest limitations: runsc uses its ptrace platform in the guest (no
 nested /dev/kvm — our VMM doesn't emulate one), so syscall-heavy
@@ -313,9 +324,20 @@ runsc there, real crun kept at `/sbin/crun.runc`:
 
 ```
 ./mkrootfs-gvisor.sh nerdbox-rootfs-arm64.erofs   # → nerdbox-rootfs-gvisor-arm64.erofs
-gantry start dev -runtime runsc                    # picks the variant automatically
+./mkkernel-4k.sh                                   # → nerdbox-kernel-arm64-4k (arm64 only!)
+gantry start dev -runtime runsc                    # picks both variants automatically
 gantry exec -runtime runsc -- /bin/sh              # one-shot
 ```
+
+**arm64 needs the 4K kernel**: stock nerdbox arm64 kernels run 16K
+pages, and gVisor's release runsc hard-fails in `runsc boot` on a page
+size it wasn't compiled for (4K; upstream offers 4K/64K builds, no 16K).
+`mkkernel-4k.sh` rebuilds the identical 7.0.12 config with
+`CONFIG_ARM64_4K_PAGES=y` — Apple Silicon and KVM both run 4K guests
+fine. x86_64 needs nothing (always 4K). The rootfs also installs a tiny
+`/sbin/crun` shim (guest/crunshim): it sets up `/dev` (vminitd leaves it
+bare and runsc allocates the console pty VM-side), supervises runsc, and
+mirrors runsc's logs onto the VM console for debuggability.
 
 Honest limitations: runsc uses its ptrace platform in the guest (no
 nested /dev/kvm — our VMM doesn't emulate one), so syscall-heavy

@@ -35,6 +35,16 @@ func GvisorRootfs(p string) string {
 	return strings.Replace(p, "rootfs-", "rootfs-gvisor-", 1)
 }
 
+// GvisorKernel maps an arm64 kernel image name to its 4K-page variant
+// (built by mkkernel-4k.sh). Stock nerdbox arm64 kernels use 16K pages,
+// which gVisor's stock runsc refuses to boot on. x86_64 is always 4K.
+func GvisorKernel(p string) string {
+	if runtime.GOARCH != "arm64" || strings.HasSuffix(p, "-4k") {
+		return p
+	}
+	return p + "-4k"
+}
+
 // defaultGvproxy names the gvproxy binary for this platform (upstream
 // gvisor-tap-vsock releases: gvproxy-{linux,darwin,windows}-{arch}).
 func DefaultGvproxy() string {
