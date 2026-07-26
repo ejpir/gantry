@@ -119,6 +119,11 @@ enabled: `dism /online /enable-feature /featurename:HypervisorPlatform`).
 
 ## gVisor-in-guest (defense in depth)
 
+✅ Verified on Apple Silicon: interactive shell, DNS + egress (through
+the embedded netstack; netpol applies), `dmesg` shows the sentry's boot
+log, `uname` reports its hardcoded `4.19.0-gvisor` impersonation string
+(not the real kernel — every syscall is answered by the sentry).
+
 `-runtime runsc` runs the workload container under **gVisor** inside the
 VM instead of plain crun:
 
@@ -150,11 +155,18 @@ fine. x86_64 needs nothing (always 4K). The rootfs also installs a tiny
 bare and runsc allocates the console pty VM-side), supervises runsc, and
 mirrors runsc's logs onto the VM console for debuggability.
 
-Honest limitations: runsc uses its ptrace platform in the guest (no
-nested /dev/kvm — our VMM doesn't emulate one), so syscall-heavy
-workloads are slower; the rootfs grows ~100 MB (static runsc binary);
-esoteric syscalls/devices may be unimplemented in the sentry. crun
-stays the default.
+Honest limitations: runsc auto-selects its systrap platform in the
+guest (no nested /dev/kvm — our VMM doesn't emulate one), so
+syscall-heavy workloads are slower than crun; the rootfs grows ~110 MB
+(static runsc binary); the sandbox chroot is skipped
+(--TESTONLY-unsafe-nonroot, traded against the VM boundary); esoteric
+syscalls/devices may be unimplemented in the sentry; networking runs in
+--network=host mode (the container shares the VM netns like crun —
+isolation stays with the VM + netpol). Untested so far: virtio-fs
+shares through the gofer, exec sessions, x86_64. crun stays the
+default. Debug the guest side with
+GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
+console + hang watchdog).
 
 ## Network policy
 
@@ -308,6 +320,11 @@ sockets.
 
 ## gVisor-in-guest (defense in depth)
 
+✅ Verified on Apple Silicon: interactive shell, DNS + egress (through
+the embedded netstack; netpol applies), `dmesg` shows the sentry's boot
+log, `uname` reports its hardcoded `4.19.0-gvisor` impersonation string
+(not the real kernel — every syscall is answered by the sentry).
+
 `-runtime runsc` runs the workload container under **gVisor** inside the
 VM instead of plain crun:
 
@@ -339,11 +356,18 @@ fine. x86_64 needs nothing (always 4K). The rootfs also installs a tiny
 bare and runsc allocates the console pty VM-side), supervises runsc, and
 mirrors runsc's logs onto the VM console for debuggability.
 
-Honest limitations: runsc uses its ptrace platform in the guest (no
-nested /dev/kvm — our VMM doesn't emulate one), so syscall-heavy
-workloads are slower; the rootfs grows ~100 MB (static runsc binary);
-esoteric syscalls/devices may be unimplemented in the sentry. crun
-stays the default.
+Honest limitations: runsc auto-selects its systrap platform in the
+guest (no nested /dev/kvm — our VMM doesn't emulate one), so
+syscall-heavy workloads are slower than crun; the rootfs grows ~110 MB
+(static runsc binary); the sandbox chroot is skipped
+(--TESTONLY-unsafe-nonroot, traded against the VM boundary); esoteric
+syscalls/devices may be unimplemented in the sentry; networking runs in
+--network=host mode (the container shares the VM netns like crun —
+isolation stays with the VM + netpol). Untested so far: virtio-fs
+shares through the gofer, exec sessions, x86_64. crun stays the
+default. Debug the guest side with
+GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
+console + hang watchdog).
 
 ## Network policy
 
