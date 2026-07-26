@@ -180,6 +180,17 @@ func fixDev() {
 			fmt.Fprintf(os.Stderr, "crunshim: devpts mount: %v\n", err)
 		}
 	}
+	// runsc wires the sandbox child's stdin/stdout/stderr to /dev/null,
+	// so a boot process dying before logger init (which is exactly what
+	// we are debugging) vanishes without a trace. Point /dev/null at the
+	// VM console: pre-logger panics/fatals become visible in the gantry
+	// daemon log. Noisy, but this rootfs exists for gVisor bring-up.
+	if exists("/dev/console") {
+		os.Remove("/dev/null")
+		if err := os.Symlink("/dev/console", "/dev/null"); err != nil {
+			fmt.Fprintf(os.Stderr, "crunshim: /dev/null -> /dev/console: %v\n", err)
+		}
+	}
 }
 
 func exists(path string) bool {
