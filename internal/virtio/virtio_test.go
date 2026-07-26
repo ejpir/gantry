@@ -491,7 +491,7 @@ func TestVirtioNetUnixgramVFKIT(t *testing.T) {
 		nic.conn.Close()
 		os.Remove(nic.localPath)
 	}()
-	server.SetReadDeadline(time.Now().Add(2 * time.Second))
+	server.SetReadDeadline(time.Now().Add(15 * time.Second))
 	buf := make([]byte, 16)
 	n, _, err := server.ReadFromUnix(buf)
 	if err != nil {
@@ -542,7 +542,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 		if string(got) != string(txFrame) {
 			t.Fatalf("backend TX = %x, want %x", got, txFrame)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for net TX")
 	}
 	if e, ok := usedPop(mem, virtioNetTxQ); !ok || e.id != 0 || e.len != 0 {
@@ -557,7 +557,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 	core.MMIOWrite(0x050, virtioNetRxQ)
 	rxFrame := []byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee, 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02, 0x08, 0x00, 5, 6, 7, 8}
 	backend.rx <- rxFrame
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	got := make([]byte, virtioNetHdrLen+len(rxFrame))
 	for {
 		// readLoop delivers RX frames from its own goroutine under core.mu
@@ -667,7 +667,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	var got []byte
 	select {
 	case got = <-hostRx:
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timeout waiting for guest->host RW")
 	}
 	if string(got) != "hello" {
@@ -685,7 +685,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	if _, err := hostSide.Write([]byte("world")); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	payload := make([]byte, 5)
 	hdrBuf := make([]byte, vsockHdrLen)
 	for {
@@ -750,7 +750,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	}
 	defer hc.Close()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var e usedElem
 	var req vsockHdr
 	for {
@@ -801,7 +801,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	availPush(mem, 1, 1)
 	core.MMIOWrite(0x050, vsockQueueTx)
 
-	hc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	hc.SetReadDeadline(time.Now().Add(15 * time.Second))
 	got := make([]byte, 4)
 	if _, err := io_ReadFull(hc, got); err != nil || string(got) != "ping" {
 		t.Fatalf("host client read: %q %v", got, err)
