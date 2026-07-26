@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"gantry/internal/gutil"
+	"gantry/internal/netpol"
 	"gantry/internal/vmm"
 	"gantry/internal/vnet"
 	"io"
@@ -55,6 +56,7 @@ type sandboxConfig struct {
 	Shares  []string `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs
 	Net     bool     `json:"net"`
 	GVProxy string   `json:"gvproxy,omitempty"`
+	NetPol  string   `json:"net_policy,omitempty"`
 	MemMB   uint     `json:"memMB"`
 	VCPUs   int      `json:"vcpus,omitempty"`
 }
@@ -146,6 +148,7 @@ func CmdStart(argv []string) int {
 	fs.Var(&shares, "share", "TAG=PATH[,ro] (repeatable)")
 	netEnabled := fs.Bool("net", true, "")
 	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
+	netpolFlag := fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)")
 	memMB := fs.Uint("mem", 512, "")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
 	fs.Parse(fargv)
@@ -168,6 +171,7 @@ func CmdStart(argv []string) int {
 		Shares:  shares,
 		Net:     *netEnabled,
 		GVProxy: gvPath,
+		NetPol:  *netpolFlag,
 		MemMB:   *memMB,
 		VCPUs:   min(*vcpus, 8),
 	}
@@ -307,6 +311,20 @@ func CmdDaemon(name string) int {
 	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	netSock := ""
 	var netConn net.Conn
+	var policy *netpol.Policy
+	if cfg.NetPol != "" {
+		var err error
+		policy, err = netpol.Load(cfg.NetPol)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "daemon:", err)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "daemon: network policy:", policy.Describe())
+	}
+	if cfg.NetPol != "" && cfg.GVProxy != "" {
+		fmt.Fprintln(os.Stderr, "daemon: -net-policy requires the embedded netstack (drop -gvproxy)")
+		return 1
+	}
 	if cfg.Net {
 		if cfg.GVProxy != "" {
 			// explicit external gvproxy (debug/interop); the default path
@@ -363,6 +381,7 @@ func CmdDaemon(name string) int {
 		Shares:      hostShares,
 		NetEndpoint: netSock,
 		NetConn:     netConn,
+		NetPolicy:   policy,
 		NetMAC:      netMAC,
 		NetVFKIT:    true,
 		VsockFwd:    dir,

@@ -117,6 +117,35 @@ Status: cross-compiles, decoder/APIC/PIT unit-tested, **untested on real
 Windows yet** (needs Windows 10 1809+ with "Windows Hypervisor Platform"
 enabled: `dism /online /enable-feature /featurename:HypervisorPlatform`).
 
+## Network policy
+
+`gantry start`/`gantry exec` accept `-net-policy policy.json`, enforced on
+the virtio-net ↔ embedded-netstack link — every guest frame crosses it, so
+the sandbox cannot bypass it (and it works identically on KVM/HVF/WHPX):
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    { "action": "allow", "proto": "tcp", "ports": "443" },
+    { "action": "deny",  "cidr": "169.254.169.254/32" }
+  ],
+  "allowDomains": ["deb.debian.org", "*.docker.io"]
+}
+```
+
+- `default`: `allow` (default) or `deny`; `rules` match in order on
+  `cidr` / `proto` (tcp|udp|icmp) / `ports` ("53", "443", "8000-9000").
+- `allowDomains`: DNS queries to the gateway resolver are filtered by name
+  (wildcards match the bare domain too); answers to allowed names are
+  snooped and the resolved IPs allowed for the record TTL (capped 5 min).
+  This is how you get "only package registries" sandboxes — see
+  `examples/netpol-debian-only.json`.
+- ARP/DHCP/gateway services always stay up; policy needs the embedded
+  netstack (mutually exclusive with `-gvproxy`). Caveat, inherent to
+  DNS-based filtering: a guest can still hit IPs it already knows without
+  asking DNS — use `rules` for hard guarantees.
+
 ## Layout vs. the real thing
 
 ```
@@ -217,12 +246,43 @@ sockets.
 ./run-qemu-rootfs-test.sh   # boots the real nerdbox EROFS rootfs
 ```
 
+## Network policy
+
+`gantry start`/`gantry exec` accept `-net-policy policy.json`, enforced on
+the virtio-net ↔ embedded-netstack link — every guest frame crosses it, so
+the sandbox cannot bypass it (and it works identically on KVM/HVF/WHPX):
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    { "action": "allow", "proto": "tcp", "ports": "443" },
+    { "action": "deny",  "cidr": "169.254.169.254/32" }
+  ],
+  "allowDomains": ["deb.debian.org", "*.docker.io"]
+}
+```
+
+- `default`: `allow` (default) or `deny`; `rules` match in order on
+  `cidr` / `proto` (tcp|udp|icmp) / `ports` ("53", "443", "8000-9000").
+- `allowDomains`: DNS queries to the gateway resolver are filtered by name
+  (wildcards match the bare domain too); answers to allowed names are
+  snooped and the resolved IPs allowed for the record TTL (capped 5 min).
+  This is how you get "only package registries" sandboxes — see
+  `examples/netpol-debian-only.json`.
+- ARP/DHCP/gateway services always stay up; policy needs the embedded
+  netstack (mutually exclusive with `-gvproxy`). Caveat, inherent to
+  DNS-based filtering: a guest can still hit IPs it already knows without
+  asking DNS — use `rules` for hard guarantees.
+
 ## Layout
 
 | package | purpose |
 |---|---|
 | `internal/virtio/` | the device model and the guest/host trust boundary: virtio-mmio v2 transport + split virtqueues (`virtio.go`), blk (`vblk.go`), net (`vnet.go`), vsock (`vvsock.go`), fs (`vfs.go`, `-share TAG=PATH[,ro]` + shares.json), rng, rtc. Guests are untrusted: queue sizes clamped, descriptor addr/len validated against RAM, FUSE names + symlink containment + host-side `,ro` |
 | `internal/vmm/` | machine assembly + boot + hypervisor backends: `machine.go` (RAM, kernel/initrd, devices, `Opts`/`Prepare`/`Run`), `fdt.go`, `bootx86.go` (vmlinux ELF, zero page, MPS), chipset (PL011, 16550, CMOS, PIC/PIT/IO-APIC), `x86emul.go` (WHPX MMIO decode), and the `backend` interface — one `platformBackend()` per target: `vm_linux.go`/`kvm_arm64.go` (KVM arm64), `kvm_amd64.go` (KVM x86-64), `vm_darwin.go`/`hv_darwin.go` (HVF), `whpx_windows.go` (WHPX) |
+| `internal/vnet/` | embedded gvisor-tap-vsock netstack (DHCP/DNS/NAT) — no gvproxy binary |
+| `internal/netpol/` | egress network policy: ordered L3/L4 rules + DNS-snoop domain allowlist, enforced on the net link |
 | `internal/sandbox/` | sandbox lifecycle: start/daemon/exec-attach/ls/stop/delete, the session broker, optional external gvproxy launcher |
 | `internal/client/` | shared ttrpc control plane: bundle.v1, task.v3, mount API, stream:// stdio |
 | `internal/gutil/` | env helpers (`GANTRY_*`/`MINIVM_*`), cmdline insertion, LE decode |
@@ -245,7 +305,7 @@ blk/fs device work runs on the vCPU thread, so a slow host filesystem
 stalls that vCPU. The VMM process still runs with your full uid privileges.
 
 - no virtio-fs DAX window/pmem, no snapshotting, no CPU throttling (only vCPU count)
-- networking is the embedded gvisor-tap-vsock stack (in-process, pure Go); no TSI, no port publishing yet (vminitd socketforward not wired)
+- no port publishing yet (vminitd socketforward not wired)
 - `hv_gic_*` needs macOS 13+
 - KVM ioctls are exercised only through unit tests here (this container's
   cgroup blocks `/dev/kvm`); the QEMU boots validate everything guest-side

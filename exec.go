@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"gantry/internal/gutil"
+	"gantry/internal/netpol"
 	"gantry/internal/sandbox"
 	"gantry/internal/vmm"
 	"gantry/internal/vnet"
@@ -39,6 +40,7 @@ func runExec(argv []string) int {
 	fs.Var(&shares, "share", "host directory exported through virtio-fs as TAG=PATH[,ro] (repeatable)")
 	netEnabled := fs.Bool("net", true, "attach virtio-net via the embedded netstack")
 	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
+	netpolFlag := fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)")
 	console := fs.Bool("console", false, "stream the guest serial console to stderr (default: log file in the work dir)")
 	memMB := fs.Uint("mem", 512, "guest RAM in MiB")
 	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
@@ -152,6 +154,20 @@ func runExec(argv []string) int {
 	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	netSock := ""
 	var netConn net.Conn
+	var policy *netpol.Policy
+	if *netpolFlag != "" {
+		if *gvproxy != "" {
+			fmt.Fprintln(os.Stderr, "gantry exec: -net-policy requires the embedded netstack (drop -gvproxy)")
+			return 1
+		}
+		var err error
+		policy, err = netpol.Load(*netpolFlag)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry exec:", err)
+			return 1
+		}
+		fmt.Println("gantry exec: network policy:", policy.Describe())
+	}
 	if *netEnabled {
 		if *gvproxy != "" {
 			gv, sock, err := sandbox.StartGVProxy(*gvproxy, tmp)
@@ -199,6 +215,7 @@ func runExec(argv []string) int {
 		Shares:      hostShares,
 		NetEndpoint: netSock,
 		NetConn:     netConn,
+		NetPolicy:   policy,
 		NetMAC:      netMAC,
 		NetVFKIT:    true,
 		VsockFwd:    tmp,

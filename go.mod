@@ -9,6 +9,7 @@ require (
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/ebitengine/purego v0.10.2
 	github.com/hanwen/go-fuse/v2 v2.11.0
+	github.com/miekg/dns v1.1.72
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.43.0
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
@@ -22,7 +23,6 @@ require (
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048 // indirect
 	github.com/insomniacslk/dhcp v0.0.0-20250919081422-f80a1952f48e // indirect
-	github.com/miekg/dns v1.1.72 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.14 // indirect

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"gantry/internal/gutil"
+	"gantry/internal/netpol"
 	"io"
 	"net"
 	"os"
@@ -82,8 +83,13 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 // packetConn interface using QEMU protocol framing (4-byte big-endian
 // length + raw Ethernet frame). This is what gvisor-tap-vsock's
 // AcceptQemu — and therefore our embedded netstack (internal/vnet) —
-// expects on the other end.
-type qemuFrameConn struct{ conn net.Conn }
+// expects on the other end. A netpol.Policy hooks every frame here: TX is
+// filtered (guest can't bypass it — we are the wire), RX is snooped for
+// DNS answers that feed the policy's dynamic allow table.
+type qemuFrameConn struct {
+	conn net.Conn
+	pol  *netpol.Policy
+}
 
 func (q qemuFrameConn) Read(p []byte) (int, error) {
 	var hdr [4]byte
@@ -94,10 +100,17 @@ func (q qemuFrameConn) Read(p []byte) (int, error) {
 	if n > uint32(len(p)) {
 		return 0, fmt.Errorf("qemu frame %d bytes > buffer %d", n, len(p))
 	}
-	return io.ReadFull(q.conn, p[:n])
+	m, err := io.ReadFull(q.conn, p[:n])
+	if err == nil && q.pol != nil {
+		q.pol.ObserveRX(p[:m])
+	}
+	return m, err
 }
 
 func (q qemuFrameConn) Write(p []byte) (int, error) {
+	if q.pol != nil && !q.pol.MatchTX(p) {
+		return len(p), nil // silently dropped, like any ethernet drop
+	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(p)))
 	buf := append(hdr[:], p...)
@@ -114,9 +127,15 @@ func (q qemuFrameConn) Close() error { return q.conn.Close() }
 // needed). The connection is unbuffered, so a busy guest TX serializes
 // frame-by-frame against the netstack's read loop; fine at sandbox scale.
 func NewNetConn(conn net.Conn, mac [6]byte) *Net {
+	return NewNetConnPolicy(conn, mac, nil)
+}
+
+// NewNetConnPolicy is NewNetConn with an egress network policy enforced on
+// the link (see internal/netpol).
+func NewNetConnPolicy(conn net.Conn, mac [6]byte, pol *netpol.Policy) *Net {
 	return &Net{
 		mac:     mac,
-		conn:    qemuFrameConn{conn},
+		conn:    qemuFrameConn{conn: conn, pol: pol},
 		verbose: gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != "",
 	}
 }
