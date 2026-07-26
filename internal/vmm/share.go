@@ -3,6 +3,7 @@ package vmm
 import (
 	"encoding/json"
 	"fmt"
+	"gantry/internal/shares"
 	"gantry/internal/virtio"
 	"os"
 	"path/filepath"
@@ -29,17 +30,10 @@ type Share struct {
 
 // ShareManifestEntry is written to <vsockfwd>/shares.json so hostctl can
 // mount exactly what the VMM exported without duplicate configuration.
-type ShareManifestEntry struct {
-	Tag     string `json:"tag"`
-	Path    string `json:"path"`
-	RO      bool   `json:"ro,omitempty"`
-	VMPath  string `json:"vmPath"`
-	CtrPath string `json:"ctrPath"`
-}
+// The schema is shared with the session client via internal/shares.
+type ShareManifestEntry = shares.Entry
 
-type ShareManifest struct {
-	Shares []ShareManifestEntry `json:"shares"`
-}
+type ShareManifest = shares.Manifest
 
 func shareVMPath(tag string) string { return "/run/mnt/" + tag }
 

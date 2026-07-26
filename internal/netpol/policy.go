@@ -45,9 +45,15 @@ const (
 	protoUDP  = 17
 
 	// gateway services that must stay reachable for the link to work
-	gatewayIP  = "192.168.127.1"
-	dnsMaxTTL  = 5 * time.Minute
-	maxDynamic = 4096
+	gatewayIP = "192.168.127.1"
+	// directed broadcast of the (fixed) guest subnet — must match
+	// vnet.SubnetCIDR (192.168.127.0/24). Compared as an exact address:
+	// a ".255" suffix match would hand the gateway-service pass to any
+	// unicast address whose last octet is 255 (8.8.8.255, ...),
+	// bypassing the rule list, the local-net wall and the default action.
+	subnetBroadcast = "192.168.127.255"
+	dnsMaxTTL       = 5 * time.Minute
+	maxDynamic      = 4096
 )
 
 // Policy is the parsed, enforced form of the policy file.
@@ -277,7 +283,11 @@ func parseFrame(frame []byte) (pp parsedPacket, arp, ok bool) {
 	}
 	pp.proto = ip[9]
 	copy(pp.dst[:], ip[16:20])
-	// fragmented non-first fragments carry no ports; treat proto-only
+	// fragmented non-first fragments carry no ports: dport stays 0, so
+	// a rule with a Ports list can't match them and they fall through to
+	// the default action. Known gap: under a default-ALLOW policy with
+	// port-scoped DENY rules, fragmenting evades those rules (under the
+	// far more common default-deny it fails closed).
 	off := int(binary.BigEndian.Uint16(ip[6:8])&0x1fff) * 8
 	pp.l4 = ip[ihl:]
 	if off == 0 && len(pp.l4) >= 4 {
@@ -302,7 +312,7 @@ func (p *Policy) MatchTX(frame []byte) bool {
 	// link-services pass; multicast is NOT exempt — mDNS/SSDP probes are
 	// LAN discovery and belong behind the local-network wall.
 	if dst.Equal(net.ParseIP(gatewayIP)) ||
-		dst.Equal(net.IPv4bcast) || strings.HasSuffix(dst.String(), ".255") {
+		dst.Equal(net.IPv4bcast) || dst.Equal(net.ParseIP(subnetBroadcast)) {
 		return p.matchGatewayService(pp)
 	}
 	return p.Allows(pp.dst, pp.proto, pp.dport)

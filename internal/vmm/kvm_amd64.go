@@ -289,7 +289,7 @@ func (b *kvmX86Backend) runVCPULoop(vc *kvmVCPU) error {
 		case kvmExitHLT:
 			// Re-enter; KVM_RUN blocks until an interrupt is pending.
 		case kvmExitShutdown:
-			stdoutFlush()
+			b.m.stdoutFlush()
 			regs := kvmRegs{}
 			_ = ioctl(vc.fd, kvmGetRegs, unsafe.Pointer(&regs))
 			fmt.Println("\n------------------------------------------------")
@@ -319,7 +319,7 @@ func (b *kvmX86Backend) handleIO(vc *kvmVCPU) error {
 
 	// Guest-initiated reset: treat as VM exit.
 	if isWrite && (port == 0xcf9 || (port == 0x64 && data[0] == 0xfe)) {
-		stdoutFlush()
+		b.m.stdoutFlush()
 		fmt.Println("\n------------------------------------------------")
 		fmt.Println("guest rebooted (reset port); exiting")
 		return ErrGuestReset

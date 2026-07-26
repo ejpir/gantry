@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 )
 
 // Guest physical layout inside RAM:
@@ -25,27 +26,26 @@ const (
 )
 
 // stdoutWrite emits guest console output, buffered to avoid one write
-// syscall per byte (thousands per second during boot).
-//
-// consoleWriter is where the guest serial console goes: os.Stdout for the
-// interactive `run` flow, a log file (or os.Stderr) for `exec`.
-var (
-	consoleWriter io.Writer = os.Stdout
-	stdoutBuf               = make([]byte, 0, 4096)
-)
-
-func stdoutWrite(b byte) {
-	stdoutBuf = append(stdoutBuf, b)
-	if b == '\n' || len(stdoutBuf) >= 4096 {
-		consoleWriter.Write(stdoutBuf)
-		stdoutBuf = stdoutBuf[:0]
+// syscall per byte (thousands per second during boot). The console writer
+// and buffer live on the Machine (not package globals): more than one
+// Machine may exist per process, and flush-on-shutdown runs on backend
+// threads — the mutex covers both.
+func (m *Machine) stdoutWrite(b byte) {
+	m.consoleMu.Lock()
+	defer m.consoleMu.Unlock()
+	m.stdoutBuf = append(m.stdoutBuf, b)
+	if b == '\n' || len(m.stdoutBuf) >= 4096 {
+		m.consoleW.Write(m.stdoutBuf)
+		m.stdoutBuf = m.stdoutBuf[:0]
 	}
 }
 
-func stdoutFlush() {
-	if len(stdoutBuf) > 0 {
-		consoleWriter.Write(stdoutBuf)
-		stdoutBuf = stdoutBuf[:0]
+func (m *Machine) stdoutFlush() {
+	m.consoleMu.Lock()
+	defer m.consoleMu.Unlock()
+	if len(m.stdoutBuf) > 0 {
+		m.consoleW.Write(m.stdoutBuf)
+		m.stdoutBuf = m.stdoutBuf[:0]
 	}
 }
 
@@ -151,9 +151,6 @@ type Machine struct {
 	ioapic    *ioApic    // x86, WHPX only (KVM has it in-kernel)
 	pit       *pit8254   // x86, WHPX only
 	pic       *pic8259   // x86, WHPX only
-	devBase   uint64     // virtio-mmio slot 0 base
-	devStride uint64
-	devIRQ    int // virtio-mmio slot 0 IRQ (arm64: 48+idx, x86: list)
 	virtios   []*virtio.Core
 	irqLine   func(irq int, level bool) // installed by the backend
 	stdinDone chan struct{}
@@ -161,6 +158,9 @@ type Machine struct {
 	// off for `exec`, where the terminal belongs to the container session).
 	consoleStdin bool
 	vcpus        int
+	consoleMu    sync.Mutex
+	consoleW     io.Writer
+	stdoutBuf    []byte
 }
 
 // x86 virtio-mmio window: above RAM (<=3 GiB), below the APIC window at
@@ -290,10 +290,17 @@ type Opts struct {
 	GuestCID    uint64
 	VsockListen []uint32 // guest ports accepting host-originated connections
 	Cmdline     string
+	// Console receives the guest serial console (default os.Stdout); the
+	// sandbox daemon points it at console.log, `exec -console` at stderr.
+	Console io.Writer
 }
 
 func Prepare(o Opts) (*Machine, error) {
-	m := &Machine{stdinDone: make(chan struct{}), consoleStdin: o.Interactive}
+	m := &Machine{stdinDone: make(chan struct{}), consoleStdin: o.Interactive,
+		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096)}
+	if m.consoleW == nil {
+		m.consoleW = os.Stdout
+	}
 
 	// guest RAM is allocated by the backend (it must be mapped into the
 	// hypervisor); here we only fill it.
@@ -311,10 +318,8 @@ func Prepare(o Opts) (*Machine, error) {
 	m.arch = arch
 	if arch == "amd64" {
 		m.mem = virtio.NewRAM(ram, 0)
-		m.devBase, m.devStride = x86MMIOBase, x86MMIOStride
 	} else {
 		m.mem = virtio.NewRAM(ram, ramBase)
-		m.devBase, m.devStride = virtio.MMIOBaseArm64, virtio.MMIOStrideArm64
 	}
 
 	var is, ie uint64
@@ -327,13 +332,13 @@ func Prepare(o Opts) (*Machine, error) {
 
 	if arch == "amd64" {
 		m.uartIO = newUART16550(func(level bool) { m.raise(x86SerialIRQ, level) },
-			func(b byte) { stdoutWrite(b) })
+			func(b byte) { m.stdoutWrite(b) })
 		m.cmos = &cmosRTC{}
 		m.pit = newPIT(func(level bool) { m.raise(0, level) })
 		m.pic = &pic8259{}
 		fmt.Printf("serial: %s (console=ttyS0)\n", m.uartIO)
 	} else {
-		m.uart = newPL011(m.raise, func(b byte) { stdoutWrite(b) })
+		m.uart = newPL011(m.raise, func(b byte) { m.stdoutWrite(b) })
 	}
 
 	// virtio devices (MMIO slots 0..n)
@@ -466,14 +471,6 @@ type backend interface {
 
 // Run boots the prepared machine on the platform hypervisor backend.
 func Run(m *Machine) error { return platformBackend().run(m) }
-
-// SetConsoleWriter redirects the guest serial console (default os.Stdout);
-// the sandbox daemon points it at console.log. Call before boot.
-func SetConsoleWriter(w io.Writer) { consoleWriter = w }
-
-// FlushConsole drains the buffered console writer (backends call this on
-// the way out; exported for the CLI's run flow).
-func FlushConsole() { stdoutFlush() }
 
 // PSTATE at boot: EL1h (0b0101), all exceptions masked (D A I F = 0x3c0).
 const pstateEL1hMask = 0x3c5

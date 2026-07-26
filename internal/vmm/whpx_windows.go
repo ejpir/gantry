@@ -294,7 +294,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			// halt: re-enter and block until the next interrupt;
 			// canceled: someone kicked us, just re-enter.
 		case whvExitUnrecoverable:
-			stdoutFlush()
+			b.m.stdoutFlush()
 			rip := binary.LittleEndian.Uint64(buf[32:])
 			return fmt.Errorf("unrecoverable guest exception (triple fault) rip=%#x", rip)
 		case whvExitInvalidVpReg:
@@ -374,7 +374,7 @@ func (b *whpxBackend) handleIOExit(vp uint32, buf []byte) error {
 
 	// guest-initiated reset
 	if isWrite && (port == 0xcf9 || (port == 0x64 && byte(rax) == 0xfe)) {
-		stdoutFlush()
+		b.m.stdoutFlush()
 		fmt.Println("\n------------------------------------------------")
 		fmt.Println("guest rebooted (reset port); exiting")
 		return ErrGuestReset

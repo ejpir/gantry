@@ -48,10 +48,19 @@ usage:
 `)
 		os.Exit(2)
 	}
+	// mustName validates a sandbox name at the dispatch layer so every
+	// name-taking subcommand (exec/start/daemon/stop/delete) is covered.
+	mustName := func(n string) string {
+		if err := sandbox.ValidateSandboxName(n); err != nil {
+			fmt.Fprintln(os.Stderr, "gantry:", err)
+			os.Exit(2)
+		}
+		return n
+	}
 	switch os.Args[1] {
 	case "exec":
 		if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-			os.Exit(sandbox.CmdSandboxExec(sandbox.CheckedSandboxName(os.Args[2]), os.Args[3:]))
+			os.Exit(sandbox.CmdSandboxExec(mustName(os.Args[2]), os.Args[3:]))
 		}
 		cmdExec(os.Args[2:])
 		return
@@ -61,7 +70,7 @@ usage:
 		if len(os.Args) != 3 {
 			os.Exit(2)
 		}
-		os.Exit(sandbox.CmdDaemon(sandbox.CheckedSandboxName(os.Args[2])))
+		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2])))
 	case "ls":
 		os.Exit(sandbox.CmdLs())
 	case "stop", "delete":
@@ -69,7 +78,7 @@ usage:
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])
 			os.Exit(2)
 		}
-		name := sandbox.CheckedSandboxName(os.Args[2])
+		name := mustName(os.Args[2])
 		if os.Args[1] == "stop" {
 			os.Exit(sandbox.CmdStop(name))
 		}

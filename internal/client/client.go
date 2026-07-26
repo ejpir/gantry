@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"gantry/internal/shares"
+
 	"github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/api/types"
 	tasktypes "github.com/containerd/containerd/api/types/task"
@@ -45,27 +47,18 @@ type ShellOptions struct {
 	ID         string // bundle/task id; default "shell"
 }
 
-// ShareEntry mirrors gantry's shareManifestEntry in shares.json.
-type ShareEntry struct {
-	Tag     string `json:"tag"`
-	Path    string `json:"path"`
-	RO      bool   `json:"ro,omitempty"`
-	VMPath  string `json:"vmPath"`
-	CtrPath string `json:"ctrPath"`
-}
-
-type shareManifest struct {
-	Shares []ShareEntry `json:"shares"`
-}
+// ShareEntry is one entry of the VMM's shares.json (schema shared with
+// internal/vmm via internal/shares).
+type ShareEntry = shares.Entry
 
 // LoadShares reads the manifest gantry wrote next to the RPC socket. A
 // missing manifest simply means "no shares".
-func LoadShares(rpcSock string) []ShareEntry {
-	b, err := os.ReadFile(filepath.Join(filepath.Dir(rpcSock), "shares.json"))
+func LoadShares(dir string) []ShareEntry {
+	b, err := os.ReadFile(filepath.Join(dir, "shares.json"))
 	if err != nil {
 		return nil
 	}
-	var m shareManifest
+	var m shares.Manifest
 	if json.Unmarshal(b, &m) != nil {
 		return nil
 	}
@@ -144,6 +137,119 @@ func streamID(prefix string) string {
 	return fmt.Sprintf("%s-%s", prefix, base64.RawURLEncoding.EncodeToString(b[:]))
 }
 
+// vminitd returns plain ttrpc "Unknown" errors — there are no typed
+// error codes — so the recovery paths below match on message text.
+// These are the strings vminitd / the OCI runtime / the kernel actually
+// produce; keep every call site on these constants so the matching
+// lives in exactly one place.
+const (
+	errTextBundleExists = "file exists"    // bundle.Create on a lingering /run/bundles/<id>
+	errTextTaskExists   = "already exists" // task.Create for a live container
+	errTextMountBusy    = "busy"           // single-instance erofs already mounted
+	errTextMountInUse   = "in-use"         // overlay upperdir still referenced
+)
+
+func errHas(err error, subs ...string) bool {
+	for _, s := range subs {
+		if strings.Contains(err.Error(), s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureBundle uploads config.json for id and returns the bundle path.
+// The bundle API is Create-only and vminitd never removes
+// /run/bundles/<id>: after a container exits, the dir lingers, so a
+// fresh Create would fail "file exists". reused=true means the old
+// bundle — including the previous config.json, so args changes need a
+// sandbox restart — is still in place.
+func ensureBundle(ctx context.Context, client *ttrpc.Client, id string, cfg string, logf func(string, ...any)) (bundlePath string, reused bool, err error) {
+	bresp, err := bundle.NewTTRPCBundleClient(client).Create(ctx, &bundle.CreateRequest{
+		ID: id,
+		Files: map[string][]byte{
+			"config.json": []byte(cfg),
+			// vminitd always loads this file after crun create. An empty
+			// Networks list is the supported no-network configuration.
+			"nw-config.json": []byte(`{"Networks":[]}`),
+		},
+	})
+	if err != nil {
+		if !errHas(err, errTextBundleExists, errTextTaskExists) {
+			return "", false, fmt.Errorf("bundle Create: %w", err)
+		}
+		b := "/run/bundles/" + id
+		logf("reusing existing bundle at %s", b)
+		return b, true, nil
+	}
+	logf("bundle created at %s", bresp.Bundle)
+	return bresp.Bundle, false, nil
+}
+
+// mountShares exports the virtio-fs tags into the VM at their VMPaths.
+func mountShares(ctx context.Context, mc mountapi.TTRPCMountService, shares []ShareEntry, logf func(string, ...any)) error {
+	if len(shares) == 0 {
+		return nil
+	}
+	specs := make([]*mountapi.MountSpec, 0, len(shares))
+	for _, s := range shares {
+		spec := &mountapi.MountSpec{Type: "virtiofs", Source: s.Tag, Target: s.VMPath}
+		if s.RO {
+			spec.Options = []string{"ro"}
+		}
+		specs = append(specs, spec)
+	}
+	if _, err := mc.MountAll(ctx, &mountapi.MountAllRequest{Mounts: specs}); err != nil {
+		return fmt.Errorf("mount virtio-fs shares: %w", err)
+	}
+	for _, s := range shares {
+		mode := "rw"
+		if s.RO {
+			mode = "ro"
+		}
+		logf("share %-12s %-30s -> %s -> container %s (%s)", s.Tag, s.Path, s.VMPath, s.CtrPath, mode)
+	}
+	return nil
+}
+
+// unmountStack best-effort tears down a bundle's rootfs mount stack.
+// Necessary because vminitd's task Delete unmounts only the overlay, and
+// erofs is single-instance: a leftover mounts/0 makes the next Create
+// fail EBUSY, and no RPC can remove it later.
+func unmountStack(ctx context.Context, mc mountapi.TTRPCMountService, bundlePath string) {
+	for _, target := range []string{
+		bundlePath + "/rootfs",
+		bundlePath + "/mounts/1",
+		bundlePath + "/mounts/0",
+	} {
+		mc.Unmount(ctx, &mountapi.UnmountRequest{Target: target})
+	}
+}
+
+// awaitRunning polls until task id is RUNNING — used after losing a
+// Create race to a concurrent session, whose container is still coming
+// up.
+func awaitRunning(ctx context.Context, tc task.TTRPCTaskService, id string) bool {
+	for range 50 {
+		st, err := tc.State(ctx, &task.StateRequest{ID: id})
+		if err == nil && st.Status == tasktypes.Status_RUNNING {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
+}
+
+// awaitGone polls until task id no longer exists (Delete is async).
+func awaitGone(ctx context.Context, tc task.TTRPCTaskService, id string) {
+	for range 50 {
+		if _, err := tc.State(ctx, &task.StateRequest{ID: id}); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // SessionOptions configures one container session over an established
 // ttrpc connection (see Session). Progress messages go to the session's
 // stdout.
@@ -217,63 +323,22 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 
 	// 1. upload the bundle (config.json) — vminitd writes it under
 	//    /run/bundles/<id>/ and returns the path
-	bresp, err := bundle.NewTTRPCBundleClient(client).Create(ctx, &bundle.CreateRequest{
-		ID: id,
-		Files: map[string][]byte{
-			"config.json": []byte(cfg),
-			// vminitd always loads this file after crun create. An empty
-			// Networks list is the supported no-network configuration.
-			"nw-config.json": []byte(`{"Networks":[]}`),
-		},
-	})
+	mountClient := mountapi.NewTTRPCMountClient(client)
+	bundlePath, reused, err := ensureBundle(ctx, client, id, cfg, logf)
 	if err != nil {
-		// The bundle API is Create-only and vminitd never removes
-		// /run/bundles/<id>: after a container exits, the dir lingers
-		// and every later session failed here with "file exists".
-		// Reusing it is fine — task Create rewrites what it needs.
-		// (Caveat: the previous session's config.json stays, so args
-		// changes across sessions need a sandbox restart.)
-		if !strings.Contains(err.Error(), "file exists") && !strings.Contains(err.Error(), "already exists") {
-			return fmt.Errorf("bundle Create: %w", err)
-		}
-		bresp = &bundle.CreateResponse{Bundle: "/run/bundles/" + id}
-		logf("reusing existing bundle at %s", bresp.Bundle)
+		return err
+	}
+	if reused {
 		// A leftover rootfs stack can also survive (daemon crash,
 		// killed session): erofs is single-instance, so a stale mount
 		// makes the next Create fail EBUSY. Best-effort clear first.
 		uctx, ucancel := context.WithTimeout(ctx, 5*time.Second)
-		for _, target := range []string{
-			"/run/bundles/" + id + "/rootfs",
-			"/run/bundles/" + id + "/mounts/1",
-			"/run/bundles/" + id + "/mounts/0",
-		} {
-			mountapi.NewTTRPCMountClient(client).Unmount(uctx, &mountapi.UnmountRequest{Target: target})
-		}
+		unmountStack(uctx, mountClient, bundlePath)
 		ucancel()
-	} else {
-		logf("bundle created at %s", bresp.Bundle)
 	}
 
-	mountClient := mountapi.NewTTRPCMountClient(client)
-	if len(shares) > 0 {
-		specs := make([]*mountapi.MountSpec, 0, len(shares))
-		for _, s := range shares {
-			spec := &mountapi.MountSpec{Type: "virtiofs", Source: s.Tag, Target: s.VMPath}
-			if s.RO {
-				spec.Options = []string{"ro"}
-			}
-			specs = append(specs, spec)
-		}
-		if _, err := mountClient.MountAll(ctx, &mountapi.MountAllRequest{Mounts: specs}); err != nil {
-			return fmt.Errorf("mount virtio-fs shares: %w", err)
-		}
-		for _, s := range shares {
-			mode := "rw"
-			if s.RO {
-				mode = "ro"
-			}
-			logf("share %-12s %-30s -> %s -> container %s (%s)", s.Tag, s.Path, s.VMPath, s.CtrPath, mode)
-		}
+	if err := mountShares(ctx, mountClient, shares, logf); err != nil {
+		return err
 	}
 
 	// 2. open stdio streams BEFORE Create so the guest can claim them
@@ -308,7 +373,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	// staged mounts.
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{
 		ID:       id,
-		Bundle:   bresp.Bundle,
+		Bundle:   bundlePath,
 		Rootfs:   RootfsMounts(opts.RW),
 		Terminal: true,
 		Stdin:    "stream://" + stdinStream.id,
@@ -318,22 +383,16 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		// Lost the race with a concurrent session: it created the
 		// container between our State probe and our Create — Exec into
 		// the winner's container instead.
-		if opts.ExecIntoExisting && strings.Contains(err.Error(), "already exists") {
+		if opts.ExecIntoExisting && errHas(err, errTextTaskExists) {
 			return sessionExec(client, tc, opts, id, stdin, stdout)
 		}
 		// Two sessions can both miss the State probe and race into
 		// Create; the loser gets EBUSY from the rootfs stack (its own
 		// attempt mounted nothing — the failure is at the first mount).
 		// Poll briefly: if the winner's task is up, Exec into it.
-		if opts.ExecIntoExisting && (strings.Contains(err.Error(), "busy") || strings.Contains(err.Error(), "in-use")) {
-			for range 50 {
-				st, serr := tc.State(ctx, &task.StateRequest{ID: id})
-				if serr == nil && st.Status == tasktypes.Status_RUNNING {
-					logf("lost create race; attaching to the running container")
-					return sessionExec(client, tc, opts, id, stdin, stdout)
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
+		if opts.ExecIntoExisting && errHas(err, errTextMountBusy, errTextMountInUse) && awaitRunning(ctx, tc, id) {
+			logf("lost create race; attaching to the running container")
+			return sessionExec(client, tc, opts, id, stdin, stdout)
 		}
 		// A failed Create leaves the bundle's rootfs stack mounted in the
 		// VM; without cleanup the NEXT exec on this sandbox dies with
@@ -342,15 +401,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer dcancel()
 		tc.Delete(dctx, &task.DeleteRequest{ID: id})
-		if mountClient != nil {
-			for _, target := range []string{
-				bresp.Bundle + "/rootfs",
-				bresp.Bundle + "/mounts/1",
-				bresp.Bundle + "/mounts/0",
-			} {
-				mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: target})
-			}
-		}
+		unmountStack(dctx, mountClient, bundlePath)
 		return fmt.Errorf("task Create: %w\n(see the VM console for vminitd logs)", err)
 	}
 	logf("task created")
@@ -404,24 +455,13 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	// once the task is really gone, and it MUST be unmounted: erofs is
 	// single-instance, so a leftover mount makes the next Create fail
 	// EBUSY ("device or resource busy" at mounts/0).
-	for range 50 {
-		if _, err := tc.State(dctx, &task.StateRequest{ID: id}); err != nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	awaitGone(dctx, tc, id)
 	for i := len(shares) - 1; i >= 0; i-- {
 		if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: shares[i].VMPath}); err != nil {
 			fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
 		}
 	}
-	for _, target := range []string{
-		bresp.Bundle + "/rootfs",
-		bresp.Bundle + "/mounts/1",
-		bresp.Bundle + "/mounts/0",
-	} {
-		mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: target})
-	}
+	unmountStack(dctx, mountClient, bundlePath)
 	logf("done")
 	return werr
 }
@@ -448,12 +488,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		logf("task %s exists but is %s; recreating the sandbox container", id, st.Status)
 		dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
 		tc.Delete(dctx, &task.DeleteRequest{ID: id})
-		for range 50 {
-			if _, err := tc.State(dctx, &task.StateRequest{ID: id}); err != nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+		awaitGone(dctx, tc, id)
 		dcancel()
 	}
 
@@ -461,45 +496,14 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 	if err != nil {
 		return err
 	}
-	bresp, err := bundle.NewTTRPCBundleClient(client).Create(ctx, &bundle.CreateRequest{
-		ID: id,
-		Files: map[string][]byte{
-			"config.json":    []byte(cfg),
-			"nw-config.json": []byte(`{"Networks":[]}`),
-		},
-	})
+	bundlePath, _, err := ensureBundle(ctx, client, id, cfg, logf)
 	if err != nil {
-		// The bundle API is Create-only and vminitd never removes
-		// /run/bundles/<id>; reuse the dir after a recreate.
-		if !strings.Contains(err.Error(), "file exists") && !strings.Contains(err.Error(), "already exists") {
-			return fmt.Errorf("bundle Create: %w", err)
-		}
-		bresp = &bundle.CreateResponse{Bundle: "/run/bundles/" + id}
-		logf("reusing existing bundle at %s", bresp.Bundle)
-	} else {
-		logf("container bundle created at %s", bresp.Bundle)
+		return err
 	}
 
 	mountClient := mountapi.NewTTRPCMountClient(client)
-	if len(opts.Shares) > 0 {
-		specs := make([]*mountapi.MountSpec, 0, len(opts.Shares))
-		for _, s := range opts.Shares {
-			spec := &mountapi.MountSpec{Type: "virtiofs", Source: s.Tag, Target: s.VMPath}
-			if s.RO {
-				spec.Options = []string{"ro"}
-			}
-			specs = append(specs, spec)
-		}
-		if _, err := mountClient.MountAll(ctx, &mountapi.MountAllRequest{Mounts: specs}); err != nil {
-			return fmt.Errorf("mount virtio-fs shares: %w", err)
-		}
-		for _, s := range opts.Shares {
-			mode := "rw"
-			if s.RO {
-				mode = "ro"
-			}
-			logf("share %-12s %-30s -> %s -> container %s (%s)", s.Tag, s.Path, s.VMPath, s.CtrPath, mode)
-		}
+	if err := mountShares(ctx, mountClient, opts.Shares, logf); err != nil {
+		return err
 	}
 
 	// Stub-init stdio: throwaway streams. Terminal tasks use the console
@@ -517,7 +521,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{
 		ID:       id,
-		Bundle:   bresp.Bundle,
+		Bundle:   bundlePath,
 		Rootfs:   RootfsMounts(opts.RW),
 		Terminal: true,
 		Stdin:    "stream://" + inID,
@@ -526,18 +530,11 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 	if err != nil {
 		inC.Close()
 		outC.Close()
-		if strings.Contains(err.Error(), "already exists") {
+		if errHas(err, errTextTaskExists) {
 			return nil // someone else won the create race
 		}
-		if strings.Contains(err.Error(), "busy") || strings.Contains(err.Error(), "in-use") {
-			// Lost the create race; the winner's container comes up shortly.
-			for range 50 {
-				st, serr := tc.State(ctx, &task.StateRequest{ID: id})
-				if serr == nil && st.Status == tasktypes.Status_RUNNING {
-					return nil
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
+		if errHas(err, errTextMountBusy, errTextMountInUse) && awaitRunning(ctx, tc, id) {
+			return nil // lost the race; the winner's container is up
 		}
 		return fmt.Errorf("task Create: %w\n(see the VM console for vminitd logs)", err)
 	}
@@ -656,7 +653,7 @@ func Shell(opts ShellOptions) error {
 	}
 	var shares []ShareEntry
 	if opts.Share {
-		shares = LoadShares(opts.RPCSock)
+		shares = LoadShares(filepath.Dir(opts.RPCSock))
 		if len(shares) == 0 {
 			return fmt.Errorf("no shares exported by the VMM\n(start gantry with -share TAG=/absolute/host/path[,ro]; see shares.json next to the RPC socket)")
 		}

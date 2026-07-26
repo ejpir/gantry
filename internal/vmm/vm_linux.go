@@ -184,7 +184,7 @@ func (b *kvmBackend) runVCPULoop(vc *kvmVCPU) error {
 		case kvmExitSystemEvent:
 			switch vc.run.sysEventType() {
 			case kvmSystemEventShutdown:
-				stdoutFlush()
+				m.stdoutFlush()
 				fmt.Println("\n------------------------------------------------")
 				fmt.Println("guest powered off (PSCI SYSTEM_OFF)")
 				return nil

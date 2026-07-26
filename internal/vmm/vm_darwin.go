@@ -581,7 +581,7 @@ func (vc *hvfVCPU) handlePSCI() error {
 		fmt.Println("\nguest requested reset; exiting")
 		return errGuestHalt
 	case psciSystemOff:
-		stdoutFlush()
+		vc.b.m.stdoutFlush()
 		fmt.Println("\n------------------------------------------------")
 		fmt.Println("guest powered off (PSCI SYSTEM_OFF)")
 		return errGuestHalt

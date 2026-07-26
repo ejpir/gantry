@@ -7,9 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"gantry/internal/gutil"
-	"gantry/internal/netpol"
 	"gantry/internal/vmm"
-	"gantry/internal/vnet"
 	"io"
 	"net"
 	"os"
@@ -47,21 +45,6 @@ import (
 //	gvproxy.log       network backend log
 //	daemon.log        daemon stdout/stderr
 
-type sandboxConfig struct {
-	Kernel  string   `json:"kernel"`
-	Rootfs  string   `json:"rootfs"`
-	Image   string   `json:"image"`
-	RWLayer string   `json:"rwlayer,omitempty"`
-	RW      bool     `json:"rw"`
-	Shares  []string `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs
-	Net     bool     `json:"net"`
-	GVProxy string   `json:"gvproxy,omitempty"`
-	NetPol  string   `json:"net_policy,omitempty"`
-	AllowLN bool     `json:"allow_local_net,omitempty"`
-	MemMB   uint     `json:"memMB"`
-	VCPUs   int      `json:"vcpus,omitempty"`
-}
-
 func sandboxRoot() string {
 	if d := gutil.EnvOr("GANTRY_HOME", "MINIVM_HOME"); d != "" {
 		return d
@@ -75,7 +58,7 @@ func sandboxRoot() string {
 	// one-time migration after the project rename
 	if _, err := os.Stat(newRoot); os.IsNotExist(err) {
 		if _, err := os.Stat(oldRoot); err == nil {
-			os.MkdirAll(filepath.Dir(newRoot), 0o755)
+			os.MkdirAll(filepath.Dir(newRoot), 0o700)
 			if err := os.Rename(oldRoot, newRoot); err == nil {
 				fmt.Println("gantry: migrated sandboxes ~/.minivm -> ~/.gantry")
 			}
@@ -104,14 +87,16 @@ func validSandboxName(name string) bool {
 	return true
 }
 
-// checkedSandboxName validates a sandbox name at the CLI dispatch layer so
-// every name-taking subcommand (exec/start/daemon/stop/delete) is covered.
-func CheckedSandboxName(name string) string {
+// ValidateSandboxName rejects names that are empty, overlong, pure dots
+// (path traversal — `delete` feeds the joined path to os.RemoveAll) or
+// contain anything but letters, digits and ._-. The CLI dispatch layer
+// (main.go) turns the error into an exit code; the library itself never
+// exits.
+func ValidateSandboxName(name string) error {
 	if !validSandboxName(name) {
-		fmt.Fprintf(os.Stderr, "gantry: invalid sandbox name %q (letters, digits, ._-; not . or ..)\n", name)
-		os.Exit(2)
+		return fmt.Errorf("invalid sandbox name %q (letters, digits, ._-; not . or ..)", name)
 	}
-	return name
+	return nil
 }
 
 func sandboxPID(name string) (int, bool) {
@@ -127,6 +112,16 @@ func sandboxPID(name string) (int, bool) {
 	if !procAlive(pid) {
 		return pid, false // stale pid file
 	}
+	// A bare pid can be recycled by the OS into an unrelated process;
+	// require the daemon's flock on vmm.lock as proof of life. Grace
+	// window: between the spawner writing vmm.pid and the daemon
+	// acquiring the lock, a fresh pid file alone counts as alive.
+	if !sandboxLockHeld(sandboxDir(name)) {
+		st, err := os.Stat(filepath.Join(sandboxDir(name), "vmm.pid"))
+		if err != nil || time.Since(st.ModTime()) > 10*time.Second {
+			return pid, false
+		}
+	}
 	return pid, true
 }
 
@@ -140,59 +135,15 @@ func CmdStart(argv []string) int {
 	name, fargv := argv[0], argv[1:]
 
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
-	kernel := fs.String("kernel", vmm.DefaultKernelImage(), "")
-	rootfs := fs.String("rootfs", vmm.DefaultRootfs(), "")
-	rt := fs.String("runtime", func() string {
-		if v := gutil.EnvOr("GANTRY_RUNTIME", "MINIVM_RUNTIME"); v != "" {
-			return v
-		}
-		return "crun"
-	}(), "container runtime in the guest: crun | runsc (gVisor)")
-	image := fs.String("image", "", "container rootfs (default: debian-bookworm.erofs if present, else shell-rootfs.erofs)")
-	rwlayer := fs.String("rwlayer", "", "ext4 writable layer (default: rwlayer.ext4 if present)")
-	rw := fs.Bool("rw", false, "writable overlay container root (default: on when a rwlayer exists)")
-	var shares gutil.StrList
-	fs.Var(&shares, "share", "TAG=PATH[,ro] (repeatable)")
-	netEnabled := fs.Bool("net", true, "")
-	gvproxy := fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack")
-	netpolFlag := fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)")
-	allowLocal := fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)")
-	memMB := fs.Uint("mem", 512, "")
-	vcpus := fs.Int("cpus", 1, "guest vCPU count (max 8)")
+	rf := RegisterRunFlags(fs)
 	fs.Parse(fargv)
-
-	rootfsSet := false
-	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "rootfs" {
-			rootfsSet = true
-		}
-	})
-	kernelSet := false
-	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "kernel" {
-			kernelSet = true
-		}
-	})
-	switch *rt {
-	case "crun":
-	case "runsc":
-		if !rootfsSet {
-			*rootfs = vmm.GvisorRootfs(*rootfs)
-		}
-		if !gutil.FileExists(*rootfs) {
-			fmt.Fprintf(os.Stderr, "gantry start: %s not found - build it with ./mkrootfs-gvisor.sh %s\n", *rootfs, vmm.DefaultRootfs())
-			return 1
-		}
-		if !kernelSet {
-			*kernel = vmm.GvisorKernel(*kernel)
-		}
-		if *kernel != "" && !gutil.FileExists(*kernel) {
-			fmt.Fprintf(os.Stderr, "gantry start: %s not found - gVisor needs the 4K-page kernel, build it with ./mkkernel-4k.sh\n", *kernel)
-			return 1
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "gantry start: -runtime must be crun or runsc, got %q\n", *rt)
+	cfg, warnings, err := rf.Resolve(fs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
+	}
+	for _, w := range warnings {
+		fmt.Fprintln(os.Stderr, "gantry start:", w)
 	}
 
 	if _, alive := sandboxPID(name); alive {
@@ -200,84 +151,17 @@ func CmdStart(argv []string) int {
 		return 1
 	}
 
-	// The daemon runs with cwd=/, so resolve everything to absolute paths.
-	gvPath := *gvproxy
-	if gvPath != "" && !strings.ContainsRune(gvPath, os.PathSeparator) && gutil.FileExists(gvPath) {
-		gvPath = absPath(gvPath)
-	}
-	cfg := sandboxConfig{
-		Kernel:  absPath(*kernel),
-		Rootfs:  absPath(*rootfs),
-		Image:   *image,
-		RWLayer: *rwlayer,
-		Shares:  shares,
-		Net:     *netEnabled,
-		GVProxy: gvPath,
-		NetPol:  *netpolFlag,
-		AllowLN: *allowLocal,
-		MemMB:   *memMB,
-		VCPUs:   min(*vcpus, 8),
-	}
-	if cfg.Image == "" {
-		if gutil.FileExists("debian-bookworm.erofs") {
-			cfg.Image = "debian-bookworm.erofs"
-		} else {
-			cfg.Image = "shell-rootfs.erofs"
-		}
-	}
-	cfg.Image = absPath(cfg.Image)
-	if cfg.RWLayer == "" && gutil.FileExists("rwlayer.ext4") {
-		cfg.RWLayer = "rwlayer.ext4"
-	}
-	if cfg.RWLayer != "" {
-		cfg.RWLayer = absPath(cfg.RWLayer)
-	}
-	rwSet := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "rw" {
-			rwSet = true
-		}
-	})
-	cfg.RW = *rw || (!rwSet && cfg.RWLayer != "")
-	if !rwSet && cfg.RWLayer == "" {
-		cfg.RW = false
-	}
-	for _, req := range []string{cfg.Kernel, cfg.Rootfs, cfg.Image} {
-		if !gutil.FileExists(req) {
-			fmt.Fprintf(os.Stderr, "gantry start: missing %s\n", req)
-			return 1
-		}
-	}
-	if cfg.RW && cfg.RWLayer != "" && !gutil.FileExists(cfg.RWLayer) {
-		fmt.Fprintf(os.Stderr, "gantry start: rwlayer %s does not exist; create it with:\n  ./mkrwlayer.sh %s 512\n", cfg.RWLayer, cfg.RWLayer)
-		return 1
-	}
-	// Validate share specs now, with absolute paths for the daemon.
-	seen := map[string]bool{}
-	for i, spec := range cfg.Shares {
-		s, err := vmm.ParseShareSpec(spec, seen)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gantry start: invalid -share %q: %v\n", spec, err)
-			return 2
-		}
-		seen[s.Tag] = true
-		p, err := filepath.Abs(s.Path)
-		if err == nil {
-			cfg.Shares[i] = s.Tag + "=" + p
-			if s.RO {
-				cfg.Shares[i] += ",ro"
-			}
-		}
-	}
-
 	dir := sandboxDir(name)
 	os.RemoveAll(dir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0700: the broker listens on ctl.sock with no authentication — the
+	// directory mode is the entire access control between a local user
+	// and a root shell inside the sandbox (plus its rw host shares).
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), b, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), b, 0o600); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
@@ -303,7 +187,7 @@ func CmdStart(argv []string) int {
 		fmt.Fprintln(os.Stderr, "gantry start: spawn daemon:", err)
 		return 1
 	}
-	os.WriteFile(filepath.Join(dir, "vmm.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644)
+	os.WriteFile(filepath.Join(dir, "vmm.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o600)
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
@@ -332,16 +216,26 @@ func CmdStart(argv []string) int {
 
 func CmdDaemon(name string) int {
 	dir := sandboxDir(name)
+	// tighten dirs created before the 0700 hardening (best-effort)
+	os.Chmod(dir, 0o700)
 	b, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
-	var cfg sandboxConfig
+	var cfg RunConfig
 	if json.Unmarshal(b, &cfg) != nil {
 		fmt.Fprintln(os.Stderr, "daemon: corrupt sandbox.json")
 		return 1
 	}
+
+	// proof of life for sandboxPID: held until the process exits
+	lock, err := holdSandboxLock(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: another daemon holds the sandbox lock:", err)
+		return 1
+	}
+	defer lock.Close()
 
 	console, err := os.Create(filepath.Join(dir, "console.log"))
 	if err != nil {
@@ -349,103 +243,30 @@ func CmdDaemon(name string) int {
 		return 1
 	}
 	defer console.Close()
-	vmm.SetConsoleWriter(console)
 
-	netMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
-	netSock := ""
-	var netConn net.Conn
-	var policy *netpol.Policy
-	if cfg.NetPol != "" {
-		var err error
-		policy, err = netpol.Load(cfg.NetPol)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "daemon:", err)
-			return 1
-		}
-	}
-	if cfg.AllowLN {
-		if policy == nil {
-			policy = netpol.DefaultPolicy()
-		}
-		policy.AllowLocal = true
-	}
-	if policy == nil && cfg.Net {
-		policy = netpol.DefaultPolicy() // internet yes, local net no
-	}
-	if policy != nil {
-		fmt.Fprintln(os.Stderr, "daemon: network policy:", policy.Describe())
-	}
-	if (cfg.NetPol != "" || cfg.AllowLN) && cfg.GVProxy != "" {
-		fmt.Fprintln(os.Stderr, "daemon: -net-policy/-allow-local-net require the embedded netstack (drop -gvproxy)")
-		return 1
-	}
-	if cfg.Net {
-		if cfg.GVProxy != "" {
-			// explicit external gvproxy (debug/interop); the default path
-			// below needs no shipped binary
-			gv, sock, err := StartGVProxy(cfg.GVProxy, dir)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "daemon:", err)
-				return 1
-			}
-			defer func() { gv.Process.Kill(); gv.Wait() }()
-			netSock = sock
-		} else {
-			stack, err := vnet.Start(netMAC)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "daemon:", err)
-				return 1
-			}
-			defer stack.Close()
-			netConn, err = stack.Dial()
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "daemon:", err)
-				return 1
-			}
-			defer netConn.Close()
-		}
-	}
-
-	var hostShares []vmm.Share
-	seen := map[string]bool{}
-	for _, spec := range cfg.Shares {
-		s, err := vmm.ParseShareSpec(spec, seen)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "daemon: bad share:", err)
-			return 1
-		}
-		seen[s.Tag] = true
-		hostShares = append(hostShares, s)
-	}
-
-	disks := []string{cfg.Image}
-	if cfg.RW && cfg.RWLayer != "" {
-		disks = append(disks, cfg.RWLayer)
-	}
-	arch, err := vmm.KernelArch(cfg.Kernel)
+	nw, err := cfg.StartNetwork(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
-	m, err := vmm.Prepare(vmm.Opts{
-		MemSize:     uint64(cfg.MemMB) << 20,
-		KernelPath:  cfg.Kernel,
-		RootfsPath:  cfg.Rootfs,
-		Disks:       disks,
-		Shares:      hostShares,
-		NetEndpoint: netSock,
-		NetConn:     netConn,
-		NetPolicy:   policy,
-		NetMAC:      netMAC,
-		NetVFKIT:    true,
-		VsockFwd:    dir,
-		VCPUs:       cfg.VCPUs,
-		GuestCID:    3,
-		VsockListen: []uint32{1026},
-		// netSock is only a "networking enabled" marker for the cmdline
-		// builder; with the embedded stack the endpoint is in-process
-		Cmdline: gutil.InsertExtraCmdline(vmm.DefaultCmdline(arch, cfg.Rootfs, "", 3, netMarker(netSock, netConn), netMAC, true)),
-	})
+	defer nw.Close()
+	if nw.Policy != nil {
+		fmt.Fprintln(os.Stderr, "daemon: network policy:", nw.Policy.Describe())
+	}
+
+	hostShares, err := cfg.ParsedShares()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: bad share:", err)
+		return 1
+	}
+
+	opts, err := cfg.Opts(nw, hostShares, dir, true)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon:", err)
+		return 1
+	}
+	opts.Console = console
+	m, err := vmm.Prepare(opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
@@ -464,7 +285,7 @@ func CmdDaemon(name string) int {
 		return 1
 	}
 	defer rpc.Close()
-	os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o600)
 	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
 
 	sigc := make(chan os.Signal, 1)
@@ -500,7 +321,7 @@ func CmdDaemon(name string) int {
 // (for "session") one JSON response line and the socket turns into raw
 // bidirectional stdio until the task exits.
 type broker struct {
-	cfg        sandboxConfig
+	cfg        RunConfig
 	dir        string
 	rpc        *ttrpc.Client
 	streamSock string
@@ -589,7 +410,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	var status int
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock: br.streamSock,
-		Shares:     client.LoadShares(filepath.Join(br.dir, "1025.sock")),
+		Shares:     client.LoadShares(br.dir),
 		RW:         br.cfg.RW,
 		Args:       args,
 		// one VM = one container workload with a well-known id, so a
@@ -672,15 +493,17 @@ func CmdSandboxExec(name string, argv []string) int {
 		}
 	}
 	// ctrl-C: ask the broker to kill the task, keep the session attached.
+	// Loop: every interrupt kills (a second ctrl-C is not swallowed).
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt)
 	defer signal.Stop(sigc)
 	go func() {
-		<-sigc
-		kc, err := net.Dial("unix", filepath.Join(dir, "ctl.sock"))
-		if err == nil {
-			json.NewEncoder(kc).Encode(&brokerRequest{Op: "kill", ID: id})
-			kc.Close()
+		for range sigc {
+			kc, err := net.Dial("unix", filepath.Join(dir, "ctl.sock"))
+			if err == nil {
+				json.NewEncoder(kc).Encode(&brokerRequest{Op: "kill", ID: id})
+				kc.Close()
+			}
 		}
 	}()
 
@@ -800,7 +623,7 @@ func CmdLs() int {
 		}
 		image := "-"
 		if b, err := os.ReadFile(filepath.Join(sandboxDir(name), "sandbox.json")); err == nil {
-			var cfg sandboxConfig
+			var cfg RunConfig
 			if json.Unmarshal(b, &cfg) == nil {
 				image = filepath.Base(cfg.Image)
 				if cfg.RW {
@@ -879,11 +702,4 @@ func dumpTail(path string) {
 		b = b[len(b)-4096:]
 	}
 	fmt.Fprintf(os.Stderr, "---- last bytes of %s ----\n%s\n----\n", filepath.Base(path), b)
-}
-
-func netMarker(endpoint string, conn net.Conn) string {
-	if endpoint != "" || conn != nil {
-		return "enabled"
-	}
-	return ""
 }

@@ -3,7 +3,9 @@
 package sandbox
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -45,4 +47,41 @@ func detachDaemon(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008, // DETACHED_PROCESS
 	}
+}
+
+// holdSandboxLock takes an exclusive lock on <dir>/vmm.lock; the daemon
+// holds it for its whole lifetime so liveness doesn't depend on a bare
+// (recyclable) pid.
+func holdSandboxLock(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, "vmm.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	ol := new(windows.Overlapped)
+	err = windows.LockFileEx(windows.Handle(f.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, ol)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// sandboxLockHeld reports whether some process holds the sandbox lock.
+func sandboxLockHeld(dir string) bool {
+	f, err := os.OpenFile(filepath.Join(dir, "vmm.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	ol := new(windows.Overlapped)
+	err = windows.LockFileEx(windows.Handle(f.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, ol)
+	if err != nil {
+		return true // held by the daemon
+	}
+	windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
+	return false
 }
