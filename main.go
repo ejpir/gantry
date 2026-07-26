@@ -43,6 +43,7 @@ usage:
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
+  gantry image <ls|pull|rm|prune>   # manage the OCI image cache
   gantry stop <name>                # stop a sandbox
   gantry delete <name>              # stop + remove a sandbox
 `)
@@ -73,6 +74,8 @@ usage:
 		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2])))
 	case "ls":
 		os.Exit(sandbox.CmdLs())
+	case "image":
+		os.Exit(sandbox.CmdImage(os.Args[2:]))
 	case "stop", "delete":
 		if len(os.Args) != 3 {
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])

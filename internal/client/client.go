@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"gantry/internal/image"
 	"gantry/internal/shares"
 
 	"github.com/containerd/containerd/api/runtime/task/v3"
@@ -44,7 +45,8 @@ type ShellOptions struct {
 	Share      bool   // mount every share from the VMM's shares.json
 	RW         bool   // writable overlay root: erofs /dev/vdb + ext4 /dev/vdc
 	Args       []string
-	ID         string // bundle/task id; default "shell"
+	ID         string      // bundle/task id; default "shell"
+	ImgCfg     *image.Config // resolved image config (nil = defaults)
 }
 
 // ShareEntry is one entry of the VMM's shares.json (schema shared with
@@ -268,6 +270,9 @@ type SessionOptions struct {
 	// instead of Create-ing a second container (which would fail — the rw
 	// rootfs stack mounts exactly once).
 	ExecIntoExisting bool
+	// ImgCfg is the resolved OCI image config (env/entrypoint/cmd/user/
+	// workdir). nil keeps the historical defaults.
+	ImgCfg *image.Config
 }
 
 func init() {
@@ -284,7 +289,10 @@ func init() {
 // over the single dial-back connection vminitd makes (see dialBackListener:
 // it dials once per VM lifetime).
 func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout io.Writer) error {
-	if len(opts.Args) == 0 {
+	// args precedence: explicit -- CMD > image Entrypoint+Cmd > /bin/sh
+	if eff := opts.ImgCfg.Command(opts.Args); len(eff) > 0 {
+		opts.Args = eff
+	} else {
 		opts.Args = []string{"/bin/sh"}
 	}
 	if opts.ID == "" {
@@ -316,7 +324,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		return sessionExec(client, tc, opts, id, stdin, stdout)
 	}
 
-	cfg, err := ConfigJSON(shares, opts.RW, opts.Args)
+	cfg, err := ConfigJSON(shares, opts.RW, opts.Args, opts.ImgCfg)
 	if err != nil {
 		return err
 	}
@@ -492,7 +500,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		dcancel()
 	}
 
-	cfg, err := ConfigJSON(opts.Shares, opts.RW, containerInitArgs)
+	cfg, err := ConfigJSON(opts.Shares, opts.RW, containerInitArgs, nil)
 	if err != nil {
 		return err
 	}
@@ -582,12 +590,13 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	logf("exec: stdio streams open, sending Exec")
 
 	execID := fmt.Sprintf("%s-exec-%d", id, time.Now().UnixNano())
+	uid, gid := opts.ImgCfg.IDs()
 	proc := &specs.Process{
 		Terminal: true,
-		User:     specs.User{UID: 0, GID: 0},
+		User:     specs.User{UID: uid, GID: gid},
 		Args:     opts.Args,
-		Env:      []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=xterm", "PS1=exec# "},
-		Cwd:      "/",
+		Env:      opts.ImgCfg.EnvWith("TERM=xterm", "PS1=exec# "),
+		Cwd:      opts.ImgCfg.WorkdirOr(),
 	}
 	specAny, err := typeurl.MarshalAny(proc)
 	if err != nil {
@@ -711,15 +720,20 @@ func RootfsMounts(rw bool) []*types.Mount {
 }
 
 // ConfigJSON renders the OCI runtime config for the shell container.
-func ConfigJSON(shares []ShareEntry, rw bool, args []string) (string, error) {
+// ConfigJSON builds the OCI config.json for a container process.
+// img is the resolved image config (nil for direct .erofs files and for
+// the stub init, which is gantry's process, not the image's): it drives
+// env (image values win, gantry's are defaults-if-absent), the run user,
+// and the working dir.
+func ConfigJSON(shares []ShareEntry, rw bool, args []string, img *image.Config) (string, error) {
 	cfg := `{
   "ociVersion": "1.1.0",
   "process": {
     "terminal": true,
-    "user": {"uid": 0, "gid": 0},
+    "user": USERJSON,
     "args": ARGS,
-    "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=xterm", "PS1=container# "],
-    "cwd": "/",
+    "env": ENVJSON,
+    "cwd": CWDJSON,
     "capabilities": {
       "bounding": ["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"],
       "effective": ["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FSETID","CAP_FOWNER","CAP_MKNOD","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SETFCAP","CAP_SETPCAP","CAP_NET_BIND_SERVICE","CAP_SYS_CHROOT","CAP_KILL","CAP_AUDIT_WRITE"],
@@ -755,11 +769,20 @@ func ConfigJSON(shares []ShareEntry, rw bool, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	uid, gid := img.IDs()
+	userJSON, _ := json.Marshal(struct {
+		UID uint32 `json:"uid"`
+		GID uint32 `json:"gid"`
+	}{uid, gid})
+	envJSON, _ := json.Marshal(img.EnvWith("TERM=xterm", "PS1=container# "))
+	cwdJSON, _ := json.Marshal(img.WorkdirOr())
 	rootRO := "true"
 	if rw {
 		rootRO = "false"
 	}
-	cfg = strings.NewReplacer("ARGS", string(argsJSON), "ROOTRO", rootRO).Replace(cfg)
+	cfg = strings.NewReplacer("ARGS", string(argsJSON), "ROOTRO", rootRO,
+		"USERJSON", string(userJSON), "ENVJSON", string(envJSON),
+		"CWDJSON", string(cwdJSON)).Replace(cfg)
 	if len(shares) == 0 {
 		return cfg, nil
 	}

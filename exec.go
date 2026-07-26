@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"gantry/internal/client"
 	"gantry/internal/sandbox"
@@ -49,13 +48,8 @@ func runExec(argv []string) int {
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "gantry exec:", w)
 	}
-	if len(args) == 0 {
-		if strings.Contains(strings.ToLower(filepath.Base(cfg.Image)), "debian") {
-			args = []string{"/bin/bash"}
-		} else {
-			args = []string{"/bin/sh"}
-		}
-	}
+	// No -- CMD: the image's Entrypoint+Cmd supplies the session command
+	// (resolved in client.Session); a plain .erofs falls back to /bin/sh.
 	hostShares, err := cfg.ParsedShares()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
@@ -140,6 +134,7 @@ func runExec(argv []string) int {
 			Share:      len(hostShares) > 0,
 			RW:         cfg.RW,
 			Args:       args,
+			ImgCfg:     cfg.ImageCfg,
 		})
 	}()
 

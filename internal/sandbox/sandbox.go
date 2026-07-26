@@ -228,6 +228,10 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon: corrupt sandbox.json")
 		return 1
 	}
+	if cfg.ImageDigest != "" && !gutil.FileExists(cfg.Image) {
+		fmt.Fprintf(os.Stderr, "daemon: image %s not in cache; run `gantry image pull %s`\n", cfg.ImageDigest, cfg.ImageRef)
+		return 1
+	}
 
 	// proof of life for sandboxPID: held until the process exits
 	lock, err := holdSandboxLock(dir)
@@ -418,6 +422,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		// fighting over the rw rootfs stack with a second Create
 		ID:               "sb",
 		ExecIntoExisting: true,
+		ImgCfg:           br.cfg.ImageCfg,
 		Cols:             req.Cols,
 		Rows:             req.Rows,
 		KillCh:           killCh,
