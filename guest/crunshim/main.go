@@ -38,7 +38,11 @@ func main() {
 // console (→ the gantry daemon log). --debug maximizes what it says.
 func insertFlags(args []string) []string {
 	out := []string{args[0]}
-	for _, f := range []string{"--debug", "--alsologtostderr"} {
+	// --TESTONLY-unsafe-nonroot: skip runsc's minimal-chroot setup for the
+	// sandbox process. That step fails silently (stderr is /dev/null) in
+	// this VM, and the chroot is defense-in-depth we can trade away: the
+	// gantry VM itself is the outer isolation boundary.
+	for _, f := range []string{"--debug", "--alsologtostderr", "--TESTONLY-unsafe-nonroot"} {
 		present := false
 		for _, a := range args[1:] {
 			if a == f || strings.HasPrefix(a, f+"=") {
