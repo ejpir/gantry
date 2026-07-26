@@ -128,14 +128,34 @@ func sandboxPID(name string) (int, bool) {
 // ---------------- gantry start <name> [flags] ------------------------------
 
 func CmdStart(argv []string) int {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	rf := RegisterRunFlags(fs)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: gantry start <name> [flags]   (name: letters, digits, ._-)
+
+Create a long-lived sandbox VM running an OCI image; attach with
+'gantry exec <name>' (docker-exec semantics, concurrent sessions OK).
+
+examples:
+  gantry start dev -image alpine:latest
+  gantry start dev -image debian:bookworm-slim -cpus 2 -mem 1024
+  gantry start dev -image ghcr.io/org/app@sha256:... -share code=$HOME/repos,ro
+  gantry start dev -runtime runsc -image alpine:latest
+  gantry start dev -image ./my-rootfs.erofs
+
+flags:`)
+		fs.PrintDefaults()
+	}
+	if len(argv) > 0 && (argv[0] == "-h" || argv[0] == "--help") {
+		fs.Usage()
+		return 0
+	}
 	if len(argv) == 0 || strings.HasPrefix(argv[0], "-") || !validSandboxName(argv[0]) {
-		fmt.Fprintln(os.Stderr, "usage: gantry start <name> [flags]  (name: letters, digits, ._-)")
+		fs.Usage()
 		return 2
 	}
 	name, fargv := argv[0], argv[1:]
 
-	fs := flag.NewFlagSet("start", flag.ExitOnError)
-	rf := RegisterRunFlags(fs)
 	rf.Name = name
 	fs.Parse(fargv)
 	cfg, warnings, err := rf.Resolve(fs, func(format string, a ...any) {

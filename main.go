@@ -43,9 +43,17 @@ usage:
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
-  gantry image <ls|pull|rm|prune>   # manage the OCI image cache
+  gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
   gantry stop <name>                # stop a sandbox
   gantry delete <name>              # stop + remove a sandbox
+
+-image accepts an OCI reference (debian:bookworm-slim,
+ghcr.io/org/app@sha256:...), an OCI layout dir, a docker save tar, or a
+plain .erofs file. Examples:
+  gantry start dev -image alpine:latest
+  gantry exec -image debian:bookworm-slim -- /bin/sh
+  gantry image pull ghcr.io/org/app:latest
+Run 'gantry start --help' or 'gantry exec --help' for all flags.
 `)
 		os.Exit(2)
 	}

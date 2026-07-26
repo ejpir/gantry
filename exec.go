@@ -27,6 +27,22 @@ func cmdExec(argv []string) { os.Exit(runExec(argv)) }
 
 func runExec(argv []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, `usage: gantry exec [flags] [-- CMD]
+
+One-shot: boot a VM on an OCI image and run CMD (default: the image's
+entrypoint+cmd, else /bin/sh) attached to this terminal.
+
+examples:
+  gantry exec -image alpine:latest
+  gantry exec -image debian:bookworm-slim -- apt list --installed
+  gantry exec -image ./my-rootfs.erofs -share code=$HOME/repos,ro
+  gantry exec -runtime runsc -image alpine:latest
+  gantry exec -net=false -console
+
+flags:`)
+		fs.PrintDefaults()
+	}
 	rf := sandbox.RegisterRunFlags(fs)
 	console := fs.Bool("console", false, "stream the guest serial console to stderr (default: log file in the work dir)")
 
