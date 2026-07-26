@@ -28,29 +28,47 @@ import (
 
 const realRuntime = "/sbin/crun.runsc"
 
-func main() {
-	fixDev()
-	os.Exit(supervise(insertFlags(os.Args)))
+// debugMode reports whether verbose runsc logging is requested via the
+// kernel cmdline: the host sets GANTRY_EXTRA_CMDLINE="crunshim.debug=1"
+// (GANTRY_EXTRA_CMDLINE is inserted into the guest cmdline by gantry).
+func debugMode() bool {
+	b, err := os.ReadFile("/proc/cmdline")
+	return err == nil && strings.Contains(string(b), "crunshim.debug=1")
 }
 
-// insertFlags adds runsc global flags (before the subcommand) and
-// rewrites --log to /dev/console. runsc propagates --log to the gofer
-// and boot children, so this puts the SENTRY's own boot log — which
-// otherwise dies with the process inside the VM — onto the VM kernel
-// console (→ the gantry daemon log). --debug maximizes what it says.
-func insertFlags(args []string) []string {
+func main() {
+	debug := debugMode()
+	fixDev(debug)
+	os.Exit(supervise(insertFlags(os.Args, debug), debug))
+}
+
+// insertFlags adjusts runsc's global flags (before the subcommand).
+//
+//	--TESTONLY-unsafe-nonroot (always): skip runsc's minimal-chroot setup
+//	for the sandbox process — defense-in-depth we trade away because the
+//	gantry VM itself is the outer isolation boundary.
+//
+//	--debug + --log→/dev/console (debug mode only): runsc propagates
+//	--log to the gofer and boot children, so this puts the SENTRY's own
+//	boot log — which otherwise dies with the process inside the VM — onto
+//	the VM kernel console (→ the gantry daemon log).
+//
+//	--alsologtostderr is deliberately NEVER injected: the boot child's
+//	stderr is the container pty (stdio-fds), and gVisor emits the banner
+//	+ full config dump to every emitter sequentially — the pty master is
+//	not drained during Create, so the small pty buffer fills and the boot
+//	child deadlocks in n_tty_write before logging a byte anywhere.
+func insertFlags(args []string, debug bool) []string {
 	out := []string{args[0]}
-	// --TESTONLY-unsafe-nonroot: skip runsc's minimal-chroot setup for the
-	// sandbox process. That step fails silently (stderr is /dev/null) in
-	// this VM, and the chroot is defense-in-depth we can trade away: the
-	// gantry VM itself is the outer isolation boundary.
-	// NOTE: --alsologtostderr is deliberately NOT injected: the boot
-	// child's stderr is the container pty (stdio-fds), and gVisor emits
-	// the banner + full config dump to every emitter sequentially — the
-	// pty master is not drained during Create, so the small pty buffer
-	// fills and the boot child deadlocks in n_tty_write before logging a
-	// byte anywhere. --log=/dev/console covers visibility without it.
-	for _, f := range []string{"--debug", "--TESTONLY-unsafe-nonroot"} {
+	// --network=host: runsc's default "sandbox" network is an isolated
+	// netstack with no upstream (loopback only, DNS dies with "network
+	// unreachable"). Our crun containers share the VM's netns; host mode
+	// preserves that. Network isolation is the gantry VM + netpol's job.
+	inject := []string{"--TESTONLY-unsafe-nonroot", "--network=host"}
+	if debug {
+		inject = append(inject, "--debug")
+	}
+	for _, f := range inject {
 		present := false
 		for _, a := range args[1:] {
 			if a == f || strings.HasPrefix(a, f+"=") {
@@ -64,12 +82,12 @@ func insertFlags(args []string) []string {
 	}
 	for i := 1; i < len(args); i++ {
 		a := args[i]
-		if a == "--log" && i+1 < len(args) {
+		if debug && a == "--log" && i+1 < len(args) {
 			out = append(out, a, "/dev/console")
 			i++
 			continue
 		}
-		if strings.HasPrefix(a, "--log=") {
+		if debug && strings.HasPrefix(a, "--log=") {
 			out = append(out, "--log=/dev/console")
 			continue
 		}
@@ -79,9 +97,10 @@ func insertFlags(args []string) []string {
 }
 
 // supervise runs runsc as a child, passing stdio through while teeing a
-// tail buffer; on failure the tail goes to /dev/console. Exit status is
-// propagated exactly (containerd maps runtime exit codes).
-func supervise(args []string) int {
+// tail buffer; on failure (or on the 25s hang watchdog) the tail goes to
+// /dev/console. Exit status is propagated exactly (containerd maps
+// runtime exit codes).
+func supervise(args []string, debug bool) int {
 	cmd := exec.Command(realRuntime, args[1:]...)
 	cmd.Args[0] = args[0]
 	tail := &tailBuf{limit: 32 << 10}
@@ -108,24 +127,29 @@ func supervise(args []string) int {
 	// grandchild found via /proc (their Go runtime dumps all goroutine
 	// stacks to stderr; the sandbox's stderr is /dev/null, which this
 	// shim pointed at /dev/console) - then dump our captured tail
-	timed := time.AfterFunc(25*time.Second, func() {
-		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
-			for _, pid := range findRunsc() {
-				// /proc FIRST: a pre-runtime child dies silently on
-				// SIGQUIT, taking the evidence with it
-				dumpProcState(c, pid)
+	// hang watchdog (debug mode): SIGQUIT the child + runsc grandchildren
+	// and dump /proc state — a hung runsc is otherwise invisible
+	var timed *time.Timer
+	if debug {
+		timed = time.AfterFunc(25*time.Second, func() {
+			if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
+				for _, pid := range findRunsc() {
+					// /proc FIRST: a pre-runtime child dies silently on
+					// SIGQUIT, taking the evidence with it
+					dumpProcState(c, pid)
+				}
+				fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", tail.String())
+				c.Close()
 			}
-			fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", tail.String())
-			c.Close()
-		}
-		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGQUIT)
-		}
-		for _, pid := range findRunsc() {
-			syscall.Kill(pid, syscall.SIGQUIT)
-		}
-	})
-	defer timed.Stop()
+			if cmd.Process != nil {
+				cmd.Process.Signal(syscall.SIGQUIT)
+			}
+			for _, pid := range findRunsc() {
+				syscall.Kill(pid, syscall.SIGQUIT)
+			}
+		})
+		defer timed.Stop()
+	}
 	err := cmd.Wait()
 	signal.Stop(sigc)
 	if err != nil {
@@ -166,7 +190,7 @@ func (t *tailBuf) String() string {
 	return string(t.buf)
 }
 
-func fixDev() {
+func fixDev(debug bool) {
 	// Whatever namespace vminitd spawns us in, it is the namespace runsc
 	// will use — verify /dev is complete here and repair it if not.
 	// stderr lands in vminitd's runtime error chain, so report findings.
@@ -211,12 +235,10 @@ func fixDev() {
 			fmt.Fprintf(os.Stderr, "crunshim: devpts mount: %v\n", err)
 		}
 	}
-	// runsc wires the sandbox child's stdin/stdout/stderr to /dev/null,
-	// so a boot process dying before logger init (which is exactly what
-	// we are debugging) vanishes without a trace. Point /dev/null at the
-	// VM console: pre-logger panics/fatals become visible in the gantry
-	// daemon log. Noisy, but this rootfs exists for gVisor bring-up.
-	if exists("/dev/console") {
+	if debug && exists("/dev/console") {
+		// runsc wires the sandbox child's stdin/stdout/stderr to /dev/null,
+		// so a boot process dying before logger init vanishes without a
+		// trace. Debug mode points /dev/null at the VM console.
 		os.Remove("/dev/null")
 		if err := os.Symlink("/dev/console", "/dev/null"); err != nil {
 			fmt.Fprintf(os.Stderr, "crunshim: /dev/null -> /dev/console: %v\n", err)
