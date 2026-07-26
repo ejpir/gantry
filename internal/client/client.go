@@ -262,6 +262,22 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		Stdout:   "stream://" + stdoutStream.id,
 	})
 	if err != nil {
+		// A failed Create leaves the bundle's rootfs stack mounted in the
+		// VM; without cleanup the NEXT exec on this sandbox dies with
+		// "upperdir is in-use"/busy. Best-effort teardown so a retry
+		// works without restarting the sandbox.
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		tc.Delete(dctx, &task.DeleteRequest{ID: id})
+		if mountClient != nil {
+			for _, target := range []string{
+				bresp.Bundle + "/rootfs",
+				bresp.Bundle + "/mounts/1",
+				bresp.Bundle + "/mounts/0",
+			} {
+				mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: target})
+			}
+		}
 		return fmt.Errorf("task Create: %w\n(see the VM console for vminitd logs)", err)
 	}
 	logf("task created")

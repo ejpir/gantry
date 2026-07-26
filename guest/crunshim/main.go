@@ -18,10 +18,34 @@ const realRuntime = "/sbin/crun.runsc"
 
 func main() {
 	fixDev()
-	if err := syscall.Exec(realRuntime, os.Args, os.Environ()); err != nil {
+	args := insertFlags(os.Args)
+	if err := syscall.Exec(realRuntime, args, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "crunshim: exec %s: %v\n", realRuntime, err)
 		os.Exit(127)
 	}
+}
+
+// insertFlags adds runsc global flags (before the subcommand) so sentry
+// boot failures are visible: --debug gives the full boot log and
+// --alsologtostderr mirrors it onto stderr, which the containerd client
+// (and therefore vminitd's Create error) captures. Without this a dying
+// sentry surfaces only as "waiting for sandbox to start: EOF".
+func insertFlags(args []string) []string {
+	extra := []string{"--debug", "--alsologtostderr"}
+	out := []string{args[0]}
+	for _, f := range extra {
+		present := false
+		for _, a := range args[1:] {
+			if a == f {
+				present = true
+				break
+			}
+		}
+		if !present {
+			out = append(out, f)
+		}
+	}
+	return append(out, args[1:]...)
 }
 
 func fixDev() {
