@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"gantry/internal/gutil"
+	"gantry/internal/image"
 	"gantry/internal/netpol"
 	"gantry/internal/vmm"
 	"gantry/internal/vnet"
@@ -30,7 +31,14 @@ type RunConfig struct {
 	Rootfs  string   `json:"rootfs"`
 	Runtime string   `json:"runtime,omitempty"`
 	Image   string   `json:"image"`
-	RWLayer string   `json:"rwlayer,omitempty"`
+	// ImageRef/ImageDigest/ImageCfg record an OCI image resolution
+	// (-image given a reference, OCI layout, or docker save tar instead
+	// of a plain .erofs file). The daemon uses the already-built EROFS at
+	// Image; it never pulls. ImageCfg feeds the session process spec.
+	ImageRef    string        `json:"image_ref,omitempty"`
+	ImageDigest string        `json:"image_digest,omitempty"`
+	ImageCfg    *image.Config `json:"image_config,omitempty"`
+	RWLayer     string        `json:"rwlayer,omitempty"`
 	RW      bool     `json:"rw"`
 	Shares  []string `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
 	Net     bool     `json:"net"`
@@ -115,6 +123,24 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet) (cfg RunConfig, warnings []string, 
 		} else {
 			cfg.Image = "shell-rootfs.erofs"
 		}
+	}
+	// Image resolution: an existing .erofs file is used as-is; anything
+	// else (OCI layout dir, docker save tar, image reference) goes
+	// through the image store, platform-matched to the GUEST kernel.
+	if !isErofsFile(cfg.Image) {
+		arch, err := vmm.KernelArch(cfg.Kernel)
+		if err != nil {
+			return cfg, nil, err
+		}
+		logf := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+		r, err := image.Resolve(cfg.Image, arch, nil, logf)
+		if err != nil {
+			return cfg, nil, err
+		}
+		if r.Config != nil {
+			cfg.ImageRef, cfg.ImageDigest, cfg.ImageCfg = r.Ref, r.Digest, r.Config
+		}
+		cfg.Image = r.Path
 	}
 	cfg.RWLayer = *f.RWLayer
 	if cfg.RWLayer == "" && gutil.FileExists("rwlayer.ext4") {
@@ -308,4 +334,14 @@ func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, env
 		VsockListen: []uint32{1026},
 		Cmdline:     cmdline,
 	}, nil
+}
+
+// isErofsFile reports whether p is an existing plain file with the
+// .erofs suffix — the one -image form that needs no resolution.
+func isErofsFile(p string) bool {
+	if !strings.HasSuffix(p, ".erofs") {
+		return false
+	}
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }

@@ -36,7 +36,7 @@ func TestConfigJSONShare(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := ConfigJSON(tc.shares, false, []string{"/bin/sh"})
+			cfg, err := ConfigJSON(tc.shares, false, []string{"/bin/sh"}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -58,7 +58,7 @@ func TestConfigJSONShare(t *testing.T) {
 }
 
 func TestConfigJSONRWAndArgs(t *testing.T) {
-	cfg, err := ConfigJSON(nil, true, []string{"/bin/bash", "-l"})
+	cfg, err := ConfigJSON(nil, true, []string{"/bin/bash", "-l"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

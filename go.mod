@@ -21,6 +21,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.3-0.20251027160822-ad3df93bed29 // indirect
 	github.com/apparentlymart/go-cidr v1.1.1 // indirect
 	github.com/containerd/log v0.1.1-0.20260403072107-cb1839ebf76b // indirect
+	github.com/erofs/go-erofs v0.3.2-0.20260721150545-622ddde0629e // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048 // indirect
