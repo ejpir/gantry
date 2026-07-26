@@ -15,9 +15,23 @@ BUCKET="${BUCKET:-gantry-kvm-test-$ACCOUNT}"
 echo "== building + uploading gantry-linux-amd64 =="
 GOOS=linux GOARCH=amd64 go build -o /tmp/gantry-linux-amd64 .
 aws s3 cp /tmp/gantry-linux-amd64 "s3://$BUCKET/gantry-linux-amd64" --quiet
-URL=$(aws s3 presign "s3://$BUCKET/gantry-linux-amd64" --expires-in 7200)
 
 echo "== running battery on ${GANTRY_TEST_IID:?export GANTRY_TEST_IID} =="
-# The battery downloads this exact binary (retry loop) before testing.
-{ echo "GANTRY_ASSET_URL='$URL'"; cat "$HERE/test-battery.sh"; } > /tmp/gantry-battery-run.sh
-python3 "$HERE/ssm.py" /tmp/gantry-battery-run.sh "${1:-900}"
+# Bootstrap /opt/gantry on the instance: presign every asset and emit a
+# retry-loop download block (fresh instances have nothing; existing
+# files are kept, the binary is always refreshed).
+ASSETS="gantry-linux-amd64 nerdbox-kernel-x86_64 nerdbox-rootfs-x86_64.erofs nerdbox-rootfs-gvisor-x86_64.erofs debian-bookworm-amd64.erofs rwlayer-amd64.ext4"
+DL="mkdir -p /opt/gantry && cd /opt/gantry"
+for a in $ASSETS; do
+	U=$(aws s3 presign "s3://$BUCKET/$a" --expires-in 7200)
+	if [ "$a" = gantry-linux-amd64 ]; then
+		DL="$DL
+for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done
+chmod +x '$a'"
+	else
+		DL="$DL
+[ -s '$a' ] || { for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done; }"
+	fi
+done
+{ echo "$DL"; echo "ls -la /opt/gantry"; cat "$HERE/test-battery.sh"; } > /tmp/gantry-battery-run.sh
+python3 "$HERE/ssm.py" /tmp/gantry-battery-run.sh "${1:-1200}"
