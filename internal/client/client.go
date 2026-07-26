@@ -202,9 +202,17 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	// process into the SAME container (task.v3 Exec).
 	tc := task.NewTTRPCTaskClient(client)
 	if opts.ExecIntoExisting {
-		if st, err := tc.State(ctx, &task.StateRequest{ID: id}); err == nil && st.Status == tasktypes.Status_RUNNING {
-			logf("task %s already running; attaching a new exec process", id)
-			return sessionExec(client, tc, opts, id, stdin, stdout)
+		if st, err := tc.State(ctx, &task.StateRequest{ID: id}); err == nil {
+			if st.Status == tasktypes.Status_RUNNING {
+				logf("task %s already running; attaching a new exec process", id)
+				return sessionExec(client, tc, opts, id, stdin, stdout)
+			}
+			// Stale task left by a session that died without cleanup:
+			// delete it so the Create below succeeds.
+			logf("task %s exists but is %s; removing stale task", id, st.Status)
+			dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
+			tc.Delete(dctx, &task.DeleteRequest{ID: id})
+			dcancel()
 		}
 	}
 
@@ -225,9 +233,20 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("bundle Create: %w", err)
+		// The bundle API is Create-only and vminitd never removes
+		// /run/bundles/<id>: after a container exits, the dir lingers
+		// and every later session failed here with "file exists".
+		// Reusing it is fine — task Create rewrites what it needs.
+		// (Caveat: the previous session's config.json stays, so args
+		// changes across sessions need a sandbox restart.)
+		if !strings.Contains(err.Error(), "file exists") && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("bundle Create: %w", err)
+		}
+		bresp = &bundle.CreateResponse{Bundle: "/run/bundles/" + id}
+		logf("reusing existing bundle at %s", bresp.Bundle)
+	} else {
+		logf("bundle created at %s", bresp.Bundle)
 	}
-	logf("bundle created at %s", bresp.Bundle)
 
 	var mountClient mountapi.TTRPCMountService
 	if len(shares) > 0 {
