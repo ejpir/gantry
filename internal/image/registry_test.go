@@ -1,6 +1,9 @@
 package image
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -137,7 +140,7 @@ func TestRegistryStripsAuthOnCrossHostRedirect(t *testing.T) {
 
 	c := newRegistryClient(hostOf(reg.srv.URL), nil, t.Logf)
 	dst := filepath.Join(t.TempDir(), "blob")
-	if _, err := c.fetchBlob(context.Background(), "library/app", digest, dst); err != nil {
+	if _, err := c.fetchBlob(context.Background(), "library/app", descriptor{Digest: digest, Size: int64(len(blobContent))}, dst); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(dst)
@@ -216,5 +219,159 @@ func TestRegistryLogRedaction(t *testing.T) {
 	out := logs.String()
 	if strings.Contains(out, "supersecret") || strings.Contains(out, reg.token) {
 		t.Errorf("logs leaked credentials:\n%s", out)
+	}
+}
+
+// ---------------- fake multi-arch registry (no auth) ----------------
+
+// fakeIndexRegistry serves one tag pointing at an index with one
+// platform manifest, plus its config and one layer. blobGets counts
+// blob requests so tests can prove a cache hit downloaded nothing.
+type fakeIndexRegistry struct {
+	srv            *httptest.Server
+	repo           string
+	indexDigest    string
+	manifestDigest string
+	blobGets       int
+	headerDigest   string // when set, overrides Docker-Content-Digest on GET
+	oversizeBlobs  bool   // serve blobs larger than their descriptor
+}
+
+func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
+	t.Helper()
+	r := &fakeIndexRegistry{repo: "library/app"}
+
+	var lb strings.Builder
+	tw := tar.NewWriter(&lb)
+	data := []byte("hello")
+	if err := tw.WriteHeader(&tar.Header{Name: "hello.txt", Mode: 0o644, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	tw.Write(data)
+	tw.Close()
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write([]byte(lb.String()))
+	zw.Close()
+	layer := gz.Bytes()
+	layerDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(layer))
+
+	cfg := fmt.Sprintf(`{"architecture":%q,"os":"linux","config":{"Env":["PATH=/usr/bin"]}}`, arch)
+	cfgDigest := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(cfg)))
+
+	manifest := fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+"config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":%q,"size":%d},
+"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":%q,"size":%d}]}`,
+		cfgDigest, len(cfg), layerDigest, len(layer))
+	r.manifestDigest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(manifest)))
+
+	index := fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",
+"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":%d,
+"platform":{"architecture":%q,"os":"linux"}}]}`, r.manifestDigest, len(manifest), arch)
+	r.indexDigest = fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(index)))
+
+	blobs := map[string][]byte{cfgDigest: []byte(cfg), layerDigest: layer}
+	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		p := strings.TrimPrefix(req.URL.Path, "/v2/"+r.repo+"/")
+		switch {
+		case strings.HasPrefix(p, "manifests/"):
+			ref := strings.TrimPrefix(p, "manifests/")
+			var body, digest string
+			switch ref {
+			case "latest":
+				body, digest = index, r.indexDigest
+			case r.manifestDigest:
+				body, digest = manifest, r.manifestDigest
+			default:
+				http.Error(w, "unknown manifest", 404)
+				return
+			}
+			if r.headerDigest != "" && req.Method == "GET" {
+				digest = r.headerDigest
+			}
+			w.Header().Set("Docker-Content-Digest", digest)
+			w.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
+			w.Write([]byte(body))
+		case strings.HasPrefix(p, "blobs/"):
+			r.blobGets++
+			b, ok := blobs[strings.TrimPrefix(p, "blobs/")]
+			if !ok {
+				http.Error(w, "unknown blob", 404)
+				return
+			}
+			if r.oversizeBlobs {
+				b = append(b, 0x41) // one byte beyond the descriptor
+			}
+			w.Write(b)
+		default:
+			http.Error(w, "unexpected", 404)
+		}
+	}))
+	t.Cleanup(r.srv.Close)
+	return r
+}
+
+func (r *fakeIndexRegistry) ref() string {
+	return strings.TrimPrefix(r.srv.URL, "http://") + "/" + r.repo + ":latest"
+}
+
+// review4 #3+#4: a multi-arch pull must hit the cache on the next
+// resolve (HEAD compares the INDEX digest against Meta.RefDigest), and
+// the cache must be keyed per arch.
+func TestCacheHitMultiArch(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	st := NewStore(t.TempDir())
+
+	r1, err := Resolve(reg.ref(), "arm64", st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.Cached {
+		t.Error("first pull must not report Cached")
+	}
+	blobsAfterFirst := reg.blobGets
+
+	r2, err := Resolve(reg.ref(), "arm64", st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r2.Cached {
+		t.Error("second resolve of an unchanged tag must be a cache hit")
+	}
+	if r2.Digest != r1.Digest {
+		t.Errorf("digest changed between resolves: %s vs %s", r1.Digest, r2.Digest)
+	}
+	if reg.blobGets != blobsAfterFirst {
+		t.Errorf("cache hit downloaded %d blobs — HEAD compare never matched (RefDigest not recorded?)",
+			reg.blobGets-blobsAfterFirst)
+	}
+
+	// arch keying: same ref, different guest arch → miss → pull →
+	// the fake registry has no amd64 manifest, proving the lookup
+	// did NOT reuse the arm64 slot
+	if _, err := Resolve(reg.ref(), "amd64", st, nil); err == nil ||
+		!strings.Contains(err.Error(), "no manifest for linux/amd64") {
+		t.Errorf("amd64 resolve: err = %v, want no-manifest (arm64 cache must not leak across arches)", err)
+	}
+}
+
+// review4 #5: the manifest digest is the content hash; a disagreeing
+// Docker-Content-Digest header is an error, not a cache key.
+func TestManifestDigestHeaderMismatch(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	reg.headerDigest = "sha256:" + strings.Repeat("0", 64)
+	if _, err := Resolve(reg.ref(), "arm64", NewStore(t.TempDir()), nil); err == nil ||
+		!strings.Contains(err.Error(), "does not match content") {
+		t.Errorf("err = %v, want a digest-mismatch error", err)
+	}
+}
+
+// review4 smaller: blob downloads are capped by the descriptor size.
+func TestBlobLargerThanDescriptor(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	reg.oversizeBlobs = true
+	_, err := Resolve(reg.ref(), "arm64", NewStore(t.TempDir()), nil)
+	if err == nil || !strings.Contains(err.Error(), "larger than its descriptor") {
+		t.Errorf("err = %v, want a descriptor-size error", err)
 	}
 }

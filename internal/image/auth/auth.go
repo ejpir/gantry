@@ -52,11 +52,12 @@ type dockerConfig struct {
 
 // Resolver finds credentials for registries. Construct with Resolve.
 type Resolver struct {
-	gantryCfg  *dockerConfig // ~/.gantry/credentials.json (also written by login)
-	gantryPath string
-	dockerCfg  *dockerConfig
-	podmanCfgs []*dockerConfig
-	envCreds   map[string]*Credential
+	gantryCfg   *dockerConfig // ~/.gantry/credentials.json (also written by login)
+	gantryPath  string
+	dockerCfg   *dockerConfig
+	podmanCfgs  []*dockerConfig
+	envCreds    map[string]*Credential
+	parseErrors []error // found-but-unparseable config files
 }
 
 var (
@@ -72,6 +73,8 @@ func Resolve() *Resolver {
 	r := &Resolver{envCreds: map[string]*Credential{}}
 
 	// 1. GANTRY_REGISTRY_AUTH: HOST=USER:SECRET, repeatable with ","
+	//    (limitation: a secret containing a comma cannot be expressed
+	//    here — use gantry image login or a docker config instead)
 	if v := os.Getenv("GANTRY_REGISTRY_AUTH"); v != "" {
 		for _, pair := range strings.Split(v, ",") {
 			host, cred, ok := strings.Cut(pair, "=")
@@ -87,25 +90,39 @@ func Resolve() *Resolver {
 
 	home, _ := homeDir()
 	r.gantryPath = filepath.Join(home, ".gantry", "credentials.json")
-	r.gantryCfg = readConfig(r.gantryPath)
-	r.dockerCfg = readConfig(filepath.Join(home, ".docker", "config.json"))
-	if x := xdgRuntime(); x != "" {
-		r.podmanCfgs = append(r.podmanCfgs, readConfig(filepath.Join(x, "containers", "auth.json")))
+	load := func(path string) *dockerConfig {
+		c, err := readConfig(path)
+		if err != nil {
+			r.parseErrors = append(r.parseErrors, err)
+		}
+		return c
 	}
-	r.podmanCfgs = append(r.podmanCfgs, readConfig(filepath.Join(home, ".config", "containers", "auth.json")))
+	r.gantryCfg = load(r.gantryPath)
+	r.dockerCfg = load(filepath.Join(home, ".docker", "config.json"))
+	if x := xdgRuntime(); x != "" {
+		r.podmanCfgs = append(r.podmanCfgs, load(filepath.Join(x, "containers", "auth.json")))
+	}
+	r.podmanCfgs = append(r.podmanCfgs, load(filepath.Join(home, ".config", "containers", "auth.json")))
 	return r
 }
 
-func readConfig(path string) *dockerConfig {
+// ParseErrors reports credential files that were found but could not be
+// parsed (they were skipped, so pulls degraded to anonymous).
+func (r *Resolver) ParseErrors() []error { return r.parseErrors }
+
+// readConfig returns (nil, nil) when the file is absent and (nil, err)
+// when it exists but is unparseable — a JSON typo must not silently
+// become a confusing anonymous 401; Resolver.ParseErrors surfaces it.
+func readConfig(path string) (*dockerConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var c dockerConfig
-	if json.Unmarshal(b, &c) != nil {
-		return nil
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return &c
+	return &c, nil
 }
 
 // normalize maps docker.io's many spellings to one lookup key.

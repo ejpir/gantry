@@ -13,6 +13,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v third_party))
+          if [ -n "$unformatted" ]; then echo "run gofmt -w:"; echo "$unformatted"; exit 1; fi
       - name: go vet
         run: go vet ./...
       - name: go test (needs no KVM, no root)

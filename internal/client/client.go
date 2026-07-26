@@ -612,8 +612,8 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 		// No PS1 override: the image's own shell setup (or the shell's
 		// compiled default) produces the familiar prompt; an injected
 		// spartan PS1 read as "bash didn't start" to users.
-		Env:      opts.ImgCfg.EnvWith("TERM=xterm"),
-		Cwd:      opts.ImgCfg.WorkdirOr(),
+		Env: opts.ImgCfg.EnvWith("TERM=xterm"),
+		Cwd: opts.ImgCfg.WorkdirOr(),
 	}
 	specAny, err := typeurl.MarshalAny(proc)
 	if err != nil {

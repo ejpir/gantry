@@ -41,6 +41,22 @@ type bearerToken struct {
 	expires time.Time
 }
 
+// imageManifest is the union we care about: a single-platform manifest
+// (config+layers) or an OCI index / docker manifest list (manifests).
+type imageManifest struct {
+	MediaType string       `json:"mediaType"`
+	Config    descriptor   `json:"config"`
+	Layers    []descriptor `json:"layers"`
+	Manifests []struct {
+		Digest   string `json:"digest"`
+		Platform struct {
+			Architecture string `json:"architecture"`
+			OS           string `json:"os"`
+		} `json:"platform"`
+		Size int64 `json:"size"`
+	} `json:"manifests"`
+}
+
 // media types we accept for manifests (OCI + docker schema 2).
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, " +
 	"application/vnd.oci.image.index.v1+json, " +
@@ -128,7 +144,7 @@ func (c *registryClient) do(ctx context.Context, method, rawurl, accept, scope s
 		if c.cred == nil || c.cred.Username == "" {
 			return nil, fmt.Errorf("%s requires basic auth but no credential is configured", c.reg)
 		}
-		if c.scheme() != "https" {
+		if c.scheme() != "https" && !isLoopbackRegistry(c.reg) {
 			return nil, fmt.Errorf("refusing to send basic-auth credentials to %s over plaintext HTTP", c.reg)
 		}
 		req, err := http.NewRequestWithContext(ctx, method, rawurl, nil)
@@ -262,6 +278,8 @@ func (c *registryClient) tokenFor(ctx context.Context, scope string) string {
 
 // fetchManifest GETs a manifest (or index) by tag or digest.
 func (c *registryClient) fetchManifest(ctx context.Context, repo, reference string) ([]byte, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	u := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", c.scheme(), c.reg, repo, reference)
 	resp, err := c.do(ctx, "GET", u, manifestAccept, "repository:"+repo+":pull")
 	if err != nil {
@@ -275,9 +293,12 @@ func (c *registryClient) fetchManifest(ctx context.Context, repo, reference stri
 	if err != nil {
 		return nil, "", err
 	}
-	digest := resp.Header.Get("Docker-Content-Digest")
-	if digest == "" {
-		digest = fmt.Sprintf("sha256:%x", sha256.Sum256(b))
+	// never trust the header over the content: the digest under which we
+	// cache (and later serve digest-pinned pulls) is the body's hash; a
+	// header that disagrees means a broken or hostile registry
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(b))
+	if hdr := resp.Header.Get("Docker-Content-Digest"); hdr != "" && hdr != digest {
+		return nil, "", fmt.Errorf("manifest %s@%s: Docker-Content-Digest %s does not match content %s", repo, reference, hdr, digest)
 	}
 	return b, digest, nil
 }
@@ -285,6 +306,8 @@ func (c *registryClient) fetchManifest(ctx context.Context, repo, reference stri
 // headManifest returns the registry's current digest for a reference
 // without downloading the manifest (Docker-Content-Digest on a HEAD).
 func (c *registryClient) headManifest(ctx context.Context, repo, reference string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	u := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", c.scheme(), c.reg, repo, reference)
 	resp, err := c.do(ctx, "HEAD", u, manifestAccept, "repository:"+repo+":pull")
 	if err != nil {
@@ -298,22 +321,29 @@ func (c *registryClient) headManifest(ctx context.Context, repo, reference strin
 }
 
 // fetchBlob streams a blob to dst, verifying its sha256.
-func (c *registryClient) fetchBlob(ctx context.Context, repo, digest, dst string) (int64, error) {
-	u := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", c.scheme(), c.reg, repo, digest)
+func (c *registryClient) fetchBlob(ctx context.Context, repo string, desc descriptor, dst string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // huge layers, slow links
+	defer cancel()
+	u := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", c.scheme(), c.reg, repo, desc.Digest)
 	resp, err := c.do(ctx, "GET", u, "", "repository:"+repo+":pull")
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("blob %s: %s", digest, resp.Status)
+		return 0, fmt.Errorf("blob %s: %s", desc.Digest, resp.Status)
 	}
 	f, err := os.Create(dst)
 	if err != nil {
 		return 0, err
 	}
 	h := sha256.New()
-	n, err := io.Copy(f, io.TeeReader(resp.Body, h))
+	// cap by the descriptor size (+1 to detect overflow): a broken or
+	// hostile registry must not fill the disk before the digest check
+	n, err := io.Copy(f, io.TeeReader(io.LimitReader(resp.Body, desc.Size+1), h))
+	if err == nil && n > desc.Size {
+		err = fmt.Errorf("blob %s: larger than its descriptor (%d > %d bytes)", desc.Digest, n, desc.Size)
+	}
 	cerr := f.Close()
 	if err != nil {
 		os.Remove(dst)
@@ -322,9 +352,9 @@ func (c *registryClient) fetchBlob(ctx context.Context, repo, digest, dst string
 	if cerr != nil {
 		return 0, cerr
 	}
-	if got := fmt.Sprintf("sha256:%x", h.Sum(nil)); got != digest {
+	if got := fmt.Sprintf("sha256:%x", h.Sum(nil)); got != desc.Digest {
 		os.Remove(dst)
-		return 0, fmt.Errorf("blob %s: digest mismatch (got %s, size %d)", digest, got, n)
+		return 0, fmt.Errorf("blob %s: digest mismatch (got %s, size %d)", desc.Digest, got, n)
 	}
 	return n, nil
 }
@@ -353,19 +383,11 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		return nil, fmt.Errorf("digest-pinned pull: registry returned %s for %s", manDigest, ref.Digest)
 	}
 
-	var head struct {
-		MediaType string       `json:"mediaType"`
-		Config    descriptor   `json:"config"`
-		Layers    []descriptor `json:"layers"`
-		Manifests []struct {
-			Digest   string `json:"digest"`
-			Platform struct {
-				Architecture string `json:"architecture"`
-				OS           string `json:"os"`
-			} `json:"platform"`
-			Size int64 `json:"size"`
-		} `json:"manifests"`
-	}
+	// refDigest records what the REF resolved to — for a multi-arch
+	// image this is the INDEX digest, which is what a later HEAD of the
+	// tag returns; the cache lookup compares like with like
+	refDigest := manDigest
+	var head imageManifest
 	if err := json.Unmarshal(manb, &head); err != nil {
 		return nil, fmt.Errorf("bad manifest: %w", err)
 	}
@@ -390,19 +412,7 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		if manDigest != pick {
 			return nil, fmt.Errorf("platform manifest digest mismatch")
 		}
-		head = struct {
-			MediaType string       `json:"mediaType"`
-			Config    descriptor   `json:"config"`
-			Layers    []descriptor `json:"layers"`
-			Manifests []struct {
-				Digest   string `json:"digest"`
-				Platform struct {
-					Architecture string `json:"architecture"`
-					OS           string `json:"os"`
-				} `json:"platform"`
-				Size int64 `json:"size"`
-			} `json:"manifests"`
-		}{}
+		head = imageManifest{}
 		if err := json.Unmarshal(manb, &head); err != nil {
 			return nil, fmt.Errorf("bad platform manifest: %w", err)
 		}
@@ -412,11 +422,11 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 	if err != nil {
 		return nil, err
 	}
-	p := &pulled{digest: manDigest, ref: refStr, tmpDir: tmp}
+	p := &pulled{digest: manDigest, refDigest: refDigest, ref: refStr, tmpDir: tmp}
 	fail := func(err error) (*pulled, error) { p.Close(); return nil, err }
 
 	cfgPath := filepath.Join(tmp, "config.json")
-	if _, err := c.fetchBlob(ctx, ref.Repo, head.Config.Digest, cfgPath); err != nil {
+	if _, err := c.fetchBlob(ctx, ref.Repo, head.Config, cfgPath); err != nil {
 		return fail(fmt.Errorf("config blob: %w", err))
 	}
 	cfgb, err := os.ReadFile(cfgPath)
@@ -442,8 +452,8 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		if logf != nil {
 			logf("layer %d/%d: %s (%s)", i+1, len(head.Layers), gutil.HumanSize(l.Size), l.Digest[:19])
 		}
-		blobPath := filepath.Join(tmp, itoa(i)+".blob")
-		if _, err := c.fetchBlob(ctx, ref.Repo, l.Digest, blobPath); err != nil {
+		blobPath := filepath.Join(tmp, strconv.Itoa(i)+".blob")
+		if _, err := c.fetchBlob(ctx, ref.Repo, l, blobPath); err != nil {
 			return fail(err)
 		}
 		f, err := decompressTo(blobPath, l.Digest, tmp, i)
@@ -462,5 +472,3 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 	}
 	return p, nil
 }
-
-func itoa(i int) string { return strconv.Itoa(i) }
