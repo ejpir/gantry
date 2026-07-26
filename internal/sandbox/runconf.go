@@ -337,9 +337,9 @@ var guestNetMAC = [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 // directory. envExtra enables the GANTRY_EXTRA_CMDLINE debug knob (the
 // daemon path; one-shot exec takes its cmdline exactly as resolved).
 func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, envExtra bool) (vmm.Opts, error) {
-	disks := []string{c.Image}
+	var disks []string
 	if c.RW && c.RWLayer != "" {
-		disks = append(disks, c.RWLayer)
+		disks = append(disks, c.RWLayer) // writable: /dev/vdc
 	}
 	arch, err := vmm.KernelArch(c.Kernel)
 	if err != nil {
@@ -359,6 +359,7 @@ func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, env
 		MemSize:     uint64(c.MemMB) << 20,
 		KernelPath:  c.Kernel,
 		RootfsPath:  c.Rootfs,
+		DisksRO:     []string{c.Image}, // container image: /dev/vdb, read-only
 		Disks:       disks,
 		Shares:      hostShares,
 		NetEndpoint: sock,
