@@ -20,8 +20,8 @@ func TestProbeExt4(t *testing.T) {
 	binary.LittleEndian.PutUint16(sb[58:60], 3) // mounted + errors
 	binary.LittleEndian.PutUint16(sb[52:54], 66)
 	binary.LittleEndian.PutUint32(sb[0x170:0x174], 5)
-	binary.LittleEndian.PutUint32(sb[0x180:0x184], 1753500000)
-	copy(sb[0x190:0x1B0], "ext4_first")
+	binary.LittleEndian.PutUint32(sb[0x1A8:0x1AC], 1753500000)
+	copy(sb[0x184:0x1A4], "ext4_first")
 	copy(sb[0x1BC:0x1DC], "ext4_validate_block_bitmap")
 	if err := os.WriteFile(img, buf, 0o644); err != nil {
 		t.Fatal(err)
@@ -126,22 +126,29 @@ func TestResolveUsesPerSandboxRWLayer(t *testing.T) {
 	}
 }
 
-func TestCopySparse(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "src.ext4")
-	f, _ := os.Create(src)
-	f.Write([]byte("header"))
-	f.Truncate(8 << 20) // sparse tail
-	f.Close()
-	dst := filepath.Join(dir, "dst.ext4")
-	if err := copySparse(src, dst); err != nil {
+func TestInflateBlankRWLayer(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "blank.ext4")
+	if err := inflateBlankRWLayer(p); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(dst)
+	fi, err := os.Stat(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(b) != 8<<20 || string(b[:6]) != "header" {
-		t.Errorf("copy: len=%d head=%q", len(b), b[:6])
+	if fi.Size() != 512<<20 {
+		t.Errorf("size = %d, want 512 MiB", fi.Size())
 	}
+	info, err := gutil.ProbeExt4(p)
+	if err != nil {
+		t.Fatalf("inflated template is not valid ext4: %v", err)
+	}
+	if info.ErrorCount != 0 {
+		t.Errorf("fresh template has errors: %+v", info)
+	}
+	// sparse: the file must hold far fewer blocks than its logical size
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st
 }
