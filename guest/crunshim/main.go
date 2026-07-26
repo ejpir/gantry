@@ -1,3 +1,5 @@
+//go:build linux
+
 // crunshim is installed as /sbin/crun in the gVisor rootfs variant
 // (mkrootfs-gvisor.sh). Two jobs:
 //
