@@ -279,6 +279,21 @@ func (c *registryClient) fetchManifest(ctx context.Context, repo, reference stri
 	return b, digest, nil
 }
 
+// headManifest returns the registry's current digest for a reference
+// without downloading the manifest (Docker-Content-Digest on a HEAD).
+func (c *registryClient) headManifest(ctx context.Context, repo, reference string) (string, error) {
+	u := fmt.Sprintf("%s://%s/v2/%s/manifests/%s", c.scheme(), c.reg, repo, reference)
+	resp, err := c.do(ctx, "HEAD", u, manifestAccept, "repository:"+repo+":pull")
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HEAD manifest %s@%s: %s", repo, reference, resp.Status)
+	}
+	return resp.Header.Get("Docker-Content-Digest"), nil
+}
+
 // fetchBlob streams a blob to dst, verifying its sha256.
 func (c *registryClient) fetchBlob(ctx context.Context, repo, digest, dst string) (int64, error) {
 	u := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", c.scheme(), c.reg, repo, digest)
