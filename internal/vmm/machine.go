@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"gantry/internal/gutil"
+	"gantry/internal/netpol"
 	"gantry/internal/virtio"
 	"io"
 	"net"
@@ -278,8 +279,9 @@ type Opts struct {
 	RootfsPath  string   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
 	Disks       []string // extra virtio-blk images (/dev/vdb, /dev/vdc, ...)
 	Shares      []Share
-	NetEndpoint string   // Unix datagram raw-Ethernet endpoint; "" disables NIC
-	NetConn     net.Conn // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
+	NetEndpoint string         // Unix datagram raw-Ethernet endpoint; "" disables NIC
+	NetConn     net.Conn       // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
+	NetPolicy   *netpol.Policy // egress policy on the NetConn link; nil = unrestricted
 	NetMAC      [6]byte
 	NetVFKIT    bool
 	VsockFwd    string // host dir for vsock forwarding; "" disables vsock
@@ -366,7 +368,7 @@ func Prepare(o Opts) (*Machine, error) {
 		var err error
 		var how string
 		if o.NetConn != nil {
-			nic = virtio.NewNetConn(o.NetConn, o.NetMAC)
+			nic = virtio.NewNetConnPolicy(o.NetConn, o.NetMAC, o.NetPolicy)
 			how = "embedded netstack"
 		} else {
 			nic, err = virtio.NewNetUnixgram(o.NetEndpoint, o.NetMAC, o.NetVFKIT)
