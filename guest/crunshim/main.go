@@ -76,7 +76,9 @@ func insertFlags(args []string, debug bool) []string {
 	// access through it.
 	inject := []string{"--network=host", "--directfs=false"}
 	if debug {
-		inject = append(inject, "--debug")
+		// In runsc >= 2026, --log is only the fatal-error logger; real
+		// debug logs go to --debug-log and are discarded when unset.
+		inject = append(inject, "--debug", "--debug-log", "/dev/console")
 	}
 	for _, f := range inject {
 		present := false
