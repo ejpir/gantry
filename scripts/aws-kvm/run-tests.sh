@@ -25,9 +25,15 @@ DL="mkdir -p /opt/gantry && cd /opt/gantry"
 for a in $ASSETS; do
 	U=$(aws s3 presign "s3://$BUCKET/$a" --expires-in 7200)
 	if [ "$a" = gantry-linux-amd64 ]; then
+		# stop daemons first, then download to a temp name and mv
+		# atomically: overwriting a RUNNING binary fails with
+		# ETXTBSY (curl 23), which previously left a stale binary
+		# testing the wrong code
 		DL="$DL
-for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done
-chmod +x '$a'"
+./gantry-linux-amd64 ls 2>/dev/null | awk '\''$2==\"running\" {print $1}'\'' | while read -r s; do ./gantry-linux-amd64 stop \"$s\" >/dev/null 2>&1; done
+pkill -f 'gantry-linux-amd64 daemon' 2>/dev/null; sleep 1
+for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o gantry-new '$U' && break; sleep 3; done
+mv -f gantry-new '$a' && chmod +x '$a'"
 	else
 		DL="$DL
 [ -s '$a' ] || { for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done; }"
