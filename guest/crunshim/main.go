@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -47,7 +48,40 @@ func main() {
 		}
 	}
 	fixDev(debug)
+	sweepFilestores(os.Args)
 	os.Exit(supervise(insertFlags(os.Args, debug), debug))
+}
+
+// sweepFilestores removes stale gVisor filestore files before a create.
+// runsc's overlay optimization writes .gvisor.filestore.<id> INTO the
+// container rootfs; our rootfs upper layer is the persistent rwlayer, so
+// a VM stopped with the task still running leaves the file behind and
+// the next create dies with "mount source already has a filestore file
+// ... repeated submounts are not supported". Any filestore found in a
+// bundle rootfs we are about to create is stale by definition (a live
+// container would fail create with AlreadyExists first).
+func sweepFilestores(args []string) {
+	bundle, isCreate := "", false
+	for i, a := range args {
+		if a == "create" {
+			isCreate = true
+		}
+		if a == "--bundle" && i+1 < len(args) {
+			bundle = args[i+1]
+		}
+		if strings.HasPrefix(a, "--bundle=") {
+			bundle = strings.TrimPrefix(a, "--bundle=")
+		}
+	}
+	if !isCreate || bundle == "" {
+		return
+	}
+	stale, _ := filepath.Glob(filepath.Join(bundle, "rootfs", ".gvisor.filestore.*"))
+	for _, f := range stale {
+		if err := os.Remove(f); err == nil {
+			fmt.Fprintf(os.Stderr, "crunshim: swept stale filestore %s\n", f)
+		}
+	}
 }
 
 // insertFlags adjusts runsc's global flags (before the subcommand).
