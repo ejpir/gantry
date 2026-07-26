@@ -592,11 +592,15 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		Shares:     client.LoadShares(filepath.Join(br.dir, "1025.sock")),
 		RW:         br.cfg.RW,
 		Args:       args,
-		ID:         "sb-" + req.ID,
-		Cols:       req.Cols,
-		Rows:       req.Rows,
-		KillCh:     killCh,
-		ExitStatus: &status,
+		// one VM = one container workload with a well-known id, so a
+		// concurrent session can find it and Exec into it instead of
+		// fighting over the rw rootfs stack with a second Create
+		ID:               "sb",
+		ExecIntoExisting: true,
+		Cols:             req.Cols,
+		Rows:             req.Rows,
+		KillCh:           killCh,
+		ExitStatus:       &status,
 	}, c, c)
 	if err != nil {
 		fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)

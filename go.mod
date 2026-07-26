@@ -6,10 +6,12 @@ require (
 	github.com/containerd/containerd/api v1.11.1
 	github.com/containerd/nerdbox v0.2.1
 	github.com/containerd/ttrpc v1.2.9
+	github.com/containerd/typeurl/v2 v2.3.0
 	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/ebitengine/purego v0.10.2
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/miekg/dns v1.1.72
+	github.com/opencontainers/runtime-spec v1.3.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.43.0
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
