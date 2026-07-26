@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -97,11 +98,16 @@ func supervise(args []string) int {
 		}
 	}()
 	// a hung runsc (deadlock waiting on gofer/sandbox sync) is otherwise
-	// invisible: after 25s send SIGQUIT - the Go runtime prints all
-	// goroutine stacks to stderr, which our tail captures - then dump
+	// invisible: after 25s, SIGQUIT the child AND every runsc-sandbox
+	// grandchild found via /proc (their Go runtime dumps all goroutine
+	// stacks to stderr; the sandbox's stderr is /dev/null, which this
+	// shim pointed at /dev/console) - then dump our captured tail
 	timed := time.AfterFunc(25*time.Second, func() {
 		if cmd.Process != nil {
 			cmd.Process.Signal(syscall.SIGQUIT)
+		}
+		for _, pid := range findRunsc() {
+			syscall.Kill(pid, syscall.SIGQUIT)
 		}
 		time.Sleep(2 * time.Second)
 		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
@@ -206,6 +212,32 @@ func fixDev() {
 			fmt.Fprintf(os.Stderr, "crunshim: /dev/null -> /dev/console: %v\n", err)
 		}
 	}
+}
+
+// findRunsc returns PIDs of processes whose cmdline contains
+// "runsc-sandbox" or "runsc-gofer" (the re-exec'd grandchildren, which
+// are not signal-reachable through our direct child's process group).
+func findRunsc() []int {
+	var pids []int
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		cl, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		s := string(cl)
+		if strings.Contains(s, "runsc-sandbox") || strings.Contains(s, "runsc-gofer") {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 func exists(path string) bool {
