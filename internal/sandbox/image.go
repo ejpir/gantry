@@ -6,18 +6,24 @@ package sandbox
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
+	"syscall"
 
 	"gantry/internal/image"
+	"gantry/internal/image/auth"
+
+	"golang.org/x/term"
 )
 
-// CmdImage implements `gantry image <ls|pull|rm|prune>`.
+// CmdImage implements `gantry image <ls|pull|rm|prune|login|logout|credentials>`.
 func CmdImage(argv []string) int {
 	if len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: gantry image <ls|pull|rm|prune>")
+		fmt.Fprintln(os.Stderr, "usage: gantry image <ls|pull|rm|prune|login|logout|credentials>")
 		return 2
 	}
 	st := image.DefaultStore()
@@ -75,10 +81,107 @@ func CmdImage(argv []string) int {
 			fmt.Println("gantry image: nothing to prune")
 		}
 		return 0
+	case "login":
+		return imageLogin(argv[1:])
+	case "logout":
+		if len(argv) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: gantry image logout REGISTRY")
+			return 2
+		}
+		if err := auth.Resolve().Erase(argv[1]); err != nil {
+			fmt.Fprintln(os.Stderr, "gantry image logout:", err)
+			return 1
+		}
+		fmt.Println("gantry image: logged out of", argv[1])
+		return 0
+	case "credentials":
+		regs := argv[1:]
+		if len(regs) == 0 {
+			regs = []string{"docker.io", "ghcr.io", "quay.io", "gcr.io"}
+		}
+		fmt.Printf("%-24s %-12s %-40s %s\n", "REGISTRY", "USERNAME", "SOURCE", "SECRET")
+		for _, row := range auth.Resolve().Table(regs) {
+			secret := "no"
+			if row.Secret.Raw() != "" {
+				secret = "yes"
+			}
+			fmt.Printf("%-24s %-12s %-40s %s\n", trunc(row.Registry, 24), trunc(row.Username, 12), trunc(row.Source, 40), secret)
+		}
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown gantry image verb %q (ls|pull|rm|prune)\n", argv[0])
+		fmt.Fprintf(os.Stderr, "unknown gantry image verb %q (ls|pull|rm|prune|login|logout|credentials)\n", argv[0])
 		return 2
 	}
+}
+
+// imageLogin implements `gantry image login REGISTRY [-u USER]
+// [--password-stdin]`. There is deliberately no --password flag: argv is
+// world-readable in ps and lands in shell history.
+func imageLogin(argv []string) int {
+	var registry, user string
+	stdin := false
+	for i := 0; i < len(argv); i++ {
+		switch argv[i] {
+		case "-u", "--username":
+			i++
+			if i >= len(argv) {
+				fmt.Fprintln(os.Stderr, "login: -u needs a value")
+				return 2
+			}
+			user = argv[i]
+		case "--password-stdin":
+			stdin = true
+		default:
+			if registry != "" {
+				fmt.Fprintln(os.Stderr, "usage: gantry image login REGISTRY [-u USER] [--password-stdin]")
+				return 2
+			}
+			registry = argv[i]
+		}
+	}
+	if registry == "" {
+		fmt.Fprintln(os.Stderr, "usage: gantry image login REGISTRY [-u USER] [--password-stdin]")
+		return 2
+	}
+	if user == "" {
+		fmt.Fprintf(os.Stderr, "Username: ")
+		if _, err := fmt.Scanln(&user); err != nil || user == "" {
+			fmt.Fprintln(os.Stderr, "login: username required")
+			return 1
+		}
+	}
+	var secret string
+	if stdin {
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "login:", err)
+			return 1
+		}
+		secret = strings.TrimSpace(string(b))
+	} else {
+		fmt.Fprintf(os.Stderr, "Password: ")
+		b, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "login:", err)
+			return 1
+		}
+		secret = string(b)
+	}
+	if secret == "" {
+		fmt.Fprintln(os.Stderr, "login: empty password")
+		return 1
+	}
+	warn, err := auth.Resolve().Store(registry, user, auth.Secret(secret))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry image login:", err)
+		return 1
+	}
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, "WARNING:", warn)
+	}
+	fmt.Println("gantry image: login stored for", registry)
+	return 0
 }
 
 // digestsInUse scans all sandbox.json files for referenced image digests.

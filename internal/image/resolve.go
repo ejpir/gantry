@@ -1,12 +1,14 @@
 package image
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"gantry/internal/gutil"
+	"gantry/internal/image/auth"
 )
 
 // resolve.go — turn an -image value into a usable rootfs disk plus the
@@ -47,6 +49,12 @@ func LooksLikeRef(v string) bool {
 // rootfs. arch is the GUEST kernel arch (from vmm.KernelArch), not the
 // host's. logf may be nil.
 func Resolve(ref, arch string, st *Store, logf func(string, ...any)) (*Resolved, error) {
+	return ResolveAuth(ref, arch, st, nil, logf)
+}
+
+// ResolveAuth is Resolve with an explicit credential resolver (nil
+// resolves from the environment, which is what the CLI wants).
+func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(string, ...any)) (*Resolved, error) {
 	if st == nil {
 		st = DefaultStore()
 	}
@@ -71,8 +79,11 @@ func Resolve(ref, arch string, st *Store, logf func(string, ...any)) (*Resolved,
 	} else if gutil.FileExists(ref) {
 		load = func() (*pulled, error) { return loadDockerSave(ref, ref, arch) }
 	} else {
-		// 4. image reference — registry pull is Phase 2
-		return nil, fmt.Errorf("%s is not a file and registry pulls are not implemented yet\n(build locally with mkimage.sh, or point -image at an OCI layout dir / docker save tar)", ref)
+		// 4. image reference → registry pull (cached by manifest digest)
+		if res == nil {
+			res = auth.Resolve()
+		}
+		load = func() (*pulled, error) { return loadRegistry(context.Background(), ref, arch, res, logf) }
 	}
 
 	p, err := load()
