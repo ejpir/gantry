@@ -68,6 +68,12 @@ func runExec(argv []string) int {
 			rootfsSet = true
 		}
 	})
+	kernelSet := false
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "kernel" {
+			kernelSet = true
+		}
+	})
 	switch *rt {
 	case "crun":
 	case "runsc":
@@ -76,6 +82,13 @@ func runExec(argv []string) int {
 		}
 		if !gutil.FileExists(*rootfs) {
 			fmt.Fprintf(os.Stderr, "gantry exec: %s not found - build it with ./mkrootfs-gvisor.sh %s\n", *rootfs, vmm.DefaultRootfs())
+			return 1
+		}
+		if !kernelSet {
+			*kernel = vmm.GvisorKernel(*kernel)
+		}
+		if *kernel != "" && !gutil.FileExists(*kernel) {
+			fmt.Fprintf(os.Stderr, "gantry exec: %s not found - gVisor needs the 4K-page kernel, build it with ./mkkernel-4k.sh\n", *kernel)
 			return 1
 		}
 	default:
