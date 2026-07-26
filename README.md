@@ -165,7 +165,11 @@ isolation stays with the VM + netpol). Concurrent `gantry exec` works
 (docker semantics: the second session Execs a process into the same
 container), and `-share` virtio-fs mounts work through the gofer
 (read + write; ownership changes are squashed to the host uid).
-x86_64 is untested. crun stays the default. Debug the guest side with
+crun stays the default.
+
+Validated on both arm64 (Apple Silicon, HVF) and x86_64 (AWS c5.metal,
+KVM): boot, sequential + concurrent exec, DNS/egress under netpol, and
+rw shares. See docs/aws-kvm-test.md for the metal-box test harness. Debug the guest side with
 GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
 console + hang watchdog).
 
@@ -367,7 +371,11 @@ isolation stays with the VM + netpol). Concurrent `gantry exec` works
 (docker semantics: the second session Execs a process into the same
 container), and `-share` virtio-fs mounts work through the gofer
 (read + write; ownership changes are squashed to the host uid).
-x86_64 is untested. crun stays the default. Debug the guest side with
+crun stays the default.
+
+Validated on both arm64 (Apple Silicon, HVF) and x86_64 (AWS c5.metal,
+KVM): boot, sequential + concurrent exec, DNS/egress under netpol, and
+rw shares. See docs/aws-kvm-test.md for the metal-box test harness. Debug the guest side with
 GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
 console + hang watchdog).
 
