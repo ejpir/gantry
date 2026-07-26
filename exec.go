@@ -33,6 +33,12 @@ func runExec(argv []string) int {
 	fs := flag.NewFlagSet("exec", flag.ExitOnError)
 	kernel := fs.String("kernel", vmm.DefaultKernelImage(), "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)")
 	rootfs := fs.String("rootfs", vmm.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)")
+	rt := fs.String("runtime", func() string {
+		if v := gutil.EnvOr("GANTRY_RUNTIME", "MINIVM_RUNTIME"); v != "" {
+			return v
+		}
+		return "crun"
+	}(), "container runtime in the guest: crun | runsc (gVisor)")
 	image := fs.String("image", "", "container rootfs disk, /dev/vdb (default: debian-bookworm.erofs if present, else shell-rootfs.erofs)")
 	rwlayer := fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: rwlayer.ext4 if present)")
 	rwFlag := fs.Bool("rw", false, "writable overlay container root (default: on when a rwlayer is available)")
@@ -55,6 +61,27 @@ func runExec(argv []string) int {
 		}
 	}
 	fs.Parse(argv)
+
+	rootfsSet := false
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "rootfs" {
+			rootfsSet = true
+		}
+	})
+	switch *rt {
+	case "crun":
+	case "runsc":
+		if !rootfsSet {
+			*rootfs = vmm.GvisorRootfs(*rootfs)
+		}
+		if !gutil.FileExists(*rootfs) {
+			fmt.Fprintf(os.Stderr, "gantry exec: %s not found - build it with ./mkrootfs-gvisor.sh %s\n", *rootfs, vmm.DefaultRootfs())
+			return 1
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "gantry exec: -runtime must be crun or runsc, got %q\n", *rt)
+		return 1
+	}
 
 	// --- resolve defaults -------------------------------------------------
 	img := *image
