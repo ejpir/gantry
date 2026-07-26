@@ -158,8 +158,7 @@ mirrors runsc's logs onto the VM console for debuggability.
 Honest limitations: runsc auto-selects its systrap platform in the
 guest (no nested /dev/kvm — our VMM doesn't emulate one), so
 syscall-heavy workloads are slower than crun; the rootfs grows ~110 MB
-(static runsc binary); the sandbox chroot is skipped
-(--TESTONLY-unsafe-nonroot, traded against the VM boundary); esoteric
+(static runsc binary); esoteric
 syscalls/devices may be unimplemented in the sentry; networking runs in
 --network=host mode (the container shares the VM netns like crun —
 isolation stays with the VM + netpol). Untested so far: virtio-fs
@@ -359,8 +358,7 @@ mirrors runsc's logs onto the VM console for debuggability.
 Honest limitations: runsc auto-selects its systrap platform in the
 guest (no nested /dev/kvm — our VMM doesn't emulate one), so
 syscall-heavy workloads are slower than crun; the rootfs grows ~110 MB
-(static runsc binary); the sandbox chroot is skipped
-(--TESTONLY-unsafe-nonroot, traded against the VM boundary); esoteric
+(static runsc binary); esoteric
 syscalls/devices may be unimplemented in the sentry; networking runs in
 --network=host mode (the container shares the VM netns like crun —
 isolation stays with the VM + netpol). Untested so far: virtio-fs

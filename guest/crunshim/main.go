@@ -44,10 +44,6 @@ func main() {
 
 // insertFlags adjusts runsc's global flags (before the subcommand).
 //
-//	--TESTONLY-unsafe-nonroot (always): skip runsc's minimal-chroot setup
-//	for the sandbox process — defense-in-depth we trade away because the
-//	gantry VM itself is the outer isolation boundary.
-//
 //	--debug + --log→/dev/console (debug mode only): runsc propagates
 //	--log to the gofer and boot children, so this puts the SENTRY's own
 //	boot log — which otherwise dies with the process inside the VM — onto
@@ -64,7 +60,10 @@ func insertFlags(args []string, debug bool) []string {
 	// netstack with no upstream (loopback only, DNS dies with "network
 	// unreachable"). Our crun containers share the VM's netns; host mode
 	// preserves that. Network isolation is the gantry VM + netpol's job.
-	inject := []string{"--TESTONLY-unsafe-nonroot", "--network=host"}
+	// (--TESTONLY-unsafe-nonroot is history: the sentry runs in runsc's
+	// minimal chroot again — it was never the problem; the 16K page size
+	// and the pty stderr buffer were.)
+	inject := []string{"--network=host"}
 	if debug {
 		inject = append(inject, "--debug")
 	}
