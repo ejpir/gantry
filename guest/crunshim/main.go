@@ -103,16 +103,20 @@ func supervise(args []string) int {
 	// stacks to stderr; the sandbox's stderr is /dev/null, which this
 	// shim pointed at /dev/console) - then dump our captured tail
 	timed := time.AfterFunc(25*time.Second, func() {
+		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
+			for _, pid := range findRunsc() {
+				// /proc FIRST: a pre-runtime child dies silently on
+				// SIGQUIT, taking the evidence with it
+				dumpProcState(c, pid)
+			}
+			fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", tail.String())
+			c.Close()
+		}
 		if cmd.Process != nil {
 			cmd.Process.Signal(syscall.SIGQUIT)
 		}
 		for _, pid := range findRunsc() {
 			syscall.Kill(pid, syscall.SIGQUIT)
-		}
-		time.Sleep(2 * time.Second)
-		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
-			fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", tail.String())
-			c.Close()
 		}
 	})
 	defer timed.Stop()
@@ -238,6 +242,37 @@ func findRunsc() []int {
 		}
 	}
 	return pids
+}
+
+// dumpProcState writes a hung process's kernel-side state to w: what
+// it's called, its State line, its wait channel, its in-kernel syscall
+// and its kernel stack (D-state hangs never answer SIGQUIT, and a Go
+// runtime that hasn't installed signal handlers yet can't either).
+func dumpProcState(w io.Writer, pid int) {
+	p := fmt.Sprintf("/proc/%d", pid)
+	fmt.Fprintf(w, "\ncrunshim: --- /proc state for pid %d ---\n", pid)
+	for _, f := range []string{"cmdline", "status", "wchan", "syscall", "stack"} {
+		b, err := os.ReadFile(p + "/" + f)
+		if err != nil {
+			fmt.Fprintf(w, "%s: %v\n", f, err)
+			continue
+		}
+		if f == "cmdline" {
+			b = []byte(strings.ReplaceAll(string(b), "\x00", " "))
+		}
+		if f == "status" {
+			// keep only the interesting lines
+			var keep []string
+			for _, ln := range strings.Split(string(b), "\n") {
+				if strings.HasPrefix(ln, "Name:") || strings.HasPrefix(ln, "State:") ||
+					strings.HasPrefix(ln, "PPid:") || strings.HasPrefix(ln, "Threads:") {
+					keep = append(keep, ln)
+				}
+			}
+			b = []byte(strings.Join(keep, "\n"))
+		}
+		fmt.Fprintf(w, "%s:\n%s\n", f, b)
+	}
 }
 
 func exists(path string) bool {
