@@ -44,7 +44,13 @@ func insertFlags(args []string) []string {
 	// sandbox process. That step fails silently (stderr is /dev/null) in
 	// this VM, and the chroot is defense-in-depth we can trade away: the
 	// gantry VM itself is the outer isolation boundary.
-	for _, f := range []string{"--debug", "--alsologtostderr", "--TESTONLY-unsafe-nonroot"} {
+	// NOTE: --alsologtostderr is deliberately NOT injected: the boot
+	// child's stderr is the container pty (stdio-fds), and gVisor emits
+	// the banner + full config dump to every emitter sequentially — the
+	// pty master is not drained during Create, so the small pty buffer
+	// fills and the boot child deadlocks in n_tty_write before logging a
+	// byte anywhere. --log=/dev/console covers visibility without it.
+	for _, f := range []string{"--debug", "--TESTONLY-unsafe-nonroot"} {
 		present := false
 		for _, a := range args[1:] {
 			if a == f || strings.HasPrefix(a, f+"=") {
