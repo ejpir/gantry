@@ -7,12 +7,6 @@
 set +e
 cd /opt/gantry || exit 1
 
-if [ -n "${GANTRY_ASSET_URL:-}" ]; then
-	echo "== downloading fresh gantry-linux-amd64 =="
-	for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o gantry-new "$GANTRY_ASSET_URL" && break; sleep 3; done
-	mv -f gantry-new gantry-linux-amd64 && chmod +x gantry-linux-amd64
-fi
-
 G=./gantry-linux-amd64
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
