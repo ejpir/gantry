@@ -163,8 +163,9 @@ syscalls/devices may be unimplemented in the sentry; networking runs in
 --network=host mode (the container shares the VM netns like crun —
 isolation stays with the VM + netpol). Concurrent `gantry exec` works
 (docker semantics: the second session Execs a process into the same
-container). Untested so far: virtio-fs shares through the gofer,
-x86_64. crun stays the default. Debug the guest side with
+container), and `-share` virtio-fs mounts work through the gofer
+(read + write; ownership changes are squashed to the host uid).
+x86_64 is untested. crun stays the default. Debug the guest side with
 GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
 console + hang watchdog).
 
@@ -364,8 +365,9 @@ syscalls/devices may be unimplemented in the sentry; networking runs in
 --network=host mode (the container shares the VM netns like crun —
 isolation stays with the VM + netpol). Concurrent `gantry exec` works
 (docker semantics: the second session Execs a process into the same
-container). Untested so far: virtio-fs shares through the gofer,
-x86_64. crun stays the default. Debug the guest side with
+container), and `-share` virtio-fs mounts work through the gofer
+(read + write; ownership changes are squashed to the host uid).
+x86_64 is untested. crun stays the default. Debug the guest side with
 GANTRY_EXTRA_CMDLINE="crunshim.debug=1" (runsc --debug + logs on the VM
 console + hang watchdog).
 
