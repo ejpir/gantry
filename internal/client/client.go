@@ -23,11 +23,15 @@ import (
 
 	"github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/api/types"
+	tasktypes "github.com/containerd/containerd/api/types/task"
 	bundle "github.com/containerd/nerdbox/api/services/bundle/v1"
 	mountapi "github.com/containerd/nerdbox/api/services/mount/v1"
 	system "github.com/containerd/nerdbox/api/services/system/v1"
 	"github.com/containerd/ttrpc"
+	"github.com/containerd/typeurl/v2"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/term"
+	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -153,6 +157,11 @@ type SessionOptions struct {
 	KillCh     <-chan struct{} // optional: first receive SIGKILLs the task
 	Quiet      bool            // suppress progress messages
 	ExitStatus *int            // optional: set to the task's exit status
+	// ExecIntoExisting allows docker-exec semantics: when the task already
+	// runs in the VM, start a new process inside it (task.v3 Exec)
+	// instead of Create-ing a second container (which would fail — the rw
+	// rootfs stack mounts exactly once).
+	ExecIntoExisting bool
 }
 
 // Session runs one container session to completion over an existing ttrpc
@@ -178,6 +187,19 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 
 	id := opts.ID
 	shares := opts.Shares
+
+	// Concurrent sessions must not each Create a container: the rw rootfs
+	// stack (ext4 + overlay upperdir) can be mounted only once, so the
+	// second Create dies with "upperdir is in-use"/EBUSY. Docker
+	// semantics instead: if the task already runs in this VM, Exec a new
+	// process into the SAME container (task.v3 Exec).
+	tc := task.NewTTRPCTaskClient(client)
+	if opts.ExecIntoExisting {
+		if st, err := tc.State(ctx, &task.StateRequest{ID: id}); err == nil && st.Status == tasktypes.Status_RUNNING {
+			return sessionExec(client, tc, opts, id, stdin, stdout)
+		}
+	}
+
 	cfg, err := ConfigJSON(shares, opts.RW, opts.Args)
 	if err != nil {
 		return err
@@ -252,7 +274,6 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	// same lower/ro + upper/rw design as sbx's rwlayer.img. The {{mount N}}
 	// templates are resolved by the guest's mountutil against earlier
 	// staged mounts.
-	tc := task.NewTTRPCTaskClient(client)
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{
 		ID:       id,
 		Bundle:   bresp.Bundle,
@@ -262,6 +283,12 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		Stdout:   "stream://" + stdoutStream.id,
 	})
 	if err != nil {
+		// Lost the race with a concurrent session: it created the
+		// container between our State probe and our Create — Exec into
+		// the winner's container instead.
+		if opts.ExecIntoExisting && strings.Contains(err.Error(), "already exists") {
+			return sessionExec(client, tc, opts, id, stdin, stdout)
+		}
 		// A failed Create leaves the bundle's rootfs stack mounted in the
 		// VM; without cleanup the NEXT exec on this sandbox dies with
 		// "upperdir is in-use"/busy. Best-effort teardown so a retry
@@ -335,6 +362,94 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		}
 	}
 	logf("done")
+	return werr
+}
+
+// sessionExec runs a session as a new process inside an already-running
+// container (task.v3 Exec) — the second-and-later `gantry exec <name>`
+// path. No bundle, no mounts, no Delete: the container and its lifecycle
+// belong to the session that created it.
+func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOptions, id string, stdin io.Reader, stdout io.Writer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	logf := func(format string, a ...any) {
+		if !opts.Quiet {
+			fmt.Fprintf(stdout, "client: "+format+"\n", a...)
+		}
+	}
+
+	// stdio streams, same protocol as Session
+	open := func(prefix string) (net.Conn, string, error) {
+		sid := streamID(prefix)
+		c, err := startStream(opts.StreamSock, sid)
+		return c, sid, err
+	}
+	stdinConn, stdinID, err := open("stdin")
+	if err != nil {
+		return fmt.Errorf("stdin stream: %w", err)
+	}
+	defer stdinConn.Close()
+	stdoutConn, stdoutID, err := open("stdout")
+	if err != nil {
+		return fmt.Errorf("stdout stream: %w", err)
+	}
+	defer stdoutConn.Close()
+
+	execID := fmt.Sprintf("%s-exec-%d", id, time.Now().UnixNano())
+	proc := &specs.Process{
+		Terminal: true,
+		User:     specs.User{UID: 0, GID: 0},
+		Args:     opts.Args,
+		Env:      []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "TERM=xterm", "PS1=exec# "},
+		Cwd:      "/",
+	}
+	specAny, err := typeurl.MarshalAny(proc)
+	if err != nil {
+		return err
+	}
+	specPB := &anypb.Any{TypeUrl: specAny.GetTypeUrl(), Value: specAny.GetValue()}
+	if _, err := tc.Exec(ctx, &task.ExecProcessRequest{
+		ID:       id,
+		ExecID:   execID,
+		Terminal: true,
+		Stdin:    "stream://" + stdinID,
+		Stdout:   "stream://" + stdoutID,
+		Spec:     specPB,
+	}); err != nil {
+		return fmt.Errorf("task Exec: %w", err)
+	}
+	logf("exec process started in container %s (type 'exit' to leave)", id)
+
+	if opts.Cols > 0 && opts.Rows > 0 {
+		tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, ExecID: execID, Width: opts.Cols, Height: opts.Rows})
+	}
+
+	go io.Copy(stdinConn, stdin)
+	stdoutDone := make(chan struct{})
+	go func() {
+		io.Copy(stdout, stdoutConn)
+		close(stdoutDone)
+	}()
+	if opts.KillCh != nil {
+		go func() {
+			<-opts.KillCh
+			tc.Kill(context.Background(), &task.KillRequest{ID: id, ExecID: execID, Signal: uint32(syscall.SIGKILL)})
+		}()
+	}
+
+	resp, werr := tc.Wait(context.Background(), &task.WaitRequest{ID: id, ExecID: execID})
+	select {
+	case <-stdoutDone:
+	case <-time.After(2 * time.Second):
+	}
+	if werr != nil {
+		fmt.Fprintf(stdout, "\nclient: Wait: %v\n", werr)
+	} else {
+		fmt.Fprintf(stdout, "\nclient: exec exited, status %d\n", resp.ExitStatus)
+		if opts.ExitStatus != nil {
+			*opts.ExitStatus = int(resp.ExitStatus)
+		}
+	}
 	return werr
 }
 
