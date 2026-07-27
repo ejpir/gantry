@@ -16,6 +16,7 @@ import (
 	"gantry/internal/gutil"
 	"gantry/internal/image"
 	"gantry/internal/netpol"
+	"gantry/internal/secret"
 	"gantry/internal/vmm"
 	"gantry/internal/vnet"
 	"net"
@@ -47,6 +48,10 @@ type RunConfig struct {
 	AllowLN     bool          `json:"allow_local_net,omitempty"`
 	MemMB       uint          `json:"memMB"`
 	VCPUs       int           `json:"vcpus,omitempty"`
+	// SecretNames records WHICH secrets the sandbox injects. Names only:
+	// the values live in the daemon's memory for the VM's lifetime and
+	// are never written anywhere (docs/secrets.md rule 1).
+	SecretNames []string `json:"secret_names,omitempty"`
 }
 
 // RunFlags holds the CLI flag pointers shared by `gantry exec` and
@@ -66,6 +71,7 @@ type RunFlags struct {
 	AllowLN                                 *bool
 	MemMB                                   *uint
 	VCPUs                                   *int
+	Secrets, SecretFiles                    *gutil.StrList
 }
 
 // RegisterRunFlags adds the shared run flags to fs.
@@ -76,15 +82,17 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 		Image: fs.String("image", "", `container image: a reference to pull ("debian:bookworm-slim",
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: debian-bookworm.erofs if present)`),
-		RWLayer: fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
-		RW:      fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
-		Net:     fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
-		GVProxy: fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
-		NetPol:  fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
-		AllowLN: fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
-		MemMB:   fs.Uint("mem", 512, "guest RAM in MiB"),
-		VCPUs:   fs.Int("cpus", 1, "guest vCPU count (max 8)"),
-		Shares:  &gutil.StrList{},
+		RWLayer:     fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
+		RW:          fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
+		Net:         fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
+		GVProxy:     fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
+		NetPol:      fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
+		AllowLN:     fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
+		MemMB:       fs.Uint("mem", 512, "guest RAM in MiB"),
+		VCPUs:       fs.Int("cpus", 1, "guest vCPU count (max 8)"),
+		Shares:      &gutil.StrList{},
+		Secrets:     &gutil.StrList{},
+		SecretFiles: &gutil.StrList{},
 	}
 	f.Runtime = fs.String("runtime", func() string {
 		if v := gutil.EnvOr("GANTRY_RUNTIME", "MINIVM_RUNTIME"); v != "" {
@@ -93,6 +101,9 @@ or a plain .erofs file (default: debian-bookworm.erofs if present)`),
 		return "crun"
 	}(), "container runtime in the guest: crun | runsc (gVisor)")
 	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[,ro] (repeatable)")
+	fs.Var(f.Secrets, "secret", `inject a secret into every session: NAME (from gantry's
+environment) or NAME=@/path; repeatable. NAME=literal is refused`)
+	fs.Var(f.SecretFiles, "secret-file", "dotenv-style file of NAME=VALUE secrets (repeatable)")
 	return f
 }
 
@@ -197,6 +208,15 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	if cfg.GVProxy != "" && !strings.ContainsRune(cfg.GVProxy, os.PathSeparator) && gutil.FileExists(cfg.GVProxy) {
 		cfg.GVProxy = absPath(cfg.GVProxy)
 	}
+	// secrets: names only in the persisted config; the CLI resolves the
+	// values via ResolveSecrets and hands them to the daemon over stdin
+	// — never argv, never the environment, never a file
+	if _, names, serr := f.ResolveSecrets(); serr != nil {
+		return cfg, warnings, serr
+	} else {
+		cfg.SecretNames = names
+	}
+
 	cfg.NetPol = *f.NetPol
 	cfg.AllowLN = *f.AllowLN
 	cfg.MemMB = *f.MemMB
@@ -236,6 +256,14 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		}
 	}
 	return cfg, warnings, nil
+}
+
+// ResolveSecrets parses -secret/-secret-file into the value map (CLI
+// memory only — never serialized) plus the ordered unique names.
+var osLookupEnv = os.LookupEnv
+
+func (f *RunFlags) ResolveSecrets() (map[string]secret.Value, []string, error) {
+	return secret.ResolveAll(f.Secrets.List(), f.SecretFiles.List(), osLookupEnv)
 }
 
 // ParsedShares validates cfg.Shares into virtio-fs share descriptors.

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"gantry/internal/client"
+	"gantry/internal/secret"
 
 	"github.com/containerd/ttrpc"
 	"golang.org/x/term"
@@ -140,6 +141,7 @@ examples:
   gantry start dev -image alpine:latest
   gantry start dev -image debian:bookworm-slim -cpus 2 -mem 1024
   gantry start dev -image ghcr.io/org/app@sha256:... -share code=$HOME/repos,ro
+  gantry start agent -secret GITHUB_TOKEN -image python:3.12 -net-policy allow-github.json
   gantry start dev -runtime runsc -image alpine:latest
   gantry start dev -image ./my-rootfs.erofs
 
@@ -167,6 +169,17 @@ flags:`)
 	}
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "gantry start:", w)
+	}
+	secrets, _, err := rf.ResolveSecrets()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry start:", err)
+		return 1
+	}
+	if len(secrets) > 0 && cfg.Net && cfg.NetPol == "" {
+		fmt.Fprintf(os.Stderr, `gantry start: %d secret(s) injected with the default egress policy (internet
+allowed). Consider -net-policy with a domain allowlist so an injected
+agent cannot send them anywhere.
+`, len(secrets))
 	}
 
 	if _, alive := sandboxPID(name); alive {
@@ -205,6 +218,7 @@ flags:`)
 	cmd := exec.Command(exe, "daemon", name)
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
+	cmd.Stdin = strings.NewReader(secretsHandshakeJSON(secrets))
 	detachDaemon(cmd)
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start: spawn daemon:", err)
@@ -238,6 +252,9 @@ flags:`)
 // ---------------- gantry daemon <name> (hidden, foreground) -----------------
 
 func CmdDaemon(name string) int {
+	// the secrets handshake arrives on stdin before anything else
+	secrets := readSecretsHandshake(os.Stdin)
+
 	dir := sandboxDir(name)
 	// tighten dirs created before the 0700 hardening (best-effort)
 	os.Chmod(dir, 0o700)
@@ -330,6 +347,7 @@ func CmdDaemon(name string) int {
 		dir:        dir,
 		rpc:        rpc,
 		streamSock: filepath.Join(dir, "listen-1026.sock"),
+		secrets:    secrets,
 		sessions:   map[string]chan struct{}{},
 	}
 	go br.serve(ln)
@@ -352,9 +370,51 @@ type broker struct {
 	dir        string
 	rpc        *ttrpc.Client
 	streamSock string
+	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 
 	mu       sync.Mutex
 	sessions map[string]chan struct{}
+}
+
+// secretsHandshakeJSON renders the CLI→daemon handshake: one line of
+// JSON on the daemon's stdin. Not argv (ps), not the environment
+// (/proc/<pid>/environ persists), not a file (docs/secrets.md rule 1).
+func secretsHandshakeJSON(secrets map[string]secret.Value) string {
+	m := map[string]string{}
+	for name, v := range secrets {
+		m[name] = v.Raw() // the injection point
+	}
+	b, _ := json.Marshal(struct {
+		Secrets map[string]string `json:"secrets"`
+	}{m})
+	return string(b) + "\n"
+}
+
+// readSecretsHandshake is the daemon side: read the one-line JSON object
+// before anything else. A terminal stdin (manual `gantry daemon`) means
+// no handshake; the deadline guards against a stalled pipe.
+func readSecretsHandshake(r *os.File) map[string]secret.Value {
+	st, err := r.Stat()
+	if err != nil || st.Mode()&os.ModeCharDevice != 0 {
+		return nil
+	}
+	r.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err := bufio.NewReader(r).ReadBytes('\n')
+	r.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil
+	}
+	var hs struct {
+		Secrets map[string]string `json:"secrets"`
+	}
+	if json.Unmarshal(line, &hs) != nil {
+		return nil
+	}
+	out := map[string]secret.Value{}
+	for name, v := range hs.Secrets {
+		out[name] = secret.Value(v)
+	}
+	return out
 }
 
 type brokerRequest struct {
@@ -426,20 +486,16 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	if _, err := fmt.Fprintln(c, `{"ok":true}`); err != nil {
 		return
 	}
-	args := req.Args
-	if len(args) == 0 {
-		if strings.Contains(strings.ToLower(filepath.Base(br.cfg.Image)), "debian") {
-			args = []string{"/bin/bash"}
-		} else {
-			args = []string{"/bin/sh"}
-		}
-	}
+	// no args defaulting here: client.Session applies the image's
+	// Entrypoint+Cmd, then /bin/sh (the debian-filename heuristic that
+	// used to live here predates image configs)
 	var status int
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock: br.streamSock,
 		Shares:     client.LoadShares(br.dir),
 		RW:         br.cfg.RW,
-		Args:       args,
+		Args:       req.Args,
+		Secrets:    secret.Env(br.secrets),
 		// one VM = one container workload with a well-known id, so a
 		// concurrent session can find it and Exec into it instead of
 		// fighting over the rw rootfs stack with a second Create
@@ -639,7 +695,7 @@ func CmdLs() int {
 		fmt.Println("no sandboxes (create one with: gantry start <name>)")
 		return 0
 	}
-	fmt.Printf("%-20s %-10s %-8s %s\n", "NAME", "STATE", "PID", "IMAGE")
+	fmt.Printf("%-20s %-10s %-8s %-24s %s\n", "NAME", "STATE", "PID", "SECRETS", "IMAGE")
 	for _, e := range ents {
 		if !e.IsDir() {
 			continue
@@ -649,7 +705,7 @@ func CmdLs() int {
 		if pid, alive := sandboxPID(name); alive {
 			state, pidStr = "running", fmt.Sprint(pid)
 		}
-		image := "-"
+		image, secrets := "-", "-"
 		if b, err := os.ReadFile(filepath.Join(sandboxDir(name), "sandbox.json")); err == nil {
 			var cfg RunConfig
 			if json.Unmarshal(b, &cfg) == nil {
@@ -657,9 +713,12 @@ func CmdLs() int {
 				if cfg.RW {
 					image += " (rw)"
 				}
+				if len(cfg.SecretNames) > 0 {
+					secrets = strings.Join(cfg.SecretNames, ",")
+				}
 			}
 		}
-		fmt.Printf("%-20s %-10s %-8s %s\n", name, state, pidStr, image)
+		fmt.Printf("%-20s %-10s %-8s %-24s %s\n", name, state, pidStr, secrets, image)
 	}
 	return 0
 }

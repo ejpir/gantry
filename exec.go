@@ -9,6 +9,7 @@ import (
 
 	"gantry/internal/client"
 	"gantry/internal/sandbox"
+	"gantry/internal/secret"
 	"gantry/internal/vmm"
 )
 
@@ -65,6 +66,17 @@ flags:`)
 	}
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "gantry exec:", w)
+	}
+	secrets, _, err := rf.ResolveSecrets()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry exec:", err)
+		return 1
+	}
+	if len(secrets) > 0 && cfg.Net && cfg.NetPol == "" {
+		fmt.Fprintf(os.Stderr, `gantry exec: %d secret(s) injected with the default egress policy (internet
+allowed). Consider -net-policy with a domain allowlist so an injected
+agent cannot send them anywhere.
+`, len(secrets))
 	}
 	// No -- CMD: the image's Entrypoint+Cmd supplies the session command
 	// (resolved in client.Session); a plain .erofs falls back to /bin/sh.
@@ -153,6 +165,7 @@ flags:`)
 			RW:         cfg.RW,
 			Args:       args,
 			ImgCfg:     cfg.ImageCfg,
+			Secrets:    secret.Env(secrets),
 		})
 	}()
 
