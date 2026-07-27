@@ -52,6 +52,9 @@ func (s *StrList) Set(v string) error {
 	return nil
 }
 
+// List returns the accumulated values.
+func (s *StrList) List() []string { return []string(*s) }
+
 // FileExists reports whether path exists on the host.
 func FileExists(path string) bool {
 	st, err := os.Stat(path)

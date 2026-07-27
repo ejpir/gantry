@@ -82,6 +82,34 @@ R=$(xe t4 'echo PATH=$PATH');                     chk "image: config env"     "P
 R=$(xe t4 'busybox | head -1');                   chk "image: busybox links"  "BusyBox" "$R"
 R=$($G image ls 2>&1);                            chk "image: ls shows pull"  "alpine" "$R"
 
+echo "===== secrets (t5: alpine, offline) ====="
+# docs/secrets.md acceptance test: a canary value must appear in the
+# workload's environment inside the guest and NOWHERE in host state.
+CANARY="sk-canary-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
+FILECANARY="sk-file-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
+printf '%s\n' "$FILECANARY" > /tmp/canary-file
+CANARY="$CANARY" $G start t5 -secret CANARY -secret FROM_FILE=@/tmp/canary-file -image alpine:latest >/dev/null 2>&1
+sleep 2
+R=$(xe t5 'printenv CANARY');     chk "secrets: env value in guest"   "$CANARY" "$R"
+R=$(xe t5 'printenv FROM_FILE');  chk "secrets: @file value in guest" "$FILECANARY" "$R"
+
+grep -q "CANARY" /tmp/.gantry/sandboxes/t5/sandbox.json 2>/dev/null \
+  && ok "secrets: name recorded in sandbox.json" || bad "secrets: name recorded in sandbox.json"
+grep -q "$CANARY" /tmp/.gantry/sandboxes/t5/sandbox.json 2>/dev/null \
+  && bad "secrets: value NOT in sandbox.json" || ok "secrets: value NOT in sandbox.json"
+
+leak=""
+grep -rqs "$CANARY" /tmp/.gantry/sandboxes/t5/ && leak="$leak sandbox-dir"
+grep -rqs "$CANARY" /tmp/.gantry/images/ 2>/dev/null && leak="$leak image-store"
+[ -f /tmp/.gantry/rwlayers/t5.ext4 ] && grep -qs "$CANARY" /tmp/.gantry/rwlayers/t5.ext4 && leak="$leak rwlayer"
+VPID=$(cat /tmp/.gantry/sandboxes/t5/vmm.pid 2>/dev/null)
+[ -n "$VPID" ] && tr '\0' '\n' < /proc/$VPID/environ 2>/dev/null | grep -qs "$CANARY" && leak="$leak environ"
+[ -n "$VPID" ] && tr '\0' ' ' < /proc/$VPID/cmdline 2>/dev/null | grep -qs "$CANARY" && leak="$leak cmdline"
+[ -z "$leak" ] && ok "secrets: canary absent from host state" || { bad "secrets: canary absent from host state"; echo "  leaked into:$leak"; }
+
+R=$($G start t6 -secret TOKEN=literal-value -image alpine:latest 2>&1)
+chk "secrets: literal refused" "refusing" "$R"
+
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

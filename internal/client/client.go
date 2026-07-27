@@ -47,6 +47,7 @@ type ShellOptions struct {
 	Args       []string
 	ID         string        // bundle/task id; default "shell"
 	ImgCfg     *image.Config // resolved image config (nil = defaults)
+	Secrets    []string      // NAME=value pairs, process-spec only (docs/secrets.md)
 }
 
 // ShareEntry is one entry of the VMM's shares.json (schema shared with
@@ -287,6 +288,12 @@ type SessionOptions struct {
 	// ImgCfg is the resolved OCI image config (env/entrypoint/cmd/user/
 	// workdir). nil keeps the historical defaults.
 	ImgCfg *image.Config
+	// Secrets are NAME=value pairs injected into the session's process
+	// spec ONLY (docs/secrets.md): they travel over ttrpc inside the
+	// Exec request and are never written to any file, host or guest —
+	// which is why one-shot sessions route through the Exec path rather
+	// than the bundle (config.json persists inside the guest).
+	Secrets []string
 }
 
 func init() {
@@ -612,7 +619,9 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 		// No PS1 override: the image's own shell setup (or the shell's
 		// compiled default) produces the familiar prompt; an injected
 		// spartan PS1 read as "bash didn't start" to users.
-		Env: opts.ImgCfg.EnvWith("TERM=xterm"),
+		// Secrets come last: the user's explicit choice overrides an
+		// image variable of the same name.
+		Env: append(opts.ImgCfg.EnvWith("TERM=xterm"), opts.Secrets...),
 		Cwd: opts.ImgCfg.WorkdirOr(),
 	}
 	specAny, err := typeurl.MarshalAny(proc)
@@ -697,6 +706,13 @@ func Shell(opts ShellOptions) error {
 		RW:         opts.RW,
 		Args:       opts.Args,
 		ID:         opts.ID,
+		ImgCfg:     opts.ImgCfg,
+		Secrets:    opts.Secrets,
+		// One-shot sessions go through the same stub-init + Exec path as
+		// sandbox sessions: the bundle's config.json persists inside the
+		// guest for the VM's life, so it must never carry secrets (or
+		// the image env — which was silently dropped here before).
+		ExecIntoExisting: true,
 	}
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		old, err := term.MakeRaw(int(os.Stdin.Fd()))
