@@ -31,7 +31,7 @@ if [[ $(uname) == Darwin ]]; then
 	BUILD=(build)
 	BUILD_ARGS=()
 	RUN_PROXY_ENV=()
-	DEFAULT_TRANSPORT=exec
+	DEFAULT_TRANSPORT=sock
 else
 	# Dev sandbox: the docker-container buildx builder boot image is
 	# Docker-Hub-blocked; use the daemon's built-in builder explicitly.
@@ -82,20 +82,52 @@ cmd_build() {
 	echo "built $IMAGE"
 }
 
+RELAY_PORT=7680
+
 cmd_run() {
 	local project
 	project=$(cd "${1:-.}" && pwd)
 	mkdir -p "$SOCK_DIR"
 	$CLI rm -f "$NAME" >/dev/null 2>&1 || true
-	$CLI run -d --name "$NAME" \
-		${RUN_PROXY_ENV[@]+"${RUN_PROXY_ENV[@]}"} \
-		-v "$SOCK_DIR:/sock" \
-		-v "$AUTH_FILE:/home/node/.pi/agent/auth.json" \
-		-v "$project:/work" \
-		-w /work \
-		"$IMAGE" --mode rpc --sock /sock/agent.sock
+	if [[ $(uname) == Darwin ]]; then
+		# No bind-mounted socket: pi listens container-local, a relay carries
+		# it to 127.0.0.1:$RELAY_PORT, a host relay serves a real unix socket.
+		$CLI run -d --name "$NAME" \
+			-p 127.0.0.1:$RELAY_PORT:$RELAY_PORT \
+			-v "$AUTH_FILE:/home/node/.pi/agent/auth.json" \
+			-v "$project:/work" \
+			-w /work \
+			"$IMAGE" --mode rpc --sock /tmp/agent.sock
+		$CLI cp "$SCRIPT_DIR/relay.js" "$NAME:/tmp/relay.js"
+		$CLI exec -d "$NAME" node /tmp/relay.js 0.0.0.0:$RELAY_PORT /tmp/agent.sock
+	else
+		$CLI run -d --name "$NAME" \
+			${RUN_PROXY_ENV[@]+"${RUN_PROXY_ENV[@]}"} \
+			-v "$SOCK_DIR:/sock" \
+			-v "$AUTH_FILE:/home/node/.pi/agent/auth.json" \
+			-v "$project:/work" \
+			-w /work \
+			"$IMAGE" --mode rpc --sock /sock/agent.sock
+	fi
 	echo "agent container '$NAME' running; project at /work: $project"
-	echo "socket: $SOCK_DIR/agent.sock"
+}
+
+# mac: ensure the host-side unix->TCP relay is up, print the socket path.
+host_relay() {
+	if ! $CLI exec "$NAME" test -S /tmp/agent.sock 2>/dev/null; then
+		sleep 2 # agent still booting
+	fi
+	if ! nc -z 127.0.0.1 $RELAY_PORT 2>/dev/null; then
+		echo "container relay not reachable on 127.0.0.1:$RELAY_PORT" >&2
+		exit 1
+	fi
+	pkill -f "relay.js $SOCK_DIR/agent.sock" 2>/dev/null || true
+	nohup node "$SCRIPT_DIR/relay.js" "$SOCK_DIR/agent.sock" 127.0.0.1:$RELAY_PORT \
+		> "$SOCK_DIR/relay.log" 2>&1 &
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		[[ -S $SOCK_DIR/agent.sock ]] && break
+		sleep 0.3
+	done
 }
 
 pi_attach() {
@@ -106,6 +138,7 @@ cmd_attach() {
 	local transport=${1:-$DEFAULT_TRANSPORT}
 	transport=${transport#--}
 	if [[ $transport == sock ]]; then
+		if [[ $(uname) == Darwin ]]; then host_relay; fi
 		pi_attach --sock "$SOCK_DIR/agent.sock"
 	else
 		pi_attach --cmd "$CLI exec -i $NAME node /opt/pi/packages/coding-agent/dist/cli.js --mode rpc"
