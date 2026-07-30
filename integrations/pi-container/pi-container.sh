@@ -115,11 +115,23 @@ cmd_run() {
 	echo "agent container '$NAME' running; project at /work: $project"
 }
 
+# Wait for the agent's in-container socket: relay.js connects to it PER
+# inbound connection, so without a readiness gate a fast attach reaches a
+# relay that has nothing to dial, gets its transport destroyed, and falls
+# into the client's hello-timeout/reconnect loop (the occasional 'attach
+# takes a little longer').
+wait_container_sock() {
+	for _ in $(seq 1 60); do # ~30s max
+		$CLI exec "$NAME" test -S /tmp/agent.sock 2>/dev/null && return 0
+		sleep 0.5
+	done
+	echo "agent socket /tmp/agent.sock did not appear in time (agent still booting?)" >&2
+	return 1
+}
+
 # mac: ensure the host-side unix->TCP relay is up, print the socket path.
 host_relay() {
-	if ! $CLI exec "$NAME" test -S /tmp/agent.sock 2>/dev/null; then
-		sleep 2 # agent still booting
-	fi
+	wait_container_sock
 	if ! nc -z 127.0.0.1 $RELAY_PORT 2>/dev/null; then
 		echo "container relay not reachable on 127.0.0.1:$RELAY_PORT" >&2
 		exit 1
@@ -141,7 +153,15 @@ cmd_attach() {
 	local transport=${1:-$DEFAULT_TRANSPORT}
 	transport=${transport#--}
 	if [[ $transport == sock ]]; then
-		if [[ $(uname) == Darwin ]]; then host_relay; fi
+		if [[ $(uname) == Darwin ]]; then
+			host_relay
+		else
+			# Bind-mounted socket: same readiness race after a fresh `run`.
+			for _ in $(seq 1 60); do
+				[[ -S $SOCK_DIR/agent.sock ]] && break
+				sleep 0.5
+			done
+		fi
 		pi_attach --sock "$SOCK_DIR/agent.sock"
 	else
 		pi_attach --cmd "$CLI exec -i $NAME node /opt/pi/packages/coding-agent/dist/cli.js --mode rpc"
