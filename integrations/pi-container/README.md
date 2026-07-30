@@ -34,7 +34,24 @@ only the TUI renderer.
 |---|---|---|
 | CLI | `docker --context default` + built-in builder | `docker` or `podman` |
 | proxy (build + run) | `gateway.docker.internal:3128` (verified reachable from containers; `192.168.1.1` is NOT) | none (direct egress) |
-| default attach | `--sock` (bind mount works) | `--exec` (bind-mounted unix sockets through the mac VM layer are unreliable) |
+| default attach | `--sock` (bind mount works) | `--sock` via relay chain (below) |
+
+## macOS transport: relay chain
+
+Bind-mounted unix sockets don't survive the mac VM file-sharing layer, so
+on macOS the socket is bridged instead — `pi attach` runs fully outside
+the container against the long-lived agent (detach/reattach/reconnect all
+exercised):
+
+```
+mac: pi attach --sock /tmp/pi-attach/agent.sock
+  → host relay (unix→TCP) → 127.0.0.1:7680
+    → container relay (TCP→unix) → pi --sock /tmp/agent.sock (container-local)
+```
+
+`relay.js` (~40 lines, zero deps) is copied into the container at `run`
+time and started alongside the agent; the host relay is spawned by
+`attach --sock` automatically. `--exec` remains as a fallback transport.
 
 The build uses `node:24-slim` and `build:offline` (`packages/ai`'s online
 build fetches model catalogs).
