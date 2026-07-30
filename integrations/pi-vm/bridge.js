@@ -37,6 +37,10 @@ function loadEnvFile() {
 		const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
 		if (m && !(m[1] in process.env)) process.env[m[1]] = m[2];
 	}
+	// Node's global fetch (undici) ignores HTTP(S)_PROXY unless told otherwise;
+	// without this, proxy-only egress hangs model-catalog refreshes and other
+	// fetch-based calls (the sequential RPC queue then jams behind them).
+	if (!("NODE_USE_ENV_PROXY" in process.env)) process.env.NODE_USE_ENV_PROXY = "1";
 }
 
 function tryConnect() {

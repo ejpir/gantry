@@ -41,7 +41,8 @@ else
 	BUILD=(buildx build --builder default --load)
 	BUILD_ARGS=(--build-arg PROXY=http://gateway.docker.internal:3128)
 	RUN_PROXY_ENV=(-e HTTPS_PROXY=http://gateway.docker.internal:3128
-		-e HTTP_PROXY=http://gateway.docker.internal:3128)
+		-e HTTP_PROXY=http://gateway.docker.internal:3128
+		-e NODE_USE_ENV_PROXY=1)
 	DEFAULT_TRANSPORT=sock
 fi
 
@@ -93,11 +94,13 @@ cmd_run() {
 		# No bind-mounted socket: pi listens container-local, a relay carries
 		# it to 127.0.0.1:$RELAY_PORT, a host relay serves a real unix socket.
 		$CLI run -d --name "$NAME" \
-			-p 127.0.0.1:$RELAY_PORT:$RELAY_PORT \
-			-v "$AUTH_FILE:/home/node/.pi/agent/auth.json" \
-			-v "$project:/work" \
-			-w /work \
-			"$IMAGE" --mode rpc --sock /tmp/agent.sock
+  -p 127.0.0.1:$RELAY_PORT:$RELAY_PORT \
+  -v "$AUTH_FILE:/home/node/.pi/agent/auth.json" \
+  -v "$project:/work" \
+  -w /work \
+  -e HTTPS_PROXY=http://192.168.1.1:3128 -e HTTP_PROXY=http://192.168.1.1:3128 \
+  -e NODE_USE_ENV_PROXY=1 \
+  "$IMAGE" --mode rpc --sock /tmp/agent.sock
 		$CLI cp "$SCRIPT_DIR/relay.js" "$NAME:/tmp/relay.js"
 		$CLI exec -d "$NAME" node /tmp/relay.js 0.0.0.0:$RELAY_PORT /tmp/agent.sock
 	else
