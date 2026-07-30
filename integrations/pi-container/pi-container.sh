@@ -2,13 +2,15 @@
 # pi-container.sh — build, run, and attach to a pi agent in a container.
 #
 # The agent (LLM calls, tools, extensions, sessions) lives inside the
-# container; your host runs only the thin TUI via `pi attach --sock`.
+# container; your host runs only the thin TUI via `pi attach`.
+# Works on the dev sandbox (linux) and on macOS (Docker Desktop or podman).
 #
 # Usage:
 #   ./pi-container.sh build                build the pi-agent image
 #   ./pi-container.sh run [project-dir]    start the agent container (default project: cwd)
-#   ./pi-container.sh attach               attach the stock pi TUI from the host
-#   ./pi-container.sh exec                 attach via docker-exec stdio transport instead
+#   ./pi-container.sh attach               attach the stock pi TUI (auto transport)
+#   ./pi-container.sh attach --sock        attach via bind-mounted unix socket
+#   ./pi-container.sh attach --exec        attach via container-exec stdio
 #   ./pi-container.sh stop                 stop and remove the container
 #   ./pi-container.sh logs                 follow agent container logs
 set -euo pipefail
@@ -19,29 +21,63 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PI_REPO=$(cd "$SCRIPT_DIR/../../../pi" && pwd)
 SOCK_DIR=${PI_SOCK_DIR:-/tmp/pi-attach}
 AUTH_FILE=${PI_AUTH_FILE:-$HOME/.pi/agent/auth.json}
-MIRROR=nn-docker-remote.artifactory.insim.biz/library/node:22-slim
 
-cmd_build() {
-	# Stage build inputs into the context (kept out of git).
+# --- container CLI + build strategy per platform ---------------------------
+if [[ $(uname) == Darwin ]]; then
+	# Docker Desktop / podman on macOS: plain build (BuildKit ships with the
+	# app; bind-mounted unix sockets through the VM layer are unreliable,
+	# so exec is the default attach transport). Direct egress: no proxy.
+	if command -v docker >/dev/null 2>&1; then CLI=docker; else CLI=podman; fi
+	BUILD=(build)
+	BUILD_ARGS=()
+	RUN_PROXY_ENV=()
+	DEFAULT_TRANSPORT=exec
+else
+	# Dev sandbox: the docker-container buildx builder boot image is
+	# Docker-Hub-blocked; use the daemon's built-in builder explicitly.
+	# Egress goes through the sandbox proxy, reachable from containers as
+	# gateway.docker.internal:3128 (verified; 192.168.1.1 is NOT reachable).
+	CLI="docker --context default"
+	BUILD=(buildx build --builder default --load)
+	BUILD_ARGS=(--build-arg PROXY=http://gateway.docker.internal:3128)
+	RUN_PROXY_ENV=(-e HTTPS_PROXY=http://gateway.docker.internal:3128
+		-e HTTP_PROXY=http://gateway.docker.internal:3128)
+	DEFAULT_TRANSPORT=sock
+fi
+
+stage_inputs() {
 	mkdir -p "$PI_REPO/.pi-container/certs"
-	cp /usr/local/share/ca-certificates/*.crt "$PI_REPO/.pi-container/certs/" 2>/dev/null || true
-	# Fall back to the system bundle's certs if the dir was empty.
 	if ! ls "$PI_REPO/.pi-container/certs"/*.crt >/dev/null 2>&1; then
-		echo "no corp certs found in /usr/local/share/ca-certificates" >&2
+		if [[ -d /usr/local/share/ca-certificates ]]; then
+			cp /usr/local/share/ca-certificates/*.crt "$PI_REPO/.pi-container/certs/" 2>/dev/null || true
+		elif [[ $(uname) == Darwin ]]; then
+			# macOS: export the system keychain roots (includes corp CAs).
+			security find-certificate -a -p /Library/Keychains/System.keychain > "$PI_REPO/.pi-container/certs/keychain-roots.crt" || true
+		fi
+	fi
+	if ! ls "$PI_REPO/.pi-container/certs"/*.crt >/dev/null 2>&1; then
+		echo "no corporate CA certs staged (needed for proxy MITM)" >&2
 		exit 1
 	fi
 	cp "$SCRIPT_DIR/settings.json" "$PI_REPO/.pi-container/settings.json"
 
-	# Context hygiene (repo .dockerignore is generated, not committed).
+	# Context hygiene (generated, not committed): source only — the image
+	# runs npm ci + build itself, so node_modules/dist are excluded.
 	cat > "$PI_REPO/.dockerignore" <<'EOF'
 .git
+node_modules
+**/node_modules
+**/dist
 **/*.test.ts
 **/test/
-**/docs/
-examples/
-.github/
+**/.pi-test-*
 EOF
-	docker --context default buildx build --builder default --load -f "$SCRIPT_DIR/Dockerfile" -t "$IMAGE" "$PI_REPO"
+}
+
+cmd_build() {
+	stage_inputs
+	# shellcheck disable=SC2068
+	$CLI ${BUILD[@]} ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$SCRIPT_DIR/Dockerfile" -t "$IMAGE" "$PI_REPO"
 	rm -f "$PI_REPO/.dockerignore"
 	echo "built $IMAGE"
 }
@@ -50,36 +86,40 @@ cmd_run() {
 	local project
 	project=$(cd "${1:-.}" && pwd)
 	mkdir -p "$SOCK_DIR"
-	docker --context default rm -f "$NAME" >/dev/null 2>&1 || true
-	docker --context default run -d --name "$NAME" \
+	$CLI rm -f "$NAME" >/dev/null 2>&1 || true
+	$CLI run -d --name "$NAME" \
+		${RUN_PROXY_ENV[@]+"${RUN_PROXY_ENV[@]}"} \
 		-v "$SOCK_DIR:/sock" \
 		-v "$AUTH_FILE:/home/node/.pi/agent/auth.json" \
 		-v "$project:/work" \
 		-w /work \
 		"$IMAGE" --mode rpc --sock /sock/agent.sock
-	echo "agent container '$NAME' running; socket: $SOCK_DIR/agent.sock"
-	echo "project mounted at /work: $project"
+	echo "agent container '$NAME' running; project at /work: $project"
+	echo "socket: $SOCK_DIR/agent.sock"
+}
+
+pi_attach() {
+	node "$PI_REPO/packages/coding-agent/dist/cli.js" attach "$@"
 }
 
 cmd_attach() {
-	node "$PI_REPO/packages/coding-agent/dist/cli.js" attach --sock "$SOCK_DIR/agent.sock"
+	local transport=${1:-$DEFAULT_TRANSPORT}
+	transport=${transport#--}
+	if [[ $transport == sock ]]; then
+		pi_attach --sock "$SOCK_DIR/agent.sock"
+	else
+		pi_attach --cmd "$CLI exec -i $NAME node /opt/pi/packages/coding-agent/dist/cli.js --mode rpc"
+	fi
 }
 
-cmd_exec() {
-	docker --context default exec -i "$NAME" node /opt/pi/packages/coding-agent/dist/cli.js --version >/dev/null
-	node "$PI_REPO/packages/coding-agent/dist/cli.js" attach \
-		--cmd "docker --context default exec -i $NAME node /opt/pi/packages/coding-agent/dist/cli.js --mode rpc"
-}
-
-cmd_stop() { docker --context default rm -f "$NAME"; }
-cmd_logs() { docker --context default logs -f "$NAME"; }
+cmd_stop() { $CLI rm -f "$NAME"; }
+cmd_logs() { $CLI logs -f "$NAME"; }
 
 case "${1:-}" in
 	build) cmd_build ;;
 	run) shift; cmd_run "$@" ;;
-	attach) cmd_attach ;;
-	exec) cmd_exec ;;
+	attach) shift; cmd_attach "$@" ;;
 	stop) cmd_stop ;;
 	logs) cmd_logs ;;
-	*) grep '^#' "$0" | head -20; exit 1 ;;
+	*) grep '^#' "$0" | head -24; exit 1 ;;
 esac
