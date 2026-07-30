@@ -20,7 +20,7 @@ func main() {
 	var disks gutil.StrList
 	run.Var(&disks, "disk", "extra virtio-blk image (repeatable): /dev/vdb, /dev/vdc, ...")
 	var shares gutil.StrList
-	run.Var(&shares, "share", "host directory exported through virtio-fs as TAG=PATH[,ro] (repeatable)")
+	run.Var(&shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
 	netEndpoint := run.String("net", "", "Unix datagram raw-Ethernet backend (e.g. gvproxy vfkit socket)")
 	netMACArg := run.String("net-mac", "5a:94:ef:e4:0c:ee", "virtio-net MAC address")
 	netVFKIT := run.Bool("net-vfkit", true, "send the VFKT registration datagram to the network backend")
@@ -43,6 +43,7 @@ usage:
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
+  gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
   gantry stop <name>                # stop a sandbox
   gantry delete <name>              # stop + remove a sandbox
@@ -82,6 +83,10 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2])))
 	case "ls":
 		os.Exit(sandbox.CmdLs())
+	case "pi":
+		os.Exit(sandbox.CmdPi(os.Args[2:]))
+	case "pi-serve":
+		os.Exit(sandbox.CmdPiServe(os.Args[2:]))
 	case "image":
 		os.Exit(sandbox.CmdImage(os.Args[2:]))
 	case "stop", "delete":

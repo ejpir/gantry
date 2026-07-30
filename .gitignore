@@ -29,3 +29,4 @@
 
 # guest build artifacts (built by mkrootfs-gvisor.sh)
 /crunshim
+pi-attach.tar

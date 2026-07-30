@@ -205,7 +205,14 @@ func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
 		Layers   []string `json:"Layers"`
 	}
 	var mans []manEntry
-	layerBlobs := map[string]string{} // tar member -> extracted path
+	// Member naming varies by producer: classic docker writes
+	// <chain-id>/layer.tar, podman/older docker write <digest>.tar at
+	// the top level, and containerd-backed docker writes OCI-style
+	// blobs/sha256/<digest> with no suffix. Extract anything that could
+	// be a blob and resolve layer/config names EXACTLY as manifest.json
+	// spells them (the previous <id>/layer.tar-only match rejected
+	// podman tars with "... is not in the tar").
+	members := map[string]string{} // tar member name -> extracted path
 	var configPath string
 
 	tr := tar.NewReader(f)
@@ -228,20 +235,19 @@ func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
 				return fail(fmt.Errorf("bad manifest.json: %w", err))
 			}
 		case strings.HasSuffix(name, ".json") && !strings.Contains(name, "/"):
-			// the config blob is a top-level <digest>.json
+			// the classic config blob is a top-level <digest>.json
 			dst := filepath.Join(tmp, "config.json")
 			if err := extractTo(tr, dst); err != nil {
 				return fail(err)
 			}
 			configPath = dst
 		default:
-			// <id>/layer.tar members
-			if strings.HasSuffix(name, "/layer.tar") {
-				dst := filepath.Join(tmp, fmt.Sprintf("layer-%d.tar", len(layerBlobs)))
+			if strings.HasSuffix(name, ".tar") || strings.HasPrefix(name, "blobs/") {
+				dst := filepath.Join(tmp, fmt.Sprintf("member-%d", len(members)))
 				if err := extractTo(tr, dst); err != nil {
 					return fail(err)
 				}
-				layerBlobs[name] = dst
+				members[name] = dst
 			}
 		}
 	}
@@ -251,7 +257,13 @@ func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
 	m := mans[0]
 
 	var cfgData []byte
-	if configPath != "" && m.Config != "" {
+	if m.Config != "" {
+		if p, ok := members[m.Config]; ok {
+			cfgData, _ = os.ReadFile(p) // containerd-style: config is a blobs/ member
+		} else if configPath != "" {
+			cfgData, _ = os.ReadFile(configPath) // classic: top-level <digest>.json
+		}
+	} else if configPath != "" {
 		cfgData, _ = os.ReadFile(configPath)
 	}
 	var oc ociConfig
@@ -267,13 +279,16 @@ func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
 	p := &pulled{ref: ref, tmpDir: tmp}
 	h := sha256.New()
 	h.Write(cfgData)
-	for _, lname := range m.Layers {
-		lp, ok := layerBlobs[lname]
+	for i, lname := range m.Layers {
+		lp, ok := members[lname]
 		if !ok {
 			p.Close()
 			return nil, fmt.Errorf("manifest.json names %s but it is not in the tar", lname)
 		}
-		f, err := os.Open(lp)
+		// containerd-backed `docker save` gzips layer blobs (classic docker
+		// wrote plain tars); route through decompressTo so the flattener
+		// always sees a seekable uncompressed tar.
+		f, err := decompressTo(lp, "", tmp, i)
 		if err != nil {
 			p.Close()
 			return nil, err
