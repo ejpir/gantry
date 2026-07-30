@@ -75,7 +75,11 @@ async function ensureAgent() {
 	} catch {
 		startAgent();
 	}
-	for (let i = 0; i < 100; i++) {
+	// 60s budget: first boot on a cold image (erofs mount, page cache,
+	// OAuth refresh, model registry) can exceed 20s; if the bridge gave up
+	// earlier, the client's reconnect simply respawned it — a sporadic
+	// extra stall on every cold attach.
+	for (let i = 0; i < 300; i++) {
 		await new Promise((r) => setTimeout(r, 200));
 		try {
 			return await tryConnect();
