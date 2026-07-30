@@ -222,12 +222,22 @@ flags:`)
 		}
 	}
 
-	// Warm the agent now so the first attach connects instantly; the
-	// bridge start-on-connect logic makes this race-free either way.
+	// Warm the agent now so the first attach connects instantly. Two steps:
+	// poke the bridge's start-on-connect (spawns the guest agent if needed),
+	// then WAIT for the guest socket — the poke returns immediately, and an
+	// attach landing while the agent is still booting stalls in the client's
+	// hello timeout / reconnect loop (the sporadic slow attach).
 	if rc := CmdSandboxExec(name, []string{"--", "node", "-e",
 		"require('node:net').connect('/tmp/pi-attach/agent.sock').once('error',()=>{require('node:child_process').spawn('node',['/opt/pi/bridge.js'],{stdio:'inherit'})}).once('connect',s=>s.end())",
 	}); rc != 0 {
 		fmt.Fprintln(os.Stderr, "gantry pi-serve: guest bridge check failed — is this a pi-attach image (integrations/pi-vm/mkpiattach.sh)?")
+		return rc
+	}
+	if rc := CmdSandboxExec(name, []string{"--", "sh", "-c",
+		"i=0; while [ $i -lt 120 ]; do [ -S /tmp/pi-attach/agent.sock ] && exit 0; i=$((i+1)); sleep 0.5 2>/dev/null || sleep 1; done; exit 1",
+	}); rc != 0 {
+		fmt.Fprintln(os.Stderr, "gantry pi-serve: guest agent did not start within 60s — check the guest log:")
+		fmt.Fprintf(os.Stderr, "  gantry exec %s -- cat /tmp/pi-attach/agent.log\n", name)
 		return rc
 	}
 
