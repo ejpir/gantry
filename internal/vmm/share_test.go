@@ -80,3 +80,37 @@ func TestShareManifestRoundTrip(t *testing.T) {
 		t.Fatalf("single-share ctr path = %q, want /host", got)
 	}
 }
+
+func TestParseShareSpecCtrPath(t *testing.T) {
+	s, err := ParseShareSpec("piagent=/Users/x/.pi/agent@/root/.pi/agent", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CtrPath != "/root/.pi/agent" || s.Path != "/Users/x/.pi/agent" || s.RO {
+		t.Fatalf("%+v", s)
+	}
+	s, err = ParseShareSpec("code=/Users/x/repos@/src,ro", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CtrPath != "/src" || !s.RO || s.Path != "/Users/x/repos" {
+		t.Fatalf("%+v", s)
+	}
+	// relative container path rejected; bare path keeps the default
+	if _, err := ParseShareSpec("x=/tmp@rel", map[string]bool{}); err == nil {
+		t.Fatal("relative @CTRPATH accepted")
+	}
+	s, err = ParseShareSpec("x=/tmp", map[string]bool{})
+	if err != nil || s.CtrPath != "" {
+		t.Fatalf("default: %+v err=%v", s, err)
+	}
+
+	// explicit CtrPath flows into the manifest unchanged
+	m := buildShareManifest([]Share{{Tag: "ws", Path: "/a"}, {Tag: "pia", Path: "/b", CtrPath: "/root/.pi/agent"}})
+	if m.Shares[1].CtrPath != "/root/.pi/agent" {
+		t.Fatalf("manifest CtrPath = %q", m.Shares[1].CtrPath)
+	}
+	if m.Shares[0].CtrPath != "/host/ws" {
+		t.Fatalf("default CtrPath = %q", m.Shares[0].CtrPath)
+	}
+}
