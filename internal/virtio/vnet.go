@@ -191,7 +191,7 @@ func (v *Net) handleQueue(qn int) {
 func (v *Net) handleTx() {
 	q := &v.core.queues[virtioNetTxQ]
 	for {
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(virtioNetTxQ)
 		if !ok {
 			return
 		}
@@ -250,7 +250,7 @@ func (v *Net) tryRx() {
 		return
 	}
 	for len(v.pending) > 0 {
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(virtioNetRxQ)
 		if !ok {
 			return
 		}
@@ -275,6 +275,27 @@ func (v *Net) tryRx() {
 		}
 		v.core.pushUsed(q, head, n)
 	}
+}
+
+// netMaxChainBytes caps one TX/RX chain at the largest legitimate frame
+// plus the 12-byte virtio_net_hdr_v1 (no GSO features are offered, so
+// frames are complete packets). A guest declaring more is fishing for a
+// guest-RAM-sized host allocation (review finding 2).
+const netMaxChainBytes = virtioNetMaxFrame + virtioNetHdrLen + 1024
+
+func (v *Net) maxChainBytes(qn int) uint64 { return netMaxChainBytes }
+
+// Close shuts the packet endpoint and removes the unixgram client
+// socket (VM teardown; see Machine.Close).
+func (v *Net) Close() error {
+	var err error
+	if v.conn != nil {
+		err = v.conn.Close()
+	}
+	if v.localPath != "" {
+		os.Remove(v.localPath)
+	}
+	return err
 }
 
 func (v *Net) setCore(c *Core) { v.core = c }

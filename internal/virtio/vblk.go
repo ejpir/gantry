@@ -80,14 +80,25 @@ func NewBlk(path string, writable bool) (*Blk, error) {
 	return b, nil
 }
 
-// Close releases the image and the write lock.
-func (b *Blk) Close() {
+// Close flushes a writable image to the host filesystem and releases the
+// image and the write lock. The guest sync at VM shutdown makes the
+// guest's view coherent; this host-side Sync makes sure the VMM's own
+// writes reached the host's storage too (review finding 5: VM stop used
+// to be a power cut for persistent disks).
+func (b *Blk) Close() error {
+	var err error
 	if b.file != nil {
-		b.file.Close()
+		if b.writable {
+			err = b.file.Sync()
+		}
+		if cerr := b.file.Close(); err == nil {
+			err = cerr
+		}
 	}
 	if b.lock != nil {
 		b.lock.Close()
 	}
+	return err
 }
 
 func (b *Blk) deviceID() uint32 { return BlkDeviceID }
@@ -118,7 +129,7 @@ func (b *Blk) configWrite(off uint64, p []byte) {}
 func (b *Blk) handleQueue(qn int) {
 	q := &b.core.queues[qn]
 	for {
-		head, chain, ok := b.core.availChain(q)
+		head, chain, ok := b.core.availChain(qn)
 		if !ok {
 			return
 		}
@@ -213,6 +224,14 @@ func (b *Blk) handleQueue(qn int) {
 		b.core.pushUsed(q, head, written)
 	}
 }
+
+// blkMaxChainBytes caps one request chain at seg_max (32) × size_max
+// (128 KiB — both advertised in the device config) plus header/status
+// slack. Anything larger is a malicious guest fishing for a
+// guest-RAM-sized host allocation (review finding 2).
+const blkMaxChainBytes = 32*(128<<10) + 4096
+
+func (b *Blk) maxChainBytes(qn int) uint64 { return blkMaxChainBytes }
 
 func (v *Blk) setCore(c *Core) { v.core = c }
 

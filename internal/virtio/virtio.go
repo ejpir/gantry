@@ -3,6 +3,7 @@ package virtio
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -185,6 +186,16 @@ func NewCoreAt(dev Device, mem *RAM, base uint64, irq int, irqLine func(int, boo
 func (c *Core) Base() uint64 { return c.base }
 func (c *Core) IRQ() int     { return c.irq }
 
+// Close releases host resources held by the device (disk images, packet
+// endpoints, forwarded sockets) at VM shutdown. Devices that hold no
+// host resources don't implement io.Closer and need no teardown.
+func (c *Core) Close() error {
+	if cl, ok := c.dev.(io.Closer); ok {
+		return cl.Close()
+	}
+	return nil
+}
+
 // ---------------- MMIO register interface (u32 accesses) --------------------
 
 func (c *Core) MMIORead(off uint64, length uint32) uint32 {
@@ -337,9 +348,37 @@ func (c *Core) descAt(q *virtq, i uint16) (desc, error) {
 	return d, nil
 }
 
+// chainLimiter is an optional Device interface: the maximum TOTAL bytes
+// one descriptor chain on queue qn may declare. Guests control descriptor
+// lengths and device handlers size their buffers from those lengths, so
+// every device caps chains at its protocol's largest legitimate message.
+// Without this a malicious guest could chain ~65 max-length descriptors
+// inside valid RAM and force a guest-RAM-sized host allocation per
+// request.
+type chainLimiter interface {
+	maxChainBytes(qn int) uint64
+}
+
+// chainLimit resolves the effective per-chain byte cap: the device's
+// protocol limit when it implements chainLimiter, else all of guest RAM.
+func (c *Core) chainLimit(qn int) uint64 {
+	if cl, ok := c.dev.(chainLimiter); ok {
+		if l := cl.maxChainBytes(qn); l > 0 {
+			return l
+		}
+	}
+	return c.mem.size()
+}
+
 // availChain pops the next available descriptor chain.
-// Returns head index and the flattened descriptor list.
-func (c *Core) availChain(q *virtq) (uint16, []desc, bool) {
+// Returns head index and the flattened descriptor list. Chains whose
+// declared total exceeds the device's protocol limit are rejected BEFORE
+// anything allocates from those lengths.
+func (c *Core) availChain(qn int) (uint16, []desc, bool) {
+	if qn < 0 || qn >= len(c.queues) {
+		return 0, nil, false
+	}
+	q := &c.queues[qn]
 	if !q.numValid() {
 		return 0, nil, false
 	}
@@ -365,6 +404,7 @@ func (c *Core) availChain(q *virtq) (uint16, []desc, bool) {
 
 	var chain []desc
 	var total uint64
+	limit := c.chainLimit(qn)
 	d, err := c.descAt(q, head)
 	if err != nil {
 		return 0, nil, false
@@ -373,8 +413,9 @@ func (c *Core) availChain(q *virtq) (uint16, []desc, bool) {
 		chain = append(chain, d)
 		total += uint64(d.len)
 		// per-chain byte cap: ~65 max-length descriptors must not sum to
-		// more than RAM (a legitimate chain never does)
-		if total > c.mem.size() {
+		// more than the device's largest legitimate protocol message (a
+		// legitimate chain never does)
+		if total > limit {
 			return 0, nil, false
 		}
 		if d.flags&vringDescFNext == 0 {

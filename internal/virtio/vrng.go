@@ -29,7 +29,7 @@ func (v *RNG) configWrite(off uint64, p []byte) {}
 func (v *RNG) handleQueue(qn int) {
 	q := &v.core.queues[qn]
 	for {
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(qn)
 		if !ok {
 			return
 		}
@@ -48,5 +48,12 @@ func (v *RNG) handleQueue(qn int) {
 		v.core.pushUsed(q, head, total)
 	}
 }
+
+// rngMaxChainBytes caps one entropy request. Legitimate hwrng reads are
+// a few bytes to a page; 1 MiB is generous but keeps a hostile guest
+// from declaring guest-RAM-sized buffers (review finding 2).
+const rngMaxChainBytes = 1 << 20
+
+func (v *RNG) maxChainBytes(qn int) uint64 { return rngMaxChainBytes }
 
 func (v *RNG) setCore(c *Core) { v.core = c }

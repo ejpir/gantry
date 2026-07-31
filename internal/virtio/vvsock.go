@@ -103,7 +103,8 @@ type Vsock struct {
 	forwardDir   string
 	dial         func(port uint32) (net.Conn, error)
 	conns        map[uint64]*vsockConn
-	pending      []vsockPkt // outbound FIFO (control + data)
+	pending      []vsockPkt     // outbound FIFO (control + data)
+	listeners    []net.Listener // AddListen sockets (closed at VM teardown)
 	core         *Core
 	verboseLog   bool
 	nextHostPort uint32
@@ -135,6 +136,7 @@ func (v *Vsock) AddListen(guestPort uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	v.listeners = append(v.listeners, ln)
 	fmt.Printf("[vsock] host->guest listen port %d at %s\n", guestPort, path)
 	go func() {
 		for {
@@ -213,7 +215,7 @@ func (v *Vsock) handleQueue(qn int) {
 func (v *Vsock) handleTx() {
 	q := &v.core.queues[vsockQueueTx]
 	for {
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(vsockQueueTx)
 		if !ok {
 			return
 		}
@@ -452,7 +454,7 @@ func (v *Vsock) tryFlush() {
 				}
 			}
 		}
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(vsockQueueRx)
 		if !ok {
 			v.logf("tryFlush: %d pending, no rx buffers", len(v.pending))
 			return // no rx buffers posted yet
@@ -490,6 +492,36 @@ func (v *Vsock) tryFlush() {
 		v.core.pushUsed(q, head, total)
 		v.pending = v.pending[1:]
 	}
+}
+
+// vsockMaxChainBytes caps one packet chain at the 44-byte header plus
+// the receive buffer credit we grant peers (vsockBufAlloc) plus slack.
+// A guest declaring more is fishing for a guest-RAM-sized host
+// allocation (review finding 2).
+const vsockMaxChainBytes = vsockBufAlloc + vsockHdrLen + 1024
+
+func (v *Vsock) maxChainBytes(qn int) uint64 { return vsockMaxChainBytes }
+
+// Close tears down the host-originated listeners and every forwarded
+// connection (VM teardown; see Machine.Close). Connection teardown
+// mirrors reset(): closed-flag first so pumpOut/closeConn can't
+// double-close c.done.
+func (v *Vsock) Close() error {
+	for _, l := range v.listeners {
+		l.Close()
+	}
+	if v.core == nil {
+		return nil
+	}
+	v.core.mu.Lock()
+	for k, c := range v.conns {
+		c.closed = true
+		c.nc.Close()
+		close(c.done)
+		delete(v.conns, k)
+	}
+	v.core.mu.Unlock()
+	return nil
 }
 
 func (v *Vsock) setCore(c *Core) { v.core = c }

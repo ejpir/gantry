@@ -62,7 +62,83 @@ func TestGiantDescriptorRejected(t *testing.T) {
 	availPush(mem, 0, 0)
 	core.MMIOWrite(0x050, 0) // notify: chain must be rejected, no 4 GiB alloc
 
-	if _, _, ok := core.availChain(&core.queues[0]); ok {
+	if _, _, ok := core.availChain(0); ok {
 		t.Fatal("oversized descriptor chain accepted")
+	}
+}
+
+// Per-device protocol limits (chainLimiter): every device caps a chain's
+// declared total far below guest RAM, so a hostile guest cannot size host
+// allocations with descriptor lengths (review finding 2).
+func TestDeviceChainLimitsImplemented(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(img, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blk, err := NewBlk(img, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsDev, err := NewFS("limit", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	devs := map[string]Device{
+		"blk":   blk,
+		"net":   &Net{},
+		"vsock": NewVsock(3, t.TempDir()),
+		"fs":    fsDev,
+		"rng":   NewRNG(),
+		"rtc":   NewRTC(),
+	}
+	for name, dev := range devs {
+		cl, ok := dev.(chainLimiter)
+		if !ok {
+			t.Errorf("%s does not implement chainLimiter", name)
+			continue
+		}
+		l := cl.maxChainBytes(0)
+		if l == 0 || l > 8<<20 {
+			t.Errorf("%s chain limit %d out of sane range (0, 8 MiB]", name, l)
+		}
+	}
+}
+
+// A chain that stays inside guest RAM descriptor-by-descriptor but exceeds
+// the device's protocol limit must be rejected before any buffer is sized
+// from it. (8 MiB of fake RAM so the chain can legally exceed blk's
+// 4 MiB cap.)
+func TestChainExceedingDeviceLimitRejected(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "disk.img")
+	if err := os.WriteFile(img, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blk, err := NewBlk(img, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ram := make([]byte, 8<<20)
+	mem := NewRAM(ram, ramBase)
+	irqs := &irqRec{raised: map[int]bool{}}
+	core := NewCoreAt(blk, mem, MMIOBaseArm64, MMIOIRQArm64, irqs.line, "blk")
+
+	setupQueue(mem, core, 0, 8)
+	// two 3 MiB descriptors: each valid RAM, total 6 MiB > blkMaxChainBytes
+	putDesc(mem, 0, 0, ramBase+0x100000, 3<<20, vringDescFNext, 1)
+	putDesc(mem, 0, 1, ramBase+0x400000, 3<<20, vringDescFWrite, 0)
+	availPush(mem, 0, 0)
+
+	if _, _, ok := core.availChain(0); ok {
+		t.Fatal("chain exceeding blk protocol limit accepted")
+	}
+	// the notify path must drop it without allocating its declared size
+	core.MMIOWrite(0x050, 0)
+
+	// a chain under the limit still works
+	putDesc(mem, 0, 2, ramBase+0x100000, 4096, vringDescFNext, 3)
+	putDesc(mem, 0, 3, ramBase+0x200000, 4096, vringDescFWrite, 0)
+	availPush(mem, 0, 2)
+	if _, chain, ok := core.availChain(0); !ok || len(chain) != 2 {
+		t.Fatalf("legitimate chain rejected: ok=%v len=%d", ok, len(chain))
 	}
 }
