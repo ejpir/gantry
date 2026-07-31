@@ -252,6 +252,17 @@ agent cannot send them anywhere.
 // ---------------- gantry daemon <name> (hidden, foreground) -----------------
 
 func CmdDaemon(name string) int {
+	// GANTRY_BOOT_TIMING=1: stamp boot phases into daemon.log so cold-boot
+	// cost can be attributed (host setup vs. network vs. vmm.Prepare vs.
+	// the guest boot up to the vsock dial-back). See bench-boot.sh.
+	t0 := time.Now()
+	bootLog := func(phase string) {
+		if gutil.EnvOr("GANTRY_BOOT_TIMING") != "" {
+			fmt.Fprintf(os.Stderr, "boot-timing: %-28s %8d ms\n", phase, time.Since(t0).Milliseconds())
+		}
+	}
+	bootLog("daemon started")
+
 	// the secrets handshake arrives on stdin before anything else
 	secrets := readSecretsHandshake(os.Stdin)
 
@@ -294,6 +305,7 @@ func CmdDaemon(name string) int {
 		return 1
 	}
 	defer nw.Close()
+	bootLog("network up")
 	if nw.Policy != nil {
 		fmt.Fprintln(os.Stderr, "daemon: network policy:", nw.Policy.Describe())
 	}
@@ -315,12 +327,14 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
+	bootLog("machine prepared (RAM+kernel)")
 	if err := vmm.WriteShareManifest(filepath.Join(dir, "shares.json"), hostShares); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: share manifest:", err)
 	}
 
 	guestErr := make(chan error, 1)
 	go func() { guestErr <- vmm.Run(m) }()
+	bootLog("vCPUs running; guest booting")
 
 	// Hold the single dial-back connection for the VM's lifetime.
 	rpc, err := client.AcceptRPC(filepath.Join(dir, "1025.sock"))
@@ -330,6 +344,7 @@ func CmdDaemon(name string) int {
 	}
 	defer rpc.Close()
 	os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o600)
+	bootLog("guest RPC connected (READY)")
 	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
 
 	sigc := make(chan os.Signal, 1)
@@ -355,6 +370,17 @@ func CmdDaemon(name string) int {
 	select {
 	case s := <-sigc:
 		fmt.Println("daemon: signal", s, "— shutting down")
+		ln.Close() // no new broker sessions
+		// Graceful stop (review finding 5): process exit is a power cut
+		// for the guest, so flush while the RPC connection is still
+		// held — guest filesystem sync first (bounded: the guest may be
+		// wedged, and gantry stop escalates to SIGKILL), then host-side
+		// device flush/close.
+		client.SyncGuest(rpc, br.streamSock, "sb", 5*time.Second)
+		if err := m.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon: device shutdown:", err)
+		}
+		fmt.Println("daemon: shutdown complete")
 		return 0
 	case err := <-guestErr:
 		fmt.Fprintln(os.Stderr, "daemon: VM exited:", err)
@@ -730,7 +756,10 @@ func CmdStop(name string) int {
 		return 1
 	}
 	procTerminate(pid)
-	for i := 0; i < 50; i++ {
+	// Grace window: the daemon's shutdown path syncs the guest and
+	// flushes devices (bounded internally at ~5s) — give it room before
+	// escalating to a power cut (review finding 5).
+	for i := 0; i < 120; i++ {
 		if !procAlive(pid) {
 			break
 		}

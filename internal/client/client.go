@@ -48,6 +48,10 @@ type ShellOptions struct {
 	ID         string        // bundle/task id; default "shell"
 	ImgCfg     *image.Config // resolved image config (nil = defaults)
 	Secrets    []string      // NAME=value pairs, process-spec only (docs/secrets.md)
+	// ExitStatus, when set, receives the task's exit status so one-shot
+	// callers (`gantry exec -- false`) can propagate it as their own
+	// exit code instead of reporting success for a failed command.
+	ExitStatus *int
 }
 
 // ShareEntry is one entry of the VMM's shares.json (schema shared with
@@ -303,6 +307,15 @@ func init() {
 	typeurl.Register(&specs.Process{}, "types.containerd.io", "opencontainers/runtime-spec", "1", "Process")
 }
 
+// resolveArgs implements the session command precedence: explicit
+// -- CMD > image Entrypoint+Cmd > /bin/sh.
+func resolveArgs(args []string, cfg *image.Config) []string {
+	if eff := cfg.Command(args); len(eff) > 0 {
+		return eff
+	}
+	return []string{"/bin/sh"}
+}
+
 // Session runs one container session to completion over an existing ttrpc
 // connection: bundle upload, optional virtio-fs mounts, task create/start,
 // stdio relay, wait, cleanup. Callers own the connection, the terminal, and
@@ -311,11 +324,7 @@ func init() {
 // it dials once per VM lifetime).
 func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout io.Writer) error {
 	// args precedence: explicit -- CMD > image Entrypoint+Cmd > /bin/sh
-	if eff := opts.ImgCfg.Command(opts.Args); len(eff) > 0 {
-		opts.Args = eff
-	} else {
-		opts.Args = []string{"/bin/sh"}
-	}
+	opts.Args = resolveArgs(opts.Args, opts.ImgCfg)
 	if opts.ID == "" {
 		opts.ID = "shell"
 	}
@@ -680,12 +689,32 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	return werr
 }
 
+// sessionOptions builds the one-shot session. ImgCfg is propagated so
+// the image's entrypoint/cmd/env/user/workdir actually apply (they were
+// silently dropped when Shell pre-defaulted Args to /bin/sh — Session's
+// image-aware resolution never saw an empty Args); Args stay untouched
+// so Session can apply the image defaults.
+func (opts ShellOptions) sessionOptions(shares []ShareEntry) SessionOptions {
+	return SessionOptions{
+		StreamSock: opts.StreamSock,
+		Shares:     shares,
+		RW:         opts.RW,
+		Args:       opts.Args,
+		ID:         opts.ID,
+		ImgCfg:     opts.ImgCfg,
+		Secrets:    opts.Secrets,
+		ExitStatus: opts.ExitStatus,
+		// One-shot sessions go through the same stub-init + Exec path as
+		// sandbox sessions: the bundle's config.json persists inside the
+		// guest for the VM's life, so it must never carry secrets (or
+		// the image env — which was silently dropped here before).
+		ExecIntoExisting: true,
+	}
+}
+
 // Shell runs one interactive session as a one-shot client: accept the
 // guest's dial-back, own the local terminal, and delegate to Session.
 func Shell(opts ShellOptions) error {
-	if len(opts.Args) == 0 {
-		opts.Args = []string{"/bin/sh"}
-	}
 	var shares []ShareEntry
 	if opts.Share {
 		shares = LoadShares(filepath.Dir(opts.RPCSock))
@@ -700,20 +729,7 @@ func Shell(opts ShellOptions) error {
 	}
 	defer client.Close()
 
-	sess := SessionOptions{
-		StreamSock: opts.StreamSock,
-		Shares:     shares,
-		RW:         opts.RW,
-		Args:       opts.Args,
-		ID:         opts.ID,
-		ImgCfg:     opts.ImgCfg,
-		Secrets:    opts.Secrets,
-		// One-shot sessions go through the same stub-init + Exec path as
-		// sandbox sessions: the bundle's config.json persists inside the
-		// guest for the VM's life, so it must never carry secrets (or
-		// the image env — which was silently dropped here before).
-		ExecIntoExisting: true,
-	}
+	sess := opts.sessionOptions(shares)
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		old, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err == nil {
@@ -733,7 +749,55 @@ func Shell(opts ShellOptions) error {
 	sess.KillCh = killCh
 	defer kill()
 
-	return Session(client, sess, os.Stdin, os.Stdout)
+	err = Session(client, sess, os.Stdin, os.Stdout)
+	if opts.RW {
+		// Process exit is a power cut for the VM: flush the guest's
+		// writable layer while the RPC connection is still held, or the
+		// ext4 upper can be left mid-journal (review finding 5).
+		id := sess.ID
+		if id == "" {
+			id = "shell" // Session's default bundle/task id
+		}
+		SyncGuest(client, opts.StreamSock, id, 5*time.Second)
+	}
+	return err
+}
+
+// SyncGuest asks the guest to flush its filesystems — "/bin/sync" exec'd
+// inside the workload container — before the VM is torn down. This is
+// the graceful half of VM shutdown (review finding 5): without it, stop
+// is a power cut for persistent disks and a corrupt writable layer is
+// the EXPECTED failure mode. Bounded by timeout; on expiry the sync
+// process is SIGKILLed and the caller proceeds to forced termination.
+// A no-op when the workload container never ran (nothing was mounted).
+func SyncGuest(client *ttrpc.Client, streamSock, containerID string, timeout time.Duration) {
+	tc := task.NewTTRPCTaskClient(client)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	st, err := tc.State(ctx, &task.StateRequest{ID: containerID})
+	cancel()
+	if err != nil || st.Status != tasktypes.Status_RUNNING {
+		return
+	}
+	killCh := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		Session(client, SessionOptions{
+			StreamSock:       streamSock,
+			Args:             []string{"/bin/sync"},
+			ID:               containerID,
+			ExecIntoExisting: true,
+			Quiet:            true,
+			KillCh:           killCh,
+		}, strings.NewReader(""), io.Discard)
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		close(killCh) // SIGKILLs the sync exec; the caller must not wait longer
+	}
 }
 
 // RootfsMounts describes how the guest assembles the container rootfs.
