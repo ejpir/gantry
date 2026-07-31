@@ -235,6 +235,7 @@ type fakeIndexRegistry struct {
 	blobGets       int
 	headerDigest   string // when set, overrides Docker-Content-Digest on GET
 	oversizeBlobs  bool   // serve blobs larger than their descriptor
+	denyStatus     int    // when set, manifest requests get this status (proxy block)
 }
 
 func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
@@ -275,6 +276,10 @@ func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
 		p := strings.TrimPrefix(req.URL.Path, "/v2/"+r.repo+"/")
 		switch {
 		case strings.HasPrefix(p, "manifests/"):
+			if r.denyStatus != 0 {
+				http.Error(w, "proxy block page", r.denyStatus)
+				return
+			}
 			ref := strings.TrimPrefix(p, "manifests/")
 			var body, digest string
 			switch ref {
@@ -373,5 +378,83 @@ func TestBlobLargerThanDescriptor(t *testing.T) {
 	_, err := Resolve(reg.ref(), "arm64", NewStore(t.TempDir()), nil)
 	if err == nil || !strings.Contains(err.Error(), "larger than its descriptor") {
 		t.Errorf("err = %v, want a descriptor-size error", err)
+	}
+}
+
+// A registry (or filtering proxy) that ANSWERS the freshness HEAD with an
+// HTTP error — e.g. a Zscaler 403 block page — is a refusal, not an
+// outage: Resolve must fail loudly rather than silently boot the stale
+// cached image.
+func TestCacheFallbackRefusedOnHTTPError(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	st := NewStore(t.TempDir())
+
+	if _, err := Resolve(reg.ref(), "arm64", st, nil); err != nil {
+		t.Fatal(err) // populate the cache
+	}
+
+	reg.denyStatus = 403
+	_, err := Resolve(reg.ref(), "arm64", st, nil)
+	if err == nil {
+		t.Fatal("403 on the freshness HEAD fell back to the cached image")
+	}
+	if !strings.Contains(err.Error(), "403 Forbidden") {
+		t.Errorf("error hides the refusal status: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NOT used silently") {
+		t.Errorf("error does not explain the refused fallback: %v", err)
+	}
+	if !strings.Contains(err.Error(), "-image ") || !strings.Contains(err.Error(), "@sha256:") {
+		t.Errorf("error does not offer the digest-pinned workaround: %v", err)
+	}
+}
+
+// A registry that cannot be reached at all (connection refused) keeps the
+// documented offline degradation: cached image + warning.
+func TestCacheFallbackOnUnreachableRegistry(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	st := NewStore(t.TempDir())
+
+	if _, err := Resolve(reg.ref(), "arm64", st, nil); err != nil {
+		t.Fatal(err)
+	}
+	reg.srv.Close() // nothing listening anymore
+
+	var warnings []string
+	say := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+	r, err := Resolve(reg.ref(), "arm64", st, say)
+	if err != nil {
+		t.Fatalf("unreachable registry with a cached image must degrade, got: %v", err)
+	}
+	if !r.Cached {
+		t.Error("expected an offline cache hit")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "registry unreachable") {
+		t.Errorf("expected exactly one unreachable warning, got %v", warnings)
+	}
+}
+
+// A 5xx is a transient outage, not a refusal: the cached image is used
+// with a warning, same as a network error.
+func TestCacheFallbackOn5xx(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	st := NewStore(t.TempDir())
+
+	if _, err := Resolve(reg.ref(), "arm64", st, nil); err != nil {
+		t.Fatal(err)
+	}
+	reg.denyStatus = 503
+
+	var warnings []string
+	say := func(format string, a ...any) { warnings = append(warnings, fmt.Sprintf(format, a...)) }
+	r, err := Resolve(reg.ref(), "arm64", st, say)
+	if err != nil {
+		t.Fatalf("503 outage with a cached image must degrade, got: %v", err)
+	}
+	if !r.Cached {
+		t.Error("expected an offline cache hit on 503")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "registry unreachable") {
+		t.Errorf("expected one unreachable warning, got %v", warnings)
 	}
 }
