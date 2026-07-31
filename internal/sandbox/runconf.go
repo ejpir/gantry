@@ -100,7 +100,7 @@ or a plain .erofs file (default: debian-bookworm.erofs if present)`),
 		}
 		return "crun"
 	}(), "container runtime in the guest: crun | runsc (gVisor)")
-	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[,ro] (repeatable)")
+	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
 	fs.Var(f.Secrets, "secret", `inject a secret into every session: NAME (from gantry's
 environment) or NAME=@/path; repeatable. NAME=literal is refused`)
 	fs.Var(f.SecretFiles, "secret-file", "dotenv-style file of NAME=VALUE secrets (repeatable)")
@@ -229,6 +229,12 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	if cfg.RWLayer != "" {
 		cfg.RWLayer = absPath(cfg.RWLayer)
 	}
+	if cfg.NetPol != "" {
+		cfg.NetPol = absPath(cfg.NetPol)
+		if !gutil.FileExists(cfg.NetPol) {
+			return cfg, nil, fmt.Errorf("network policy file %s does not exist", cfg.NetPol)
+		}
+	}
 
 	for _, req := range []string{cfg.Kernel, cfg.Rootfs, cfg.Image} {
 		if !gutil.FileExists(req) {
@@ -250,6 +256,9 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		p, err := filepath.Abs(s.Path)
 		if err == nil {
 			cfg.Shares[i] = s.Tag + "=" + p
+			if s.CtrPath != "" {
+				cfg.Shares[i] += "@" + s.CtrPath // keep the explicit container path
+			}
 			if s.RO {
 				cfg.Shares[i] += ",ro"
 			}

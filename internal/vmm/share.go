@@ -16,7 +16,7 @@ const virtioFSTagLen = virtio.FSTagLen
 // ErrGuestReset signals a guest-initiated reboot via the reset ports.
 var ErrGuestReset = fmt.Errorf("guest requested reset via port 0xcf9/0x64")
 
-// Share is one -share TAG=PATH[,ro] command-line export.
+// Share is one -share TAG=PATH[@CTRPATH][,ro] command-line export.
 //
 // Read-only semantics are enforced where Docker enforces them for virtio-fs
 // bind mounts too: in the guest. hostctl mounts the tag with MS_RDONLY and
@@ -26,6 +26,10 @@ type Share struct {
 	Tag  string
 	Path string
 	RO   bool
+	// CtrPath overrides the container bind-mount target (default:
+	// shareCtrPath — /host or /host/<tag>). `gantry pi` uses it to land
+	// the host's ~/.pi/agent at /root/.pi/agent in the guest.
+	CtrPath string
 }
 
 // ShareManifestEntry is written to <vsockfwd>/shares.json so hostctl can
@@ -48,18 +52,28 @@ func shareCtrPath(tag string, multi bool) string {
 	return "/host/" + tag
 }
 
-// ParseShareSpec parses TAG=PATH[,ro]. The ,ro suffix is the only supported
-// option; a Windows-style drive colon in PATH is not a concern on
-// Linux/macOS hosts.
+// ParseShareSpec parses TAG=PATH[@CTRPATH][,ro]: the optional @CTRPATH
+// (an absolute container path) overrides where crun bind-mounts the
+// share; the ,ro suffix is the only other supported option. A
+// Windows-style drive colon in PATH is not a concern on Linux/macOS
+// hosts.
 func ParseShareSpec(spec string, seen map[string]bool) (Share, error) {
 	tag, path, ok := strings.Cut(spec, "=")
 	if !ok {
-		return Share{}, fmt.Errorf("want TAG=PATH[,ro]")
+		return Share{}, fmt.Errorf("want TAG=PATH[@CTRPATH][,ro]")
 	}
 	var ro bool
 	if strings.HasSuffix(path, ",ro") {
 		ro = true
 		path = strings.TrimSuffix(path, ",ro")
+	}
+	var ctr string
+	if i := strings.LastIndex(path, "@"); i >= 0 {
+		ctr = path[i+1:]
+		path = path[:i]
+		if !strings.HasPrefix(ctr, "/") {
+			return Share{}, fmt.Errorf("container path after @ must be absolute (got %q)", ctr)
+		}
 	}
 	switch {
 	case !validShareTag(tag):
@@ -69,19 +83,23 @@ func ParseShareSpec(spec string, seen map[string]bool) (Share, error) {
 	case seen[tag]:
 		return Share{}, fmt.Errorf("duplicate tag %q", tag)
 	}
-	return Share{Tag: tag, Path: path, RO: ro}, nil
+	return Share{Tag: tag, Path: path, RO: ro, CtrPath: ctr}, nil
 }
 
 func buildShareManifest(shares []Share) ShareManifest {
 	m := ShareManifest{Shares: []ShareManifestEntry{}}
 	multi := len(shares) > 1
 	for _, s := range shares {
+		ctr := s.CtrPath
+		if ctr == "" {
+			ctr = shareCtrPath(s.Tag, multi)
+		}
 		m.Shares = append(m.Shares, ShareManifestEntry{
 			Tag:     s.Tag,
 			Path:    s.Path,
 			RO:      s.RO,
 			VMPath:  shareVMPath(s.Tag),
-			CtrPath: shareCtrPath(s.Tag, multi),
+			CtrPath: ctr,
 		})
 	}
 	return m

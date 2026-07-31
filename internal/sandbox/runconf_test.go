@@ -116,3 +116,45 @@ func TestValidateSandboxName(t *testing.T) {
 		}
 	}
 }
+
+func TestPiSandboxName(t *testing.T) {
+	for _, tc := range []struct{ cwd, want string }{
+		{"/Users/x/repos/minivm", "pi-minivm"},
+		{"/Users/x/repos/my project (v2)", "pi-my-project--v2-"},
+		{"/", "pi--"},
+	} {
+		if got := piSandboxName(tc.cwd); got != tc.want {
+			t.Errorf("piSandboxName(%q) = %q, want %q", tc.cwd, got, tc.want)
+		}
+		if err := ValidateSandboxName(piSandboxName(tc.cwd)); err != nil {
+			t.Errorf("piSandboxName(%q) invalid: %v", tc.cwd, err)
+		}
+	}
+	long := "/" + string(make([]byte, 200))
+	if n := piSandboxName(long); len(n) > 64 {
+		t.Errorf("name length %d > 64", len(n))
+	}
+}
+
+// Share specs are absolutized in Resolve — the explicit @CTRPATH must
+// survive the normalization (it was silently dropped, which is why
+// `gantry pi` mounted the project at /host/ws instead of /workspace).
+func TestResolveShareCtrPathPreserved(t *testing.T) {
+	cfg, _, err := resolveSandbox(t, "-share", "ws=/tmp@/workspace", "-share", "code=/tmp@/src,ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shares, err := cfg.ParsedShares()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shares) != 2 {
+		t.Fatalf("shares = %+v", shares)
+	}
+	if shares[0].CtrPath != "/workspace" {
+		t.Errorf("ws CtrPath = %q, want /workspace", shares[0].CtrPath)
+	}
+	if shares[1].CtrPath != "/src" || !shares[1].RO {
+		t.Errorf("code = %+v, want CtrPath=/src ro", shares[1])
+	}
+}
