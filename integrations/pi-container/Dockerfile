@@ -9,7 +9,7 @@
 ARG BASE=nn-docker-remote.artifactory.insim.biz/library/node:24-slim
 # Egress proxy for npm ci during the build (dev sandbox:
 # http://gateway.docker.internal:3128; direct-egress hosts: leave empty).
-ARG PROXY=""
+ARG PROXY="http://192.168.1.1:3128"
 
 # ---------------------------------------------------------------------------
 # build stage: npm ci + full monorepo build

@@ -5,6 +5,7 @@ package vmm
 
 import (
 	"fmt"
+	"gantry/internal/gutil"
 	"net"
 	"runtime"
 	"strings"
@@ -55,6 +56,20 @@ func DefaultGvproxy() string {
 	return s
 }
 
+// bootLogLevel caps kernel printk at KERN_WARNING on the console:
+// every console byte crosses an MMIO exit round-trip through the VMM,
+// and the ~10 KB of a verbose boot costs tens of ms of the in-guest
+// boot time. Warnings and errors still land in console.log (so boot
+// failures stay diagnosable), and vminitd's own stdout is unaffected
+// (it writes /dev/console directly). GANTRY_DEBUG_BOOT=1 restores the
+// full spew.
+func bootLogLevel() string {
+	if gutil.EnvOr("GANTRY_DEBUG_BOOT") != "" {
+		return ""
+	}
+	return " loglevel=4"
+}
+
 // defaultCmdline mirrors nerdbox's libkrun instance.go (PL011 on arm64,
 // 16550 on x86 replaces virtio-console). Arguments after "--" configure
 // vminitd.
@@ -66,10 +81,11 @@ func DefaultCmdline(arch, rootfsPath, initrdPath string, guestCID uint64, netEnd
 	switch {
 	case rootfsPath != "" && initrdPath != "":
 		// combo: kernel runs our init from the initramfs; it mounts the
-		// attached rootfs at /mnt (no root= on purpose)
+		// attached rootfs at /mnt (no root= on purpose). Debug shells:
+		// keep the full boot spew.
 		return console + " panic=-1 nokaslr"
 	case rootfsPath != "":
-		cmdline := fmt.Sprintf("%s root=/dev/vda rootfstype=erofs ro nokaslr init=/sbin/vminitd -- -vsock-rpc-port=1025 -vsock-stream-port=1026 -vsock-cid=%d", console, guestCID)
+		cmdline := fmt.Sprintf("%s%s root=/dev/vda rootfstype=erofs ro nokaslr init=/sbin/vminitd -- -vsock-rpc-port=1025 -vsock-stream-port=1026 -vsock-cid=%d", console, bootLogLevel(), guestCID)
 		if netEndpoint != "" {
 			cmdline += fmt.Sprintf(" -network=mac=%s", net.HardwareAddr(netMAC[:]))
 			if netDHCP {
