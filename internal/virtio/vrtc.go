@@ -52,7 +52,7 @@ func (v *RTC) configWrite(off uint64, p []byte) {}
 func (v *RTC) handleQueue(qn int) {
 	q := &v.core.queues[qn]
 	for {
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(qn)
 		if !ok {
 			return
 		}
@@ -122,5 +122,12 @@ func (v *RTC) dispatch(msgType uint16, req []byte, resp *[RTCRespLen]byte) {
 		resp[0] = RTCSEOPNOTSUPP
 	}
 }
+
+// rtcMaxChainBytes caps one request chain; every legitimate RTC message
+// is 16 bytes (review finding 2: no device may size host allocations
+// from unchecked guest lengths).
+const rtcMaxChainBytes = 4096
+
+func (v *RTC) maxChainBytes(qn int) uint64 { return rtcMaxChainBytes }
 
 func (v *RTC) setCore(c *Core) { v.core = c }
