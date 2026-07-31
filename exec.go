@@ -156,6 +156,7 @@ agent cannot send them anywhere.
 	go func() { guestErr <- vmm.Run(m) }()
 
 	// --- session ------------------------------------------------------------
+	var taskStatus int // the command's exit status, propagated to ours
 	shellErr := make(chan error, 1)
 	go func() {
 		shellErr <- client.Shell(client.ShellOptions{
@@ -166,15 +167,28 @@ agent cannot send them anywhere.
 			Args:       args,
 			ImgCfg:     cfg.ImageCfg,
 			Secrets:    secret.Env(secrets),
+			ExitStatus: &taskStatus,
 		})
 	}()
 
 	select {
 	case err := <-shellErr:
 		fmt.Println("gantry exec: shutting down the VM")
+		// The session already synced the guest (client.Shell, RW mode);
+		// flush/close the devices host-side too — process exit alone is
+		// a power cut that leaves flocks held and writes unflushed
+		// (review finding 5).
+		if cerr := m.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "gantry exec: device shutdown: %v\n", cerr)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gantry exec: %v\n", err)
 			return 1
+		}
+		if taskStatus != 0 {
+			// `gantry exec -- false` must fail: the task's exit status is
+			// the command's result, not a transport detail.
+			return taskStatus
 		}
 	case gerr := <-guestErr:
 		keepTmp = true

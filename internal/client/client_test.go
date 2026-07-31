@@ -178,3 +178,69 @@ func TestConfigJSONValidAndImageDriven(t *testing.T) {
 		t.Errorf("env = %v", v.Process.Env)
 	}
 }
+
+// One-shot command resolution: explicit -- CMD beats the image
+// Entrypoint+Cmd, which beats the /bin/sh fallback. (Regression: Shell
+// pre-defaulted Args to /bin/sh, so the image's entrypoint/cmd never
+// applied to `gantry exec`.)
+func TestResolveArgs(t *testing.T) {
+	img := &image.Config{
+		Entrypoint: []string{"/entry"},
+		Cmd:        []string{"--serve"},
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		cfg  *image.Config
+		want []string
+	}{
+		{"explicit args win", []string{"echo", "hi"}, img, []string{"echo", "hi"}},
+		{"entrypoint+cmd", nil, img, []string{"/entry", "--serve"}},
+		{"entrypoint only", nil, &image.Config{Entrypoint: []string{"/init"}}, []string{"/init"}},
+		{"cmd only", nil, &image.Config{Cmd: []string{"ls"}}, []string{"ls"}},
+		{"empty image config", nil, &image.Config{}, []string{"/bin/sh"}},
+		{"nil image config", nil, nil, []string{"/bin/sh"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveArgs(tc.args, tc.cfg)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("resolveArgs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The one-shot session must carry the image config, secrets, and the
+// exit-status sink through to Session, and must NOT pre-default Args
+// (Session resolves image defaults; see TestResolveArgs).
+func TestShellSessionOptions(t *testing.T) {
+	img := &image.Config{Entrypoint: []string{"/entry"}, WorkingDir: "/app"}
+	var status int
+	opts := ShellOptions{
+		StreamSock: "/tmp/stream.sock",
+		RW:         true,
+		ID:         "oneshot",
+		ImgCfg:     img,
+		Secrets:    []string{"TOKEN=abc"},
+		ExitStatus: &status,
+	}
+	sess := opts.sessionOptions(nil)
+	if sess.ImgCfg != img {
+		t.Error("ImgCfg dropped")
+	}
+	if len(sess.Args) != 0 {
+		t.Errorf("Args pre-defaulted to %v — image entrypoint would never apply", sess.Args)
+	}
+	if !sess.ExecIntoExisting {
+		t.Error("one-shot sessions must use the Exec path (no secrets in the bundle)")
+	}
+	if sess.ExitStatus != &status {
+		t.Error("ExitStatus sink dropped — `gantry exec -- false` would report success")
+	}
+	if len(sess.Secrets) != 1 || sess.Secrets[0] != "TOKEN=abc" {
+		t.Errorf("Secrets = %v", sess.Secrets)
+	}
+	if sess.ID != "oneshot" || sess.StreamSock != "/tmp/stream.sock" || !sess.RW {
+		t.Errorf("ID/StreamSock/RW not propagated: %+v", sess)
+	}
+}

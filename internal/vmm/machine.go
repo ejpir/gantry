@@ -161,6 +161,28 @@ type Machine struct {
 	consoleMu    sync.Mutex
 	consoleW     io.Writer
 	stdoutBuf    []byte
+	closeOnce    sync.Once
+	closeErr     error
+}
+
+// Close flushes and releases every host resource the machine's devices
+// hold: writable disk images are synced to host storage and closed
+// (releasing their flocks), packet endpoints and forwarded sockets are
+// closed, and the console buffer is flushed. It is idempotent and safe
+// to call while the backend is still running (the sandbox daemon's
+// graceful-stop path does exactly that) — in-flight device operations
+// may then fail, which is expected during teardown (review finding 5:
+// VM stop used to be a power cut that never flushed or closed anything).
+func (m *Machine) Close() error {
+	m.closeOnce.Do(func() {
+		for _, vc := range m.virtios {
+			if err := vc.Close(); err != nil && m.closeErr == nil {
+				m.closeErr = err
+			}
+		}
+		m.stdoutFlush()
+	})
+	return m.closeErr
 }
 
 // x86 virtio-mmio window: above RAM (<=3 GiB), below the APIC window at
@@ -478,12 +500,26 @@ func insertKernelArgs(cmdline, args string) string {
 // platformBackend in vm_linux.go, kvm_amd64.go, vm_darwin.go and
 // whpx_windows.go. Adding a platform means implementing backend and
 // returning it from platformBackend; nothing else in vmm is platform-aware.
+//
+// Lifecycle: the backend owns vCPU execution only. Device teardown is
+// Machine.Close — Run invokes it when the guest powers off or the
+// backend fails, and a caller that stops the VM out of band (the
+// sandbox daemon's signal path) must call it before exiting; it is
+// idempotent. Forced process termination remains the fallback after a
+// bounded graceful window (gantry stop escalates SIGTERM → SIGKILL).
 type backend interface {
 	run(m *Machine) error
 }
 
 // Run boots the prepared machine on the platform hypervisor backend.
-func Run(m *Machine) error { return platformBackend().run(m) }
+// Devices are flushed and closed (Machine.Close) before Run returns.
+func Run(m *Machine) error {
+	err := platformBackend().run(m)
+	if cerr := m.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
 
 // PSTATE at boot: EL1h (0b0101), all exceptions masked (D A I F = 0x3c0).
 const pstateEL1hMask = 0x3c5
