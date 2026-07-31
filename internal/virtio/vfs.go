@@ -24,12 +24,14 @@ import (
 // the guest, and crun bind-mounts the guest path into the container.
 //
 // TRUST BOUNDARY: the request virtqueue is written by the guest, not by the
-// Linux FUSE client, so the vendored go-fuse carries two gantry patches —
+// Linux FUSE client, so the vendored go-fuse carries three gantry patches —
 // validGuestName (bridge.go: rejects ".", "..", "/", NUL in names) and
 // LoopbackNode.securePath (loopback.go: refuses paths that escape the share
-// root through an intermediate symlink swap). Re-vendoring upstream go-fuse
-// must re-apply both; TestVirtioFSShareEscape/TestVirtioFSSymlinkEscapeBlocked
-// fail without them. `,ro` is enforced here too (roFuseHandler).
+// root through an intermediate symlink swap), plus the exported opcode
+// aliases (opcode_gantry.go) that keep the read-only gate below on the
+// shared opcode definitions. Re-vendoring upstream go-fuse must re-apply
+// all three; TestVirtioFSShareEscape/TestVirtioFSSymlinkEscapeBlocked
+// fail without the first two. `,ro` is enforced here too (roFuseHandler).
 const (
 	virtioFSDeviceID = 26
 	virtioFSHiprioQ  = 0
@@ -130,29 +132,61 @@ func (h *roFuseHandler) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	return h.inner.HandleRequest(in, out)
 }
 
-// FUSE opcodes that mutate host state (linux/fuse.h). On a `,ro` share the
-// host rejects them — the guest-side MS_RDONLY mount is only a convention,
-// and a sandboxed guest is precisely what `,ro` is meant to defend against.
-var roMutatingOps = map[uint32]bool{
-	4:  true, // SETATTR
-	6:  true, // SYMLINK
-	8:  true, // MKNOD
-	9:  true, // MKDIR
-	10: true, // UNLINK
-	11: true, // RMDIR
-	12: true, // RENAME
-	13: true, // LINK
-	16: true, // WRITE
-	20: true, // SETXATTR
-	23: true, // REMOVEXATTR
-	35: true, // CREATE
-	39: true, // IOCTL
-	43: true, // FALLOCATE
-	45: true, // RENAME2
-	47: true, // COPY_FILE_RANGE
+// roAllowedOps is the DEFAULT-DENY allowlist for a `,ro` share: opcodes
+// known to be read-only pass; every other opcode — including mutation
+// opcodes added to the protocol after this list was written — gets EROFS.
+// (This replaced a mutation blocklist whose hand-copied numbers were
+// wrong for SETXATTR/REMOVEXATTR: those mutations reached the loopback
+// while harmless FSYNC/LISTXATTR were denied.) Values come from the
+// vendored go-fuse opcode aliases (third_party/go-fuse/fuse/
+// opcode_gantry.go), so drift against the shared definitions is a
+// compile error, not a silent hole.
+var roAllowedOps = map[uint32]bool{
+	fuse.OpLookup:      true,
+	fuse.OpForget:      true,
+	fuse.OpGetattr:     true,
+	fuse.OpReadlink:    true,
+	fuse.OpOpen:        true, // flags gated separately below
+	fuse.OpRead:        true,
+	fuse.OpStatfs:      true,
+	fuse.OpRelease:     true,
+	fuse.OpFsync:       true,
+	fuse.OpGetxattr:    true,
+	fuse.OpListxattr:   true,
+	fuse.OpFlush:       true,
+	fuse.OpInit:        true,
+	fuse.OpOpendir:     true,
+	fuse.OpReaddir:     true,
+	fuse.OpReleasedir:  true,
+	fuse.OpFsyncdir:    true,
+	fuse.OpGetlk:       true,
+	fuse.OpAccess:      true,
+	fuse.OpInterrupt:   true,
+	fuse.OpBmap:        true,
+	fuse.OpDestroy:     true,
+	fuse.OpPoll:        true,
+	fuse.OpNotifyReply: true,
+	fuse.OpBatchForget: true,
+	fuse.OpReaddirplus: true,
+	fuse.OpLseek:       true,
+	fuse.OpStatx:       true,
 }
 
-const fuseOpOpen = 14
+// Linux open(2) flag values as they appear on the FUSE wire. These are
+// the GUEST's Linux constants regardless of the host OS — deliberately
+// NOT the syscall package's, which differ on macOS and Windows.
+const (
+	linuxOAccmode = 0x3      // O_WRONLY|O_RDWR (O_RDONLY == 0)
+	linuxOCreat   = 0x40     // 0100
+	linuxOTrunc   = 0x200    // 01000
+	linuxOAppend  = 0x400    // 02000
+	linuxOTmpfile = 0x410000 // __O_TMPFILE | O_DIRECTORY
+
+	// openWriteFlags is every open flag that can mutate host state even
+	// with the access mode set to O_RDONLY — O_RDONLY|O_TRUNC truncated
+	// host files through a "read-only" share before this mask existed.
+	openWriteFlags = linuxOAccmode | linuxOCreat | linuxOTrunc | linuxOAppend | linuxOTmpfile
+)
 
 // roGate inspects a raw FUSE request and returns EROFS for operations that
 // would mutate the host share. The header is 40 bytes (opcode @4); OPEN's
@@ -170,12 +204,12 @@ func roGate(in [][]byte) fuse.Status {
 		return fuse.OK // malformed; let the protocol server complain
 	}
 	op := binary.LittleEndian.Uint32(hdr[4:8])
-	if roMutatingOps[op] {
+	if !roAllowedOps[op] {
 		return fuse.EROFS
 	}
-	if op == fuseOpOpen && n >= 44 {
+	if op == fuse.OpOpen && n >= 44 {
 		flags := binary.LittleEndian.Uint32(hdr[40:44])
-		if flags&0x3 != 0 { // O_WRONLY / O_RDWR (O_RDONLY == 0)
+		if flags&openWriteFlags != 0 {
 			return fuse.EROFS
 		}
 	}
@@ -212,7 +246,7 @@ func (v *FS) handleQueue(qn int) {
 	}
 	q := &v.core.queues[qn]
 	for {
-		head, chain, ok := v.core.availChain(q)
+		head, chain, ok := v.core.availChain(qn)
 		if !ok {
 			return
 		}
@@ -304,6 +338,15 @@ func (v *FS) writeProtocolError(in, out [][]byte, status fuse.Status) int {
 	}
 	return 16
 }
+
+// fsMaxChainBytes caps one FUSE message: the 40-byte header plus the
+// negotiated MaxWrite (128 KiB), with generous headroom for
+// READDIRPLUS/read reply buffers from guests with 16K/64K pages. A
+// guest declaring more is fishing for a guest-RAM-sized host allocation
+// (review finding 2).
+const fsMaxChainBytes = 256 << 10
+
+func (v *FS) maxChainBytes(qn int) uint64 { return fsMaxChainBytes }
 
 func (v *FS) setCore(c *Core) { v.core = c }
 

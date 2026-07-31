@@ -258,3 +258,122 @@ func TestVirtioFSReadOnlyShare(t *testing.T) {
 		t.Fatal("ro share content modified")
 	}
 }
+
+// The read-only gate is default-deny with the vendored opcode definitions:
+// every mutation opcode (xattr writes included — the original bug used
+// FSYNC/LISTXATTR's numbers for SETXATTR/REMOVEXATTR) and every
+// write-affecting OPEN flag (O_TRUNC passed before) must get EROFS,
+// while harmless read-only requests keep working.
+func TestVirtioFSReadOnlyGate(t *testing.T) {
+	share := t.TempDir()
+	if err := os.WriteFile(filepath.Join(share, "hello.txt"), []byte("in-share\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := NewFS("ro-gate", share, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fuseInitDevice(t, dev)
+
+	const erofs = -30 // Linux EROFS on the wire
+
+	hello, errno := lookup(t, dev, 2, 1, "hello.txt")
+	if errno != 0 {
+		t.Fatalf("LOOKUP errno %d", errno)
+	}
+
+	// outSizes must match the op's reply iov exactly (the inner server
+	// validates the shape); denied ops never reach that validation.
+	gate := func(unique uint64, op uint32, nodeid uint64, outSizes []int, payload ...[]byte) int32 {
+		payloadLen := 0
+		for _, p := range payload {
+			payloadLen += len(p)
+		}
+		in := [][]byte{fuseInHeader(op, unique, nodeid, payloadLen)}
+		in = append(in, payload...)
+		_, errno, _ := req(t, dev, in, outSizes...)
+		return errno
+	}
+
+	// Every mutation opcode is rejected — including SETXATTR (21) and
+	// REMOVEXATTR (24), which the old blocklist mis-numbered as 20/23.
+	mutations := map[string]uint32{
+		"SETATTR": 4, "SYMLINK": 6, "MKNOD": 8, "MKDIR": 9,
+		"UNLINK": 10, "RMDIR": 11, "RENAME": 12, "LINK": 13,
+		"WRITE": 16, "SETXATTR": 21, "REMOVEXATTR": 24,
+		"SETLK": 32, "SETLKW": 33, "CREATE": 35, "IOCTL": 39,
+		"FALLOCATE": 43, "RENAME2": 45, "COPY_FILE_RANGE": 47,
+		"TMPFILE": 51,
+	}
+	uniq := uint64(100)
+	for name, op := range mutations {
+		uniq++
+		body := make([]byte, 64)
+		if errno := gate(uniq, op, hello, []int{16, 256}, body); errno != erofs {
+			t.Errorf("%s (%d) on ro share errno %d, want EROFS", name, op, errno)
+		}
+	}
+
+	// Unknown / future opcodes are denied by default.
+	if errno := gate(999, 999, 1, []int{16, 256}, make([]byte, 16)); errno != erofs {
+		t.Errorf("unknown opcode 999 errno %d, want EROFS", errno)
+	}
+
+	// Read-only opcodes the old table mis-classified as mutations must
+	// reach the filesystem again (they may fail for other reasons —
+	// unknown file handle here — but never with EROFS). Bodies are sized
+	// to the wire structs so the inner server's strict parser accepts
+	// them: fuse_fsync_in = 16, fuse_getxattr_in = 8 (+name).
+	readOnly := map[string]struct {
+		op   uint32
+		body []byte
+		outs []int
+	}{
+		"FSYNC":     {20, make([]byte, 16), []int{16}},
+		"LISTXATTR": {23, make([]byte, 8), []int{16, 8}},
+		"GETXATTR":  {22, append(make([]byte, 8), []byte("user.x\x00")...), []int{16, 8}},
+	}
+	for name, rc := range readOnly {
+		uniq++
+		if errno := gate(uniq, rc.op, hello, rc.outs, rc.body); errno == erofs {
+			t.Errorf("%s (%d) denied on ro share — gate over-blocking", name, rc.op)
+		}
+	}
+
+	// OPEN flag gate: every write-affecting flag is rejected even with
+	// the O_RDONLY access mode (O_RDONLY|O_TRUNC truncated host files
+	// before this existed).
+	writeFlags := map[string]uint32{
+		"O_WRONLY":         1,
+		"O_RDWR":           2,
+		"O_RDONLY|O_CREAT": 0x40,
+		"O_RDONLY|O_TRUNC": 0x200,
+		"O_RDONLY|O_APPEN": 0x400,
+		"O_TMPFILE|O_RDWR": 0x410002,
+	}
+	for name, flags := range writeFlags {
+		uniq++
+		openIn := make([]byte, 8)
+		binary.LittleEndian.PutUint32(openIn[0:4], flags)
+		if _, errno, _ := req(t, dev,
+			[][]byte{fuseInHeader(fuseOpen, uniq, hello, len(openIn)), openIn},
+			16, 16); errno != erofs {
+			t.Errorf("OPEN %s on ro share errno %d, want EROFS", name, errno)
+		}
+	}
+
+	// Plain O_RDONLY OPEN (with harmless flags) still works.
+	uniq++
+	openIn := make([]byte, 8)
+	binary.LittleEndian.PutUint32(openIn[0:4], 0x8000) // O_LARGEFILE
+	if _, errno, _ := req(t, dev,
+		[][]byte{fuseInHeader(fuseOpen, uniq, hello, len(openIn)), openIn},
+		16, 16); errno != 0 {
+		t.Fatalf("O_RDONLY OPEN on ro share errno %d", errno)
+	}
+
+	// and the file really is untouched
+	if b, _ := os.ReadFile(filepath.Join(share, "hello.txt")); string(b) != "in-share\n" {
+		t.Fatal("ro share content modified")
+	}
+}
