@@ -31,8 +31,24 @@ fi
 cd "$WORK"
 [ -f .config ] || {
   echo "== extracting config from $STOCK"
-  scripts/extract-ikconfig "$OLDPWD/$STOCK" > .config
+  # Not scripts/extract-ikconfig: its GNU-grep regexes fail on macOS's
+  # BSD grep and leave a truncated .config that builds a defconfig
+  # kernel (no EROFS — the guest can't mount its rootfs).
+  python3 - "$OLDPWD/$STOCK" > .config <<'PYEOF'
+import sys, gzip
+data = open(sys.argv[1], 'rb').read()
+i, j = data.find(b'IKCFG_ST'), data.find(b'IKCFG_ED')
+if i < 0 or j < 0:
+    sys.exit('no embedded config (CONFIG_IKCONFIG) in ' + sys.argv[1])
+g = data.find(b'\x1f\x8b', i + 8, i + 24)
+sys.stdout.buffer.write(gzip.decompress(data[g:j]))
+PYEOF
 }
+if ! grep -q "^CONFIG_EROFS_FS=y" .config; then
+  echo "config extraction failed (.config lacks EROFS_FS)" >&2
+  echo "remove $WORK/.config and re-run" >&2
+  exit 1
+fi
 scripts/config --disable ARM64_16K_PAGES --disable ARM64_64K_PAGES --enable ARM64_4K_PAGES
 yes "" | make olddefconfig >/dev/null
 grep -q "^CONFIG_ARM64_4K_PAGES=y" .config || { echo "config flip failed" >&2; exit 1; }

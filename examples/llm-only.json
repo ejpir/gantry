@@ -1,0 +1,20 @@
+{
+  "default": "deny",
+  "allowDomains": [
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+    "registry.npmjs.org",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "objects.githubusercontent.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "registry-1.docker.io",
+    "auth.docker.io",
+    "production.cloudflare.docker.com"
+  ]
+}
