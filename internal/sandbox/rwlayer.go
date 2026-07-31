@@ -52,9 +52,15 @@ func rwlayerPairingPath(layer string) string { return layer + ".image" }
 func defaultRWLayer(name, imageID string) (string, []string, error) {
 	p := defaultRWLayerPath(name)
 	if gutil.FileExists(p) {
+		// Layers hold persistent filesystem data: 0600/0700 now, but
+		// older gantry versions created them 0644/0755 — tighten on use
+		// (review finding 6). Best-effort.
+		os.Chmod(rwlayersRoot(), 0o700)
+		os.Chmod(p, 0o600)
+		os.Chmod(rwlayerPairingPath(p), 0o600)
 		return p, nil, nil
 	}
-	if err := os.MkdirAll(rwlayersRoot(), 0o755); err != nil {
+	if err := os.MkdirAll(rwlayersRoot(), 0o700); err != nil {
 		return "", nil, err
 	}
 	warns, err := createRWLayer(p)
@@ -75,7 +81,7 @@ func createRWLayer(path string) ([]string, error) {
 	mkfs, err1 := exec.LookPath("mkfs.ext4")
 	debugfs, err2 := exec.LookPath("debugfs")
 	if err1 == nil && err2 == nil {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
 			return nil, err
 		}
@@ -111,7 +117,7 @@ func inflateBlankRWLayer(path string) error {
 		return err
 	}
 	defer gz.Close()
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o644)
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -190,7 +196,7 @@ func writeRWLayerPairing(layer, imageID string) {
 	b, _ := json.Marshal(struct {
 		Image string `json:"image"`
 	}{imageID})
-	os.WriteFile(rwlayerPairingPath(layer), b, 0o644)
+	os.WriteFile(rwlayerPairingPath(layer), b, 0o600)
 }
 
 // rwlayerHealthWarning reads the ext4 superblock and reports recorded

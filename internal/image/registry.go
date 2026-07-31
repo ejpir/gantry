@@ -69,8 +69,17 @@ func newRegistryClient(reg string, cred *auth.Credential, logf func(string, ...a
 		debug:  gutil.EnvOr("GANTRY_DEBUG_REGISTRY") != "",
 		tokens: map[string]*bearerToken{},
 	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// No keep-alives. A pull is a handful of requests, and an idle
+	// persistent connection behind a MITM/filtering proxy invites
+	// injected bytes — observed in the field as the proxy's HTML block
+	// page arriving late on an idle channel ("unsolicited response
+	// received on idle HTTP channel") after it had already answered a
+	// request with a refusal.
+	transport.DisableKeepAlives = true
 	c.hc = &http.Client{
-		Timeout: 5 * time.Minute, // blob downloads can be slow
+		Transport: transport,
+		Timeout:   5 * time.Minute, // blob downloads can be slow
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Strip Authorization when the redirect leaves the origin
 			// authority (host AND port): blob GETs redirect to
@@ -303,6 +312,23 @@ func (c *registryClient) fetchManifest(ctx context.Context, repo, reference stri
 	return b, digest, nil
 }
 
+// statusError is a definitive HTTP answer to a registry request: the
+// registry (or a middlebox) ANSWERED, so callers must not blindly file
+// it under "registry unreachable" — a 403 from a filtering proxy is a
+// policy refusal, not a network outage. Callers decide by code class:
+// 4xx is a refusal (won't heal by itself), 5xx is a transient outage.
+type statusError struct {
+	op        string
+	repo      string
+	reference string
+	status    string
+	code      int
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("%s manifest %s@%s: %s", e.op, e.repo, e.reference, e.status)
+}
+
 // headManifest returns the registry's current digest for a reference
 // without downloading the manifest (Docker-Content-Digest on a HEAD).
 func (c *registryClient) headManifest(ctx context.Context, repo, reference string) (string, error) {
@@ -315,7 +341,7 @@ func (c *registryClient) headManifest(ctx context.Context, repo, reference strin
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HEAD manifest %s@%s: %s", repo, reference, resp.Status)
+		return "", &statusError{op: "HEAD", repo: repo, reference: reference, status: resp.Status, code: resp.StatusCode}
 	}
 	return resp.Header.Get("Docker-Content-Digest"), nil
 }

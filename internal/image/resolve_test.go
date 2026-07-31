@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	erofs "github.com/erofs/go-erofs"
@@ -186,4 +187,95 @@ func TestResolveDockerSave(t *testing.T) {
 
 func readAllFile(fsys fs.FS, name string) ([]byte, error) {
 	return fs.ReadFile(fsys, name)
+}
+
+// An explicit path that doesn't exist must produce a clear "not found",
+// never a registry pull from a mangled hostname ("./pi-agent.tar" used
+// to become a pull from a registry literally named ".").
+func TestResolveMissingPathIsClearError(t *testing.T) {
+	for _, ref := range []string{"./pi-agent.tar", "/tmp/nope.tar", "~/x.oci", "images/foo.tar"} {
+		_, err := Resolve(ref, "arm64", NewStore(t.TempDir()), nil)
+		if err == nil || !strings.Contains(err.Error(), "image file not found") {
+			t.Errorf("Resolve(%q): err = %v, want image-file-not-found", ref, err)
+		}
+	}
+}
+
+// docker save tars from podman / older docker name layers <digest>.tar
+// at the top level; containerd-backed docker uses OCI-style
+// blobs/sha256/<digest> with no suffix. Both must resolve — the loader
+// used to accept only <id>/layer.tar and reject these with
+// "is not in the tar".
+func TestResolveDockerSaveNamingVariants(t *testing.T) {
+	layerTar := func(content string) []byte {
+		var lb bytes.Buffer
+		lw := tar.NewWriter(&lb)
+		lw.WriteHeader(&tar.Header{Name: "hello.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))})
+		lw.Write([]byte(content))
+		lw.Close()
+		return lb.Bytes()
+	}
+	cfg := `{"architecture":"amd64","os":"linux","config":{"Cmd":["/bin/app"]}}`
+
+	for _, tc := range []struct {
+		name    string
+		members map[string][]byte // member name -> content (manifest.json added by the test)
+		cfgName string
+		layer   string
+	}{
+		{
+			name: "podman top-level <digest>.tar",
+			members: map[string][]byte{
+				"12cdff3b.tar": layerTar("hello"),
+				"ab90.json":    []byte(cfg),
+			},
+			cfgName: "ab90.json",
+			layer:   "12cdff3b.tar",
+		},
+		{
+			name: "containerd blobs/sha256/<digest>",
+			members: map[string][]byte{
+				"blobs/sha256/1111": layerTar("hello"),
+				"blobs/sha256/2222": []byte(cfg),
+			},
+			cfgName: "blobs/sha256/2222",
+			layer:   "blobs/sha256/1111",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			for name, b := range tc.members {
+				if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(b))}); err != nil {
+					t.Fatal(err)
+				}
+				tw.Write(b)
+			}
+			man := fmt.Sprintf(`[{"Config":%q,"RepoTags":["app:latest"],"Layers":[%q]}]`, tc.cfgName, tc.layer)
+			tw.WriteHeader(&tar.Header{Name: "manifest.json", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(man))})
+			tw.Write([]byte(man))
+			tw.Close()
+
+			savePath := filepath.Join(t.TempDir(), "save.tar")
+			if err := os.WriteFile(savePath, buf.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r, err := Resolve(savePath, "amd64", NewStore(t.TempDir()), t.Logf)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if r.Config == nil || len(r.Config.Cmd) != 1 || r.Config.Cmd[0] != "/bin/app" {
+				t.Errorf("config = %+v", r.Config)
+			}
+			f, _ := os.Open(r.Path)
+			defer f.Close()
+			img, err := erofs.Open(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b, err := readAllFile(img, "hello.txt"); err != nil || string(b) != "hello" {
+				t.Errorf("hello.txt = %q, %v", b, err)
+			}
+		})
+	}
 }

@@ -3,9 +3,36 @@ package sandbox
 import (
 	"bytes"
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
+
+// syncBuffer is a bytes.Buffer safe for concurrent writer/reader — the
+// interactive-echo test polls output while the copy goroutine is still
+// writing (a plain bytes.Buffer trips the race detector there).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Len()
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // Sandbox names feed filepath.Join + os.RemoveAll: path traversal out of the
 // sandbox root must be rejected before any subcommand sees the name.
@@ -48,7 +75,7 @@ func TestExitTrailer(t *testing.T) {
 // nothing until 32 bytes accumulated — i.e. until you hit Enter).
 func TestExitTrailerInteractiveEcho(t *testing.T) {
 	pr, pw := io.Pipe()
-	var out bytes.Buffer
+	var out syncBuffer
 	statusCh := make(chan int, 1)
 	go func() { statusCh <- copyStrippingExitTrailer(&out, pr) }()
 

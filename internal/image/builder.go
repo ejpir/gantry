@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	erofs "github.com/erofs/go-erofs"
 )
@@ -22,11 +23,15 @@ import (
 // and resolves the image config's user against the merged passwd/group.
 // Returns the number of entries emitted.
 func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...any)) (int, error) {
-	tmp := outPath + ".tmp"
-	f, err := os.Create(tmp)
+	// Unique temp name: a fixed outPath+".tmp" let one process delete
+	// another's in-flight build during crash-litter cleanup (review
+	// finding 4). CreateTemp also makes the file 0600, so the final
+	// rename lands with private content private (review finding 6).
+	f, err := os.CreateTemp(filepath.Dir(outPath), filepath.Base(outPath)+".*.tmp")
 	if err != nil {
 		return 0, err
 	}
+	tmp := f.Name()
 	defer os.Remove(tmp)
 
 	w := erofs.Create(f, erofs.WithBlockSize(4096))
@@ -60,6 +65,9 @@ func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...
 	if err := os.Rename(tmp, outPath); err != nil {
 		return 0, err
 	}
+	// CreateTemp's 0600 survives the rename; assert it for images built
+	// by an older gantry and re-verified here.
+	os.Chmod(outPath, 0o600)
 	return len(idx.entries), nil
 }
 
