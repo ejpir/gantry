@@ -246,6 +246,8 @@ agent cannot send them anywhere.
 		time.Sleep(100 * time.Millisecond)
 	}
 	fmt.Fprintf(os.Stderr, "gantry start: timed out waiting for the guest RPC connection; see %s\n", dir)
+	dumpTail(filepath.Join(dir, "console.log"))
+	dumpTail(filepath.Join(dir, "daemon.log"))
 	return 1
 }
 
@@ -332,14 +334,42 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon: share manifest:", err)
 	}
 
+	// Create the RPC listener before booting: vminitd makes one dial-back
+	// attempt, and a fast CI VM can otherwise beat net.Listen below.
+	rpcSock := filepath.Join(dir, "1025.sock")
+	rpcListener, err := client.ListenRPC(rpcSock)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon:", err)
+		return 1
+	}
+
 	guestErr := make(chan error, 1)
 	go func() { guestErr <- vmm.Run(m) }()
 	bootLog("vCPUs running; guest booting")
 
-	// Hold the single dial-back connection for the VM's lifetime.
-	rpc, err := client.AcceptRPC(filepath.Join(dir, "1025.sock"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "daemon:", err)
+	// Hold the single dial-back connection for the VM's lifetime, while also
+	// watching guestErr so a failed boot cannot leave CmdStart waiting for the
+	// full timeout on a dead guest.
+	type rpcResult struct {
+		client *ttrpc.Client
+		err    error
+	}
+	rpcCh := make(chan rpcResult, 1)
+	go func() {
+		rpc, err := client.AcceptRPCListener(rpcListener, rpcSock)
+		rpcCh <- rpcResult{client: rpc, err: err}
+	}()
+	var rpc *ttrpc.Client
+	select {
+	case result := <-rpcCh:
+		if result.err != nil {
+			fmt.Fprintln(os.Stderr, "daemon:", result.err)
+			return 1
+		}
+		rpc = result.client
+	case err := <-guestErr:
+		_ = rpcListener.Close()
+		fmt.Fprintln(os.Stderr, "daemon: VM exited before guest RPC:", err)
 		return 1
 	}
 	defer rpc.Close()
