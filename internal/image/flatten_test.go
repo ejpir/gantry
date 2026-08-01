@@ -225,9 +225,16 @@ func TestFlattenRootIsRootOwned(t *testing.T) {
 func TestFlattenTraversalRejected(t *testing.T) {
 	l := writeLayer(t, tarEntry{"../evil", tar.TypeReg, 0o644, 0, 0, "x", "", 0, 0})
 	out := filepath.Join(t.TempDir(), "out.erofs")
-	f, _ := os.Create(out)
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := erofs.Create(f)
-	_, err := flattenLayers(w, []*os.File{l}, nil)
+	defer func() {
+		_ = w.Close()
+		_ = f.Close()
+	}()
+	_, err = flattenLayers(w, []*os.File{l}, nil)
 	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Errorf("want traversal rejection, got %v", err)
 	}

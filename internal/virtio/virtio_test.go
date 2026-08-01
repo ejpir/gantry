@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -72,17 +73,26 @@ type usedElem struct {
 	len uint32
 }
 
-func usedPop(mem mem, qn uint32) (usedElem, bool) {
+func usedIndex(mem mem, qn uint32) uint16 {
 	base := ramBase + testUsedAddr + uint64(qn)*testStride
 	var idx [2]byte
 	mem.readAt(base+2, idx[:])
-	n := binary.LittleEndian.Uint16(idx[:])
+	return binary.LittleEndian.Uint16(idx[:])
+}
+
+func usedAt(mem mem, qn uint32, n uint16) usedElem {
+	base := ramBase + testUsedAddr + uint64(qn)*testStride
+	var e [8]byte
+	mem.readAt(base+4+uint64(n%8)*8, e[:])
+	return usedElem{binary.LittleEndian.Uint32(e[0:]), binary.LittleEndian.Uint32(e[4:])}
+}
+
+func usedPop(mem mem, qn uint32) (usedElem, bool) {
+	n := usedIndex(mem, qn)
 	if n == 0 {
 		return usedElem{}, false
 	}
-	var e [8]byte
-	mem.readAt(base+4+uint64((n-1)%8)*8, e[:]) // latest element
-	return usedElem{binary.LittleEndian.Uint32(e[0:]), binary.LittleEndian.Uint32(e[4:])}, true
+	return usedAt(mem, qn, n-1), true
 }
 
 func TestVirtioBlkRead(t *testing.T) {
@@ -203,8 +213,14 @@ func TestVirtioFSLoopbackProtocol(t *testing.T) {
 	initOut := [][]byte{make([]byte, 16), make([]byte, 64)}
 	n, status := dev.handler.HandleRequest(
 		[][]byte{header(26, 1, 0, len(initPayload)), initPayload}, initOut)
-	if status != fuse.OK || n != 80 || int32(binary.LittleEndian.Uint32(initOut[0][4:8])) != 0 {
-		t.Fatalf("FUSE_INIT: n=%d status=%v header=%x", n, status, initOut[0])
+	wantInit := 80
+	if runtime.GOOS == "darwin" {
+		// The vendored go-fuse Darwin protocol advertises minor 19 and
+		// therefore returns the legacy 24-byte InitOut.
+		wantInit = 40
+	}
+	if status != fuse.OK || n != wantInit || int32(binary.LittleEndian.Uint32(initOut[0][4:8])) != 0 {
+		t.Fatalf("FUSE_INIT: n=%d want=%d status=%v header=%x", n, wantInit, status, initOut[0])
 	}
 	if major := binary.LittleEndian.Uint32(initOut[1][0:4]); major != 7 {
 		t.Fatalf("FUSE_INIT major = %d", major)
@@ -471,8 +487,18 @@ func (c *testPacketConn) Write(p []byte) (int, error) {
 }
 func (c *testPacketConn) Close() error { return nil }
 
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "gantry-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestVirtioNetUnixgramVFKIT(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "net.sock")
+	path := filepath.Join(shortSocketDir(t), "net.sock")
 	addr, err := net.ResolveUnixAddr("unixgram", path)
 	if err != nil {
 		t.Fatal(err)
@@ -682,6 +708,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	postRxBuf(2)
 	postRxBuf(4)
 	postRxBuf(6)
+	seenUsed := usedIndex(mem, vsockQueueRx)
 	if _, err := hostSide.Write([]byte("world")); err != nil {
 		t.Fatal(err)
 	}
@@ -689,15 +716,24 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	payload := make([]byte, 5)
 	hdrBuf := make([]byte, vsockHdrLen)
 	for {
-		// pumpHost delivers host->guest data from its own goroutine (core.mu)
+		found := false
+		// pumpHost delivers host->guest data from its own goroutine (core.mu).
+		// Credit updates can be delivered after the data packet, so scan all
+		// new used elements instead of looking only at the latest one.
 		core.mu.Lock()
-		e, ok := usedPop(mem, vsockQueueRx)
-		if ok && e.len > vsockHdrLen {
-			mem.readAt(ramBase+testDataAddr+0x800+uint64(e.id)*0x100, payload)
-			mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, hdrBuf)
+		currentUsed := usedIndex(mem, vsockQueueRx)
+		for n := seenUsed; n != currentUsed; n++ {
+			e := usedAt(mem, vsockQueueRx, n)
+			if e.len > vsockHdrLen {
+				mem.readAt(ramBase+testDataAddr+0x800+uint64(e.id)*0x100, payload)
+				mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, hdrBuf)
+				found = true
+				break
+			}
 		}
+		seenUsed = currentUsed
 		core.mu.Unlock()
-		if ok && e.len > vsockHdrLen {
+		if found {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -719,7 +755,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 }
 
 func TestVirtioVsockHostListen(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	vs := NewVsock(3, dir)
 	ram := make([]byte, 2<<20)
 	mem := NewRAM(ram, ramBase)

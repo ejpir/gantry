@@ -42,24 +42,46 @@ type Net struct {
 	verbose   bool
 }
 
-// NewNetUnixgram connects to a gvproxy/vmnet-helper Unix datagram
-// endpoint. gvproxy's vfkit listener requires one VFKT registration datagram;
+// newUnixgramClientPath reserves a short, unique path and removes the
+// placeholder before the socket is bound. Keeping it under the system temp
+// directory avoids exceeding macOS's shorter AF_UNIX path limit when the peer
+// endpoint is nested under a long temporary directory.
+func newUnixgramClientPath() (string, error) {
+	f, err := os.CreateTemp("", "gantry-net-*.sock")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := os.Remove(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// NewNetUnixgram connects to a gvproxy/vmnet-helper Unix datagram endpoint.
+// gvproxy's vfkit listener requires one VFKT registration datagram;
 // vmnet-helper uses the same raw-frame transport without that handshake.
 func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 	peer, err := net.ResolveUnixAddr("unixgram", endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("resolve network endpoint: %w", err)
 	}
-	localPath := endpoint + ".client"
-	if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove stale network socket: %w", err)
+	localPath, err := newUnixgramClientPath()
+	if err != nil {
+		return nil, fmt.Errorf("create local network socket path: %w", err)
 	}
 	local, err := net.ResolveUnixAddr("unixgram", localPath)
 	if err != nil {
+		_ = os.Remove(localPath)
 		return nil, fmt.Errorf("resolve local network socket: %w", err)
 	}
 	conn, err := net.DialUnix("unixgram", local, peer)
 	if err != nil {
+		_ = os.Remove(localPath)
 		return nil, fmt.Errorf("connect network endpoint %s: %w", endpoint, err)
 	}
 	_ = conn.SetReadBuffer(7 << 20)
@@ -67,7 +89,7 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 	if vfkit {
 		if _, err := conn.Write([]byte("VFKT")); err != nil {
 			conn.Close()
-			os.Remove(localPath)
+			_ = os.Remove(localPath)
 			return nil, fmt.Errorf("send VFKT handshake: %w", err)
 		}
 	}
