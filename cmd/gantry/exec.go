@@ -152,6 +152,15 @@ agent cannot send them anywhere.
 		fmt.Fprintf(os.Stderr, "gantry exec: write share manifest: %v\n", err)
 	}
 
+	// Create the RPC listener before booting: vminitd makes one dial-back
+	// attempt, so starting the VM first introduces a fast-boot race.
+	rpcPath := filepath.Join(tmp, "1025.sock")
+	rpcListener, err := client.ListenRPC(rpcPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry exec:", err)
+		return 1
+	}
+
 	guestErr := make(chan error, 1)
 	go func() { guestErr <- vmm.Run(m) }()
 
@@ -160,14 +169,15 @@ agent cannot send them anywhere.
 	shellErr := make(chan error, 1)
 	go func() {
 		shellErr <- client.Shell(client.ShellOptions{
-			RPCSock:    filepath.Join(tmp, "1025.sock"),
-			StreamSock: filepath.Join(tmp, "listen-1026.sock"),
-			Share:      len(hostShares) > 0,
-			RW:         cfg.RW,
-			Args:       args,
-			ImgCfg:     cfg.ImageCfg,
-			Secrets:    secret.Env(secrets),
-			ExitStatus: &taskStatus,
+			RPCSock:     rpcPath,
+			RPCListener: rpcListener,
+			StreamSock:  filepath.Join(tmp, "listen-1026.sock"),
+			Share:       len(hostShares) > 0,
+			RW:          cfg.RW,
+			Args:        args,
+			ImgCfg:      cfg.ImageCfg,
+			Secrets:     secret.Env(secrets),
+			ExitStatus:  &taskStatus,
 		})
 	}()
 
@@ -191,6 +201,7 @@ agent cannot send them anywhere.
 			return taskStatus
 		}
 	case gerr := <-guestErr:
+		_ = rpcListener.Close()
 		keepTmp = true
 		fmt.Fprintf(os.Stderr, "gantry exec: VM exited before the session started: %v\n", gerr)
 		dumpLog("console.log")

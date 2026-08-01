@@ -40,14 +40,15 @@ import (
 
 // ShellOptions configures one interactive container session.
 type ShellOptions struct {
-	RPCSock    string // unix socket accepting vminitd's vsock dial-back
-	StreamSock string // unix socket forwarding guest stream port 1026
-	Share      bool   // mount every share from the VMM's shares.json
-	RW         bool   // writable overlay root: erofs /dev/vdb + ext4 /dev/vdc
-	Args       []string
-	ID         string        // bundle/task id; default "shell"
-	ImgCfg     *image.Config // resolved image config (nil = defaults)
-	Secrets    []string      // NAME=value pairs, process-spec only (docs/secrets.md)
+	RPCSock     string       // unix socket accepting vminitd's vsock dial-back
+	RPCListener net.Listener // pre-created RPCSock listener, when booting a VM
+	StreamSock  string       // unix socket forwarding guest stream port 1026
+	Share       bool         // mount every share from the VMM's shares.json
+	RW          bool         // writable overlay root: erofs /dev/vdb + ext4 /dev/vdc
+	Args        []string
+	ID          string        // bundle/task id; default "shell"
+	ImgCfg      *image.Config // resolved image config (nil = defaults)
+	Secrets     []string      // NAME=value pairs, process-spec only (docs/secrets.md)
 	// ExitStatus, when set, receives the task's exit status so one-shot
 	// callers (`gantry exec -- false`) can propagate it as their own
 	// exit code instead of reporting success for a failed command.
@@ -72,13 +73,22 @@ func LoadShares(dir string) []ShareEntry {
 	return m.Shares
 }
 
-// AcceptRPC waits for vminitd's vsock dial-back and returns a ttrpc client.
-func AcceptRPC(rpcSock string) (*ttrpc.Client, error) {
-	os.Remove(rpcSock)
+// ListenRPC creates the host endpoint before a VM is started. vminitd makes
+// a single vsock dial-back attempt, so the listener must exist before the
+// guest can boot; otherwise a fast VM can lose the connection race.
+func ListenRPC(rpcSock string) (net.Listener, error) {
+	_ = os.Remove(rpcSock)
 	ln, err := net.Listen("unix", rpcSock)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", rpcSock, err)
 	}
+	return ln, nil
+}
+
+// AcceptRPCListener waits for vminitd's vsock dial-back on a listener that was
+// created before the VM started. The listener is closed after the connection
+// is accepted (or on error).
+func AcceptRPCListener(ln net.Listener, rpcSock string) (*ttrpc.Client, error) {
 	defer ln.Close()
 	fmt.Printf("client: listening on %s — start the VM now\n", rpcSock)
 	conn, err := ln.Accept()
@@ -87,6 +97,18 @@ func AcceptRPC(rpcSock string) (*ttrpc.Client, error) {
 	}
 	fmt.Println("client: guest connected over vsock dial-back")
 	return ttrpc.NewClient(conn), nil
+}
+
+// AcceptRPC waits for vminitd's vsock dial-back and returns a ttrpc client.
+// Callers that start a VM should use ListenRPC first to remove the startup
+// race; this convenience wrapper preserves the original API for callers that
+// start the VM elsewhere.
+func AcceptRPC(rpcSock string) (*ttrpc.Client, error) {
+	ln, err := ListenRPC(rpcSock)
+	if err != nil {
+		return nil, err
+	}
+	return AcceptRPCListener(ln, rpcSock)
 }
 
 // Info queries the guest system service.
@@ -723,7 +745,13 @@ func Shell(opts ShellOptions) error {
 		}
 	}
 
-	client, err := AcceptRPC(opts.RPCSock)
+	var client *ttrpc.Client
+	var err error
+	if opts.RPCListener != nil {
+		client, err = AcceptRPCListener(opts.RPCListener, opts.RPCSock)
+	} else {
+		client, err = AcceptRPC(opts.RPCSock)
+	}
 	if err != nil {
 		return err
 	}
