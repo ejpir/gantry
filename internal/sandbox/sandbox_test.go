@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -32,9 +33,9 @@ func TestSandboxPIDLifecycle(t *testing.T) {
 	if _, alive := sandboxPID(name); alive {
 		t.Fatal("stale pid treated as alive")
 	}
-	os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte("1"), 0o644)
+	os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
 	if _, alive := sandboxPID(name); !alive {
-		t.Fatal("pid 1 not detected as alive")
+		t.Fatal("current process not detected as alive")
 	}
 }
 

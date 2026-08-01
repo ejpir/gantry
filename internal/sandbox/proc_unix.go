@@ -11,7 +11,10 @@ import (
 
 // procAlive reports whether pid exists (kill signal 0).
 func procAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+	err := syscall.Kill(pid, 0)
+	// EPERM still means the process exists; this is common for PID 1 in
+	// hosted/containerized CI environments where signaling it is forbidden.
+	return err == nil || err == syscall.EPERM
 }
 
 // procTerminate asks a daemon to exit gracefully.
