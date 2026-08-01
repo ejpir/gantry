@@ -165,7 +165,7 @@ func rwlayerHint(err error, rw bool) string {
 		return ""
 	}
 	if strings.Contains(err.Error(), "stale file handle") || strings.Contains(err.Error(), "bad message") {
-		return "\n(the rwlayer looks corrupted — recreate it with ./mkrwlayer.sh rwlayer.ext4 512, or e2fsck it)"
+		return "\n(the rwlayer looks corrupted — recreate it with ./scripts/mkrwlayer.sh artifacts/rwlayer.ext4 512, or e2fsck it)"
 	}
 	return ""
 }

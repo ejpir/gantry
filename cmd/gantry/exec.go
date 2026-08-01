@@ -14,16 +14,16 @@ import (
 )
 
 // cmdExec is the sbx-style single-command flow: boot a VM (with gvproxy
-// networking, like run-macos.sh container) and immediately start an
+// networking, like scripts/run-macos.sh container) and immediately start an
 // interactive container session — one terminal, one process:
 //
 //	gantry exec                      # full Debian, writable root, bash
 //	gantry exec -- /bin/sh           # pick the command
-//	gantry exec -image shell-rootfs.erofs -- /bin/sh
+//	gantry exec -image artifacts/shell-rootfs.erofs -- /bin/sh
 //	gantry exec -share code=$HOME/repos,ro
 //	gantry exec -net=false -console  # no gvproxy; watch the guest boot
 //
-// hostctl + run-macos.sh remain for the two-terminal debug flow.
+// hostctl + scripts/run-macos.sh remain for the two-terminal debug flow.
 func cmdExec(argv []string) { os.Exit(runExec(argv)) }
 
 func runExec(argv []string) int {

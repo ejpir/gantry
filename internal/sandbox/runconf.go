@@ -81,7 +81,7 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 		Rootfs: fs.String("rootfs", vmm.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)"),
 		Image: fs.String("image", "", `container image: a reference to pull ("debian:bookworm-slim",
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
-or a plain .erofs file (default: debian-bookworm.erofs if present)`),
+or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
 		RWLayer:     fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
 		RW:          fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
 		Net:         fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
@@ -130,13 +130,13 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 			cfg.Rootfs = vmm.GvisorRootfs(cfg.Rootfs)
 		}
 		if !gutil.FileExists(cfg.Rootfs) {
-			return cfg, nil, fmt.Errorf("%s not found - build it with ./mkrootfs-gvisor.sh %s", cfg.Rootfs, vmm.DefaultRootfs())
+			return cfg, nil, fmt.Errorf("%s not found - build it with ./scripts/mkrootfs-gvisor.sh %s", cfg.Rootfs, vmm.DefaultRootfs())
 		}
 		if !set["kernel"] {
 			cfg.Kernel = vmm.GvisorKernel(cfg.Kernel)
 		}
 		if cfg.Kernel != "" && !gutil.FileExists(cfg.Kernel) {
-			return cfg, nil, fmt.Errorf("%s not found - gVisor needs the 4K-page kernel, build it with ./mkkernel-4k.sh", cfg.Kernel)
+			return cfg, nil, fmt.Errorf("%s not found - gVisor needs the 4K-page kernel, build it with ./scripts/mkkernel-4k.sh", cfg.Kernel)
 		}
 	default:
 		return cfg, nil, fmt.Errorf("-runtime must be crun or runsc, got %q", cfg.Runtime)
@@ -144,11 +144,7 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 
 	cfg.Image = *f.Image
 	if cfg.Image == "" {
-		if gutil.FileExists("debian-bookworm.erofs") {
-			cfg.Image = "debian-bookworm.erofs"
-		} else {
-			cfg.Image = "shell-rootfs.erofs"
-		}
+		cfg.Image = vmm.DefaultImage()
 	}
 	// Image resolution: an existing .erofs file is used as-is; anything
 	// else (OCI layout dir, docker save tar, image reference) goes
@@ -178,10 +174,10 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		}
 		warnings = append(warnings, w...)
 		cfg.RWLayer = p
-	} else if cfg.RWLayer == "" && gutil.FileExists("rwlayer.ext4") {
+	} else if cfg.RWLayer == "" && gutil.FileExists(vmm.AssetPath("rwlayer.ext4")) {
 		// one-shot exec: legacy shared default, flock-guarded by the
 		// blk device and pairing-checked like everything else
-		cfg.RWLayer = "rwlayer.ext4"
+		cfg.RWLayer = vmm.AssetPath("rwlayer.ext4")
 		explicitRWLayer = true // user-owned file: no pairing enforcement
 	}
 	// -rw rules: default on when a writable layer exists, forced off when
@@ -189,7 +185,7 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	cfg.RW = *f.RW || (!set["rw"] && cfg.RWLayer != "")
 	if cfg.RWLayer == "" && cfg.RW {
 		cfg.RW = false
-		warnings = append(warnings, "-rw: no writable layer found; running read-only. Create one with ./mkrwlayer.sh rwlayer.ext4 512")
+		warnings = append(warnings, "-rw: no writable layer found; running read-only. Create one with ./scripts/mkrwlayer.sh artifacts/rwlayer.ext4 512")
 	}
 	if cfg.RWLayer != "" {
 		if w := rwlayerHealthWarning(cfg.RWLayer); w != "" {
@@ -242,7 +238,7 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		}
 	}
 	if cfg.RW && cfg.RWLayer != "" && !gutil.FileExists(cfg.RWLayer) {
-		return cfg, nil, fmt.Errorf("rwlayer %s does not exist; create it with:\n  ./mkrwlayer.sh %s 512", cfg.RWLayer, cfg.RWLayer)
+		return cfg, nil, fmt.Errorf("rwlayer %s does not exist; create it with:\n  ./scripts/mkrwlayer.sh %s 512", cfg.RWLayer, cfg.RWLayer)
 	}
 
 	// validate share specs now, normalizing to absolute paths

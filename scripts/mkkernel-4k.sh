@@ -8,15 +8,18 @@
 # kernel rebuilt with CONFIG_ARM64_4K_PAGES=y — everything else identical
 # (same version, same config, extracted from the stock kernel).
 #
-#   ./mkkernel-4k.sh                    # → nerdbox-kernel-arm64-4k
+#   ./scripts/mkkernel-4k.sh             # → artifacts/nerdbox-kernel-arm64-4k
 #
 # Needs: curl, xz, gcc, flex, bison, bc (native arm64 or cross via
 # CROSS_COMPILE=aarch64-linux-gnu-). ~10-20 min on a modern machine.
 set -e
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+mkdir -p "$ARTIFACTS"
 
 VERSION=7.0.12   # must match `strings nerdbox-kernel-arm64 | grep "Linux version"`
-STOCK=${1:-nerdbox-kernel-arm64}
-OUT=${2:-nerdbox-kernel-arm64-4k}
+STOCK=${1:-$ARTIFACTS/nerdbox-kernel-arm64}
+OUT=${2:-$ARTIFACTS/nerdbox-kernel-arm64-4k}
 WORK=${WORK:-/tmp/linux-$VERSION-build}
 
 if [ ! -d "$WORK" ]; then
@@ -34,7 +37,7 @@ cd "$WORK"
   # Not scripts/extract-ikconfig: its GNU-grep regexes fail on macOS's
   # BSD grep and leave a truncated .config that builds a defconfig
   # kernel (no EROFS — the guest can't mount its rootfs).
-  python3 - "$OLDPWD/$STOCK" > .config <<'PYEOF'
+  python3 - "$STOCK" > .config <<'PYEOF'
 import sys, gzip
 data = open(sys.argv[1], 'rb').read()
 i, j = data.find(b'IKCFG_ST'), data.find(b'IKCFG_ED')
@@ -57,6 +60,6 @@ echo "== building (this takes a while)"
 # gantry's arm64 boot path wants the raw Image (ARM\x64 magic at 0x38),
 # not the vmlinux ELF (that one is the x86-64 format)
 make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" Image
-cp arch/arm64/boot/Image "$OLDPWD/$OUT"
-ls -lh "$OLDPWD/$OUT"
+cp arch/arm64/boot/Image "$OUT"
+ls -lh "$OUT"
 echo "done: gantry start <name> -runtime runsc   (auto-picks $OUT)"

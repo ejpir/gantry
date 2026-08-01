@@ -6,13 +6,15 @@
 #   guest# exit            <- powers off the VM and exits qemu
 #   Ctrl-A X               <- emergency: kill qemu
 set -e
-cd "$(dirname "$0")"
-KERNEL="${KERNEL:-../nerdbox-kernel-arm64_4k}"
-[ -f initramfs-shell.cpio.gz ] || ./build.sh
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+KERNEL="${KERNEL:-$ARTIFACTS/nerdbox-kernel-arm64_4k}"
+INITRD="$ARTIFACTS/initramfs-shell.cpio.gz"
+[ -f "$INITRD" ] || "$ROOT/scripts/build.sh"
 
 exec qemu-system-aarch64 \
   -machine virt,gic-version=3 -cpu cortex-a72 -smp 1 -m 512 \
   -kernel "$KERNEL" \
-  -initrd initramfs-shell.cpio.gz \
+  -initrd "$INITRD" \
   -append "console=ttyAMA0 panic=-1" \
   -nographic -no-reboot

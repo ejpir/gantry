@@ -1,69 +1,76 @@
 #!/bin/sh
 # Run gantry on macOS (Apple Silicon) under Hypervisor.framework.
 #
-#   ./run-macos.sh            # our guest init + busybox shell (interactive)
-#   ./run-macos.sh rootfs     # the real nerdbox rootfs + vminitd
-#   ./run-macos.sh container  # two-terminal hostctl debug (external gvproxy)
-#   ./run-macos.sh exec ...   # sbx-style: build+sign, then `gantry exec`
+#   ./scripts/run-macos.sh            # our guest init + busybox shell (interactive)
+#   ./scripts/run-macos.sh rootfs     # the real nerdbox rootfs + vminitd
+#   ./scripts/run-macos.sh container  # two-terminal hostctl debug (external gvproxy)
+#   ./scripts/run-macos.sh exec ...   # sbx-style: build+sign, then `gantry exec`
 #
 # Requirements: macOS 13+ (hv_gic_* APIs), Apple Silicon.
 # The binary needs the hypervisor entitlement; we ad-hoc codesign locally.
 set -e
-cd "$(dirname "$0")"
 
-BIN=gantry-darwin-arm64
-KERNEL="${KERNEL:-nerdbox-kernel-arm64}"   # 16K pages — the macOS build
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+mkdir -p "$ARTIFACTS"
 
-# 1. build if Go is available, else use the prebuilt binary from the repo
+BIN="${GANTRY_BIN:-$ARTIFACTS/gantry-darwin-arm64}"
+KERNEL="${KERNEL:-$ARTIFACTS/nerdbox-kernel-arm64}"   # 16K pages — the macOS build
+ROOTFS="$ARTIFACTS/nerdbox-rootfs-arm64.erofs"
+INITRD="$ARTIFACTS/initramfs-shell.cpio.gz"
+HOSTCTL="$ARTIFACTS/hostctl-darwin-arm64"
+cd "$ROOT"
+
+# 1. build if Go is available, else use the prebuilt binary from artifacts/
 if command -v go >/dev/null 2>&1; then
   echo "== building $BIN"
-  GOOS=darwin GOARCH=arm64 go build -o "$BIN" .
+  (cd "$ROOT" && GOOS=darwin GOARCH=arm64 go build -o "$BIN" ./cmd/gantry)
 fi
 [ -x "$BIN" ] || { echo "no $BIN and no Go toolchain"; exit 1; }
 
 # 2. ad-hoc codesign with the hypervisor entitlement (idempotent)
 echo "== codesign (ad-hoc) with com.apple.security.hypervisor"
-codesign --sign - --entitlements entitlements.plist -f "$BIN" 2>&1 | grep -v 'replacing existing signature' || true
+codesign --sign - --entitlements "$ROOT/config/entitlements.plist" -f "$BIN" 2>&1 | grep -v 'replacing existing signature' || true
 
 # 3. run
 case "$1" in
   rootfs)
     mkdir -p /tmp/gantry-vsock
     if [ ! -S /tmp/gantry-vsock/1025.sock ]; then
-      echo "tip: run './hostctl-darwin-arm64' in another terminal first"
+      echo "tip: run '$HOSTCTL shell' in another terminal first"
       echo "     (vminitd dials back to the host ~0.5s into boot)"
     fi
-    exec ./"$BIN" run -kernel "$KERNEL" \
-      -rootfs nerdbox-rootfs-arm64.erofs \
+    exec "$BIN" run -kernel "$KERNEL" \
+      -rootfs "$ROOTFS" \
       -vsockfwd /tmp/gantry-vsock
     ;;
   rootfs-shell)
     # debug-only: initramfs shell, real nerdbox rootfs mounted at /mnt
-    exec ./"$BIN" run -kernel "$KERNEL" \
-      -initrd initramfs-shell.cpio.gz \
-      -rootfs nerdbox-rootfs-arm64.erofs
+    exec "$BIN" run -kernel "$KERNEL" \
+      -initrd "$INITRD" \
+      -rootfs "$ROOTFS"
     ;;
   container)
     # The real path: vminitd + task.v3 + crun, with the container rootfs
-    # attached as /dev/vdb. Start `./hostctl-darwin-arm64 shell` first.
-    # IMAGE picks the container rootfs (default: busybox; debian-bookworm.erofs
+    # attached as /dev/vdb. Start `hostctl shell` first.
+    # IMAGE picks the container rootfs (default: busybox; a Debian EROFS
     # gives a full Debian userland). RWLAYER attaches an ext4 rwlayer as
     # /dev/vdc for a writable, sbx-style overlay root (hostctl --rw).
-    IMAGE="${IMAGE:-shell-rootfs.erofs}"
+    IMAGE="${IMAGE:-$ARTIFACTS/shell-rootfs.erofs}"
     mkdir -p /tmp/gantry-vsock
     if [ ! -S /tmp/gantry-vsock/1025.sock ]; then
       echo "start this first in another terminal:"
-      hint="./hostctl-darwin-arm64 shell"
+      hint="$HOSTCTL shell"
       [ -n "${GANTRY_SHARE:-${MINIVM_SHARE:-}}${GANTRY_SHARES:-${MINIVM_SHARES:-}}" ] && hint="$hint --share"
       [ -n "${RWLAYER:-}" ] && hint="$hint --rw"
-      [ "$IMAGE" != "shell-rootfs.erofs" ] && hint="$hint -- /bin/bash"
+      [ "$IMAGE" != "$ARTIFACTS/shell-rootfs.erofs" ] && hint="$hint -- /bin/bash"
       echo "  $hint"
       echo
     fi
 
     # Match nerdbox/libkrun's documented macOS network path: a virtio-net
     # device exchanges raw Ethernet datagrams with gvproxy's vfkit endpoint.
-    GVPROXY=./gvproxy-darwin-arm64
+    GVPROXY="$ARTIFACTS/gvproxy-darwin-arm64"
     [ -x "$GVPROXY" ] || { echo "missing $GVPROXY"; exit 1; }
     codesign --sign - -f "$GVPROXY" 2>&1 | grep -v 'replacing existing signature' || true
     NET_SOCK=/tmp/gantry-net.sock
@@ -95,8 +102,8 @@ case "$1" in
     echo "== gvproxy network ready ($NET_SOCK)"
 
     echo "== container rootfs: $IMAGE -> /dev/vdb"
-    set -- ./"$BIN" run -kernel "$KERNEL" \
-      -rootfs nerdbox-rootfs-arm64.erofs \
+    set -- "$BIN" run -kernel "$KERNEL" \
+      -rootfs "$ROOTFS" \
       -disk "$IMAGE" \
       -net "$NET_SOCK" \
       -vsockfwd /tmp/gantry-vsock
@@ -105,26 +112,26 @@ case "$1" in
       set -- "$@" -disk "$RWLAYER"
     fi
     if [ -n "${GANTRY_SHARE:-${MINIVM_SHARE:-}}" ]; then
-      echo "== virtio-fs host share: $GANTRY_SHARE -> container /host"
+      echo "== virtio-fs host share: ${GANTRY_SHARE:-$MINIVM_SHARE} -> container /host"
       set -- "$@" -share "hostshare=${GANTRY_SHARE:-$MINIVM_SHARE}"
     fi
     # Extra shares (space-separated TAG=PATH[,ro]; no spaces in paths):
     #   GANTRY_SHARES="code=/Users/you/repos,ro docs=/Users/you/Documents"
     # land at /host/<tag> inside the container.
     if [ -n "${GANTRY_SHARES:-${MINIVM_SHARES:-}}" ]; then
-      echo "== virtio-fs extra shares: $GANTRY_SHARES -> container /host/<tag>"
+      echo "== virtio-fs extra shares: ${GANTRY_SHARES:-$MINIVM_SHARES} -> container /host/<tag>"
       for spec in ${GANTRY_SHARES:-$MINIVM_SHARES}; do set -- "$@" -share "$spec"; done
     fi
     "$@"
     ;;
   exec)
     shift
-    exec ./"$BIN" exec "$@"
+    exec "$BIN" exec "$@"
     ;;
   start|stop|ls|delete)
-    exec ./"$BIN" "$@"
+    exec "$BIN" "$@"
     ;;
   *)
-    exec ./"$BIN" run -kernel "$KERNEL" -initrd initramfs-shell.cpio.gz
+    exec "$BIN" run -kernel "$KERNEL" -initrd "$INITRD"
     ;;
 esac

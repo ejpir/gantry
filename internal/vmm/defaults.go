@@ -7,24 +7,50 @@ import (
 	"fmt"
 	"gantry/internal/gutil"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
+
+// AssetPath returns the repository's conventional path for a generated
+// guest asset. Artifacts live in ./artifacts in a checkout, while the bare
+// name remains a compatibility fallback for callers that stage assets in
+// their working directory (and for tests).
+func AssetPath(name string) string {
+	if dir := os.Getenv("GANTRY_ARTIFACTS"); dir != "" {
+		return filepath.Join(dir, name)
+	}
+	candidate := filepath.Join("artifacts", name)
+	if gutil.FileExists(candidate) {
+		return candidate
+	}
+	return name
+}
 
 // defaultKernelImage/defaultRootfs pick the nerdbox assets matching the
 // host architecture (sbx ships nerdbox-{kernel,rootfs}-{arm64,x86_64}).
 func DefaultKernelImage() string {
 	if runtime.GOARCH == "amd64" {
-		return "nerdbox-kernel-x86_64"
+		return AssetPath("nerdbox-kernel-x86_64")
 	}
-	return "nerdbox-kernel-arm64"
+	return AssetPath("nerdbox-kernel-arm64")
 }
 
 func DefaultRootfs() string {
 	if runtime.GOARCH == "amd64" {
-		return "nerdbox-rootfs-x86_64.erofs"
+		return AssetPath("nerdbox-rootfs-x86_64.erofs")
 	}
-	return "nerdbox-rootfs-arm64.erofs"
+	return AssetPath("nerdbox-rootfs-arm64.erofs")
+}
+
+// DefaultImage picks the full Debian image when it is staged, otherwise the
+// small debug image. Both are generated artifacts rather than source files.
+func DefaultImage() string {
+	if p := AssetPath("debian-bookworm.erofs"); gutil.FileExists(p) {
+		return p
+	}
+	return AssetPath("shell-rootfs.erofs")
 }
 
 // GvisorRootfs maps a rootfs image name to its gVisor variant (built by

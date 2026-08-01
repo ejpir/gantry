@@ -83,7 +83,7 @@ func ensurePiSandbox(cfg *piConfig, cwd, name string) int {
 	}
 	if cfg.image == "" {
 		fmt.Fprintln(os.Stderr, `gantry pi: no image configured and the sandbox is not running.
-Build one with ./mkpiimage.sh, then:
+Build one with ./scripts/mkpiimage.sh, then:
   gantry pi -image ./pi-agent.tar
 (or export GANTRY_PI_IMAGE to make it permanent)`)
 		return 2
@@ -136,7 +136,7 @@ Run the pi coding agent inside a gantry sandbox: one persistent sandbox
 per project directory, the project mounted at /workspace, TUI on this
 terminal. Your host ~/.pi/agent (auth, sessions, settings) is shared
 into the guest by default — no env vars to pass (-pi-auth=false opts
-out). First run needs a pi-capable image (./mkpiimage.sh builds
+out). First run needs a pi-capable image (./scripts/mkpiimage.sh builds
 ./pi-agent.tar); while the sandbox is running, plain 'gantry pi'
 reattaches — including from other terminals.
 

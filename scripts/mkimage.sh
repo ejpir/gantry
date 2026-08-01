@@ -2,8 +2,8 @@
 # mkimage.sh — flatten an OCI image into an EROFS container rootfs
 # (the "sbx kit" build step).
 #
-#   ./mkimage.sh debian:bookworm-slim debian-bookworm.erofs
-#   ./mkimage.sh alpine:latest alpine.erofs
+#   ./scripts/mkimage.sh debian:bookworm-slim artifacts/debian-bookworm.erofs
+#   ./scripts/mkimage.sh alpine:latest artifacts/alpine.erofs
 #
 # Requirements: a working docker daemon, mkfs.erofs. Must run on Linux
 # (docker export + erofs-utils); on macOS run it inside a Linux

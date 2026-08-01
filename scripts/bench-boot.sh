@@ -11,12 +11,14 @@
 # Phase attribution: run one boot with GANTRY_BOOT_TIMING=1 and read
 # daemon.log; in-guest time is in console.log (kernel printk stamps).
 #
-# usage: ./bench-boot.sh [runs] [image]
-# env:   GANTRY=./gantry-darwin-arm64  (binary to test)
+# usage: ./scripts/bench-boot.sh [runs] [image]
+# env:   GANTRY=./artifacts/gantry-darwin-arm64  (binary to test)
 set -u
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 runs=${1:-5}
 image=${2:-alpine:latest}
-gantry=${GANTRY:-./gantry}
+gantry=${GANTRY:-$ROOT/artifacts/gantry}
+cd "$ROOT"
 name="bench-boot-$$"
 
 now() { python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }

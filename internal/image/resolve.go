@@ -173,7 +173,7 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		// An explicit path that doesn't exist must not fall through to
 		// the registry branch: ParseRef would mangle "./pi-agent.tar"
 		// into a pull from a registry literally named ".".
-		return nil, fmt.Errorf("image file not found: %s\n(pass an OCI reference like debian:bookworm-slim, or build the file first — e.g. ./mkpiimage.sh)", ref)
+		return nil, fmt.Errorf("image file not found: %s\n(pass an OCI reference like debian:bookworm-slim, or build the file first — e.g. ./scripts/mkpiimage.sh)", ref)
 	} else {
 		// 4. image reference → registry pull (cached by manifest digest)
 		if res == nil {

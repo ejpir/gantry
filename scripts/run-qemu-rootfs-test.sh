@@ -7,9 +7,10 @@
 # dial the host over vsock (no vsock device in this QEMU config) — proving
 # the guest side of the hybrid stack end-to-end.
 set -e
-cd "$(dirname "$0")"
-KERNEL="${KERNEL:-../nerdbox-kernel-arm64_4k}"
-ROOTFS="${ROOTFS:-../nerdbox-rootfs-arm64.erofs}"
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+KERNEL="${KERNEL:-$ARTIFACTS/nerdbox-kernel-arm64_4k}"
+ROOTFS="${ROOTFS:-$ARTIFACTS/nerdbox-rootfs-arm64.erofs}"
 
 timeout "${TIMEOUT:-75}" qemu-system-aarch64 \
   -machine virt,gic-version=3 -cpu cortex-a72 -smp 1 -m 512 \

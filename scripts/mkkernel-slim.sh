@@ -14,17 +14,20 @@
 #    ~ms     KVM probe, 9pnet, USB, SCSI, netfilter init
 #
 # Usage:
-#   ./mkkernel-slim.sh                    # → nerdbox-kernel-arm64-slim (16K pages)
-#   PAGES=4k ./mkkernel-slim.sh           # 4K-page variant (runsc, see mkkernel-4k.sh)
-#   ./gantry start dev -kernel nerdbox-kernel-arm64-slim
+#   ./scripts/mkkernel-slim.sh             # → artifacts/nerdbox-kernel-arm64-slim (16K pages)
+#   PAGES=4k ./scripts/mkkernel-slim.sh    # 4K-page variant (runsc)
+#   ./artifacts/gantry start dev -kernel artifacts/nerdbox-kernel-arm64-slim
 #
 # Iterate: boot with GANTRY_DEBUG_BOOT=1 and re-run the gap analysis from
 # bench-boot.sh; every printk jump >2 ms is a candidate for this list.
 set -e
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+mkdir -p "$ARTIFACTS"
 
 VERSION=7.0.12   # must match mkkernel-4k.sh / the stock kernel
-STOCK=${STOCK:-nerdbox-kernel-arm64}
-OUT=${OUT:-nerdbox-kernel-arm64-slim}
+STOCK=${STOCK:-$ARTIFACTS/nerdbox-kernel-arm64}
+OUT=${OUT:-$ARTIFACTS/nerdbox-kernel-arm64-slim}
 WORK=${WORK:-/tmp/linux-$VERSION-build}
 PAGES=${PAGES:-16k}
 
@@ -66,7 +69,7 @@ cd "$WORK"
   # Not scripts/extract-ikconfig: its GNU-grep regexes fail on macOS's
   # BSD grep ("Unmatched ( or \(") and the truncated .config it leaves
   # behind builds a defconfig kernel that can't mount the erofs rootfs.
-  python3 - "$OLDPWD/$STOCK" > .config <<'PYEOF'
+  python3 - "$STOCK" > .config <<'PYEOF'
 import sys, gzip
 data = open(sys.argv[1], 'rb').read()
 i, j = data.find(b'IKCFG_ST'), data.find(b'IKCFG_ED')
@@ -98,17 +101,17 @@ yes "" | make olddefconfig >/dev/null
 
 echo "== building (this takes a while)"
 make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" Image
-cp arch/arm64/boot/Image "$OLDPWD/$OUT"
-ls -lh "$OLDPWD/$OUT"
+cp arch/arm64/boot/Image "$OUT"
+ls -lh "$OUT"
 
 cat <<EOF
 done. Measure the difference:
 
-  ./gantry start dev -kernel $OUT
+  $ROOT/artifacts/gantry start dev -kernel $OUT
   grep boot-timing ~/.gantry/sandboxes/dev/daemon.log
 
   # remaining gaps >2 ms:
-  GANTRY_DEBUG_BOOT=1 ./gantry start dev -kernel $OUT
+  GANTRY_DEBUG_BOOT=1 $ROOT/artifacts/gantry start dev -kernel $OUT
   perl -ne 'if (/^\[\s*([0-9.]+)\]\s*(.*)/) { \$t=\$1;
     printf "%6.1f ms  %s\n", (\$t-\$p)*1000, \$pl if defined \$p && (\$t-\$p) > 0.002;
     \$p=\$t; \$pl=\$2 }' ~/.gantry/sandboxes/dev/console.log

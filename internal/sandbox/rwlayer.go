@@ -26,7 +26,7 @@ import (
 )
 
 // blankRWLayer is a 512 MiB ext4 with /upper + /work, gzipped (~0.5 MB).
-// Deterministic, built by mkblankrwlayer.sh; embedded so per-sandbox
+// Deterministic, built by scripts/mkblankrwlayer.sh; embedded so per-sandbox
 // layers need no host e2fsprogs (stock macOS has none).
 //
 //go:embed assets/blank.ext4.gz
@@ -65,7 +65,7 @@ func defaultRWLayer(name, imageID string) (string, []string, error) {
 	}
 	warns, err := createRWLayer(p)
 	if err != nil {
-		return "", nil, fmt.Errorf("creating rwlayer %s: %w\n(create it manually with ./mkrwlayer.sh %s 512)", p, err, p)
+		return "", nil, fmt.Errorf("creating rwlayer %s: %w\n(create it manually with ./scripts/mkrwlayer.sh %s 512)", p, err, p)
 	}
 	return p, warns, nil
 }
@@ -211,7 +211,7 @@ func rwlayerHealthWarning(path string) string {
 	if info.ErrorCount == 0 {
 		return ""
 	}
-	return fmt.Sprintf("rwlayer %s: %s\nit mounts, but consider recreating it: ./mkrwlayer.sh %s 512", path, info.Diagnosis(), path)
+	return fmt.Sprintf("rwlayer %s: %s\nit mounts, but consider recreating it: ./scripts/mkrwlayer.sh %s 512", path, info.Diagnosis(), path)
 }
 
 // forgetRWLayer removes a sandbox's default layer + sidecar (delete).
