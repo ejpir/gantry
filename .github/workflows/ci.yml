@@ -2,44 +2,81 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [main, master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test/${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux, os: ubuntu-latest, quality: true, race: true }
+          - { name: windows-arm64, os: windows-11-arm, quality: false, race: false }
+          - { name: macos, os: macos-latest, quality: false, race: false }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.5"
       - name: gofmt
+        if: matrix.quality
+        shell: bash
         run: |
           unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v third_party))
-          if [ -n "$unformatted" ]; then echo "run gofmt -w:"; echo "$unformatted"; exit 1; fi
+          if [ -n "$unformatted" ]; then
+            echo "run gofmt -w:"
+            echo "$unformatted"
+            exit 1
+          fi
       - name: go vet
+        if: matrix.quality
         run: go vet ./...
-      - name: go test (needs no KVM, no root)
+      - name: go test
         run: go test -count=1 ./...
-      - name: go test -race (needs no KVM, no root)
+      - name: go test -race
+        if: matrix.race
         run: go test -race -count=1 ./...
 
-  cross-build:
+  build:
+    name: build/${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - { goos: linux, goarch: amd64 }
-          - { goos: linux, goarch: arm64 }
-          - { goos: darwin, goarch: arm64 }
-          - { goos: windows, goarch: amd64 }
+        include:
+          - { goos: linux, goarch: amd64, ext: "" }
+          - { goos: linux, goarch: arm64, ext: "" }
+          - { goos: darwin, goarch: arm64, ext: "" }
+          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.5"
-      - name: build ${{ matrix.target.goos }}/${{ matrix.target.goarch }}
+      - name: build packages
         run: go build ./...
         env:
-          GOOS: ${{ matrix.target.goos }}
-          GOARCH: ${{ matrix.target.goarch }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+      - name: build binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/gantry
+          go build -trimpath -o "dist/hostctl-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/hostctl
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gantry-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
