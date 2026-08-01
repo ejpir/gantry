@@ -6,8 +6,8 @@
 # agent + the basics pi shells out to (bash, git, ripgrep, certs). The
 # guest arch must match the VM kernel — on Apple Silicon that's arm64.
 #
-#   ./mkpiimage.sh                 # → ./pi-agent.tar
-#   gantry pi -image ./pi-agent.tar -secret ANTHROPIC_API_KEY
+#   ./scripts/mkpiimage.sh                 # → ./artifacts/pi-agent.tar
+#   gantry pi -image ./artifacts/pi-agent.tar -secret ANTHROPIC_API_KEY
 #
 # Needs docker (or podman, via DOCKER=podman) with network access.
 # apt/npm inside the build go through $PROXY (default below; override
@@ -15,11 +15,15 @@
 # uses the docker DAEMON's own proxy config (~/.docker/config.json
 # "proxies" or daemon env) — build-args can't affect that.
 set -e
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+mkdir -p "$ARTIFACTS"
+cd "$ROOT"
 
 DOCKER=${DOCKER:-docker}
 PROXY=${PROXY:-http://192.168.1.1:3128}
 PLATFORM=${PLATFORM:-linux/$(uname -m | sed 's/x86_64/amd64/;s/arm64/arm64/')}
-OUT=${OUT:-pi-agent.tar}
+OUT=${OUT:-$ARTIFACTS/pi-agent.tar}
 
 proxy_args=""
 if [ -n "$PROXY" ]; then

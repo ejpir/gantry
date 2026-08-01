@@ -203,7 +203,7 @@ agent cannot send them anywhere.
 	}
 
 	// Detached daemon: same binary, signed (this is why start goes through
-	// run-macos.sh on macOS: build+codesign first).
+	// scripts/run-macos.sh on macOS: build+codesign first).
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
@@ -254,7 +254,7 @@ agent cannot send them anywhere.
 func CmdDaemon(name string) int {
 	// GANTRY_BOOT_TIMING=1: stamp boot phases into daemon.log so cold-boot
 	// cost can be attributed (host setup vs. network vs. vmm.Prepare vs.
-	// the guest boot up to the vsock dial-back). See bench-boot.sh.
+	// the guest boot up to the vsock dial-back). See scripts/bench-boot.sh.
 	t0 := time.Now()
 	bootLog := func(phase string) {
 		if gutil.EnvOr("GANTRY_BOOT_TIMING") != "" {

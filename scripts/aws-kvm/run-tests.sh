@@ -4,8 +4,9 @@
 #   export GANTRY_TEST_IID=i-xxx   (from infra-up.sh)
 #   sh scripts/aws-kvm/run-tests.sh
 set -euo pipefail
-cd "$(dirname "$0")/../.."
-HERE=scripts/aws-kvm
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+HERE="$ROOT/scripts/aws-kvm"
 
 REGION="${REGION:-eu-west-1}"
 export AWS_DEFAULT_REGION="$REGION"
@@ -13,7 +14,7 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="${BUCKET:-gantry-kvm-test-$ACCOUNT}"
 
 echo "== building + uploading gantry-linux-amd64 =="
-GOOS=linux GOARCH=amd64 go build -o /tmp/gantry-linux-amd64 .
+GOOS=linux GOARCH=amd64 go build -o /tmp/gantry-linux-amd64 ./cmd/gantry
 aws s3 cp /tmp/gantry-linux-amd64 "s3://$BUCKET/gantry-linux-amd64" --quiet
 
 echo "== running battery on ${GANTRY_TEST_IID:?export GANTRY_TEST_IID} =="

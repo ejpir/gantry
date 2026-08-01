@@ -4,15 +4,16 @@
 # runc CLI on purpose — that's how containerd shims drive gVisor), with
 # the real crun kept at /sbin/crun.runc. vminitd is unchanged.
 #
-#   ./mkrootfs-gvisor.sh nerdbox-rootfs-arm64.erofs
-#   → nerdbox-rootfs-gvisor-arm64.erofs     (use with: -runtime runsc)
+#   ./scripts/mkrootfs-gvisor.sh artifacts/nerdbox-rootfs-arm64.erofs
+#   → artifacts/nerdbox-rootfs-gvisor-arm64.erofs (use with: -runtime runsc)
 #
 # Needs: mkfs.erofs, fsck.erofs, curl, go. Downloads the matching runsc
 # release binary (static, ~45 MB) from the gVisor release bucket, and
 # builds the crunshim /dev fixer (guest/crunshim) for the target arch.
 set -e
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
-IN=${1:?"usage: mkrootfs-gvisor.sh nerdbox-rootfs-ARCH.erofs"}
+IN=${1:?"usage: mkrootfs-gvisor.sh artifacts/nerdbox-rootfs-ARCH.erofs"}
 case "$IN" in
 *arm64*|*aarch64*) RUNSC_ARCH=aarch64; GO_ARCH=arm64 ;;
 *x86_64*|*amd64*) RUNSC_ARCH=x86_64;  GO_ARCH=amd64 ;;
@@ -36,7 +37,7 @@ curl -fsSL "$BASE/runsc.sha512" -o "$WORK/runsc.sha512"
 chmod +x "$WORK/runsc"
 
 echo "== building crunshim ($GO_ARCH)"
-(cd "$(dirname "$0")" && CGO_ENABLED=0 GOOS=linux GOARCH=$GO_ARCH \
+(cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=$GO_ARCH \
     go build -trimpath -ldflags='-s -w' -o "$WORK/crunshim" ./guest/crunshim)
 
 echo "== installing: /sbin/crun = crunshim -> /sbin/crun.runsc (crun -> crun.runc)"

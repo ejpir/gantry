@@ -36,9 +36,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, `gantry — a tiny microVM monitor (KVM on Linux arm64/x86-64, HVF on macOS).
 
 usage:
-  gantry run -kernel Image -initrd initramfs.cpio.gz   # our guest init
-  gantry run -kernel Image -rootfs nerdbox-rootfs \    # the real nerdbox
-             -vsockfwd /tmp/gantry-vsock               #   guest + vminitd
+  gantry run -kernel Image -initrd artifacts/initramfs.cpio.gz   # our guest init
+  gantry run -kernel artifacts/nerdbox-kernel-arm64 \
+             -rootfs artifacts/nerdbox-rootfs-arm64.erofs \
+             -vsockfwd /tmp/gantry-vsock               #   real nerdbox guest
   gantry exec [flags] [-- CMD]      # one-shot: boot VM + shell in one command
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox

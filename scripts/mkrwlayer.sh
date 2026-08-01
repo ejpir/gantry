@@ -3,7 +3,7 @@
 # sbx rwlayer.img equivalent): a sparse ext4 image with the /upper and
 # /work directories overlayfs needs.
 #
-#   ./mkrwlayer.sh rwlayer-dev.ext4 [SIZE_MB]
+#   ./scripts/mkrwlayer.sh artifacts/rwlayer-dev.ext4 [SIZE_MB]
 #
 # Requirements: mkfs.ext4 + debugfs (e2fsprogs). Must run on Linux; on
 # macOS use a Linux container/VM with the repo shared. One rwlayer per

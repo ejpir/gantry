@@ -5,8 +5,8 @@
 # + `--mode rpc --sock`) together with the guest bridge into a docker-save
 # tar that `gantry run -image` / `gantry pi -image` load directly.
 #
-#   integrations/pi-vm/mkpiattach.sh              # → ./pi-attach.tar
-#   gantry pi -image ./pi-attach.tar -serve       # boot + serve
+#   integrations/pi-vm/mkpiattach.sh              # → ./artifacts/pi-attach.tar
+#   gantry pi -image ./artifacts/pi-attach.tar -serve # boot + serve
 #   pi attach --cmd "gantry exec pi-<dir> -- node /opt/pi/bridge.js"
 #
 # Env:
@@ -19,7 +19,7 @@
 #             http://192.168.1.1:3128)
 #   REGISTRY  npm registry override        (default: npmjs via PROXY)
 #   CA_DIR    dir of corp root .pem files  (default: ../pi-container/certs)
-#   OUT       output tar                   (default: pi-attach.tar)
+#   OUT       output tar                   (default: artifacts/pi-attach.tar)
 set -e
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -33,7 +33,8 @@ BASE=${BASE:-node:24-bookworm-slim}
 PROXY=${PROXY:-}
 REGISTRY=${REGISTRY:-}
 CA_DIR=${CA_DIR:-$HERE/../pi-container/certs}
-OUT=${OUT:-pi-attach.tar}
+OUT=${OUT:-$HERE/../../artifacts/pi-attach.tar}
+mkdir -p "$(dirname -- "$OUT")"
 
 [ -d "$PI_REPO/packages/coding-agent" ] || { echo "mkpiattach: PI_REPO $PI_REPO is not a pi checkout" >&2; exit 2; }
 

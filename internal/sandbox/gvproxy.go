@@ -24,7 +24,7 @@ func StartGVProxy(binPath, dir string) (*exec.Cmd, string, error) {
 	gvPath := binPath
 	if !strings.ContainsRune(gvPath, os.PathSeparator) && gutil.FileExists(gvPath) {
 		// exec.Command only searches $PATH for bare names; prefer the
-		// binary next to gantry (what run-macos.sh does with ./gvproxy).
+		// binary next to gantry (what scripts/run-macos.sh does with artifacts/gvproxy).
 		if abs, err := filepath.Abs(gvPath); err == nil {
 			gvPath = abs
 		}

@@ -14,7 +14,7 @@
 //	          /dev/vdc (ext4 rwlayer with /upper and /work), sbx-style
 //	-- CMD    container command (default /bin/sh; try /bin/bash on debian)
 //
-// Start the VM first:  ./run-macos.sh container
+// Start the VM first:  ./scripts/run-macos.sh container
 package main
 
 import (
