@@ -26,12 +26,22 @@ jobs:
           - { name: arm64, docker_arch: arm64, kernel_arch: arm64, page_size: 16k }
     steps:
       - uses: actions/checkout@v4
+      - name: cache guest assets
+        id: guest-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bundle
+          key: guest-assets-v0.2.1-${{ matrix.name }}-${{ hashFiles('scripts/mkimage.sh', '.github/workflows/ci.yml') }}
       - uses: docker/setup-buildx-action@v3
+        if: steps.guest-cache.outputs.cache-hit != 'true'
       - name: install EROFS tools
+        if: steps.guest-cache.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y erofs-utils
       - name: fetch guest source
+        if: steps.guest-cache.outputs.cache-hit != 'true'
         run: git clone --depth 1 --branch v0.2.1 https://github.com/containerd/nerdbox.git "$RUNNER_TEMP/nerdbox"
       - name: build guest kernel
+        if: steps.guest-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/guest/kernel" "$RUNNER_TEMP/guest/rootfs" "$RUNNER_TEMP/bundle"
           docker buildx build --progress=plain \
@@ -46,6 +56,7 @@ jobs:
           cp "$RUNNER_TEMP/guest/kernel/nerdbox-kernel-${{ matrix.kernel_arch }}" \
             "$RUNNER_TEMP/bundle/nerdbox-kernel"
       - name: build guest rootfs
+        if: steps.guest-cache.outputs.cache-hit != 'true'
         run: |
           docker buildx build --progress=plain \
             --file "$RUNNER_TEMP/nerdbox/Dockerfile" \
@@ -59,6 +70,7 @@ jobs:
           cp "$RUNNER_TEMP/guest/rootfs/nerdbox-rootfs.erofs" \
             "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs"
       - name: build test image
+        if: steps.guest-cache.outputs.cache-hit != 'true'
         run: ./scripts/mkimage.sh alpine:3.22 "$RUNNER_TEMP/bundle/alpine.erofs" "linux/${{ matrix.docker_arch }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -138,8 +150,12 @@ jobs:
           ASSETS="${{ runner.temp }}/guest-assets"
           export GANTRY_HOME="$RUNNER_TEMP/gantry-home"
           cleanup() {
+            status=$?
             "$BIN" stop ci >/dev/null 2>&1 || true
-            "$BIN" delete ci >/dev/null 2>&1 || true
+            if [ "$status" -eq 0 ]; then
+              "$BIN" delete ci >/dev/null 2>&1 || true
+            fi
+            return "$status"
           }
           trap cleanup EXIT
           "$BIN" start ci \
@@ -150,6 +166,14 @@ jobs:
           output=$("$BIN" exec ci -- /bin/sh -c 'echo hello world')
           printf '%s\n' "$output"
           printf '%s\n' "$output" | grep -Fqx 'hello world'
+      - name: upload VM logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-smoke-${{ matrix.name }}-logs
+          path: ${{ runner.temp }}/gantry-home/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build:
     name: build/${{ matrix.goos }}/${{ matrix.goarch }}
