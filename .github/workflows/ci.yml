@@ -154,6 +154,14 @@ jobs:
             "$BIN" stop ci >/dev/null 2>&1 || true
             if [ "$status" -eq 0 ]; then
               "$BIN" delete ci >/dev/null 2>&1 || true
+            else
+              for log in "$GANTRY_HOME/ci/daemon.log" "$GANTRY_HOME/ci/console.log"; do
+                if [ -f "$log" ]; then
+                  echo "---- $log ----"
+                  tail -c 8192 "$log" || true
+                  echo "----"
+                fi
+              done
             fi
             return "$status"
           }
@@ -173,7 +181,7 @@ jobs:
             echo "gantry exec failed with status $exec_rc" >&2
             exit "$exec_rc"
           fi
-          printf '%s\n' "$output" | grep -Fqx 'hello world'
+          printf '%s\n' "$output" | tr -d '\r' | grep -Fqx 'hello world'
       - name: upload VM logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
