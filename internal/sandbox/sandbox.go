@@ -408,6 +408,11 @@ func CmdDaemon(name string) int {
 		// device flush/close.
 		client.SyncGuest(rpc, br.streamSock, "sb", 5*time.Second)
 		br.closeInitStreams()
+		// Stop an external gvproxy before closing the VM's packet socket;
+		// otherwise its normal peer EOF is logged as an ERROR during teardown.
+		if nw.Sock != "" {
+			nw.Close()
+		}
 		if err := m.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "daemon: device shutdown:", err)
 		}

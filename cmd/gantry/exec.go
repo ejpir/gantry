@@ -184,6 +184,12 @@ agent cannot send them anywhere.
 	select {
 	case err := <-shellErr:
 		fmt.Println("gantry exec: shutting down the VM")
+		// Stop an external gvproxy before closing the VM's packet socket;
+		// otherwise gvproxy logs the expected peer EOF as an ERROR during
+		// normal teardown. Embedded networking remains open until m.Close.
+		if nw.Sock != "" {
+			nw.Close()
+		}
 		// The session already synced the guest (client.Shell, RW mode);
 		// flush/close the devices host-side too — process exit alone is
 		// a power cut that leaves flocks held and writes unflushed
