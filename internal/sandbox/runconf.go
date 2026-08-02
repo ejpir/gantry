@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // RunConfig is the fully-resolved description of one gantry VM run.
@@ -292,13 +293,19 @@ type Network struct {
 	Conn   net.Conn
 	Policy *netpol.Policy
 	close  func()
+	once   sync.Once
 }
 
 // Close releases the backend (netstack / gvproxy process / conn).
 func (n *Network) Close() {
-	if n != nil && n.close != nil {
-		n.close()
+	if n == nil {
+		return
 	}
+	n.once.Do(func() {
+		if n.close != nil {
+			n.close()
+		}
+	})
 }
 
 // NetMarker is the "networking enabled" marker DefaultCmdline consumes.
