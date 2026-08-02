@@ -163,8 +163,16 @@ jobs:
             -rootfs "$ASSETS/nerdbox-rootfs.erofs" \
             -image "$ASSETS/alpine.erofs" \
             -net=false -rw=false
-          output=$("$BIN" exec ci -- /bin/sh -c 'echo hello world')
+          if output=$("$BIN" exec ci -- /bin/sh -c 'echo hello world' 2>&1); then
+            exec_rc=0
+          else
+            exec_rc=$?
+          fi
           printf '%s\n' "$output"
+          if [ "$exec_rc" -ne 0 ]; then
+            echo "gantry exec failed with status $exec_rc" >&2
+            exit "$exec_rc"
+          fi
           printf '%s\n' "$output" | grep -Fqx 'hello world'
       - name: upload VM logs on failure
         if: failure()
