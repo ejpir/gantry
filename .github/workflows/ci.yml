@@ -1,10 +1,40 @@
 name: CI
 
+# Keep CI focused on executable/build inputs. Documentation-only changes do
+# not consume runners; version tags still run the release job.
 on:
   push:
     branches: [main, master]
     tags: ['v*']
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '**/go.mod'
+      - '**/go.sum'
+      - 'config/**'
+      - 'guest/**'
+      - 'integrations/**/*.js'
+      - 'integrations/**/*.sh'
+      - 'integrations/**/*.ts'
+      - 'integrations/**/Dockerfile'
+      - 'scripts/**'
+      - '.github/workflows/ci.yml'
   pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '**/go.mod'
+      - '**/go.sum'
+      - 'config/**'
+      - 'guest/**'
+      - 'integrations/**/*.js'
+      - 'integrations/**/*.sh'
+      - 'integrations/**/*.ts'
+      - 'integrations/**/Dockerfile'
+      - 'scripts/**'
+      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 permissions:
