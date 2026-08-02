@@ -2,6 +2,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"gantry/internal/image"
 	"strings"
 	"testing"
@@ -53,6 +54,34 @@ func TestConfigJSONShare(t *testing.T) {
 				if strings.Contains(cfg, nw) {
 					t.Errorf("unexpected %q", nw)
 				}
+			}
+		})
+	}
+}
+
+func TestConfigJSONTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		terminal bool
+		want     bool
+	}{
+		{terminal: true, want: true},
+		{terminal: false, want: false},
+	} {
+		t.Run(fmt.Sprintf("terminal-%t", tc.terminal), func(t *testing.T) {
+			cfg, err := configJSON(nil, false, []string{"/bin/sh"}, nil, tc.terminal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var v struct {
+				Process struct {
+					Terminal bool `json:"terminal"`
+				} `json:"process"`
+			}
+			if err := json.Unmarshal([]byte(cfg), &v); err != nil {
+				t.Fatal(err)
+			}
+			if v.Process.Terminal != tc.want {
+				t.Errorf("terminal = %v, want %v", v.Process.Terminal, tc.want)
 			}
 		})
 	}
