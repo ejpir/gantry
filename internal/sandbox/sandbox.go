@@ -591,6 +591,12 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	}, c, c)
 	if err != nil {
 		fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
+		// The broker is the only process that still has the sandbox logs
+		// while an attach client is connected. Include their tails in the
+		// failure stream so CI and remote callers can diagnose guest boot
+		// and daemon failures without guessing GANTRY_HOME.
+		dumpTailTo(c, filepath.Join(br.dir, "daemon.log"))
+		dumpTailTo(c, filepath.Join(br.dir, "console.log"))
 	}
 	// trailer for the attach client (cmdSandboxExec): the stream is raw at
 	// this point, so frame the exit status between NULs — impossible to
@@ -867,6 +873,10 @@ func absPath(p string) string {
 }
 
 func dumpTail(path string) {
+	dumpTailTo(os.Stderr, path)
+}
+
+func dumpTailTo(w io.Writer, path string) {
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) == 0 {
 		return
@@ -874,5 +884,5 @@ func dumpTail(path string) {
 	if len(b) > 4096 {
 		b = b[len(b)-4096:]
 	}
-	fmt.Fprintf(os.Stderr, "---- last bytes of %s ----\n%s\n----\n", filepath.Base(path), b)
+	fmt.Fprintf(w, "---- last bytes of %s ----\n%s\n----\n", filepath.Base(path), b)
 }
