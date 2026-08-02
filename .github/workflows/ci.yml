@@ -244,13 +244,14 @@ jobs:
       - name: publish release binaries
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           set -eu
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$RUNNER_TEMP"/release/* --clobber
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$RUNNER_TEMP"/release/* --repo "$REPO" --clobber
           else
             gh release create "$TAG" "$RUNNER_TEMP"/release/* \
-              --title "$TAG" --generate-notes
+              --repo "$REPO" --title "$TAG" --generate-notes
           fi
           ls -lh "$RUNNER_TEMP"/release
