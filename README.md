@@ -61,6 +61,14 @@ G=./artifacts/gantry                 # Linux
 # G=./artifacts/gantry-darwin-arm64  # macOS
 ```
 
+The interactive dashboard lists local sandboxes and supports refresh, exec,
+stop, and delete actions. It starts automatically when `gantry` is run in an
+interactive terminal, or can be opened explicitly:
+
+```sh
+$G tui
+```
+
 Run a container. OCI references are pulled and cached automatically:
 
 ```sh

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 func main() {
@@ -33,6 +35,9 @@ func main() {
 	append_ := run.String("append", "", "kernel cmdline (default depends on -rootfs)")
 
 	if len(os.Args) < 2 {
+		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+			os.Exit(sandbox.CmdTUI())
+		}
 		fmt.Fprintf(os.Stderr, `gantry — a tiny microVM monitor (KVM on Linux arm64/x86-64, HVF on macOS).
 
 usage:
@@ -44,6 +49,7 @@ usage:
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
+  gantry tui                        # interactive local sandbox dashboard
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
   gantry stop <name>                # stop a sandbox
@@ -84,6 +90,8 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2])))
 	case "ls":
 		os.Exit(sandbox.CmdLs())
+	case "tui":
+		os.Exit(sandbox.CmdTUI())
 	case "pi":
 		os.Exit(sandbox.CmdPi(os.Args[2:]))
 	case "pi-serve":
