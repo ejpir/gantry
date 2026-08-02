@@ -499,11 +499,12 @@ func readSecretsHandshake(r *os.File) map[string]secret.Value {
 }
 
 type brokerRequest struct {
-	Op   string   `json:"op"` // "session" | "kill"
-	ID   string   `json:"id"`
-	Args []string `json:"args,omitempty"`
-	Cols uint32   `json:"cols,omitempty"`
-	Rows uint32   `json:"rows,omitempty"`
+	Op       string   `json:"op"` // "session" | "kill"
+	ID       string   `json:"id"`
+	Args     []string `json:"args,omitempty"`
+	Cols     uint32   `json:"cols,omitempty"`
+	Rows     uint32   `json:"rows,omitempty"`
+	Terminal bool     `json:"terminal,omitempty"`
 }
 
 func (br *broker) serve(ln net.Listener) {
@@ -586,6 +587,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		ImgCfg:           br.cfg.ImageCfg,
 		Cols:             req.Cols,
 		Rows:             req.Rows,
+		Terminal:         req.Terminal,
 		KillCh:           killCh,
 		ExitStatus:       &status,
 	}, c, c)
@@ -635,7 +637,8 @@ func CmdSandboxExec(name string, argv []string) int {
 
 	id := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
 	req := brokerRequest{Op: "session", ID: id, Args: args}
-	if term.IsTerminal(int(os.Stdin.Fd())) {
+	req.Terminal = term.IsTerminal(int(os.Stdin.Fd()))
+	if req.Terminal {
 		if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
 			req.Cols, req.Rows = uint32(w), uint32(h)
 		}
@@ -659,7 +662,7 @@ func CmdSandboxExec(name string, argv []string) int {
 		return 1
 	}
 
-	if term.IsTerminal(int(os.Stdin.Fd())) {
+	if req.Terminal {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
 		}

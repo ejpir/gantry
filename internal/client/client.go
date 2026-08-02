@@ -303,6 +303,7 @@ type SessionOptions struct {
 	Args       []string
 	ID         string
 	Cols, Rows uint32          // initial pty size; 0 skips ResizePty
+	Terminal   bool            // allocate a pty; false uses pipe stdio
 	KillCh     <-chan struct{} // optional: first receive SIGKILLs the task
 	Quiet      bool            // suppress progress messages
 	ExitStatus *int            // optional: set to the task's exit status
@@ -455,7 +456,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		ID:       id,
 		Bundle:   bundlePath,
 		Rootfs:   RootfsMounts(opts.RW),
-		Terminal: true,
+		Terminal: opts.Terminal,
 		Stdin:    "stream://" + stdinStream.id,
 		Stdout:   "stream://" + stdoutStream.id,
 	})
@@ -490,7 +491,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	}
 	logf("task started — shell is live (type 'exit' to leave)")
 
-	if opts.Cols > 0 && opts.Rows > 0 {
+	if opts.Terminal && opts.Cols > 0 && opts.Rows > 0 {
 		tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, Width: opts.Cols, Height: opts.Rows})
 	}
 
@@ -668,7 +669,7 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	execID := fmt.Sprintf("%s-exec-%d", id, time.Now().UnixNano())
 	uid, gid := opts.ImgCfg.IDs()
 	proc := &specs.Process{
-		Terminal: true,
+		Terminal: opts.Terminal,
 		User:     specs.User{UID: uid, GID: gid},
 		Args:     opts.Args,
 		// No PS1 override: the image's own shell setup (or the shell's
@@ -687,7 +688,7 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	if _, err := tc.Exec(ctx, &task.ExecProcessRequest{
 		ID:       id,
 		ExecID:   execID,
-		Terminal: true,
+		Terminal: opts.Terminal,
 		Stdin:    "stream://" + stdinID,
 		Stdout:   "stream://" + stdoutID,
 		Spec:     specPB,
@@ -702,7 +703,7 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	}
 	logf("exec process started in container %s (type 'exit' to leave)", id)
 
-	if opts.Cols > 0 && opts.Rows > 0 {
+	if opts.Terminal && opts.Cols > 0 && opts.Rows > 0 {
 		tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, ExecID: execID, Width: opts.Cols, Height: opts.Rows})
 	}
 
@@ -782,7 +783,8 @@ func Shell(opts ShellOptions) error {
 	defer client.Close()
 
 	sess := opts.sessionOptions(shares)
-	if term.IsTerminal(int(os.Stdin.Fd())) {
+	sess.Terminal = term.IsTerminal(int(os.Stdin.Fd()))
+	if sess.Terminal {
 		old, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err == nil {
 			defer term.Restore(int(os.Stdin.Fd()), old)
