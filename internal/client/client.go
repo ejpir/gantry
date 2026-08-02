@@ -320,6 +320,11 @@ type SessionOptions struct {
 	// which is why one-shot sessions route through the Exec path rather
 	// than the bundle (config.json persists inside the guest).
 	Secrets []string
+	// Keepalive retains host-side stream connections used by the
+	// long-lived sandbox init. The owner must keep them open until the
+	// VM exits; otherwise Go can collect them and the guest terminal gets
+	// a hangup, stopping the init before the next Exec.
+	Keepalive func(...io.Closer)
 }
 
 func init() {
@@ -360,6 +365,21 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 
 	id := opts.ID
 	shares := opts.Shares
+
+	// One-shot callers do not have a broker to own the init's terminal
+	// streams, so retain them until this session finishes. The daemon passes
+	// its own longer-lived Keepalive callback below.
+	var localKeepalive []io.Closer
+	if opts.Keepalive == nil {
+		opts.Keepalive = func(conns ...io.Closer) {
+			localKeepalive = append(localKeepalive, conns...)
+		}
+		defer func() {
+			for _, c := range localKeepalive {
+				_ = c.Close()
+			}
+		}()
+	}
 
 	tc := task.NewTTRPCTaskClient(client)
 	if opts.ExecIntoExisting {
@@ -603,9 +623,13 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		outC.Close()
 		return fmt.Errorf("task Start: %w", err)
 	}
-	// NOTE: inC/outC are deliberately NOT closed: closing them ends the
-	// guest's console relay, which closes the pty master and SIGHUPs the
-	// stub init. They are reclaimed when the daemon (VM) exits.
+	// Keep the host-side stream connections reachable for the entire lifetime
+	// of the init. If they are collected after this function returns, the
+	// guest terminal relay sees a hangup and the init becomes STOPPED before
+	// the next session can issue Exec.
+	if opts.Keepalive != nil {
+		opts.Keepalive(inC, outC)
+	}
 	logf("sandbox container %s is up (long-lived init; sessions attach as exec)", id)
 	return nil
 }
