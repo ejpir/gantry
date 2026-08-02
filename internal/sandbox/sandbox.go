@@ -407,7 +407,6 @@ func CmdDaemon(name string) int {
 		// wedged, and gantry stop escalates to SIGKILL), then host-side
 		// device flush/close.
 		client.SyncGuest(rpc, br.streamSock, "sb", 5*time.Second)
-		br.closeInitStreams()
 		// Stop an external gvproxy before closing the VM's packet socket;
 		// otherwise its normal peer EOF is logged as an ERROR during teardown.
 		if nw.Sock != "" {
@@ -436,25 +435,6 @@ type broker struct {
 
 	mu       sync.Mutex
 	sessions map[string]chan struct{}
-
-	keepaliveMu sync.Mutex
-	initStreams []io.Closer
-}
-
-func (br *broker) retainInitStreams(streams ...io.Closer) {
-	br.keepaliveMu.Lock()
-	br.initStreams = append(br.initStreams, streams...)
-	br.keepaliveMu.Unlock()
-}
-
-func (br *broker) closeInitStreams() {
-	br.keepaliveMu.Lock()
-	streams := br.initStreams
-	br.initStreams = nil
-	br.keepaliveMu.Unlock()
-	for _, stream := range streams {
-		_ = stream.Close()
-	}
 }
 
 // secretsHandshakeJSON renders the CLI→daemon handshake: one line of
@@ -583,7 +563,6 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		// fighting over the rw rootfs stack with a second Create
 		ID:               "sb",
 		ExecIntoExisting: true,
-		Keepalive:        br.retainInitStreams,
 		ImgCfg:           br.cfg.ImageCfg,
 		Cols:             req.Cols,
 		Rows:             req.Rows,

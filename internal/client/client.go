@@ -321,11 +321,6 @@ type SessionOptions struct {
 	// which is why one-shot sessions route through the Exec path rather
 	// than the bundle (config.json persists inside the guest).
 	Secrets []string
-	// Keepalive retains host-side stream connections used by the
-	// long-lived sandbox init. The owner must keep them open until the
-	// VM exits; otherwise Go can collect them and the guest terminal gets
-	// a hangup, stopping the init before the next Exec.
-	Keepalive func(...io.Closer)
 }
 
 func init() {
@@ -366,21 +361,6 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 
 	id := opts.ID
 	shares := opts.Shares
-
-	// One-shot callers do not have a broker to own the init's terminal
-	// streams, so retain them until this session finishes. The daemon passes
-	// its own longer-lived Keepalive callback below.
-	var localKeepalive []io.Closer
-	if opts.Keepalive == nil {
-		opts.Keepalive = func(conns ...io.Closer) {
-			localKeepalive = append(localKeepalive, conns...)
-		}
-		defer func() {
-			for _, c := range localKeepalive {
-				_ = c.Close()
-			}
-		}()
-	}
 
 	tc := task.NewTTRPCTaskClient(client)
 	if opts.ExecIntoExisting {
@@ -550,11 +530,9 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 // containerInitArgs is the long-lived stub a sandbox container runs as
 // init (ExecIntoExisting mode). User sessions never touch it: they Exec
 // their own processes in. It only dies when the sandbox (VM) stops.
-// nohup + stdio detach: when the guest's console relay ends, the pty
-// master closes and the kernel SIGHUPs the foreground pgrp — a plain
-// dash init dies instantly (seen under runsc; crun's pty setup masks
-// it). SIGHUP must be ignored and the ctty fds dropped.
-var containerInitArgs = []string{"/usr/bin/nohup", "/bin/sh", "-c", "exec </dev/null >/dev/null 2>&1; while :; do sleep 86400; done"}
+// The stub uses null stdio and no terminal; tying its lifetime to a session
+// pty makes it vulnerable to a hangup before the first Exec.
+var containerInitArgs = []string{"/bin/sh", "-c", "while :; do sleep 86400; done"}
 
 // ensureSandboxContainer makes sure the sandbox's long-lived container
 // exists and is RUNNING, creating it (stub init) if not.
@@ -573,7 +551,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		dcancel()
 	}
 
-	cfg, err := ConfigJSON(opts.Shares, opts.RW, containerInitArgs, nil)
+	cfg, err := configJSON(opts.Shares, opts.RW, containerInitArgs, nil, false)
 	if err != nil {
 		return err
 	}
@@ -587,30 +565,13 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		return err
 	}
 
-	// Stub-init stdio: throwaway streams. Terminal tasks use the console
-	// socket, so these are never claimed; close them right after Start.
-	inID, outID := streamID("init-stdin"), streamID("init-stdout")
-	inC, err := startStream(opts.StreamSock, inID)
-	if err != nil {
-		return fmt.Errorf("init stdin stream: %w", err)
-	}
-	outC, err := startStream(opts.StreamSock, outID)
-	if err != nil {
-		inC.Close()
-		return fmt.Errorf("init stdout stream: %w", err)
-	}
-
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{
 		ID:       id,
 		Bundle:   bundlePath,
 		Rootfs:   RootfsMounts(opts.RW),
-		Terminal: true,
-		Stdin:    "stream://" + inID,
-		Stdout:   "stream://" + outID,
+		Terminal: false,
 	})
 	if err != nil {
-		inC.Close()
-		outC.Close()
 		if errHas(err, errTextTaskExists) {
 			return nil // someone else won the create race
 		}
@@ -620,16 +581,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		return fmt.Errorf("task Create: %w%s\n(see the VM console for vminitd logs)", err, rwlayerHint(err, opts.RW))
 	}
 	if _, err := tc.Start(ctx, &task.StartRequest{ID: id}); err != nil {
-		inC.Close()
-		outC.Close()
 		return fmt.Errorf("task Start: %w", err)
-	}
-	// Keep the host-side stream connections reachable for the entire lifetime
-	// of the init. If they are collected after this function returns, the
-	// guest terminal relay sees a hangup and the init becomes STOPPED before
-	// the next session can issue Exec.
-	if opts.Keepalive != nil {
-		opts.Keepalive(inC, outC)
 	}
 	logf("sandbox container %s is up (long-lived init; sessions attach as exec)", id)
 	return nil
@@ -882,17 +834,23 @@ func RootfsMounts(rw bool) []*types.Mount {
 	}
 }
 
-// ConfigJSON renders the OCI runtime config for the shell container.
-// ConfigJSON builds the OCI config.json for a container process.
+// ConfigJSON renders the OCI runtime config for a terminal shell container.
 // img is the resolved image config (nil for direct .erofs files and for
 // the stub init, which is gantry's process, not the image's): it drives
 // env (image values win, gantry's are defaults-if-absent), the run user,
 // and the working dir.
 func ConfigJSON(shares []ShareEntry, rw bool, args []string, img *image.Config) (string, error) {
+	return configJSON(shares, rw, args, img, true)
+}
+
+// configJSON is also used for the sandbox's long-lived stub init. That
+// process deliberately has null stdio and no terminal, so its lifetime is
+// independent of any session pty.
+func configJSON(shares []ShareEntry, rw bool, args []string, img *image.Config, terminal bool) (string, error) {
 	cfg := `{
   "ociVersion": "1.1.0",
   "process": {
-    "terminal": true,
+    "terminal": TERMINAL,
     "user": USERJSON,
     "args": ARGS,
     "env": ENVJSON,
@@ -943,9 +901,13 @@ func ConfigJSON(shares []ShareEntry, rw bool, args []string, img *image.Config) 
 	if rw {
 		rootRO = "false"
 	}
+	terminalJSON := "false"
+	if terminal {
+		terminalJSON = "true"
+	}
 	cfg = strings.NewReplacer("ARGS", string(argsJSON), "ROOTRO", rootRO,
-		"USERJSON", string(userJSON), "ENVJSON", string(envJSON),
-		"CWDJSON", string(cwdJSON)).Replace(cfg)
+		"TERMINAL", terminalJSON, "USERJSON", string(userJSON),
+		"ENVJSON", string(envJSON), "CWDJSON", string(cwdJSON)).Replace(cfg)
 	if len(shares) == 0 {
 		return cfg, nil
 	}
