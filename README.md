@@ -86,6 +86,16 @@ On macOS, use the signing wrapper:
 ./artifacts/gantry-darwin-arm64 exec dev -- /bin/sh
 ```
 
+For a downloaded macOS binary, apply a temporary ad-hoc signature and remove
+macOS quarantine before running it:
+
+```sh
+codesign --force --sign - --timestamp=none gantry-darwin-arm64
+codesign --verify --verbose gantry-darwin-arm64
+xattr -d com.apple.quarantine gantry-darwin-arm64
+./gantry-darwin-arm64
+```
+
 A named sandbox gets a private, persistent layer at
 `~/.gantry/rwlayers/<name>.ext4`. Use `-rw=false` to disable it.
 
