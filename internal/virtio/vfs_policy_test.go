@@ -85,3 +85,65 @@ func TestOneShotSharePolicyParity(t *testing.T) {
 		t.Errorf("ro open(O_WRONLY) errno %d, want EROFS", errno)
 	}
 }
+
+// After an inode was resolved as a real directory, a host-side swap of that
+// directory for a symlink must fail every subsequent operation through the
+// pinned-root walk (O_NOFOLLOW on every component) — and, critically, must
+// never act on the symlink's target outside the share.
+func TestPinnedRootRejectsSwappedDirectory(t *testing.T) {
+	share := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "file.txt"), []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(share, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(share, "sub", "file.txt"), []byte("inside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dev, err := NewFS("pinned", share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fuseInitDevice(t, dev)
+
+	subNode, errno := lookup(t, dev, 2, 1, "sub")
+	if errno != 0 {
+		t.Fatalf("sub lookup errno %d", errno)
+	}
+	if _, errno := lookup(t, dev, 3, subNode, "file.txt"); errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+
+	// Host-side swap: real directory becomes a symlink out of the share.
+	if err := os.RemoveAll(filepath.Join(share, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(share, "sub")); err != nil {
+		t.Fatal(err)
+	}
+
+	// UNLINK through the stale inode must fail, and the outside file must
+	// survive untouched.
+	name := append([]byte("file.txt"), 0)
+	_, errno, _ = req(t, dev,
+		[][]byte{fuseInHeader(10 /* UNLINK */, 4, subNode, len(name)), name},
+		16, 16)
+	if errno == 0 {
+		t.Fatal("unlink through a swapped directory succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "file.txt")); err != nil {
+		t.Fatalf("swapped-symlink unlink reached outside the share: %v", err)
+	}
+
+	// OPEN through the stale inode must fail too (O_NOFOLLOW walk).
+	openIn := make([]byte, 8)
+	_, errno, _ = req(t, dev,
+		[][]byte{fuseInHeader(fuseOpen, 5, subNode, len(openIn)), openIn},
+		16, 16)
+	if errno == 0 {
+		t.Error("opendir/open through a swapped directory succeeded")
+	}
+}

@@ -114,13 +114,25 @@ var _ = (NodeStatfser)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	s := syscall.Statfs_t{}
-	p, errno := n.securePath("")
-	if errno != 0 {
-		return errno
-	}
-	err := syscall.Statfs(p, &s)
-	if err != nil {
-		return ToErrno(err)
+	if n.pinned() {
+		dirfd, err := openRelDir(n.RootData.RootFD, n.relPath())
+		if err != nil {
+			return ToErrno(err)
+		}
+		defer unix.Close(dirfd)
+		var us unix.Statfs_t
+		if err := unix.Fstatfs(dirfd, &us); err != nil {
+			return ToErrno(err)
+		}
+		s = statfsToSyscall(&us)
+	} else {
+		p, errno := n.securePath("")
+		if errno != 0 {
+			return errno
+		}
+		if err := syscall.Statfs(p, &s); err != nil {
+			return ToErrno(err)
+		}
 	}
 	out.FromStatfsT(&s)
 	return OK
@@ -208,15 +220,21 @@ func (n *LoopbackNode) securePath(name string) (string, syscall.Errno) {
 var _ = (NodeLookuper)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
-	p, errno := n.securePath(name)
-	if errno != 0 {
-		return nil, errno
-	}
-
-	st := syscall.Stat_t{}
-	err := syscall.Lstat(p, &st)
-	if err != nil {
-		return nil, ToErrno(err)
+	var st syscall.Stat_t
+	if n.pinned() {
+		var errno syscall.Errno
+		st, errno = lstatRel(n.RootData.RootFD, relJoin(n.relPath(), name))
+		if errno != 0 {
+			return nil, errno
+		}
+	} else {
+		p, errno := n.securePath(name)
+		if errno != 0 {
+			return nil, errno
+		}
+		if err := syscall.Lstat(p, &st); err != nil {
+			return nil, ToErrno(err)
+		}
 	}
 
 	out.Attr.FromStat(&st)
@@ -241,6 +259,9 @@ func (n *LoopbackNode) preserveOwner(ctx context.Context, path string) error {
 var _ = (NodeMknoder)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Mknod(ctx context.Context, name string, mode, rdev uint32, out *fuse.EntryOut) (*Inode, syscall.Errno) {
+	if n.pinned() {
+		return n.mknodAt(ctx, name, mode, rdev, out)
+	}
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return nil, errno
@@ -267,6 +288,9 @@ func (n *LoopbackNode) Mknod(ctx context.Context, name string, mode, rdev uint32
 var _ = (NodeMkdirer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*Inode, syscall.Errno) {
+	if n.pinned() {
+		return n.mkdirAt(ctx, name, mode, out)
+	}
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return nil, errno
@@ -293,6 +317,12 @@ func (n *LoopbackNode) Mkdir(ctx context.Context, name string, mode uint32, out 
 var _ = (NodeRmdirer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	if n.pinned() {
+		return withParentAt(n.RootData.RootFD, relJoin(n.relPath(), name),
+			func(dirfd int, base string) error {
+				return unix.Unlinkat(dirfd, base, unix.AT_REMOVEDIR)
+			})
+	}
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return errno
@@ -304,6 +334,12 @@ func (n *LoopbackNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 var _ = (NodeUnlinker)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	if n.pinned() {
+		return withParentAt(n.RootData.RootFD, relJoin(n.relPath(), name),
+			func(dirfd int, base string) error {
+				return unix.Unlinkat(dirfd, base, 0)
+			})
+	}
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return errno
@@ -328,6 +364,10 @@ func (n *LoopbackNode) Rename(ctx context.Context, name string, newParent InodeE
 		return n.rename2(name, e2.loopbackNode(), newName, flags)
 	}
 
+	if n.pinned() {
+		return n.renameAt(name, e2.loopbackNode(), newName)
+	}
+
 	p1, errno := n.securePath(name)
 	if errno != 0 {
 		return errno
@@ -344,6 +384,9 @@ func (n *LoopbackNode) Rename(ctx context.Context, name string, newParent InodeE
 var _ = (NodeCreater)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *Inode, fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	if n.pinned() {
+		return n.createAt(ctx, name, flags, mode, out)
+	}
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return nil, nil, 0, errno
@@ -369,20 +412,30 @@ func (n *LoopbackNode) Create(ctx context.Context, name string, flags uint32, mo
 }
 
 func (n *LoopbackNode) rename2(name string, newParent *LoopbackNode, newName string, flags uint32) syscall.Errno {
-	p1, errno := n.securePath("")
-	if errno != 0 {
-		return errno
+	var fd1, fd2 int
+	var err error
+	if n.pinned() {
+		fd1, err = openRelDir(n.RootData.RootFD, n.relPath())
+	} else {
+		p1, errno := n.securePath("")
+		if errno != 0 {
+			return errno
+		}
+		fd1, err = syscall.Open(p1, syscall.O_DIRECTORY, 0)
 	}
-	fd1, err := syscall.Open(p1, syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return ToErrno(err)
 	}
 	defer syscall.Close(fd1)
-	p2, errno := newParent.securePath("")
-	if errno != 0 {
-		return errno
+	if newParent.pinned() {
+		fd2, err = openRelDir(newParent.RootData.RootFD, newParent.relPath())
+	} else {
+		p2, errno := newParent.securePath("")
+		if errno != 0 {
+			return errno
+		}
+		fd2, err = syscall.Open(p2, syscall.O_DIRECTORY, 0)
 	}
-	fd2, err := syscall.Open(p2, syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return ToErrno(err)
 	}
@@ -415,13 +468,16 @@ func (n *LoopbackNode) rename2(name string, newParent *LoopbackNode, newName str
 var _ = (NodeSymlinker)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
+	// NOTE: target is intentionally NOT validated — a symlink may point
+	// anywhere; what matters is that gantry never FOLLOWS one out of the
+	// share (pinned-root *at walk with O_NOFOLLOW on every op).
+	if n.pinned() {
+		return n.symlinkAt(ctx, target, name, out)
+	}
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return nil, errno
 	}
-	// NOTE: target is intentionally NOT validated — a symlink may point
-	// anywhere; what matters is that gantry never FOLLOWS one out of the
-	// share (securePath on every path-based op, O_NOFOLLOW openat on Open).
 	err := syscall.Symlink(target, p)
 	if err != nil {
 		return nil, ToErrno(err)
@@ -451,6 +507,10 @@ func (n *LoopbackNode) Link(ctx context.Context, target InodeEmbedder, name stri
 		return nil, syscall.EXDEV
 	}
 
+	if n.pinned() {
+		return n.linkAt(ctx, e2.loopbackNode(), name, out)
+	}
+
 	p, errno := n.securePath(name)
 	if errno != 0 {
 		return nil, errno
@@ -478,6 +538,23 @@ func (n *LoopbackNode) Link(ctx context.Context, target InodeEmbedder, name stri
 var _ = (NodeReadlinker)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	if n.pinned() {
+		var out []byte
+		errno := withParentAt(n.RootData.RootFD, n.relPath(), func(dirfd int, base string) error {
+			for l := 256; ; l *= 2 {
+				buf := make([]byte, l)
+				sz, err := unix.Readlinkat(dirfd, base, buf)
+				if err != nil {
+					return err
+				}
+				if sz < len(buf) {
+					out = buf[:sz]
+					return nil
+				}
+			}
+		})
+		return out, errno
+	}
 	p, errno := n.securePath("")
 	if errno != 0 {
 		return nil, errno
@@ -498,10 +575,24 @@ func (n *LoopbackNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 
 var _ = (NodeOpener)((*LoopbackNode)(nil))
 
-// Symlink-safe through use of OpenSymlinkAware.
+// Symlink-safe: pinned exports walk from the root descriptor with
+// O_NOFOLLOW on every component including the final one.
 func (n *LoopbackNode) Open(ctx context.Context, flags uint32) (fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	flags = flags &^ fuse.FMODE_EXEC
 	hostFlags := openFlagsToHost(flags) &^ syscall.O_APPEND
+
+	if n.pinned() {
+		var fd int = -1
+		errno := withParentAt(n.RootData.RootFD, n.relPath(), func(dirfd int, base string) error {
+			var err error
+			fd, err = unix.Openat(dirfd, base, hostFlags|unix.O_NOFOLLOW, 0)
+			return err
+		})
+		if errno != 0 {
+			return nil, 0, errno
+		}
+		return NewLoopbackFile(fd), 0, 0
+	}
 
 	f, err := openat.OpenSymlinkAware(n.rootPath(), n.relativePath(), hostFlags, 0)
 	if err != nil {
@@ -514,6 +605,18 @@ func (n *LoopbackNode) Open(ctx context.Context, flags uint32) (fh FileHandle, f
 var _ = (NodeOpendirHandler)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) OpendirHandle(ctx context.Context, flags uint32) (FileHandle, uint32, syscall.Errno) {
+	if n.pinned() {
+		dirfd, err := openRelDir(n.RootData.RootFD, n.relPath())
+		if err != nil {
+			return nil, 0, ToErrno(err)
+		}
+		ds, errno := NewLoopbackDirStreamFd(dirfd)
+		if errno != 0 {
+			unix.Close(dirfd)
+			return nil, 0, errno
+		}
+		return ds, 0, 0
+	}
 	p, gerrno := n.securePath("")
 	if gerrno != 0 {
 		return nil, 0, gerrno
@@ -528,6 +631,18 @@ func (n *LoopbackNode) OpendirHandle(ctx context.Context, flags uint32) (FileHan
 var _ = (NodeReaddirer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Readdir(ctx context.Context) (DirStream, syscall.Errno) {
+	if n.pinned() {
+		dirfd, err := openRelDir(n.RootData.RootFD, n.relPath())
+		if err != nil {
+			return nil, ToErrno(err)
+		}
+		ds, errno := NewLoopbackDirStreamFd(dirfd)
+		if errno != 0 {
+			unix.Close(dirfd)
+			return nil, errno
+		}
+		return ds, 0
+	}
 	p, errno := n.securePath("")
 	if errno != 0 {
 		return nil, errno
@@ -542,6 +657,15 @@ func (n *LoopbackNode) Getattr(ctx context.Context, f FileHandle, out *fuse.Attr
 		if fga, ok := f.(FileGetattrer); ok {
 			return fga.Getattr(ctx, out)
 		}
+	}
+
+	if n.pinned() {
+		st, errno := lstatRel(n.RootData.RootFD, n.relPath())
+		if errno != 0 {
+			return errno
+		}
+		out.FromStat(&st)
+		return OK
 	}
 
 	p, errno := n.securePath("")
@@ -567,6 +691,9 @@ func (n *LoopbackNode) Getattr(ctx context.Context, f FileHandle, out *fuse.Attr
 var _ = (NodeSetattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Setattr(ctx context.Context, f FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if n.pinned() {
+		return n.setattrAt(ctx, f, in, out)
+	}
 	p, errno := n.securePath("")
 	if errno != 0 {
 		return errno
