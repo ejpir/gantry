@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -307,16 +309,34 @@ func (m sandboxTUIModel) renderPortDetail(theme tuiTheme, width int) []string {
 	if row.Error != "" {
 		state = "error: " + row.Error
 	}
-	exposure := "loopback only"
-	wide := strings.HasPrefix(row.Bind, "0.0.0.0:") || (strings.HasPrefix(row.Bind, "[") && !strings.HasPrefix(row.Bind, "[::1]"))
-	if wide {
-		exposure = "LAN-reachable \u2014 explicit wide bind"
-	}
+	exposure := bindExposure(row.Bind)
 	return []string{
 		m.renderTableSeparator(theme, width),
 		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(title) + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(state),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("exposure   ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(exposure),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("netpol     ") + lipgloss.NewStyle().Foreground(theme.secondary).Render("publishes are inbound holes: egress rules do not apply to forwarded connections"),
+	}
+}
+
+// bindExposure classifies a bind address by parsing it, not by prefix
+// matching: loopback stays loopback, wildcard is all-interfaces, and a
+// specific LAN address is reported as such instead of mislabelled loopback.
+func bindExposure(bind string) string {
+	host, _, err := net.SplitHostPort(bind)
+	if err != nil {
+		return "unparseable bind"
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return "unparseable bind"
+	}
+	switch {
+	case addr.IsLoopback():
+		return "loopback only"
+	case addr.IsUnspecified():
+		return "all interfaces — LAN-reachable"
+	default:
+		return "host address " + host + " — reachable where that address routes"
 	}
 }
 

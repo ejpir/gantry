@@ -20,11 +20,18 @@ const maxManagedShares = 256
 // receives the manager's hub before boot; the ctl.sock broker retains the
 // manager so live mutations update the FUSE namespace, sandbox.json and the
 // dashboard manifest as one control-plane transaction.
+//
+// Transaction order is crash-atomic: the persisted configuration is updated
+// first (a single ConfigStore mutation computing the final Shares slice),
+// the manifest is published second, and only then is the live namespace
+// touched. Every step before the hub mutation is reversible, so a failure
+// anywhere rolls all three back; a crash anywhere leaves on-disk state the
+// next boot can either replay (config) or regenerate (manifest).
 type ShareManager struct {
 	dir        string
 	hub        *virtio.ShareHub
+	store      *ConfigStore
 	mu         sync.Mutex
-	cfg        RunConfig
 	exports    map[string]*managedShare
 	retired    []*managedShare
 	generation uint64
@@ -38,9 +45,11 @@ type managedShare struct {
 
 // NewShareManager prepares every configured export before vmm.Prepare. A nil
 // hub (only on platforms without a virtio-fs backend) preserves the legacy
-// per-device path for an empty configuration.
-func NewShareManager(dir string, cfg RunConfig) (*ShareManager, []string, error) {
-	m := &ShareManager{dir: dir, cfg: cfg, exports: map[string]*managedShare{}}
+// per-device path for an empty configuration. The store is the broker-owned
+// configuration owner; boot state is read from its snapshot.
+func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, error) {
+	cfg := store.Snapshot()
+	m := &ShareManager{dir: dir, store: store, exports: map[string]*managedShare{}}
 	if len(cfg.Shares) > maxManagedShares {
 		return nil, nil, fmt.Errorf("too many shares: %d (max %d)", len(cfg.Shares), maxManagedShares)
 	}
@@ -174,7 +183,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	if m.hub == nil {
 		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
-	if !m.cfg.RW {
+	if !m.store.Snapshot().RW {
 		// A read-only container root cannot create the /host bind target,
 		// so the hub was never mounted into the container (client.go).
 		return shares.Entry{}, fmt.Errorf("live shares require a writable container root (sandbox started with -rw=false)")
@@ -201,7 +210,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 			// Identical share: re-adding an ephemeral share with --persist
 			// promotes it to persistent instead of being a no-op.
 			if persistent && existing.ephemeral {
-				if err := m.persistAddLocked(existing.share); err != nil {
+				if err := m.mutateSharesLocked(share.Tag, shareConfigSpec(existing.share)); err != nil {
 					return shares.Entry{}, err
 				}
 				existing.ephemeral = false
@@ -230,26 +239,43 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	}
 	share.Path = canonical
 	ms := &managedShare{share: share, ephemeral: !persistent}
-	// Persist the candidate configuration before touching the live
-	// namespace, snapshotting so any later failure restores the previous
-	// state. The old export keeps serving until the atomic hub Swap.
-	var oldCfg []string
+
+	// Persist first: one mutation computing the final Shares slice (an
+	// atomic replace for an existing tag — never separate remove+add
+	// writes). Then stage memory + manifest, and touch the live namespace
+	// last; failures before the hub mutation roll everything back.
+	var oldConfig []string
 	if persistent {
-		oldCfg = append([]string(nil), m.cfg.Shares...)
-		if existing != nil && !existing.ephemeral {
-			if err := m.persistRemoveLocked(share.Tag); err != nil {
-				prepared.ClosePrepared()
-				return shares.Entry{}, err
-			}
-		}
-		if err := m.persistAddLocked(share); err != nil {
-			if oldCfg != nil {
-				m.cfg.Shares = oldCfg
-				_ = m.writeConfigLocked()
-			}
+		// Replacing an existing persistent share is still a single
+		// slice swap: shareSpecsReplacingTag drops the tag's old
+		// specs and appends the new one in one write.
+		if err := m.mutateSharesSnapshotLocked(share.Tag, shareConfigSpec(share), &oldConfig); err != nil {
 			prepared.ClosePrepared()
 			return shares.Entry{}, err
 		}
+	}
+	retiredIdx := len(m.retired)
+	m.exports[share.Tag] = ms
+	if existing != nil {
+		m.retired = append(m.retired, existing)
+	}
+	m.generation++
+	rollback := func(err error) (shares.Entry, error) {
+		delete(m.exports, share.Tag)
+		m.retired = m.retired[:retiredIdx]
+		if existing != nil {
+			m.exports[share.Tag] = existing
+		}
+		m.generation++
+		if persistent {
+			m.restoreSharesLocked(oldConfig)
+		}
+		_ = m.publishLocked()
+		prepared.ClosePrepared()
+		return shares.Entry{}, err
+	}
+	if err := m.publishLocked(); err != nil {
+		return rollback(err)
 	}
 	var export *virtio.ShareExport
 	if existing != nil {
@@ -258,22 +284,15 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 		export, err = m.hub.Publish(prepared)
 	}
 	if err != nil {
-		if persistent {
-			m.cfg.Shares = oldCfg
-			_ = m.writeConfigLocked()
-		}
-		prepared.ClosePrepared()
-		return shares.Entry{}, err
+		return rollback(err)
 	}
 	ms.export = export
-	m.exports[share.Tag] = ms
-	if existing != nil {
-		// The swapped-out export is revoked; keep it visible while it drains.
-		m.retired = append(m.retired, existing)
-	}
-	m.generation++
-	entry := m.entry(ms)
-	return entry, m.publishLocked()
+	// Best-effort refresh: the pre-swap publish validated writability and
+	// the rollback path republishes on failure; this one just tightens the
+	// retired/active states now that the live namespace has moved. A stale
+	// manifest self-heals on the next mutation or boot Publish.
+	_ = m.publishLocked()
+	return m.entry(ms), nil
 }
 
 // Remove hides a share immediately. Graceful removal drains existing handles;
@@ -299,23 +318,38 @@ func (m *ShareManager) removeLocked(tag string, persistent, force bool) (shares.
 	if ctr != defaultHubCtrPath(tag) && !force {
 		return shares.Entry{}, fmt.Errorf("share %q has an explicit container alias at %s; use --force or restart the sandbox", tag, ctr)
 	}
+	var oldConfig []string
 	if persistent && !ms.ephemeral {
-		if err := m.persistRemoveLocked(tag); err != nil {
+		if err := m.mutateSharesSnapshotLocked(tag, "", &oldConfig); err != nil {
 			return shares.Entry{}, err
 		}
 	}
-	export, err := m.hub.Remove(tag, force)
-	if err != nil {
-		if persistent && !ms.ephemeral {
-			_ = m.persistAddLocked(ms.share)
-		}
-		return shares.Entry{}, err
-	}
+	// Unstage + manifest before revoking the live export, so a failure
+	// anywhere leaves config, manifest and live state consistent.
+	retiredIdx := len(m.retired)
 	delete(m.exports, tag)
 	m.retired = append(m.retired, ms)
 	m.generation++
-	entry := m.entry(&managedShare{share: ms.share, export: export, ephemeral: ms.ephemeral})
-	return entry, m.publishLocked()
+	rollback := func(err error) (shares.Entry, error) {
+		m.retired = m.retired[:retiredIdx]
+		m.exports[tag] = ms
+		m.generation++
+		if persistent && !ms.ephemeral {
+			m.restoreSharesLocked(oldConfig)
+		}
+		_ = m.publishLocked()
+		return shares.Entry{}, err
+	}
+	if err := m.publishLocked(); err != nil {
+		return rollback(err)
+	}
+	export, err := m.hub.Remove(tag, force)
+	if err != nil {
+		return rollback(err)
+	}
+	ms.export = export
+	_ = m.publishLocked() // refresh export states post-revoke; see Add
+	return m.entry(ms), nil
 }
 
 // Generation is the live namespace version written to shares.json.
@@ -408,45 +442,48 @@ func shareConfigSpec(share vmm.Share) string {
 	return spec
 }
 
-func (m *ShareManager) persistAddLocked(share vmm.Share) error {
-	spec := shareConfigSpec(share)
-	for _, existing := range m.cfg.Shares {
-		if existing == spec {
-			return nil
-		}
-	}
-	old := append([]string(nil), m.cfg.Shares...)
-	m.cfg.Shares = append(m.cfg.Shares, spec)
-	if err := m.writeConfigLocked(); err != nil {
-		m.cfg.Shares = old
-		return err
-	}
-	return nil
-}
-
-func (m *ShareManager) persistRemoveLocked(tag string) error {
-	old := append([]string(nil), m.cfg.Shares...)
-	filtered := m.cfg.Shares[:0]
-	for _, raw := range m.cfg.Shares {
+// shareSpecsReplacingTag returns specs with every entry for tag dropped and
+// newSpec appended ("" = removal only). One slice, one write — replacing a
+// share never takes the remove-then-add path that a crash could split.
+func shareSpecsReplacingTag(specs []string, tag, newSpec string) []string {
+	out := make([]string, 0, len(specs)+1)
+	for _, raw := range specs {
 		share, err := vmm.ParseShareSpec(raw, map[string]bool{})
 		if err != nil || share.Tag != tag {
-			filtered = append(filtered, raw)
+			out = append(out, raw)
 		}
 	}
-	m.cfg.Shares = filtered
-	if err := m.writeConfigLocked(); err != nil {
-		m.cfg.Shares = old
-		return err
+	if newSpec != "" {
+		out = append(out, newSpec)
 	}
-	return nil
+	return out
 }
 
-func (m *ShareManager) writeConfigLocked() error {
-	b, err := json.MarshalIndent(m.cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(filepath.Join(m.dir, "sandbox.json"), b, 0o600)
+// mutateSharesSnapshotLocked persists the tag replacement through the
+// ConfigStore and returns the previous Shares slice for rollback.
+func (m *ShareManager) mutateSharesSnapshotLocked(tag, newSpec string, old *[]string) error {
+	*old = append([]string(nil), m.store.Snapshot().Shares...)
+	final := shareSpecsReplacingTag(m.store.Snapshot().Shares, tag, newSpec)
+	return m.store.Mutate(func(cfg *RunConfig) error {
+		cfg.Shares = final
+		return nil
+	})
+}
+
+// mutateSharesLocked is the no-rollback-needed variant (promotion path).
+func (m *ShareManager) mutateSharesLocked(tag, newSpec string) error {
+	final := shareSpecsReplacingTag(m.store.Snapshot().Shares, tag, newSpec)
+	return m.store.Mutate(func(cfg *RunConfig) error {
+		cfg.Shares = final
+		return nil
+	})
+}
+
+func (m *ShareManager) restoreSharesLocked(old []string) {
+	_ = m.store.Mutate(func(cfg *RunConfig) error {
+		cfg.Shares = append([]string(nil), old...)
+		return nil
+	})
 }
 
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {

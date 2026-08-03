@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,17 +13,13 @@ import (
 func newTestPortManager(t *testing.T) (*PortManager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := RunConfig{Ports: []string{"127.0.0.1:18080:80"}}
-	raw, _ := json.Marshal(cfg)
-	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	store := newTestConfigStore(t, dir, RunConfig{Ports: []string{"127.0.0.1:18080:80"}})
 	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(stack.Close)
-	return NewPortManager(dir, cfg, stack), dir
+	return NewPortManager(store, stack), dir
 }
 
 func readSavedPorts(t *testing.T, dir string) []string {
@@ -120,4 +117,72 @@ func TestPortManagerAutoAssign(t *testing.T) {
 	if err != nil || m2.HostPort != entry.Mapping.HostPort {
 		t.Fatalf("saved spec %q does not carry the assigned port %+v", saved[1], m2)
 	}
+}
+
+// Regression: share and port managers used to keep private RunConfig copies
+// and rewrite sandbox.json wholesale, so a port publish after a persistent
+// share add dropped the share from disk (and vice versa). Both must mutate
+// through the shared ConfigStore.
+func TestConfigStoreShareAndPortMutationsCoexist(t *testing.T) {
+	dir := t.TempDir()
+	shareDir := t.TempDir()
+	// One store shared by both managers — the daemon's construction. Two
+	// stores over one file would reintroduce the clobbering one level up.
+	store := newTestConfigStore(t, dir, RunConfig{RW: true})
+	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stack.Close)
+	m := NewPortManager(store, stack)
+	shareManager, _, err := NewShareManager(dir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { shareManager.Close() })
+
+	if _, err := shareManager.Add("data="+shareDir, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Publish("19093:9093", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := shareManager.Add("more="+t.TempDir(), true, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Publish("19094:9094", true); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := readSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 2 {
+		t.Fatalf("shares clobbered: %v", cfg.Shares)
+	}
+	if len(cfg.Ports) != 2 {
+		t.Fatalf("ports clobbered: %v", cfg.Ports)
+	}
+}
+
+// Auto-assign probes the requested bind address: a wildcard publish must not
+// hand out a port that is only free on loopback.
+func TestNormalizePortSpecProbesRequestedBind(t *testing.T) {
+	spec, err := NormalizePortSpec("0.0.0.0:0:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := ParsePortSpec(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.HostIP != "0.0.0.0" || m.HostPort == 0 {
+		t.Fatalf("wildcard auto-assign: %+v", m)
+	}
+	ln, err := net.Listen("tcp", m.Local())
+	if err != nil {
+		t.Fatalf("assigned port not bindable on the wildcard address: %v", err)
+	}
+	ln.Close()
 }

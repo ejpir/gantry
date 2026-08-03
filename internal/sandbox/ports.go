@@ -134,7 +134,7 @@ func NormalizePortSpec(spec string) (string, error) {
 		return "", err
 	}
 	if m.HostPort == 0 {
-		free, err := freePortForProto(m.Proto)
+		free, err := freePortForProto(m.Proto, m.bindAddr())
 		if err != nil {
 			return "", fmt.Errorf("auto-assign host port: %w", err)
 		}
@@ -143,18 +143,29 @@ func NormalizePortSpec(spec string) (string, error) {
 	return m.String(), nil
 }
 
-func freePortForProto(proto string) (uint16, error) {
+// bindAddr is the address the auto-assign probe listens on: the requested
+// bind IP when given, loopback otherwise. Probing 127.0.0.1 for a wildcard
+// or LAN bind could hand out a port that is busy on another interface.
+func (m PortMapping) bindAddr() string {
+	if m.HostIP != "" {
+		return m.HostIP
+	}
+	return "127.0.0.1"
+}
+
+func freePortForProto(proto, addr string) (uint16, error) {
 	if proto == "udp" {
-		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		pc, err := net.ListenPacket("udp", net.JoinHostPort(addr, "0"))
 		if err != nil {
 			return 0, err
 		}
 		defer pc.Close()
 		return uint16(pc.LocalAddr().(*net.UDPAddr).Port), nil
 	}
-	p, err := freeTCPPort()
+	ln, err := net.Listen("tcp", net.JoinHostPort(addr, "0"))
 	if err != nil {
 		return 0, err
 	}
-	return uint16(p), nil
+	defer ln.Close()
+	return uint16(ln.Addr().(*net.TCPAddr).Port), nil
 }
