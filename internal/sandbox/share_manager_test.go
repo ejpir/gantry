@@ -164,3 +164,74 @@ func TestBrokerShareControl(t *testing.T) {
 		t.Fatalf("remove resp = %s", resp)
 	}
 }
+
+// TestShareManagerReplaceIsTransactional: the candidate is prepared and
+// persisted before the live export is swapped atomically; the old share
+// stays in the retired (revoked, draining) set instead of vanishing first.
+func TestShareManagerReplaceIsTransactional(t *testing.T) {
+	manager, dir := newTestShareManager(t)
+	if err := manager.Publish(); err != nil {
+		t.Fatal(err)
+	}
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
+	if _, err := manager.Add("code="+oldDir, true, false); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := manager.Add("code="+newDir+",ro", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !entry.RO {
+		t.Errorf("replaced entry RO = false, want true: %+v", entry)
+	}
+	canonicalNew, _ := filepath.EvalSymlinks(newDir)
+	if got := manager.Hub().Export("code").Path; got != canonicalNew {
+		t.Errorf("live export path = %q, want %q", got, canonicalNew)
+	}
+	// persisted config carries exactly the replacement spec
+	raw, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg RunConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 1 || cfg.Shares[0] != "code="+canonicalNew+",ro" {
+		t.Errorf("persisted shares = %v, want exactly [code=%s,ro]", cfg.Shares, canonicalNew)
+	}
+	// Revoke of the swapped-out export is asserted wire-level in
+	// TestShareHubSwapRevokesReplacedExport; without a FUSE session the
+	// old export drains instantly and leaves no retired entry here.
+}
+
+// TestShareManagerPromoteEphemeralToPersistent: re-adding an identical
+// share with --persist must persist it instead of hitting the no-op fast
+// path.
+func TestShareManagerPromoteEphemeralToPersistent(t *testing.T) {
+	manager, dir := newTestShareManager(t)
+	if err := manager.Publish(); err != nil {
+		t.Fatal(err)
+	}
+	shareDir := t.TempDir()
+	spec := "code=" + shareDir
+	if _, err := manager.Add(spec, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Add(spec, true, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg RunConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	canonical, _ := filepath.EvalSymlinks(shareDir)
+	if len(cfg.Shares) != 1 || cfg.Shares[0] != "code="+canonical {
+		t.Errorf("persisted shares = %v, want exactly [code=%s]", cfg.Shares, canonical)
+	}
+}

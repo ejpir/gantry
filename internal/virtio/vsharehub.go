@@ -249,6 +249,44 @@ func (h *ShareHub) Publish(p *PreparedShare) (*ShareExport, error) {
 	return exp, nil
 }
 
+// Swap atomically replaces the export under p's tag: the prepared export
+// is installed and the old one revoked in a single critical section, so a
+// replacement never exposes a window where the tag is missing and, on any
+// earlier failure, the working export is still live. The revoked export's
+// nodes and handles fail ESTALE from here on.
+func (h *ShareHub) Swap(p *PreparedShare) (old, exp *ShareExport, err error) {
+	if p == nil || p.export == nil {
+		return nil, nil, fmt.Errorf("nil prepared share")
+	}
+	exp = p.export
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return nil, nil, fmt.Errorf("share hub is closed")
+	}
+	old = h.exports[exp.Tag]
+	if old == nil {
+		h.mu.Unlock()
+		return nil, nil, fmt.Errorf("share tag %q not found", exp.Tag)
+	}
+	old.setState(ShareExportRevoked)
+	oldChild := h.root.GetChild(exp.Tag)
+	child := h.root.NewPersistentInode(context.Background(), exp.node, fs.StableAttr{Mode: syscall.S_IFDIR})
+	if !h.root.AddChild(exp.Tag, child, true) {
+		h.mu.Unlock()
+		return nil, nil, fmt.Errorf("share tag %q swap failed", exp.Tag)
+	}
+	if oldChild != nil {
+		oldChild.ForgetPersistent()
+	}
+	exp.inode = child
+	h.exports[exp.Tag] = exp
+	h.all[exp] = struct{}{}
+	h.mu.Unlock()
+	h.root.NotifyEntry(exp.Tag)
+	return old, exp, nil
+}
+
 // Export returns the active or draining export for tag.
 func (h *ShareHub) Export(tag string) *ShareExport {
 	h.mu.RLock()

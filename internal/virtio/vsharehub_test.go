@@ -354,3 +354,85 @@ func TestShareHubDefaultDenyOps(t *testing.T) {
 		t.Errorf("ioctl errno %d, want ENOTSUP", errno)
 	}
 }
+
+// TestShareHubSwapRevokesReplacedExport: Swap installs the replacement
+// atomically — the tag never disappears from the namespace — and revokes
+// the old export, so its nodes and open handles fail ESTALE.
+func TestShareHubSwapRevokesReplacedExport(t *testing.T) {
+	hub, err := NewShareHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	fuseInitHub(t, hub)
+
+	const estale = -116
+	oldDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(oldDir, "a.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	publishHubShare(t, hub, "code", oldDir, true)
+	tagNode, errno := hubLookup(t, hub, 2, 1, "code")
+	if errno != 0 {
+		t.Fatalf("share lookup errno %d", errno)
+	}
+	oldFile, errno := hubLookup(t, hub, 3, tagNode, "a.txt")
+	if errno != 0 {
+		t.Fatalf("old file lookup errno %d", errno)
+	}
+	openIn := make([]byte, 8)
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpen, 4, oldFile, len(openIn)), openIn}, 16, 16); errno != 0 {
+		t.Fatalf("open before swap errno %d", errno)
+	}
+
+	newDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(newDir, "b.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prepared, _, err := hub.Prepare("code", newDir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldExport, newExport, err := hub.Swap(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldExport.State() != ShareExportRevoked {
+		t.Errorf("old export state %v, want revoked", oldExport.State())
+	}
+	if newExport.State() != ShareExportActive {
+		t.Errorf("new export state %v, want active", newExport.State())
+	}
+
+	// The tag resolves to the replacement immediately.
+	newTag, errno := hubLookup(t, hub, 5, 1, "code")
+	if errno != 0 {
+		t.Fatalf("tag lookup after swap errno %d", errno)
+	}
+	if _, errno := hubLookup(t, hub, 6, newTag, "b.txt"); errno != 0 {
+		t.Fatalf("replacement file lookup errno %d", errno)
+	}
+	if node, _ := hubLookup(t, hub, 7, newTag, "a.txt"); node != 0 {
+		t.Fatal("old file still visible after swap")
+	}
+
+	// The old export's nodes and open handles are revoked.
+	getattrIn := make([]byte, 16)
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseGetattr, 8, oldFile, len(getattrIn)), getattrIn}, 16, 104); errno != estale {
+		t.Errorf("old node getattr errno %d, want ESTALE", errno)
+	}
+
+	// Publish of the live tag still conflicts.
+	p2, _, err := hub.Prepare("code", oldDir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Publish(p2); err == nil {
+		t.Error("Publish on a swapped-in tag succeeded, want conflict")
+		p2.ClosePrepared()
+	} else {
+		p2.ClosePrepared()
+	}
+}

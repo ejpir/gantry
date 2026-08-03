@@ -198,6 +198,16 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	if existing = m.exports[share.Tag]; existing != nil {
 		canonical, _ := canonicalManagedPath(share.Path)
 		if existing.share.Path == canonical && existing.share.RO == share.RO {
+			// Identical share: re-adding an ephemeral share with --persist
+			// promotes it to persistent instead of being a no-op.
+			if persistent && existing.ephemeral {
+				if err := m.persistAddLocked(existing.share); err != nil {
+					return shares.Entry{}, err
+				}
+				existing.ephemeral = false
+				m.generation++
+				return m.entry(existing), m.publishLocked()
+			}
 			return m.entry(existing), nil
 		}
 		if !replace {
@@ -218,30 +228,49 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	if err != nil {
 		return shares.Entry{}, err
 	}
-	if existing != nil {
-		if _, err := m.removeLocked(share.Tag, persistent, true); err != nil {
-			prepared.ClosePrepared()
-			return shares.Entry{}, err
-		}
-	}
 	share.Path = canonical
 	ms := &managedShare{share: share, ephemeral: !persistent}
+	// Persist the candidate configuration before touching the live
+	// namespace, snapshotting so any later failure restores the previous
+	// state. The old export keeps serving until the atomic hub Swap.
+	var oldCfg []string
 	if persistent {
+		oldCfg = append([]string(nil), m.cfg.Shares...)
+		if existing != nil && !existing.ephemeral {
+			if err := m.persistRemoveLocked(share.Tag); err != nil {
+				prepared.ClosePrepared()
+				return shares.Entry{}, err
+			}
+		}
 		if err := m.persistAddLocked(share); err != nil {
+			if oldCfg != nil {
+				m.cfg.Shares = oldCfg
+				_ = m.writeConfigLocked()
+			}
 			prepared.ClosePrepared()
 			return shares.Entry{}, err
 		}
 	}
-	export, err := m.hub.Publish(prepared)
+	var export *virtio.ShareExport
+	if existing != nil {
+		_, export, err = m.hub.Swap(prepared)
+	} else {
+		export, err = m.hub.Publish(prepared)
+	}
 	if err != nil {
 		if persistent {
-			_ = m.persistRemoveLocked(share.Tag)
+			m.cfg.Shares = oldCfg
+			_ = m.writeConfigLocked()
 		}
 		prepared.ClosePrepared()
 		return shares.Entry{}, err
 	}
 	ms.export = export
 	m.exports[share.Tag] = ms
+	if existing != nil {
+		// The swapped-out export is revoked; keep it visible while it drains.
+		m.retired = append(m.retired, existing)
+	}
 	m.generation++
 	entry := m.entry(ms)
 	return entry, m.publishLocked()
