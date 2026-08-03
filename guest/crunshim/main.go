@@ -23,12 +23,12 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
 
-const realRuntime = "/sbin/crun.runsc"
+// realRuntime is a var so tests can point supervise at a helper process.
+var realRuntime = "/sbin/crun.runsc"
 
 // debugMode reports whether verbose runsc logging is requested via the
 // kernel cmdline: the host sets GANTRY_EXTRA_CMDLINE="crunshim.debug=1"
@@ -110,17 +110,33 @@ func insertFlags(args []string, debug bool) []string {
 	return out
 }
 
-// supervise runs runsc as a child, passing stdio through while teeing a
-// tail buffer; on failure (or on the 25s hang watchdog) the tail goes to
-// /dev/console. Exit status is propagated exactly (containerd maps
-// runtime exit codes).
+// supervise runs runsc as a child and propagates its exit status exactly
+// (containerd maps runtime exit codes).
+//
+// The child's stdout/stderr go to a temp file, NOT a pipe: os/exec skips
+// its copy goroutines for *os.File, so cmd.Wait returns the instant the
+// child exits. With a pipe, Wait also blocks on pipe EOF — and runsc >=
+// 2026-07 leaves parked create/start grandchildren (gofer, sandbox)
+// holding the inherited pipe for the container's whole lifetime. That
+// wedged every Create (the "sb" hang); in debug the watchdog then
+// SIGQUIT'd the healthy sandbox. The file is replayed to our stderr
+// after Wait, preserving containerd's runtime-error UX, and its tail is
+// dumped to /dev/console on failure (a dying sentry surfaces only as
+// "waiting for sandbox to start: EOF" otherwise).
 func supervise(args []string, debug bool) int {
 	cmd := exec.Command(realRuntime, args[1:]...)
 	cmd.Args[0] = args[0]
-	tail := &tailBuf{limit: 32 << 10}
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = io.MultiWriter(os.Stdout, tail)
-	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
+	stdio, err := os.CreateTemp("", "crunshim-stdio-*.log")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "crunshim: temp log: %v\n", err)
+		return 127
+	}
+	defer func() {
+		stdio.Close()
+		os.Remove(stdio.Name())
+	}()
+	cmd.Stdout, cmd.Stderr = stdio, stdio
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "crunshim: start %s: %v\n", realRuntime, err)
 		return 127
@@ -140,11 +156,18 @@ func supervise(args []string, debug bool) int {
 	// invisible: after 25s, SIGQUIT the child AND every runsc-sandbox
 	// grandchild found via /proc (their Go runtime dumps all goroutine
 	// stacks to stderr; the sandbox's stderr is /dev/null, which this
-	// shim pointed at /dev/console) - then dump our captured tail
-	// hang watchdog (debug mode): SIGQUIT the child + runsc grandchildren
-	// and dump /proc state — a hung runsc is otherwise invisible
+	// shim pointed at /dev/console) - then dump our captured tail.
+	// Debug mode only, and never for `run`: a healthy one-shot container
+	// outlives 25s and must not be SIGQUIT'd.
+	isRun := false
+	for _, a := range args[1:] {
+		if a == "run" {
+			isRun = true
+			break
+		}
+	}
 	var timed *time.Timer
-	if debug {
+	if debug && !isRun {
 		timed = time.AfterFunc(25*time.Second, func() {
 			if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
 				for _, pid := range findRunsc() {
@@ -152,7 +175,7 @@ func supervise(args []string, debug bool) int {
 					// SIGQUIT, taking the evidence with it
 					dumpProcState(c, pid)
 				}
-				fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", tail.String())
+				fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", fileTail(stdio, 32<<10))
 				c.Close()
 			}
 			if cmd.Process != nil {
@@ -164,11 +187,12 @@ func supervise(args []string, debug bool) int {
 		})
 		defer timed.Stop()
 	}
-	err := cmd.Wait()
+	err = cmd.Wait()
 	signal.Stop(sigc)
+	replayStdio(stdio)
 	if err != nil {
 		if c, cerr := os.OpenFile("/dev/console", os.O_WRONLY, 0); cerr == nil {
-			fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, tail.String())
+			fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, fileTail(stdio, 32<<10))
 			c.Close()
 		}
 		if cmd.ProcessState != nil {
@@ -181,27 +205,34 @@ func supervise(args []string, debug bool) int {
 	return 0
 }
 
-// tailBuf keeps the last `limit` bytes written.
-type tailBuf struct {
-	mu    sync.Mutex
-	buf   []byte
-	limit int
-}
-
-func (t *tailBuf) Write(p []byte) (int, error) {
-	t.mu.Lock()
-	t.buf = append(t.buf, p...)
-	if len(t.buf) > t.limit {
-		t.buf = t.buf[len(t.buf)-t.limit:]
+// fileTail returns the last limit bytes of f, without disturbing the
+// file offset of any concurrent writer.
+func fileTail(f *os.File, limit int64) string {
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return ""
 	}
-	t.mu.Unlock()
-	return len(p), nil
+	start := int64(0)
+	if st.Size() > limit {
+		start = st.Size() - limit
+	}
+	buf := make([]byte, st.Size()-start)
+	n, _ := f.ReadAt(buf, start)
+	return string(buf[:n])
 }
 
-func (t *tailBuf) String() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return string(t.buf)
+// replayStdio forwards the child's captured output to our stderr so
+// containerd's task errors keep the runtime's diagnostics (bounded).
+func replayStdio(f *os.File) {
+	const maxReplay = 256 << 10
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return
+	}
+	if st.Size() > maxReplay {
+		fmt.Fprintf(os.Stderr, "crunshim: [%d bytes of runtime output elided]\n", st.Size()-maxReplay)
+	}
+	fmt.Fprint(os.Stderr, fileTail(f, maxReplay))
 }
 
 func fixDev(debug bool) {
