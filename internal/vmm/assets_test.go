@@ -1,9 +1,12 @@
 package vmm
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -76,17 +79,27 @@ func TestEnsureRootfsRefusesNonReleasePath(t *testing.T) {
 	}
 }
 
+// assetServer serves name with payload plus its <name>.sha256 sidecar.
+func assetServer(t *testing.T, name, payload string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch path.Base(r.URL.Path) {
+		case name:
+			io_writeString(w, payload)
+		case name + ".sha256":
+			sum := sha256.Sum256([]byte(payload))
+			fmt.Fprintf(w, "%x  %s\n", sum, name)
+		default:
+			http.Error(w, "nope", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func TestEnsureRootfsDownload(t *testing.T) {
 	payload := strings.Repeat("R", 1<<20)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/nerdbox-rootfs-arm64.erofs") {
-			http.Error(w, "nope", http.StatusNotFound)
-			return
-		}
-		io_writeString(w, payload)
-	}))
-	defer srv.Close()
-	t.Setenv("GANTRY_RELEASE_BASE", srv.URL)
+	t.Setenv("GANTRY_RELEASE_BASE", assetServer(t, "nerdbox-rootfs-arm64.erofs", payload).URL)
 
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "nerdbox-rootfs-arm64.erofs")
@@ -107,15 +120,7 @@ func TestEnsureRootfsDownload(t *testing.T) {
 
 func TestEnsureKernelDownload(t *testing.T) {
 	payload := strings.Repeat("K", 1<<20)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/gantry-kernel-arm64") {
-			http.Error(w, "nope", http.StatusNotFound)
-			return
-		}
-		io_writeString(w, payload)
-	}))
-	defer srv.Close()
-	t.Setenv("GANTRY_RELEASE_BASE", srv.URL)
+	t.Setenv("GANTRY_RELEASE_BASE", assetServer(t, "gantry-kernel-arm64", payload).URL)
 
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "gantry-kernel-arm64")
@@ -150,11 +155,63 @@ func TestEnsureKernelDownload404(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("GANTRY_RELEASE_BASE", srv.URL)
 	dest := filepath.Join(t.TempDir(), "gantry-kernel-arm64")
-	if _, err := EnsureKernel(dest, nil); err == nil || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("want 404 error, got %v", err)
+	if _, err := EnsureKernel(dest, nil); err == nil || !strings.Contains(err.Error(), "refusing unverified download") {
+		t.Fatalf("want missing-sidecar error, got %v", err)
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Error("failed download left a file behind")
+	}
+}
+
+func TestEnsureKernelDownloadHashMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch path.Base(r.URL.Path) {
+		case "gantry-kernel-arm64":
+			io_writeString(w, "payload")
+		case "gantry-kernel-arm64.sha256":
+			io_writeString(w, strings.Repeat("0", 64)+"  gantry-kernel-arm64\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("GANTRY_RELEASE_BASE", srv.URL)
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "gantry-kernel-arm64")
+	if _, err := EnsureKernel(dest, nil); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("want sha256 mismatch, got %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("mismatched download left %d entries behind", len(entries))
+	}
+}
+
+func TestEnsureKernelDownloadOversized(t *testing.T) {
+	old := maxAssetSize
+	maxAssetSize = 8
+	defer func() { maxAssetSize = old }()
+	t.Setenv("GANTRY_RELEASE_BASE", assetServer(t, "gantry-kernel-arm64", strings.Repeat("K", 64)).URL)
+	// the sidecar matches the payload, so only the size cap can trip
+	dest := filepath.Join(t.TempDir(), "gantry-kernel-arm64")
+	if _, err := EnsureKernel(dest, nil); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("want oversized error, got %v", err)
+	}
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Error("oversized download left a file behind")
+	}
+}
+
+func TestReleaseBaseVersionPinned(t *testing.T) {
+	old := Version
+	defer func() { Version = old }()
+	t.Setenv("GANTRY_RELEASE_BASE", "")
+	Version = "v1.2.3"
+	if got := releaseBase(); got != "https://github.com/ejpir/gantry/releases/download/v1.2.3" {
+		t.Errorf("pinned releaseBase = %s", got)
+	}
+	Version = "dev"
+	if got := releaseBase(); got != "https://github.com/ejpir/gantry/releases/latest/download" {
+		t.Errorf("dev releaseBase = %s", got)
 	}
 }
 
