@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install build deps
-        run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3
+        run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3 libelf-dev libssl-dev
       - name: cache kernel tree
         uses: actions/cache@v4
         with:
