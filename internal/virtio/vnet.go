@@ -32,9 +32,11 @@ type packetConn interface {
 }
 
 type Net struct {
-	core *Core
-	mac  [6]byte
-	conn packetConn
+	core    *Core
+	mac     [6]byte
+	conn    packetConn
+	policy  *netpol.Policy
+	traffic *netpol.TrafficRecorder
 
 	localPath string
 	pending   [][]byte
@@ -105,13 +107,13 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 // packetConn interface using QEMU protocol framing (4-byte big-endian
 // length + raw Ethernet frame). This is what gvisor-tap-vsock's
 // AcceptQemu — and therefore our embedded netstack (internal/vnet) —
-// expects on the other end. A netpol.Policy hooks every frame here: TX is
-// filtered (guest can't bypass it — we are the wire), RX is snooped for
-// DNS answers that feed the policy's dynamic allow table.
+// expects on the other end. Policy and traffic observation live on Net so
+// both this backend and external unixgram backends get identical accounting.
 type qemuFrameConn struct {
-	conn    net.Conn
-	pol     *netpol.Policy
-	verbose bool
+	conn net.Conn
+	// pol is retained for direct wire-level tests. Production attaches policy
+	// to Net so unixgram and QEMU backends share one enforcement point.
+	pol *netpol.Policy
 }
 
 func (q qemuFrameConn) Read(p []byte) (int, error) {
@@ -132,10 +134,7 @@ func (q qemuFrameConn) Read(p []byte) (int, error) {
 
 func (q qemuFrameConn) Write(p []byte) (int, error) {
 	if q.pol != nil && !q.pol.MatchTX(p) {
-		if q.verbose {
-			fmt.Printf("[net] policy drop: %s\n", netpol.Summarize(p))
-		}
-		return len(p), nil // silently dropped, like any ethernet drop
+		return len(p), nil
 	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(p)))
@@ -162,9 +161,16 @@ func NewNetConnPolicy(conn net.Conn, mac [6]byte, pol *netpol.Policy) *Net {
 	verbose := gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != ""
 	return &Net{
 		mac:     mac,
-		conn:    qemuFrameConn{conn: conn, pol: pol, verbose: verbose},
+		conn:    qemuFrameConn{conn: conn},
+		policy:  pol,
 		verbose: verbose,
 	}
+}
+
+// SetTrafficRecorder attaches persistent dashboard accounting before the
+// device starts processing queues.
+func (v *Net) SetTrafficRecorder(recorder *netpol.TrafficRecorder) {
+	v.traffic = recorder
 }
 
 func (v *Net) deviceID() uint32 { return virtioNetDeviceID }
@@ -207,6 +213,38 @@ func (v *Net) handleQueue(qn int) {
 	}
 }
 
+// writeFrame is the single egress enforcement and observation point shared by
+// every packet backend.
+func (v *Net) writeFrame(frame []byte) (int, error) {
+	allowed := v.policy == nil || v.policy.MatchTX(frame)
+	if v.traffic != nil {
+		v.traffic.ObserveTX(frame, allowed)
+	}
+	if !allowed {
+		v.logf("policy drop: %s", netpol.Summarize(frame))
+		return len(frame), nil // silently dropped, like any ethernet drop
+	}
+	n, err := v.conn.Write(frame)
+	if err == nil {
+		v.logf("tx frame %d bytes", len(frame))
+	}
+	return n, err
+}
+
+// readFrame observes ingress before it reaches the guest receive queue.
+func (v *Net) readFrame(frame []byte) (int, error) {
+	n, err := v.conn.Read(frame)
+	if n > 0 {
+		if v.policy != nil {
+			v.policy.ObserveRX(frame[:n])
+		}
+		if v.traffic != nil {
+			v.traffic.ObserveRX(frame[:n])
+		}
+	}
+	return n, err
+}
+
 // handleTx removes the 12-byte virtio header and sends one raw Ethernet frame
 // per Unix datagram. No checksum/GSO features are advertised, so Linux emits
 // complete packets and the header is metadata-only.
@@ -222,12 +260,10 @@ func (v *Net) handleTx() {
 		if err == nil && len(buf) >= virtioNetHdrLen {
 			frame := buf[virtioNetHdrLen:]
 			if len(frame) > 0 {
-				if _, err := v.conn.Write(frame); err != nil {
+				if _, err := v.writeFrame(frame); err != nil {
 					// Ethernet may drop packets. Always return the descriptor so a
 					// full host socket cannot wedge the guest TX queue forever.
 					v.logf("drop tx frame (%d bytes): %v", len(frame), err)
-				} else {
-					v.logf("tx frame %d bytes", len(frame))
 				}
 			}
 		} else if err != nil {
@@ -241,7 +277,7 @@ func (v *Net) handleTx() {
 func (v *Net) readLoop() {
 	buf := make([]byte, virtioNetMaxFrame)
 	for {
-		n, err := v.conn.Read(buf)
+		n, err := v.readFrame(buf)
 		if n > 0 {
 			frame := append([]byte(nil), buf[:n]...)
 			v.core.mu.Lock()

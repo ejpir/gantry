@@ -5,9 +5,11 @@ Go VMM and CLI, not a containerd runtime shim. It uses KVM on Linux and
 Hypervisor.framework on Apple Silicon macOS. Windows WHPX support is
 experimental.
 
-Gantry reuses the guest kernel, EROFS rootfs, `vminitd`, and task APIs from
+Gantry reuses the EROFS rootfs, `vminitd`, and task APIs from
 [nerdbox](https://github.com/containerd/nerdbox), but does not require Docker,
-containerd, or libkrun.
+containerd, or libkrun. The guest kernel is Gantry's own hardened build
+(nerdbox-derived baseline plus memory-safety and info-leak hardening; see
+[docs/sbx-hardening-audit.md](docs/sbx-hardening-audit.md)).
 
 - One-shot and persistent sandboxes
 - OCI registry, OCI layout, Docker-save, and EROFS images
@@ -25,22 +27,24 @@ containerd, or libkrun.
 | Linux arm64 | KVM | Implemented; requires `/dev/kvm` |
 | Linux x86-64 | KVM | Verified on EC2 `m6i.metal` |
 | macOS arm64 | Hypervisor.framework | Verified; macOS 13+ |
-| Windows x86-64 | WHPX | Cross-build only; not boot-verified |
+| Windows x86-64 | WHPX | Native NTFS virtio-fs; cross-build only, not boot-verified |
 
 ## Getting started
 
 Requirements:
 
 - Go 1.26.5+
-- A matching kernel and guest rootfs in `artifacts/`:
+- A guest rootfs in `artifacts/`:
 
   ```text
-  artifacts/nerdbox-kernel-arm64
   artifacts/nerdbox-rootfs-arm64.erofs
-  artifacts/nerdbox-kernel-x86_64
   artifacts/nerdbox-rootfs-x86_64.erofs
   ```
 
+- The guest kernel downloads automatically from the GitHub release page on
+  first start (`gantry-kernel-<arch>`, and the 4K-page variant for
+  `-runtime runsc` on arm64). To build it locally instead:
+  `./scripts/mkkernel.sh`
 - Linux: `/dev/kvm`
 - macOS: Apple Silicon, macOS 13+
 
@@ -61,13 +65,24 @@ G=./artifacts/gantry                 # Linux
 # G=./artifacts/gantry-darwin-arm64  # macOS
 ```
 
-The interactive dashboard lists local sandboxes and supports refresh, exec,
-stop, and delete actions. It starts automatically when `gantry` is run in an
-interactive terminal, or can be opened explicitly:
+The interactive dashboard provides responsive sandbox cards, create/start/stop,
+exec, inspect, remove, refresh, keyboard navigation, and mouse controls. Its
+Traffic, Rules, and Mounts views show per-sandbox network destinations and byte
+counts, effective egress policy, and host-to-guest share mappings. Traffic is
+captured from VM boot and retained across stop/resume cycles; only destination
+metadata and counters are stored, never packet payloads. A sandbox already
+running when Gantry is upgraded must be stopped and started once from the
+new dashboard to enable capture in its VMM process. The dashboard starts
+automatically when `gantry` is run in an interactive terminal, or can be opened
+explicitly:
 
 ```sh
 $G tui
 ```
+
+Use `tab`/`shift+tab`, `1`–`4`, or the mouse to switch dashboard views. The
+New Sandbox dialog also selects the guest runtime (`crun`/`runsc`) and the
+kernel (auto-download, or any build staged in `artifacts/`).
 
 Run a container. OCI references are pulled and cached automatically:
 
@@ -83,6 +98,7 @@ $G start dev -image debian:bookworm-slim
 $G exec dev -- /bin/bash
 $G ls
 $G stop dev
+$G resume dev             # restart with its saved configuration
 $G delete dev
 ```
 
@@ -137,6 +153,27 @@ $G start dev -image python:3.12 \
 $G exec dev -- sh -c 'cd /workspace && python -m pytest'
 ```
 
+Attach another directory without restarting the VM (it appears immediately at
+`/host/<tag>` in the long-running container):
+
+```sh
+$G share add dev data="$PWD/data,ro"
+$G share ls dev
+$G share remove dev data
+```
+
+Live share changes update `sandbox.json` by default; `--ephemeral` applies
+only to the current boot. The dashboard's Mounts page exposes the same
+operations with `a` (add), `d` (remove), and `r` (replace).
+
+On Windows, host shares use the native NTFS passthrough backend. Local NTFS
+paths such as `C:\Users\me\project` are supported; UNC/network drives,
+FAT/exFAT/ReFS, and export roots that are reparse points are rejected.
+
+See [Hot-Adding Host Shares](docs/hot-add-shares.md) and the
+[Windows native passthrough design](docs/windows-shares.md) for implementation
+notes.
+
 The default network allows the public internet but blocks local networks.
 
 ```sh
@@ -154,7 +191,8 @@ Policies support ordered CIDR, protocol, port, and DNS-domain rules. Use
 
 ```sh
 ./scripts/mkrootfs-gvisor.sh artifacts/nerdbox-rootfs-arm64.erofs
-./scripts/mkkernel-4k.sh                 # arm64 only
+# arm64 only: the 4K-page kernel downloads automatically,
+# or build it with: PAGES=4k ./scripts/mkkernel.sh
 $G start hardened -runtime runsc -image alpine:latest
 ```
 
@@ -172,11 +210,22 @@ with `./scripts/mkpiimage.sh`.
 ## Debugging
 
 ```sh
-$G run -kernel artifacts/nerdbox-kernel-arm64 \
+$G run -kernel artifacts/gantry-kernel-arm64 \
   -initrd artifacts/initramfs-shell.cpio.gz
 ./scripts/run-qemu-test.sh       # no KVM required
 ./scripts/run-qemu-shell.sh
 ```
+
+Boot/runtime debug knobs (environment):
+
+- `GANTRY_DEBUG_BOOT=1` — full kernel printk on the console instead of
+  warnings only.
+- `GANTRY_EXTRA_CMDLINE="crunshim.debug=1"` — with `-runtime runsc`,
+  forwards runsc's `--debug --debug-log /dev/console`: the sentry's boot
+  log, which otherwise dies silently inside the VM, lands in console.log.
+- `GANTRY_NO_CMDLINE_HARDENING=1` — boots without the hardening
+  boot-params/sysctls, for bisecting guest boot problems.
+- `GANTRY_BOOT_TIMING=1` — per-phase boot timings in daemon.log.
 
 ## Layout
 
@@ -206,7 +255,7 @@ Native KVM/HVF testing needs the corresponding host and guest assets. See
 
 ## Limitations
 
-- Windows boot and virtio-fs are not verified.
+- Windows boot and Windows virtio-fs VM integration are not verified.
 - No snapshots, CPU throttling, or port publishing.
 - The VMM runs with the user's host privileges.
 - DNS allowlists do not constrain connections to already-known IP addresses.

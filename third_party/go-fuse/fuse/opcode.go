@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"runtime"
-	"syscall"
 	"unsafe"
 )
 
@@ -137,7 +136,7 @@ func doInit(server *protocolServer, req *request) {
 	// maxPages is the maximum request size we want the kernel to use, in units of
 	// memory pages (usually 4kiB). Linux v4.19 and older ignore this and always use
 	// 128kiB.
-	maxPages := (server.opts.MaxWrite-1)/syscall.Getpagesize() + 1 // Round up
+	maxPages := (server.opts.MaxWrite-1)/hostPageSize() + 1 // Round up
 
 	congestionThreshold := server.opts.CongestionThreshold
 	if congestionThreshold <= 0 {

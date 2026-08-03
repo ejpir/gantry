@@ -1,5 +1,5 @@
-// GANTRY PATCH (third of three; see validGuestName in bridge.go and
-// LoopbackNode.securePath in loopback.go): exported aliases for the wire
+// GANTRY PATCH (see validGuestName in bridge.go, LoopbackNode.securePath
+// and NewLoopbackRootFD in loopback.go, and the Darwin errno mapping): exported aliases for the wire
 // opcodes that gantry's host-side read-only gate (internal/virtio/vfs.go,
 // roFuseHandler) must classify.
 //

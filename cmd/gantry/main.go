@@ -52,7 +52,9 @@ usage:
   gantry tui                        # interactive local sandbox dashboard
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
+  gantry share <verb>               # live host shares: add|remove|ls
   gantry stop <name>                # stop a sandbox
+  gantry resume <name>              # boot a stopped sandbox from saved config
   gantry delete <name>              # stop + remove a sandbox
 
 -image accepts an OCI reference (debian:bookworm-slim,
@@ -66,7 +68,7 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(2)
 	}
 	// mustName validates a sandbox name at the dispatch layer so every
-	// name-taking subcommand (exec/start/daemon/stop/delete) is covered.
+	// name-taking subcommand (exec/start/resume/daemon/stop/delete) is covered.
 	mustName := func(n string) string {
 		if err := sandbox.ValidateSandboxName(n); err != nil {
 			fmt.Fprintln(os.Stderr, "gantry:", err)
@@ -83,6 +85,16 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		return
 	case "start":
 		os.Exit(sandbox.CmdStart(os.Args[2:]))
+	case "resume":
+		if len(os.Args) == 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
+			fmt.Fprintln(os.Stderr, "usage: gantry resume <name>   # boot from saved sandbox.json")
+			return
+		}
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: gantry resume <name>")
+			os.Exit(2)
+		}
+		os.Exit(sandbox.CmdResume(mustName(os.Args[2])))
 	case "daemon":
 		if len(os.Args) != 3 {
 			os.Exit(2)
@@ -98,6 +110,8 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(sandbox.CmdPiServe(os.Args[2:]))
 	case "image":
 		os.Exit(sandbox.CmdImage(os.Args[2:]))
+	case "share":
+		os.Exit(sandbox.CmdShare(os.Args[2:]))
 	case "stop", "delete":
 		if len(os.Args) != 3 {
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])

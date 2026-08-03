@@ -59,18 +59,24 @@ type ShellOptions struct {
 // internal/vmm via internal/shares).
 type ShareEntry = shares.Entry
 
-// LoadShares reads the manifest gantry wrote next to the RPC socket. A
-// missing manifest simply means "no shares".
-func LoadShares(dir string) []ShareEntry {
+// LoadShareManifest reads the manifest gantry wrote next to the RPC socket.
+// A missing or legacy manifest simply means "no hub transport".
+func LoadShareManifest(dir string) shares.Manifest {
 	b, err := os.ReadFile(filepath.Join(dir, "shares.json"))
 	if err != nil {
-		return nil
+		return shares.Manifest{}
 	}
 	var m shares.Manifest
 	if json.Unmarshal(b, &m) != nil {
-		return nil
+		return shares.Manifest{}
 	}
-	return m.Shares
+	return m
+}
+
+// LoadShares reads the entries of the manifest gantry wrote next to the RPC
+// socket. A missing manifest simply means "no shares".
+func LoadShares(dir string) []ShareEntry {
+	return LoadShareManifest(dir).Shares
 }
 
 // ListenRPC creates the host endpoint before a VM is started. vminitd makes
@@ -229,13 +235,34 @@ func ensureBundle(ctx context.Context, client *ttrpc.Client, id string, cfg stri
 	return bresp.Bundle, false, nil
 }
 
-// mountShares exports the virtio-fs tags into the VM at their VMPaths.
-func mountShares(ctx context.Context, mc mountapi.TTRPCMountService, shares []ShareEntry, logf func(string, ...any)) error {
-	if len(shares) == 0 {
+// mountShares exports the virtio-fs tags into the VM. Hub manifests mount
+// one permanent transport; legacy manifests mount each per-share device.
+func mountShares(ctx context.Context, mc mountapi.TTRPCMountService, entries []ShareEntry, transport *shares.Transport, logf func(string, ...any)) error {
+	if transport != nil {
+		if _, err := mc.MountAll(ctx, &mountapi.MountAllRequest{Mounts: []*mountapi.MountSpec{{
+			Type: "virtiofs", Source: transport.Tag, Target: transport.VMPath,
+		}}}); err != nil {
+			if !errHas(err, errTextMountBusy) {
+				return fmt.Errorf("mount virtio-fs share hub: %w", err)
+			}
+			logf("share hub %-6s already mounted at %s", transport.Tag, transport.VMPath)
+		} else {
+			logf("share hub %-6s %-28s -> %s", transport.Tag, "(dynamic)", transport.VMPath)
+		}
+		for _, s := range entries {
+			mode := "rw"
+			if s.RO {
+				mode = "ro"
+			}
+			logf("share %-12s %-30s -> %s -> container %s (%s, %s)", s.Tag, s.Path, s.VMPath, s.CtrPath, mode, defaultShareState(s.State))
+		}
 		return nil
 	}
-	specs := make([]*mountapi.MountSpec, 0, len(shares))
-	for _, s := range shares {
+	if len(entries) == 0 {
+		return nil
+	}
+	specs := make([]*mountapi.MountSpec, 0, len(entries))
+	for _, s := range entries {
 		spec := &mountapi.MountSpec{Type: "virtiofs", Source: s.Tag, Target: s.VMPath}
 		if s.RO {
 			spec.Options = []string{"ro"}
@@ -245,7 +272,7 @@ func mountShares(ctx context.Context, mc mountapi.TTRPCMountService, shares []Sh
 	if _, err := mc.MountAll(ctx, &mountapi.MountAllRequest{Mounts: specs}); err != nil {
 		return fmt.Errorf("mount virtio-fs shares: %w", err)
 	}
-	for _, s := range shares {
+	for _, s := range entries {
 		mode := "rw"
 		if s.RO {
 			mode = "ro"
@@ -253,6 +280,13 @@ func mountShares(ctx context.Context, mc mountapi.TTRPCMountService, shares []Sh
 		logf("share %-12s %-30s -> %s -> container %s (%s)", s.Tag, s.Path, s.VMPath, s.CtrPath, mode)
 	}
 	return nil
+}
+
+func defaultShareState(state string) string {
+	if state == "" {
+		return "active"
+	}
+	return state
 }
 
 // unmountStack best-effort tears down a bundle's rootfs mount stack.
@@ -299,14 +333,18 @@ func awaitGone(ctx context.Context, tc task.TTRPCTaskService, id string) {
 type SessionOptions struct {
 	StreamSock string
 	Shares     []ShareEntry
-	RW         bool
-	Args       []string
-	ID         string
-	Cols, Rows uint32          // initial pty size; 0 skips ResizePty
-	Terminal   bool            // allocate a pty; false uses pipe stdio
-	KillCh     <-chan struct{} // optional: first receive SIGKILLs the task
-	Quiet      bool            // suppress progress messages
-	ExitStatus *int            // optional: set to the task's exit status
+	// ShareTransport, when non-nil, is the hub manifest's one virtio-fs
+	// device. Shares are logical children beneath it and may change while
+	// the sandbox runs.
+	ShareTransport *shares.Transport
+	RW             bool
+	Args           []string
+	ID             string
+	Cols, Rows     uint32          // initial pty size; 0 skips ResizePty
+	Terminal       bool            // allocate a pty; false uses pipe stdio
+	KillCh         <-chan struct{} // optional: first receive SIGKILLs the task
+	Quiet          bool            // suppress progress messages
+	ExitStatus     *int            // optional: set to the task's exit status
 	// ExecIntoExisting allows docker-exec semantics: when the task already
 	// runs in the VM, start a new process inside it (task.v3 Exec)
 	// instead of Create-ing a second container (which would fail — the rw
@@ -377,7 +415,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		return sessionExec(client, tc, opts, id, stdin, stdout)
 	}
 
-	cfg, err := ConfigJSON(shares, opts.RW, opts.Args, opts.ImgCfg)
+	cfg, err := ConfigJSONWithTransport(shares, opts.ShareTransport, opts.RW, opts.Args, opts.ImgCfg)
 	if err != nil {
 		return err
 	}
@@ -398,7 +436,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		ucancel()
 	}
 
-	if err := mountShares(ctx, mountClient, shares, logf); err != nil {
+	if err := mountShares(ctx, mountClient, shares, opts.ShareTransport, logf); err != nil {
 		return err
 	}
 
@@ -517,9 +555,15 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	// single-instance, so a leftover mount makes the next Create fail
 	// EBUSY ("device or resource busy" at mounts/0).
 	awaitGone(dctx, tc, id)
-	for i := len(shares) - 1; i >= 0; i-- {
-		if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: shares[i].VMPath}); err != nil {
-			fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
+	if opts.ShareTransport != nil {
+		if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: opts.ShareTransport.VMPath}); err != nil {
+			fmt.Fprintf(stdout, "client: unmount share hub: %v\n", err)
+		}
+	} else {
+		for i := len(shares) - 1; i >= 0; i-- {
+			if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: shares[i].VMPath}); err != nil {
+				fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
+			}
 		}
 	}
 	unmountStack(dctx, mountClient, bundlePath)
@@ -551,7 +595,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		dcancel()
 	}
 
-	cfg, err := configJSON(opts.Shares, opts.RW, containerInitArgs, nil, false)
+	cfg, err := configJSONWithTransport(opts.Shares, opts.ShareTransport, opts.RW, containerInitArgs, nil, false)
 	if err != nil {
 		return err
 	}
@@ -561,7 +605,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 	}
 
 	mountClient := mountapi.NewTTRPCMountClient(client)
-	if err := mountShares(ctx, mountClient, opts.Shares, logf); err != nil {
+	if err := mountShares(ctx, mountClient, opts.Shares, opts.ShareTransport, logf); err != nil {
 		return err
 	}
 
@@ -840,13 +884,23 @@ func RootfsMounts(rw bool) []*types.Mount {
 // env (image values win, gantry's are defaults-if-absent), the run user,
 // and the working dir.
 func ConfigJSON(shares []ShareEntry, rw bool, args []string, img *image.Config) (string, error) {
-	return configJSON(shares, rw, args, img, true)
+	return configJSONWithTransport(shares, nil, rw, args, img, true)
+}
+
+// ConfigJSONWithTransport renders a hub-aware config for sandbox tests and
+// callers that have a versioned share manifest.
+func ConfigJSONWithTransport(shares []ShareEntry, transport *shares.Transport, rw bool, args []string, img *image.Config) (string, error) {
+	return configJSONWithTransport(shares, transport, rw, args, img, true)
 }
 
 // configJSON is also used for the sandbox's long-lived stub init. That
 // process deliberately has null stdio and no terminal, so its lifetime is
 // independent of any session pty.
 func configJSON(shares []ShareEntry, rw bool, args []string, img *image.Config, terminal bool) (string, error) {
+	return configJSONWithTransport(shares, nil, rw, args, img, terminal)
+}
+
+func configJSONWithTransport(shares []ShareEntry, transport *shares.Transport, rw bool, args []string, img *image.Config, terminal bool) (string, error) {
 	cfg := `{
   "ociVersion": "1.1.0",
   "process": {
@@ -908,27 +962,84 @@ func configJSON(shares []ShareEntry, rw bool, args []string, img *image.Config, 
 	cfg = strings.NewReplacer("ARGS", string(argsJSON), "ROOTRO", rootRO,
 		"TERMINAL", terminalJSON, "USERJSON", string(userJSON),
 		"ENVJSON", string(envJSON), "CWDJSON", string(cwdJSON)).Replace(cfg)
-	if len(shares) == 0 {
+	if transport == nil && len(shares) == 0 {
 		return cfg, nil
 	}
 	var extra []string
-	// Per-tag mountpoints live under /host. The container rootfs is
-	// read-only EROFS, so put a tmpfs there when crun needs to create
-	// subdirectories. (A lone "hostshare" binds at /host directly.)
-	for _, s := range shares {
-		if s.CtrPath != "/host" {
-			extra = append(extra, `    {"destination": "/host", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","nodev","rw"]}`)
-			break
+	if transport != nil {
+		extra = append(extra, hubShareMounts(shares, transport)...)
+	} else {
+		// Per-tag mountpoints live under /host. The container rootfs is
+		// read-only EROFS, so put a tmpfs there when crun needs to create
+		// subdirectories. (A lone "hostshare" binds at /host directly.)
+		for _, s := range shares {
+			if s.CtrPath != "/host" {
+				extra = append(extra, `    {"destination": "/host", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid","nodev","rw"]}`)
+				break
+			}
+		}
+		for _, s := range shares {
+			opts := `"rbind","rprivate"`
+			if s.RO {
+				opts += `,"ro"`
+			}
+			extra = append(extra, fmt.Sprintf(`    {"destination": %q, "type": "bind", "source": %q, "options": [%s]}`,
+				s.CtrPath, s.VMPath, opts))
 		}
 	}
-	for _, s := range shares {
-		opts := `"rbind","rprivate"`
-		if s.RO {
-			opts += `,"ro"`
-		}
-		extra = append(extra, fmt.Sprintf(`    {"destination": %q, "type": "bind", "source": %q, "options": [%s]}`,
-			s.CtrPath, s.VMPath, opts))
+	if len(extra) == 0 {
+		return cfg, nil
 	}
 	const anchor = `    {"destination": "/etc/hosts", "type": "bind", "source": "/etc/hosts", "options": ["rbind","rprivate","ro"]}`
 	return strings.Replace(cfg, anchor, anchor+",\n"+strings.Join(extra, ",\n"), 1), nil
+}
+
+// hubShareMounts binds the permanent hub into the long-lived sandbox
+// container once. Logical shares are then just directory entries beneath
+// /host, so live additions are visible to already-running processes.
+func hubShareMounts(entries []ShareEntry, transport *shares.Transport) []string {
+	if transport == nil {
+		return nil
+	}
+	mount := func(destination, source string, ro bool) string {
+		opts := `"rbind","rprivate"`
+		if ro {
+			opts += `,"ro"`
+		}
+		return fmt.Sprintf(`    {"destination": %q, "type": "bind", "source": %q, "options": [%s]}`, destination, source, opts)
+	}
+	joinVM := func(elem string) string {
+		return strings.TrimRight(transport.VMPath, "/") + "/" + elem
+	}
+	var out []string
+	// An internal stable path remains reachable even when a compatibility
+	// alias covers /host.
+	out = append(out, mount(shares.HubInternalPath, transport.VMPath, false))
+	coverHost := false
+	for _, s := range entries {
+		ctr := s.CtrPath
+		if ctr == "" {
+			ctr = shares.HubHostPath + "/" + s.Tag
+		}
+		if ctr == shares.HubHostPath {
+			coverHost = true
+			break
+		}
+	}
+	if !coverHost {
+		out = append(out, mount(shares.HubHostPath, transport.VMPath, false))
+	}
+	for _, s := range entries {
+		ctr := s.CtrPath
+		if ctr == "" {
+			ctr = shares.HubHostPath + "/" + s.Tag
+		}
+		// The hub-root bind already provides default paths. Explicit aliases
+		// are separate binds so their RO flag is guest-enforced too.
+		if ctr == shares.HubHostPath+"/"+s.Tag || ctr == shares.HubInternalPath+"/"+s.Tag {
+			continue
+		}
+		out = append(out, mount(ctr, joinVM(s.Tag), s.RO))
+	}
+	return out
 }

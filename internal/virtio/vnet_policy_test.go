@@ -3,6 +3,7 @@ package virtio
 import (
 	"encoding/binary"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +12,41 @@ import (
 
 	"github.com/miekg/dns"
 )
+
+func TestNetWireRecordsAllowedAndBlockedTraffic(t *testing.T) {
+	policy, err := netpol.Parse([]byte(`{"default":"deny","rules":[{"action":"allow","proto":"tcp","ports":"443"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &testPacketConn{rx: make(chan []byte, 1), tx: make(chan []byte, 1)}
+	recorder := netpol.NewTrafficRecorder(filepath.Join(t.TempDir(), netpol.TrafficFileName))
+	nic := &Net{conn: backend, policy: policy, traffic: recorder}
+
+	allowed := tcpSYNFrame(t, "1.1.1.1", 443)
+	if _, err := nic.writeFrame(allowed); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-backend.tx:
+	default:
+		t.Fatal("allowed frame did not reach backend")
+	}
+	blocked := tcpSYNFrame(t, "1.1.1.1", 80)
+	if _, err := nic.writeFrame(blocked); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-backend.tx:
+		t.Fatal("blocked frame reached backend")
+	default:
+	}
+
+	snapshot := recorder.Snapshot()
+	recorder.Close()
+	if snapshot.TXPackets != 2 || snapshot.DroppedPackets != 1 || len(snapshot.Entries) != 2 {
+		t.Fatalf("wire traffic snapshot = %#v", snapshot)
+	}
+}
 
 // End-to-end through the production enforcement point: a QEMU-framed link
 // with a policy attached, talking to the real embedded netstack. Verifies
