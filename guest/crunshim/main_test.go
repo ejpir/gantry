@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -83,4 +84,63 @@ func TestInsertFlags(t *testing.T) {
 	if !strings.Contains(strings.Join(out2, " "), "--log /run/bundles/sb/log.json") {
 		t.Errorf("debug=false: --log must stay: %v", out2)
 	}
+}
+
+// TestSweepFilestores guards the stale-filestore sweep: a duplicate create
+// against a live container must leave its in-use filestore alone (runsc
+// create then fails with AlreadyExists), while a post-reboot bundle with
+// no runtime state gets swept.
+func TestSweepFilestores(t *testing.T) {
+	old := realRuntime
+	defer func() { realRuntime = old }()
+
+	setup := func(t *testing.T) (bundle string, args []string, filestore string) {
+		dir := t.TempDir()
+		bundle = filepath.Join(dir, "bundle")
+		if err := os.MkdirAll(filepath.Join(bundle, "rootfs"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		filestore = filepath.Join(bundle, "rootfs", ".gvisor.filestore.sb")
+		if err := os.WriteFile(filestore, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		args = []string{"crun", "--root", filepath.Join(dir, "runroot"), "create", "--bundle", bundle, "sb"}
+		return bundle, args, filestore
+	}
+	stubRuntime := func(t *testing.T, stateRC int) {
+		stub := filepath.Join(t.TempDir(), "runsc")
+		script := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = state ] && exit %d; done\nexit 1\n", stateRC)
+		if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		realRuntime = stub
+	}
+
+	t.Run("live state keeps filestore", func(t *testing.T) {
+		_, args, filestore := setup(t)
+		stubRuntime(t, 0)
+		sweepFilestores(args)
+		if _, err := os.Stat(filestore); err != nil {
+			t.Error("duplicate create against a live container must not delete its filestore")
+		}
+	})
+
+	t.Run("no state sweeps stale filestore", func(t *testing.T) {
+		_, args, filestore := setup(t)
+		stubRuntime(t, 1)
+		sweepFilestores(args)
+		if _, err := os.Stat(filestore); !os.IsNotExist(err) {
+			t.Errorf("stale filestore not swept: %v", err)
+		}
+	})
+
+	t.Run("undetermined id skips sweep", func(t *testing.T) {
+		_, args, filestore := setup(t)
+		stubRuntime(t, 1)
+		args[len(args)-1] = "--no-pivot" // no container id to probe
+		sweepFilestores(args)
+		if _, err := os.Stat(filestore); err != nil {
+			t.Error("sweep without a container id must not touch filestores")
+		}
+	})
 }

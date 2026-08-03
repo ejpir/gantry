@@ -57,14 +57,17 @@ func main() {
 // container rootfs; our rootfs upper layer is the persistent rwlayer, so
 // a VM stopped with the task still running leaves the file behind and
 // the next create dies with "mount source already has a filestore file
-// ... repeated submounts are not supported". Any filestore found in a
-// bundle rootfs we are about to create is stale by definition (a live
-// container would fail create with AlreadyExists first).
+// ... repeated submounts are not supported". Stale here means: the VM
+// rebooted (/run is tmpfs, so runtime state is gone) while the rwlayer
+// survived. A duplicate create against a LIVE container must instead
+// fail with runsc's own AlreadyExists — its filestore is in use, not
+// stale — so sweep only after proving the runtime tracks no state for
+// the container id.
 func sweepFilestores(args []string) {
-	bundle, isCreate := "", false
+	bundle, isCreate, createIdx := "", false, -1
 	for i, a := range args {
-		if a == "create" {
-			isCreate = true
+		if a == "create" && createIdx < 0 {
+			isCreate, createIdx = true, i
 		}
 		if a == "--bundle" && i+1 < len(args) {
 			bundle = args[i+1]
@@ -76,12 +79,29 @@ func sweepFilestores(args []string) {
 	if !isCreate || bundle == "" {
 		return
 	}
+	id := ""
+	if last := args[len(args)-1]; !strings.HasPrefix(last, "-") {
+		id = last
+	}
+	if id == "" || runtimeStateExists(args[1:createIdx], id) {
+		return
+	}
 	stale, _ := filepath.Glob(filepath.Join(bundle, "rootfs", ".gvisor.filestore.*"))
 	for _, f := range stale {
 		if err := os.Remove(f); err == nil {
 			fmt.Fprintf(os.Stderr, "crunshim: swept stale filestore %s\n", f)
 		}
 	}
+}
+
+// runtimeStateExists reports whether the runtime tracks any state for id
+// (live or stopped); runsc exits non-zero for unknown containers. The
+// runtime's global flags (everything before the create subcommand, e.g.
+// --root) are replayed so state probes the same state directory create
+// would use.
+func runtimeStateExists(globalFlags []string, id string) bool {
+	stateArgs := append(append([]string{}, globalFlags...), "state", id)
+	return exec.Command(realRuntime, stateArgs...).Run() == nil
 }
 
 // insertFlags adjusts runsc's global flags (before the subcommand).
