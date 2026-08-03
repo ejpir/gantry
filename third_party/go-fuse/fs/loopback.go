@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright 2019 the Go-FUSE Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -6,8 +8,10 @@ package fs
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -27,6 +31,22 @@ type LoopbackRoot struct {
 	// The device on which the Path resides. This must be set if
 	// the underlying filesystem crosses file systems.
 	Dev uint64
+
+	// RootPrefix is the canonical host path used for escape checks when
+	// Path itself is a pinned /proc/self/fd or /dev/fd handle. Empty means
+	// Path is also the comparison root.
+	RootPrefix string
+
+	// RootFD, when non-negative, pins the directory descriptor backing Path.
+	// Darwin resolves it with F_GETPATH for every operation because /dev/fd
+	// does not reliably behave as a directory symlink there; Linux uses Path's
+	// /proc/self/fd entry directly.
+	RootFD int
+
+	// InoSalt namespaces StableAttr inode numbers when the same host file can
+	// be reached through two independently confined exports (for example via
+	// a pre-existing hard link). Zero preserves the traditional mapping.
+	InoSalt uint64
 
 	// NewNode returns a new InodeEmbedder to be used to respond
 	// to a LOOKUP/CREATE/MKDIR/MKNOD opcode. If not set, use a
@@ -65,7 +85,7 @@ func (r *LoopbackRoot) idFromStat(st *syscall.Stat_t) StableAttr {
 		Gen:  1,
 		// This should work well for traditional backing FSes,
 		// not so much for other go-fuse FS-es
-		Ino: (swapped ^ swappedRootDev) ^ st.Ino,
+		Ino: ((swapped ^ swappedRootDev) ^ st.Ino) ^ r.InoSalt,
 	}
 }
 
@@ -139,7 +159,18 @@ func (n *LoopbackNode) path() string {
 // raced from the guest side.
 func (n *LoopbackNode) securePath(name string) (string, syscall.Errno) {
 	root := n.RootData.Path
-	dir := n.path()
+	if n.RootData.RootFD >= 0 {
+		root = loopbackRootFDPath(n.RootData.RootFD, root)
+	}
+	compareRoot := root
+	if n.RootData.RootPrefix != "" && n.RootData.RootFD < 0 {
+		var err error
+		compareRoot, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			return "", ToErrno(err)
+		}
+	}
+	dir := filepath.Join(root, n.relativePath())
 	base := ""
 	if name != "" {
 		base = name
@@ -152,7 +183,7 @@ func (n *LoopbackNode) securePath(name string) (string, syscall.Errno) {
 	if err != nil {
 		return "", ToErrno(err)
 	}
-	if resolved != root && !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+	if resolved != compareRoot && !strings.HasPrefix(resolved, compareRoot+string(filepath.Separator)) {
 		return "", syscall.EACCES
 	}
 	if base == "" {
@@ -507,7 +538,7 @@ func (n *LoopbackNode) Getattr(ctx context.Context, f FileHandle, out *fuse.Attr
 
 	var err error
 	st := syscall.Stat_t{}
-	if &n.Inode == n.Root() {
+	if &n.Inode == n.root() {
 		err = syscall.Stat(p, &st)
 	} else {
 		err = syscall.Lstat(p, &st)
@@ -677,10 +708,41 @@ func NewLoopbackRoot(rootPath string) (InodeEmbedder, error) {
 	}
 
 	root := &LoopbackRoot{
-		Path: resolved,
-		Dev:  uint64(st.Dev),
+		Path:   resolved,
+		Dev:    uint64(st.Dev),
+		RootFD: -1,
 	}
 
+	rootNode := root.newNode(nil, "", &st)
+	root.RootNode = rootNode
+	return rootNode, nil
+}
+
+// NewLoopbackRootFD returns a loopback root addressed through an already
+// pinned directory descriptor (/proc/self/fd on Linux, /dev/fd on Darwin).
+// Path-based operations still resolve through securePath, while renaming or
+// replacing the original host directory no longer retargets the export.
+// rootFD must remain open for the export's lifetime.
+func NewLoopbackRootFD(rootPath string, rootFD int) (InodeEmbedder, error) {
+	resolved, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	fdPath := filepath.Join("/proc/self/fd", fmt.Sprint(rootFD))
+	if runtime.GOOS == "darwin" {
+		fdPath = filepath.Join("/dev/fd", fmt.Sprint(rootFD))
+	}
+	var st syscall.Stat_t
+	if err := syscall.Stat(resolved, &st); err != nil {
+		return nil, err
+	}
+	configuredPath := fdPath
+	if runtime.GOOS == "darwin" {
+		// Operations resolve F_GETPATH dynamically; Path is only the fallback
+		// used if that unexpectedly fails.
+		configuredPath = resolved
+	}
+	root := &LoopbackRoot{Path: configuredPath, RootPrefix: resolved, RootFD: rootFD, Dev: uint64(st.Dev)}
 	rootNode := root.newNode(nil, "", &st)
 	root.RootNode = rootNode
 	return rootNode, nil

@@ -2,8 +2,12 @@ package sandbox
 
 import (
 	"flag"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -101,6 +105,83 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 	// runsc without the gvisor rootfs: actionable error
 	if _, _, err := resolveSandbox(t, "-runtime", "runsc"); err == nil || !strings.Contains(err.Error(), "mkrootfs-gvisor.sh") {
 		t.Errorf("runsc without rootfs: want mkrootfs-gvisor hint, got %v", err)
+	}
+}
+
+// resolveSandboxNoKernel stages everything but the kernels and points the
+// release download at srv, so Resolve exercises the on-demand fetch.
+func resolveSandboxNoKernel(t *testing.T, srv string, args ...string) (RunConfig, error) {
+	t.Helper()
+	t.Setenv("GANTRY_RELEASE_BASE", srv)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	assets := []string{
+		"nerdbox-rootfs-arm64.erofs", "nerdbox-rootfs-gvisor-arm64.erofs",
+		"nerdbox-rootfs-x86_64.erofs", "nerdbox-rootfs-gvisor-x86_64.erofs",
+		"debian-bookworm.erofs",
+	}
+	for _, f := range assets {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	rf := RegisterRunFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := rf.Resolve(fs, nil)
+	return cfg, err
+}
+
+func kernelServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(path.Base(r.URL.Path), "gantry-kernel-") {
+			_, _ = w.Write([]byte("downloaded-kernel"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveDownloadsKernel(t *testing.T) {
+	cfg, err := resolveSandboxNoKernel(t, kernelServer(t).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "gantry-kernel-arm64"
+	if runtime.GOARCH == "amd64" {
+		want = "gantry-kernel-x86_64"
+	}
+	if filepath.Base(cfg.Kernel) != want {
+		t.Errorf("kernel = %s, want .../%s", cfg.Kernel, want)
+	}
+	if b, _ := os.ReadFile(cfg.Kernel); string(b) != "downloaded-kernel" {
+		t.Errorf("kernel content = %q, want the downloaded payload", b)
+	}
+}
+
+func TestResolveRunscDownloads4kKernel(t *testing.T) {
+	cfg, err := resolveSandboxNoKernel(t, kernelServer(t).URL, "-runtime", "runsc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "gantry-kernel-arm64-4k"
+	if runtime.GOARCH == "amd64" {
+		want = "gantry-kernel-x86_64" // x86_64 is always 4K pages
+	}
+	if filepath.Base(cfg.Kernel) != want {
+		t.Errorf("runsc kernel = %s, want .../%s", cfg.Kernel, want)
+	}
+}
+
+func TestResolveExplicitKernelMissing(t *testing.T) {
+	_, err := resolveSandboxNoKernel(t, kernelServer(t).URL, "-kernel", "/no/such/kernel")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("explicit missing kernel: want not-found error, got %v", err)
 	}
 }
 

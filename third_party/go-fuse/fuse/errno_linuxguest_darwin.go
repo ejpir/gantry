@@ -102,6 +102,8 @@ func hostErrnoToLinux(e syscall.Errno) Status {
 		return Status(94)
 	case syscall.ENOTSUP:
 		return Status(95)
+	case syscall.ESTALE:
+		return Status(116)
 	case syscall.EPFNOSUPPORT:
 		return Status(96)
 	case syscall.EAFNOSUPPORT:

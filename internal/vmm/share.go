@@ -18,10 +18,10 @@ var ErrGuestReset = fmt.Errorf("guest requested reset via port 0xcf9/0x64")
 
 // Share is one -share TAG=PATH[@CTRPATH][,ro] command-line export.
 //
-// Read-only semantics are enforced where Docker enforces them for virtio-fs
-// bind mounts too: in the guest. hostctl mounts the tag with MS_RDONLY and
-// adds "ro" to the OCI bind mount, so the guest kernel VFS rejects writes
-// before they can reach the FUSE server.
+// Read-only semantics are enforced on the host by the virtio-fs backend
+// (raw-opcode gate for legacy Unix devices, per-export node gates for the
+// hub and Windows backend). hostctl additionally mounts the tag with
+// MS_RDONLY and adds "ro" to the OCI bind mount as defense in depth.
 type Share struct {
 	Tag  string
 	Path string
@@ -54,9 +54,8 @@ func shareCtrPath(tag string, multi bool) string {
 
 // ParseShareSpec parses TAG=PATH[@CTRPATH][,ro]: the optional @CTRPATH
 // (an absolute container path) overrides where crun bind-mounts the
-// share; the ,ro suffix is the only other supported option. A
-// Windows-style drive colon in PATH is not a concern on Linux/macOS
-// hosts.
+// share; the ,ro suffix is the only other supported option. Splitting only
+// on the first '=' leaves Windows drive colons in PATH intact.
 func ParseShareSpec(spec string, seen map[string]bool) (Share, error) {
 	tag, path, ok := strings.Cut(spec, "=")
 	if !ok {

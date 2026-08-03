@@ -136,11 +136,27 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		if !set["kernel"] {
 			cfg.Kernel = vmm.GvisorKernel(cfg.Kernel)
 		}
-		if cfg.Kernel != "" && !gutil.FileExists(cfg.Kernel) {
-			return cfg, nil, fmt.Errorf("%s not found - gVisor needs the 4K-page kernel, build it with ./scripts/mkkernel-4k.sh", cfg.Kernel)
-		}
 	default:
 		return cfg, nil, fmt.Errorf("-runtime must be crun or runsc, got %q", cfg.Runtime)
+	}
+
+	// Kernel resolution: a default kernel that is not staged yet is
+	// downloaded from the release page (gantry-kernel-* assets only, so
+	// this never fires for user-supplied or nerdbox paths); an explicit
+	// -kernel that is missing is a hard error.
+	if cfg.Kernel != "" && !gutil.FileExists(cfg.Kernel) {
+		if set["kernel"] {
+			return cfg, nil, fmt.Errorf("kernel %s not found", cfg.Kernel)
+		}
+		k, err := vmm.EnsureKernel(cfg.Kernel, say)
+		if err != nil {
+			hint := "build it with ./scripts/mkkernel.sh"
+			if cfg.Runtime == "runsc" {
+				hint = "gVisor needs the 4K-page kernel: PAGES=4k ./scripts/mkkernel.sh"
+			}
+			return cfg, nil, fmt.Errorf("%w (%s)", err, hint)
+		}
+		cfg.Kernel = k
 	}
 
 	cfg.Image = *f.Image
@@ -289,21 +305,37 @@ func (c RunConfig) ParsedShares() ([]vmm.Share, error) {
 
 // Network is a resolved network backend plus egress policy for one run.
 type Network struct {
-	Sock   string // external gvproxy endpoint ("" when embedded)
-	Conn   net.Conn
-	Policy *netpol.Policy
-	close  func()
-	once   sync.Once
+	Sock        string // external gvproxy endpoint ("" when embedded)
+	Conn        net.Conn
+	Policy      *netpol.Policy
+	Traffic     *netpol.TrafficRecorder
+	close       func()
+	backendOnce sync.Once
+	trafficOnce sync.Once
 }
 
-// Close releases the backend (netstack / gvproxy process / conn).
+// CloseBackend releases the netstack / gvproxy process / connection while
+// leaving the traffic recorder alive until device shutdown completes.
+func (n *Network) CloseBackend() {
+	if n == nil {
+		return
+	}
+	n.backendOnce.Do(func() {
+		if n.close != nil {
+			n.close()
+		}
+	})
+}
+
+// Close releases the backend and publishes the final traffic snapshot.
 func (n *Network) Close() {
 	if n == nil {
 		return
 	}
-	n.once.Do(func() {
-		if n.close != nil {
-			n.close()
+	n.CloseBackend()
+	n.trafficOnce.Do(func() {
+		if n.Traffic != nil {
+			n.Traffic.Close()
 		}
 	})
 }
@@ -352,6 +384,7 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 		}
 		n.Sock = sock
 		n.close = func() { gv.Process.Kill(); gv.Wait() }
+		n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 		return n, nil
 	}
 	stack, err := vnet.Start(guestNetMAC)
@@ -365,6 +398,7 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	}
 	n.Conn = conn
 	n.close = func() { conn.Close(); stack.Close() }
+	n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 	return n, nil
 }
 
@@ -396,8 +430,9 @@ func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, env
 	var sock string
 	var conn net.Conn
 	var policy *netpol.Policy
+	var traffic *netpol.TrafficRecorder
 	if n != nil {
-		sock, conn, policy = n.Sock, n.Conn, n.Policy
+		sock, conn, policy, traffic = n.Sock, n.Conn, n.Policy, n.Traffic
 	}
 	cmdline := vmm.DefaultCmdline(arch, c.Rootfs, "", 3, NetMarker(sock, conn), guestNetMAC, true)
 	if envExtra {
@@ -413,6 +448,7 @@ func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, env
 		NetEndpoint: sock,
 		NetConn:     conn,
 		NetPolicy:   policy,
+		NetTraffic:  traffic,
 		NetMAC:      guestNetMAC,
 		NetVFKIT:    true,
 		VsockFwd:    vsockFwd,

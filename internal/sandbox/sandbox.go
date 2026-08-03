@@ -22,6 +22,7 @@ import (
 
 	"gantry/internal/client"
 	"gantry/internal/secret"
+	"gantry/internal/shares"
 
 	"github.com/containerd/ttrpc"
 	"golang.org/x/term"
@@ -182,13 +183,50 @@ agent cannot send them anywhere.
 `, len(secrets))
 	}
 
+	return launchSandbox(name, cfg, secrets, true)
+}
+
+// CmdResume boots a stopped sandbox from its persisted configuration. The
+// dashboard's Start action invokes the same CLI primitive asynchronously,
+// avoiding duplicate daemon lifecycle code. Secret values are never persisted;
+// configured names must be present in Gantry's current environment.
+func CmdResume(name string) int {
+	dir := sandboxDir(name)
+	b, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has no saved configuration: %v\n", name, err)
+		return 1
+	}
+	var cfg RunConfig
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has a corrupt configuration: %v\n", name, err)
+		return 1
+	}
+	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
+	for _, secretName := range cfg.SecretNames {
+		name, value, err := secret.Parse(secretName, os.LookupEnv)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry resume:", err)
+			return 1
+		}
+		secrets[name] = value
+	}
+	return launchSandbox(name, cfg, secrets, false)
+}
+
+func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, replaceConfig bool) int {
 	if _, alive := sandboxPID(name); alive {
 		fmt.Fprintf(os.Stderr, "gantry start: sandbox %q is already running\n", name)
 		return 1
 	}
 
 	dir := sandboxDir(name)
-	os.RemoveAll(dir)
+	if replaceConfig {
+		if err := os.RemoveAll(dir); err != nil {
+			fmt.Fprintln(os.Stderr, "gantry start:", err)
+			return 1
+		}
+	}
 	// 0700: the broker listens on ctl.sock with no authentication — the
 	// directory mode is the entire access control between a local user
 	// and a root shell inside the sandbox (plus its rw host shares).
@@ -196,10 +234,15 @@ agent cannot send them anywhere.
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), b, 0o600); err != nil {
-		fmt.Fprintln(os.Stderr, "gantry start:", err)
-		return 1
+	cleanupSandboxRuntime(dir)
+	if replaceConfig {
+		b, _ := json.MarshalIndent(cfg, "", "  ")
+		if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), b, 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "gantry start:", err)
+			return 1
+		}
+	} else {
+		fmt.Printf("gantry start: using saved configuration for %q\n", name)
 	}
 
 	// Detached daemon: same binary, signed (this is why start goes through
@@ -312,17 +355,30 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon: network policy:", nw.Policy.Describe())
 	}
 
-	hostShares, err := cfg.ParsedShares()
+	shareManager, shareWarnings, err := NewShareManager(dir, cfg)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "daemon: bad share:", err)
+		fmt.Fprintln(os.Stderr, "daemon: shares:", err)
 		return 1
 	}
+	defer shareManager.Close()
+	for _, warning := range shareWarnings {
+		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
+	}
 
+	var hostShares []vmm.Share
+	if shareManager.Hub() == nil {
+		hostShares, err = cfg.ParsedShares()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "daemon: bad share:", err)
+			return 1
+		}
+	}
 	opts, err := cfg.Opts(nw, hostShares, dir, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
+	opts.ShareHub = shareManager.Hub()
 	opts.Console = console
 	m, err := vmm.Prepare(opts)
 	if err != nil {
@@ -330,8 +386,9 @@ func CmdDaemon(name string) int {
 		return 1
 	}
 	bootLog("machine prepared (RAM+kernel)")
-	if err := vmm.WriteShareManifest(filepath.Join(dir, "shares.json"), hostShares); err != nil {
+	if err := shareManager.Publish(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: share manifest:", err)
+		return 1
 	}
 
 	// Create the RPC listener before booting: vminitd makes one dial-back
@@ -393,6 +450,7 @@ func CmdDaemon(name string) int {
 		rpc:        rpc,
 		streamSock: filepath.Join(dir, "listen-1026.sock"),
 		secrets:    secrets,
+		shares:     shareManager,
 		sessions:   map[string]chan struct{}{},
 	}
 	go br.serve(ln)
@@ -410,7 +468,7 @@ func CmdDaemon(name string) int {
 		// Stop an external gvproxy before closing the VM's packet socket;
 		// otherwise its normal peer EOF is logged as an ERROR during teardown.
 		if nw.Sock != "" {
-			nw.Close()
+			nw.CloseBackend()
 		}
 		if err := m.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "daemon: device shutdown:", err)
@@ -431,6 +489,7 @@ type broker struct {
 	dir        string
 	rpc        *ttrpc.Client
 	streamSock string
+	shares     *ShareManager
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 
 	mu       sync.Mutex
@@ -479,12 +538,29 @@ func readSecretsHandshake(r *os.File) map[string]secret.Value {
 }
 
 type brokerRequest struct {
-	Op       string   `json:"op"` // "session" | "kill"
-	ID       string   `json:"id"`
-	Args     []string `json:"args,omitempty"`
-	Cols     uint32   `json:"cols,omitempty"`
-	Rows     uint32   `json:"rows,omitempty"`
-	Terminal bool     `json:"terminal,omitempty"`
+	Op       string              `json:"op"` // "session" | "kill" | "share.*"
+	ID       string              `json:"id"`
+	Args     []string            `json:"args,omitempty"`
+	Cols     uint32              `json:"cols,omitempty"`
+	Rows     uint32              `json:"rows,omitempty"`
+	Terminal bool                `json:"terminal,omitempty"`
+	Share    *brokerShareRequest `json:"share,omitempty"`
+}
+
+type brokerShareRequest struct {
+	Spec       string `json:"spec,omitempty"`
+	Tag        string `json:"tag,omitempty"`
+	Persistent bool   `json:"persistent"`
+	Replace    bool   `json:"replace,omitempty"`
+	Force      bool   `json:"force,omitempty"`
+}
+
+type brokerShareResponse struct {
+	OK         bool           `json:"ok"`
+	Error      string         `json:"error,omitempty"`
+	Generation uint64         `json:"generation,omitempty"`
+	Entry      *shares.Entry  `json:"entry,omitempty"`
+	Shares     []shares.Entry `json:"shares,omitempty"`
 }
 
 func (br *broker) serve(ln net.Listener) {
@@ -522,11 +598,43 @@ func (br *broker) handle(c net.Conn) {
 			return
 		}
 		fmt.Fprintln(c, `{"ok":true}`)
+	case "share.add", "share.remove", "share.list":
+		br.shareControl(c, req)
 	case "session":
 		br.session(c, req)
 	default:
 		fmt.Fprintln(c, `{"error":"unknown op"}`)
 	}
+}
+
+func (br *broker) shareControl(c net.Conn, req brokerRequest) {
+	respond := func(resp brokerShareResponse) {
+		_ = json.NewEncoder(c).Encode(&resp)
+	}
+	if br.shares == nil {
+		respond(brokerShareResponse{Error: "share manager unavailable"})
+		return
+	}
+	spec := brokerShareRequest{Persistent: true}
+	if req.Share != nil {
+		spec = *req.Share
+	}
+	var entry shares.Entry
+	var err error
+	switch req.Op {
+	case "share.add":
+		entry, err = br.shares.Add(spec.Spec, spec.Persistent, spec.Replace)
+	case "share.remove":
+		entry, err = br.shares.Remove(spec.Tag, spec.Persistent, spec.Force)
+	case "share.list":
+		respond(brokerShareResponse{OK: true, Generation: br.shares.Generation(), Shares: br.shares.Entries()})
+		return
+	}
+	if err != nil {
+		respond(brokerShareResponse{Error: err.Error(), Generation: br.shares.Generation()})
+		return
+	}
+	respond(brokerShareResponse{OK: true, Generation: br.shares.Generation(), Entry: &entry})
 }
 
 func (br *broker) session(c net.Conn, req brokerRequest) {
@@ -551,13 +659,15 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	// no args defaulting here: client.Session applies the image's
 	// Entrypoint+Cmd, then /bin/sh (the debian-filename heuristic that
 	// used to live here predates image configs)
+	manifest := client.LoadShareManifest(br.dir)
 	var status int
 	err := client.Session(br.rpc, client.SessionOptions{
-		StreamSock: br.streamSock,
-		Shares:     client.LoadShares(br.dir),
-		RW:         br.cfg.RW,
-		Args:       req.Args,
-		Secrets:    secret.Env(br.secrets),
+		StreamSock:     br.streamSock,
+		Shares:         manifest.Shares,
+		ShareTransport: manifest.Transport,
+		RW:             br.cfg.RW,
+		Args:           req.Args,
+		Secrets:        secret.Env(br.secrets),
 		// one VM = one container workload with a well-known id, so a
 		// concurrent session can find it and Exec into it instead of
 		// fighting over the rw rootfs stack with a second Create
@@ -821,13 +931,17 @@ func CmdStop(name string) int {
 			procKill(gpid)
 		}
 	}
-	// clean runtime files; sandbox.json stays (only cmdDaemon reads it, to
-	// boot the VM, and cmdLs reads it for the image column)
-	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", "ctl.sock", "1025.sock", "listen-1026.sock", "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
-		os.Remove(filepath.Join(dir, f))
-	}
+	// Clean runtime files; sandbox.json stays so CmdResume and the dashboard
+	// can boot the same VM configuration again.
+	cleanupSandboxRuntime(dir)
 	fmt.Printf("gantry stop: sandbox %q stopped\n", name)
 	return 0
+}
+
+func cleanupSandboxRuntime(dir string) {
+	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", "ctl.sock", "1025.sock", "listen-1026.sock", "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
+		_ = os.Remove(filepath.Join(dir, f))
+	}
 }
 
 func CmdDelete(name string) int {

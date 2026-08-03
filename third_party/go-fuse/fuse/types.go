@@ -4,11 +4,7 @@
 
 package fuse
 
-import (
-	"io"
-	"syscall"
-	"time"
-)
+import "time"
 
 const (
 	_DEFAULT_BACKGROUND_TASKS = 12
@@ -20,24 +16,31 @@ type Status int32
 // Status values are Linux errno numbers because ProtocolServer serves a Linux
 // virtio-fs guest even when this package is built on a Darwin host.
 const (
-	OK      = Status(0)
-	EPERM   = Status(1)
-	ENOENT  = Status(2)
-	EINTR   = Status(4)
-	EIO     = Status(5)
-	EBADF   = Status(9)
-	EAGAIN  = Status(11)
-	EACCES  = Status(13)
-	EBUSY   = Status(16)
-	EXDEV   = Status(18)
-	ENODEV  = Status(19)
-	ENOTDIR = Status(20)
-	EISDIR  = Status(21)
-	EINVAL  = Status(22)
-	EROFS   = Status(30)
-	ERANGE  = Status(34)
-	ENOSYS  = Status(38)
-	ENOTSUP = Status(95)
+	OK           = Status(0)
+	EPERM        = Status(1)
+	ENOENT       = Status(2)
+	EINTR        = Status(4)
+	EIO          = Status(5)
+	EBADF        = Status(9)
+	EAGAIN       = Status(11)
+	EACCES       = Status(13)
+	EBUSY        = Status(16)
+	EEXIST       = Status(17)
+	EXDEV        = Status(18)
+	ENODEV       = Status(19)
+	ENOTDIR      = Status(20)
+	EISDIR       = Status(21)
+	EINVAL       = Status(22)
+	EMFILE       = Status(24)
+	ENOSPC       = Status(28)
+	EROFS        = Status(30)
+	EPIPE        = Status(32)
+	ERANGE       = Status(34)
+	ENAMETOOLONG = Status(36)
+	ENOSYS       = Status(38)
+	ENOTEMPTY    = Status(39)
+	ENOTSUP      = Status(95)
+	ESTALE       = Status(116)
 )
 
 type ForgetIn struct {
@@ -678,30 +681,6 @@ type FallocateIn struct {
 	Length  uint64
 	Mode    uint32
 	Padding uint32
-}
-
-func (lk *FileLock) ToFlockT(flockT *syscall.Flock_t) {
-	flockT.Start = int64(lk.Start)
-	if lk.End == (1<<63)-1 {
-		flockT.Len = 0
-	} else {
-		flockT.Len = int64(lk.End - lk.Start + 1)
-	}
-	flockT.Whence = int16(io.SeekStart)
-	flockT.Type = int16(lk.Typ)
-}
-
-func (lk *FileLock) FromFlockT(flockT *syscall.Flock_t) {
-	lk.Typ = uint32(flockT.Type)
-	if flockT.Type != syscall.F_UNLCK {
-		lk.Start = uint64(flockT.Start)
-		if flockT.Len == 0 {
-			lk.End = (1 << 63) - 1
-		} else {
-			lk.End = uint64(flockT.Start + flockT.Len - 1)
-		}
-	}
-	lk.Pid = uint32(flockT.Pid)
 }
 
 const (

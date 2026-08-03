@@ -472,21 +472,6 @@ func TestVirtioFSTransport(t *testing.T) {
 	}
 }
 
-type testPacketConn struct {
-	rx chan []byte
-	tx chan []byte
-}
-
-func (c *testPacketConn) Read(p []byte) (int, error) {
-	frame := <-c.rx
-	return copy(p, frame), nil
-}
-func (c *testPacketConn) Write(p []byte) (int, error) {
-	c.tx <- append([]byte(nil), p...)
-	return len(p), nil
-}
-func (c *testPacketConn) Close() error { return nil }
-
 func shortSocketDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "gantry-sock-")

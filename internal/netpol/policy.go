@@ -229,6 +229,76 @@ func parsePortRange(spec string) (PortRange, error) {
 	return PortRange{uint16(l), uint16(h)}, nil
 }
 
+// RuleSummary is a stable, presentation-friendly view used by the dashboard.
+type RuleSummary struct {
+	Action   string `json:"action"`
+	Target   string `json:"target"`
+	Protocol string `json:"protocol"`
+	Ports    string `json:"ports,omitempty"`
+	Source   string `json:"source"`
+}
+
+// RuleSummaries returns explicit rules in evaluation order followed by the
+// domain allowlist, local-network posture and default internet action.
+func (p *Policy) RuleSummaries() []RuleSummary {
+	if p == nil {
+		return nil
+	}
+	out := make([]RuleSummary, 0, len(p.Rules)+len(p.AllowDomains)+3)
+	out = append(out, RuleSummary{
+		Action: "deny", Target: "IPv6 and non-IPv4 traffic", Protocol: "ether", Source: "built-in",
+	})
+	for i, rule := range p.Rules {
+		action := "allow"
+		if rule.Deny {
+			action = "deny"
+		}
+		target := "all destinations"
+		if rule.CIDR != nil {
+			target = rule.CIDR.String()
+		}
+		var ports []string
+		for _, portRange := range rule.Ports {
+			if portRange.Lo == portRange.Hi {
+				ports = append(ports, strconv.Itoa(int(portRange.Lo)))
+			} else {
+				ports = append(ports, fmt.Sprintf("%d-%d", portRange.Lo, portRange.Hi))
+			}
+		}
+		out = append(out, RuleSummary{
+			Action: action, Target: target, Protocol: protocolLabel(rule.Proto),
+			Ports: strings.Join(ports, ","), Source: fmt.Sprintf("rule %d", i+1),
+		})
+	}
+	for _, domain := range p.AllowDomains {
+		out = append(out, RuleSummary{Action: "allow", Target: domain, Protocol: "dns", Source: "domain"})
+	}
+	localAction := "deny"
+	if p.AllowLocal {
+		localAction = "allow"
+	}
+	out = append(out, RuleSummary{Action: localAction, Target: "local networks", Protocol: "any", Source: "built-in"})
+	defaultAction := "deny"
+	if p.DefaultAllow {
+		defaultAction = "allow"
+	}
+	out = append(out, RuleSummary{Action: defaultAction, Target: "public internet", Protocol: "any", Source: "default"})
+	return out
+}
+
+func protocolLabel(protocol uint8) string {
+	switch protocol {
+	case protoTCP:
+		return "tcp"
+	case protoUDP:
+		return "udp"
+	case protoICMP:
+		return "icmp"
+	default:
+		return "any"
+	}
+}
+
 // Describe summarizes the policy for startup logs.
 func (p *Policy) Describe() string {
 	def := "deny"
@@ -254,8 +324,10 @@ func (p *Policy) Describe() string {
 // frame inspection
 
 type parsedPacket struct {
+	src      [4]byte
 	dst      [4]byte
 	proto    uint8
+	sport    uint16
 	dport    uint16
 	l4       []byte // transport header (for DNS parsing)
 	isUDP    bool
@@ -282,6 +354,7 @@ func parseFrame(frame []byte) (pp parsedPacket, arp, ok bool) {
 		return pp, false, false
 	}
 	pp.proto = ip[9]
+	copy(pp.src[:], ip[12:16])
 	copy(pp.dst[:], ip[16:20])
 	// fragmented non-first fragments carry no ports: dport stays 0, so
 	// a rule with a Ports list can't match them and they fall through to
@@ -291,9 +364,10 @@ func parseFrame(frame []byte) (pp parsedPacket, arp, ok bool) {
 	off := int(binary.BigEndian.Uint16(ip[6:8])&0x1fff) * 8
 	pp.l4 = ip[ihl:]
 	if off == 0 && len(pp.l4) >= 4 {
+		pp.sport = binary.BigEndian.Uint16(pp.l4[0:2])
 		pp.dport = binary.BigEndian.Uint16(pp.l4[2:4])
 		pp.isUDP = pp.proto == protoUDP
-		pp.srcIsDNS = binary.BigEndian.Uint16(pp.l4[0:2]) == 53
+		pp.srcIsDNS = pp.sport == 53
 	}
 	return pp, false, true
 }

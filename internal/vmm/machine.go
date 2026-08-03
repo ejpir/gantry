@@ -295,16 +295,22 @@ func (m *Machine) handleIO(isWrite bool, port uint16, val uint32, size int) uint
 }
 
 type Opts struct {
-	MemSize     uint64
-	KernelPath  string
-	InitrdPath  string   // optional when Disks are set
-	RootfsPath  string   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
-	DisksRO     []string // extra virtio-blk images attached READ-ONLY (container images: vdb...)
-	Disks       []string // extra virtio-blk images, writable (rwlayers, scratch disks)
-	Shares      []Share
-	NetEndpoint string         // Unix datagram raw-Ethernet endpoint; "" disables NIC
-	NetConn     net.Conn       // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
-	NetPolicy   *netpol.Policy // egress policy on the NetConn link; nil = unrestricted
+	MemSize    uint64
+	KernelPath string
+	InitrdPath string   // optional when Disks are set
+	RootfsPath string   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
+	DisksRO    []string // extra virtio-blk images attached READ-ONLY (container images: vdb...)
+	Disks      []string // extra virtio-blk images, writable (rwlayers, scratch disks)
+	Shares     []Share
+	// ShareHub is the persistent-sandbox share transport: one multiplexed
+	// virtio-fs device instead of one MMIO device per Share. It is
+	// constructed by the sandbox daemon before Prepare so the broker can
+	// keep mutating its namespace while the VM runs.
+	ShareHub    *virtio.ShareHub
+	NetEndpoint string                  // Unix datagram raw-Ethernet endpoint; "" disables NIC
+	NetConn     net.Conn                // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
+	NetPolicy   *netpol.Policy          // egress policy on the NetConn link; nil = unrestricted
+	NetTraffic  *netpol.TrafficRecorder // persistent per-VM dashboard accounting
 	NetMAC      [6]byte
 	NetVFKIT    bool
 	VsockFwd    string // host dir for vsock forwarding; "" disables vsock
@@ -398,9 +404,18 @@ func Prepare(o Opts) (*Machine, error) {
 		fmt.Printf("virtio-blk: %s @ %#x irq %d (%s, %d MiB) -> /dev/vd%c\n",
 			path, core.Base(), core.IRQ(), mode, blk.Size()>>20, 'a'+i)
 	}
-	for _, share := range o.Shares {
-		if err := m.addShare(share); err != nil {
+	if o.ShareHub != nil {
+		if len(o.Shares) != 0 {
+			return nil, fmt.Errorf("virtio-fs: ShareHub and per-share devices are mutually exclusive")
+		}
+		if err := m.addShareHub(o.ShareHub); err != nil {
 			return nil, err
+		}
+	} else {
+		for _, share := range o.Shares {
+			if err := m.addShare(share); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if o.NetConn != nil || o.NetEndpoint != "" {
@@ -417,6 +432,7 @@ func Prepare(o Opts) (*Machine, error) {
 			}
 			how = "unixgram " + o.NetEndpoint
 		}
+		nic.SetTrafficRecorder(o.NetTraffic)
 		core, err := m.addVirtio(nic, "net")
 		if err != nil {
 			return nil, err

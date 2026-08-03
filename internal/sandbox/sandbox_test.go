@@ -22,6 +22,26 @@ func TestValidSandboxName(t *testing.T) {
 	}
 }
 
+func TestCleanupSandboxRuntimePreservesConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"sandbox.json", "network-traffic.json", "vmm.pid", "ready", "ctl.sock", "shares.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupSandboxRuntime(dir)
+	for _, name := range []string{"sandbox.json", "network-traffic.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("persistent file %s was removed: %v", name, err)
+		}
+	}
+	for _, name := range []string{"vmm.pid", "ready", "ctl.sock", "shares.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("runtime file %s still exists (err=%v)", name, err)
+		}
+	}
+}
+
 func TestSandboxPIDLifecycle(t *testing.T) {
 	t.Setenv("GANTRY_HOME", t.TempDir())
 	name := "testbox"

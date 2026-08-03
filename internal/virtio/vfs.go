@@ -24,14 +24,15 @@ import (
 // the guest, and crun bind-mounts the guest path into the container.
 //
 // TRUST BOUNDARY: the request virtqueue is written by the guest, not by the
-// Linux FUSE client, so the vendored go-fuse carries three gantry patches —
-// validGuestName (bridge.go: rejects ".", "..", "/", NUL in names) and
+// Linux FUSE client, so the vendored go-fuse carries gantry patches:
+// validGuestName (bridge.go: rejects ".", "..", "/", NUL in names),
 // LoopbackNode.securePath (loopback.go: refuses paths that escape the share
-// root through an intermediate symlink swap), plus the exported opcode
-// aliases (opcode_gantry.go) that keep the read-only gate below on the
-// shared opcode definitions. Re-vendoring upstream go-fuse must re-apply
-// all three; TestVirtioFSShareEscape/TestVirtioFSSymlinkEscapeBlocked
-// fail without the first two. `,ro` is enforced here too (roFuseHandler).
+// root through an intermediate symlink swap), the exported opcode aliases
+// (opcode_gantry.go), Linux-guest errno mapping for Darwin, and the pinned
+// NewLoopbackRootFD/RootPrefix/InoSalt support used by ShareHub. Re-vendoring
+// upstream go-fuse must re-apply all of them;
+// TestVirtioFSShareEscape/TestVirtioFSSymlinkEscapeBlocked fail without the
+// first two. `,ro` is enforced here too (roFuseHandler).
 const (
 	virtioFSDeviceID = 26
 	virtioFSHiprioQ  = 0

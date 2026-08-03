@@ -23,16 +23,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// FUSE opcodes (linux/fs/fuse: uapi/linux/fuse.h).
-const (
-	fuseLookup  = 1
-	fuseSymlink = 6
-	fuseUnlink  = 10
-	fuseOpen    = 14
-	fuseWrite   = 16
-	fuseInit    = 26
-	fuseCreate  = 35
-)
+// FUSE operation helpers shared with the hub tests live in
+// test_helpers_test.go.
 
 // fuseInitDevice negotiates the protocol like the Linux client does first.
 func fuseInitDevice(t *testing.T, dev *FS) {
@@ -58,17 +50,6 @@ func lookup(t *testing.T, dev *FS, unique uint64, parent uint64, name string) (u
 		return 0, errno
 	}
 	return binary.LittleEndian.Uint64(out[1][0:8]), 0
-}
-
-// fuseInHeader builds the 40-byte struct fuse_in_header that prefixes every
-// request: {len, opcode, unique, nodeid, uid, gid, pid, ...}.
-func fuseInHeader(op uint32, unique, nodeid uint64, payloadLen int) []byte {
-	b := make([]byte, 40)
-	binary.LittleEndian.PutUint32(b[0:4], uint32(40+payloadLen))
-	binary.LittleEndian.PutUint32(b[4:8], op)
-	binary.LittleEndian.PutUint64(b[8:16], unique)
-	binary.LittleEndian.PutUint64(b[16:24], nodeid)
-	return b
 }
 
 // req sends one request to the device and returns (bytesWritten, errno). errno

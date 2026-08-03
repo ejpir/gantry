@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gantry/internal/image"
+	"gantry/internal/shares"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,50 @@ func TestConfigJSONShare(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConfigJSONShareHub(t *testing.T) {
+	transport := &shares.Transport{Tag: shares.HubTag, VMPath: shares.HubVMPath}
+	entries := []ShareEntry{
+		{Tag: "code", RO: true, VMPath: shares.HubVMPath + "/code", CtrPath: "/host/code"},
+		{Tag: "work", VMPath: shares.HubVMPath + "/work", CtrPath: "/workspace"},
+	}
+	cfg, err := ConfigJSONWithTransport(entries, transport, false, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(cfg)) {
+		t.Fatalf("invalid JSON:\n%s", cfg)
+	}
+	for _, want := range []string{
+		`"destination": "/run/gantry/shares", "type": "bind", "source": "/run/mnt/gantry-shares"`,
+		`"destination": "/host", "type": "bind", "source": "/run/mnt/gantry-shares"`,
+		`"destination": "/workspace", "type": "bind", "source": "/run/mnt/gantry-shares/work"`,
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(cfg, `"destination": "/host/code", "type": "bind"`) {
+		t.Error("default /host/<tag> received a redundant bind")
+	}
+	if strings.Contains(cfg, `"destination": "/host", "type": "tmpfs"`) {
+		t.Error("hub mode must not replace /host with a tmpfs")
+	}
+
+	// An explicit legacy /host alias covers the hub root; the internal stable
+	// path remains available for all other live shares.
+	entries[0].CtrPath = "/host"
+	cfg, err = ConfigJSONWithTransport(entries, transport, false, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(cfg, `"destination": "/host", "type": "bind", "source": "/run/mnt/gantry-shares/code", "options": ["rbind","rprivate","ro"]`) {
+		t.Errorf("missing explicit /host alias:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, `"destination": "/run/gantry/shares"`) {
+		t.Errorf("missing internal hub fallback:\n%s", cfg)
 	}
 }
 

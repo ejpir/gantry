@@ -97,6 +97,28 @@ func TestPolicyParse(t *testing.T) {
 	}
 }
 
+func TestPolicyRuleSummaries(t *testing.T) {
+	policy := mustParse(t, `{
+		"default":"deny",
+		"allowLocal":true,
+		"rules":[{"action":"allow","cidr":"203.0.113.0/24","proto":"tcp","ports":"443,8000-8001"}],
+		"allowDomains":["example.com"]
+	}`)
+	rules := policy.RuleSummaries()
+	if len(rules) != 5 {
+		t.Fatalf("summaries = %#v", rules)
+	}
+	if rules[0].Action != "deny" || rules[0].Protocol != "ether" {
+		t.Fatalf("link summary = %#v", rules[0])
+	}
+	if rules[1].Action != "allow" || rules[1].Target != "203.0.113.0/24" || rules[1].Protocol != "tcp" || rules[1].Ports != "443,8000-8001" {
+		t.Fatalf("explicit summary = %#v", rules[1])
+	}
+	if rules[2].Target != "example.com" || rules[3].Action != "allow" || rules[4].Action != "deny" {
+		t.Fatalf("posture summaries = %#v", rules[2:])
+	}
+}
+
 func TestPolicyMatchTX(t *testing.T) {
 	p := mustParse(t, `{
 		"default": "deny",
