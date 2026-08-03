@@ -53,6 +53,7 @@ usage:
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
   gantry share <verb>               # live host shares: add|remove|ls
+  gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
   gantry stop <name>                # stop a sandbox
   gantry resume <name>              # boot a stopped sandbox from saved config
   gantry delete <name>              # stop + remove a sandbox
@@ -112,6 +113,8 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(sandbox.CmdImage(os.Args[2:]))
 	case "share":
 		os.Exit(sandbox.CmdShare(os.Args[2:]))
+	case "ports":
+		os.Exit(sandbox.CmdPorts(os.Args[2:]))
 	case "stop", "delete":
 		if len(os.Args) != 3 {
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])

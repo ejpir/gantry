@@ -58,7 +58,7 @@ func TestPolicyEnforcedOnWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee})
+	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func dnsResponsePayload(frame []byte) []byte {
 // it. DNS via the gateway resolver must also keep working.
 func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 	pol := netpol.DefaultPolicy()
-	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee})
+	stack, err := vnet.Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
