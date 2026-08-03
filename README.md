@@ -9,7 +9,7 @@ Gantry reuses the EROFS rootfs, `vminitd`, and task APIs from
 [nerdbox](https://github.com/containerd/nerdbox), but does not require Docker,
 containerd, or libkrun. The guest kernel is Gantry's own hardened build
 (nerdbox-derived baseline plus memory-safety and info-leak hardening; see
-[docs/sbx-hardening-audit.md](docs/sbx-hardening-audit.md)).
+[docs/hardening-audit.md](docs/hardening-audit.md)).
 
 - One-shot and persistent sandboxes
 - OCI registry, OCI layout, Docker-save, and EROFS images
