@@ -144,9 +144,20 @@ func (n *LoopbackNode) relativePath() string {
 	return n.Path(n.root())
 }
 
+// rootPath returns the export root path. With a pinned root descriptor it
+// resolves through the descriptor (F_GETPATH on Darwin, /proc/self/fd on
+// Linux), so renaming the exported root and planting a replacement at the
+// original path cannot retarget operations at the replacement directory.
+func (n *LoopbackNode) rootPath() string {
+	if n.RootData.RootFD >= 0 {
+		return loopbackRootFDPath(n.RootData.RootFD, n.RootData.Path)
+	}
+	return n.RootData.Path
+}
+
 // path returns the absolute path to the node
 func (n *LoopbackNode) path() string {
-	return filepath.Join(n.RootData.Path, n.relativePath())
+	return filepath.Join(n.rootPath(), n.relativePath())
 }
 
 // securePath resolves n's directory through any symlinks and refuses to
@@ -158,10 +169,7 @@ func (n *LoopbackNode) path() string {
 // requests on the virtio transport lock, so resolve-then-act cannot be
 // raced from the guest side.
 func (n *LoopbackNode) securePath(name string) (string, syscall.Errno) {
-	root := n.RootData.Path
-	if n.RootData.RootFD >= 0 {
-		root = loopbackRootFDPath(n.RootData.RootFD, root)
-	}
+	root := n.rootPath()
 	compareRoot := root
 	if n.RootData.RootPrefix != "" && n.RootData.RootFD < 0 {
 		var err error
@@ -490,7 +498,7 @@ func (n *LoopbackNode) Open(ctx context.Context, flags uint32) (fh FileHandle, f
 	flags = flags &^ fuse.FMODE_EXEC
 	hostFlags := openFlagsToHost(flags) &^ syscall.O_APPEND
 
-	f, err := openat.OpenSymlinkAware(n.RootData.Path, n.relativePath(), hostFlags, 0)
+	f, err := openat.OpenSymlinkAware(n.rootPath(), n.relativePath(), hostFlags, 0)
 	if err != nil {
 		return nil, 0, ToErrno(err)
 	}
@@ -732,8 +740,11 @@ func NewLoopbackRootFD(rootPath string, rootFD int) (InodeEmbedder, error) {
 	if runtime.GOOS == "darwin" {
 		fdPath = filepath.Join("/dev/fd", fmt.Sprint(rootFD))
 	}
+	// Identity comes from the pinned descriptor, not the path: re-resolving
+	// and stating rootPath after the fd was opened would race a host-side
+	// swap of the directory.
 	var st syscall.Stat_t
-	if err := syscall.Stat(resolved, &st); err != nil {
+	if err := syscall.Fstat(rootFD, &st); err != nil {
 		return nil, err
 	}
 	configuredPath := fdPath
