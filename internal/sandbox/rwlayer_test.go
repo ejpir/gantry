@@ -50,7 +50,7 @@ func TestProbeExt4(t *testing.T) {
 
 func TestRWLayerPairing(t *testing.T) {
 	dir := t.TempDir()
-	layer := filepath.Join(dir, "sbx.ext4")
+	layer := filepath.Join(dir, "test.ext4")
 	os.WriteFile(layer, []byte("x"), 0o644)
 
 	// no sidecar: recorded, no error

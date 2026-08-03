@@ -8,7 +8,7 @@ import "crypto/rand"
 // boot relies on jitter entropy, which is a coin flip: when it loses,
 // vminitd's DHCP client blocks in getrandom() for two minutes, exits,
 // PID 1 dies and the VM panics ("could not get random number").
-// libsailor ships the same device ("created virtio-rng device").
+// The reference VMM ships the same device ("created virtio-rng device").
 const virtioRngDeviceID = 4
 
 type RNG struct {

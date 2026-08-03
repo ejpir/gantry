@@ -28,8 +28,8 @@ import (
 	"golang.org/x/term"
 )
 
-// Sandbox lifecycle, mirroring `sbx create/start/stop/ls/delete` +
-// `sbx exec`. A sandbox is a long-lived VMM daemon holding the single
+// Sandbox lifecycle: create/start/stop/ls/delete + exec.
+// A sandbox is a long-lived VMM daemon holding the single
 // vsock dial-back ttrpc connection vminitd makes per VM lifetime
 // (dialBackListener dials exactly once). `gantry exec <name>` is a thin
 // client; the daemon multiplexes sessions over that one connection (ttrpc

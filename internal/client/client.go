@@ -1,7 +1,7 @@
 // Package client is the ttrpc control-plane client for the nerdbox guest
 // agent (vminitd) running inside a gantry VM. It is shared by the hostctl
 // binary (two-terminal/debug flow) and by `gantry exec` (single-command
-// sbx-style flow).
+// flow).
 package client
 
 import (
@@ -467,7 +467,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 
 	// 3. create + start the task. Read-only mode mounts /dev/vdb (erofs)
 	// directly; RW stacks an ext4 rwlayer over it with overlayfs — the
-	// same lower/ro + upper/rw design as sbx's rwlayer.img. The {{mount N}}
+	// same lower/ro + upper/rw design as the reference rwlayer.img. The {{mount N}}
 	// templates are resolved by the guest's mountutil against earlier
 	// staged mounts.
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{

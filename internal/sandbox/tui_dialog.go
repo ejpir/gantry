@@ -481,8 +481,8 @@ func (m *sandboxTUIModel) updateMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		}
 	}
 
-	// The menu bar exposes the same primary actions as sbx: New and Help are
-	// both keyboard shortcuts and mouse targets.
+	// The menu bar exposes the same primary actions as the reference CLI:
+	// New and Help are both keyboard shortcuts and mouse targets.
 	if mouse.Y == 1 {
 		switch {
 		case mouse.X >= m.width-9:

@@ -9,7 +9,7 @@
 /minivm-*
 *.exe
 
-# guest assets (regenerate: ./scripts/build.sh, or copy from Docker's sbx release)
+# guest assets (regenerate: ./scripts/build.sh, or copy from a nerdbox release)
 /initramfs*.cpio.gz
 /shell-rootfs.erofs
 /nerdbox-kernel-*

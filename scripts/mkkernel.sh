@@ -5,7 +5,7 @@
 # than depending on the stock nerdbox kernel: same version and same baseline
 # config lineage (extracted once from the nerdbox kernel, committed under
 # config/), minus boot-time dead weight, plus the always-on hardening in
-# scripts/kernel-hardening.sh (see docs/sbx-hardening-audit.md for why).
+# scripts/kernel-hardening.sh (see docs/hardening-audit.md for why).
 #
 #   ./scripts/mkkernel.sh              # → artifacts/gantry-kernel-<host arch>
 #   ./scripts/mkkernel.sh x86_64       # cross/native for another arch

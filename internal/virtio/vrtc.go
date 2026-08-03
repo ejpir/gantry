@@ -8,7 +8,7 @@ import (
 // virtio-rtc (device ID 17), no ALARM feature: a single requestq answering
 // READ/CFG/CLOCK_CAP for one UTC clock backed by the host clock. This is
 // the OpenSynergy virtio-rtc protocol (virtio-spec device-types/rtc), which
-// is also what libsailor implements (crates/devices/virtio-rtc) and what
+// is also what the reference VMM implements (crates/devices/virtio-rtc) and what
 // the nerdbox kernel's CONFIG_VIRTIO_RTC{_CLASS,_PTP} driver expects:
 // the kernel sets the system time from it at probe (hctosys), and vminitd's
 // clock service keeps it in sync through the /dev/ptp clock the driver

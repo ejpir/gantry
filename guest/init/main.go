@@ -5,7 +5,7 @@
 // serial console, then power off via PSCI (which our VMM turns into a
 // clean exit).
 //
-// Mount hardening mirrors nerdbox's vminitd (docs/sbx-hardening-audit.md
+// Mount hardening mirrors nerdbox's vminitd (docs/hardening-audit.md
 // layer 4): every pseudo-fs is nosuid/noexec/nodev, /tmp gets the same,
 // cgroup2 is mounted with subtree-control delegation, and the sysctls
 // below match the ones DefaultCmdline sets for production vminitd boots

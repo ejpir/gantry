@@ -19,7 +19,7 @@ import (
 //
 // Differences vs the KVM backend:
 //   - the vGIC is created via hv_gic_* (same GICD/GICR addresses; requires
-//     macOS 13+; sailor calls this its hardware GIC mode)
+//     macOS 13+; the reference VMM calls this its hardware GIC mode)
 //   - MMIO exits come as raw data-abort syndromes; we decode ESR ourselves
 //     (ISV/SAS/WnR/SRT) instead of getting a pre-decoded kvm_run.mmio
 //   - PSCI is NOT handled in-kernel: guest HVC calls exit to us and we
@@ -451,7 +451,7 @@ func (vc *hvfVCPU) handleException() error {
 	case 0x18: // MSR/MRS/system-instruction trap
 		return vc.handleSysreg(syn)
 	case ecWfi:
-		// Guest idled. sailor sleeps the host thread here until the timer
+		// Guest idled. The reference VMM sleeps the host thread here until the timer
 		// or an IRQ ("vCPU WFI: sleeping until timer"); a short sleep keeps
 		// us from burning a host core on idle guests.
 		time.Sleep(time.Millisecond)

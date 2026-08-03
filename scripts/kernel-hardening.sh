@@ -10,7 +10,7 @@
 # stacks add attack surface and maintenance for a layer that is already
 # disposable: a guest-kernel compromise is contained by the VM boundary.
 # We take the cheap, always-on memory-corruption and info-leak hardening
-# instead. See docs/sbx-hardening-audit.md for the full comparison.
+# instead. See docs/hardening-audit.md for the full comparison.
 
 # Always-on hardening. Each symbol must survive olddefconfig — the verify
 # step below fails the build otherwise.

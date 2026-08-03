@@ -9,12 +9,12 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-// Hypervisor.framework bindings — the exact API surface libsailor.dylib
-// imports (verified against its Mach-O import table), called via purego
-// (no cgo), the same mechanism Docker's Go sailor bindings use.
+// Hypervisor.framework bindings — the exact API surface the reference VMM
+// dylib imports (verified against its Mach-O import table), called via purego
+// (no cgo), the same mechanism its Go bindings use.
 //
 // Struct layouts and constants cross-checked against libkrun's public
-// hvf crate (containers/libkrun, src/hvf), sailor's ancestor.
+// hvf crate (containers/libkrun, src/hvf), the reference VMM's ancestor.
 
 var (
 	hvVmConfigCreate                func() uintptr

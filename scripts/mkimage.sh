@@ -1,6 +1,6 @@
 #!/bin/sh
 # mkimage.sh — flatten an OCI image into an EROFS container rootfs
-# (the "sbx kit" build step).
+# (the "kit" build step).
 #
 #   ./scripts/mkimage.sh debian:bookworm-slim artifacts/debian-bookworm.erofs
 #   ./scripts/mkimage.sh alpine:latest artifacts/alpine.erofs
