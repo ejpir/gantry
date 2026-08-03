@@ -53,8 +53,7 @@ the latest release on first start. Manual fallback: copy the rootfs from a
 - **Host shares** — export directories over virtio-fs:
   `-share repo="$PWD@/workspace,ro"`. Hot-add without a restart:
   `gantry share add dev data="$PWD/data,ro"` (also `ls`/`remove`; the
-  dashboard's Mounts view does the same). Details:
-  [docs/hot-add-shares.md](docs/hot-add-shares.md).
+  dashboard's Mounts view does the same).
 - **Networking** — embedded netstack; public internet allowed, local networks
   blocked by default (`-allow-local-net` to opt in). Egress policies with
   CIDR/proto/port/DNS rules: `-net-policy examples/llm-only.json`.
@@ -81,13 +80,7 @@ go test ./...
 | macOS arm64 | Hypervisor.framework | Verified; macOS 13+ |
 | Windows x86-64 | WHPX | Cross-build only, not boot-verified |
 
-## Docs and limitations
-
-- [docs/macos.md](docs/macos.md) — macOS specifics, signing, virtio devices
-- [docs/windows-shares.md](docs/windows-shares.md) — Windows NTFS passthrough
-- [docs/hardening-audit.md](docs/hardening-audit.md) — hardened kernel, guest
-  init, and the threat model behind them
-- [docs/aws-kvm-test.md](docs/aws-kvm-test.md) — native KVM testing on EC2
+## Limitations
 
 Not (yet): Windows boot verification, snapshots, port publishing. The VMM
 runs with the launching user's host privileges; writable layers must not be
