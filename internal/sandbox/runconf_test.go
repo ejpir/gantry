@@ -102,9 +102,15 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 	if _, _, err := resolveSandbox(t, "-runtime", "bogus"); err == nil || !strings.Contains(err.Error(), "crun or runsc") {
 		t.Errorf("bogus runtime: want switch error, got %v", err)
 	}
-	// runsc without the gvisor rootfs: actionable error
+// runsc without the gvisor rootfs: actionable error
 	if _, _, err := resolveSandbox(t, "-runtime", "runsc"); err == nil || !strings.Contains(err.Error(), "mkrootfs-gvisor.sh") {
 		t.Errorf("runsc without rootfs: want mkrootfs-gvisor hint, got %v", err)
+	}
+}
+
+func TestResolveSharesRequireWritableRoot(t *testing.T) {
+	if _, _, err := resolveSandbox(t, "-rw=false", "-share", "code=/tmp"); err == nil || !strings.Contains(err.Error(), "writable container root") {
+		t.Errorf("shares with -rw=false: want writable-root error, got %v", err)
 	}
 }
 
@@ -284,7 +290,11 @@ func TestPiSandboxName(t *testing.T) {
 // survive the normalization (it was silently dropped, which is why
 // `gantry pi` mounted the project at /host/ws instead of /workspace).
 func TestResolveShareCtrPathPreserved(t *testing.T) {
-	cfg, _, err := resolveSandbox(t, "-share", "ws=/tmp@/workspace", "-share", "code=/tmp@/src,ro")
+	layer := filepath.Join(t.TempDir(), "rw.ext4")
+	if err := os.WriteFile(layer, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := resolveSandbox(t, "-share", "ws=/tmp@/workspace", "-share", "code=/tmp@/src,ro", "-rwlayer", layer)
 	if err != nil {
 		t.Fatal(err)
 	}

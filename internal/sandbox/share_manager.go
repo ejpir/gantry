@@ -174,6 +174,11 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	if m.hub == nil {
 		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
+	if !m.cfg.RW {
+		// A read-only container root cannot create the /host bind target,
+		// so the hub was never mounted into the container (client.go).
+		return shares.Entry{}, fmt.Errorf("live shares require a writable container root (sandbox started with -rw=false)")
+	}
 	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
 	if err != nil {
 		return shares.Entry{}, err

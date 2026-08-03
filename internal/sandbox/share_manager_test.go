@@ -15,7 +15,7 @@ import (
 func newTestShareManager(t *testing.T, specs ...string) (*ShareManager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	cfg := RunConfig{Kernel: "/kernel", Rootfs: "/rootfs", Image: "/image", Shares: specs, MemMB: 512}
+	cfg := RunConfig{Kernel: "/kernel", Rootfs: "/rootfs", Image: "/image", Shares: specs, MemMB: 512, RW: true}
 	manager, warnings, err := NewShareManager(dir, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +133,7 @@ func TestShareManagerRemoveUpdatesConfig(t *testing.T) {
 
 func TestShareManagerHostshareNormalizesToHubChild(t *testing.T) {
 	dir := t.TempDir()
-	manager, warnings, err := NewShareManager(t.TempDir(), RunConfig{Shares: []string{"hostshare=" + dir}})
+	manager, warnings, err := NewShareManager(t.TempDir(), RunConfig{Shares: []string{"hostshare=" + dir}, RW: true})
 	if err != nil {
 		t.Fatal(err)
 	}

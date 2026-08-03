@@ -232,6 +232,9 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	}
 
 	cfg.Shares = *f.Shares
+	if !cfg.RW && len(cfg.Shares) > 0 {
+		return cfg, nil, fmt.Errorf("shares require a writable container root (remove -rw=false)")
+	}
 	cfg.Net = *f.Net
 	cfg.GVProxy = *f.GVProxy
 	if cfg.GVProxy != "" && !strings.ContainsRune(cfg.GVProxy, os.PathSeparator) && gutil.FileExists(cfg.GVProxy) {
