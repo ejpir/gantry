@@ -4,19 +4,58 @@
 // vminitd but minimal: mount filesystems, say hello, run a shell on the
 // serial console, then power off via PSCI (which our VMM turns into a
 // clean exit).
+//
+// Mount hardening mirrors nerdbox's vminitd (docs/sbx-hardening-audit.md
+// layer 4): every pseudo-fs is nosuid/noexec/nodev, /tmp gets the same,
+// cgroup2 is mounted with subtree-control delegation, and the sysctls
+// below match the ones DefaultCmdline sets for production vminitd boots
+// (this init also serves bare-kernel debug boots whose cmdline lacks
+// them). All of it is best-effort: a kernel without YAMA or cgroup2
+// still boots the dev shell.
 package main
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
 
-func mount(src, target, fstype string) {
-	if err := syscall.Mount(src, target, fstype, 0, ""); err != nil && err != syscall.EBUSY {
+func mount(src, target, fstype string, flags uintptr) {
+	if err := syscall.Mount(src, target, fstype, flags, ""); err != nil && err != syscall.EBUSY {
 		fmt.Printf("[init] mount %s: %v\n", target, err)
+	}
+}
+
+// sysctl writes key=value under /proc/sys, silently skipping sysctls the
+// kernel does not have (e.g. kernel.yama.ptrace_scope without CONFIG_YAMA).
+func sysctl(key, value string) {
+	p := "/proc/sys/" + strings.ReplaceAll(key, ".", "/")
+	if err := os.WriteFile(p, []byte(value), 0o644); err != nil && !os.IsNotExist(err) {
+		fmt.Printf("[init] sysctl %s=%s: %v\n", key, value, err)
+	}
+}
+
+// mountCgroups mounts cgroup2 and delegates the controllers crun needs to
+// nested cgroups, matching what vminitd does for production sandboxes.
+func mountCgroups() {
+	if err := os.MkdirAll("/sys/fs/cgroup", 0o755); err != nil {
+		return
+	}
+	if err := syscall.Mount("cgroup2", "/sys/fs/cgroup", "cgroup2", syscall.MS_NOSUID|syscall.MS_NOEXEC|syscall.MS_NODEV, ""); err != nil {
+		if err != syscall.EBUSY && err != syscall.ENODEV && err != syscall.ENOENT {
+			fmt.Printf("[init] mount cgroup2: %v\n", err)
+		}
+		return
+	}
+	// cpuset is separate: enabling it fails when the root cgroup has no
+	// cpus/mems assigned yet, and the rest must still go through.
+	for _, ctrls := range []string{"+cpu +memory +pids +io", "+cpuset"} {
+		if err := os.WriteFile("/sys/fs/cgroup/cgroup.subtree_control", []byte(ctrls), 0o644); err != nil {
+			fmt.Printf("[init] cgroup subtree_control %q: %v\n", ctrls, err)
+		}
 	}
 }
 
@@ -26,11 +65,25 @@ func main() {
 	fmt.Println(" gantry guest init (PID 1, static Go)")
 	fmt.Println("==========================================")
 
-	// devtmpfs is usually pre-mounted by the kernel; mount the rest
-	mount("devtmpfs", "/dev", "devtmpfs")
-	mount("proc", "/proc", "proc")
-	mount("sysfs", "/sys", "sys")
-	mount("tmpfs", "/tmp", "tmpfs")
+	const pseudo = syscall.MS_NOSUID | syscall.MS_NOEXEC | syscall.MS_NODEV
+	// devtmpfs is usually pre-mounted by the kernel; mount the rest.
+	// /dev keeps device nodes usable (no MS_NODEV) but drops suid/exec;
+	// the pseudo filesystems and /tmp get the full nosuid/noexec/nodev.
+	mount("devtmpfs", "/dev", "devtmpfs", syscall.MS_NOSUID|syscall.MS_NOEXEC)
+	mount("proc", "/proc", "proc", pseudo)
+	mount("sysfs", "/sys", "sysfs", pseudo)
+	mount("tmpfs", "/tmp", "tmpfs", pseudo)
+	mountCgroups()
+
+	// Same hardening sysctls DefaultCmdline passes to production boots;
+	// repeated here because this init also runs on bare debug boots whose
+	// cmdline carries none of them.
+	sysctl("kernel.kptr_restrict", "2")
+	sysctl("kernel.dmesg_restrict", "1")
+	sysctl("kernel.unprivileged_bpf_disabled", "1")
+	sysctl("kernel.yama.ptrace_scope", "1")
+	sysctl("kernel.kexec_load_disabled", "1")
+	sysctl("net.core.bpf_jit_harden", "2")
 
 	// make sure console device nodes exist even if the kernel's devtmpfs
 	// population is late (PID 1 dies early without /dev/console)
@@ -50,7 +103,7 @@ func main() {
 	// the real nerdbox rootfs at /mnt for exploration
 	if _, err := os.Stat("/dev/vda"); err == nil {
 		os.MkdirAll("/mnt", 0o755)
-		if err := syscall.Mount("/dev/vda", "/mnt", "erofs", syscall.MS_RDONLY, ""); err != nil {
+		if err := syscall.Mount("/dev/vda", "/mnt", "erofs", syscall.MS_RDONLY|syscall.MS_NOSUID|syscall.MS_NODEV, ""); err != nil {
 			fmt.Printf("[init] mount /dev/vda: %v\n", err)
 		} else {
 			fmt.Println("[init] nerdbox rootfs mounted at /mnt (erofs, ro)")
