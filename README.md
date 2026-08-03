@@ -22,13 +22,11 @@ codesign --force --sign - --entitlements entitlements.plist gantry-darwin-arm64
 xattr -d com.apple.quarantine gantry-darwin-arm64
 ```
 
-Two guest assets are needed before first run:
-
-- **Rootfs**: copy `nerdbox-rootfs-<arch>.erofs` from a
-  [nerdbox release](https://github.com/containerd/nerdbox/releases) into
-  `artifacts/` (or build from source, below).
-- **Kernel**: nothing to do — `gantry-kernel-<arch>` downloads automatically
-  from the latest release on first start.
+Guest assets: nothing to do — the hardened kernel (`gantry-kernel-<arch>`)
+and guest rootfs (`nerdbox-rootfs-<arch>.erofs`) download automatically from
+the latest release on first start. Manual fallback: copy the rootfs from a
+[nerdbox release](https://github.com/containerd/nerdbox/releases) into
+`artifacts/`, or build from source below.
 
 ## Use
 

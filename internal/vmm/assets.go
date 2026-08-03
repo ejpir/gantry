@@ -1,10 +1,11 @@
 package vmm
 
-// On-demand guest-asset downloads: the CLI ships without guest kernels and
-// fetches gantry-kernel-<arch>[-4k] from the GitHub release page the first
-// time a sandbox needs one. Downloads go to the artifacts dir next to the
-// other staged assets and are atomic (temp file + rename), so a killed
-// download never leaves a half-written kernel behind.
+// On-demand guest-asset downloads: the CLI ships without guest kernels or
+// rootfs images and fetches gantry-kernel-<arch>[-4k] and
+// nerdbox-rootfs-<arch>.erofs from the GitHub release page the first time a
+// sandbox needs them. Downloads go to the artifacts dir next to the other
+// staged assets and are atomic (temp file + rename), so a killed download
+// never leaves a half-written asset behind.
 
 import (
 	"fmt"
@@ -18,9 +19,9 @@ import (
 )
 
 // releaseBase is the stable "latest release" download prefix. Releases are
-// tagged v* and kernels are attached by the CI kernels job as
-// gantry-kernel-<arch> / gantry-kernel-arm64-4k / gantry-kernel-x86_64.
-// GANTRY_RELEASE_BASE overrides the prefix for mirrors and tests.
+// tagged v*; the CI attaches gantry-kernel-<arch>[-4k] and
+// nerdbox-rootfs-<arch>.erofs assets to them. GANTRY_RELEASE_BASE overrides
+// the prefix for mirrors and tests.
 const defaultReleaseBase = "https://github.com/ejpir/gantry/releases/latest/download"
 
 func releaseBase() string {
@@ -31,10 +32,18 @@ func releaseBase() string {
 }
 
 // downloadableAsset reports whether path names a guest asset Gantry can
-// fetch itself (as opposed to a user-supplied path or a nerdbox asset,
-// which we do not distribute).
+// fetch itself (as opposed to a user-supplied path or a locally built
+// variant such as the gVisor rootfs, which we do not distribute).
 func downloadableAsset(path string) bool {
-	return strings.HasPrefix(filepath.Base(path), "gantry-kernel-")
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, "gantry-kernel-") {
+		return true
+	}
+	switch base {
+	case "nerdbox-rootfs-arm64.erofs", "nerdbox-rootfs-x86_64.erofs":
+		return true
+	}
+	return false
 }
 
 // EnsureKernel returns path if it exists; otherwise, when path names a
@@ -42,11 +51,21 @@ func downloadableAsset(path string) bool {
 // returns the same path. progress (may be nil) reports the download start
 // so users understand the first-start delay.
 func EnsureKernel(path string, progress func(string, ...any)) (string, error) {
+	return ensureAsset(path, "kernel", progress)
+}
+
+// EnsureRootfs is EnsureKernel for the nerdbox-rootfs-<arch>.erofs guest
+// rootfs asset.
+func EnsureRootfs(path string, progress func(string, ...any)) (string, error) {
+	return ensureAsset(path, "rootfs", progress)
+}
+
+func ensureAsset(path, what string, progress func(string, ...any)) (string, error) {
 	if gutil.FileExists(path) {
 		return path, nil
 	}
 	if !downloadableAsset(path) {
-		return "", fmt.Errorf("kernel %s not found", path)
+		return "", fmt.Errorf("%s %s not found", what, path)
 	}
 	if err := downloadAsset(path, progress); err != nil {
 		return "", err

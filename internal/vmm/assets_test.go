@@ -67,6 +67,44 @@ func TestEnsureKernelRefusesNonGantryPath(t *testing.T) {
 	}
 }
 
+func TestEnsureRootfsRefusesNonReleasePath(t *testing.T) {
+	// custom names and the locally built gVisor variant are not release assets
+	for _, name := range []string{"my-rootfs.erofs", "nerdbox-rootfs-gvisor-arm64.erofs"} {
+		if _, err := EnsureRootfs(filepath.Join(t.TempDir(), name), nil); err == nil {
+			t.Errorf("%s: want error, got nil", name)
+		}
+	}
+}
+
+func TestEnsureRootfsDownload(t *testing.T) {
+	payload := strings.Repeat("R", 1<<20)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/nerdbox-rootfs-arm64.erofs") {
+			http.Error(w, "nope", http.StatusNotFound)
+			return
+		}
+		io_writeString(w, payload)
+	}))
+	defer srv.Close()
+	t.Setenv("GANTRY_RELEASE_BASE", srv.URL)
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "nerdbox-rootfs-arm64.erofs")
+	got, err := EnsureRootfs(dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dest {
+		t.Errorf("got %q, want %q", got, dest)
+	}
+	if b, _ := os.ReadFile(dest); string(b) != payload {
+		t.Errorf("downloaded %d bytes, want %d", len(b), len(payload))
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("artifacts dir holds %d entries, want 1", len(entries))
+	}
+}
+
 func TestEnsureKernelDownload(t *testing.T) {
 	payload := strings.Repeat("K", 1<<20)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -159,6 +159,22 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		cfg.Kernel = k
 	}
 
+	// Rootfs resolution: a default rootfs that is not staged yet is
+	// downloaded from the release page (nerdbox-rootfs-<arch>.erofs only,
+	// so this never fires for user-supplied paths); an explicit -rootfs
+	// that is missing is a hard error. The gVisor rootfs used with
+	// -runtime runsc is still built locally (checked above).
+	if cfg.Rootfs != "" && !gutil.FileExists(cfg.Rootfs) {
+		if set["rootfs"] {
+			return cfg, nil, fmt.Errorf("rootfs %s not found", cfg.Rootfs)
+		}
+		r, err := vmm.EnsureRootfs(cfg.Rootfs, say)
+		if err != nil {
+			return cfg, nil, fmt.Errorf("%w (copy nerdbox-rootfs-<arch>.erofs from a nerdbox release into artifacts/, or build from source)", err)
+		}
+		cfg.Rootfs = r
+	}
+
 	cfg.Image = *f.Image
 	if cfg.Image == "" {
 		cfg.Image = vmm.DefaultImage()
