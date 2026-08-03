@@ -3,14 +3,12 @@
 package virtio
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"gantry/internal/gutil"
 
@@ -64,21 +62,15 @@ func NewFS(tag, root string, ro ...bool) (*FS, error) {
 		return nil, fmt.Errorf("shared path is not a directory: %s", abs)
 	}
 
-	rootNode, err := fs.NewLoopbackRoot(abs)
-	if err != nil {
-		return nil, fmt.Errorf("create loopback filesystem: %w", err)
-	}
-	// Ownership squash: gVisor's gofer chowns every file/dir it creates
-	// to the container process's uid (MkdirAt{UID:0,...}), and non-root
-	// hosts (macOS!) cannot chown at all -> every share write failed with
-	// EPERM under -runtime runsc. Ownership on a share is cosmetic (the
-	// host uid owns everything regardless), so child nodes retry failed
-	// chowns with the uid/gid change dropped.
-	ln := rootNode.(*fs.LoopbackNode)
-	ln.RootData.NewNode = func(rootData *fs.LoopbackRoot, parent *fs.Inode, name string, st *syscall.Stat_t) fs.InodeEmbedder {
-		return &squashNode{LoopbackNode: fs.LoopbackNode{RootData: rootData}}
-	}
 	roFlag := len(ro) > 0 && ro[0]
+	// One-shot shares use the same export backend as the persistent hub:
+	// pinned root descriptor, default-deny ioctls/MKNOD/xattrs, special
+	// file rejection and ownership squash. The wire-level roFuseHandler
+	// still applies on top for read-only shares.
+	rootNode, err := NewShareNodeFS(abs, roFlag)
+	if err != nil {
+		return nil, fmt.Errorf("create share filesystem: %w", err)
+	}
 	debug := gutil.EnvOr("GANTRY_DEBUG_FS", "MINIVM_DEBUG_FS") != ""
 	logger := log.New(io.Discard, "", 0)
 	if debug {
@@ -347,30 +339,6 @@ func (v *FS) setCore(c *Core) { v.core = c }
 // Root reports the exported host directory (logs).
 func (v *FS) Root() string { return v.root }
 
-// squashNode wraps loopback child nodes with ownership-squash Setattr
-// (see NewFS). Only child nodes are wrapped; the root node keeps stock
-// behavior.
-type squashNode struct {
-	fs.LoopbackNode
-}
-
-var _ fs.NodeSetattrer = (*squashNode)(nil)
-
-func (n *squashNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	errno := n.LoopbackNode.Setattr(ctx, f, in, out)
-	if errno != syscall.EPERM && errno != syscall.EACCES {
-		return errno
-	}
-	if in.Valid&(fuse.FATTR_UID|fuse.FATTR_GID) == 0 {
-		return errno
-	}
-	retry := *in
-	retry.Valid &^= fuse.FATTR_UID | fuse.FATTR_GID
-	if retry.Valid != 0 {
-		// Apply the non-owner changes (mode/size/times); owner stays
-		// with the host uid.
-		return n.LoopbackNode.Setattr(ctx, f, &retry, out)
-	}
-	// Pure chown: pretend it worked, reporting fresh attrs.
-	return n.LoopbackNode.Getattr(ctx, f, out)
-}
+// squashNode is retired: one-shot shares now use NewShareNodeFS (the hub
+// export backend), whose shareNode.Setattr performs the same ownership
+// squash with the full default-deny policy on top.

@@ -196,7 +196,7 @@ func (h *ShareHub) Prepare(tag, path string, ro bool) (*PreparedShare, string, e
 	}
 	exp := &ShareExport{Tag: tag, RO: ro}
 	exp.state.Store(int32(ShareExportActive))
-	node, finalPath, release, err := h.newExportNode(exp, path, h.nextSalt.Add(1)<<32)
+	node, finalPath, release, err := newExportNode(exp, path, h.nextSalt.Add(1)<<32)
 	if err != nil {
 		return nil, "", err
 	}

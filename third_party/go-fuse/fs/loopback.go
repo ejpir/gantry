@@ -160,6 +160,11 @@ func (n *LoopbackNode) path() string {
 	return filepath.Join(n.rootPath(), n.relativePath())
 }
 
+// HostPath exposes the node's resolved host path (via the pinned root
+// when available) for gantry's policy wrappers, which must inspect the
+// host file type before opening it.
+func (n *LoopbackNode) HostPath() string { return n.path() }
+
 // securePath resolves n's directory through any symlinks and refuses to
 // operate once the node has escaped the exported root through an
 // intermediate symlink swap (a guest can rename a directory aside and plant

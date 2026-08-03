@@ -20,9 +20,10 @@ import (
 // platform-neutral and live in vsharehub_common.go.
 
 // newExportNode pins path beneath an open root descriptor and builds the
-// loopback node presented as /<tag>. The returned release func drops the
-// pinned root when the export finishes.
-func (h *ShareHub) newExportNode(exp *ShareExport, path string, salt uint64) (fs.InodeEmbedder, string, func(), error) {
+// loopback node presented as the export root. The returned release func
+// drops the pinned root when the export finishes. It is hub-agnostic so
+// the one-shot share path reuses the exact same confinement as hub exports.
+func newExportNode(exp *ShareExport, path string, salt uint64) (fs.InodeEmbedder, string, func(), error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("resolve share path: %w", err)
@@ -58,6 +59,26 @@ func (h *ShareHub) newExportNode(exp *ShareExport, path string, salt uint64) (fs
 	rootData.RootNode = node
 	release := func() { _ = rootFD.Close() }
 	return node, ln.RootData.RootPrefix, release, nil
+}
+
+// NewShareNodeFS builds the root for a one-shot share device with exactly
+// the hub export policy: pinned root descriptor, default-deny ioctls, MKNOD
+// and xattrs, special-file rejection, ownership squash and host-enforced
+// read-only. The legacy LoopbackNode+squashNode backend is retired so
+// `gantry run/exec -share` gets the same confinement as persistent hub
+// exports. The pinned descriptor closes when the kernel forgets the root
+// (unmount / device teardown) via shareNode.OnForget.
+func NewShareNodeFS(root string, readonly bool) (fs.InodeEmbedder, error) {
+	exp := &ShareExport{Tag: "share", RO: readonly}
+	exp.state.Store(int32(ShareExportActive))
+	node, finalPath, release, err := newExportNode(exp, root, 1<<32)
+	if err != nil {
+		return nil, err
+	}
+	exp.Path = finalPath
+	exp.node = node
+	exp.release = release
+	return node, nil
 }
 
 // shareNode wraps every loopback node beneath one export. It carries the
@@ -204,6 +225,18 @@ func (n *shareNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint
 	}
 	if n.export.RO && flags&openWriteFlags != 0 {
 		return nil, 0, syscall.EROFS
+	}
+	// Reject pre-existing special files before opening: opening a host
+	// device node has side effects and must never be reachable from the
+	// guest, and FIFOs/sockets are equally out of policy. Shares may
+	// carry regular files, directories and symlinks only.
+	var st syscall.Stat_t
+	if err := syscall.Lstat(n.HostPath(), &st); err == nil {
+		switch st.Mode & syscall.S_IFMT {
+		case syscall.S_IFREG, syscall.S_IFDIR, syscall.S_IFLNK:
+		default:
+			return nil, 0, syscall.EPERM
+		}
 	}
 	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, flags)
 	wrapped, _, errno := n.wrapFile(fh, errno)
