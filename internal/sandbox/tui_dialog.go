@@ -2,9 +2,12 @@ package sandbox
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -373,21 +376,36 @@ func (m *sandboxTUIModel) focusPort(index int) tea.Cmd {
 
 // portSpecFromDialog composes [IP:]HOST:GUEST[/udp] from the dialog fields.
 // Split out for tests: blank bind = auto host port on loopback, a bare
-// number = loopback + that port, ip:port widens the bind explicitly.
+// number = loopback + that port, ip:port widens the bind explicitly. Both
+// fields are validated strictly BEFORE spec composition: the guest field is
+// digits-only, so it can never smuggle an address (e.g. "[::]:80") into the
+// bind position, and a bind address must parse as an IP.
 func (m *sandboxTUIModel) portSpecFromDialog() (string, error) {
 	guest := strings.TrimSpace(m.portGuest.Value())
-	if guest == "" {
-		return "", fmt.Errorf("guest port is required")
+	if _, err := parseStrictPort(guest, "guest port"); err != nil {
+		return "", err
 	}
 	bind := strings.TrimSpace(m.portBind.Value())
-	spec := ""
-	switch {
-	case bind == "":
-		spec = guest // auto host port
-	case strings.Contains(bind, ":"):
-		spec = bind + ":" + guest
-	default:
-		spec = bind + ":" + guest
+	spec := guest // auto host port on loopback
+	if bind != "" {
+		host, port := bind, ""
+		if h, p, err := net.SplitHostPort(bind); err == nil {
+			host, port = h, p
+		}
+		if port != "" {
+			if addr, err := netip.ParseAddr(host); err != nil || addr.Zone() != "" {
+				return "", fmt.Errorf("host bind %q is not an IP address", host)
+			}
+			if _, err := parseStrictPort(port, "host port"); err != nil {
+				return "", err
+			}
+			spec = bind + ":" + guest
+		} else {
+			if _, err := parseStrictPort(host, "host bind (want port or ip:port)"); err != nil {
+				return "", err
+			}
+			spec = host + ":" + guest
+		}
 	}
 	if m.portUDP {
 		spec += "/udp"
@@ -396,6 +414,22 @@ func (m *sandboxTUIModel) portSpecFromDialog() (string, error) {
 		return "", err
 	}
 	return spec, nil
+}
+
+func parseStrictPort(value, what string) (int, error) {
+	if value == "" {
+		return 0, fmt.Errorf("%s is required", what)
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("%s must be a number 1-65535 (got %q)", what, value)
+		}
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("%s must be a number 1-65535 (got %q)", what, value)
+	}
+	return n, nil
 }
 
 func (m *sandboxTUIModel) submitPort() (tea.Model, tea.Cmd) {
@@ -407,7 +441,7 @@ func (m *sandboxTUIModel) submitPort() (tea.Model, tea.Cmd) {
 	spec, err := m.portSpecFromDialog()
 	if err != nil {
 		m.formError = err.Error()
-		if strings.TrimSpace(m.portGuest.Value()) == "" {
+		if strings.Contains(err.Error(), "guest port") {
 			return m, m.focusPort(1)
 		}
 		return m, m.focusPort(0)

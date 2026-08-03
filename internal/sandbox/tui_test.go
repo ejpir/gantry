@@ -433,3 +433,55 @@ func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {
 		t.Errorf("kernel selection after full cycle = %q, want auto", k)
 	}
 }
+
+// Regression: the publish dialog's guest field accepted arbitrary text, so
+// "[::]:80" in the guest field composed into an IPv6 wildcard bind despite
+// the dialog claiming loopback defaults. Both fields are now strict ports.
+func TestPortDialogRejectsSmuggledBind(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	m.portGuest.SetValue("[::]:80")
+	if _, err := m.portSpecFromDialog(); err == nil {
+		t.Fatal("guest field accepted an address")
+	}
+	m.portGuest.SetValue("80")
+	m.portBind.SetValue("0.0.0.0:8080")
+	spec, err := m.portSpecFromDialog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pm, err := ParsePortSpec(spec)
+	if err != nil || pm.HostIP != "0.0.0.0" || pm.HostPort != 8080 || pm.GuestPort != 80 {
+		t.Fatalf("spec %q → %+v (%v)", spec, pm, err)
+	}
+	m.portBind.SetValue("8080") // bare number = loopback + port
+	if spec, err = m.portSpecFromDialog(); err != nil {
+		t.Fatal(err)
+	}
+	pm, _ = ParsePortSpec(spec)
+	if pm.HostIP != "127.0.0.1" || pm.HostPort != 8080 {
+		t.Fatalf("bare bind → %+v", pm)
+	}
+	m.portBind.SetValue("example.com:8080") // hostnames are not accepted
+	if _, err := m.portSpecFromDialog(); err == nil {
+		t.Fatal("hostname bind accepted")
+	}
+}
+
+// bindExposure classifies by parsing: a specific LAN address must not be
+// labelled loopback-only.
+func TestBindExposureClassification(t *testing.T) {
+	cases := map[string]string{
+		"127.0.0.1:8080":    "loopback",
+		"[::1]:8080":        "loopback",
+		"0.0.0.0:8080":      "LAN",
+		"[::]:8080":         "LAN",
+		"192.168.1.10:8080": "192.168.1.10",
+	}
+	for bind, want := range cases {
+		if got := bindExposure(bind); !strings.Contains(got, want) {
+			t.Errorf("bindExposure(%q) = %q, want %q", bind, got, want)
+		}
+	}
+}

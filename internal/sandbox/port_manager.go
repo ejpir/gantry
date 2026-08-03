@@ -1,10 +1,8 @@
 package sandbox
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
@@ -17,9 +15,12 @@ import (
 // in sandbox.json (replayed at every boot as static forwards). Mutations
 // go live first, persist second, and roll the live side back if the write
 // fails — a crashed publish never leaves a phantom listener behind.
+//
+// Persistence goes through the broker-owned ConfigStore, so a port publish
+// can never clobber a concurrent (or earlier) share mutation: both managers
+// always mutate the latest configuration, under one lock.
 type PortManager struct {
-	dir   string
-	cfg   RunConfig
+	store *ConfigStore
 	stack *vnet.Stack // nil: ports unavailable (gvproxy backend or -net=false)
 
 	mu sync.Mutex
@@ -34,8 +35,8 @@ type PortEntry struct {
 
 // NewPortManager binds the manager to the sandbox's netstack; stack may be
 // nil (ports then report unavailable, listing still shows the saved set).
-func NewPortManager(dir string, cfg RunConfig, stack *vnet.Stack) *PortManager {
-	return &PortManager{dir: dir, cfg: cfg, stack: stack}
+func NewPortManager(store *ConfigStore, stack *vnet.Stack) *PortManager {
+	return &PortManager{store: store, stack: stack}
 }
 
 var errPortsUnavailable = fmt.Errorf("port publishing requires the embedded netstack and networking enabled")
@@ -66,7 +67,8 @@ func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 		return PortEntry{}, err
 	}
 	if persistent {
-		if err := m.persistLocked(append(append([]string(nil), m.cfg.Ports...), normalized)); err != nil {
+		ports := append(append([]string(nil), m.store.Snapshot().Ports...), normalized)
+		if err := m.persistLocked(ports); err != nil {
 			_ = m.stack.Unpublish(mapping.Proto, mapping.Local())
 			return PortEntry{}, err
 		}
@@ -106,8 +108,8 @@ func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error)
 		}
 	}
 	if persistent {
-		filtered := make([]string, 0, len(m.cfg.Ports))
-		for _, raw := range m.cfg.Ports {
+		filtered := make([]string, 0)
+		for _, raw := range m.store.Snapshot().Ports {
 			if saved, err := ParsePortSpec(raw); err != nil || saved.Key() != mapping.Key() {
 				filtered = append(filtered, raw)
 			}
@@ -140,7 +142,7 @@ func (m *PortManager) List() ([]PortEntry, error) {
 			bound[mapping.Key()] = PortEntry{Mapping: mapping, State: "bound"}
 		}
 	}
-	for _, raw := range m.cfg.Ports {
+	for _, raw := range m.store.Snapshot().Ports {
 		mapping, err := ParsePortSpec(raw)
 		if err != nil {
 			continue
@@ -158,18 +160,10 @@ func (m *PortManager) List() ([]PortEntry, error) {
 }
 
 func (m *PortManager) persistLocked(ports []string) error {
-	old := m.cfg.Ports
-	m.cfg.Ports = ports
-	b, err := json.MarshalIndent(m.cfg, "", "  ")
-	if err != nil {
-		m.cfg.Ports = old
-		return err
-	}
-	if err := writeFileAtomic(filepath.Join(m.dir, "sandbox.json"), b, 0o600); err != nil {
-		m.cfg.Ports = old
-		return err
-	}
-	return nil
+	return m.store.Mutate(func(cfg *RunConfig) error {
+		cfg.Ports = ports
+		return nil
+	})
 }
 
 // forwardMapping converts the netstack's wire shape back to a PortMapping
