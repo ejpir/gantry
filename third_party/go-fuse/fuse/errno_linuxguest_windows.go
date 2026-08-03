@@ -26,6 +26,12 @@ func hostErrnoToLinux(e syscall.Errno) Status {
 		return Status(uintptr(e) - linuxStatusErrnoBase)
 	}
 	switch e {
+	case 0:
+		// Success: the fs bridge returns bare syscall.Errno(0) from
+		// successful node ops and for negative-cache lookups. Without
+		// this case every successful mutation reported EIO to the guest
+		// (Linux maps identically; Darwin special-cases 0 the same way).
+		return OK
 	case windows.ERROR_FILE_NOT_FOUND, windows.ERROR_PATH_NOT_FOUND:
 		return ENOENT
 	case windows.ERROR_TOO_MANY_OPEN_FILES:
