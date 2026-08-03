@@ -83,6 +83,9 @@ func main() {
 	sysctl("kernel.unprivileged_bpf_disabled", "1")
 	sysctl("kernel.yama.ptrace_scope", "1")
 	sysctl("kernel.kexec_load_disabled", "1")
+	// Irreversible until reboot; silently skipped on our module-less
+	// kernels, so this covers module-capable fallback kernels.
+	sysctl("kernel.modules_disabled", "1")
 	sysctl("net.core.bpf_jit_harden", "2")
 
 	// make sure console device nodes exist even if the kernel's devtmpfs

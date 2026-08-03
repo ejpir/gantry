@@ -32,9 +32,12 @@ RANDOMIZE_KSTACK_OFFSET_DEFAULT  # per-syscall kernel stack randomization
 "
 
 # Attack surface we never want in a guest. KEXEC is already absent from the
-# nerdbox baseline; keep it out if a future baseline re-enables it.
+# nerdbox baseline; keep it out if a future baseline re-enables it. MODULES
+# let guest root load arbitrary unsigned kernel code and undo most other
+# hardening; every in-guest driver is built-in (=y), so modules buy nothing.
 GANTRY_HARDENING_DISABLES="
 KEXEC KEXEC_FILE           # no kexec from inside the guest
+MODULES                    # no loadable modules (unsigned module = full bypass)
 "
 
 # Best-effort: kept when toolchain/hardware support exists, warned about
