@@ -42,8 +42,9 @@ permissions:
 
 jobs:
   # Build the Linux guest pieces used by the native exec smoke tests. The
-  # host binaries are this repository's artifacts; the guest kernel/rootfs
-  # are the compatible nerdbox assets that Gantry boots.
+  # host binaries are this repository's artifacts; the guest rootfs is the
+  # compatible nerdbox asset (vminitd + crun). The kernel is Gantry's own
+  # hardened build from the kernels job below.
   guest-assets:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     name: guest-assets/${{ matrix.name }}
@@ -70,24 +71,10 @@ jobs:
       - name: fetch guest source
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: git clone --depth 1 --branch v0.2.1 https://github.com/containerd/nerdbox.git "$RUNNER_TEMP/nerdbox"
-      - name: build guest kernel
-        if: steps.guest-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p "$RUNNER_TEMP/guest/kernel" "$RUNNER_TEMP/guest/rootfs" "$RUNNER_TEMP/bundle"
-          docker buildx build --progress=plain \
-            --file "$RUNNER_TEMP/nerdbox/Dockerfile" \
-            --platform "linux/${{ matrix.docker_arch }}" \
-            --target kernel \
-            --build-arg KERNEL_ARCH=${{ matrix.kernel_arch }} \
-            --build-arg KERNEL_PAGE_SIZE=${{ matrix.page_size }} \
-            --build-arg KERNEL_NPROC=2 \
-            --output "type=local,dest=$RUNNER_TEMP/guest/kernel" \
-            "$RUNNER_TEMP/nerdbox"
-          cp "$RUNNER_TEMP/guest/kernel/nerdbox-kernel-${{ matrix.kernel_arch }}" \
-            "$RUNNER_TEMP/bundle/nerdbox-kernel"
       - name: build guest rootfs
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: |
+          mkdir -p "$RUNNER_TEMP/guest/rootfs" "$RUNNER_TEMP/bundle"
           docker buildx build --progress=plain \
             --file "$RUNNER_TEMP/nerdbox/Dockerfile" \
             --platform "linux/${{ matrix.docker_arch }}" \
@@ -108,6 +95,49 @@ jobs:
           path: ${{ runner.temp }}/bundle/
           if-no-files-found: error
           retention-days: 1
+
+  # Gantry's own hardened guest kernels (scripts/mkkernel.sh). These are
+  # what the CLI downloads from the release page on first start, and what
+  # the native smoke test boots. arm64 builds both the 16K default and the
+  # 4K runsc twin; x86_64 is 4K-only. The build tree cache makes pushes
+  # that don't touch kernel inputs incremental.
+  # Keep /tmp/linux-VERSION paths in sync with VERSION in scripts/mkkernel.sh.
+  kernels:
+    name: kernel/${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, os: ubuntu-24.04-arm }
+          - { arch: x86_64, os: ubuntu-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: install build deps
+        run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3
+      - name: cache kernel tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/linux-7.0.12.tar.xz
+            /tmp/linux-7.0.12-build-${{ matrix.arch }}
+          key: kernel-7.0.12-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
+      - name: build kernels
+        shell: bash
+        run: |
+          set -eu
+          export GANTRY_ARTIFACTS="$RUNNER_TEMP/kernels"
+          ./scripts/mkkernel.sh ${{ matrix.arch }}
+          if [ "${{ matrix.arch }}" = arm64 ]; then
+            PAGES=4k ./scripts/mkkernel.sh arm64
+          fi
+          ls -lh "$RUNNER_TEMP/kernels"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gantry-kernel-${{ matrix.arch }}
+          path: ${{ runner.temp }}/kernels/
+          if-no-files-found: error
 
   test:
     name: test/${{ matrix.name }}
@@ -146,7 +176,7 @@ jobs:
   native-smoke:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     name: native-smoke/${{ matrix.name }}
-    needs: [build, guest-assets]
+    needs: [build, guest-assets, kernels]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -164,6 +194,10 @@ jobs:
         with:
           name: guest-assets-${{ matrix.guest }}
           path: ${{ runner.temp }}/guest-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: gantry-kernel-x86_64
+          path: ${{ runner.temp }}/kernels
       - name: make binary executable
         run: chmod +x "${{ runner.temp }}/gantry-artifact/${{ matrix.binary }}"
       - name: Enable KVM group perms
@@ -197,7 +231,7 @@ jobs:
           }
           trap cleanup EXIT
           "$BIN" start ci \
-            -kernel "$ASSETS/nerdbox-kernel" \
+            -kernel "${{ runner.temp }}/kernels/gantry-kernel-x86_64" \
             -rootfs "$ASSETS/nerdbox-rootfs.erofs" \
             -image "$ASSETS/alpine.erofs" \
             -net=false -rw=false
@@ -261,7 +295,7 @@ jobs:
   release:
     name: release/${{ github.ref_name }}
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: build
+    needs: [build, kernels]
     runs-on: ubuntu-latest
     permissions:
       contents: write

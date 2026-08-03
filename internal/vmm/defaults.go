@@ -28,13 +28,23 @@ func AssetPath(name string) string {
 	return name
 }
 
-// defaultKernelImage/defaultRootfs pick the nerdbox assets matching the
-// host architecture (sbx ships nerdbox-{kernel,rootfs}-{arm64,x86_64}).
+// defaultKernelImage picks Gantry's own hardened kernel (built by
+// scripts/mkkernel.sh, or downloaded from the release page by
+// EnsureKernel) when staged, falling back to the stock nerdbox kernel
+// when that is what the user has. When neither exists the gantry-kernel
+// path is returned anyway: Resolve downloads it on demand.
 func DefaultKernelImage() string {
+	gantry, nerdbox := "gantry-kernel-arm64", "nerdbox-kernel-arm64"
 	if runtime.GOARCH == "amd64" {
-		return AssetPath("nerdbox-kernel-x86_64")
+		gantry, nerdbox = "gantry-kernel-x86_64", "nerdbox-kernel-x86_64"
 	}
-	return AssetPath("nerdbox-kernel-arm64")
+	if p := AssetPath(gantry); gutil.FileExists(p) {
+		return p
+	}
+	if p := AssetPath(nerdbox); gutil.FileExists(p) {
+		return p
+	}
+	return AssetPath(gantry)
 }
 
 func DefaultRootfs() string {
@@ -96,6 +106,26 @@ func bootLogLevel() string {
 	return " loglevel=4"
 }
 
+// guestHardeningParams hardens whatever kernel boots — stock nerdbox or
+// gantry's own — via boot parameters and early sysctl settings (supported
+// since Linux 5.8; unknown keys are dropped with a printk, so a kernel
+// lacking YAMA simply ignores that line). vminitd never overwrites these
+// sysctls. KEXEC is not covered here: both supported kernels compile it
+// out, so the sysctl would only print "parameter not found" (the dev
+// guest init sets it silently instead). GANTRY_NO_CMDLINE_HARDENING=1
+// drops the whole set — a bisect knob for guest boot problems.
+func guestHardeningParams() string {
+	if gutil.EnvOr("GANTRY_NO_CMDLINE_HARDENING") != "" {
+		return ""
+	}
+	return " init_on_alloc=1 init_on_free=1" +
+		" sysctl.kernel.kptr_restrict=2" +
+		" sysctl.kernel.dmesg_restrict=1" +
+		" sysctl.kernel.unprivileged_bpf_disabled=1" +
+		" sysctl.kernel.yama.ptrace_scope=1" +
+		" sysctl.net.core.bpf_jit_harden=2"
+}
+
 // defaultCmdline mirrors nerdbox's libkrun instance.go (PL011 on arm64,
 // 16550 on x86 replaces virtio-console). Arguments after "--" configure
 // vminitd.
@@ -111,7 +141,7 @@ func DefaultCmdline(arch, rootfsPath, initrdPath string, guestCID uint64, netEnd
 		// keep the full boot spew.
 		return console + " panic=-1 nokaslr"
 	case rootfsPath != "":
-		cmdline := fmt.Sprintf("%s%s root=/dev/vda rootfstype=erofs ro nokaslr init=/sbin/vminitd -- -vsock-rpc-port=1025 -vsock-stream-port=1026 -vsock-cid=%d", console, bootLogLevel(), guestCID)
+		cmdline := fmt.Sprintf("%s%s%s root=/dev/vda rootfstype=erofs ro nokaslr init=/sbin/vminitd -- -vsock-rpc-port=1025 -vsock-stream-port=1026 -vsock-cid=%d", console, bootLogLevel(), guestHardeningParams(), guestCID)
 		if netEndpoint != "" {
 			cmdline += fmt.Sprintf(" -network=mac=%s", net.HardwareAddr(netMAC[:]))
 			if netDHCP {
