@@ -33,7 +33,7 @@ func NewFS(tag, root string, ro ...bool) (*FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	exp := &ShareExport{Tag: tag, Path: backend.path, RO: roFlag, backend: backend}
+	exp := &ShareExport{Tag: tag, Path: backend.path, RO: roFlag, release: func() { _ = backend.Close() }}
 	exp.state.Store(int32(ShareExportActive))
 	exp.node = &winShareNode{export: exp, backend: backend}
 	debug := gutil.EnvOr("GANTRY_DEBUG_FS", "MINIVM_DEBUG_FS") != ""
