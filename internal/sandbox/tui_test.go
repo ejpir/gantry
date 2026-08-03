@@ -212,7 +212,7 @@ func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 	}}
 	view := m.View()
 	plain := ansi.Strip(view.Content)
-	for _, want := range []string{"GANTRY", "SANDBOXES", "TRAFFIC", "RULES", "MOUNTS", "dev", "RUNNING", "alpine:latest", "New Sandbox"} {
+	for _, want := range []string{"GANTRY", "SANDBOXES", "TRAFFIC", "RULES", "MOUNTS", "PORTS", "dev", "RUNNING", "alpine:latest", "New Sandbox"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, plain)
 		}
@@ -239,6 +239,7 @@ func TestSandboxTUIRenderSizes(t *testing.T) {
 		m.traffic = []tuiTrafficRow{{Sandbox: "dev", Host: "example.com", Address: "93.184.216.34", Protocol: "tcp", Port: 443, Allowed: true}}
 		m.rules = []tuiRuleRow{{Sandbox: "dev", Action: "allow", Target: "public internet", Proto: "any"}}
 		m.mounts = []tuiMountRow{{Sandbox: "dev", Tag: "code", Host: "/tmp/code", Guest: "/workspace"}}
+		m.ports = []tuiPortRow{{Sandbox: "dev", Bind: "127.0.0.1:8080", Guest: 80, Proto: "tcp", State: "bound"}}
 		for page := tuiSandboxesPage; page < tuiPageCount; page++ {
 			m.page = page
 			for _, dialog := range []tuiDialog{tuiNoDialog, tuiHelpDialog, tuiInfoDialog, tuiRemoveDialog, tuiCreateDialog} {

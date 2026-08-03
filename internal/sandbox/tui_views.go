@@ -18,6 +18,8 @@ func pageTitle(page tuiPage) string {
 		return "RULES"
 	case tuiMountsPage:
 		return "MOUNTS"
+	case tuiPortsPage:
+		return "PORTS"
 	default:
 		return "SANDBOXES"
 	}
@@ -31,6 +33,8 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 		return len(m.rules)
 	case tuiMountsPage:
 		return len(m.mounts)
+	case tuiPortsPage:
+		return len(m.ports)
 	default:
 		return len(m.sandboxes)
 	}
@@ -233,6 +237,86 @@ func (m sandboxTUIModel) renderRuleDetail(theme tuiTheme, width int) []string {
 		lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Sandbox + "  •  " + strings.ToUpper(row.Proto) + "  •  ports " + defaultText(row.Ports, "any")),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("source " + row.Source),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("policy " + defaultText(row.Policy, "built-in")),
+	}
+}
+
+func (m sandboxTUIModel) renderPortsView(theme tuiTheme, layout tuiDashboardLayout) string {
+	if m.loading {
+		return m.renderTableLoading(theme, layout, "Loading published ports…")
+	}
+	if len(m.ports) == 0 {
+		return m.renderTableEmpty(theme, layout, "No published ports", "Press p to publish a guest port on the host, or start with -p [IP:]HOST:GUEST[/udp].")
+	}
+	inner := maxInt(1, layout.width-4)
+	lines := []string{m.renderPortsHeader(theme, inner), m.renderTableSeparator(theme, inner)}
+	end := minInt(len(m.ports), m.portScroll+m.tableVisibleRows())
+	for index := m.portScroll; index < end; index++ {
+		line := m.renderPortRow(theme, m.ports[index], inner)
+		lines = append(lines, renderTableSelection(theme, line, inner, index == m.portCursor))
+	}
+	lines = m.appendTableDetail(lines, m.renderPortDetail(theme, inner), layout.contentHeight)
+	return renderTableSurface(theme, layout, lines)
+}
+
+func (m sandboxTUIModel) renderPortsHeader(theme tuiTheme, width int) string {
+	style := lipgloss.NewStyle().Bold(true).Foreground(theme.muted)
+	var line string
+	if width >= 72 {
+		bindWidth := maxInt(16, width-43)
+		line = tableCell("STATE", 8) + " " + tableCell("SANDBOX", 14) + " " + tableCell("HOST BIND", bindWidth) + " " +
+			tableCell("GUEST", 7) + " " + tableCell("PROTO", 5)
+	} else {
+		bindWidth := maxInt(12, width-27)
+		line = tableCell("", 2) + " " + tableCell("SANDBOX", 12) + " " + tableCell("BIND", bindWidth) + " " + tableCell("GUEST", 6)
+	}
+	return style.Render(truncateANSI(line, width))
+}
+
+func (m sandboxTUIModel) renderPortRow(theme tuiTheme, row tuiPortRow, width int) string {
+	icon, color := "\u21e2", theme.success
+	state := row.State
+	if state == "saved" {
+		icon, color = "\u00b7", theme.info
+	}
+	if row.Error != "" {
+		icon, color, state = "!", theme.error, "error"
+	}
+	stateText := lipgloss.NewStyle().Foreground(color).Render(strings.ToUpper(state))
+	bind := row.Bind
+	if row.Error != "" {
+		bind = row.Error
+	}
+	guest := fmt.Sprintf("%d", row.Guest)
+	if width >= 72 {
+		bindWidth := maxInt(16, width-43)
+		return tableCell(stateText, 8) + " " + tableCell(row.Sandbox, 14) + " " + tableCell(bind, bindWidth) + " " +
+			tableCell(guest, 7) + " " + tableCell(row.Proto, 5)
+	}
+	bindWidth := maxInt(12, width-27)
+	return tableCell(lipgloss.NewStyle().Foreground(color).Render(icon), 2) + " " + tableCell(row.Sandbox, 12) + " " +
+		tableCell(bind, bindWidth) + " " + tableCell(guest, 6)
+}
+
+func (m sandboxTUIModel) renderPortDetail(theme tuiTheme, width int) []string {
+	if m.portCursor < 0 || m.portCursor >= len(m.ports) || m.tableDetailHeight() == 0 {
+		return nil
+	}
+	row := m.ports[m.portCursor]
+	title := row.Sandbox + "  " + row.Bind + " \u2192 " + fmt.Sprintf("%d/%s", row.Guest, row.Proto)
+	state := row.State
+	if row.Error != "" {
+		state = "error: " + row.Error
+	}
+	exposure := "loopback only"
+	wide := strings.HasPrefix(row.Bind, "0.0.0.0:") || (strings.HasPrefix(row.Bind, "[") && !strings.HasPrefix(row.Bind, "[::1]"))
+	if wide {
+		exposure = "LAN-reachable \u2014 explicit wide bind"
+	}
+	return []string{
+		m.renderTableSeparator(theme, width),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(title) + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(state),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("exposure   ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(exposure),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("netpol     ") + lipgloss.NewStyle().Foreground(theme.secondary).Render("publishes are inbound holes: egress rules do not apply to forwarded connections"),
 	}
 }
 
