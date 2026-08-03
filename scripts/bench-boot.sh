@@ -6,7 +6,7 @@
 #   2. exec        `gantry exec <name> -- true` into the running VM
 #                  (the per-tool-call cost for agent integrations)
 #   3. one-shot    `gantry exec -image ... -- true` (resolve + boot +
-#                  container + graceful shutdown, the sbx-style flow)
+#                  container + graceful shutdown, the one-shot flow)
 #
 # Phase attribution: run one boot with GANTRY_BOOT_TIMING=1 and read
 # daemon.log; in-guest time is in console.log (kernel printk stamps).

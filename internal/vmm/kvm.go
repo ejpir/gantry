@@ -1,8 +1,8 @@
 //go:build linux
 
 // Package main implements a minimal virtual machine monitor (VMM) for
-// Linux/aarch64 using the raw KVM API — the same interface Docker's
-// libsailor.so (rust-vmm style) uses, just without any frameworks.
+// Linux/aarch64 using the raw KVM API — the same interface the
+// reference VMM (rust-vmm style) uses, just without any frameworks.
 package vmm
 
 import (

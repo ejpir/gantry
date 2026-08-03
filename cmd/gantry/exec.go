@@ -13,7 +13,7 @@ import (
 	"gantry/internal/vmm"
 )
 
-// cmdExec is the sbx-style single-command flow: boot a VM (with gvproxy
+// cmdExec is the single-command flow: boot a VM (with gvproxy
 // networking, like scripts/run-macos.sh container) and immediately start an
 // interactive container session — one terminal, one process:
 //

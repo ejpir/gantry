@@ -11,7 +11,7 @@ import (
 // This is a minimal Flattened Device Tree (DTB) writer. The VMM builds the
 // exact tree a Linux arm64 kernel needs to boot: memory, CPUs, PSCI, GICv3,
 // architected timer, and a PL011 UART for the serial console. It mirrors
-// what kvmtool / Firecracker / sailor generate, minus virtio devices.
+// what kvmtool / Firecracker generate, minus virtio devices.
 
 // Guest physical memory map (aligned with QEMU's "virt" machine conventions).
 const (

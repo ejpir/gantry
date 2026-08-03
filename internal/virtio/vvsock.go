@@ -14,7 +14,7 @@ import (
 //
 // vminitd in the nerdbox rootfs *dials back* to the host (CID 2) on ports
 // 1025/1026 to speak ttrpc. We forward each such connection to a host unix
-// socket at <forwardDir>/<port> — same role as sailor's uds_forward — so a
+// socket at <forwardDir>/<port> — same role as the reference uds_forward — so a
 // host-side ttrpc server can answer (or netcat for experiments).
 const (
 	VsockDeviceID = 19
@@ -128,7 +128,7 @@ func NewVsock(guestCID uint64, forwardDir string) *Vsock {
 // AddListen makes the device accept HOST-originated connections: a client
 // connecting to <forwardDir>/listen-<guestPort>.sock triggers a vsock
 // REQUEST from host CID 2 to the guest's listening port (e.g. vminitd's
-// streaming service on 1026). Mirrors sailor_config_add_vsock_port_listen.
+// streaming service on 1026). Mirrors the reference VMM's vsock listen-port registration.
 func (v *Vsock) AddListen(guestPort uint32) (string, error) {
 	path := filepath.Join(v.forwardDir, fmt.Sprintf("listen-%d.sock", guestPort))
 	os.Remove(path)

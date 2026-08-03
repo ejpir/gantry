@@ -150,7 +150,7 @@ func TestConfigJSONRWAndArgs(t *testing.T) {
 		}
 	}
 
-	// RW rootfs: erofs lower + ext4 upper + overlay, sbx rwlayer style.
+	// RW rootfs: erofs lower + ext4 upper + overlay.
 	mounts := RootfsMounts(true)
 	if len(mounts) != 3 {
 		t.Fatalf("rw rootfs mounts = %d, want 3", len(mounts))

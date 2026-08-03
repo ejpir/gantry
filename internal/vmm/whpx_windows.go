@@ -3,7 +3,7 @@
 package vmm
 
 // Windows Hypervisor Platform (WHPX) backend for x86-64 guests — the same
-// hypervisor API Docker's sailor.dll uses on Windows (WHvCreatePartition /
+// hypervisor API the reference Windows VMM uses (WHvCreatePartition /
 // WHvRunVirtualProcessor; verified in the release binary).
 //
 // Unlike KVM there is no in-kernel irqchip/PIT: the LAPIC is emulated by

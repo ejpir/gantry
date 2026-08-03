@@ -9,7 +9,7 @@ import (
 
 // virtio-blk (device ID 2), file-backed. The boot -rootfs is exposed
 // read-only (VIRTIO_BLK_F_RO); extra -disk images are writable and support
-// WRITE (T_OUT) and FLUSH, which is what the sbx-style ext4 rwlayer needs.
+// WRITE (T_OUT) and FLUSH, which is what the ext4 rwlayer needs.
 const (
 	BlkDeviceID = 2
 

@@ -4,7 +4,7 @@
 #   ./scripts/run-macos.sh            # our guest init + busybox shell (interactive)
 #   ./scripts/run-macos.sh rootfs     # the real nerdbox rootfs + vminitd
 #   ./scripts/run-macos.sh container  # two-terminal hostctl debug (external gvproxy)
-#   ./scripts/run-macos.sh exec ...   # sbx-style: build+sign, then `gantry exec`
+#   ./scripts/run-macos.sh exec ...   # one-shot: build+sign, then `gantry exec`
 #
 # Requirements: macOS 13+ (hv_gic_* APIs), Apple Silicon.
 # The binary needs the hypervisor entitlement; we ad-hoc codesign locally.
@@ -55,7 +55,7 @@ case "$1" in
     # attached as /dev/vdb. Start `hostctl shell` first.
     # IMAGE picks the container rootfs (default: busybox; a Debian EROFS
     # gives a full Debian userland). RWLAYER attaches an ext4 rwlayer as
-    # /dev/vdc for a writable, sbx-style overlay root (hostctl --rw).
+    # /dev/vdc for a writable overlay root (hostctl --rw).
     IMAGE="${IMAGE:-$ARTIFACTS/shell-rootfs.erofs}"
     mkdir -p /tmp/gantry-vsock
     if [ ! -S /tmp/gantry-vsock/1025.sock ]; then

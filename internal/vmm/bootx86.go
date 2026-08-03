@@ -218,7 +218,7 @@ func putE820(b []byte, addr, size uint64, typ uint32) {
 	binary.LittleEndian.PutUint32(b[16:], typ)
 }
 
-// loadKernelX86 loads a vmlinux ELF64 (what sbx ships as
+// loadKernelX86 loads a vmlinux ELF64 (what the reference stack ships as
 // nerdbox-kernel-x86_64) into guest RAM at each PT_LOAD's physical address
 // and returns the ELF entry point.
 func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {

@@ -1,6 +1,6 @@
 #!/bin/sh
 # mkrwlayer.sh — create an ext4 writable layer for a sandbox (the
-# sbx rwlayer.img equivalent): a sparse ext4 image with the /upper and
+# reference rwlayer.img equivalent): a sparse ext4 image with the /upper and
 # /work directories overlayfs needs.
 #
 #   ./scripts/mkrwlayer.sh artifacts/rwlayer-dev.ext4 [SIZE_MB]

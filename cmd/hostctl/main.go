@@ -1,6 +1,6 @@
 // hostctl — ttrpc client for the nerdbox guest agent (vminitd) running
 // inside a gantry VM. This is the two-terminal/debug tool; for the
-// single-command sbx-style flow use `gantry exec` instead.
+// single-command flow use `gantry exec` instead.
 //
 // Usage:
 //
@@ -11,7 +11,7 @@
 //
 //	--share   bind every virtio-fs share the VMM exported (shares.json)
 //	--rw      writable root: overlayfs = /dev/vdb (erofs, ro lower) +
-//	          /dev/vdc (ext4 rwlayer with /upper and /work), sbx-style
+//	          /dev/vdc (ext4 rwlayer with /upper and /work)
 //	-- CMD    container command (default /bin/sh; try /bin/bash on debian)
 //
 // Start the VM first:  ./scripts/run-macos.sh container
