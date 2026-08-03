@@ -33,12 +33,7 @@ import (
 // upstream go-fuse must re-apply all of them;
 // TestVirtioFSShareEscape/TestVirtioFSSymlinkEscapeBlocked fail without the
 // first two. `,ro` is enforced here too (roFuseHandler).
-const (
-	virtioFSDeviceID = 26
-	virtioFSHiprioQ  = 0
-	virtioFSRequestQ = 1
-	// FSTagLen lives in share.go (needed on all platforms)
-)
+// The virtio-fs device/queue constants live in vsharehub_common.go.
 
 type fuseRequestHandler interface {
 	HandleRequest(in, out [][]byte) (int, fuse.Status)
@@ -345,8 +340,6 @@ func (v *FS) writeProtocolError(in, out [][]byte, status fuse.Status) int {
 // READDIRPLUS/read reply buffers from guests with 16K/64K pages. A
 // guest declaring more is fishing for a guest-RAM-sized host allocation
 // (review finding 2).
-const fsMaxChainBytes = 256 << 10
-
 func (v *FS) maxChainBytes(qn int) uint64 { return fsMaxChainBytes }
 
 func (v *FS) setCore(c *Core) { v.core = c }
