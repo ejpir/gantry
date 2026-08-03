@@ -13,7 +13,7 @@ import (
 // depends on first.
 func TestEmbeddedStackARP(t *testing.T) {
 	guestMAC := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
-	stack, err := Start(guestMAC)
+	stack, err := Start(guestMAC, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

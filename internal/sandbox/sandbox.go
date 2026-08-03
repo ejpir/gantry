@@ -364,6 +364,7 @@ func CmdDaemon(name string) int {
 	for _, warning := range shareWarnings {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
 	}
+	portManager := NewPortManager(dir, cfg, nw.Stack)
 
 	var hostShares []vmm.Share
 	if shareManager.Hub() == nil {
@@ -451,6 +452,7 @@ func CmdDaemon(name string) int {
 		streamSock: filepath.Join(dir, "listen-1026.sock"),
 		secrets:    secrets,
 		shares:     shareManager,
+		ports:      portManager,
 		sessions:   map[string]chan struct{}{},
 	}
 	go br.serve(ln)
@@ -490,6 +492,7 @@ type broker struct {
 	rpc        *ttrpc.Client
 	streamSock string
 	shares     *ShareManager
+	ports      *PortManager
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 
 	mu       sync.Mutex
@@ -538,13 +541,14 @@ func readSecretsHandshake(r *os.File) map[string]secret.Value {
 }
 
 type brokerRequest struct {
-	Op       string              `json:"op"` // "session" | "kill" | "share.*"
+	Op       string              `json:"op"` // "session" | "kill" | "share.*" | "port.*"
 	ID       string              `json:"id"`
 	Args     []string            `json:"args,omitempty"`
 	Cols     uint32              `json:"cols,omitempty"`
 	Rows     uint32              `json:"rows,omitempty"`
 	Terminal bool                `json:"terminal,omitempty"`
 	Share    *brokerShareRequest `json:"share,omitempty"`
+	Port     *brokerPortRequest  `json:"port,omitempty"`
 }
 
 type brokerShareRequest struct {
@@ -561,6 +565,18 @@ type brokerShareResponse struct {
 	Generation uint64         `json:"generation,omitempty"`
 	Entry      *shares.Entry  `json:"entry,omitempty"`
 	Shares     []shares.Entry `json:"shares,omitempty"`
+}
+
+type brokerPortRequest struct {
+	Spec       string `json:"spec"`
+	Persistent bool   `json:"persistent"`
+}
+
+type brokerPortResponse struct {
+	OK    bool        `json:"ok"`
+	Error string      `json:"error,omitempty"`
+	Entry *PortEntry  `json:"entry,omitempty"`
+	Ports []PortEntry `json:"ports,omitempty"`
 }
 
 func (br *broker) serve(ln net.Listener) {
@@ -600,6 +616,8 @@ func (br *broker) handle(c net.Conn) {
 		fmt.Fprintln(c, `{"ok":true}`)
 	case "share.add", "share.remove", "share.list":
 		br.shareControl(c, req)
+	case "port.publish", "port.unpublish", "port.list":
+		br.portControl(c, req)
 	case "session":
 		br.session(c, req)
 	default:
@@ -635,6 +653,41 @@ func (br *broker) shareControl(c net.Conn, req brokerRequest) {
 		return
 	}
 	respond(brokerShareResponse{OK: true, Generation: br.shares.Generation(), Entry: &entry})
+}
+
+func (br *broker) portControl(c net.Conn, req brokerRequest) {
+	respond := func(resp brokerPortResponse) {
+		_ = json.NewEncoder(c).Encode(&resp)
+	}
+	if br.ports == nil {
+		respond(brokerPortResponse{Error: "port manager unavailable"})
+		return
+	}
+	spec := brokerPortRequest{Persistent: true}
+	if req.Port != nil {
+		spec = *req.Port
+	}
+	var entry PortEntry
+	var err error
+	switch req.Op {
+	case "port.publish":
+		entry, err = br.ports.Publish(spec.Spec, spec.Persistent)
+	case "port.unpublish":
+		entry, err = br.ports.Unpublish(spec.Spec, spec.Persistent)
+	case "port.list":
+		ports, lerr := br.ports.List()
+		if lerr != nil {
+			respond(brokerPortResponse{Error: lerr.Error()})
+			return
+		}
+		respond(brokerPortResponse{OK: true, Ports: ports})
+		return
+	}
+	if err != nil {
+		respond(brokerPortResponse{Error: err.Error()})
+		return
+	}
+	respond(brokerPortResponse{OK: true, Entry: &entry})
 }
 
 func (br *broker) session(c net.Conn, req brokerRequest) {

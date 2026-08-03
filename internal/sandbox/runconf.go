@@ -43,6 +43,7 @@ type RunConfig struct {
 	RWLayer     string        `json:"rwlayer,omitempty"`
 	RW          bool          `json:"rw"`
 	Shares      []string      `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
+	Ports       []string      `json:"ports,omitempty"`  // canonical IP:HOST:GUEST[/PROTO] publish specs
 	Net         bool          `json:"net"`
 	GVProxy     string        `json:"gvproxy,omitempty"`
 	NetPol      string        `json:"net_policy,omitempty"`
@@ -67,6 +68,7 @@ type RunFlags struct {
 	Kernel, Rootfs, Runtime, Image, RWLayer *string
 	RW                                      *bool
 	Shares                                  *gutil.StrList
+	Publish                                 *gutil.StrList
 	Net                                     *bool
 	GVProxy, NetPol                         *string
 	AllowLN                                 *bool
@@ -92,6 +94,7 @@ or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
 		MemMB:       fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:       fs.Int("cpus", 1, "guest vCPU count (max 8)"),
 		Shares:      &gutil.StrList{},
+		Publish:     &gutil.StrList{},
 		Secrets:     &gutil.StrList{},
 		SecretFiles: &gutil.StrList{},
 	}
@@ -102,6 +105,8 @@ or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
 		return "crun"
 	}(), "container runtime in the guest: crun | runsc (gVisor)")
 	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
+	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
+	fs.Var(f.Publish, "publish", "alias for -p")
 	fs.Var(f.Secrets, "secret", `inject a secret into every session: NAME (from gantry's
 environment) or NAME=@/path; repeatable. NAME=literal is refused`)
 	fs.Var(f.SecretFiles, "secret-file", "dotenv-style file of NAME=VALUE secrets (repeatable)")
@@ -235,8 +240,30 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	if !cfg.RW && len(cfg.Shares) > 0 {
 		return cfg, nil, fmt.Errorf("shares require a writable container root (remove -rw=false)")
 	}
+	cfg.Ports = *f.Publish
 	cfg.Net = *f.Net
 	cfg.GVProxy = *f.GVProxy
+	if len(cfg.Ports) > 0 {
+		if !cfg.Net {
+			return cfg, nil, fmt.Errorf("port publishing requires networking (remove -net=false)")
+		}
+		if cfg.GVProxy != "" {
+			return cfg, nil, fmt.Errorf("port publishing requires the embedded netstack (remove -gvproxy)")
+		}
+		seenPorts := map[string]bool{}
+		for i, spec := range cfg.Ports {
+			normalized, err := NormalizePortSpec(spec)
+			if err != nil {
+				return cfg, nil, fmt.Errorf("invalid -p %q: %v", spec, err)
+			}
+			m, _ := ParsePortSpec(normalized)
+			if seenPorts[m.Key()] {
+				return cfg, nil, fmt.Errorf("duplicate -p %q", spec)
+			}
+			seenPorts[m.Key()] = true
+			cfg.Ports[i] = normalized
+		}
+	}
 	if cfg.GVProxy != "" && !strings.ContainsRune(cfg.GVProxy, os.PathSeparator) && gutil.FileExists(cfg.GVProxy) {
 		cfg.GVProxy = absPath(cfg.GVProxy)
 	}
@@ -326,6 +353,7 @@ func (c RunConfig) ParsedShares() ([]vmm.Share, error) {
 type Network struct {
 	Sock        string // external gvproxy endpoint ("" when embedded)
 	Conn        net.Conn
+	Stack       *vnet.Stack // nil for the gvproxy backend
 	Policy      *netpol.Policy
 	Traffic     *netpol.TrafficRecorder
 	close       func()
@@ -406,7 +434,7 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 		n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 		return n, nil
 	}
-	stack, err := vnet.Start(guestNetMAC)
+	stack, err := vnet.Start(guestNetMAC, portForwards(c.Ports))
 	if err != nil {
 		return nil, err
 	}
@@ -416,9 +444,31 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 		return nil, err
 	}
 	n.Conn = conn
+	n.Stack = stack
 	n.close = func() { conn.Close(); stack.Close() }
 	n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 	return n, nil
+}
+
+// portForwards translates canonical publish specs into the netstack's
+// static forward map ("udp:" key prefix for UDP, per gvisor-tap-vsock).
+func portForwards(specs []string) map[string]string {
+	if len(specs) == 0 {
+		return nil
+	}
+	forwards := make(map[string]string, len(specs))
+	for _, spec := range specs {
+		m, err := ParsePortSpec(spec)
+		if err != nil {
+			continue // Resolve validated every spec
+		}
+		local := m.Local()
+		if m.Proto == "udp" {
+			local = "udp:" + local
+		}
+		forwards[local] = m.Remote()
+	}
+	return forwards
 }
 
 // imageIdentity is the stable identity used for rwlayer pairing: the
