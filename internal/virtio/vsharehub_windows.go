@@ -771,6 +771,11 @@ func (f *winShareFile) Flush(ctx context.Context) syscall.Errno {
 	if errno := f.available(); errno != 0 {
 		return errno
 	}
+	if !f.wf.writable {
+		// FlushFileBuffers requires write access; a flush after reads on a
+		// read-only handle is a no-op, not an access-denied error.
+		return 0
+	}
 	return ntStatusErrno(windows.FlushFileBuffers(windows.Handle(f.wf.file.Fd())))
 }
 
@@ -779,6 +784,10 @@ var _ fs.FileFsyncer = (*winShareFile)(nil)
 func (f *winShareFile) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	if errno := f.available(); errno != 0 {
 		return errno
+	}
+	if !f.wf.writable {
+		// same FlushFileBuffers access requirement as Flush
+		return 0
 	}
 	return ntStatusErrno(windows.FlushFileBuffers(windows.Handle(f.wf.file.Fd())))
 }
