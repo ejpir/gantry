@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"crypto/sha256"
 	"flag"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -170,6 +172,14 @@ func guestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := path.Base(r.URL.Path)
+		if strings.HasSuffix(base, ".sha256") {
+			asset := strings.TrimSuffix(base, ".sha256")
+			if strings.HasPrefix(asset, "gantry-kernel-") || strings.HasPrefix(asset, "nerdbox-rootfs-") {
+				sum := sha256.Sum256([]byte("downloaded-" + asset))
+				fmt.Fprintf(w, "%x  %s\n", sum, asset)
+				return
+			}
+		}
 		if strings.HasPrefix(base, "gantry-kernel-") || strings.HasPrefix(base, "nerdbox-rootfs-") {
 			_, _ = w.Write([]byte("downloaded-" + base))
 			return
@@ -206,7 +216,16 @@ func TestResolveExplicitRootfsMissing(t *testing.T) {
 func kernelServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(path.Base(r.URL.Path), "gantry-kernel-") {
+		base := path.Base(r.URL.Path)
+		if strings.HasSuffix(base, ".sha256") {
+			asset := strings.TrimSuffix(base, ".sha256")
+			if strings.HasPrefix(asset, "gantry-kernel-") {
+				sum := sha256.Sum256([]byte("downloaded-kernel"))
+				fmt.Fprintf(w, "%x  %s\n", sum, asset)
+				return
+			}
+		}
+		if strings.HasPrefix(base, "gantry-kernel-") {
 			_, _ = w.Write([]byte("downloaded-kernel"))
 			return
 		}

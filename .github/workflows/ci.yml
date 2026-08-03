@@ -280,7 +280,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dist"
-          go build -trimpath -o "$RUNNER_TEMP/dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/gantry
+          go build -trimpath -ldflags "-X gantry/internal/vmm.Version=${{ github.ref_name }}" \
+            -o "$RUNNER_TEMP/dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/gantry
           go build -trimpath -o "$RUNNER_TEMP/dist/hostctl-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/hostctl
         env:
           GOOS: ${{ matrix.goos }}
@@ -314,6 +315,10 @@ jobs:
             "${{ runner.temp }}/release/nerdbox-rootfs-arm64.erofs"
           cp "${{ runner.temp }}/guest/guest-assets-amd64/nerdbox-rootfs.erofs" \
             "${{ runner.temp }}/release/nerdbox-rootfs-x86_64.erofs"
+      - name: checksum sidecars
+        run: |
+          cd "${{ runner.temp }}/release"
+          for f in *; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done
       - name: publish release binaries
         env:
           GH_TOKEN: ${{ github.token }}
