@@ -102,7 +102,7 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 	if _, _, err := resolveSandbox(t, "-runtime", "bogus"); err == nil || !strings.Contains(err.Error(), "crun or runsc") {
 		t.Errorf("bogus runtime: want switch error, got %v", err)
 	}
-// runsc without the gvisor rootfs: actionable error
+	// runsc without the gvisor rootfs: actionable error
 	if _, _, err := resolveSandbox(t, "-runtime", "runsc"); err == nil || !strings.Contains(err.Error(), "mkrootfs-gvisor.sh") {
 		t.Errorf("runsc without rootfs: want mkrootfs-gvisor hint, got %v", err)
 	}
