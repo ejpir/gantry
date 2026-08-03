@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gantry/internal/shares"
 )
 
 func TestParseShareSpec(t *testing.T) {
@@ -112,5 +114,20 @@ func TestParseShareSpecCtrPath(t *testing.T) {
 	}
 	if m.Shares[0].CtrPath != "/host/ws" {
 		t.Fatalf("default CtrPath = %q", m.Shares[0].CtrPath)
+	}
+}
+
+// Reserved directory entries must never become synthetic FUSE children.
+func TestParseShareSpecRejectsReservedTags(t *testing.T) {
+	for _, tag := range []string{".", ".."} {
+		if _, err := ParseShareSpec(tag+"=/tmp", map[string]bool{}); err == nil {
+			t.Errorf("tag %q accepted", tag)
+		}
+		if err := shares.ValidateShareTag(tag); err == nil {
+			t.Errorf("ValidateShareTag(%q) accepted", tag)
+		}
+	}
+	if _, err := ParseShareSpec("ok.tag=/tmp", map[string]bool{}); err != nil {
+		t.Errorf("dotted tag rejected: %v", err)
 	}
 }

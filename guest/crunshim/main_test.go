@@ -107,9 +107,16 @@ func TestSweepFilestores(t *testing.T) {
 		args = []string{"crun", "--root", filepath.Join(dir, "runroot"), "create", "--bundle", bundle, "sb"}
 		return bundle, args, filestore
 	}
-	stubRuntime := func(t *testing.T, stateRC int) {
+	// stubRuntime fakes runsc's `list --quiet`: "present" prints the
+	// container id, "absent" prints nothing successfully, "error" fails.
+	stubRuntime := func(t *testing.T, mode string) {
 		stub := filepath.Join(t.TempDir(), "runsc")
-		script := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = state ] && exit %d; done\nexit 1\n", stateRC)
+		behavior := map[string]string{
+			"present": "echo sb; exit 0",
+			"absent":  "exit 0",
+			"error":   "exit 1",
+		}[mode]
+		script := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = list ] && { %s; }; done\nexit 1\n", behavior)
 		if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +125,7 @@ func TestSweepFilestores(t *testing.T) {
 
 	t.Run("live state keeps filestore", func(t *testing.T) {
 		_, args, filestore := setup(t)
-		stubRuntime(t, 0)
+		stubRuntime(t, "present")
 		sweepFilestores(args)
 		if _, err := os.Stat(filestore); err != nil {
 			t.Error("duplicate create against a live container must not delete its filestore")
@@ -127,16 +134,25 @@ func TestSweepFilestores(t *testing.T) {
 
 	t.Run("no state sweeps stale filestore", func(t *testing.T) {
 		_, args, filestore := setup(t)
-		stubRuntime(t, 1)
+		stubRuntime(t, "absent")
 		sweepFilestores(args)
 		if _, err := os.Stat(filestore); !os.IsNotExist(err) {
 			t.Errorf("stale filestore not swept: %v", err)
 		}
 	})
 
+	t.Run("probe error keeps filestore", func(t *testing.T) {
+		_, args, filestore := setup(t)
+		stubRuntime(t, "error")
+		sweepFilestores(args)
+		if _, err := os.Stat(filestore); err != nil {
+			t.Error("a failed state probe must fail closed, not delete a potentially live filestore")
+		}
+	})
+
 	t.Run("undetermined id skips sweep", func(t *testing.T) {
 		_, args, filestore := setup(t)
-		stubRuntime(t, 1)
+		stubRuntime(t, "absent")
 		args[len(args)-1] = "--no-pivot" // no container id to probe
 		sweepFilestores(args)
 		if _, err := os.Stat(filestore); err != nil {

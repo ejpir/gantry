@@ -3,15 +3,12 @@ package vmm
 import (
 	"encoding/json"
 	"fmt"
-	"gantry/internal/shares"
-	"gantry/internal/virtio"
 	"os"
 	"path/filepath"
 	"strings"
-)
 
-// virtioFSTagLen is the virtio-fs tag length limit from the spec.
-const virtioFSTagLen = virtio.FSTagLen
+	"gantry/internal/shares"
+)
 
 // ErrGuestReset signals a guest-initiated reboot via the reset ports.
 var ErrGuestReset = fmt.Errorf("guest requested reset via port 0xcf9/0x64")
@@ -75,8 +72,8 @@ func ParseShareSpec(spec string, seen map[string]bool) (Share, error) {
 		}
 	}
 	switch {
-	case !validShareTag(tag):
-		return Share{}, fmt.Errorf("invalid tag %q (letters, digits, ._-; max %d bytes)", tag, virtioFSTagLen)
+	case shares.ValidateShareTag(tag) != nil:
+		return Share{}, shares.ValidateShareTag(tag)
 	case path == "":
 		return Share{}, fmt.Errorf("empty path")
 	case seen[tag]:
@@ -115,18 +112,4 @@ func WriteShareManifest(path string, shares []Share) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o644)
-}
-
-func validShareTag(tag string) bool {
-	if tag == "" || len([]byte(tag)) > virtioFSTagLen {
-		return false
-	}
-	for _, r := range tag {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
-			continue
-		}
-		return false
-	}
-	return true
 }

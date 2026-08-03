@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"gantry/internal/gutil"
+	"gantry/internal/shares"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -185,27 +186,13 @@ func NewShareHub() (*ShareHub, error) {
 	return h, nil
 }
 
-func validHubShareTag(tag string) bool {
-	if tag == "" || len([]byte(tag)) > FSTagLen {
-		return false
-	}
-	for _, r := range tag {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 // Prepare validates and pins a host directory without publishing it. The
 // export is aborted by ClosePrepared when the control-plane transaction
 // fails. The platform half (newExportNode) pins the root and builds the
 // node wrapper; everything about the lifecycle is platform-neutral.
 func (h *ShareHub) Prepare(tag, path string, ro bool) (*PreparedShare, string, error) {
-	if !validHubShareTag(tag) {
-		return nil, "", fmt.Errorf("invalid share tag %q", tag)
+	if err := shares.ValidateShareTag(tag); err != nil {
+		return nil, "", err
 	}
 	exp := &ShareExport{Tag: tag, RO: ro}
 	exp.state.Store(int32(ShareExportActive))

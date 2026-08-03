@@ -83,7 +83,7 @@ func sweepFilestores(args []string) {
 	if last := args[len(args)-1]; !strings.HasPrefix(last, "-") {
 		id = last
 	}
-	if id == "" || runtimeStateExists(args[1:createIdx], id) {
+	if id == "" || probeRuntimeState(args[1:createIdx], id) != runtimeStateAbsent {
 		return
 	}
 	stale, _ := filepath.Glob(filepath.Join(bundle, "rootfs", ".gvisor.filestore.*"))
@@ -94,14 +94,40 @@ func sweepFilestores(args []string) {
 	}
 }
 
-// runtimeStateExists reports whether the runtime tracks any state for id
-// (live or stopped); runsc exits non-zero for unknown containers. The
-// runtime's global flags (everything before the create subcommand, e.g.
-// --root) are replayed so state probes the same state directory create
-// would use.
-func runtimeStateExists(globalFlags []string, id string) bool {
-	stateArgs := append(append([]string{}, globalFlags...), "state", id)
-	return exec.Command(realRuntime, stateArgs...).Run() == nil
+// runtimeState is the tri-state answer to "does the runtime track id?".
+// Sweeping is only ever allowed on a definitive Absent.
+type runtimeState int
+
+const (
+	runtimeStateAbsent runtimeState = iota
+	runtimeStatePresent
+	runtimeStateUnknown
+)
+
+// probeRuntimeState decides whether the runtime tracks any state for id
+// (live or stopped). It prefers `runsc list`: a successful listing means
+// the runtime answered, so an absent id is definitive. Any probe error —
+// runtime failure, corrupt state, permissions, transient I/O — yields
+// Unknown, and the caller fails closed (keeps the filestore): deleting a
+// live container's filestore is data loss, keeping a stale one merely
+// blocks the next create with runsc's own error.
+//
+// The runtime's global flags (everything before the create subcommand,
+// e.g. --root) are replayed so the probe reads the same state directory
+// create would use.
+func probeRuntimeState(globalFlags []string, id string) runtimeState {
+	listArgs := append(append([]string{}, globalFlags...), "list", "--quiet")
+	out, err := exec.Command(realRuntime, listArgs...).Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "crunshim: runsc list failed, keeping filestore: %v\n", err)
+		return runtimeStateUnknown
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == id {
+			return runtimeStatePresent
+		}
+	}
+	return runtimeStateAbsent
 }
 
 // insertFlags adjusts runsc's global flags (before the subcommand).
