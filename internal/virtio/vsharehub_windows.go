@@ -36,9 +36,10 @@ const (
 )
 
 // newExportNode pins sharePath beneath a root handle and builds the
-// passthrough node presented as /<tag>. The returned release func drops
-// the backend when the export finishes.
-func (h *ShareHub) newExportNode(exp *ShareExport, sharePath string, salt uint64) (fs.InodeEmbedder, string, func(), error) {
+// passthrough node presented as the export root. The returned release func
+// drops the backend when the export finishes. Hub-agnostic, mirroring the
+// Unix backend, so a future one-shot path reuses the same confinement.
+func newExportNode(exp *ShareExport, sharePath string, salt uint64) (fs.InodeEmbedder, string, func(), error) {
 	backend, err := newWinExportFS(sharePath, salt)
 	if err != nil {
 		return nil, "", nil, err
