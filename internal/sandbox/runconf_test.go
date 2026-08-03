@@ -134,6 +134,69 @@ func resolveSandboxNoKernel(t *testing.T, srv string, args ...string) (RunConfig
 	return cfg, err
 }
 
+// resolveSandboxNoRootfs stages everything but the rootfs assets and points
+// the release download at srv, so Resolve exercises the rootfs fetch.
+func resolveSandboxNoRootfs(t *testing.T, srv string, args ...string) (RunConfig, error) {
+	t.Helper()
+	t.Setenv("GANTRY_RELEASE_BASE", srv)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	assets := []string{
+		"gantry-kernel-arm64", "gantry-kernel-x86_64",
+		"debian-bookworm.erofs",
+	}
+	for _, f := range assets {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	rf := RegisterRunFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := rf.Resolve(fs, nil)
+	return cfg, err
+}
+
+// guestServer serves both kernel and rootfs release assets.
+func guestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := path.Base(r.URL.Path)
+		if strings.HasPrefix(base, "gantry-kernel-") || strings.HasPrefix(base, "nerdbox-rootfs-") {
+			_, _ = w.Write([]byte("downloaded-" + base))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveDownloadsRootfs(t *testing.T) {
+	cfg, err := resolveSandboxNoRootfs(t, guestServer(t).URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "nerdbox-rootfs-arm64.erofs"
+	if runtime.GOARCH == "amd64" {
+		want = "nerdbox-rootfs-x86_64.erofs"
+	}
+	if filepath.Base(cfg.Rootfs) != want {
+		t.Errorf("rootfs = %s, want .../%s", cfg.Rootfs, want)
+	}
+	if b, _ := os.ReadFile(cfg.Rootfs); string(b) != "downloaded-"+want {
+		t.Errorf("rootfs content = %q, want the downloaded payload", b)
+	}
+}
+
+func TestResolveExplicitRootfsMissing(t *testing.T) {
+	if _, err := resolveSandboxNoRootfs(t, guestServer(t).URL, "-rootfs", "/nope/custom.erofs"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("explicit missing -rootfs: want not-found error, got %v", err)
+	}
+}
+
 func kernelServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
