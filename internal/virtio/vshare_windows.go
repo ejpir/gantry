@@ -550,7 +550,7 @@ func (b *winExportFS) open(rel string, flags uint32) (*winOpenFile, winFileInfo,
 		_ = windows.CloseHandle(h)
 		return nil, info, linuxErrno(fuse.EIO)
 	}
-	wf := &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0}
+	wf := &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0, writable: flags&linuxOAccmode != 0}
 	if flags&linuxOTrunc != 0 {
 		if err := f.Truncate(0); err != nil {
 			_ = f.Close()
@@ -615,7 +615,7 @@ func (b *winExportFS) create(parentRel, name string, flags, mode uint32) (*winOp
 	if createInfo == winFileCreated && mode&0o222 == 0 {
 		_ = b.setReadOnly(h, true)
 	}
-	return &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0}, info, 0
+	return &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0, writable: true}, info, 0
 }
 
 func (b *winExportFS) mkdir(parentRel, name string) (winFileInfo, syscall.Errno) {
@@ -727,16 +727,27 @@ func (b *winExportFS) rename(oldParentRel, oldName, newParentRel, newName string
 		&buf[0], uint32(len(buf)), windows.FileRenameInformation))
 }
 
+// winBasicInfo mirrors FILE_BASIC_INFO for NtQuery/NtSetInformationFile.
+type winBasicInfo struct {
+	creationTime   int64
+	lastAccessTime int64
+	lastWriteTime  int64
+	changeTime     int64
+	attrs          uint32
+	_              uint32 // alignment padding
+}
+
+// setReadOnly flips FILE_ATTRIBUTE_READONLY through the handle itself.
+// The previous path-based SetFileAttributes could be retargeted at a
+// replacement if the host renamed the file between operations.
 func (b *winExportFS) setReadOnly(h windows.Handle, ro bool) syscall.Errno {
-	info, errno := b.infoForHandle(h)
-	if errno != 0 {
-		return errno
-	}
-	p, err := winPathForHandle(h)
-	if err != nil {
+	var bi winBasicInfo
+	var iosb windows.IO_STATUS_BLOCK
+	if err := windows.NtQueryInformationFile(h, &iosb,
+		(*byte)(unsafe.Pointer(&bi)), uint32(unsafe.Sizeof(bi)), windows.FileBasicInformation); err != nil {
 		return ntStatusErrno(err)
 	}
-	attrs := info.attrs & (windows.FILE_ATTRIBUTE_READONLY |
+	attrs := bi.attrs & (windows.FILE_ATTRIBUTE_READONLY |
 		windows.FILE_ATTRIBUTE_HIDDEN | windows.FILE_ATTRIBUTE_SYSTEM |
 		windows.FILE_ATTRIBUTE_ARCHIVE | windows.FILE_ATTRIBUTE_TEMPORARY)
 	if attrs == 0 {
@@ -747,7 +758,10 @@ func (b *winExportFS) setReadOnly(h windows.Handle, ro bool) syscall.Errno {
 	} else {
 		attrs &^= windows.FILE_ATTRIBUTE_READONLY
 	}
-	return ntStatusErrno(windows.SetFileAttributes(windows.StringToUTF16Ptr(winExtendedPath(p)), attrs))
+	bi.attrs = attrs
+	// the queried times are written back unchanged
+	return ntStatusErrno(windows.NtSetInformationFile(h, &iosb,
+		(*byte)(unsafe.Pointer(&bi)), uint32(unsafe.Sizeof(bi)), windows.FileBasicInformation))
 }
 
 func (b *winExportFS) setattr(rel string, file *winOpenFile, in *fuse.SetAttrIn) (fuse.Attr, syscall.Errno) {
@@ -805,61 +819,92 @@ func (b *winExportFS) setattr(rel string, file *winOpenFile, in *fuse.SetAttrIn)
 	return info.attr, errno
 }
 
+// procNtQueryDirectoryFile enumerates a directory through its handle;
+// x/sys/windows wraps neither it nor a handle-based directory query.
+var procNtQueryDirectoryFile = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueryDirectoryFile")
+
+const (
+	// FILE_INFORMATION_CLASS value (distinct from the similarly named
+	// FILE_INFO_BY_HANDLE_CLASS enum in x/sys/windows).
+	ntFileIdBothDirectoryInformation = 37
+	ntStatusNoMoreFiles              = 0x80000006
+	ntStatusBufferOverflow           = 0x80000005
+
+	// FILE_ID_BOTH_DIR_INFORMATION field offsets.
+	winDirEntryAttrs   = 56
+	winDirEntryNameLen = 60
+	winDirEntryName    = 104
+)
+
+// readdir enumerates rel through the opened directory handle, so a
+// concurrent host rename/replacement of the directory cannot retarget
+// the listing at a reconstructed path. Per-entry metadata still comes
+// from handle-relative child opens (ntOpen against the directory handle).
 func (b *winExportFS) readdir(rel string) ([]fuse.DirEntry, syscall.Errno) {
 	dir, info, errno := b.resolveDir(rel)
 	if errno != 0 {
 		return nil, errno
 	}
 	defer windows.CloseHandle(dir)
-	dirPath, err := winPathForHandle(dir)
-	if err != nil {
-		return nil, ntStatusErrno(err)
-	}
 	entries := []fuse.DirEntry{
 		{Name: ".", Mode: fuse.S_IFDIR, Ino: info.attr.Ino},
 		{Name: "..", Mode: fuse.S_IFDIR},
 	}
-	pattern := winExtendedPath(dirPath)
-	if !strings.HasSuffix(pattern, `\`) {
-		pattern += `\`
-	}
-	pattern += `*`
-	var find windows.Win32finddata
-	fh, err := windows.FindFirstFile(windows.StringToUTF16Ptr(pattern), &find)
-	if err != nil {
-		if err == windows.ERROR_FILE_NOT_FOUND {
-			return entries, 0
-		}
-		return nil, ntStatusErrno(err)
-	}
-	defer windows.FindClose(fh)
+	buf := make([]byte, 256*1024)
+	restart := uintptr(1)
 	for {
-		name := windows.UTF16ToString(find.FileName[:])
-		if name != "." && name != ".." && validWinGuestName(name) {
-			mode := uint32(fuse.S_IFREG)
-			var ino uint64
-			if child, err := b.ntOpen(dir, name, winMetadataAccess,
-				windows.FILE_OPEN, winBaseOpenOpts); err == nil {
-				if childInfo, errno := b.infoForHandle(child); errno == 0 {
-					mode = childInfo.attr.Mode & 0o170000
-					ino = childInfo.attr.Ino
-				}
-				_ = windows.CloseHandle(child)
-			}
-			if find.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-				mode = fuse.S_IFDIR
-			}
-			if find.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-				mode = fuse.S_IFLNK
-			}
-			entries = append(entries, fuse.DirEntry{Name: name, Mode: mode, Ino: ino})
+		var iosb windows.IO_STATUS_BLOCK
+		status, _, _ := syscall.SyscallN(procNtQueryDirectoryFile.Addr(),
+			uintptr(dir), 0, 0, 0,
+			uintptr(unsafe.Pointer(&iosb)),
+			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)),
+			ntFileIdBothDirectoryInformation, 0, 0, restart)
+		restart = 0
+		if status == ntStatusNoMoreFiles {
+			break
 		}
-		err = windows.FindNextFile(fh, &find)
-		if err != nil {
-			if err == windows.ERROR_NO_MORE_FILES {
+		if status != 0 && status != ntStatusBufferOverflow {
+			return nil, ntStatusErrno(syscall.Errno(status))
+		}
+		if iosb.Information == 0 {
+			break
+		}
+		off := 0
+		for {
+			if off+winDirEntryName > int(iosb.Information) {
 				break
 			}
-			return nil, ntStatusErrno(err)
+			next := *(*uint32)(unsafe.Pointer(&buf[off]))
+			attrs := *(*uint32)(unsafe.Pointer(&buf[off+winDirEntryAttrs]))
+			nameLen := *(*uint32)(unsafe.Pointer(&buf[off+winDirEntryNameLen]))
+			if off+winDirEntryName+int(nameLen) > len(buf) {
+				break
+			}
+			name := windows.UTF16ToString(unsafe.Slice(
+				(*uint16)(unsafe.Pointer(&buf[off+winDirEntryName])), nameLen/2))
+			if name != "." && name != ".." && validWinGuestName(name) {
+				mode := uint32(fuse.S_IFREG)
+				var ino uint64
+				if child, err := b.ntOpen(dir, name, winMetadataAccess,
+					windows.FILE_OPEN, winBaseOpenOpts); err == nil {
+					if childInfo, errno := b.infoForHandle(child); errno == 0 {
+						mode = childInfo.attr.Mode & 0o170000
+						ino = childInfo.attr.Ino
+					}
+					_ = windows.CloseHandle(child)
+				}
+				if attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+					mode = fuse.S_IFDIR
+				}
+				if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+					mode = fuse.S_IFLNK
+				}
+				entries = append(entries, fuse.DirEntry{Name: name, Mode: mode, Ino: ino})
+			}
+			if next == 0 {
+				break
+			}
+			off += int(next)
 		}
 	}
 	return entries, 0
@@ -892,6 +937,7 @@ func (b *winExportFS) statfs(out *fuse.StatfsOut) syscall.Errno {
 type winOpenFile struct {
 	file       *os.File
 	appendMode bool
+	writable   bool // opened with any write access; Flush/Fsync gate on it
 	writeMu    sync.Mutex
 }
 
