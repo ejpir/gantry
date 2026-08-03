@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -465,7 +466,11 @@ func (n *shareNode) Mknod(ctx context.Context, name string, mode, rdev uint32, o
 	if errno := n.mutable(); errno != 0 {
 		return nil, errno
 	}
-	return n.LoopbackNode.Mknod(ctx, name, mode, rdev, out)
+	// Special-file creation (device nodes, fifos, sockets) executes with
+	// the VMM's host credentials; a guest must never plant device nodes
+	// on the host, even inside a writable export. Regular files are
+	// created through Create and are unaffected.
+	return nil, syscall.EPERM
 }
 
 func (n *shareNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -600,6 +605,13 @@ func (n *shareNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 	return n.LoopbackNode.Getattr(ctx, f, out)
 }
 
+// xattrWriteAllowed permits only user.* attributes. security.*
+// (capabilities, LSM labels), trusted.* and system.* (ACLs) are written
+// with the VMM's host credentials and must never cross the guest boundary.
+func xattrWriteAllowed(attr string) bool {
+	return strings.HasPrefix(attr, "user.")
+}
+
 func (n *shareNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	if errno := n.available(); errno != 0 {
 		return 0, errno
@@ -611,12 +623,18 @@ func (n *shareNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
+	if !xattrWriteAllowed(attr) {
+		return syscall.EPERM
+	}
 	return n.LoopbackNode.Setxattr(ctx, attr, data, flags)
 }
 
 func (n *shareNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
 	if errno := n.mutable(); errno != 0 {
 		return errno
+	}
+	if !xattrWriteAllowed(attr) {
+		return syscall.EPERM
 	}
 	return n.LoopbackNode.Removexattr(ctx, attr)
 }
@@ -777,11 +795,11 @@ func (f *shareFile) Ioctl(ctx context.Context, cmd uint32, arg uint64, input []b
 	if errno := f.available(); errno != 0 {
 		return 0, errno
 	}
-	i, ok := f.FileHandle.(fs.FileIoctler)
-	if !ok {
-		return 0, syscall.ENOTSUP
-	}
-	return i.Ioctl(ctx, cmd, arg, input, output)
+	// Default-deny: ioctls execute host-side with the VMM's credentials,
+	// and several (FS_IOC_SETFLAGS, FS_IOC_FSSETXATTR, ...) mutate the
+	// file even through an O_RDONLY descriptor, bypassing the export's RO
+	// enforcement. Nothing a legitimate guest needs crosses this boundary.
+	return 0, syscall.ENOTSUP
 }
 
 func (f *shareFile) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
@@ -900,11 +918,9 @@ func (d *shareDirHandle) Ioctl(ctx context.Context, cmd uint32, arg uint64, inpu
 	if !d.available() {
 		return 0, syscall.ESTALE
 	}
-	i, ok := d.FileHandle.(fs.FileIoctler)
-	if !ok {
-		return 0, syscall.ENOTSUP
-	}
-	return i.Ioctl(ctx, cmd, arg, input, output)
+	// Default-deny like shareFile.Ioctl: no directory ioctl may execute
+	// host-side with the VMM's credentials.
+	return 0, syscall.ENOTSUP
 }
 
 // Device transport. This intentionally mirrors FS: virtio-fs has two queues
