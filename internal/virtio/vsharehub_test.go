@@ -243,3 +243,87 @@ func TestShareHubCrossExportRenameRejected(t *testing.T) {
 		t.Fatal("rename escaped the left export")
 	}
 }
+
+// TestShareHubDefaultDenyOps covers the hub's default-deny operation
+// policy over the FUSE wire: host-side ioctls, special-file creation and
+// non-user xattrs all execute with the VMM's credentials and must never
+// cross the guest boundary, even inside a writable export.
+func TestShareHubDefaultDenyOps(t *testing.T) {
+	hub, err := NewShareHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	fuseInitHub(t, hub)
+
+	const (
+		fuseMknod       = 8
+		fuseSetxattr    = 21
+		fuseRemovexattr = 24
+		fuseIoctl       = 39
+		eperm           = -1
+		enotsup         = -95
+	)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	publishHubShare(t, hub, "work", dir, false)
+
+	tagNode, errno := hubLookup(t, hub, 2, 1, "work")
+	if errno != 0 {
+		t.Fatalf("share lookup errno %d", errno)
+	}
+
+	// MKNOD: a guest must not plant special files on the host.
+	mknodIn := make([]byte, 16)
+	binary.LittleEndian.PutUint32(mknodIn[0:4], uint32(syscall.S_IFCHR|0o644))
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseMknod, 3, tagNode, len(mknodIn)+5), mknodIn, []byte("dev0\x00")}, 16, 128); errno != eperm {
+		t.Errorf("mknod errno %d, want EPERM", errno)
+	}
+
+	fileNode, errno := hubLookup(t, hub, 4, tagNode, "file.txt")
+	if errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+
+	// XATTR writes: only user.* may cross the boundary.
+	setxattr := func(unique uint64, name, value string) int32 {
+		in := make([]byte, 8) // fuse SetXAttrIn: size, flags
+		binary.LittleEndian.PutUint32(in[0:4], uint32(len(value)))
+		payload := append(in, append([]byte(name+"\x00"), []byte(value)...)...)
+		_, errno, _ := hubReq(t, hub,
+			[][]byte{fuseInHeader(fuseSetxattr, unique, fileNode, len(payload)), payload}, 16, 16)
+		return errno
+	}
+	for i, attr := range []string{"security.capability", "trusted.overlay.opaque", "system.posix_acl_access"} {
+		if errno := setxattr(uint64(10+i), attr, "x"); errno != eperm {
+			t.Errorf("setxattr %s errno %d, want EPERM", attr, errno)
+		}
+		removeIn := []byte(attr + "\x00")
+		if _, errno, _ := hubReq(t, hub,
+			[][]byte{fuseInHeader(fuseRemovexattr, 20, fileNode, len(removeIn)), removeIn}, 16, 16); errno != eperm {
+			t.Errorf("removexattr %s errno %d, want EPERM", attr, errno)
+		}
+	}
+	if errno := setxattr(30, "user.gantry", "x"); errno != 0 {
+		t.Errorf("setxattr user.* errno %d, want allowed", errno)
+	}
+
+	// IOCTL: default-deny even though the host permits mutating ioctls
+	// (FS_IOC_SETFLAGS et al.) through O_RDONLY descriptors.
+	openIn := make([]byte, 8)
+	_, errno, openOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpen, 40, fileNode, len(openIn)), openIn}, 16, 16)
+	if errno != 0 {
+		t.Fatalf("open errno %d", errno)
+	}
+	ioctlIn := make([]byte, 32)         // fh, flags, cmd, arg, inSize, outSize
+	copy(ioctlIn[0:8], openOut[1][0:8]) // fh
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseIoctl, 41, fileNode, len(ioctlIn)), ioctlIn}, 16, 16); errno != enotsup {
+		t.Errorf("ioctl errno %d, want ENOTSUP", errno)
+	}
+}
