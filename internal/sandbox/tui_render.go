@@ -205,6 +205,8 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 		body = m.renderRulesView(theme, layout)
 	case tuiMountsPage:
 		body = m.renderMountsView(theme, layout)
+	case tuiPortsPage:
+		body = m.renderPortsView(theme, layout)
 	default:
 		body = m.renderCardGrid(theme, layout)
 	}
@@ -289,6 +291,7 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 		fmt.Sprintf("2 TRAFFIC %d", len(m.traffic)),
 		fmt.Sprintf("3 NET RULES %d", len(m.rules)),
 		fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
+		fmt.Sprintf("5 PORTS %d", len(m.ports)),
 	}
 	if width < 82 {
 		labels = []string{
@@ -296,6 +299,7 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 			fmt.Sprintf("2 NET %d", len(m.traffic)),
 			fmt.Sprintf("3 RULES %d", len(m.rules)),
 			fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
+			fmt.Sprintf("5 PORTS %d", len(m.ports)),
 		}
 	}
 	if width < 50 {
@@ -395,6 +399,14 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 			}
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d total  •  %d read-only", len(m.mounts), readOnly))
+	case tuiPortsPage:
+		bound := 0
+		for _, port := range m.ports {
+			if port.State == "bound" {
+				bound++
+			}
+		}
+		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d bound  •  %d saved", bound, len(m.ports)-bound))
 	default:
 		running, starting := 0, 0
 		for _, sandbox := range m.sandboxes {
@@ -644,6 +656,8 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 		return [][2]string{{"↑/↓", "inspect"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	case tuiMountsPage:
 		return [][2]string{{"a", "add share"}, {"d", "remove share"}, {"r", "replace"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
+	case tuiPortsPage:
+		return [][2]string{{"p", "publish"}, {"d", "unpublish"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	}
 	if m.onNewCard() {
 		return [][2]string{{"enter", "create"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
@@ -733,11 +747,11 @@ func (m sandboxTUIModel) dialogSize(kind tuiDialog) (int, int) {
 		idealWidth, idealHeight = 72, 24
 	case tuiInfoDialog:
 		idealWidth, idealHeight = 68, 25
-	case tuiRemoveDialog, tuiShareRemoveDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog:
 		idealWidth, idealHeight = 54, 15
 	case tuiCreateDialog:
 		idealWidth, idealHeight = 64, 22
-	case tuiShareAddDialog:
+	case tuiShareAddDialog, tuiPortPublishDialog:
 		idealWidth, idealHeight = 68, 20
 	}
 	width := minInt(idealWidth, maxInt(24, m.width-4))
@@ -775,6 +789,11 @@ func (m sandboxTUIModel) renderDialog(theme tuiTheme) string {
 		content = m.renderCreateDialog(theme, innerWidth)
 	case tuiShareAddDialog:
 		content = m.renderShareAddDialog(theme, innerWidth)
+	case tuiPortUnpublishDialog:
+		content = m.renderPortUnpublishDialog(theme, innerWidth)
+		border = theme.error
+	case tuiPortPublishDialog:
+		content = m.renderPortPublishDialog(theme, innerWidth)
 	}
 	content = truncateBlockLines(content, maxInt(1, height-4))
 	style := lipgloss.NewStyle().
@@ -999,6 +1018,56 @@ func (m sandboxTUIModel) renderShareAddDialog(theme tuiTheme, width int) string 
 	return header + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(description) + "\n" + targetLine +
 		"\n" + tagLabel + "\n" + tagField + "\n" + pathLabel + "\n" + pathField +
 		"\n" + modeLabel + "  " + modeValue + "\n" + errorLine + "\n" + buttons + "\n" + hint
+}
+
+func (m sandboxTUIModel) renderPortUnpublishDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Unpublish Port", width)
+	row := m.selectedPort()
+	if row == nil {
+		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No port selected.")
+	}
+	label := lipgloss.NewStyle().Foreground(theme.secondary).Render("Publish: ")
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("%s  %s → %d/%s", row.Sandbox, row.Bind, row.Guest, row.Proto))
+	warning := lipgloss.NewStyle().Foreground(theme.error).Render(row.Bind + " will stop forwarding into the sandbox.")
+	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("Unpublish %s?", row.Bind))
+	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
+	remove := renderDialogButton(theme, "Unpublish", m.confirmRemove, true)
+	buttons := alignRight(cancel+"  "+remove, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
+	return header + "\n\n" + label + value + "\n\n" + warning + "\n\n" + question + "\n\n" + buttons + "\n" + hint
+}
+
+func (m sandboxTUIModel) renderPortPublishDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Publish Port", width)
+	description := "Forward a guest port to a host listener, without a restart."
+	target := "none"
+	if sandbox := m.shareTargetSandbox(); sandbox != nil {
+		target = sandbox.Name
+	}
+	targetLine := lipgloss.NewStyle().Foreground(theme.muted).Render("sandbox  ") +
+		lipgloss.NewStyle().Foreground(theme.secondary).Render(target)
+	bindLabel := formLabel(theme, "Host bind", m.portFocus == 0)
+	guestLabel := formLabel(theme, "Guest port", m.portFocus == 1)
+	bindField := renderInputField(theme, m.portBind.View(), width, m.portFocus == 0)
+	guestField := renderInputField(theme, m.portGuest.View(), width, m.portFocus == 1)
+	proto := "tcp"
+	if m.portUDP {
+		proto = "udp"
+	}
+	protoLabel := formLabel(theme, "Protocol", m.portFocus == 2)
+	protoValue := lipgloss.NewStyle().Foreground(theme.text).Render(proto) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
+	exposure := lipgloss.NewStyle().Foreground(theme.muted).Render("Bind is loopback by default; write 0.0.0.0:port to expose on the LAN.")
+	errorLine := ""
+	if m.formError != "" {
+		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
+	}
+	button := renderDialogButton(theme, "Publish", m.portFocus == 3, false)
+	buttons := alignRight(button, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  enter continue  •  esc cancel")
+	return header + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(description) + "\n" + targetLine +
+		"\n" + bindLabel + "\n" + bindField + "\n" + guestLabel + "\n" + guestField +
+		"\n" + protoLabel + "  " + protoValue + "\n" + exposure + "\n" + errorLine + "\n" + buttons + "\n" + hint
 }
 
 func formLabel(theme tuiTheme, label string, focused bool) string {

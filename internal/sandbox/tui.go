@@ -54,6 +54,7 @@ const (
 	tuiTrafficPage
 	tuiRulesPage
 	tuiMountsPage
+	tuiPortsPage
 	tuiPageCount
 )
 
@@ -117,6 +118,15 @@ type tuiMountRow struct {
 	Error    string
 }
 
+type tuiPortRow struct {
+	Sandbox string
+	Bind    string // host bind, e.g. "127.0.0.1:8080"
+	Guest   int
+	Proto   string
+	State   string // "bound" | "saved"
+	Error   string
+}
+
 type tuiDialog uint8
 
 const (
@@ -127,6 +137,8 @@ const (
 	tuiCreateDialog
 	tuiShareAddDialog
 	tuiShareRemoveDialog
+	tuiPortPublishDialog
+	tuiPortUnpublishDialog
 )
 
 type tuiToastKind uint8
@@ -150,6 +162,7 @@ type tuiRefreshMsg struct {
 	traffic   []tuiTrafficRow
 	rules     []tuiRuleRow
 	mounts    []tuiMountRow
+	ports     []tuiPortRow
 	err       error
 	at        time.Time
 }
@@ -180,6 +193,9 @@ type sandboxTUIModel struct {
 	mounts        []tuiMountRow
 	mountCursor   int
 	mountScroll   int
+	ports         []tuiPortRow
+	portCursor    int
+	portScroll    int
 
 	width  int
 	height int
@@ -211,6 +227,10 @@ type sandboxTUIModel struct {
 	sharePath     textinput.Model
 	shareRO       bool
 	shareReplace  bool
+	portFocus     int
+	portBind      textinput.Model
+	portGuest     textinput.Model
+	portUDP       bool
 	formError     string
 
 	lastClickIndex int
@@ -234,6 +254,14 @@ func newSandboxTUIModel() sandboxTUIModel {
 	sharePath.Placeholder = "/absolute/host/path"
 	sharePath.CharLimit = 4096
 	sharePath.Prompt = ""
+	portBind := textinput.New()
+	portBind.Placeholder = "8080 (blank = auto, ip:port to widen)"
+	portBind.CharLimit = 64
+	portBind.Prompt = ""
+	portGuest := textinput.New()
+	portGuest.Placeholder = "80"
+	portGuest.CharLimit = 8
+	portGuest.Prompt = ""
 
 	m := sandboxTUIModel{
 		width:          100,
@@ -249,6 +277,8 @@ func newSandboxTUIModel() sandboxTUIModel {
 		shareTag:       shareTag,
 		sharePath:      sharePath,
 		shareRO:        true,
+		portBind:       portBind,
+		portGuest:      portGuest,
 		lastClickIndex: -1,
 	}
 	m.applyInputTheme()
@@ -332,11 +362,12 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	if selected := m.selected(); selected != nil {
 		selectedName = selected.Name
 	}
-	trafficKey, ruleKey, mountKey := m.selectedTableKeys()
+	trafficKey, ruleKey, mountKey, portKey := m.selectedTableKeys()
 	m.sandboxes = msg.sandboxes
 	m.traffic = msg.traffic
 	m.rules = msg.rules
 	m.mounts = msg.mounts
+	m.ports = msg.ports
 
 	target := m.selectNext
 	if target == "" {
@@ -363,7 +394,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	} else if !found && m.cursor > len(m.sandboxes) {
 		m.cursor = len(m.sandboxes)
 	}
-	m.restoreTableSelections(trafficKey, ruleKey, mountKey)
+	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey)
 	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 	return m, m.ensureAnimation()
@@ -408,6 +439,8 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.setPage(tuiRulesPage)
 		case "4":
 			m.setPage(tuiMountsPage)
+		case "5":
+			m.setPage(tuiPortsPage)
 		case "tab", "]":
 			m.cyclePage(1)
 		case "shift+tab", "[":
@@ -440,6 +473,18 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.page == tuiPortsPage {
+		switch key {
+		case "p", "a":
+			return m, m.openPortPublishDialog()
+		case "d", "delete", "x", "u":
+			if m.selectedPort() != nil {
+				m.dialog = tuiPortUnpublishDialog
+				m.confirmRemove = false
+			}
+			return m, nil
+		}
+	}
 	switch key {
 	case "q", "ctrl+c":
 		return m, func() tea.Msg { return tea.Quit() }
@@ -457,6 +502,9 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "4":
 		m.setPage(tuiMountsPage)
+		return m, nil
+	case "5":
+		m.setPage(tuiPortsPage)
 		return m, nil
 	case "tab", "]":
 		m.cyclePage(1)
@@ -657,6 +705,13 @@ func (m *sandboxTUIModel) selectedMount() *tuiMountRow {
 	return &m.mounts[m.mountCursor]
 }
 
+func (m *sandboxTUIModel) selectedPort() *tuiPortRow {
+	if m.portCursor < 0 || m.portCursor >= len(m.ports) {
+		return nil
+	}
+	return &m.ports[m.portCursor]
+}
+
 func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
 	if selected := m.selected(); selected != nil && selected.State == tuiRunning {
 		return selected
@@ -739,6 +794,8 @@ func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
 		return &m.rulesCursor, &m.rulesScroll, len(m.rules)
 	case tuiMountsPage:
 		return &m.mountCursor, &m.mountScroll, len(m.mounts)
+	case tuiPortsPage:
+		return &m.portCursor, &m.portScroll, len(m.ports)
 	default:
 		return nil, nil, 0
 	}
@@ -773,7 +830,7 @@ func (m *sandboxTUIModel) ensureTableCursorVisible() {
 	*scroll = clampInt(*scroll, 0, maxInt(0, count-visible))
 }
 
-func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount string) {
+func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port string) {
 	if m.trafficCursor >= 0 && m.trafficCursor < len(m.traffic) {
 		traffic = trafficRowKey(m.traffic[m.trafficCursor])
 	}
@@ -783,10 +840,13 @@ func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount string) {
 	if m.mountCursor >= 0 && m.mountCursor < len(m.mounts) {
 		mount = mountRowKey(m.mounts[m.mountCursor])
 	}
+	if m.portCursor >= 0 && m.portCursor < len(m.ports) {
+		port = portRowKey(m.ports[m.portCursor])
+	}
 	return
 }
 
-func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount string) {
+func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port string) {
 	for i := range m.traffic {
 		if traffic != "" && trafficRowKey(m.traffic[i]) == traffic {
 			m.trafficCursor = i
@@ -805,9 +865,16 @@ func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount string) {
 			break
 		}
 	}
+	for i := range m.ports {
+		if port != "" && portRowKey(m.ports[i]) == port {
+			m.portCursor = i
+			break
+		}
+	}
 	m.trafficCursor = clampTableCursor(m.trafficCursor, len(m.traffic))
 	m.rulesCursor = clampTableCursor(m.rulesCursor, len(m.rules))
 	m.mountCursor = clampTableCursor(m.mountCursor, len(m.mounts))
+	m.portCursor = clampTableCursor(m.portCursor, len(m.ports))
 }
 
 func trafficRowKey(row tuiTrafficRow) string {
@@ -822,6 +889,10 @@ func mountRowKey(row tuiMountRow) string {
 	return strings.Join([]string{row.Sandbox, row.Tag, row.Host, row.Guest}, "\x00")
 }
 
+func portRowKey(row tuiPortRow) string {
+	return strings.Join([]string{row.Sandbox, row.Bind, row.Proto}, "\x00")
+}
+
 func clampTableCursor(cursor, count int) int {
 	if count == 0 {
 		return 0
@@ -834,7 +905,7 @@ func refreshSandboxesCmd() tea.Cmd {
 		data, err := loadTUIData()
 		return tuiRefreshMsg{
 			sandboxes: data.sandboxes, traffic: data.traffic,
-			rules: data.rules, mounts: data.mounts, err: err, at: time.Now(),
+			rules: data.rules, mounts: data.mounts, ports: data.ports, err: err, at: time.Now(),
 		}
 	}
 }
@@ -848,6 +919,7 @@ type tuiData struct {
 	traffic   []tuiTrafficRow
 	rules     []tuiRuleRow
 	mounts    []tuiMountRow
+	ports     []tuiPortRow
 }
 
 func loadTUISandboxes() ([]tuiSandbox, error) {
@@ -959,6 +1031,7 @@ func loadTUIData() (tuiData, error) {
 			if live {
 				sandbox.Shares = len(mountRows)
 			}
+			data.ports = append(data.ports, loadTUIPorts(name, cfg, sandbox.State == tuiRunning)...)
 		}
 		data.sandboxes = append(data.sandboxes, sandbox)
 	}
@@ -977,6 +1050,12 @@ func loadTUIData() (tuiData, error) {
 			return data.mounts[i].Tag < data.mounts[j].Tag
 		}
 		return data.mounts[i].Sandbox < data.mounts[j].Sandbox
+	})
+	sort.SliceStable(data.ports, func(i, j int) bool {
+		if data.ports[i].Sandbox == data.ports[j].Sandbox {
+			return data.ports[i].Bind < data.ports[j].Bind
+		}
+		return data.ports[i].Sandbox < data.ports[j].Sandbox
 	})
 	return data, nil
 }
@@ -1054,6 +1133,42 @@ func loadTUIMounts(sandbox string, cfg RunConfig, running bool) ([]tuiMountRow, 
 	return rows, false
 }
 
+// loadTUIPorts reads the publish set for one sandbox: the live bound/saved
+// merge from the running daemon's broker, else the desired specs persisted
+// in sandbox.json (state "saved").
+func loadTUIPorts(sandbox string, cfg RunConfig, running bool) []tuiPortRow {
+	rowFor := func(mapping PortMapping, state string) tuiPortRow {
+		return tuiPortRow{
+			Sandbox: sandbox,
+			Bind:    safeUILine(mapping.Local()),
+			Guest:   int(mapping.GuestPort),
+			Proto:   mapping.Proto,
+			State:   state,
+		}
+	}
+	if running {
+		resp, err := portControlRPC(sandbox, "port.list", brokerPortRequest{Persistent: true})
+		if err != nil {
+			return []tuiPortRow{{Sandbox: sandbox, Bind: "unavailable", Error: safeUILine(err.Error())}}
+		}
+		rows := make([]tuiPortRow, 0, len(resp.Ports))
+		for _, entry := range resp.Ports {
+			rows = append(rows, rowFor(entry.Mapping, entry.State))
+		}
+		return rows
+	}
+	rows := make([]tuiPortRow, 0, len(cfg.Ports))
+	for _, spec := range cfg.Ports {
+		mapping, err := ParsePortSpec(spec)
+		if err != nil {
+			rows = append(rows, tuiPortRow{Sandbox: sandbox, Bind: "invalid", Error: safeUILine(err.Error())})
+			continue
+		}
+		rows = append(rows, rowFor(mapping, "saved"))
+	}
+	return rows
+}
+
 func compactCommandError(output string, err error) string {
 	output = strings.TrimSpace(output)
 	if output == "" {
@@ -1084,6 +1199,10 @@ func actionTitle(action string) string {
 		return "Replace share"
 	case "share remove":
 		return "Remove share"
+	case "port publish":
+		return "Publish port"
+	case "port unpublish":
+		return "Unpublish port"
 	default:
 		return strings.Title(action) //nolint:staticcheck // action names are ASCII UI labels.
 	}
@@ -1107,6 +1226,10 @@ func actionPastTense(action string) string {
 		return "Share replaced"
 	case "share remove":
 		return "Share removed"
+	case "port publish":
+		return "Port published"
+	case "port unpublish":
+		return "Port unpublished"
 	default:
 		return actionTitle(action) + " complete"
 	}

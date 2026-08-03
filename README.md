@@ -57,6 +57,11 @@ the latest release on first start. Manual fallback: copy the rootfs from a
 - **Networking** — embedded netstack; public internet allowed, local networks
   blocked by default (`-allow-local-net` to opt in). Egress policies with
   CIDR/proto/port/DNS rules: `-net-policy examples/llm-only.json`.
+- **Port publishing** — expose guest services on the host:
+  `-p 8080:80` (loopback by default; `-p 0.0.0.0:8080:80` opts into LAN,
+  `/udp` for UDP). Hot publish on a running sandbox:
+  `gantry ports publish dev 8081:8080` (also `ls`/`unpublish`; the
+  dashboard's Ports view does the same).
 - **Runtimes** — `crun` by default; in-VM gVisor with `-runtime runsc`
   (rootfs via `./scripts/mkrootfs-gvisor.sh`).
 - **Secrets** — `-secret GITHUB_TOKEN` injects from the environment, never
@@ -82,7 +87,7 @@ go test ./...
 
 ## Limitations
 
-Not (yet): Windows boot verification, snapshots, port publishing. The VMM
+Not (yet): Windows boot verification, snapshots. The VMM
 runs with the launching user's host privileges; writable layers must not be
 shared between live VMs.
 

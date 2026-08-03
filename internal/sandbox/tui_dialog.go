@@ -22,6 +22,25 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateCreateDialogKey(msg)
 	case tuiShareAddDialog:
 		return m.updateShareDialogKey(msg)
+	case tuiPortPublishDialog:
+		return m.updatePortDialogKey(msg)
+	case tuiPortUnpublishDialog:
+		switch msg.String() {
+		case "esc", "q", "n", "N":
+			m.closeDialog()
+		case "left", "h":
+			m.confirmRemove = false
+		case "right", "l", "tab", "shift+tab":
+			m.confirmRemove = !m.confirmRemove
+		case "y", "Y":
+			m.confirmRemove = true
+			return m.unpublishSelectedPort()
+		case "enter":
+			if m.confirmRemove {
+				return m.unpublishSelectedPort()
+			}
+			m.closeDialog()
+		}
 	case tuiShareRemoveDialog:
 		switch msg.String() {
 		case "esc", "q", "n", "N":
@@ -290,6 +309,125 @@ func (m *sandboxTUIModel) focusShare(index int) tea.Cmd {
 	}
 }
 
+func (m *sandboxTUIModel) updatePortDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.closeDialog()
+		return m, nil
+	case "tab", "down":
+		return m, m.focusPort((m.portFocus + 1) % 4)
+	case "shift+tab", "up":
+		return m, m.focusPort((m.portFocus + 3) % 4)
+	case "left", "right", " ", "space":
+		if m.portFocus == 2 {
+			m.portUDP = !m.portUDP
+			return m, nil
+		}
+	case "ctrl+enter":
+		return m.submitPort()
+	case "enter":
+		if m.portFocus < 3 {
+			return m, m.focusPort(m.portFocus + 1)
+		}
+		return m.submitPort()
+	}
+
+	var cmd tea.Cmd
+	switch m.portFocus {
+	case 0:
+		m.portBind, cmd = m.portBind.Update(msg)
+	case 1:
+		m.portGuest, cmd = m.portGuest.Update(msg)
+	}
+	m.formError = ""
+	return m, cmd
+}
+
+func (m *sandboxTUIModel) openPortPublishDialog() tea.Cmd {
+	target := m.shareTargetSandbox() // same selection rule as live shares
+	if target == nil {
+		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before publishing a port.")
+	}
+	m.dialog = tuiPortPublishDialog
+	m.formError = ""
+	m.portUDP = false
+	m.portBind.Reset()
+	m.portGuest.Reset()
+	m.resizeInputs()
+	return m.focusPort(0)
+}
+
+func (m *sandboxTUIModel) focusPort(index int) tea.Cmd {
+	m.portFocus = clampInt(index, 0, 3)
+	m.portBind.Blur()
+	m.portGuest.Blur()
+	switch m.portFocus {
+	case 0:
+		return m.portBind.Focus()
+	case 1:
+		return m.portGuest.Focus()
+	default:
+		return nil
+	}
+}
+
+// portSpecFromDialog composes [IP:]HOST:GUEST[/udp] from the dialog fields.
+// Split out for tests: blank bind = auto host port on loopback, a bare
+// number = loopback + that port, ip:port widens the bind explicitly.
+func (m *sandboxTUIModel) portSpecFromDialog() (string, error) {
+	guest := strings.TrimSpace(m.portGuest.Value())
+	if guest == "" {
+		return "", fmt.Errorf("guest port is required")
+	}
+	bind := strings.TrimSpace(m.portBind.Value())
+	spec := ""
+	switch {
+	case bind == "":
+		spec = guest // auto host port
+	case strings.Contains(bind, ":"):
+		spec = bind + ":" + guest
+	default:
+		spec = bind + ":" + guest
+	}
+	if m.portUDP {
+		spec += "/udp"
+	}
+	if _, err := ParsePortSpec(spec); err != nil {
+		return "", err
+	}
+	return spec, nil
+}
+
+func (m *sandboxTUIModel) submitPort() (tea.Model, tea.Cmd) {
+	target := m.shareTargetSandbox()
+	if target == nil {
+		m.formError = "no running sandbox available"
+		return m, nil
+	}
+	spec, err := m.portSpecFromDialog()
+	if err != nil {
+		m.formError = err.Error()
+		if strings.TrimSpace(m.portGuest.Value()) == "" {
+			return m, m.focusPort(1)
+		}
+		return m, m.focusPort(0)
+	}
+	return m.beginAction("port publish", target.Name+"/"+spec, []string{"ports", "publish", target.Name, spec}, false)
+}
+
+func (m *sandboxTUIModel) unpublishSelectedPort() (tea.Model, tea.Cmd) {
+	row := m.selectedPort()
+	if row == nil || row.Error != "" {
+		m.closeDialog()
+		return m, nil
+	}
+	spec := row.Bind + ":" + fmt.Sprintf("%d", row.Guest)
+	if row.Proto != "tcp" {
+		spec += "/" + row.Proto
+	}
+	return m.beginAction("port unpublish", row.Sandbox+"/"+row.Bind, []string{"ports", "unpublish", row.Sandbox, spec}, false)
+}
+
 func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 	targetName := ""
 	if m.shareReplace {
@@ -358,6 +496,8 @@ func (m *sandboxTUIModel) closeDialog() {
 	m.createImage.Blur()
 	m.shareTag.Blur()
 	m.sharePath.Blur()
+	m.portBind.Blur()
+	m.portGuest.Blur()
 	m.shareReplace = false
 }
 
@@ -370,6 +510,10 @@ func (m *sandboxTUIModel) resizeInputs() {
 	shareFieldWidth := maxInt(12, shareWidth-10)
 	m.shareTag.SetWidth(shareFieldWidth)
 	m.sharePath.SetWidth(shareFieldWidth)
+	portWidth, _ := m.dialogSize(tuiPortPublishDialog)
+	portFieldWidth := maxInt(12, portWidth-10)
+	m.portBind.SetWidth(portFieldWidth)
+	m.portGuest.SetWidth(portFieldWidth)
 }
 
 func (m *sandboxTUIModel) applyInputTheme() {
@@ -386,6 +530,8 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	m.createImage.SetStyles(styles)
 	m.shareTag.SetStyles(styles)
 	m.sharePath.SetStyles(styles)
+	m.portBind.SetStyles(styles)
+	m.portGuest.SetStyles(styles)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(theme.accent)
 }
 
@@ -458,6 +604,29 @@ func (m *sandboxTUIModel) updateMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd)
 				m.shareFocus = 3
 				return m.submitShare()
 			}
+		}
+		if m.dialog == tuiPortPublishDialog {
+			relY := mouse.Y - bounds.y
+			switch {
+			case relY >= 6 && relY <= 8:
+				return m, m.focusPort(0)
+			case relY >= 10 && relY <= 12:
+				return m, m.focusPort(1)
+			case relY >= 13 && relY <= 14:
+				m.portFocus = 2
+				m.portUDP = !m.portUDP
+			case relY >= bounds.h-5 && mouse.X >= bounds.x+bounds.w/2:
+				m.portFocus = 3
+				return m.submitPort()
+			}
+		}
+		if m.dialog == tuiPortUnpublishDialog && mouse.Y == bounds.y+bounds.h-3 {
+			if mouse.X >= bounds.x+bounds.w/2 {
+				m.confirmRemove = true
+				return m.unpublishSelectedPort()
+			}
+			m.closeDialog()
+			return m, nil
 		}
 		return m, nil
 	}
