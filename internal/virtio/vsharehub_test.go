@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 
@@ -289,8 +290,17 @@ func TestShareHubDefaultDenyOps(t *testing.T) {
 		fuseRemovexattr = 24
 		fuseIoctl       = 39
 		eperm           = -1
+		enosys          = -38
 		enotsup         = -95
 	)
+
+	// Wire errnos are Linux numbers on every platform. The Unix backend
+	// denies with EPERM by policy; the Windows passthrough backend has no
+	// special-file or xattr concept at all, so its deny arrives as ENOSYS.
+	denyMknod, denyXattr, allowUser := int32(eperm), int32(eperm), int32(0)
+	if runtime.GOOS == "windows" {
+		denyMknod, denyXattr, allowUser = enosys, enosys, enosys
+	}
 
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("x"), 0o644); err != nil {
@@ -307,8 +317,8 @@ func TestShareHubDefaultDenyOps(t *testing.T) {
 	mknodIn := make([]byte, 16)
 	binary.LittleEndian.PutUint32(mknodIn[0:4], uint32(syscall.S_IFCHR|0o644))
 	if _, errno, _ := hubReq(t, hub,
-		[][]byte{fuseInHeader(fuseMknod, 3, tagNode, len(mknodIn)+5), mknodIn, []byte("dev0\x00")}, 16, 128); errno != eperm {
-		t.Errorf("mknod errno %d, want EPERM", errno)
+		[][]byte{fuseInHeader(fuseMknod, 3, tagNode, len(mknodIn)+5), mknodIn, []byte("dev0\x00")}, 16, 128); errno != denyMknod {
+		t.Errorf("mknod errno %d, want EPERM (ENOSYS on Windows)", errno)
 	}
 
 	fileNode, errno := hubLookup(t, hub, 4, tagNode, "file.txt")
@@ -326,17 +336,17 @@ func TestShareHubDefaultDenyOps(t *testing.T) {
 		return errno
 	}
 	for i, attr := range []string{"security.capability", "trusted.overlay.opaque", "system.posix_acl_access"} {
-		if errno := setxattr(uint64(10+i), attr, "x"); errno != eperm {
-			t.Errorf("setxattr %s errno %d, want EPERM", attr, errno)
+		if errno := setxattr(uint64(10+i), attr, "x"); errno != denyXattr {
+			t.Errorf("setxattr %s errno %d, want EPERM (ENOSYS on Windows)", attr, errno)
 		}
 		removeIn := []byte(attr + "\x00")
 		if _, errno, _ := hubReq(t, hub,
-			[][]byte{fuseInHeader(fuseRemovexattr, 20, fileNode, len(removeIn)), removeIn}, 16, 16); errno != eperm {
-			t.Errorf("removexattr %s errno %d, want EPERM", attr, errno)
+			[][]byte{fuseInHeader(fuseRemovexattr, 20, fileNode, len(removeIn)), removeIn}, 16, 16); errno != denyXattr {
+			t.Errorf("removexattr %s errno %d, want EPERM (ENOSYS on Windows)", attr, errno)
 		}
 	}
-	if errno := setxattr(30, "user.gantry", "x"); errno != 0 {
-		t.Errorf("setxattr user.* errno %d, want allowed", errno)
+	if errno := setxattr(30, "user.gantry", "x"); errno != allowUser {
+		t.Errorf("setxattr user.* errno %d, want allowed (ENOSYS on Windows)", errno)
 	}
 
 	// IOCTL: default-deny even though the host permits mutating ioctls

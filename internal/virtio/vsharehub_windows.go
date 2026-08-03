@@ -437,3 +437,12 @@ func (f *winShareFile) Lseek(ctx context.Context, off uint64, whence uint32) (ui
 	n, err := f.wf.file.Seek(int64(off), int(whence))
 	return uint64(n), ntStatusErrno(err)
 }
+
+var _ fs.FileIoctler = (*winShareFile)(nil)
+
+// Ioctl is default-deny, mirroring the Unix hub: no mutating host ioctls
+// may cross the boundary. Without an explicit implementation the bridge
+// reported EIO, which misreads as a backend failure instead of policy.
+func (f *winShareFile) Ioctl(ctx context.Context, cmd uint32, arg uint64, input []byte, output []byte) (int32, syscall.Errno) {
+	return 0, fuse.ErrnoFromStatus(fuse.ENOTSUP)
+}
