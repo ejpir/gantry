@@ -967,7 +967,13 @@ func configJSONWithTransport(shares []ShareEntry, transport *shares.Transport, r
 	}
 	var extra []string
 	if transport != nil {
-		extra = append(extra, hubShareMounts(shares, transport)...)
+		// The hub binds make crun create their targets (/run/gantry/shares,
+		// /host) inside the container rootfs, which is impossible on a
+		// read-only root. Shares and live hot-add are writable-root-only;
+		// on rw=false the hub stays guest-side so shareless RO boots work.
+		if rw {
+			extra = append(extra, hubShareMounts(shares, transport)...)
+		}
 	} else {
 		// Per-tag mountpoints live under /host. The container rootfs is
 		// read-only EROFS, so put a tmpfs there when crun needs to create

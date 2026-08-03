@@ -66,7 +66,7 @@ func TestConfigJSONShareHub(t *testing.T) {
 		{Tag: "code", RO: true, VMPath: shares.HubVMPath + "/code", CtrPath: "/host/code"},
 		{Tag: "work", VMPath: shares.HubVMPath + "/work", CtrPath: "/workspace"},
 	}
-	cfg, err := ConfigJSONWithTransport(entries, transport, false, []string{"/bin/sh"}, nil)
+	cfg, err := ConfigJSONWithTransport(entries, transport, true, []string{"/bin/sh"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestConfigJSONShareHub(t *testing.T) {
 	// An explicit legacy /host alias covers the hub root; the internal stable
 	// path remains available for all other live shares.
 	entries[0].CtrPath = "/host"
-	cfg, err = ConfigJSONWithTransport(entries, transport, false, []string{"/bin/sh"}, nil)
+	cfg, err = ConfigJSONWithTransport(entries, transport, true, []string{"/bin/sh"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +101,27 @@ func TestConfigJSONShareHub(t *testing.T) {
 	}
 	if !strings.Contains(cfg, `"destination": "/run/gantry/shares"`) {
 		t.Errorf("missing internal hub fallback:\n%s", cfg)
+	}
+}
+
+func TestConfigJSONShareHubReadOnlyRoot(t *testing.T) {
+	// rw=false: crun cannot create the hub bind targets inside a read-only
+	// container root, so the hub must stay guest-side only.
+	transport := &shares.Transport{Tag: shares.HubTag, VMPath: shares.HubVMPath}
+	entries := []ShareEntry{
+		{Tag: "code", RO: true, VMPath: shares.HubVMPath + "/code", CtrPath: "/host/code"},
+	}
+	cfg, err := ConfigJSONWithTransport(entries, transport, false, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(cfg)) {
+		t.Fatalf("invalid JSON:\n%s", cfg)
+	}
+	for _, absent := range []string{"/run/gantry/shares", `"destination": "/host"`} {
+		if strings.Contains(cfg, absent) {
+			t.Errorf("read-only root must not carry hub bind %q", absent)
+		}
 	}
 }
 
