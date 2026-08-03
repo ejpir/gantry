@@ -162,6 +162,33 @@ func TestShareHubPinsRenamedHostRoot(t *testing.T) {
 	if _, errno := hubLookup(t, hub, 3, tagNode, "pinned.txt"); errno != 0 {
 		t.Fatalf("pinned root lookup after rename errno %d", errno)
 	}
+
+	// The replacement directory at the original path must not retarget
+	// opens: reads have to come from the pinned (renamed) root.
+	if err := os.WriteFile(filepath.Join(original, "pinned.txt"), []byte("REPLACEMENT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileNode, errno := hubLookup(t, hub, 4, tagNode, "pinned.txt")
+	if errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+	openIn := make([]byte, 8)
+	_, errno, openOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpen, 5, fileNode, len(openIn)), openIn}, 16, 16)
+	if errno != 0 {
+		t.Fatalf("open errno %d", errno)
+	}
+	readIn := make([]byte, 40)
+	copy(readIn[0:8], openOut[1][0:8])                 // fh
+	binary.LittleEndian.PutUint32(readIn[16:20], 4096) // size
+	_, errno, readOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(15 /* fuseRead */, 6, fileNode, len(readIn)), readIn}, 16, 4096)
+	if errno != 0 {
+		t.Fatalf("read errno %d", errno)
+	}
+	if got := string(readOut[1][:9]); got != "old root\n" {
+		t.Fatalf("read %q, want content from the pinned (renamed) root", got)
+	}
 }
 
 func TestShareHubRenameWithinExport(t *testing.T) {
