@@ -28,6 +28,12 @@ the latest release on first start. Manual fallback: copy the rootfs from a
 [nerdbox release](https://github.com/containerd/nerdbox/releases) into
 `artifacts/`, or build from source below.
 
+Release integrity: every download is verified against the `.sha256` sidecar
+published beside the asset (fail-closed), assets are immutable once
+published, and each artifact carries a Sigstore build-provenance
+attestation — verify with
+`gh attestation verify <file> --repo ejpir/gantry`.
+
 ## Use
 
 ```sh
