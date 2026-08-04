@@ -110,7 +110,17 @@ func TestStartWithForwards(t *testing.T) {
 	}
 	if _, err := Start([6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}, conflict); err == nil {
 		t.Fatal("want bind-conflict failure for a busy host port")
-	} else if !strings.Contains(fmt.Sprint(err), "forwarder") && !strings.Contains(fmt.Sprint(err), "address already in use") {
-		t.Fatalf("unexpected conflict error: %v", err)
+	} else {
+		// The bind error wording is platform-specific ("address already in
+		// use" vs Windows' "Only one usage of each socket address..."), so
+		// assert on the stable part: the busy port must appear in the
+		// failure.
+		_, port, splitErr := net.SplitHostPort(blocker.LocalAddr().String())
+		if splitErr != nil {
+			t.Fatal(splitErr)
+		}
+		if !strings.Contains(fmt.Sprint(err), ":"+port) {
+			t.Fatalf("conflict error %q does not reference busy port %s", err, port)
+		}
 	}
 }
