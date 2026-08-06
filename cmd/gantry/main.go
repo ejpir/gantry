@@ -6,6 +6,7 @@ import (
 	"gantry/internal/gutil"
 	"gantry/internal/sandbox"
 	"gantry/internal/vmm"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,39 @@ import (
 
 	"golang.org/x/term"
 )
+
+func writeMainHelp(output io.Writer) {
+	fmt.Fprint(output, `gantry — a tiny microVM monitor (KVM on Linux arm64/x86-64, HVF on macOS).
+
+usage:
+  gantry run -kernel Image -initrd artifacts/initramfs.cpio.gz   # our guest init
+  gantry run -kernel artifacts/nerdbox-kernel-arm64 \
+             -rootfs artifacts/nerdbox-rootfs-arm64.erofs \
+             -vsockfwd /tmp/gantry-vsock               #   real nerdbox guest
+  gantry exec [flags] [-- CMD]      # one-shot: boot VM + shell in one command
+  gantry start <name> [flags]       # create a long-lived sandbox VM
+  gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
+  gantry ls                         # list sandboxes
+  gantry tui                        # interactive local sandbox dashboard
+  gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
+  gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
+  gantry share <verb>               # live host shares: add|remove|ls
+  gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
+  gantry net-policy <verb>          # live egress policy: set|default|show
+  gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
+  gantry stop <name>                # stop a sandbox
+  gantry resume <name>              # boot a stopped sandbox from saved config
+  gantry delete <name>              # stop + remove a sandbox
+
+-image accepts an OCI reference (debian:bookworm-slim,
+ghcr.io/org/app@sha256:...), an OCI layout dir, a docker save tar, or a
+plain .erofs file. Examples:
+  gantry start dev -image alpine:latest
+  gantry exec -image debian:bookworm-slim -- /bin/sh
+  gantry image pull ghcr.io/org/app:latest
+Run 'gantry start --help' or 'gantry exec --help' for all flags.
+`)
+}
 
 func main() {
 	run := flag.NewFlagSet("run", flag.ExitOnError)
@@ -38,35 +72,7 @@ func main() {
 		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
 			os.Exit(sandbox.CmdTUI())
 		}
-		fmt.Fprintf(os.Stderr, `gantry — a tiny microVM monitor (KVM on Linux arm64/x86-64, HVF on macOS).
-
-usage:
-  gantry run -kernel Image -initrd artifacts/initramfs.cpio.gz   # our guest init
-  gantry run -kernel artifacts/nerdbox-kernel-arm64 \
-             -rootfs artifacts/nerdbox-rootfs-arm64.erofs \
-             -vsockfwd /tmp/gantry-vsock               #   real nerdbox guest
-  gantry exec [flags] [-- CMD]      # one-shot: boot VM + shell in one command
-  gantry start <name> [flags]       # create a long-lived sandbox VM
-  gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
-  gantry ls                         # list sandboxes
-  gantry tui                        # interactive local sandbox dashboard
-  gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
-  gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
-  gantry share <verb>               # live host shares: add|remove|ls
-  gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
-  gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
-  gantry stop <name>                # stop a sandbox
-  gantry resume <name>              # boot a stopped sandbox from saved config
-  gantry delete <name>              # stop + remove a sandbox
-
--image accepts an OCI reference (debian:bookworm-slim,
-ghcr.io/org/app@sha256:...), an OCI layout dir, a docker save tar, or a
-plain .erofs file. Examples:
-  gantry start dev -image alpine:latest
-  gantry exec -image debian:bookworm-slim -- /bin/sh
-  gantry image pull ghcr.io/org/app:latest
-Run 'gantry start --help' or 'gantry exec --help' for all flags.
-`)
+		writeMainHelp(os.Stderr)
 		os.Exit(2)
 	}
 	// mustName validates a sandbox name at the dispatch layer so every
@@ -79,6 +85,9 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		return n
 	}
 	switch os.Args[1] {
+	case "-h", "--help", "help":
+		writeMainHelp(os.Stdout)
+		return
 	case "exec":
 		if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
 			os.Exit(sandbox.CmdSandboxExec(mustName(os.Args[2]), os.Args[3:]))
@@ -116,6 +125,8 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(sandbox.CmdShare(os.Args[2:]))
 	case "ports":
 		os.Exit(sandbox.CmdPorts(os.Args[2:]))
+	case "net-policy":
+		os.Exit(sandbox.CmdNetworkPolicy(os.Args[2:]))
 	case "import":
 		os.Exit(sandbox.CmdImport(os.Args[2:]))
 	case "stop", "delete":
@@ -131,6 +142,8 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 	case "run":
 		// fall through below
 	default:
+		fmt.Fprintf(os.Stderr, "gantry: unknown command %q\n\n", os.Args[1])
+		writeMainHelp(os.Stderr)
 		os.Exit(2)
 	}
 	run.Parse(os.Args[2:])

@@ -379,6 +379,9 @@ func (m sandboxTUIModel) renderMountRow(theme tuiTheme, row tuiMountRow, width i
 	if row.ReadOnly {
 		icon, mode, color = "←", "RO", theme.info
 	}
+	if row.State == "restart" {
+		icon, color = "↻", theme.warning
+	}
 	if row.Error != "" {
 		icon, mode, color = "!", "ERR", theme.error
 	}
