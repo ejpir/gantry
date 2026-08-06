@@ -1,20 +1,24 @@
 package sandbox
 
 // import_cmd.go — `gantry import`: adopt a sandbox from the reference
-// stack's state directory. The image content never moves — the guest
-// attaches the snapshotter's native multi-device erofs layer set and the
-// sandbox's existing ext4 writable layer — while the workspace, published
-// ports, service domains and container config are mapped onto gantry's
-// own sandbox.json.
+// stack's state directory. Immutable image content never moves — the guest
+// attaches the snapshotter's native multi-device erofs layer set. The ext4
+// upper is cloned into Gantry's private store so the two runtimes never write
+// the same filesystem. Workspace, ports, service domains and container config
+// are mapped onto Gantry's own sandbox.json.
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"gantry/internal/gutil"
+	"gantry/internal/image"
 	"gantry/internal/vmm"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -25,17 +29,20 @@ func CmdImport(argv []string) int {
 	as := fs.String("as", "", "gantry sandbox name (default: the source runtime name)")
 	dryRun := fs.Bool("dry-run", false, "print the resolved gantry configuration without starting anything")
 	logPath := fs.String("log", "", "daemon.log path (default: <root>/daemon.log)")
+	workspaceOwner := fs.String("workspace-owner", "auto", "guest-visible workspace owner: auto | host | UID:GID")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, `usage: gantry import [<name>] [flags]
 
 Import a sandbox from the reference sandbox stack: list with no name,
-adopt with one. The image layers and writable layer attach natively
-(multi-device erofs + ext4) — nothing is exported, pulled or flattened.
+adopt with one. Immutable image layers attach natively (multi-device
+erofs); the writable ext4 layer is cloned privately. Nothing is pulled
+or flattened.
 
 examples:
   gantry import                       # list discoverable sandboxes
   gantry import codex-dev --dry-run   # show what would be adopted
   gantry import codex-dev             # adopt and start
+  gantry import codex-dev --workspace-owner 1000:1000
 
 flags:`)
 		fs.PrintDefaults()
@@ -58,7 +65,7 @@ flags:`)
 	if len(args) == 0 {
 		return listDockerSandboxes(*root)
 	}
-	return importDockerSandbox(*root, args[0], *as, *logPath, *dryRun)
+	return importDockerSandbox(*root, args[0], *as, *logPath, *workspaceOwner, *dryRun)
 }
 
 func listDockerSandboxes(root string) int {
@@ -67,7 +74,8 @@ func listDockerSandboxes(root string) int {
 		fmt.Fprintf(os.Stderr, "gantry import: no sandboxes found under %s\n", root)
 		return 1
 	}
-	fmt.Printf("%-20s %-44s %-30s %s\n", "SANDBOX", "IMAGE", "WORKSPACE", "PORTS")
+	w := newCLITable(os.Stdout)
+	fmt.Fprintln(w, "SANDBOX\tIMAGE\tWORKSPACE\tPORTS")
 	names := []string{}
 	byName := map[string]string{}
 	for _, e := range entries {
@@ -92,12 +100,26 @@ func listDockerSandboxes(root string) int {
 				ports = strings.Join(specs, ",")
 			}
 		}
-		fmt.Printf("%-20s %-44s %-30s %s\n", rt.Spec.RuntimeName, rt.Spec.Template, rt.Spec.WorkspaceDir, ports)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", rt.Spec.RuntimeName, rt.Spec.Template, rt.Spec.WorkspaceDir, ports)
 	}
+	_ = w.Flush()
+	fmt.Fprintln(os.Stdout)
+	writeImportCommands(os.Stdout)
 	return 0
 }
 
-func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
+func writeImportCommands(output io.Writer) {
+	w := newCLITable(output)
+	fmt.Fprintln(w, "COMMAND\tDESCRIPTION")
+	fmt.Fprintln(w, "gantry import <name>\tImport and start a discovered sandbox")
+	fmt.Fprintln(w, "gantry import <name> --dry-run\tPreview the resolved configuration without changing anything")
+	fmt.Fprintln(w, "gantry import <name> --as <new-name>\tImport under a different Gantry sandbox name")
+	fmt.Fprintln(w, "gantry import <name> --workspace-owner <owner>\tChoose auto, host, or UID:GID ownership")
+	fmt.Fprintln(w, "gantry import --help\tShow every flag and example")
+	_ = w.Flush()
+}
+
+func importDockerSandbox(root, name, as, logPath, workspaceOwner string, dryRun bool) int {
 	rtPath := filepath.Join(root, "runtimes", name+".json")
 	b, err := os.ReadFile(rtPath)
 	if err != nil {
@@ -126,9 +148,18 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 		return 1
 	}
+	if !dockerSourceQuiescent(ctr.State) {
+		fmt.Fprintf(os.Stderr, "gantry import: source sandbox %q is %s; stop it before importing its writable layer\n", name, ctr.State)
+		return 1
+	}
 	imgCfg, err := dockerImageConfig(sock, ctr.ID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry import: inspect: %v\n", err)
+		return 1
+	}
+	ownerSuffix, err := importedWorkspaceOwner(workspaceOwner, imgCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gantry import: --workspace-owner: %v\n", err)
 		return 1
 	}
 
@@ -142,7 +173,7 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 		return 1
 	}
-	ls, rwlayer, err := parseTaskRootfs(string(logText), ctr.ID)
+	ls, sourceRWLayer, err := parseTaskRootfs(string(logText), ctr.ID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 		return 1
@@ -151,6 +182,28 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 		return 1
 	}
+	// Probe and clone under an exclusive flock on the SOURCE rwlayer. The
+	// lock serializes us against other gantry attaches (our vblk layer
+	// takes the same lock); it cannot stop a non-cooperative writer, so
+	// the container state is re-checked right before the clone to narrow
+	// the window where the reference stack restarts mid-import.
+	sourceLock, err := gutil.TryLockFile(sourceRWLayer)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gantry import: source writable layer is locked by another gantry process: %v\n", err)
+		return 1
+	}
+	defer sourceLock.Close()
+	if info, err := gutil.ProbeExt4(sourceRWLayer); err != nil {
+		fmt.Fprintf(os.Stderr, "gantry import: writable layer: %v\n", err)
+		return 1
+	} else if info.State&gutil.Ext4StateError != 0 {
+		fmt.Fprintf(os.Stderr, "gantry import: source writable layer is damaged: %s (repair it offline before importing)\n", info.Diagnosis())
+		return 1
+	}
+	// Immutable EROFS layers are safe to share, but an ext4 writable layer
+	// is not. Point Gantry at its own clone so the source stack can restart
+	// safely and two runtimes can never attach the same mutable filesystem.
+	rwlayer := defaultRWLayerPath(gname)
 
 	// Published ports.
 	var ports []string
@@ -204,7 +257,7 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 
 	var shares []string
 	if rt.Spec.WorkspaceDir != "" {
-		shares = append(shares, "workspace="+rt.Spec.WorkspaceDir+"@"+rt.Spec.WorkspaceDir)
+		shares = append(shares, "workspace="+rt.Spec.WorkspaceDir+"@"+rt.Spec.WorkspaceDir+ownerSuffix)
 	}
 
 	cfg := RunConfig{
@@ -229,9 +282,67 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		return 0
 	}
 
-	fmt.Printf("gantry import: adopting %q: %d erofs layers + rwlayer %s\n", name, len(ls.Layers), filepath.Base(rwlayer))
+	// Last-moment state re-check: a source that restarted since the first
+	// lookup would be writing to the layer we are about to clone.
+	if ctr, err := dockerFindContainer(sock, name); err != nil {
+		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
+		return 1
+	} else if !dockerSourceQuiescent(ctr.State) {
+		fmt.Fprintf(os.Stderr, "gantry import: source sandbox %q became %s during import; stop it and retry\n", name, ctr.State)
+		return 1
+	}
+	if err := cloneImportedRWLayer(sourceRWLayer, rwlayer); err != nil {
+		fmt.Fprintf(os.Stderr, "gantry import: clone writable layer: %v\n", err)
+		return 1
+	}
+	writeRWLayerPairing(rwlayer, cfg.imageIdentity())
+
+	fmt.Printf("gantry import: adopting %q: %d shared erofs layers + private rwlayer %s\n", name, len(ls.Layers), filepath.Base(rwlayer))
 	if len(ports) > 0 {
 		fmt.Printf("gantry import: publishing %s\n", strings.Join(ports, ", "))
 	}
 	return launchSandbox(gname, cfg, nil, true)
+}
+
+// importedWorkspaceOwner resolves the import-only ownership policy. "auto"
+// is deliberately conservative: only a resolved/non-root image user or an
+// explicit numeric user:group is trustworthy. Empty/root image users keep
+// literal host ownership; images that switch users later can opt in with the
+// flag instead of inheriting a guessed 1000:1000 mapping.
+func importedWorkspaceOwner(value string, cfg *image.Config) (string, error) {
+	switch value {
+	case "", "auto":
+		if cfg == nil || cfg.User == "" || cfg.User == "root" || cfg.User == "0" || cfg.User == "0:0" {
+			return "", nil
+		}
+		if cfg.UID != 0 && cfg.GID != 0 {
+			return fmt.Sprintf(",uid=%d,gid=%d", cfg.UID, cfg.GID), nil
+		}
+		u, g, ok := strings.Cut(cfg.User, ":")
+		if !ok {
+			return "", nil
+		}
+		uid, uerr := strconv.ParseUint(u, 10, 32)
+		gid, gerr := strconv.ParseUint(g, 10, 32)
+		if uerr == nil && gerr == nil {
+			return fmt.Sprintf(",uid=%d,gid=%d", uid, gid), nil
+		}
+		return "", nil
+	case "host":
+		return "", nil
+	default:
+		u, g, ok := strings.Cut(value, ":")
+		if !ok || u == "" || g == "" {
+			return "", fmt.Errorf("want auto, host, or UID:GID")
+		}
+		uid, err := strconv.ParseUint(u, 10, 32)
+		if err != nil {
+			return "", fmt.Errorf("invalid UID %q", u)
+		}
+		gid, err := strconv.ParseUint(g, 10, 32)
+		if err != nil {
+			return "", fmt.Errorf("invalid GID %q", g)
+		}
+		return fmt.Sprintf(",uid=%d,gid=%d", uid, gid), nil
+	}
 }

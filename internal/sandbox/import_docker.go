@@ -215,9 +215,10 @@ func dockerAPIClient(sockPath string) *http.Client {
 }
 
 type dockerContainerSummary struct {
-	ID     string   `json:"Id"`
-	Names  []string `json:"Names"`
-	Image  string   `json:"Image"`
+	ID     string            `json:"Id"`
+	Names  []string          `json:"Names"`
+	Image  string            `json:"Image"`
+	State  string            `json:"State"`
 	Labels map[string]string `json:"Labels"`
 }
 
@@ -300,4 +301,18 @@ func importedNetpol(rt *dockerRuntime) ([]byte, error) {
 		"default":      "allow",
 		"allowDomains": list,
 	}, "", "  ")
+}
+
+// dockerSourceQuiescent reports whether the source container's writable
+// layer is guaranteed unattached. Anything but a fully stopped container
+// (exited/created) can still write: a PAUSED guest is frozen with dirty
+// in-memory ext4 state, and restarting/running/removing/dead all imply an
+// active or uncertain attachment. Cloning in those states risks a torn
+// filesystem image.
+func dockerSourceQuiescent(state string) bool {
+	switch strings.ToLower(state) {
+	case "exited", "created":
+		return true
+	}
+	return false
 }

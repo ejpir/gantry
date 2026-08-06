@@ -1,12 +1,40 @@
 package sandbox
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestCloneImportedRWLayerIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	source := dir + "/source.ext4"
+	destination := dir + "/gantry/private.ext4"
+	want := bytes.Repeat([]byte("rwlayer"), 1024)
+	if err := os.WriteFile(source, want, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := cloneImportedRWLayer(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("writing the imported layer changed its source")
+	}
+	if err := cloneImportedRWLayer(source, destination); err == nil {
+		t.Fatal("second clone should not overwrite a persistent layer")
+	}
+}
 
 // taskLogLine renders a daemon.log line the way the reference daemon
 // writes it: a JSON object whose msg field carries a Go-quoted rootfs
@@ -113,10 +141,72 @@ func TestParseDockerRuntime(t *testing.T) {
 	}
 }
 
+func TestWriteImportCommands(t *testing.T) {
+	var output bytes.Buffer
+	writeImportCommands(&output)
+	got := output.String()
+	for _, want := range []string{
+		"COMMAND", "DESCRIPTION",
+		"gantry import <name>",
+		"gantry import <name> --dry-run",
+		"gantry import <name> --as <new-name>",
+		"gantry import <name> --workspace-owner <owner>",
+		"gantry import --help",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("import command help missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestDockerPortsAttributionHash(t *testing.T) {
 	// The ports file is named sha256(<runtime name>) — verified against
 	// the reference store layout.
 	if got := sha256Hex("codex-dev"); got != "ab13da902099dbed35e60c72f6188522d324d576a1e88c3b5ebb0549aedc0c2a" {
 		t.Fatalf("sha256(codex-dev) = %s", got)
+	}
+}
+
+func TestImportedWorkspaceOwner(t *testing.T) {
+	if got, err := importedWorkspaceOwner("auto", nil); err != nil || got != "" {
+		t.Fatalf("root/default auto owner = %q, %v", got, err)
+	}
+	if got, err := importedWorkspaceOwner("1000:1001", nil); err != nil || got != ",uid=1000,gid=1001" {
+		t.Fatalf("explicit owner = %q, %v", got, err)
+	}
+	if _, err := importedWorkspaceOwner("agent", nil); err == nil {
+		t.Fatal("named import owner was accepted")
+	}
+}
+
+func TestDockerSourceQuiescent(t *testing.T) {
+	// Only a fully stopped container has a guaranteed-unattached writable
+	// layer; paused keeps a frozen guest with dirty ext4 state attached.
+	for state, want := range map[string]bool{
+		"exited": true, "created": true, "Exited": true,
+		"running": false, "paused": false, "restarting": false,
+		"removing": false, "dead": false, "": false,
+	} {
+		if got := dockerSourceQuiescent(state); got != want {
+			t.Errorf("dockerSourceQuiescent(%q) = %v, want %v", state, got, want)
+		}
+	}
+}
+
+func TestContainerPathsOverlap(t *testing.T) {
+	hub := "/run/gantry/shares"
+	for target, want := range map[string]bool{
+		"/run/gantry/shares":      true,  // exact
+		"/run/gantry":             true,  // parent
+		"/run":                    true,  // grandparent
+		"/":                       true,  // root
+		"/run/gantry/shares/code": true,  // child
+		"/run/gantry/sharesx":     false, // prefix but not a path component
+		"/host/code":              false,
+		"/data":                   false,
+	} {
+		if got := containerPathsOverlap(target, hub); got != want {
+			t.Errorf("containerPathsOverlap(%q, hub) = %v, want %v", target, got, want)
+		}
 	}
 }
