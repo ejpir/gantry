@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,9 +30,16 @@ const (
 	testStride    = 0x10000
 )
 
-type irqRec struct{ raised map[int]bool }
+// irqRec records IRQ line callbacks. Devices raise IRQs from their own
+// goroutines (vsock pump, fs workers), so all access goes through the mutex.
+type irqRec struct {
+	mu     sync.Mutex
+	raised map[int]bool
+}
 
-func (r *irqRec) line(irq int, level bool) { r.raised[irq] = level }
+func (r *irqRec) line(irq int, level bool) { r.mu.Lock(); r.raised[irq] = level; r.mu.Unlock() }
+
+func (r *irqRec) isRaised(irq int) bool { r.mu.Lock(); defer r.mu.Unlock(); return r.raised[irq] }
 
 // setupQueue wires one virtqueue into fake RAM the way a driver would.
 func setupQueue(mem mem, core *Core, qn, num uint32) {
@@ -159,7 +167,7 @@ func TestVirtioBlkRead(t *testing.T) {
 			t.Fatalf("data[%d] = %d, want 2", i, got[i])
 		}
 	}
-	if !irqs.raised[MMIOIRQArm64] {
+	if !irqs.isRaised(MMIOIRQArm64) {
 		t.Fatal("IRQ not raised")
 	}
 	// driver ACKs -> interrupt status register clears (line itself is
@@ -467,7 +475,7 @@ func TestVirtioFSTransport(t *testing.T) {
 	if string(got) != "payload!" {
 		t.Fatalf("response payload = %q", got)
 	}
-	if !irqs.raised[MMIOIRQArm64] {
+	if !irqs.isRaised(MMIOIRQArm64) {
 		t.Fatal("virtio-fs IRQ not raised")
 	}
 }
@@ -597,7 +605,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 			t.Fatalf("virtio net header byte %d = %#x", i, b)
 		}
 	}
-	if !irqs.raised[MMIOIRQArm64] {
+	if !irqs.isRaised(MMIOIRQArm64) {
 		t.Fatal("net IRQ not raised")
 	}
 }
@@ -734,7 +742,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	if rw.op != vsockOpRW || rw.dstCID != 3 || rw.dstPort != 1111 {
 		t.Fatalf("bad RW header: %+v", rw)
 	}
-	if !irqs.raised[MMIOIRQArm64+1] {
+	if !irqs.isRaised(MMIOIRQArm64 + 1) {
 		t.Fatal("vsock IRQ not raised")
 	}
 }
