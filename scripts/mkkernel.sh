@@ -145,7 +145,15 @@ yes "" | make ARCH=$KARCH olddefconfig >/dev/null
 verify_kernel_hardening
 
 echo "== building $ARCH $TARGET ($PAGES pages, hardened)"
-make ARCH=$KARCH -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" "$TARGET"
+# ccache passthrough: CI exports CC/HOSTCC='ccache gcc' and caches the
+# small ~/.ccache instead of the multi-GB build tree (which blows the
+# 2 GB cache-entry limit on arm64, where two configs build in one tree).
+# Values contain a space, so build the argument list with set -- rather
+# than a word-split string (which would hand kbuild a bogus 'gcc' target).
+set --
+[ -n "${CC:-}" ] && set -- "$@" "CC=$CC"
+[ -n "${HOSTCC:-}" ] && set -- "$@" "HOSTCC=$HOSTCC"
+make ARCH=$KARCH "$@" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" "$TARGET"
 cp "$RESULT" "$OUT"
 # the artifact must match the requested arch even when cross-building:
 # arm64 Image carries "ARM\x64" at 0x38, x86-64 vmlinux is an ELF with

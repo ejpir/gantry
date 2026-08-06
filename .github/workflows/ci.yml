@@ -104,8 +104,10 @@ jobs:
   # Gantry's own hardened guest kernels (scripts/mkkernel.sh). These are
   # what the CLI downloads from the release page on first start, and what
   # the native smoke test boots. arm64 builds both the 16K default and the
-  # 4K runsc twin; x86_64 is 4K-only. The build tree cache makes pushes
-  # that don't touch kernel inputs incremental.
+  # 4K runsc twin; x86_64 is 4K-only. Caching: the source tarball plus a
+  # ccache directory — the full build tree is too big for the 2 GB
+  # cache-entry limit on arm64 (two configs in one tree), and a job that
+  # overruns its timeout never reaches the post-job cache save at all.
   # Keep /tmp/linux-VERSION paths in sync with VERSION in scripts/mkkernel.sh.
   kernels:
     name: kernel/${{ matrix.arch }}
@@ -116,27 +118,32 @@ jobs:
           - { arch: arm64, os: ubuntu-24.04-arm }
           - { arch: x86_64, os: ubuntu-latest }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: install build deps
-        run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3 libelf-dev libssl-dev
-      - name: cache kernel tree
+        run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3 libelf-dev libssl-dev ccache
+      - name: cache kernel inputs
         uses: actions/cache@v4
         with:
           path: |
             /tmp/linux-7.0.12.tar.xz
-            /tmp/linux-7.0.12-build-${{ matrix.arch }}
-          key: kernel-7.0.12-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
+            ~/.ccache
+          key: kernel-ccache-7.0.12-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
+          restore-keys: |
+            kernel-ccache-7.0.12-${{ matrix.arch }}-
       - name: build kernels
         shell: bash
         run: |
           set -eu
           export GANTRY_ARTIFACTS="$RUNNER_TEMP/kernels"
+          export CC="ccache gcc" HOSTCC="ccache gcc"
+          ccache -M 1G
           ./scripts/mkkernel.sh ${{ matrix.arch }}
           if [ "${{ matrix.arch }}" = arm64 ]; then
             PAGES=4k ./scripts/mkkernel.sh arm64
           fi
+          ccache -s
           ls -lh "$RUNNER_TEMP/kernels"
       - uses: actions/upload-artifact@v4
         with:
