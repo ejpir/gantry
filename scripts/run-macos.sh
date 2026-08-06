@@ -128,7 +128,7 @@ case "$1" in
     shift
     exec "$BIN" exec "$@"
     ;;
-  start|stop|ls|delete)
+  start|stop|resume|ls|delete|import)
     exec "$BIN" "$@"
     ;;
   *)

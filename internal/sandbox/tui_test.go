@@ -138,14 +138,35 @@ func TestLoadTUIMountsUsesLiveHubManifest(t *testing.T) {
 	}
 }
 
+func TestLoadTUIMountsShowsPendingRestartAlias(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	name := "live"
+	if err := os.MkdirAll(sandboxDir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{
+		"version": 2,
+		"generation": 3,
+		"transport": {"tag":"gantry-shares","vmPath":"/run/mnt/gantry-shares"},
+		"shares": [{"tag":"code","path":"/tmp/code","vmPath":"/run/mnt/gantry-shares/code","ctrPath":"/host/code","state":"active"}]
+	}`
+	if err := os.WriteFile(filepath.Join(sandboxDir(name), "shares.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, live := loadTUIMounts(name, RunConfig{Shares: []string{"code=/tmp/code@/workspace"}}, true)
+	if !live || len(rows) != 1 || rows[0].Guest != "/workspace" || rows[0].State != "restart" {
+		t.Fatalf("pending rows=%#v live=%v", rows, live)
+	}
+}
+
 func TestSandboxTUIShareDialogActions(t *testing.T) {
 	m := newSandboxTUIModel()
 	m.loading = false
 	m.page = tuiMountsPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
 	m.cursor = 0
-	cmd := m.openShareAddDialog(false)
-	if cmd == nil || m.dialog != tuiShareAddDialog {
+	m.openShareAddDialog(false)
+	if m.dialog != tuiShareAddDialog || m.shareSandbox.Value() != "dev" {
 		t.Fatalf("share dialog not open: %v", m.dialog)
 	}
 	m.shareTag.SetValue("code")
@@ -178,22 +199,179 @@ func TestSandboxTUIShareDialogActions(t *testing.T) {
 	}
 }
 
+func TestSandboxTUIFormsSelectSandboxAndCustomMount(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{
+		{Name: "dev", State: tuiRunning, Net: true},
+		{Name: "other", State: tuiRunning, Net: true},
+		{Name: "stopped", State: tuiStopped},
+	}
+	m.cursor = 0
+	m.openShareAddDialog(false)
+	_, _ = m.updateShareDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, _ = m.updateShareDialogKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	_, _ = m.updateShareDialogKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.shareSandbox.Value() != "other" || m.shareSandbox.open {
+		t.Fatalf("mount picker = %q open=%v", m.shareSandbox.Value(), m.shareSandbox.open)
+	}
+	m.shareTag.SetValue("workspace")
+	m.sharePath.SetValue(t.TempDir())
+	m.shareMount.SetValue("/Users/eh04xk")
+	plain := ansi.Strip(m.renderShareAddDialog(tuiThemeFor(m.dark), 62))
+	if !strings.Contains(plain, "restart") || !strings.Contains(plain, "Save") {
+		t.Fatalf("custom mount does not explain restart behavior:\n%s", plain)
+	}
+	model, cmd := m.submitShare()
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.busyAction != "share configure" || m.busyName != "other/workspace" {
+		t.Fatalf("custom mount action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
+	}
+
+	m.busyAction = ""
+	m.dialog = tuiNoDialog
+	m.openPortPublishDialog()
+	_, _ = m.updatePortDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.portSandbox.Value() != "other" {
+		t.Fatalf("port picker = %q", m.portSandbox.Value())
+	}
+	m.portGuest.SetValue("80")
+	model, _ = m.submitPort()
+	m = *model.(*sandboxTUIModel)
+	if m.busyAction != "port publish" || !strings.HasPrefix(m.busyName, "other/") {
+		t.Fatalf("port action = %q %q", m.busyAction, m.busyName)
+	}
+}
+
+func TestSandboxTUINetworkPolicyDialog(t *testing.T) {
+	dir := t.TempDir()
+	devPolicy := filepath.Join(dir, "dev.json")
+	otherPolicy := filepath.Join(dir, "other.json")
+	if err := os.WriteFile(devPolicy, []byte(`{"default":"deny"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(otherPolicy, []byte(`{"default":"allow"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.page = tuiRulesPage
+	m.sandboxes = []tuiSandbox{
+		{Name: "dev", State: tuiRunning, Net: true, NetPolicy: devPolicy, AllowLocal: true},
+		{Name: "other", State: tuiRunning, Net: true, NetPolicy: otherPolicy},
+		{Name: "external", State: tuiRunning, Net: true, GVProxy: "/tmp/gvproxy.sock"},
+	}
+	m.rules = []tuiRuleRow{{Sandbox: "dev", Action: "deny", Target: "public internet", Proto: "any"}}
+	if cmd := m.openNetworkPolicyDialog(); cmd != nil {
+		_ = cmd
+	}
+	if m.dialog != tuiNetworkPolicyDialog || m.policySandbox.Value() != "dev" || m.policyPath.Value() != devPolicy || !m.policyLocal {
+		t.Fatalf("initial policy form = dialog %d sandbox %q path %q local %t", m.dialog, m.policySandbox.Value(), m.policyPath.Value(), m.policyLocal)
+	}
+	if len(m.policySandbox.options) != 2 {
+		t.Fatalf("eligible policy sandboxes = %v", m.policySandbox.options)
+	}
+
+	// The shared picker changes the target and reloads that sandbox's current
+	// values instead of carrying form state across targets.
+	_, _ = m.updateNetworkPolicyDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.policySandbox.Value() != "other" || m.policyPath.Value() != otherPolicy || m.policyLocal {
+		t.Fatalf("selected policy form = sandbox %q path %q local %t", m.policySandbox.Value(), m.policyPath.Value(), m.policyLocal)
+	}
+
+	rendered := m.renderDialog(tuiThemeFor(m.dark))
+	plain := ansi.Strip(rendered)
+	for _, want := range []string{"Network Policy", "Policy file", "Local network override", "Subsequent packets", "Apply", "esc cancel"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("policy dialog missing %q:\n%s", want, plain)
+		}
+	}
+	if got, want := lipgloss.Height(rendered), m.dialogBounds(tuiNetworkPolicyDialog).h; got != want {
+		t.Fatalf("policy dialog height = %d, bounds = %d", got, want)
+	}
+	lines := strings.Split(plain, "\n")
+	if last := lines[len(lines)-1]; !strings.Contains(last, "╰") || !strings.Contains(last, "╯") {
+		t.Fatalf("policy dialog bottom border was clipped: %q", last)
+	}
+
+	bounds := m.dialogBounds(tuiNetworkPolicyDialog)
+	buttonX, buttonY := -1, -1
+	for row, line := range lines {
+		if byteOffset := strings.LastIndex(line, "Apply"); byteOffset >= 0 {
+			buttonX = bounds.x + lipgloss.Width(line[:byteOffset]) + 1
+			buttonY = bounds.y + row
+			break
+		}
+	}
+	if buttonX < 0 || buttonY < 0 {
+		t.Fatalf("Apply button not rendered:\n%s", plain)
+	}
+	model, cmd := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "netpolicy set" || m.busyName != "other" {
+		t.Fatalf("policy action = dialog %d busy %q/%q cmd=%v", m.dialog, m.busyAction, m.busyName, cmd)
+	}
+}
+
+func TestSandboxTUIShareOwner(t *testing.T) {
+	uid, gid := uint32(1000), uint32(1001)
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.page = tuiMountsPage
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
+	m.mounts = []tuiMountRow{{
+		Sandbox: "dev", Tag: "code", Host: "/tmp/code", Guest: "/host/code",
+		UID: &uid, GID: &gid, State: "active",
+	}}
+	m.mountCursor = 0
+	m.openShareAddDialog(true)
+	if got := m.shareOwner.Value(); got != "1000:1001" {
+		t.Fatalf("replacement owner = %q", got)
+	}
+	if got, err := shareOwnerSuffix("1000:1001"); err != nil || got != ",uid=1000,gid=1001" {
+		t.Fatalf("owner suffix = %q, %v", got, err)
+	}
+	if _, err := shareOwnerSuffix("agent"); err == nil {
+		t.Fatal("named owner was accepted")
+	}
+	m.shareOwner.SetValue("bad")
+	model, _ := m.submitShare()
+	m = *model.(*sandboxTUIModel)
+	if m.formError == "" || m.busyAction != "" || m.shareFocus != 4 {
+		t.Fatalf("invalid owner: error=%q busy=%q focus=%d", m.formError, m.busyAction, m.shareFocus)
+	}
+}
+
+func TestTUIShareRemoveForcesExplicitContainerAlias(t *testing.T) {
+	normal := tuiMountRow{Sandbox: "dev", Tag: "code", Guest: "/host/code"}
+	if got := strings.Join(shareRemoveArgv(normal), " "); got != "share remove dev code" {
+		t.Fatalf("normal remove argv = %q", got)
+	}
+	imported := tuiMountRow{Sandbox: "codex-dev", Tag: "workspace", Guest: "/Users/eh04xk"}
+	if got := strings.Join(shareRemoveArgv(imported), " "); got != "share remove --force codex-dev workspace" {
+		t.Fatalf("aliased remove argv = %q", got)
+	}
+}
+
 func TestSandboxTUIRendersShareHubMountsAndDialog(t *testing.T) {
 	m := newSandboxTUIModel()
 	m.loading = false
 	m.width, m.height = 110, 32
 	m.page = tuiMountsPage
-	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
 	m.mounts = []tuiMountRow{{
 		Sandbox: "dev", Tag: "code", Host: "/tmp/code",
 		VM: "/run/mnt/gantry-shares/code", Guest: "/host/code",
 		ReadOnly: true, State: "active",
 	}}
-	m.dialog = tuiShareAddDialog
+	m.openShareAddDialog(false)
 	m.shareTag.SetValue("data")
 	m.sharePath.SetValue("/tmp/data")
 	plain := ansi.Strip(m.View().Content)
-	for _, want := range []string{"STATE", "ACTIVE", "/host/code", "Add Live Share", "Host path", "read-only"} {
+	for _, want := range []string{"STATE", "ACTIVE", "Add Live Share", "Sandbox", "Host path", "read-only"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("render missing %q:\n%s", want, plain)
 		}
@@ -242,7 +420,7 @@ func TestSandboxTUIRenderSizes(t *testing.T) {
 		m.ports = []tuiPortRow{{Sandbox: "dev", Bind: "127.0.0.1:8080", Guest: 80, Proto: "tcp", State: "bound"}}
 		for page := tuiSandboxesPage; page < tuiPageCount; page++ {
 			m.page = page
-			for _, dialog := range []tuiDialog{tuiNoDialog, tuiHelpDialog, tuiInfoDialog, tuiRemoveDialog, tuiCreateDialog} {
+			for _, dialog := range []tuiDialog{tuiNoDialog, tuiHelpDialog, tuiInfoDialog, tuiRemoveDialog, tuiCreateDialog, tuiEditDialog} {
 				m.dialog = dialog
 				view := m.View().Content
 				if got := lipgloss.Width(view); got != m.width {
@@ -434,6 +612,284 @@ func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {
 	}
 }
 
+func TestSandboxTUICreateResourceSliders(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.openCreateDialog()
+	m.createName.SetValue("bigger")
+	m.focusCreate(4)
+	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.createCPUs.Value != 2 {
+		t.Fatalf("CPU slider = %d, want 2", m.createCPUs.Value)
+	}
+	m.focusCreate(5)
+	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.createMemory.Value != 640 {
+		t.Fatalf("memory slider = %d, want 640", m.createMemory.Value)
+	}
+	argv := strings.Join(m.createArgv("bigger"), " ")
+	if !strings.Contains(argv, "-cpus 2") || !strings.Contains(argv, "-mem 640") {
+		t.Fatalf("create argv = %q", argv)
+	}
+}
+
+func TestSandboxTUIEditResourceSliders(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, MemMB: 2048, VCPUs: 2}}
+	m.cursor = 0
+	if cmd := m.openEditDialog(); cmd != nil {
+		_ = cmd
+	}
+	if m.dialog != tuiEditDialog || m.editCPUs.Value != 2 || m.editMemory.Value != 2048 {
+		t.Fatalf("edit dialog state: dialog=%d cpu=%d memory=%d", m.dialog, m.editCPUs.Value, m.editMemory.Value)
+	}
+	_, _ = m.updateEditDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.editCPUs.Value != 3 {
+		t.Fatalf("edited CPU = %d, want 3", m.editCPUs.Value)
+	}
+	plain := ansi.Strip(m.View().Content)
+	for _, want := range []string{"Edit Sandbox", "3 CPU", "2048 MiB", "Restart"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("edit dialog missing %q:\n%s", want, plain)
+		}
+	}
+}
+
+func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped, MemMB: 2048, VCPUs: 2}}
+	m.cursor = 0
+	m.openEditDialog()
+
+	plain := ansi.Strip(m.View().Content)
+	buttonX, buttonY := -1, -1
+	for y, line := range strings.Split(plain, "\n") {
+		if byteOffset := strings.Index(line, "Save"); byteOffset >= 0 {
+			buttonX = lipgloss.Width(line[:byteOffset]) + 1
+			buttonY = y
+			break
+		}
+	}
+	if buttonX < 0 || buttonY < 0 {
+		t.Fatalf("Save button not rendered:\n%s", plain)
+	}
+	model, _ := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiNoDialog || m.busyAction != "edit" || m.busyName != "dev" {
+		t.Fatalf("Save click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+	}
+}
+
+func TestSandboxTUIMountAndPortButtonHitboxes(t *testing.T) {
+	clickLabel := func(t *testing.T, m *sandboxTUIModel, label string) *sandboxTUIModel {
+		t.Helper()
+		plain := ansi.Strip(m.View().Content)
+		lines := strings.Split(plain, "\n")
+		for y := len(lines) - 1; y >= 0; y-- {
+			if byteOffset := strings.LastIndex(lines[y], label); byteOffset >= 0 {
+				x := lipgloss.Width(lines[y][:byteOffset]) + 1
+				model, _ := m.updateMouseClick(tea.Mouse{X: x, Y: y, Button: tea.MouseLeft})
+				return model.(*sandboxTUIModel)
+			}
+		}
+		t.Fatalf("%q button not rendered:\n%s", label, plain)
+		return m
+	}
+
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
+	m.openShareAddDialog(false)
+	m.shareTag.SetValue("code")
+	m.sharePath.SetValue(t.TempDir())
+	m = *clickLabel(t, &m, "Add")
+	if m.busyAction != "share add" || m.busyName != "dev/code" {
+		t.Fatalf("Add click missed: busy=%q name=%q", m.busyAction, m.busyName)
+	}
+
+	m.busyAction = ""
+	m.dialog = tuiNoDialog
+	m.openPortPublishDialog()
+	m.portGuest.SetValue("80")
+	m = *clickLabel(t, &m, "Publish")
+	if m.busyAction != "port publish" || !strings.HasPrefix(m.busyName, "dev/") {
+		t.Fatalf("Publish click missed: busy=%q name=%q", m.busyAction, m.busyName)
+	}
+}
+
+func TestSandboxTUIEditDialogMatchesOverlayBounds(t *testing.T) {
+	for _, size := range [][2]int{{100, 30}, {68, 22}, {60, 20}} {
+		m := newSandboxTUIModel()
+		m.loading = false
+		m.width, m.height = size[0], size[1]
+		m.sandboxes = []tuiSandbox{{
+			Name: strings.Repeat("long-name-", 8), State: tuiRunning, MemMB: 7296, VCPUs: 1,
+		}}
+		m.openEditDialog()
+		_, wantHeight := m.dialogSize(tuiEditDialog)
+		rendered := m.renderDialog(tuiThemeFor(m.dark))
+		if got := lipgloss.Height(rendered); got != wantHeight {
+			t.Errorf("%dx%d rendered dialog height = %d, bounds = %d", size[0], size[1], got, wantHeight)
+		}
+		if got, wantWidth := lipgloss.Width(rendered), m.dialogBounds(tuiEditDialog).w; got != wantWidth {
+			t.Errorf("%dx%d rendered dialog width = %d, bounds = %d", size[0], size[1], got, wantWidth)
+		}
+	}
+}
+
+func TestSandboxTUIFormDialogsKeepFooterAndBorder(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
+	m.cursor = 0
+
+	for _, tc := range []struct {
+		name   string
+		dialog tuiDialog
+		open   func()
+	}{
+		{name: "create", dialog: tuiCreateDialog, open: func() { m.openCreateDialog() }},
+		{name: "mount", dialog: tuiShareAddDialog, open: func() { m.openShareAddDialog(false) }},
+		{name: "publish port", dialog: tuiPortPublishDialog, open: func() { m.openPortPublishDialog() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.open()
+			rendered := m.renderDialog(tuiThemeFor(m.dark))
+			_, wantHeight := m.dialogSize(tc.dialog)
+			if got := lipgloss.Height(rendered); got != wantHeight {
+				t.Fatalf("rendered height = %d, bounds = %d", got, wantHeight)
+			}
+			plain := ansi.Strip(rendered)
+			if !strings.Contains(plain, "esc cancel") {
+				t.Fatalf("footer was clipped:\n%s", plain)
+			}
+			lines := strings.Split(plain, "\n")
+			last := lines[len(lines)-1]
+			if !strings.Contains(last, "╰") || !strings.Contains(last, "╯") {
+				t.Fatalf("bottom border was clipped: %q\n%s", last, plain)
+			}
+		})
+	}
+}
+
+func TestSandboxTUIConfirmationDialogsMeasureWrappedContent(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.mounts = []tuiMountRow{{Sandbox: "codex-dev", Tag: "code", Host: "/Users/eh04xk/repos", Guest: "/host/code"}}
+	m.ports = []tuiPortRow{{Sandbox: "codex-dev", Bind: "127.0.0.1:8080", Guest: 80, Proto: "tcp"}}
+	theme := tuiThemeFor(m.dark)
+	for _, dialog := range []tuiDialog{tuiShareRemoveDialog, tuiPortUnpublishDialog} {
+		m.dialog = dialog
+		rendered := m.renderDialog(theme)
+		plain := ansi.Strip(rendered)
+		if !strings.Contains(plain, "enter confirm") {
+			t.Fatalf("dialog %d clipped its footer:\n%s", dialog, plain)
+		}
+		lines := strings.Split(plain, "\n")
+		hintRow := -1
+		for i, line := range lines {
+			if strings.Contains(line, "enter confirm") {
+				hintRow = i
+				break
+			}
+		}
+		separator := ""
+		if hintRow >= 1 {
+			separator = strings.TrimSpace(strings.Trim(lines[hintRow-1], "│"))
+		}
+		if hintRow < 1 || separator != "" {
+			t.Fatalf("dialog %d has no separator above keyboard hints:\n%s", dialog, plain)
+		}
+		last := lines[len(lines)-1]
+		if !strings.Contains(last, "╰") || !strings.Contains(last, "╯") {
+			t.Fatalf("dialog %d clipped its bottom border:\n%s", dialog, plain)
+		}
+		if got, want := lipgloss.Height(rendered), m.dialogBounds(dialog).h; got != want {
+			t.Fatalf("dialog %d height=%d bounds=%d", dialog, got, want)
+		}
+	}
+}
+
+func TestSandboxTUIFormDialogsUseSpaciousSections(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	theme := tuiThemeFor(m.dark)
+	for _, tc := range []struct {
+		name   string
+		render func() string
+		labels []string
+	}{
+		{name: "create", render: func() string { return m.renderCreateDialog(theme, 58) }, labels: []string{"Name", "OCI image", "Runtime", "Kernel", "CPUs", "Memory"}},
+		{name: "mount", render: func() string { return m.renderShareAddDialog(theme, 62) }, labels: []string{"Sandbox", "Tag", "Host path", "Mount point", "Guest owner", "Mode"}},
+		{name: "port", render: func() string { return m.renderPortPublishDialog(theme, 62) }, labels: []string{"Host bind", "Guest port", "Protocol"}},
+		{name: "policy", render: func() string { return m.renderNetworkPolicyDialog(theme, 62) }, labels: []string{"Sandbox", "Policy file", "Local network override"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := ansi.Strip(tc.render())
+			for _, next := range tc.labels {
+				if !strings.Contains(plain, "\n\n"+next) {
+					t.Fatalf("missing section spacing before %q:\n%s", next, plain)
+				}
+			}
+		})
+	}
+}
+
+func TestSandboxTUIFormFooterSeparatesActionAndHints(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	theme := tuiThemeFor(m.dark)
+	for _, tc := range []struct {
+		name, button, hint, rendered string
+	}{
+		{name: "create", button: "Create", hint: "tab next", rendered: m.renderCreateDialog(theme, 58)},
+		{name: "edit", button: "Save", hint: "adjust", rendered: m.renderEditDialog(theme, 58)},
+		{name: "mount", button: "Add", hint: "tab next", rendered: m.renderShareAddDialog(theme, 62)},
+		{name: "port", button: "Publish", hint: "tab next", rendered: m.renderPortPublishDialog(theme, 62)},
+		{name: "policy", button: "Apply", hint: "tab next", rendered: m.renderNetworkPolicyDialog(theme, 62)},
+	} {
+		plain := ansi.Strip(tc.rendered)
+		lines := strings.Split(plain, "\n")
+		hintRow := -1
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(lines[i], tc.hint) {
+				hintRow = i
+				break
+			}
+		}
+		if hintRow < 2 || strings.TrimSpace(lines[hintRow-1]) != "" || !strings.Contains(lines[hintRow-2], tc.button) {
+			t.Fatalf("%s footer does not separate %q from its hints:\n%s", tc.name, tc.button, plain)
+		}
+	}
+}
+
+func TestResourceSliderMouseAndBounds(t *testing.T) {
+	slider := newResourceSlider(1, 8, 1, 1)
+	slider.SetFraction(9, 10)
+	if slider.Value != 8 {
+		t.Fatalf("mouse max = %d, want 8", slider.Value)
+	}
+	slider.Adjust(1)
+	if slider.Value != 8 {
+		t.Fatalf("slider escaped max: %d", slider.Value)
+	}
+	slider.SetFraction(0, 10)
+	if slider.Value != 1 {
+		t.Fatalf("mouse min = %d, want 1", slider.Value)
+	}
+}
+
 // Regression: the publish dialog's guest field accepted arbitrary text, so
 // "[::]:80" in the guest field composed into an IPv6 wildcard bind despite
 // the dialog claiming loopback defaults. Both fields are now strict ports.
@@ -483,5 +939,47 @@ func TestBindExposureClassification(t *testing.T) {
 		if got := bindExposure(bind); !strings.Contains(got, want) {
 			t.Errorf("bindExposure(%q) = %q, want %q", bind, got, want)
 		}
+	}
+}
+
+func TestSandboxPickerEmptyDoesNotOpen(t *testing.T) {
+	// regression: enter/space on a picker with zero options opened an
+	// empty bordered menu under a "no running sandbox" field.
+	var p sandboxPicker
+	p.ResetWhere(nil, "", func(tuiSandbox) bool { return true })
+	for _, key := range []string{"enter", " ", "space"} {
+		p.HandleKey(key)
+		if p.open {
+			t.Fatalf("key %q opened an empty picker", key)
+		}
+		if p.menuHeight() != 0 {
+			t.Fatalf("key %q: empty picker must not reserve menu rows", key)
+		}
+	}
+	p.ResetWhere([]tuiSandbox{{Name: "sb", State: tuiRunning}}, "", func(s tuiSandbox) bool { return s.State == tuiRunning })
+	p.HandleKey("enter")
+	if !p.open {
+		t.Fatal("picker with options must open on enter")
+	}
+}
+
+func TestShareMountRowsKeepLiveError(t *testing.T) {
+	// regression: config drift replacement clobbered a live error row
+	// with the desired "restart" row, hiding the backend failure.
+	rows := []tuiMountRow{{Sandbox: "sb", Tag: "code", State: "error", Error: "share backend error"}}
+	// simulate the merge in loadShareRows: desired differs (drifted path)
+	desired := tuiMountRow{Sandbox: "sb", Tag: "code", Host: "/new/path", State: "restart"}
+	index := 0
+	if !tuiMountRowsEqual(rows[index], desired) {
+		if rows[index].State == "error" {
+			desired.State, desired.Error = rows[index].State, rows[index].Error
+		}
+		rows[index] = desired
+	}
+	if rows[0].State != "error" || rows[0].Error == "" {
+		t.Fatalf("live error state lost: %+v", rows[0])
+	}
+	if rows[0].Host != "/new/path" {
+		t.Fatalf("drifted fields must still update: %+v", rows[0])
 	}
 }

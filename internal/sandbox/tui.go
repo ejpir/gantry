@@ -12,6 +12,7 @@ import (
 
 	"gantry/internal/netpol"
 	"gantry/internal/shares"
+	"gantry/internal/vmm"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -68,6 +69,9 @@ type tuiSandbox struct {
 	SecretCount      int
 	RW               bool
 	Net              bool
+	GVProxy          string
+	NetPolicy        string
+	AllowLocal       bool
 	Shares           int
 	MemMB            uint
 	VCPUs            int
@@ -114,6 +118,8 @@ type tuiMountRow struct {
 	VM       string
 	Guest    string
 	ReadOnly bool
+	UID      *uint32
+	GID      *uint32
 	State    string
 	Error    string
 }
@@ -135,10 +141,12 @@ const (
 	tuiInfoDialog
 	tuiRemoveDialog
 	tuiCreateDialog
+	tuiEditDialog
 	tuiShareAddDialog
 	tuiShareRemoveDialog
 	tuiPortPublishDialog
 	tuiPortUnpublishDialog
+	tuiNetworkPolicyDialog
 )
 
 type tuiToastKind uint8
@@ -219,18 +227,31 @@ type sandboxTUIModel struct {
 	createFocus   int
 	createName    textinput.Model
 	createImage   textinput.Model
+	createCPUs    resourceSlider
+	createMemory  resourceSlider
 	createRuntime string   // "crun" (default) or "runsc"
 	createKernels []string // staged kernel paths; index 0 in the UI is "auto"
 	createKernel  int
+	editFocus     int
+	editCPUs      resourceSlider
+	editMemory    resourceSlider
 	shareFocus    int
+	shareSandbox  sandboxPicker
 	shareTag      textinput.Model
 	sharePath     textinput.Model
+	shareMount    textinput.Model
+	shareOwner    textinput.Model
 	shareRO       bool
 	shareReplace  bool
 	portFocus     int
+	portSandbox   sandboxPicker
 	portBind      textinput.Model
 	portGuest     textinput.Model
 	portUDP       bool
+	policyFocus   int
+	policySandbox sandboxPicker
+	policyPath    textinput.Model
+	policyLocal   bool
 	formError     string
 
 	lastClickIndex int
@@ -246,6 +267,10 @@ func newSandboxTUIModel() sandboxTUIModel {
 	image := textinput.New()
 	image.Placeholder = "blank uses Gantry's configured default"
 	image.Prompt = ""
+	createCPUs := newResourceSlider(1, maxSandboxVCPUs, 1, 1)
+	createMemory := newResourceSlider(128, 65536, 128, 512)
+	editCPUs := newResourceSlider(1, maxSandboxVCPUs, 1, 1)
+	editMemory := newResourceSlider(128, 65536, 128, 512)
 	shareTag := textinput.New()
 	shareTag.Placeholder = "code"
 	shareTag.CharLimit = 36
@@ -254,6 +279,14 @@ func newSandboxTUIModel() sandboxTUIModel {
 	sharePath.Placeholder = "/absolute/host/path"
 	sharePath.CharLimit = 4096
 	sharePath.Prompt = ""
+	shareMount := textinput.New()
+	shareMount.Placeholder = "/host/<tag> (default)"
+	shareMount.CharLimit = 4096
+	shareMount.Prompt = ""
+	shareOwner := textinput.New()
+	shareOwner.Placeholder = "host (or UID:GID, e.g. 1000:1000)"
+	shareOwner.CharLimit = 32
+	shareOwner.Prompt = ""
 	portBind := textinput.New()
 	portBind.Placeholder = "8080 (blank = auto, ip:port to widen)"
 	portBind.CharLimit = 64
@@ -262,6 +295,10 @@ func newSandboxTUIModel() sandboxTUIModel {
 	portGuest.Placeholder = "80"
 	portGuest.CharLimit = 8
 	portGuest.Prompt = ""
+	policyPath := textinput.New()
+	policyPath.Placeholder = "blank uses the built-in default"
+	policyPath.CharLimit = 4096
+	policyPath.Prompt = ""
 
 	m := sandboxTUIModel{
 		width:          100,
@@ -273,12 +310,19 @@ func newSandboxTUIModel() sandboxTUIModel {
 		animating:      true,
 		createName:     name,
 		createImage:    image,
+		createCPUs:     createCPUs,
+		createMemory:   createMemory,
 		createRuntime:  "crun",
+		editCPUs:       editCPUs,
+		editMemory:     editMemory,
 		shareTag:       shareTag,
 		sharePath:      sharePath,
+		shareMount:     shareMount,
+		shareOwner:     shareOwner,
 		shareRO:        true,
 		portBind:       portBind,
 		portGuest:      portGuest,
+		policyPath:     policyPath,
 		lastClickIndex: -1,
 	}
 	m.applyInputTheme()
@@ -411,6 +455,8 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 		title = actionTitle(msg.action) + " failed"
 		body = compactCommandError(msg.output, msg.err)
 		m.selectNext = ""
+	} else if (msg.action == "edit" || msg.action == "share configure" || msg.action == "netpolicy set") && msg.output != "" {
+		body = strings.TrimSpace(msg.output)
 	} else if msg.action == "open" {
 		// An interactive command that exits non-zero is useful information, but
 		// it should not make the dashboard itself look broken.
@@ -471,6 +517,12 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(refreshSandboxesCmd(), m.ensureAnimation())
 			}
 			return m, nil
+		}
+	}
+	if m.page == tuiRulesPage {
+		switch key {
+		case "e", "p":
+			return m, m.openNetworkPolicyDialog()
 		}
 	}
 	if m.page == tuiPortsPage {
@@ -580,6 +632,8 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.selected() != nil {
 			m.dialog = tuiInfoDialog
 		}
+	case "e":
+		return m, m.openEditDialog()
 	case "d", "delete", "x":
 		if selected := m.selected(); selected != nil {
 			m.dialog = tuiRemoveDialog
@@ -662,6 +716,38 @@ func runTUIProcessCmd(action, name string, argv []string, interactive bool) tea.
 	}
 }
 
+func saveSandboxResourcesCmd(name string, memMB uint, vcpus int, running bool) tea.Cmd {
+	return func() tea.Msg {
+		err := setSandboxResources(name, memMB, vcpus)
+		body := fmt.Sprintf("%d CPU · %d MiB RAM", vcpus, memMB)
+		if running {
+			body += " · restart to apply"
+		} else {
+			body += " · applies on next start"
+		}
+		return tuiProcessDoneMsg{action: "edit", name: name, output: body, err: err}
+	}
+}
+
+func setSandboxNetworkPolicyCmd(name, path string, allowLocal bool) tea.Cmd {
+	return func() tea.Msg {
+		entry, err := setSandboxNetworkPolicy(name, path, allowLocal)
+		body := entry.Description
+		if entry.Path == "" {
+			body = "built-in default · " + body
+		}
+		return tuiProcessDoneMsg{action: "netpolicy set", name: name, output: body, err: err}
+	}
+}
+
+func configureSandboxShareCmd(name, tag, spec, mountpoint string, replace bool) tea.Cmd {
+	return func() tea.Msg {
+		err := configureSandboxShare(name, spec, replace)
+		body := fmt.Sprintf("%s → %s · restart to apply", tag, mountpoint)
+		return tuiProcessDoneMsg{action: "share configure", name: name + "/" + tag, output: body, err: err}
+	}
+}
+
 func (m *sandboxTUIModel) needsAnimation() bool {
 	if m.loading || m.refreshVisible || m.busyAction != "" {
 		return true
@@ -710,6 +796,22 @@ func (m *sandboxTUIModel) selectedPort() *tuiPortRow {
 		return nil
 	}
 	return &m.ports[m.portCursor]
+}
+
+func (m *sandboxTUIModel) selectedRule() *tuiRuleRow {
+	if m.rulesCursor < 0 || m.rulesCursor >= len(m.rules) {
+		return nil
+	}
+	return &m.rules[m.rulesCursor]
+}
+
+func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
+	for i := range m.sandboxes {
+		if m.sandboxes[i].Name == name {
+			return &m.sandboxes[i]
+		}
+	}
+	return nil
 }
 
 func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
@@ -974,6 +1076,9 @@ func loadTUIData() (tuiData, error) {
 				sandbox.Runtime = safeUILine(cfg.Runtime)
 			}
 			sandbox.RW, sandbox.Net, sandbox.Shares = cfg.RW, cfg.Net, len(cfg.Shares)
+			sandbox.GVProxy = safeUILine(cfg.GVProxy)
+			sandbox.NetPolicy = safeUILine(cfg.NetPol)
+			sandbox.AllowLocal = cfg.AllowLN
 			if cfg.MemMB > 0 {
 				sandbox.MemMB = cfg.MemMB
 			}
@@ -1092,6 +1197,15 @@ func loadTUIRules(sandbox string, cfg RunConfig) []tuiRuleRow {
 }
 
 func loadTUIMounts(sandbox string, cfg RunConfig, running bool) ([]tuiMountRow, bool) {
+	parsed, parseErr := cfg.ParsedShares()
+	rowForConfigured := func(share vmm.Share, state string) tuiMountRow {
+		guest := configuredShareTarget(share)
+		return tuiMountRow{
+			Sandbox: sandbox, Tag: safeUILine(share.Tag), Host: safeUILine(share.Path),
+			VM: shares.HubVMPath + "/" + safeUILine(share.Tag), Guest: safeUILine(guest),
+			ReadOnly: share.RO, UID: share.UID, GID: share.GID, State: state,
+		}
+	}
 	if running {
 		if raw, err := os.ReadFile(filepath.Join(sandboxDir(sandbox), "shares.json")); err == nil {
 			var manifest shares.Manifest
@@ -1101,12 +1215,37 @@ func loadTUIMounts(sandbox string, cfg RunConfig, running bool) ([]tuiMountRow, 
 					row := tuiMountRow{
 						Sandbox: sandbox, Tag: safeUILine(entry.Tag), Host: safeUILine(entry.Path),
 						VM: safeUILine(entry.VMPath), Guest: safeUILine(entry.CtrPath),
-						ReadOnly: entry.RO, State: safeUILine(defaultShareState(entry.State)),
+						ReadOnly: entry.RO, UID: entry.UID, GID: entry.GID,
+						State: safeUILine(defaultShareState(entry.State)),
 					}
 					if row.State == "error" {
 						row.Error = "share backend error"
 					}
 					rows = append(rows, row)
+				}
+				if parseErr != nil {
+					rows = append(rows, tuiMountRow{Sandbox: sandbox, Tag: "invalid", Error: safeUILine(parseErr.Error())})
+					return rows, true
+				}
+				liveByTag := make(map[string]int, len(rows))
+				for i := range rows {
+					liveByTag[rows[i].Tag] = i
+				}
+				for _, configured := range parsed {
+					desired := rowForConfigured(configured, "restart")
+					if index, ok := liveByTag[desired.Tag]; ok {
+						if tuiMountRowsEqual(rows[index], desired) {
+							continue
+						}
+						// A live error state is health information, not drift:
+						// keep it instead of clobbering the row with "restart".
+						if rows[index].State == "error" {
+							desired.State, desired.Error = rows[index].State, rows[index].Error
+						}
+						rows[index] = desired
+						continue
+					}
+					rows = append(rows, desired)
 				}
 				return rows, true
 			}
@@ -1114,23 +1253,26 @@ func loadTUIMounts(sandbox string, cfg RunConfig, running bool) ([]tuiMountRow, 
 			return []tuiMountRow{{Sandbox: sandbox, Tag: "invalid", Error: safeUILine(err.Error())}}, true
 		}
 	}
-	parsed, err := cfg.ParsedShares()
-	if err != nil {
-		return []tuiMountRow{{Sandbox: sandbox, Tag: "invalid", Error: safeUILine(err.Error())}}, false
+	if parseErr != nil {
+		return []tuiMountRow{{Sandbox: sandbox, Tag: "invalid", Error: safeUILine(parseErr.Error())}}, false
 	}
 	rows := make([]tuiMountRow, 0, len(parsed))
 	for _, share := range parsed {
-		guest := share.CtrPath
-		if guest == "" {
-			guest = shares.HubHostPath + "/" + share.Tag
-		}
-		rows = append(rows, tuiMountRow{
-			Sandbox: sandbox, Tag: safeUILine(share.Tag), Host: safeUILine(share.Path),
-			VM: shares.HubVMPath + "/" + safeUILine(share.Tag), Guest: safeUILine(guest),
-			ReadOnly: share.RO, State: "saved",
-		})
+		rows = append(rows, rowForConfigured(share, "saved"))
 	}
 	return rows, false
+}
+
+func tuiMountRowsEqual(a, b tuiMountRow) bool {
+	return a.Tag == b.Tag && a.Host == b.Host && a.Guest == b.Guest && a.ReadOnly == b.ReadOnly &&
+		optionalUint32Equal(a.UID, b.UID) && optionalUint32Equal(a.GID, b.GID)
+}
+
+func optionalUint32Equal(a, b *uint32) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }
 
 // loadTUIPorts reads the publish set for one sandbox: the live bound/saved
@@ -1199,10 +1341,16 @@ func actionTitle(action string) string {
 		return "Replace share"
 	case "share remove":
 		return "Remove share"
+	case "share configure":
+		return "Save share"
 	case "port publish":
 		return "Publish port"
 	case "port unpublish":
 		return "Unpublish port"
+	case "edit":
+		return "Edit sandbox"
+	case "netpolicy set":
+		return "Apply network policy"
 	default:
 		return strings.Title(action) //nolint:staticcheck // action names are ASCII UI labels.
 	}
@@ -1226,10 +1374,16 @@ func actionPastTense(action string) string {
 		return "Share replaced"
 	case "share remove":
 		return "Share removed"
+	case "share configure":
+		return "Share saved"
 	case "port publish":
 		return "Port published"
 	case "port unpublish":
 		return "Port unpublished"
+	case "edit":
+		return "Sandbox updated"
+	case "netpolicy set":
+		return "Network policy applied"
 	default:
 		return actionTitle(action) + " complete"
 	}
