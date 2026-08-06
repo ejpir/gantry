@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"gantry/internal/shares"
+	"gantry/internal/vmm"
 )
 
 // ConfigStore is the single owner of sandbox.json for a running daemon.
@@ -74,6 +77,119 @@ func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 		return err
 	}
 	return nil
+}
+
+const maxSandboxVCPUs = 8
+
+// maxSandboxMemMB bounds the persisted allocation at 1 TiB: a stray extra
+// zero on the CLI should not write a value the VMM can never satisfy at
+// the next boot.
+const maxSandboxMemMB = 1 << 20
+
+func validateSandboxResources(memMB uint, vcpus int) error {
+	if memMB == 0 {
+		return fmt.Errorf("memory must be at least 1 MiB")
+	}
+	if memMB > maxSandboxMemMB {
+		return fmt.Errorf("memory must be at most %d MiB", maxSandboxMemMB)
+	}
+	if vcpus < 1 || vcpus > maxSandboxVCPUs {
+		return fmt.Errorf("CPUs must be between 1 and %d", maxSandboxVCPUs)
+	}
+	return nil
+}
+
+// SetResources persists the allocation used the next time the VM boots. A
+// running machine is intentionally not mutated in place; its broker owns this
+// store so the update cannot race live share or port configuration changes.
+func (s *ConfigStore) SetResources(memMB uint, vcpus int) error {
+	if err := validateSandboxResources(memMB, vcpus); err != nil {
+		return err
+	}
+	return s.Mutate(func(cfg *RunConfig) error {
+		cfg.MemMB = memMB
+		cfg.VCPUs = vcpus
+		return nil
+	})
+}
+
+func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {
+	return s.Mutate(func(cfg *RunConfig) error {
+		cfg.NetPol = path
+		cfg.AllowLN = allowLocal
+		return nil
+	})
+}
+
+// SetShareForRestart updates the desired share set without mutating the live
+// hub. It is used for explicit container aliases, which are OCI mounts created
+// when the sandbox container starts. Validation happens while this store owns
+// the configuration lock so a concurrent live share/port mutation cannot race
+// the replacement.
+func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (vmm.Share, error) {
+	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
+	if err != nil {
+		return vmm.Share{}, err
+	}
+	if !filepath.IsAbs(share.Path) {
+		return vmm.Share{}, fmt.Errorf("share path must be absolute (got %q)", share.Path)
+	}
+	share.Path, err = canonicalManagedPath(share.Path)
+	if err != nil {
+		return vmm.Share{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	backup := s.cfg
+	backup.Shares = append([]string(nil), s.cfg.Shares...)
+	backup.Ports = append([]string(nil), s.cfg.Ports...)
+
+	seen, found := map[string]bool{}, false
+	for _, raw := range s.cfg.Shares {
+		existing, parseErr := vmm.ParseShareSpec(raw, seen)
+		if parseErr != nil {
+			return vmm.Share{}, fmt.Errorf("bad configured share %q: %w", raw, parseErr)
+		}
+		seen[existing.Tag] = true
+		if existing.Tag == share.Tag {
+			found = true
+			continue
+		}
+		otherPath, pathErr := canonicalManagedPath(existing.Path)
+		if pathErr != nil {
+			return vmm.Share{}, fmt.Errorf("share %s: %w", existing.Tag, pathErr)
+		}
+		if pathsOverlap(share.Path, otherPath) {
+			return vmm.Share{}, fmt.Errorf("share %s overlaps share %s (%s)", share.Tag, existing.Tag, otherPath)
+		}
+		if configuredShareTarget(share) == configuredShareTarget(existing) {
+			return vmm.Share{}, fmt.Errorf("share tags %q and %q both target %s", existing.Tag, share.Tag, configuredShareTarget(share))
+		}
+	}
+	if found && !replace {
+		return vmm.Share{}, fmt.Errorf("share tag %q already exists (use replace)", share.Tag)
+	}
+	if !found && len(s.cfg.Shares) >= maxManagedShares {
+		return vmm.Share{}, fmt.Errorf("too many shares (max %d)", maxManagedShares)
+	}
+	if containerPathsOverlap(configuredShareTarget(share), shares.HubInternalPath) {
+		return vmm.Share{}, fmt.Errorf("share %s may not cover, sit under, or contain the internal hub path %s", share.Tag, shares.HubInternalPath)
+	}
+
+	s.cfg.Shares = shareSpecsReplacingTag(s.cfg.Shares, share.Tag, shareConfigSpec(share))
+	if err := s.writeLocked(); err != nil {
+		s.cfg = backup
+		return vmm.Share{}, err
+	}
+	return share, nil
+}
+
+func configuredShareTarget(share vmm.Share) string {
+	if share.CtrPath != "" {
+		return share.CtrPath
+	}
+	return defaultHubCtrPath(share.Tag)
 }
 
 func (s *ConfigStore) writeLocked() error {
