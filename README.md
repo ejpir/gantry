@@ -47,7 +47,7 @@ attestation — verify with
 ./gantry-linux-arm64 stop dev      # resume / delete work as expected
 
 # interactive dashboard (auto-starts in a terminal): cards, create/start/
-# stop/exec, and Traffic / Rules / Mounts views — tab or 1–4 to switch
+# stop/exec, and Traffic / Rules / Mounts / Ports views — tab or 1–5 to switch
 ./gantry-linux-arm64 tui
 ```
 
@@ -62,7 +62,11 @@ attestation — verify with
   dashboard's Mounts view does the same).
 - **Networking** — embedded netstack; public internet allowed, local networks
   blocked by default (`-allow-local-net` to opt in). Egress policies with
-  CIDR/proto/port/DNS rules: `-net-policy examples/llm-only.json`.
+  CIDR/proto/port/DNS rules: `-net-policy examples/llm-only.json`. Replace a
+  running sandbox's policy without restarting it with
+  `gantry net-policy set dev examples/llm-only.json`; use `show` to inspect it
+  or `default dev` to restore Gantry's built-in policy. The Rules view exposes
+  the same live editor with `e`.
 - **Port publishing** — expose guest services on the host:
   `-p 8080:80` (loopback by default; `-p 0.0.0.0:8080:80` opts into LAN,
   `/udp` for UDP). Hot publish on a running sandbox:
