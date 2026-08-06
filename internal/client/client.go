@@ -45,10 +45,13 @@ type ShellOptions struct {
 	StreamSock  string       // unix socket forwarding guest stream port 1026
 	Share       bool         // mount every share from the VMM's shares.json
 	RW          bool         // writable overlay root: erofs /dev/vdb + ext4 /dev/vdc
-	Args        []string
-	ID          string        // bundle/task id; default "shell"
-	ImgCfg      *image.Config // resolved image config (nil = defaults)
-	Secrets     []string      // NAME=value pairs, process-spec only (docs/secrets.md)
+	// LayerSet replaces the flattened /dev/vdb image with a native
+	// multi-device EROFS set (fsmeta + ordered layer blobs); implies RW.
+	LayerSet *LayerSet
+	Args     []string
+	ID       string        // bundle/task id; default "shell"
+	ImgCfg   *image.Config // resolved image config (nil = defaults)
+	Secrets  []string      // NAME=value pairs, process-spec only (docs/secrets.md)
 	// ExitStatus, when set, receives the task's exit status so one-shot
 	// callers (`gantry exec -- false`) can propagate it as their own
 	// exit code instead of reporting success for a failed command.
@@ -338,13 +341,16 @@ type SessionOptions struct {
 	// the sandbox runs.
 	ShareTransport *shares.Transport
 	RW             bool
-	Args           []string
-	ID             string
-	Cols, Rows     uint32          // initial pty size; 0 skips ResizePty
-	Terminal       bool            // allocate a pty; false uses pipe stdio
-	KillCh         <-chan struct{} // optional: first receive SIGKILLs the task
-	Quiet          bool            // suppress progress messages
-	ExitStatus     *int            // optional: set to the task's exit status
+	// LayerSet replaces the flattened /dev/vdb image with a native
+	// multi-device EROFS set (fsmeta + ordered layer blobs); implies RW.
+	LayerSet   *LayerSet
+	Args       []string
+	ID         string
+	Cols, Rows uint32          // initial pty size; 0 skips ResizePty
+	Terminal   bool            // allocate a pty; false uses pipe stdio
+	KillCh     <-chan struct{} // optional: first receive SIGKILLs the task
+	Quiet      bool            // suppress progress messages
+	ExitStatus *int            // optional: set to the task's exit status
 	// ExecIntoExisting allows docker-exec semantics: when the task already
 	// runs in the VM, start a new process inside it (task.v3 Exec)
 	// instead of Create-ing a second container (which would fail — the rw
@@ -473,7 +479,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{
 		ID:       id,
 		Bundle:   bundlePath,
-		Rootfs:   RootfsMounts(opts.RW),
+		Rootfs:   opts.RootfsMountsFor(),
 		Terminal: opts.Terminal,
 		Stdin:    "stream://" + stdinStream.id,
 		Stdout:   "stream://" + stdoutStream.id,
@@ -612,7 +618,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 	_, err = tc.Create(ctx, &task.CreateTaskRequest{
 		ID:       id,
 		Bundle:   bundlePath,
-		Rootfs:   RootfsMounts(opts.RW),
+		Rootfs:   opts.RootfsMountsFor(),
 		Terminal: false,
 	})
 	if err != nil {
@@ -742,6 +748,7 @@ func (opts ShellOptions) sessionOptions(shares []ShareEntry) SessionOptions {
 		StreamSock: opts.StreamSock,
 		Shares:     shares,
 		RW:         opts.RW,
+		LayerSet:   opts.LayerSet,
 		Args:       opts.Args,
 		ID:         opts.ID,
 		ImgCfg:     opts.ImgCfg,
@@ -850,32 +857,12 @@ func SyncGuest(client *ttrpc.Client, streamSock, containerID string, timeout tim
 	}
 }
 
-// RootfsMounts describes how the guest assembles the container rootfs.
-func RootfsMounts(rw bool) []*types.Mount {
-	if !rw {
-		return []*types.Mount{{Type: "erofs", Source: "/dev/vdb", Options: []string{"ro"}}}
+// RootfsMountsFor describes how the guest assembles the container rootfs.
+func (opts SessionOptions) RootfsMountsFor() []*types.Mount {
+	if opts.LayerSet != nil {
+		return RootfsMountsLayerSet(*opts.LayerSet)
 	}
-	return []*types.Mount{
-		{Type: "erofs", Source: "/dev/vdb", Options: []string{"ro"}},
-		{Type: "ext4", Source: "/dev/vdc", Options: []string{"rw"}},
-		{Type: "format/overlay", Source: "overlay", Options: []string{
-			"lowerdir={{mount 0}}",
-			"upperdir={{mount 1}}/upper",
-			"workdir={{mount 1}}/work",
-			// The nerdbox arm64 kernel builds with
-			// CONFIG_OVERLAY_FS_INDEX=y, which makes "index" default
-			// ON for every overlay mount — and index's origin
-			// verification (exportfs fh decode of the upper root)
-			// fails the whole mount with ESTALE when the rwlayer is
-			// damaged or carries xattrs from a previous image pairing.
-			// We need neither the inode index nor NFS export; pin
-			// both index and xino off explicitly (x86_64 kernels
-			// default them off already). gVisor's sentry ignores
-			// unknown overlay options, so runsc is unaffected.
-			"index=off",
-			"xino=off",
-		}},
-	}
+	return RootfsMounts(opts.RW)
 }
 
 // ConfigJSON renders the OCI runtime config for a terminal shell container.
