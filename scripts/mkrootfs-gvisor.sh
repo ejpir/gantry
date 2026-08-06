@@ -13,11 +13,13 @@
 set -e
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
-IN=${1:?"usage: mkrootfs-gvisor.sh artifacts/nerdbox-rootfs-ARCH.erofs"}
-case "$IN" in
+IN=${1:?"usage: mkrootfs-gvisor.sh artifacts/nerdbox-rootfs-ARCH.erofs [ARCH]"}
+# ARCH (arm64|x86_64) may be given explicitly — the CI bundle file is
+# arch-less (nerdbox-rootfs.erofs); otherwise infer it from the file name.
+case "${2:-$IN}" in
 *arm64*|*aarch64*) RUNSC_ARCH=aarch64; GO_ARCH=arm64 ;;
 *x86_64*|*amd64*) RUNSC_ARCH=x86_64;  GO_ARCH=amd64 ;;
-*) echo "cannot infer arch from $IN" >&2; exit 1 ;;
+*) echo "cannot infer arch from $IN (pass it as: mkrootfs-gvisor.sh $IN ARCH)" >&2; exit 1 ;;
 esac
 OUT=$(echo "$IN" | sed 's/rootfs-/rootfs-gvisor-/')
 [ "$OUT" != "$IN" ] || { echo "input name must contain 'rootfs-'" >&2; exit 1; }
