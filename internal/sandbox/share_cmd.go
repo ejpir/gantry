@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"gantry/internal/shares"
@@ -22,7 +21,7 @@ import (
 func CmdShare(argv []string) int {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, `usage:
-  gantry share add [--replace] [--ephemeral] <name> TAG=PATH[,ro]
+  gantry share add [--replace] [--ephemeral] <name> TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N]
   gantry share remove [--force] [--ephemeral] <name> TAG
   gantry share ls <name>
 
@@ -159,6 +158,31 @@ func shareControlRPC(name, op string, shareReq brokerShareRequest) (brokerShareR
 	return resp, nil
 }
 
+// configureSandboxShare persists an OCI container mount alias. Running
+// sandboxes delegate to their broker because it exclusively owns sandbox.json;
+// stopped sandboxes can update the same ConfigStore directly.
+func configureSandboxShare(name, spec string, replace bool) error {
+	if err := ValidateSandboxName(name); err != nil {
+		return err
+	}
+	normalized, err := normalizeShareSpecForClient(spec)
+	if err != nil {
+		return err
+	}
+	if _, alive := sandboxPID(name); alive {
+		_, err = shareControlRPC(name, "share.configure", brokerShareRequest{
+			Spec: normalized, Persistent: true, Replace: replace,
+		})
+		return err
+	}
+	store, err := LoadConfigStore(sandboxDir(name))
+	if err != nil {
+		return err
+	}
+	_, err = store.SetShareForRestart(normalized, replace)
+	return err
+}
+
 func normalizeShareSpecForClient(spec string) (string, error) {
 	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
 	if err != nil {
@@ -174,6 +198,9 @@ func normalizeShareSpecForClient(spec string) (string, error) {
 	}
 	if share.RO {
 		normalized += ",ro"
+	}
+	if share.UID != nil {
+		normalized += fmt.Sprintf(",uid=%d,gid=%d", *share.UID, *share.GID)
 	}
 	return normalized, nil
 }
@@ -245,7 +272,7 @@ func printShares(name string) int {
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Tag < entries[j].Tag })
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newCLITable(os.Stdout)
 	fmt.Fprintln(w, "TAG\tMODE\tSTATE\tHOST PATH\tCONTAINER PATH")
 	for _, entry := range entries {
 		mode := "rw"

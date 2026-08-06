@@ -80,6 +80,29 @@ func TestShareManagerLiveAddPersistsAndPublishes(t *testing.T) {
 	}
 }
 
+func TestShareManagerPersistsGuestOwnership(t *testing.T) {
+	manager, dir := newTestShareManager(t)
+	shareDir := t.TempDir()
+	entry, err := manager.Add("code="+shareDir+",uid=1000,gid=1000", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.UID == nil || entry.GID == nil || *entry.UID != 1000 || *entry.GID != 1000 {
+		t.Fatalf("entry ownership = uid=%v gid=%v", entry.UID, entry.GID)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg RunConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 1 || !strings.HasSuffix(cfg.Shares[0], ",uid=1000,gid=1000") {
+		t.Fatalf("persisted shares = %v", cfg.Shares)
+	}
+}
+
 func TestShareManagerRejectsOverlapAndDuplicateContainerTarget(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
@@ -128,6 +151,31 @@ func TestShareManagerRemoveUpdatesConfig(t *testing.T) {
 	}
 	if manager.Hub().Export("code") != nil {
 		t.Fatal("removed share still visible in hub")
+	}
+}
+
+func TestShareManagerForceRemovesExplicitContainerAlias(t *testing.T) {
+	dir := t.TempDir()
+	manager, sandboxDir := newTestShareManager(t, "workspace="+dir+"@/workspace")
+	if err := manager.Publish(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Remove("workspace", true, false); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("non-force alias removal error = %v", err)
+	}
+	if _, err := manager.Remove("workspace", true, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(sandboxDir, "sandbox.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg RunConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 0 {
+		t.Fatalf("removed aliased share still persisted: %v", cfg.Shares)
 	}
 }
 
