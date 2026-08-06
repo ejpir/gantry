@@ -62,18 +62,28 @@ func relSplitParent(rel string) (dir, base string) {
 	return "", rel
 }
 
+// traversalOpenFlags is how the walker opens every intermediate component.
+// O_DIRECTORY makes the kernel refuse non-directories AT OPEN TIME: a FIFO
+// would otherwise block open(O_RDONLY) until a writer appears, and opening
+// a device node has host-side effects — both reachable via crafted guest
+// FUSE requests that name a special file as a parent inode. O_NOFOLLOW
+// refuses symlink components. The Fstat S_IFDIR check below stays as
+// defense in depth.
+const traversalOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
 // openRelDir returns a descriptor for the directory at rel beneath rootFD.
 // The returned descriptor has its own open-file description (and therefore
-// its own directory offset), including when rel is empty. Every component opens O_NOFOLLOW
-// and must stat as a directory: a directory swapped for a symlink — or
-// anything else — after lookup fails the walk instead of redirecting the
-// operation outside the export. The caller owns the returned descriptor.
+// its own directory offset), including when rel is empty. Every component
+// opens with traversalOpenFlags and must stat as a directory: a directory
+// swapped for a symlink — or anything else — after lookup fails the walk
+// instead of redirecting the operation outside the export. The caller owns
+// the returned descriptor.
 func openRelDir(rootFD int, rel string) (int, error) {
 	// dup(2) would share the root descriptor's directory offset. The first
 	// READDIR would then leave the pinned descriptor at EOF, making every
 	// later READDIR of the export root appear empty. openat(".") pins the
 	// same directory while creating an independent open-file description.
-	cur, err := unix.Openat(rootFD, ".", unix.O_RDONLY|unix.O_NOFOLLOW, 0)
+	cur, err := unix.Openat(rootFD, ".", traversalOpenFlags, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -89,7 +99,7 @@ func openRelDir(rootFD int, rel string) (int, error) {
 		if comp == "" || comp == "." {
 			continue
 		}
-		next, err := unix.Openat(cur, comp, unix.O_RDONLY|unix.O_NOFOLLOW, 0)
+		next, err := unix.Openat(cur, comp, traversalOpenFlags, 0)
 		unix.Close(cur)
 		if err != nil {
 			return -1, err
