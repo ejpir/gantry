@@ -90,7 +90,7 @@ jobs:
         # Produces bundle/nerdbox-rootfs-gvisor.erofs: /sbin/crun replaced by
         # runsc (released as nerdbox-rootfs-gvisor-<arch>.erofs, which the CLI
         # auto-downloads on first -runtime runsc start).
-        run: ./scripts/mkrootfs-gvisor.sh "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs"
+        run: ./scripts/mkrootfs-gvisor.sh "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs" "${{ matrix.kernel_arch }}"
       - name: build test image
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: ./scripts/mkimage.sh alpine:3.22 "$RUNNER_TEMP/bundle/alpine.erofs" "linux/${{ matrix.docker_arch }}"
