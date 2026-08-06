@@ -844,7 +844,9 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 		return m, m.focusShare(2)
 	}
 	mountpoint := strings.TrimSpace(m.shareMount.Value())
-	if mountpoint != "" && !filepath.IsAbs(mountpoint) {
+	if mountpoint != "" && !strings.HasPrefix(mountpoint, "/") {
+		// Container path: slash-absolute on every host OS (filepath.IsAbs
+		// would reject "/data" on Windows).
 		m.formError = "mount point must be an absolute path"
 		return m, m.focusShare(3)
 	}

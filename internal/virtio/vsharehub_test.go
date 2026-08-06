@@ -69,6 +69,9 @@ func publishHubShare(t *testing.T, hub *ShareHub, tag, path string, ro bool) *Sh
 }
 
 func TestShareHubMapsGuestOwnership(t *testing.T) {
+	if !shareOwnerMappingSupported {
+		t.Skip("ownership mapping is not supported on this platform")
+	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -105,6 +108,9 @@ func TestShareHubMapsGuestOwnership(t *testing.T) {
 }
 
 func TestShareHubStatxMapsGuestOwnership(t *testing.T) {
+	if !shareOwnerMappingSupported {
+		t.Skip("ownership mapping is not supported on this platform")
+	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -524,5 +530,22 @@ func TestShareHubSwapRevokesReplacedExport(t *testing.T) {
 		p2.ClosePrepared()
 	} else {
 		p2.ClosePrepared()
+	}
+}
+
+func TestShareHubOwnerMappingRejectedWhereUnsupported(t *testing.T) {
+	if shareOwnerMappingSupported {
+		t.Skip("ownership mapping is supported on this platform")
+	}
+	// PrepareMapped must fail loudly rather than silently report the
+	// host's real ownership on platforms whose backend cannot map.
+	hub, err := NewShareHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	uid, gid := uint32(1000), uint32(1000)
+	if _, _, err := hub.PrepareMapped("workspace", t.TempDir(), false, &uid, &gid); err == nil {
+		t.Fatal("want an explicit unsupported-platform error")
 	}
 }
