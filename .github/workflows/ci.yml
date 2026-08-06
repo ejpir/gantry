@@ -61,7 +61,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/bundle
-          key: guest-assets-v0.2.1-${{ matrix.name }}-${{ hashFiles('scripts/mkimage.sh', '.github/workflows/ci.yml') }}
+          key: guest-assets-v0.2.1-${{ matrix.name }}-${{ hashFiles('scripts/mkimage.sh', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
       - uses: docker/setup-buildx-action@v3
         if: steps.guest-cache.outputs.cache-hit != 'true'
       - name: install EROFS tools
@@ -85,6 +85,12 @@ jobs:
             "$RUNNER_TEMP/nerdbox"
           cp "$RUNNER_TEMP/guest/rootfs/nerdbox-rootfs.erofs" \
             "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs"
+      - name: build gVisor rootfs variant
+        if: steps.guest-cache.outputs.cache-hit != 'true'
+        # Produces bundle/nerdbox-rootfs-gvisor.erofs: /sbin/crun replaced by
+        # runsc (released as nerdbox-rootfs-gvisor-<arch>.erofs, which the CLI
+        # auto-downloads on first -runtime runsc start).
+        run: ./scripts/mkrootfs-gvisor.sh "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs"
       - name: build test image
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: ./scripts/mkimage.sh alpine:3.22 "$RUNNER_TEMP/bundle/alpine.erofs" "linux/${{ matrix.docker_arch }}"
@@ -334,6 +340,10 @@ jobs:
             "${{ runner.temp }}/release/nerdbox-rootfs-arm64.erofs"
           cp "${{ runner.temp }}/guest/guest-assets-amd64/nerdbox-rootfs.erofs" \
             "${{ runner.temp }}/release/nerdbox-rootfs-x86_64.erofs"
+          cp "${{ runner.temp }}/guest/guest-assets-arm64/nerdbox-rootfs-gvisor.erofs" \
+            "${{ runner.temp }}/release/nerdbox-rootfs-gvisor-arm64.erofs"
+          cp "${{ runner.temp }}/guest/guest-assets-amd64/nerdbox-rootfs-gvisor.erofs" \
+            "${{ runner.temp }}/release/nerdbox-rootfs-gvisor-x86_64.erofs"
       - name: checksum sidecars
         run: |
           cd "${{ runner.temp }}/release"
