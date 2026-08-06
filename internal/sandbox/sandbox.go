@@ -724,6 +724,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		Shares:         manifest.Shares,
 		ShareTransport: manifest.Transport,
 		RW:             br.cfg.RW,
+		LayerSet:       br.cfg.LayerSet,
 		Args:           req.Args,
 		Secrets:        secret.Env(br.secrets),
 		// one VM = one container workload with a well-known id, so a

@@ -54,6 +54,7 @@ usage:
   gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
   gantry share <verb>               # live host shares: add|remove|ls
   gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
+  gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
   gantry stop <name>                # stop a sandbox
   gantry resume <name>              # boot a stopped sandbox from saved config
   gantry delete <name>              # stop + remove a sandbox
@@ -115,6 +116,8 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 		os.Exit(sandbox.CmdShare(os.Args[2:]))
 	case "ports":
 		os.Exit(sandbox.CmdPorts(os.Args[2:]))
+	case "import":
+		os.Exit(sandbox.CmdImport(os.Args[2:]))
 	case "stop", "delete":
 		if len(os.Args) != 3 {
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])

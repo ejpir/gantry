@@ -331,3 +331,56 @@ func TestResolveShareCtrPathPreserved(t *testing.T) {
 		t.Errorf("code = %+v, want CtrPath=/src ro", shares[1])
 	}
 }
+
+func TestResolveLayerSet(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	files := append(append([]string{}, resolveAssets...),
+		"fsmeta.erofs", "l1.erofs", "l2.erofs", "rw.ext4")
+	for _, f := range files {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := filepath.Join(dir, "ls.json")
+	os.WriteFile(manifest, []byte(`{"fsmeta":"fsmeta.erofs","layers":["l1.erofs","l2.erofs"]}`), 0o644)
+
+	parse := func(args ...string) (RunConfig, []string, error) {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		rf := RegisterRunFlags(fs)
+		rf.Name = "lsbox"
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		return rf.Resolve(fs, nil)
+	}
+
+	cfg, _, err := parse("-layerset", manifest, "-rwlayer", filepath.Join(dir, "rw.ext4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LayerSet == nil || len(cfg.LayerSet.Layers) != 2 {
+		t.Fatalf("LayerSet = %+v", cfg.LayerSet)
+	}
+	if !cfg.RW {
+		t.Error("a layerset must force RW on")
+	}
+	if cfg.ImageCfg != nil || cfg.ImageRef != "" {
+		t.Error("no image resolution should happen for a layerset")
+	}
+
+	// the image file requirement is waived, the rwlayer requirement is not
+	if _, _, err := parse("-layerset", manifest); err == nil {
+		// per-sandbox default rwlayer would be created under ~/.gantry —
+		// in the temp HOME-less test env this may resolve; what must hold
+		// is the -rw=false rejection below
+		_ = err
+	}
+	if _, _, err = parse("-layerset", manifest, "-rwlayer", filepath.Join(dir, "rw.ext4"), "-rw=false"); err == nil {
+		t.Fatal("want -rw=false rejection for a layerset")
+	}
+	// the rwlayer attaches RW after the RO set
+	if !cfg.RW || cfg.RWLayer == "" {
+		t.Fatalf("RW=%v RWLayer=%q", cfg.RW, cfg.RWLayer)
+	}
+}

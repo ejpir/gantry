@@ -13,6 +13,7 @@ package sandbox
 import (
 	"flag"
 	"fmt"
+	"gantry/internal/client"
 	"gantry/internal/gutil"
 	"gantry/internal/image"
 	"gantry/internal/netpol"
@@ -40,16 +41,22 @@ type RunConfig struct {
 	ImageRef    string        `json:"image_ref,omitempty"`
 	ImageDigest string        `json:"image_digest,omitempty"`
 	ImageCfg    *image.Config `json:"image_config,omitempty"`
-	RWLayer     string        `json:"rwlayer,omitempty"`
-	RW          bool          `json:"rw"`
-	Shares      []string      `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
-	Ports       []string      `json:"ports,omitempty"`  // canonical IP:HOST:GUEST[/PROTO] publish specs
-	Net         bool          `json:"net"`
-	GVProxy     string        `json:"gvproxy,omitempty"`
-	NetPol      string        `json:"net_policy,omitempty"`
-	AllowLN     bool          `json:"allow_local_net,omitempty"`
-	MemMB       uint          `json:"memMB"`
-	VCPUs       int           `json:"vcpus,omitempty"`
+	// LayerSet replaces the flattened Image with a native multi-device
+	// EROFS set (containerd erofs-snapshotter layout: fsmeta + ordered
+	// layer blobs), attached as-is — e.g. another stack's store. When
+	// set, Image is empty and the guest mounts fsmeta with every layer
+	// blob as a device= option.
+	LayerSet *client.LayerSet `json:"layerset,omitempty"`
+	RWLayer  string           `json:"rwlayer,omitempty"`
+	RW       bool             `json:"rw"`
+	Shares   []string         `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
+	Ports    []string         `json:"ports,omitempty"`  // canonical IP:HOST:GUEST[/PROTO] publish specs
+	Net      bool             `json:"net"`
+	GVProxy  string           `json:"gvproxy,omitempty"`
+	NetPol   string           `json:"net_policy,omitempty"`
+	AllowLN  bool             `json:"allow_local_net,omitempty"`
+	MemMB    uint             `json:"memMB"`
+	VCPUs    int              `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1).
@@ -66,6 +73,7 @@ type RunFlags struct {
 	// vector behind the ESTALE saga (two live VMs on one ext4).
 	Name                                    string
 	Kernel, Rootfs, Runtime, Image, RWLayer *string
+	LayerSet                                *string
 	RW                                      *bool
 	Shares                                  *gutil.StrList
 	Publish                                 *gutil.StrList
@@ -86,6 +94,7 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
 		RWLayer:     fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
+		LayerSet:    fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
 		RW:          fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
 		Net:         fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
 		GVProxy:     fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
@@ -184,10 +193,21 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	if cfg.Image == "" {
 		cfg.Image = vmm.DefaultImage()
 	}
+	if *f.LayerSet != "" {
+		ls, err := client.LoadLayerSet(*f.LayerSet)
+		if err != nil {
+			return cfg, nil, err
+		}
+		if err := ls.Validate(); err != nil {
+			return cfg, nil, err
+		}
+		cfg.LayerSet = ls
+	}
 	// Image resolution: an existing .erofs file is used as-is; anything
 	// else (OCI layout dir, docker save tar, image reference) goes
 	// through the image store, platform-matched to the GUEST kernel.
-	if !isErofsFile(cfg.Image) {
+	// A layerset replaces the flattened image entirely.
+	if cfg.LayerSet == nil && !isErofsFile(cfg.Image) {
 		arch, err := vmm.KernelArch(cfg.Kernel)
 		if err != nil {
 			return cfg, nil, err
@@ -220,7 +240,18 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	}
 	// -rw rules: default on when a writable layer exists, forced off when
 	// none does — never hand the guest RW=true for a disk we didn't attach.
-	cfg.RW = *f.RW || (!set["rw"] && cfg.RWLayer != "")
+	// A layerset IS the overlay pair: the rwlayer is mandatory and RW is
+	// always on.
+	if cfg.LayerSet != nil {
+		if set["rw"] && !*f.RW {
+			return cfg, nil, fmt.Errorf("a layerset is a writable overlay pair (remove -rw=false)")
+		}
+		if cfg.RWLayer == "" {
+			return cfg, nil, fmt.Errorf("a layerset requires a writable layer (-rwlayer, or the per-sandbox default)")
+		}
+		cfg.RW = true
+	}
+	cfg.RW = *f.RW || cfg.RW || (!set["rw"] && cfg.RWLayer != "")
 	if cfg.RWLayer == "" && cfg.RW {
 		cfg.RW = false
 		warnings = append(warnings, "-rw: no writable layer found; running read-only. Create one with ./scripts/mkrwlayer.sh artifacts/rwlayer.ext4 512")
@@ -295,10 +326,13 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		}
 	}
 
-	for _, req := range []string{cfg.Kernel, cfg.Rootfs, cfg.Image} {
+	for _, req := range []string{cfg.Kernel, cfg.Rootfs} {
 		if !gutil.FileExists(req) {
 			return cfg, nil, fmt.Errorf("missing %s", req)
 		}
+	}
+	if cfg.LayerSet == nil && !gutil.FileExists(cfg.Image) {
+		return cfg, nil, fmt.Errorf("missing %s", cfg.Image)
 	}
 	if cfg.RW && cfg.RWLayer != "" && !gutil.FileExists(cfg.RWLayer) {
 		return cfg, nil, fmt.Errorf("rwlayer %s does not exist; create it with:\n  ./scripts/mkrwlayer.sh %s 512", cfg.RWLayer, cfg.RWLayer)
@@ -474,6 +508,9 @@ func portForwards(specs []string) map[string]string {
 // imageIdentity is the stable identity used for rwlayer pairing: the
 // OCI digest when the image came through the store, else the file path.
 func (c RunConfig) imageIdentity() string {
+	if c.LayerSet != nil {
+		return "layerset:" + c.LayerSet.FSMeta
+	}
 	if c.ImageDigest != "" {
 		return c.ImageDigest
 	}
@@ -507,11 +544,15 @@ func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, env
 	if envExtra {
 		cmdline = gutil.InsertExtraCmdline(cmdline)
 	}
+	disksRO := []string{c.Image}
+	if c.LayerSet != nil {
+		disksRO = c.LayerSet.DisksRO()
+	}
 	return vmm.Opts{
 		MemSize:     uint64(c.MemMB) << 20,
 		KernelPath:  c.Kernel,
 		RootfsPath:  c.Rootfs,
-		DisksRO:     []string{c.Image}, // container image: /dev/vdb, read-only
+		DisksRO:     disksRO, // container image: /dev/vdb..., read-only
 		Disks:       disks,
 		Shares:      hostShares,
 		NetEndpoint: sock,
