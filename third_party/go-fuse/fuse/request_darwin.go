@@ -4,7 +4,10 @@
 
 package fuse
 
-const outputDataSize = 184
+// GANTRY PATCH: Darwin serves a Linux virtio-fs guest. Linux STATX is the
+// largest fixed reply currently registered and does not fit the macFUSE-sized
+// inline buffer.
+const outputDataSize = 288
 
 const (
 	_FUSE_KERNEL_VERSION   = 7
