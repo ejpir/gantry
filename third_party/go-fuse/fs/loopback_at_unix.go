@@ -62,14 +62,27 @@ func relSplitParent(rel string) (dir, base string) {
 	return "", rel
 }
 
-// openRelDir returns a descriptor for the directory at rel beneath rootFD
-// (rel "" duplicates the root itself). Every component opens O_NOFOLLOW
+// openRelDir returns a descriptor for the directory at rel beneath rootFD.
+// The returned descriptor has its own open-file description (and therefore
+// its own directory offset), including when rel is empty. Every component opens O_NOFOLLOW
 // and must stat as a directory: a directory swapped for a symlink — or
 // anything else — after lookup fails the walk instead of redirecting the
 // operation outside the export. The caller owns the returned descriptor.
 func openRelDir(rootFD int, rel string) (int, error) {
-	cur, err := unix.Dup(rootFD)
+	// dup(2) would share the root descriptor's directory offset. The first
+	// READDIR would then leave the pinned descriptor at EOF, making every
+	// later READDIR of the export root appear empty. openat(".") pins the
+	// same directory while creating an independent open-file description.
+	cur, err := unix.Openat(rootFD, ".", unix.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
+		return -1, err
+	}
+	var rootStat unix.Stat_t
+	if err := unix.Fstat(cur, &rootStat); err != nil || rootStat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		unix.Close(cur)
+		if err == nil {
+			err = unix.ENOTDIR
+		}
 		return -1, err
 	}
 	for _, comp := range strings.Split(rel, "/") {
