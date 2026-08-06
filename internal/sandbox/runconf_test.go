@@ -104,9 +104,35 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 	if _, _, err := resolveSandbox(t, "-runtime", "bogus"); err == nil || !strings.Contains(err.Error(), "crun or runsc") {
 		t.Errorf("bogus runtime: want switch error, got %v", err)
 	}
-	// runsc without the gvisor rootfs: actionable error
-	if _, _, err := resolveSandbox(t, "-runtime", "runsc"); err == nil || !strings.Contains(err.Error(), "mkrootfs-gvisor.sh") {
-		t.Errorf("runsc without rootfs: want mkrootfs-gvisor hint, got %v", err)
+}
+
+func TestResolveRunscDownloadsGvisorRootfs(t *testing.T) {
+	// the mapped gVisor rootfs is a whitelisted release asset: a first
+	// runsc start downloads it like the default rootfs instead of
+	// demanding a local mkrootfs-gvisor.sh build.
+	cfg, err := resolveSandboxNoRootfs(t, guestServer(t).URL, "-runtime", "runsc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "nerdbox-rootfs-gvisor-arm64.erofs"
+	if runtime.GOARCH == "amd64" {
+		want = "nerdbox-rootfs-gvisor-x86_64.erofs"
+	}
+	if filepath.Base(cfg.Rootfs) != want {
+		t.Errorf("rootfs = %s, want .../%s", cfg.Rootfs, want)
+	}
+	if b, _ := os.ReadFile(cfg.Rootfs); string(b) != "downloaded-"+want {
+		t.Errorf("rootfs content = %q, want the downloaded payload", b)
+	}
+	if runtime.GOARCH == "arm64" && !strings.HasSuffix(cfg.Kernel, "-4k") {
+		t.Errorf("runsc on arm64 must map to the 4K kernel, got %s", cfg.Kernel)
+	}
+}
+
+func TestResolveRunscExplicitRootfsMissing(t *testing.T) {
+	// an explicit -rootfs is user-supplied: never downloaded, hard error
+	if _, err := resolveSandboxNoRootfs(t, guestServer(t).URL, "-runtime", "runsc", "-rootfs", "/nope/gvisor.erofs"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("explicit missing -rootfs with runsc: want not-found error, got %v", err)
 	}
 }
 

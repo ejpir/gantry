@@ -2,10 +2,10 @@ package vmm
 
 // On-demand guest-asset downloads: the CLI ships without guest kernels or
 // rootfs images and fetches gantry-kernel-<arch>[-4k] and
-// nerdbox-rootfs-<arch>.erofs from the GitHub release page the first time a
-// sandbox needs them. Downloads go to the artifacts dir next to the other
-// staged assets and are atomic (temp file + rename), so a killed download
-// never leaves a half-written asset behind.
+// nerdbox-rootfs[-gvisor]-<arch>.erofs from the GitHub release page the
+// first time a sandbox needs them. Downloads go to the artifacts dir next
+// to the other staged assets and are atomic (temp file + rename), so a
+// killed download never leaves a half-written asset behind.
 
 import (
 	"crypto/sha256"
@@ -27,8 +27,8 @@ var Version = "dev"
 
 // releaseBase is the download prefix for guest assets. Releases are tagged
 // v*; the CI attaches gantry-kernel-<arch>[-4k] and
-// nerdbox-rootfs-<arch>.erofs assets plus a <asset>.sha256 sidecar to them.
-// GANTRY_RELEASE_BASE overrides the prefix for mirrors and tests.
+// nerdbox-rootfs[-gvisor]-<arch>.erofs assets plus a <asset>.sha256 sidecar
+// to them. GANTRY_RELEASE_BASE overrides the prefix for mirrors and tests.
 func releaseBase() string {
 	if b := os.Getenv("GANTRY_RELEASE_BASE"); b != "" {
 		return strings.TrimRight(b, "/")
@@ -48,7 +48,10 @@ func downloadableAsset(path string) bool {
 		return true
 	}
 	switch base {
-	case "nerdbox-rootfs-arm64.erofs", "nerdbox-rootfs-x86_64.erofs":
+	case "nerdbox-rootfs-arm64.erofs", "nerdbox-rootfs-x86_64.erofs",
+		// The gVisor variant runsc maps to is a first-class release asset
+		// too (built by the guest-assets CI job via mkrootfs-gvisor.sh).
+		"nerdbox-rootfs-gvisor-arm64.erofs", "nerdbox-rootfs-gvisor-x86_64.erofs":
 		return true
 	}
 	return false

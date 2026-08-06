@@ -144,12 +144,13 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		if !set["rootfs"] {
 			cfg.Rootfs = vmm.GvisorRootfs(cfg.Rootfs)
 		}
-		if !gutil.FileExists(cfg.Rootfs) {
-			return cfg, nil, fmt.Errorf("%s not found - build it with ./scripts/mkrootfs-gvisor.sh %s", cfg.Rootfs, vmm.DefaultRootfs())
-		}
 		if !set["kernel"] {
 			cfg.Kernel = vmm.GvisorKernel(cfg.Kernel)
 		}
+		// No existence check here: the mapped gVisor rootfs is a
+		// whitelisted release asset, so the generic rootfs resolution
+		// below downloads it on first use, exactly like the default
+		// rootfs. An explicit -rootfs still hard-errors when missing.
 	default:
 		return cfg, nil, fmt.Errorf("-runtime must be crun or runsc, got %q", cfg.Runtime)
 	}
@@ -174,17 +175,21 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	}
 
 	// Rootfs resolution: a default rootfs that is not staged yet is
-	// downloaded from the release page (nerdbox-rootfs-<arch>.erofs only,
-	// so this never fires for user-supplied paths); an explicit -rootfs
-	// that is missing is a hard error. The gVisor rootfs used with
-	// -runtime runsc is still built locally (checked above).
+	// downloaded from the release page (whitelisted nerdbox-rootfs*
+	// assets only — including the gVisor variant -runtime runsc maps
+	// to — so this never fires for user-supplied paths); an explicit
+	// -rootfs that is missing is a hard error.
 	if cfg.Rootfs != "" && !gutil.FileExists(cfg.Rootfs) {
 		if set["rootfs"] {
 			return cfg, nil, fmt.Errorf("rootfs %s not found", cfg.Rootfs)
 		}
 		r, err := vmm.EnsureRootfs(cfg.Rootfs, say)
 		if err != nil {
-			return cfg, nil, fmt.Errorf("%w (copy nerdbox-rootfs-<arch>.erofs from a nerdbox release into artifacts/, or build from source)", err)
+			hint := "copy nerdbox-rootfs-<arch>.erofs from a nerdbox release into artifacts/, or build from source"
+			if cfg.Runtime == "runsc" {
+				hint = "or build it locally with ./scripts/mkrootfs-gvisor.sh " + vmm.DefaultRootfs()
+			}
+			return cfg, nil, fmt.Errorf("%w (%s)", err, hint)
 		}
 		cfg.Rootfs = r
 	}

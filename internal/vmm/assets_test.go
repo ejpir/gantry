@@ -71,8 +71,8 @@ func TestEnsureKernelRefusesNonGantryPath(t *testing.T) {
 }
 
 func TestEnsureRootfsRefusesNonReleasePath(t *testing.T) {
-	// custom names and the locally built gVisor variant are not release assets
-	for _, name := range []string{"my-rootfs.erofs", "nerdbox-rootfs-gvisor-arm64.erofs"} {
+	// custom names are not release assets; the gVisor variant now is
+	for _, name := range []string{"my-rootfs.erofs", "nerdbox-rootfs-riscv64.erofs"} {
 		if _, err := EnsureRootfs(filepath.Join(t.TempDir(), name), nil); err == nil {
 			t.Errorf("%s: want error, got nil", name)
 		}
@@ -245,3 +245,17 @@ func TestDefaultCmdlineHardening(t *testing.T) {
 }
 
 func io_writeString(w http.ResponseWriter, s string) { _, _ = w.Write([]byte(s)) }
+
+func TestEnsureRootfsDownloadsGvisorVariant(t *testing.T) {
+	payload := strings.Repeat("G", 1<<20)
+	t.Setenv("GANTRY_RELEASE_BASE", assetServer(t, "nerdbox-rootfs-gvisor-arm64.erofs", payload).URL)
+
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "nerdbox-rootfs-gvisor-arm64.erofs")
+	if _, err := EnsureRootfs(dest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dest); string(b) != payload {
+		t.Errorf("downloaded %d bytes, want %d", len(b), len(payload))
+	}
+}
