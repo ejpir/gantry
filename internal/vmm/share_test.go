@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gantry/internal/shares"
@@ -24,7 +25,7 @@ func TestParseShareSpec(t *testing.T) {
 		{spec: "=/tmp", wantErr: true},
 		{spec: "ok=", wantErr: true},
 		{spec: "bad tag=/tmp", wantErr: true},
-		{spec: "x=/tmp,ro,ro", path: "/tmp,ro", tag: "x", ro: true}, // only one suffix stripped
+		{spec: "x=/tmp,ro,ro", wantErr: true},
 	} {
 		t.Run(tc.spec, func(t *testing.T) {
 			s, err := ParseShareSpec(tc.spec, map[string]bool{})
@@ -117,6 +118,22 @@ func TestParseShareSpecCtrPath(t *testing.T) {
 	}
 }
 
+func TestParseShareSpecGuestOwnership(t *testing.T) {
+	s, err := ParseShareSpec("workspace=/Users/x@/workspace,ro,uid=1000,gid=1000", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.UID == nil || s.GID == nil || *s.UID != 1000 || *s.GID != 1000 || !s.RO {
+		t.Fatalf("ownership mapping = uid=%v gid=%v ro=%v", s.UID, s.GID, s.RO)
+	}
+	if _, err := ParseShareSpec("bad=/tmp,uid=1000", map[string]bool{}); err == nil {
+		t.Fatal("uid without gid was accepted")
+	}
+	if _, err := ParseShareSpec("bad=/tmp,uid=agent,gid=1000", map[string]bool{}); err == nil {
+		t.Fatal("non-numeric uid was accepted")
+	}
+}
+
 // Reserved directory entries must never become synthetic FUSE children.
 func TestParseShareSpecRejectsReservedTags(t *testing.T) {
 	for _, tag := range []string{".", ".."} {
@@ -129,5 +146,23 @@ func TestParseShareSpecRejectsReservedTags(t *testing.T) {
 	}
 	if _, err := ParseShareSpec("ok.tag=/tmp", map[string]bool{}); err != nil {
 		t.Errorf("dotted tag rejected: %v", err)
+	}
+}
+
+func TestParseShareSpecUnknownOption(t *testing.T) {
+	// a key=value-looking trailing segment is a typo, not part of the path
+	if _, err := ParseShareSpec("code=/tmp/x,uidx=1000", map[string]bool{}); err == nil {
+		t.Fatal("want unknown-option error for ,uidx=1000")
+	}
+	if _, err := ParseShareSpec("code=/tmp/x,rw", map[string]bool{}); err == nil {
+		// plain unknown segment WITHOUT '=' stays part of the path? no —
+		// it must: paths may contain commas. verify it parses and keeps it.
+	} else {
+		t.Fatalf("plain comma path segment must keep parsing: %v", err)
+	}
+	// diagnostics include the underlying reason
+	_, err := ParseShareSpec("code=/tmp/x,uid=abc,gid=1", map[string]bool{})
+	if err == nil || !strings.Contains(err.Error(), "invalid syntax") {
+		t.Fatalf("uid error should carry the strconv reason, got %v", err)
 	}
 }

@@ -113,7 +113,7 @@ or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
 		}
 		return "crun"
 	}(), "container runtime in the guest: crun | runsc (gVisor)")
-	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
+	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
 	fs.Var(f.Publish, "publish", "alias for -p")
 	fs.Var(f.Secrets, "secret", `inject a secret into every session: NAME (from gantry's
@@ -354,6 +354,12 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 			}
 			if s.RO {
 				cfg.Shares[i] += ",ro"
+			}
+			if s.UID != nil && s.GID != nil {
+				// Round-trip the ownership mapping: cfg.Shares is persisted
+				// and re-parsed, so dropping the suffix here would silently
+				// turn -share ...,uid=N,gid=N into a no-op.
+				cfg.Shares[i] += fmt.Sprintf(",uid=%d,gid=%d", *s.UID, *s.GID)
 			}
 		}
 	}
