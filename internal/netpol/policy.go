@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -70,6 +71,29 @@ type Policy struct {
 
 	mu      sync.Mutex
 	dynamic map[[4]byte]time.Time // DNS-learned allowances: IPv4 -> expiry
+	active  atomic.Pointer[Policy]
+}
+
+// Replace atomically switches every future policy decision to next. The
+// stable receiver remains attached to the virtio-net device, so a running VM
+// can change policy without rebuilding its device graph or network stack.
+// DNS-learned allowances intentionally start empty in the replacement.
+func (p *Policy) Replace(next *Policy) error {
+	if p == nil || next == nil {
+		return fmt.Errorf("network policy replacement is nil")
+	}
+	p.active.Store(next.current())
+	return nil
+}
+
+func (p *Policy) current() *Policy {
+	if p == nil {
+		return nil
+	}
+	if current := p.active.Load(); current != nil {
+		return current
+	}
+	return p
 }
 
 // localCIDRs is "the local network" the sandbox is walled off from unless
@@ -241,6 +265,9 @@ type RuleSummary struct {
 // RuleSummaries returns explicit rules in evaluation order followed by the
 // domain allowlist, local-network posture and default internet action.
 func (p *Policy) RuleSummaries() []RuleSummary {
+	if current := p.current(); current != p {
+		return current.RuleSummaries()
+	}
 	if p == nil {
 		return nil
 	}
@@ -301,6 +328,9 @@ func protocolLabel(protocol uint8) string {
 
 // Describe summarizes the policy for startup logs.
 func (p *Policy) Describe() string {
+	if current := p.current(); current != p {
+		return current.Describe()
+	}
 	def := "deny"
 	if p.DefaultAllow {
 		def = "allow"
@@ -374,6 +404,9 @@ func parseFrame(frame []byte) (pp parsedPacket, arp, ok bool) {
 
 // MatchTX decides whether an egress frame from the guest may proceed.
 func (p *Policy) MatchTX(frame []byte) bool {
+	if current := p.current(); current != p {
+		return current.MatchTX(frame)
+	}
 	pp, arp, ok := parseFrame(frame)
 	if arp {
 		return true // link-local name resolution, harmless
@@ -448,6 +481,9 @@ func dnsPayload(pp parsedPacket) []byte {
 // allowlisted domain that resolves to a local address (DNS rebinding) is
 // still blocked unless local access was explicitly granted.
 func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
+	if current := p.current(); current != p {
+		return current.Allows(dst, proto, dport)
+	}
 	dstIP := net.IP(dst[:])
 	for _, r := range p.Rules {
 		if r.CIDR != nil && !r.CIDR.Contains(dstIP) {
@@ -489,6 +525,10 @@ func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
 // responses to allowlisted questions become dynamic allowances. (AAAA IPs
 // are recorded but moot — the embedded netstack is IPv4-only today.)
 func (p *Policy) ObserveRX(frame []byte) {
+	if current := p.current(); current != p {
+		current.ObserveRX(frame)
+		return
+	}
 	if len(p.AllowDomains) == 0 {
 		return
 	}
@@ -542,6 +582,9 @@ func (p *Policy) ObserveRX(frame []byte) {
 
 // DynamicSize exposes the learned-allowance table size (for tests/logs).
 func (p *Policy) DynamicSize() int {
+	if current := p.current(); current != p {
+		return current.DynamicSize()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.dynamic)

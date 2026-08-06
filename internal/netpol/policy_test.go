@@ -119,6 +119,43 @@ func TestPolicyRuleSummaries(t *testing.T) {
 	}
 }
 
+func TestPolicyReplaceAppliesToStableReceiver(t *testing.T) {
+	stable := DefaultPolicy()
+	public := [4]byte{8, 8, 8, 8}
+	local := [4]byte{10, 0, 0, 1}
+	if !stable.Allows(public, protoTCP, 443) {
+		t.Fatal("default policy should allow public traffic")
+	}
+	if stable.Allows(local, protoTCP, 443) {
+		t.Fatal("default policy should block local traffic")
+	}
+
+	deny := mustParse(t, `{"default":"deny","allowLocal":true}`)
+	if err := stable.Replace(deny); err != nil {
+		t.Fatal(err)
+	}
+	if stable.Allows(public, protoTCP, 443) {
+		t.Fatal("stable receiver kept the old default after replacement")
+	}
+	if stable.Allows(local, protoTCP, 443) {
+		t.Fatal("replacement's deny default should still deny local traffic")
+	}
+	if got := stable.Describe(); got != "default deny, local net allowed" {
+		t.Fatalf("replacement description = %q", got)
+	}
+
+	allow := mustParse(t, `{"default":"allow","allowLocal":true}`)
+	if err := stable.Replace(allow); err != nil {
+		t.Fatal(err)
+	}
+	if !stable.Allows(public, protoTCP, 443) || !stable.Allows(local, protoTCP, 443) {
+		t.Fatal("second replacement was not applied")
+	}
+	if err := stable.Replace(nil); err == nil {
+		t.Fatal("nil replacement succeeded")
+	}
+}
+
 func TestPolicyMatchTX(t *testing.T) {
 	p := mustParse(t, `{
 		"default": "deny",

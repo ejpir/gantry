@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 )
 
@@ -160,7 +159,7 @@ func printPorts(name string) int {
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Mapping.Key() < entries[j].Mapping.Key() })
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := newCLITable(os.Stdout)
 	fmt.Fprintln(w, "BIND\tGUEST\tPROTO\tSTATE")
 	for _, e := range entries {
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", net.JoinHostPort(e.Mapping.HostIP, fmt.Sprint(e.Mapping.HostPort)),

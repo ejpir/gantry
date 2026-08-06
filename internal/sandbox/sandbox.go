@@ -456,8 +456,10 @@ func CmdDaemon(name string) int {
 		rpc:        rpc,
 		streamSock: filepath.Join(dir, "listen-1026.sock"),
 		secrets:    secrets,
+		store:      configStore,
 		shares:     shareManager,
 		ports:      portManager,
+		netPolicy:  NewNetworkPolicyManager(configStore, nw.Policy, nw.Stack),
 		sessions:   map[string]chan struct{}{},
 	}
 	go br.serve(ln)
@@ -496,8 +498,10 @@ type broker struct {
 	dir        string
 	rpc        *ttrpc.Client
 	streamSock string
+	store      *ConfigStore
 	shares     *ShareManager
 	ports      *PortManager
+	netPolicy  *NetworkPolicyManager
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 
 	mu       sync.Mutex
@@ -546,14 +550,26 @@ func readSecretsHandshake(r *os.File) map[string]secret.Value {
 }
 
 type brokerRequest struct {
-	Op       string              `json:"op"` // "session" | "kill" | "share.*" | "port.*"
-	ID       string              `json:"id"`
-	Args     []string            `json:"args,omitempty"`
-	Cols     uint32              `json:"cols,omitempty"`
-	Rows     uint32              `json:"rows,omitempty"`
-	Terminal bool                `json:"terminal,omitempty"`
-	Share    *brokerShareRequest `json:"share,omitempty"`
-	Port     *brokerPortRequest  `json:"port,omitempty"`
+	Op        string                      `json:"op"` // "session" | "kill" | "share.*" | "port.*" | "resources.set"
+	ID        string                      `json:"id"`
+	Args      []string                    `json:"args,omitempty"`
+	Cols      uint32                      `json:"cols,omitempty"`
+	Rows      uint32                      `json:"rows,omitempty"`
+	Terminal  bool                        `json:"terminal,omitempty"`
+	Share     *brokerShareRequest         `json:"share,omitempty"`
+	Port      *brokerPortRequest          `json:"port,omitempty"`
+	Resources *brokerResourceRequest      `json:"resources,omitempty"`
+	NetPolicy *brokerNetworkPolicyRequest `json:"net_policy,omitempty"`
+}
+
+type brokerResourceRequest struct {
+	MemMB uint `json:"mem_mb"`
+	VCPUs int  `json:"vcpus"`
+}
+
+type brokerResourceResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 type brokerShareRequest struct {
@@ -619,10 +635,14 @@ func (br *broker) handle(c net.Conn) {
 			return
 		}
 		fmt.Fprintln(c, `{"ok":true}`)
-	case "share.add", "share.remove", "share.list":
+	case "share.add", "share.remove", "share.list", "share.configure":
 		br.shareControl(c, req)
 	case "port.publish", "port.unpublish", "port.list":
 		br.portControl(c, req)
+	case "resources.set":
+		br.resourceControl(c, req)
+	case "netpolicy.set", "netpolicy.get":
+		br.networkPolicyControl(c, req)
 	case "session":
 		br.session(c, req)
 	default:
@@ -630,13 +650,54 @@ func (br *broker) handle(c net.Conn) {
 	}
 }
 
+func (br *broker) resourceControl(c net.Conn, req brokerRequest) {
+	respond := func(resp brokerResourceResponse) {
+		_ = json.NewEncoder(c).Encode(&resp)
+	}
+	if br.store == nil {
+		respond(brokerResourceResponse{Error: "config store unavailable"})
+		return
+	}
+	if req.Resources == nil {
+		respond(brokerResourceResponse{Error: "resource settings are required"})
+		return
+	}
+	if err := br.store.SetResources(req.Resources.MemMB, req.Resources.VCPUs); err != nil {
+		respond(brokerResourceResponse{Error: err.Error()})
+		return
+	}
+	respond(brokerResourceResponse{OK: true})
+}
+
+func (br *broker) networkPolicyControl(c net.Conn, req brokerRequest) {
+	respond := func(resp brokerNetworkPolicyResponse) {
+		_ = json.NewEncoder(c).Encode(&resp)
+	}
+	if br.netPolicy == nil {
+		respond(brokerNetworkPolicyResponse{Error: "network policy manager unavailable"})
+		return
+	}
+	var entry NetworkPolicyEntry
+	var err error
+	if req.Op == "netpolicy.set" {
+		if req.NetPolicy == nil {
+			respond(brokerNetworkPolicyResponse{Error: "network policy settings are required"})
+			return
+		}
+		entry, err = br.netPolicy.Set(req.NetPolicy.Path, req.NetPolicy.AllowLocal)
+	} else {
+		entry, err = br.netPolicy.Get()
+	}
+	if err != nil {
+		respond(brokerNetworkPolicyResponse{Error: err.Error()})
+		return
+	}
+	respond(brokerNetworkPolicyResponse{OK: true, Policy: &entry})
+}
+
 func (br *broker) shareControl(c net.Conn, req brokerRequest) {
 	respond := func(resp brokerShareResponse) {
 		_ = json.NewEncoder(c).Encode(&resp)
-	}
-	if br.shares == nil {
-		respond(brokerShareResponse{Error: "share manager unavailable"})
-		return
 	}
 	spec := brokerShareRequest{Persistent: true}
 	if req.Share != nil {
@@ -644,6 +705,29 @@ func (br *broker) shareControl(c net.Conn, req brokerRequest) {
 	}
 	var entry shares.Entry
 	var err error
+	if req.Op == "share.configure" {
+		if br.store == nil {
+			respond(brokerShareResponse{Error: "config store unavailable"})
+			return
+		}
+		configured, configureErr := br.store.SetShareForRestart(spec.Spec, spec.Replace)
+		if configureErr != nil {
+			respond(brokerShareResponse{Error: configureErr.Error()})
+			return
+		}
+		entry = shares.Entry{
+			Tag: configured.Tag, Path: configured.Path, RO: configured.RO,
+			UID: configured.UID, GID: configured.GID,
+			VMPath:  shares.HubVMPath + "/" + configured.Tag,
+			CtrPath: configuredShareTarget(configured), State: "restart",
+		}
+		respond(brokerShareResponse{OK: true, Entry: &entry})
+		return
+	}
+	if br.shares == nil {
+		respond(brokerShareResponse{Error: "share manager unavailable"})
+		return
+	}
 	switch req.Op {
 	case "share.add":
 		entry, err = br.shares.Add(spec.Spec, spec.Persistent, spec.Replace)

@@ -1,6 +1,7 @@
 package virtio
 
 import (
+	"context"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -8,12 +9,14 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 const (
 	fuseGetattr = 3
 	fuseOpendir = 27
+	fuseStatx   = 52
 )
 
 func fuseInitHub(t *testing.T, hub *ShareHub) {
@@ -63,6 +66,83 @@ func publishHubShare(t *testing.T, hub *ShareHub, tag, path string, ro bool) *Sh
 		t.Fatal(err)
 	}
 	return export
+}
+
+func TestShareHubMapsGuestOwnership(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewShareHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	uid, gid := uint32(1000), uint32(1000)
+	prepared, _, err := hub.PrepareMapped("workspace", dir, false, &uid, &gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Publish(prepared); err != nil {
+		t.Fatal(err)
+	}
+	var rootOut fuse.EntryOut
+	root, errno := hub.root.Lookup(context.Background(), "workspace", &rootOut)
+	if errno != 0 {
+		t.Fatalf("root lookup: %v", errno)
+	}
+	if rootOut.Uid != uid || rootOut.Gid != gid {
+		t.Fatalf("root owner = %d:%d, want %d:%d", rootOut.Uid, rootOut.Gid, uid, gid)
+	}
+	var fileOut fuse.EntryOut
+	lookup := root.Operations().(fs.NodeLookuper)
+	if _, errno := lookup.Lookup(context.Background(), "file", &fileOut); errno != 0 {
+		t.Fatalf("file lookup: %v", errno)
+	}
+	if fileOut.Uid != uid || fileOut.Gid != gid {
+		t.Fatalf("file owner = %d:%d, want %d:%d", fileOut.Uid, fileOut.Gid, uid, gid)
+	}
+}
+
+func TestShareHubStatxMapsGuestOwnership(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewShareHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	fuseInitHub(t, hub)
+
+	uid, gid := uint32(1000), uint32(1001)
+	prepared, _, err := hub.PrepareMapped("workspace", dir, false, &uid, &gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hub.Publish(prepared); err != nil {
+		t.Fatal(err)
+	}
+	rootNode, errno := hubLookup(t, hub, 2, 1, "workspace")
+	if errno != 0 {
+		t.Fatalf("root lookup errno %d", errno)
+	}
+	fileNode, errno := hubLookup(t, hub, 3, rootNode, "file")
+	if errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+
+	statxIn := make([]byte, 24)
+	binary.LittleEndian.PutUint32(statxIn[20:24], 0x07ff)
+	_, errno, statxOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseStatx, 4, fileNode, len(statxIn)), statxIn}, 16, 288)
+	if errno != 0 {
+		t.Fatalf("statx errno %d", errno)
+	}
+	if gotUID, gotGID := binary.LittleEndian.Uint32(statxOut[1][52:56]), binary.LittleEndian.Uint32(statxOut[1][56:60]); gotUID != uid || gotGID != gid {
+		t.Fatalf("statx owner = %d:%d, want %d:%d", gotUID, gotGID, uid, gid)
+	}
 }
 
 func TestShareHubDynamicNamespace(t *testing.T) {

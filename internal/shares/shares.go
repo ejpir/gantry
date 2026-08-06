@@ -25,12 +25,14 @@ type Transport struct {
 
 // Entry is one exported host directory and where it appears for the guest.
 type Entry struct {
-	Tag     string `json:"tag"`
-	Path    string `json:"path"`
-	RO      bool   `json:"ro,omitempty"`
-	VMPath  string `json:"vmPath"`
-	CtrPath string `json:"ctrPath"`
-	State   string `json:"state,omitempty"`
+	Tag     string  `json:"tag"`
+	Path    string  `json:"path"`
+	RO      bool    `json:"ro,omitempty"`
+	UID     *uint32 `json:"uid,omitempty"`
+	GID     *uint32 `json:"gid,omitempty"`
+	VMPath  string  `json:"vmPath"`
+	CtrPath string  `json:"ctrPath"`
+	State   string  `json:"state,omitempty"`
 }
 
 // Manifest is <vsockfwd>/shares.json. Version/Generation/Transport are

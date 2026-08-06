@@ -105,3 +105,45 @@ func TestBrokerBadRequest(t *testing.T) {
 		t.Fatalf("resp = %s", got)
 	}
 }
+
+func TestBrokerSetResources(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1})
+	br := &broker{store: store, sessions: map[string]chan struct{}{}}
+	request := `{"op":"resources.set","id":"edit","resources":{"mem_mb":2048,"vcpus":3}}` + "\n"
+	if got := brokerPipe(t, br, request); !strings.Contains(got, `"ok":true`) {
+		t.Fatalf("resp = %s", got)
+	}
+	cfg, err := readSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MemMB != 2048 || cfg.VCPUs != 3 {
+		t.Fatalf("resources = %d MiB/%d CPU", cfg.MemMB, cfg.VCPUs)
+	}
+}
+
+func TestBrokerConfiguresShareForRestart(t *testing.T) {
+	dir := t.TempDir()
+	host := filepath.Join(dir, "host")
+	if err := os.Mkdir(host, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := newTestConfigStore(t, dir, RunConfig{})
+	br := &broker{store: store, sessions: map[string]chan struct{}{}}
+	req := brokerRequest{
+		Op: "share.configure", ID: "mount",
+		Share: &brokerShareRequest{Spec: "code=" + host + "@/workspace", Persistent: true},
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := brokerPipe(t, br, string(raw)+"\n")
+	if !strings.Contains(got, `"ok":true`) || !strings.Contains(got, `"ctrPath":"/workspace"`) {
+		t.Fatalf("resp = %s", got)
+	}
+	if saved := store.Snapshot().Shares; len(saved) != 1 || !strings.Contains(saved[0], "@/workspace") {
+		t.Fatalf("saved shares = %v", saved)
+	}
+}
