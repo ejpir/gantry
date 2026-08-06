@@ -183,15 +183,17 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		return 1
 	}
 
-	// Egress policy mirroring the source service domains.
-	dir := sandboxDir(gname)
+	// Egress policy mirroring the source service domains. Written OUTSIDE
+	// the sandbox dir on purpose: launchSandbox removes and recreates that
+	// directory on start.
 	netpolPath := ""
 	if pol, _ := importedNetpol(rt); pol != nil {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		polDir := filepath.Join(filepath.Dir(sandboxRoot()), "netpol")
+		if err := os.MkdirAll(polDir, 0o700); err != nil {
 			fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 			return 1
 		}
-		netpolPath = filepath.Join(dir, "imported-netpol.json")
+		netpolPath = filepath.Join(polDir, "imported-"+gname+".json")
 		if err := os.WriteFile(netpolPath, pol, 0o600); err != nil {
 			fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 			return 1
