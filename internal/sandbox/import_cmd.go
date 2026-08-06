@@ -170,7 +170,8 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		}
 	}
 
-	// Guest assets (auto-download on first use).
+	// Guest assets (auto-download on first use). Absolute paths: the
+	// daemon runs with cwd=/, so anything relative would break there.
 	say := func(format string, a ...any) { fmt.Printf("gantry import: "+format+"\n", a...) }
 	kernel, err := vmm.EnsureKernel(vmm.DefaultKernelImage(), say)
 	if err != nil {
@@ -182,6 +183,7 @@ func importDockerSandbox(root, name, as, logPath string, dryRun bool) int {
 		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
 		return 1
 	}
+	kernel, rootfs = absPath(kernel), absPath(rootfs)
 
 	// Egress policy mirroring the source service domains. Written OUTSIDE
 	// the sandbox dir on purpose: launchSandbox removes and recreates that
