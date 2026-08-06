@@ -21,8 +21,11 @@ case "${2:-$IN}" in
 *x86_64*|*amd64*) RUNSC_ARCH=x86_64;  GO_ARCH=amd64 ;;
 *) echo "cannot infer arch from $IN (pass it as: mkrootfs-gvisor.sh $IN ARCH)" >&2; exit 1 ;;
 esac
-OUT=$(echo "$IN" | sed 's/rootfs-/rootfs-gvisor-/')
-[ "$OUT" != "$IN" ] || { echo "input name must contain 'rootfs-'" >&2; exit 1; }
+case "$IN" in
+*rootfs-*) OUT=$(echo "$IN" | sed 's/rootfs-/rootfs-gvisor-/') ;;
+*rootfs*)  OUT=$(echo "$IN" | sed 's/rootfs/rootfs-gvisor/') ;;  # arch-less CI bundle name
+*) echo "input name must contain 'rootfs'" >&2; exit 1 ;;
+esac
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
