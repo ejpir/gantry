@@ -7,6 +7,8 @@ import (
 	"time"
 	"unicode"
 
+	"gantry/internal/shares"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -584,9 +586,9 @@ func (m sandboxTUIModel) renderCardActions(theme tuiTheme, sandbox tuiSandbox, s
 		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.busyAction))+"…"), width)
 	}
 	type action struct{ key, label string }
-	actions := []action{{"↵", "start"}, {"i", "nfo"}, {"d", "elete"}}
+	actions := []action{{"↵", "start"}, {"e", "dit"}, {"d", "elete"}}
 	if sandbox.State == tuiRunning {
-		actions = []action{{"↵", "open"}, {"s", "top"}, {"i", "nfo"}, {"d", "elete"}}
+		actions = []action{{"↵", "open"}, {"s", "top"}, {"e", "dit"}, {"d", "elete"}}
 	}
 	var rendered []string
 	for _, action := range actions {
@@ -653,7 +655,7 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 	case tuiTrafficPage:
 		return [][2]string{{"↑/↓", "inspect"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	case tuiRulesPage:
-		return [][2]string{{"↑/↓", "inspect"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
+		return [][2]string{{"↑/↓", "inspect"}, {"e", "edit policy"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	case tuiMountsPage:
 		return [][2]string{{"a", "add share"}, {"d", "remove share"}, {"r", "replace"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiPortsPage:
@@ -664,9 +666,9 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 	}
 	selected := m.selected()
 	if selected != nil && selected.State == tuiRunning {
-		return [][2]string{{"enter", "open"}, {"s", "stop"}, {"i", "details"}, {"d", "remove"}, {"?", "help"}}
+		return [][2]string{{"enter", "open"}, {"s", "stop"}, {"e", "edit"}, {"i", "details"}, {"d", "remove"}, {"?", "help"}}
 	}
-	return [][2]string{{"enter", "start"}, {"s", "start"}, {"i", "details"}, {"d", "remove"}, {"?", "help"}}
+	return [][2]string{{"enter", "start"}, {"s", "start"}, {"e", "edit"}, {"i", "details"}, {"d", "remove"}, {"?", "help"}}
 }
 
 func (m sandboxTUIModel) pagePosition() string {
@@ -740,23 +742,57 @@ func (m sandboxTUIModel) renderToast(theme tuiTheme) string {
 	return renderSurface(style, theme.text, theme.panel, content)
 }
 
-func (m sandboxTUIModel) dialogSize(kind tuiDialog) (int, int) {
-	idealWidth, idealHeight := 62, 18
+// dialogMeasured renders the dialog body ONCE and derives the geometry
+// from it. dialogSize and renderDialog both need the same wrapped content;
+// rendering it twice per frame doubled the cost of every dialog repaint.
+func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, height int, content string, border color.Color) {
+	idealWidth := 62
 	switch kind {
 	case tuiHelpDialog:
-		idealWidth, idealHeight = 72, 24
+		idealWidth = 72
 	case tuiInfoDialog:
-		idealWidth, idealHeight = 68, 25
+		idealWidth = 68
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog:
-		idealWidth, idealHeight = 54, 15
+		idealWidth = 54
 	case tuiCreateDialog:
-		idealWidth, idealHeight = 64, 22
-	case tuiShareAddDialog, tuiPortPublishDialog:
-		idealWidth, idealHeight = 68, 20
+		idealWidth = 64
+	case tuiEditDialog:
+		idealWidth = 64
+	case tuiPortPublishDialog:
+		idealWidth = 68
+	case tuiShareAddDialog:
+		idealWidth = 68
+	case tuiNetworkPolicyDialog:
+		idealWidth = 68
 	}
-	width := minInt(idealWidth, maxInt(24, m.width-4))
-	height := minInt(idealHeight, maxInt(8, m.height-2))
+	width = minInt(idealWidth, maxInt(24, m.width-4))
+	innerWidth := maxInt(10, width-6)
+	content, border = m.dialogContent(theme, kind, innerWidth)
+	content = lipgloss.Wrap(content, innerWidth, "")
+	// Border and vertical padding consume four rows. Measuring the actual
+	// wrapped body keeps geometry, overlay bounds, and mouse hit testing in
+	// agreement even when labels or paths wrap at narrower widths.
+	height = minInt(maxInt(8, lipgloss.Height(content)+4), maxInt(8, m.height-2))
+	return width, height, content, border
+}
+
+func (m sandboxTUIModel) dialogSize(kind tuiDialog) (int, int) {
+	width, height, _, _ := m.dialogMeasured(tuiThemeFor(m.dark), kind)
 	return width, height
+}
+
+// Forms benefit from visual separation between sections, but retaining every
+// control is more important in a short terminal. Compact layouts keep the same
+// fields and keyboard order with the blank separator rows removed.
+func (m sandboxTUIModel) formDialogsSpacious() bool {
+	return m.height >= 35 && !m.shareSandbox.open && !m.portSandbox.open && !m.policySandbox.open
+}
+
+func (m sandboxTUIModel) formSectionGap() string {
+	if m.formDialogsSpacious() {
+		return "\n\n"
+	}
+	return "\n"
 }
 
 func (m sandboxTUIModel) dialogBounds(kind tuiDialog) tuiRect {
@@ -770,11 +806,24 @@ func (m sandboxTUIModel) dialogBounds(kind tuiDialog) tuiRect {
 }
 
 func (m sandboxTUIModel) renderDialog(theme tuiTheme) string {
-	width, height := m.dialogSize(m.dialog)
-	innerWidth := maxInt(10, width-6)
-	content := ""
+	width, height, content, border := m.dialogMeasured(theme, m.dialog)
+	content = truncateBlockLines(content, maxInt(1, height-4))
+	style := lipgloss.NewStyle().
+		Foreground(theme.text).
+		Background(theme.panel).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(border).
+		Padding(1, 2).
+		Width(width).
+		Height(height).
+		MaxHeight(height)
+	return renderSurface(style, theme.text, theme.panel, content)
+}
+
+func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidth int) (string, color.Color) {
 	border := theme.accent
-	switch m.dialog {
+	content := ""
+	switch kind {
 	case tuiHelpDialog:
 		content = m.renderHelpDialog(theme, innerWidth)
 	case tuiInfoDialog:
@@ -787,6 +836,8 @@ func (m sandboxTUIModel) renderDialog(theme tuiTheme) string {
 		border = theme.error
 	case tuiCreateDialog:
 		content = m.renderCreateDialog(theme, innerWidth)
+	case tuiEditDialog:
+		content = m.renderEditDialog(theme, innerWidth)
 	case tuiShareAddDialog:
 		content = m.renderShareAddDialog(theme, innerWidth)
 	case tuiPortUnpublishDialog:
@@ -794,18 +845,10 @@ func (m sandboxTUIModel) renderDialog(theme tuiTheme) string {
 		border = theme.error
 	case tuiPortPublishDialog:
 		content = m.renderPortPublishDialog(theme, innerWidth)
+	case tuiNetworkPolicyDialog:
+		content = m.renderNetworkPolicyDialog(theme, innerWidth)
 	}
-	content = truncateBlockLines(content, maxInt(1, height-4))
-	style := lipgloss.NewStyle().
-		Foreground(theme.text).
-		Background(theme.panel).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(border).
-		Padding(1, 2).
-		Width(width).
-		Height(height).
-		MaxHeight(height)
-	return renderSurface(style, theme.text, theme.panel, content)
+	return content, border
 }
 
 func (m sandboxTUIModel) dialogHeader(theme tuiTheme, title string, width int) string {
@@ -832,12 +875,13 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"g / G", "first / last row"},
 		{"mouse wheel", "scroll the view"},
 		{"tab / S-tab", "switch views"},
-		{"1 … 4", "jump to a view"},
+		{"1 … 5", "jump to a view"},
 	})
 	actions := column("SANDBOX ACTIONS", [][2]string{
 		{"enter", "open or start"},
 		{"s", "start / stop"},
 		{"n", "create a sandbox"},
+		{"e", "edit CPU / memory"},
 		{"i", "show details"},
 		{"d", "remove"},
 		{"r", "refresh"},
@@ -846,6 +890,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"a", "add a live share"},
 		{"d", "remove selected share"},
 		{"r", "replace selected share"},
+		{"e (Rules)", "edit network policy"},
 	})
 	application := column("APPLICATION", [][2]string{
 		{"?", "toggle this help"},
@@ -864,14 +909,14 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		}
 		navigation = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("NAVIGATION"),
-			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…4", "jump"),
+			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…5", "jump"),
 			binding("g / G", "first / last") + "  ·  " + binding("wheel", "scroll"),
 		}, "\n")
 		actions = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("SANDBOX ACTIONS"),
 			binding("enter", "open / start") + "  ·  " + binding("s", "start / stop"),
 			binding("n", "create") + "  ·  " + binding("i", "details") + "  ·  " + binding("d", "remove"),
-			binding("r", "refresh") + "  ·  " + binding("a/d/r", "share add/remove/replace"),
+			binding("r", "refresh") + "  ·  " + binding("a/d/r", "share add/remove/replace") + "  ·  " + binding("e", "policy (Rules)"),
 		}, "\n")
 		application = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("APPLICATION"),
@@ -933,7 +978,7 @@ func (m sandboxTUIModel) renderRemoveDialog(theme tuiTheme, width int) string {
 	remove := renderDialogButton(theme, "Remove", m.confirmRemove, true)
 	buttons := alignRight(cancel+"  "+remove, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
-	return header + "\n\n" + label + value + "\n\n" + warning + "\n\n" + question + "\n\n" + buttons + "\n" + hint
+	return header + "\n\n" + label + value + "\n\n" + warning + "\n\n" + question + "\n\n" + renderConfirmationFooter(buttons, hint)
 }
 
 func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
@@ -949,14 +994,53 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 	kernelLabel := formLabel(theme, "Kernel", m.createFocus == 3)
 	kernelValue := lipgloss.NewStyle().Foreground(theme.text).Render(truncateText(m.createKernelLabel(), maxInt(12, width-16))) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles)")
+	cpuLabel := formLabel(theme, "CPUs", m.createFocus == 4)
+	cpuSlider := m.createCPUs.View(theme, width, m.createFocus == 4, "CPU")
+	memoryLabel := formLabel(theme, "Memory", m.createFocus == 5)
+	memorySlider := m.createMemory.View(theme, width, m.createFocus == 5, "MiB")
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	create := renderDialogButton(theme, "Create", m.createFocus == 4, false)
+	create := renderDialogButton(theme, "Create", m.createFocus == 6, false)
 	buttons := alignRight(create, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  enter continue  •  esc cancel")
-	return header + "\n" + description + "\n" + nameLabel + "\n" + nameField + "\n" + imageLabel + "\n" + imageField + "\n" + runtimeLabel + "\n" + runtimeValue + "\n" + kernelLabel + "\n" + kernelValue + "\n" + errorLine + "\n" + buttons + "\n" + hint
+	gap := m.formSectionGap()
+	fields := []string{
+		nameLabel + "\n" + nameField,
+		imageLabel + "\n" + imageField,
+		runtimeLabel + "\n" + runtimeValue,
+		kernelLabel + "\n" + kernelValue,
+		cpuLabel + "\n" + cpuSlider,
+		memoryLabel + "\n" + memorySlider,
+	}
+	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Edit Sandbox", width)
+	sandbox := m.selected()
+	if sandbox == nil {
+		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No sandbox selected.")
+	}
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText("Change the VM allocation for "+sandbox.Name+".", width))
+	cpuLabel := formLabel(theme, "CPUs", m.editFocus == 0)
+	cpuSlider := m.editCPUs.View(theme, width, m.editFocus == 0, "CPU")
+	memoryLabel := formLabel(theme, "Memory", m.editFocus == 1)
+	memorySlider := m.editMemory.View(theme, width, m.editFocus == 1, "MiB")
+	note := "Applied when the sandbox next starts."
+	if sandbox.State == tuiRunning {
+		note = "Restart the sandbox to apply this allocation."
+	}
+	noteLine := lipgloss.NewStyle().Foreground(theme.warning).Render(truncateText(note, width))
+	errorLine := ""
+	if m.formError != "" {
+		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
+	}
+	save := renderDialogButton(theme, "Save", m.editFocus == 2, false)
+	buttons := alignRight(save, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText("←/→ adjust  •  PgUp/PgDn jump  •  tab next  •  esc cancel", width))
+	return header + "\n" + description + "\n\n" + cpuLabel + "\n" + cpuSlider + "\n\n" + memoryLabel + "\n" + memorySlider + "\n\n" + noteLine + "\n" + renderFormFooter(errorLine, buttons, hint)
 }
 
 func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) string {
@@ -974,50 +1058,71 @@ func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) stri
 	remove := renderDialogButton(theme, "Remove", m.confirmRemove, true)
 	buttons := alignRight(cancel+"  "+remove, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
-	return header + "\n\n" + label + value + "\n" + path + "\n\n" + warning + "\n\n" + question + "\n\n" + buttons + "\n" + hint
+	return header + "\n\n" + label + value + "\n" + path + "\n\n" + warning + "\n\n" + question + "\n\n" + renderConfirmationFooter(buttons, hint)
 }
 
 func (m sandboxTUIModel) renderShareAddDialog(theme tuiTheme, width int) string {
-	title := "Add Live Share"
-	description := "Attach a host directory without restarting the sandbox."
-	buttonLabel := "Add"
-	if m.shareReplace {
-		title = "Replace Share"
-		description = "Replace the selected share while the sandbox keeps running."
-		buttonLabel = "Replace"
-	}
+	title, description, buttonLabel := m.shareDialogCopy()
 	header := m.dialogHeader(theme, title, width)
-	target := "none"
-	if m.shareReplace {
-		if row := m.selectedMount(); row != nil {
-			target = row.Sandbox
-		}
-	} else if sandbox := m.shareTargetSandbox(); sandbox != nil {
-		target = sandbox.Name
-	}
-	targetLine := lipgloss.NewStyle().Foreground(theme.muted).Render("sandbox  ") +
-		lipgloss.NewStyle().Foreground(theme.secondary).Render(target)
-	tagLabel := formLabel(theme, "Tag", m.shareFocus == 0)
-	pathLabel := formLabel(theme, "Host path", m.shareFocus == 1)
-	tagField := renderInputField(theme, m.shareTag.View(), width, m.shareFocus == 0)
-	pathField := renderInputField(theme, m.sharePath.View(), width, m.shareFocus == 1)
+	sandboxLabel := formLabel(theme, "Sandbox", m.shareFocus == 0)
+	sandboxField := m.shareSandbox.View(theme, width, m.shareFocus == 0)
+	tagLabel := formLabel(theme, "Tag", m.shareFocus == 1)
+	pathLabel := formLabel(theme, "Host path", m.shareFocus == 2)
+	mountLabel := formLabel(theme, "Mount point", m.shareFocus == 3)
+	ownerLabel := formLabel(theme, "Guest owner", m.shareFocus == 4)
+	tagField := renderInputField(theme, m.shareTag.View(), width, m.shareFocus == 1)
+	pathField := renderInputField(theme, m.sharePath.View(), width, m.shareFocus == 2)
+	mountField := renderInputField(theme, m.shareMount.View(), width, m.shareFocus == 3)
+	ownerField := renderInputField(theme, m.shareOwner.View(), width, m.shareFocus == 4)
 	mode := "read-write"
 	if m.shareRO {
 		mode = "read-only"
 	}
-	modeLabel := formLabel(theme, "Mode", m.shareFocus == 2)
+	modeLabel := formLabel(theme, "Mode", m.shareFocus == 5)
 	modeValue := lipgloss.NewStyle().Foreground(theme.text).Render(mode) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	button := renderDialogButton(theme, buttonLabel, m.shareFocus == 3, false)
+	button := renderDialogButton(theme, buttonLabel, m.shareFocus == 6, false)
 	buttons := alignRight(button, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  enter continue  •  esc cancel")
-	return header + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(description) + "\n" + targetLine +
-		"\n" + tagLabel + "\n" + tagField + "\n" + pathLabel + "\n" + pathField +
-		"\n" + modeLabel + "  " + modeValue + "\n" + errorLine + "\n" + buttons + "\n" + hint
+	gap := m.formSectionGap()
+	fields := []string{
+		sandboxLabel + "\n" + sandboxField,
+		tagLabel + "\n" + tagField,
+		pathLabel + "\n" + pathField,
+		mountLabel + "\n" + mountField,
+		ownerLabel + "\n" + ownerField,
+		modeLabel + "  " + modeValue,
+	}
+	return header + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(description) +
+		gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
+	title = "Add Live Share"
+	description = "Attach a host directory without restarting the sandbox."
+	button = "Add"
+	tag := strings.TrimSpace(m.shareTag.Value())
+	mountpoint := strings.TrimSpace(m.shareMount.Value())
+	customMount := mountpoint != "" && mountpoint != shares.HubHostPath+"/"+tag
+	if customMount {
+		title = "Add Share"
+		description = "Save this container mount point; restart the sandbox to apply it."
+		button = "Save"
+	}
+	if m.shareReplace {
+		title = "Replace Share"
+		description = "Replace the selected share while the sandbox keeps running."
+		button = "Replace"
+		if customMount {
+			description = "Save this container mount point; restart the sandbox to apply it."
+			button = "Save"
+		}
+	}
+	return title, description, button
 }
 
 func (m sandboxTUIModel) renderPortUnpublishDialog(theme tuiTheme, width int) string {
@@ -1034,40 +1139,88 @@ func (m sandboxTUIModel) renderPortUnpublishDialog(theme tuiTheme, width int) st
 	remove := renderDialogButton(theme, "Unpublish", m.confirmRemove, true)
 	buttons := alignRight(cancel+"  "+remove, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
-	return header + "\n\n" + label + value + "\n\n" + warning + "\n\n" + question + "\n\n" + buttons + "\n" + hint
+	return header + "\n\n" + label + value + "\n\n" + warning + "\n\n" + question + "\n\n" + renderConfirmationFooter(buttons, hint)
 }
 
 func (m sandboxTUIModel) renderPortPublishDialog(theme tuiTheme, width int) string {
 	header := m.dialogHeader(theme, "Publish Port", width)
 	description := "Forward a guest port to a host listener, without a restart."
-	target := "none"
-	if sandbox := m.shareTargetSandbox(); sandbox != nil {
-		target = sandbox.Name
-	}
-	targetLine := lipgloss.NewStyle().Foreground(theme.muted).Render("sandbox  ") +
-		lipgloss.NewStyle().Foreground(theme.secondary).Render(target)
-	bindLabel := formLabel(theme, "Host bind", m.portFocus == 0)
-	guestLabel := formLabel(theme, "Guest port", m.portFocus == 1)
-	bindField := renderInputField(theme, m.portBind.View(), width, m.portFocus == 0)
-	guestField := renderInputField(theme, m.portGuest.View(), width, m.portFocus == 1)
+	sandboxLabel := formLabel(theme, "Sandbox", m.portFocus == 0)
+	sandboxField := m.portSandbox.View(theme, width, m.portFocus == 0)
+	bindLabel := formLabel(theme, "Host bind", m.portFocus == 1)
+	guestLabel := formLabel(theme, "Guest port", m.portFocus == 2)
+	bindField := renderInputField(theme, m.portBind.View(), width, m.portFocus == 1)
+	guestField := renderInputField(theme, m.portGuest.View(), width, m.portFocus == 2)
 	proto := "tcp"
 	if m.portUDP {
 		proto = "udp"
 	}
-	protoLabel := formLabel(theme, "Protocol", m.portFocus == 2)
+	protoLabel := formLabel(theme, "Protocol", m.portFocus == 3)
 	protoValue := lipgloss.NewStyle().Foreground(theme.text).Render(proto) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
-	exposure := lipgloss.NewStyle().Foreground(theme.muted).Render("Bind is loopback by default; write 0.0.0.0:port to expose on the LAN.")
+	// Wrap before the outer dialog applies its width. Otherwise the surface
+	// wraps this line after content truncation and pushes the footer/border out
+	// of the declared modal bounds.
+	exposure := lipgloss.NewStyle().Foreground(theme.muted).Render(
+		lipgloss.Wrap("Bind is loopback by default; write 0.0.0.0:port to expose on the LAN.", width, ""),
+	)
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	button := renderDialogButton(theme, "Publish", m.portFocus == 3, false)
+	button := renderDialogButton(theme, "Publish", m.portFocus == 4, false)
 	buttons := alignRight(button, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  enter continue  •  esc cancel")
-	return header + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(description) + "\n" + targetLine +
-		"\n" + bindLabel + "\n" + bindField + "\n" + guestLabel + "\n" + guestField +
-		"\n" + protoLabel + "  " + protoValue + "\n" + exposure + "\n" + errorLine + "\n" + buttons + "\n" + hint
+	gap := m.formSectionGap()
+	fields := []string{
+		sandboxLabel + "\n" + sandboxField,
+		bindLabel + "\n" + bindField,
+		guestLabel + "\n" + guestField,
+		protoLabel + "  " + protoValue + "\n" + exposure,
+	}
+	return header + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(description) +
+		gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func (m sandboxTUIModel) renderNetworkPolicyDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Network Policy", width)
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Replace the running sandbox's egress policy immediately.")
+	sandboxLabel := formLabel(theme, "Sandbox", m.policyFocus == 0)
+	sandboxField := m.policySandbox.View(theme, width, m.policyFocus == 0)
+	pathLabel := formLabel(theme, "Policy file", m.policyFocus == 1) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  blank = built-in default")
+	pathField := renderInputField(theme, m.policyPath.View(), width, m.policyFocus == 1)
+	localLabel := formLabel(theme, "Local network override", m.policyFocus == 2)
+	localValue := "blocked"
+	if m.policyLocal {
+		localValue = "allowed"
+	}
+	local := localLabel + "  " + lipgloss.NewStyle().Foreground(theme.text).Render(localValue) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
+	note := lipgloss.NewStyle().Foreground(theme.warning).Render("Subsequent packets use this policy immediately; existing sockets are not actively closed.")
+	errorLine := ""
+	if m.formError != "" {
+		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
+	}
+	apply := renderDialogButton(theme, "Apply", m.policyFocus == 3, false)
+	buttons := alignRight(apply, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  enter continue  •  esc cancel")
+	gap := m.formSectionGap()
+	fields := []string{
+		sandboxLabel + "\n" + sandboxField,
+		pathLabel + "\n" + pathField,
+		local,
+		note,
+	}
+	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func renderFormFooter(errorLine, buttons, hint string) string {
+	return errorLine + "\n" + buttons + "\n\n" + hint
+}
+
+func renderConfirmationFooter(buttons, hint string) string {
+	return buttons + "\n\n" + hint
 }
 
 func formLabel(theme tuiTheme, label string, focused bool) string {
