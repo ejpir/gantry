@@ -35,6 +35,11 @@ const (
 	openWriteFlags = linuxOAccmode | linuxOCreat | linuxOTrunc | linuxOAppend | linuxOTmpfile
 )
 
+// shareOwnerMappingSupported: the Windows passthrough node always reports
+// the host's real ownership (no mapGuestOwner equivalent), so PrepareMapped
+// rejects uid=/gid= explicitly rather than letting it no-op.
+const shareOwnerMappingSupported = false
+
 // newExportNode pins sharePath beneath a root handle and builds the
 // passthrough node presented as the export root. The returned release func
 // drops the backend when the export finishes. Hub-agnostic, mirroring the

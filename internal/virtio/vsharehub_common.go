@@ -69,6 +69,8 @@ type ShareExport struct {
 	Tag  string
 	Path string
 	RO   bool
+	UID  *uint32
+	GID  *uint32
 
 	state atomic.Int32
 	// node is the platform backend's root node, presented at /<tag>.
@@ -107,6 +109,32 @@ func (e *ShareExport) mutable() syscall.Errno {
 		return syscall.EROFS
 	}
 	return 0
+}
+
+// mapGuestOwner rewrites only the numeric ownership reported to the guest.
+// The host inode and all host-side access checks remain unchanged.
+func mapGuestOwner(e *ShareExport, attr *fuse.Attr) {
+	if e == nil || attr == nil {
+		return
+	}
+	if e.UID != nil {
+		attr.Uid = *e.UID
+	}
+	if e.GID != nil {
+		attr.Gid = *e.GID
+	}
+}
+
+func mapGuestStatxOwner(e *ShareExport, attr *fuse.Statx) {
+	if e == nil || attr == nil {
+		return
+	}
+	if e.UID != nil {
+		attr.Uid = *e.UID
+	}
+	if e.GID != nil {
+		attr.Gid = *e.GID
+	}
 }
 
 func (e *ShareExport) finish() {
@@ -191,10 +219,21 @@ func NewShareHub() (*ShareHub, error) {
 // fails. The platform half (newExportNode) pins the root and builds the
 // node wrapper; everything about the lifecycle is platform-neutral.
 func (h *ShareHub) Prepare(tag, path string, ro bool) (*PreparedShare, string, error) {
+	return h.PrepareMapped(tag, path, ro, nil, nil)
+}
+
+// PrepareMapped is Prepare with optional guest-visible UID/GID mapping.
+func (h *ShareHub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*PreparedShare, string, error) {
 	if err := shares.ValidateShareTag(tag); err != nil {
 		return nil, "", err
 	}
-	exp := &ShareExport{Tag: tag, RO: ro}
+	if (uid != nil || gid != nil) && !shareOwnerMappingSupported {
+		// Explicit beats silently divergent: the Windows passthrough
+		// backend always reports the host's real ownership, so accepting
+		// the option there would make it a no-op the user asked for.
+		return nil, "", fmt.Errorf("share uid=/gid= ownership mapping is not supported on this platform")
+	}
+	exp := &ShareExport{Tag: tag, RO: ro, UID: uid, GID: gid}
 	exp.state.Store(int32(ShareExportActive))
 	node, finalPath, release, err := newExportNode(exp, path, h.nextSalt.Add(1)<<32)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gantry/internal/shares"
@@ -23,6 +24,11 @@ type Share struct {
 	Tag  string
 	Path string
 	RO   bool
+	// UID/GID optionally replace host numeric ownership in guest-visible
+	// attributes. Host ownership is never changed; all I/O still runs with
+	// the VMM process's host credentials.
+	UID *uint32
+	GID *uint32
 	// CtrPath overrides the container bind-mount target (default:
 	// shareCtrPath — /host or /host/<tag>). `gantry pi` uses it to land
 	// the host's ~/.pi/agent at /root/.pi/agent in the guest.
@@ -49,19 +55,69 @@ func shareCtrPath(tag string, multi bool) string {
 	return "/host/" + tag
 }
 
-// ParseShareSpec parses TAG=PATH[@CTRPATH][,ro]: the optional @CTRPATH
+// ParseShareSpec parses TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N]: @CTRPATH
 // (an absolute container path) overrides where crun bind-mounts the
-// share; the ,ro suffix is the only other supported option. Splitting only
+// share; suffix options control read-only mode and guest-visible ownership. Splitting only
 // on the first '=' leaves Windows drive colons in PATH intact.
 func ParseShareSpec(spec string, seen map[string]bool) (Share, error) {
 	tag, path, ok := strings.Cut(spec, "=")
 	if !ok {
-		return Share{}, fmt.Errorf("want TAG=PATH[@CTRPATH][,ro]")
+		return Share{}, fmt.Errorf("want TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N]")
 	}
 	var ro bool
-	if strings.HasSuffix(path, ",ro") {
-		ro = true
-		path = strings.TrimSuffix(path, ",ro")
+	var uid, gid *uint32
+	// Options are suffixes so commas remain valid in the host/container path
+	// unless every trailing component is a recognized option.
+	for {
+		i := strings.LastIndex(path, ",")
+		if i < 0 {
+			break
+		}
+		base, opt := path[:i], path[i+1:]
+		recognized := true
+		switch {
+		case opt == "ro":
+			if ro {
+				return Share{}, fmt.Errorf("duplicate share option ro")
+			}
+			ro = true
+		case strings.HasPrefix(opt, "uid="):
+			if uid != nil {
+				return Share{}, fmt.Errorf("duplicate share option uid")
+			}
+			v, err := strconv.ParseUint(strings.TrimPrefix(opt, "uid="), 10, 32)
+			if err != nil {
+				return Share{}, fmt.Errorf("invalid share uid %q: %v", strings.TrimPrefix(opt, "uid="), err)
+			}
+			n := uint32(v)
+			uid = &n
+		case strings.HasPrefix(opt, "gid="):
+			if gid != nil {
+				return Share{}, fmt.Errorf("duplicate share option gid")
+			}
+			v, err := strconv.ParseUint(strings.TrimPrefix(opt, "gid="), 10, 32)
+			if err != nil {
+				return Share{}, fmt.Errorf("invalid share gid %q: %v", strings.TrimPrefix(opt, "gid="), err)
+			}
+			n := uint32(v)
+			gid = &n
+		default:
+			recognized = false
+		}
+		if !recognized {
+			// A trailing segment that LOOKS like an option (key=value) but
+			// isn't recognized is a typo, not part of the path: fail loudly
+			// instead of silently sharing "/data,uidx=1000". Plain commas in
+			// host paths (no '=') keep working.
+			if k, _, isOpt := strings.Cut(opt, "="); isOpt {
+				return Share{}, fmt.Errorf("unknown share option %q (want ro, uid=N, gid=N)", k)
+			}
+			break
+		}
+		path = base
+	}
+	if (uid == nil) != (gid == nil) {
+		return Share{}, fmt.Errorf("share ownership mapping requires both uid=N and gid=N")
 	}
 	var ctr string
 	if i := strings.LastIndex(path, "@"); i >= 0 {
@@ -79,7 +135,7 @@ func ParseShareSpec(spec string, seen map[string]bool) (Share, error) {
 	case seen[tag]:
 		return Share{}, fmt.Errorf("duplicate tag %q", tag)
 	}
-	return Share{Tag: tag, Path: path, RO: ro, CtrPath: ctr}, nil
+	return Share{Tag: tag, Path: path, RO: ro, UID: uid, GID: gid, CtrPath: ctr}, nil
 }
 
 func buildShareManifest(shares []Share) ShareManifest {
@@ -94,6 +150,8 @@ func buildShareManifest(shares []Share) ShareManifest {
 			Tag:     s.Tag,
 			Path:    s.Path,
 			RO:      s.RO,
+			UID:     s.UID,
+			GID:     s.GID,
 			VMPath:  shareVMPath(s.Tag),
 			CtrPath: ctr,
 		})

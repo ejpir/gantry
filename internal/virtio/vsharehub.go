@@ -19,6 +19,10 @@ import (
 // lifecycle, synthetic namespace root, and device transport are
 // platform-neutral and live in vsharehub_common.go.
 
+// shareOwnerMappingSupported: the unix loopback wrapper rewrites owner
+// fields via mapGuestOwner, so uid=/gid= exports are honored.
+const shareOwnerMappingSupported = true
+
 // newExportNode pins path beneath an open root descriptor and builds the
 // loopback node presented as the export root. The returned release func
 // drops the pinned root when the export finishes. It is hub-agnostic so
@@ -136,7 +140,11 @@ func (n *shareNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	if errno := n.available(); errno != 0 {
 		return nil, errno
 	}
-	return n.LoopbackNode.Lookup(ctx, name, out)
+	inode, errno := n.LoopbackNode.Lookup(ctx, name, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
+	return inode, errno
 }
 
 func (n *shareNode) Mknod(ctx context.Context, name string, mode, rdev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -154,7 +162,11 @@ func (n *shareNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	if errno := n.mutable(); errno != 0 {
 		return nil, errno
 	}
-	return n.LoopbackNode.Mkdir(ctx, name, mode, out)
+	inode, errno := n.LoopbackNode.Mkdir(ctx, name, mode, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
+	return inode, errno
 }
 
 func (n *shareNode) Rmdir(ctx context.Context, name string) syscall.Errno {
@@ -191,6 +203,9 @@ func (n *shareNode) Create(ctx context.Context, name string, flags uint32, mode 
 		return nil, nil, 0, errno
 	}
 	inode, fh, fuseFlags, errno = n.LoopbackNode.Create(ctx, name, flags, mode, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
 	fh, _, errno = n.wrapFile(fh, errno)
 	return inode, fh, fuseFlags, errno
 }
@@ -199,7 +214,11 @@ func (n *shareNode) Symlink(ctx context.Context, target, name string, out *fuse.
 	if errno := n.mutable(); errno != 0 {
 		return nil, errno
 	}
-	return n.LoopbackNode.Symlink(ctx, target, name, out)
+	inode, errno := n.LoopbackNode.Symlink(ctx, target, name, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
+	return inode, errno
 }
 
 func (n *shareNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -209,7 +228,11 @@ func (n *shareNode) Link(ctx context.Context, target fs.InodeEmbedder, name stri
 	if other, ok := target.(*shareNode); ok && other.export != n.export {
 		return nil, syscall.EXDEV
 	}
-	return n.LoopbackNode.Link(ctx, target, name, out)
+	inode, errno := n.LoopbackNode.Link(ctx, target, name, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
+	return inode, errno
 }
 
 func (n *shareNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
@@ -269,7 +292,26 @@ func (n *shareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	if errno := n.available(); errno != 0 {
 		return errno
 	}
-	return n.LoopbackNode.Getattr(ctx, f, out)
+	errno := n.LoopbackNode.Getattr(ctx, f, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
+	return errno
+}
+
+func (n *shareNode) Statx(ctx context.Context, f fs.FileHandle, flags uint32, mask uint32, out *fuse.StatxOut) syscall.Errno {
+	if errno := n.available(); errno != 0 {
+		return errno
+	}
+	statxer, ok := any(&n.LoopbackNode).(fs.NodeStatxer)
+	if !ok {
+		return syscall.ENOTSUP
+	}
+	errno := statxer.Statx(ctx, f, flags, mask, out)
+	if errno == 0 {
+		mapGuestStatxOwner(n.export, &out.Statx)
+	}
+	return errno
 }
 
 func (n *shareNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
@@ -280,6 +322,10 @@ func (n *shareNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 	// Ownership squash, as in NewFS: gVisor's gofer chowns every file it
 	// creates, and non-root hosts cannot chown. Ownership is cosmetic on a
 	// host share; apply all other requested attribute changes.
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+		return 0
+	}
 	if errno != syscall.EPERM && errno != syscall.EACCES {
 		return errno
 	}
@@ -289,9 +335,17 @@ func (n *shareNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 	retry := *in
 	retry.Valid &^= fuse.FATTR_UID | fuse.FATTR_GID
 	if retry.Valid != 0 {
-		return n.LoopbackNode.Setattr(ctx, f, &retry, out)
+		errno = n.LoopbackNode.Setattr(ctx, f, &retry, out)
+		if errno == 0 {
+			mapGuestOwner(n.export, &out.Attr)
+		}
+		return errno
 	}
-	return n.LoopbackNode.Getattr(ctx, f, out)
+	errno = n.LoopbackNode.Getattr(ctx, f, out)
+	if errno == 0 {
+		mapGuestOwner(n.export, &out.Attr)
+	}
+	return errno
 }
 
 // xattrWriteAllowed permits only user.* attributes. security.*
@@ -420,7 +474,11 @@ func (f *shareFile) Getattr(ctx context.Context, out *fuse.AttrOut) syscall.Errn
 	if !ok {
 		return syscall.ENOTSUP
 	}
-	return g.Getattr(ctx, out)
+	errno := g.Getattr(ctx, out)
+	if errno == 0 {
+		mapGuestOwner(f.export, &out.Attr)
+	}
+	return errno
 }
 
 func (f *shareFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
@@ -431,7 +489,20 @@ func (f *shareFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.A
 	if !ok {
 		return syscall.ENOTSUP
 	}
-	return s.Setattr(ctx, in, out)
+	errno := s.Setattr(ctx, in, out)
+	if (errno == syscall.EPERM || errno == syscall.EACCES) && in.Valid&(fuse.FATTR_UID|fuse.FATTR_GID) != 0 {
+		retry := *in
+		retry.Valid &^= fuse.FATTR_UID | fuse.FATTR_GID
+		if retry.Valid != 0 {
+			errno = s.Setattr(ctx, &retry, out)
+		} else if g, ok := f.FileHandle.(fs.FileGetattrer); ok {
+			errno = g.Getattr(ctx, out)
+		}
+	}
+	if errno == 0 {
+		mapGuestOwner(f.export, &out.Attr)
+	}
+	return errno
 }
 
 func (f *shareFile) Flush(ctx context.Context) syscall.Errno {
@@ -532,7 +603,11 @@ func (f *shareFile) Statx(ctx context.Context, flags uint32, mask uint32, out *f
 	if !ok {
 		return syscall.ENOTSUP
 	}
-	return s.Statx(ctx, flags, mask, out)
+	errno := s.Statx(ctx, flags, mask, out)
+	if errno == 0 {
+		mapGuestStatxOwner(f.export, &out.Statx)
+	}
+	return errno
 }
 
 // shareDirStream covers Readdir; shareDirHandle covers the OpendirHandle path.

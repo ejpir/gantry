@@ -384,3 +384,53 @@ func TestResolveLayerSet(t *testing.T) {
 		t.Fatalf("RW=%v RWLayer=%q", cfg.RW, cfg.RWLayer)
 	}
 }
+
+func TestResolveShareOwnerRoundTrip(t *testing.T) {
+	// regression: -share ...,uid=N,gid=N must survive Resolve's
+	// normalize-and-persist; dropping the suffix made the mapping a no-op.
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, f := range append(append([]string{}, resolveAssets...), "rwlayer.ext4") {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parse := func(args ...string) (RunConfig, []string, error) {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		rf := RegisterRunFlags(fs)
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		return rf.Resolve(fs, nil)
+	}
+	shareDir := filepath.Join(dir, "shared")
+	if err := os.Mkdir(shareDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := parse("-share", "code="+shareDir+",uid=1000,gid=1000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 1 {
+		t.Fatalf("shares = %v", cfg.Shares)
+	}
+	parsed, err := cfg.ParsedShares()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed) != 1 || parsed[0].UID == nil || *parsed[0].UID != 1000 || parsed[0].GID == nil || *parsed[0].GID != 1000 {
+		t.Fatalf("uid/gid lost in round-trip: spec=%q parsed=%+v", cfg.Shares[0], parsed)
+	}
+	// ro + ctrpath + owner all compose
+	cfg, _, err = parse("-share", "code="+shareDir+"@/data,ro,uid=7,gid=8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err = cfg.ParsedShares()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed[0].RO || parsed[0].CtrPath != "/data" || parsed[0].UID == nil || *parsed[0].UID != 7 || *parsed[0].GID != 8 {
+		t.Fatalf("composed spec lost options: %q -> %+v", cfg.Shares[0], parsed[0])
+	}
+}
