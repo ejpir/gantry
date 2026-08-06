@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -84,7 +85,7 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 			m.Close()
 			return nil, nil, err
 		}
-		prepared, canonical, err := m.hub.Prepare(share.Tag, share.Path, share.RO)
+		prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
 		if err != nil {
 			m.Close()
 			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
@@ -140,6 +141,21 @@ func pathsOverlap(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+string(filepath.Separator)) || strings.HasPrefix(b, a+string(filepath.Separator))
 }
 
+// containerPathsOverlap is pathsOverlap for guest container paths: always
+// slash-separated regardless of the host OS, so it must not go through
+// filepath.Clean on Windows. Equal, ancestor, and descendant targets all
+// overlap — a bind-mount at any of those shadows (or is shadowed by) the
+// hub FUSE mount depending on mount order.
+func containerPathsOverlap(a, b string) bool {
+	a = path.Clean(a)
+	b = path.Clean(b)
+	if a == b || a == "/" || b == "/" {
+		// the root contains every target
+		return true
+	}
+	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
 func (m *ShareManager) validateNewShare(share vmm.Share) error {
 	if len(m.exports) >= maxManagedShares {
 		return fmt.Errorf("too many shares (max %d)", maxManagedShares)
@@ -155,8 +171,8 @@ func (m *ShareManager) validateNewShare(share vmm.Share) error {
 	if ctr == "" {
 		ctr = defaultHubCtrPath(share.Tag)
 	}
-	if ctr == shares.HubInternalPath {
-		return fmt.Errorf("share %s may not cover the internal hub path %s", share.Tag, shares.HubInternalPath)
+	if containerPathsOverlap(ctr, shares.HubInternalPath) {
+		return fmt.Errorf("share %s may not cover, sit under, or contain the internal hub path %s", share.Tag, shares.HubInternalPath)
 	}
 	for _, existing := range m.exports {
 		otherCanonical, err := canonicalManagedPath(existing.share.Path)
@@ -206,7 +222,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	var existing *managedShare
 	if existing = m.exports[share.Tag]; existing != nil {
 		canonical, _ := canonicalManagedPath(share.Path)
-		if existing.share.Path == canonical && existing.share.RO == share.RO {
+		if existing.share.Path == canonical && existing.share.RO == share.RO && shareOwnerEqual(existing.share, share) {
 			// Identical share: re-adding an ephemeral share with --persist
 			// promotes it to persistent instead of being a no-op.
 			if persistent && existing.ephemeral {
@@ -233,7 +249,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	} else if err := m.validateNewShare(share); err != nil {
 		return shares.Entry{}, err
 	}
-	prepared, canonical, err := m.hub.Prepare(share.Tag, share.Path, share.RO)
+	prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
 	if err != nil {
 		return shares.Entry{}, err
 	}
@@ -293,6 +309,13 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	// manifest self-heals on the next mutation or boot Publish.
 	_ = m.publishLocked()
 	return m.entry(ms), nil
+}
+
+func shareOwnerEqual(a, b vmm.Share) bool {
+	if (a.UID == nil) != (b.UID == nil) || (a.GID == nil) != (b.GID == nil) {
+		return false
+	}
+	return (a.UID == nil || *a.UID == *b.UID) && (a.GID == nil || *a.GID == *b.GID)
 }
 
 // Remove hides a share immediately. Graceful removal drains existing handles;
@@ -400,6 +423,8 @@ func (m *ShareManager) entry(ms *managedShare) shares.Entry {
 		Tag:     ms.share.Tag,
 		Path:    ms.share.Path,
 		RO:      ms.share.RO,
+		UID:     ms.share.UID,
+		GID:     ms.share.GID,
 		VMPath:  shares.HubVMPath + "/" + ms.share.Tag,
 		CtrPath: ctr,
 		State:   state,
@@ -439,6 +464,9 @@ func shareConfigSpec(share vmm.Share) string {
 	if share.RO {
 		spec += ",ro"
 	}
+	if share.UID != nil {
+		spec += fmt.Sprintf(",uid=%d,gid=%d", *share.UID, *share.GID)
+	}
 	return spec
 }
 
@@ -460,21 +488,24 @@ func shareSpecsReplacingTag(specs []string, tag, newSpec string) []string {
 }
 
 // mutateSharesSnapshotLocked persists the tag replacement through the
-// ConfigStore and returns the previous Shares slice for rollback.
+// ConfigStore and returns the previous Shares slice for rollback. The
+// replacement is computed INSIDE the Mutate callback, which runs under
+// the store lock: the read-modify-write is then atomic against every
+// other cfg.Shares writer (SetShareForRestart, resources, netpol).
+// Computing from a pre-Mutate Snapshot would let a concurrent configure
+// commit in between and be silently overwritten by a stale final slice.
 func (m *ShareManager) mutateSharesSnapshotLocked(tag, newSpec string, old *[]string) error {
-	*old = append([]string(nil), m.store.Snapshot().Shares...)
-	final := shareSpecsReplacingTag(m.store.Snapshot().Shares, tag, newSpec)
 	return m.store.Mutate(func(cfg *RunConfig) error {
-		cfg.Shares = final
+		*old = append([]string(nil), cfg.Shares...)
+		cfg.Shares = shareSpecsReplacingTag(cfg.Shares, tag, newSpec)
 		return nil
 	})
 }
 
 // mutateSharesLocked is the no-rollback-needed variant (promotion path).
 func (m *ShareManager) mutateSharesLocked(tag, newSpec string) error {
-	final := shareSpecsReplacingTag(m.store.Snapshot().Shares, tag, newSpec)
 	return m.store.Mutate(func(cfg *RunConfig) error {
-		cfg.Shares = final
+		cfg.Shares = shareSpecsReplacingTag(cfg.Shares, tag, newSpec)
 		return nil
 	})
 }
