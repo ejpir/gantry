@@ -17,7 +17,9 @@
 # users never run this script.
 #
 # Needs: curl, xz, gcc (or CROSS_COMPILE), flex, bison, bc, python3.
-# ~10-20 min on a modern machine; incremental afterwards in $WORK.
+# ~10-20 min on a modern machine. With WORK unset the build uses a fresh
+# private temp tree (safe on multi-user machines, but cold every run); for
+# incremental builds set WORK to a directory of your own — see below.
 set -e
 STARTPWD=$PWD
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -32,7 +34,36 @@ amd64|x86_64)  ARCH=x86_64 ;;
 *) echo "usage: mkkernel.sh [arm64|x86_64]"; exit 1 ;;
 esac
 PAGES=${PAGES:-16k}   # arm64 only; x86_64 is always 4K
-WORK=${WORK:-/tmp/linux-$VERSION-build-$ARCH}
+
+# Build tree. Never default to a predictable /tmp path: the script cd's
+# into WORK and executes its scripts/config and Makefiles, so a shared or
+# pre-created directory is cross-user local code execution. Unset WORK →
+# fresh private mktemp tree, removed on exit. An explicit WORK is reused
+# only after proving it is entirely owned by and writable only by this
+# user (a freshly created one is re-validated after mkdir to close the
+# creation race).
+TEMP_WORK=
+ARCHIVE=
+cleanup() {
+	[ -z "$ARCHIVE" ] || rm -f -- "$ARCHIVE"
+	[ -z "$TEMP_WORK" ] || rm -rf -- "$TEMP_WORK"
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ -z "${WORK+x}" ]; then
+	umask 077
+	WORK=$(mktemp -d "${TMPDIR:-/tmp}/linux-$VERSION-build-$ARCH.XXXXXX")
+	TEMP_WORK=$WORK
+else
+	[ -e "$WORK" ] || { umask 077; mkdir -p -- "$WORK"; }
+	if [ -L "$WORK" ] || [ ! -d "$WORK" ] ||
+		[ -n "$(find "$WORK" ! -user "$(id -un)" -print -quit)" ] ||
+		[ -n "$(find "$WORK" \( -perm -020 -o -perm -002 \) -print -quit)" ]; then
+		echo "refusing unsafe WORK directory: $WORK" >&2
+		echo "WORK must be a real directory whose contents are all owned by and writable only by $(id -un)" >&2
+		exit 1
+	fi
+fi
 
 # Output + make target per arch: arm64 boots the raw Image (ARM\x64 magic),
 # x86-64 boots the vmlinux ELF (see bootx86.go). KARCH is the kernel tree's
@@ -88,13 +119,17 @@ OUT=$(abspath "$OUT" "$PWD")
 
 . "$ROOT/scripts/kernel-hardening.sh"
 
-if [ ! -d "$WORK" ]; then
+if [ ! -f "$WORK/Makefile" ]; then
 	echo "== downloading linux-$VERSION"
-	curl -fsSL -o /tmp/linux-$VERSION.tar.xz \
+	# Unpredictable archive path too: a predictable one lets another local
+	# user pre-plant a symlink and redirect the download over a user file.
+	ARCHIVE=$(mktemp "${TMPDIR:-/tmp}/linux-$VERSION.XXXXXX.tar.xz")
+	curl -fsSL -o "$ARCHIVE" \
 		https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-$VERSION.tar.xz
 	echo "== extracting to $WORK"
-	mkdir -p "$WORK"
-	tar -xJf /tmp/linux-$VERSION.tar.xz -C "$WORK" --strip-components=1
+	tar -xJf "$ARCHIVE" -C "$WORK" --strip-components=1
+	rm -f -- "$ARCHIVE"
+	ARCHIVE=
 fi
 
 cd "$WORK"

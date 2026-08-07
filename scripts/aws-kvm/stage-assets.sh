@@ -13,7 +13,11 @@ BUCKET="${BUCKET:-gantry-kvm-test-$ACCOUNT}"
 export AWS_DEFAULT_REGION="$REGION"
 
 echo "== building gantry-linux-amd64 =="
-GOOS=linux GOARCH=amd64 go build -o /tmp/gantry-linux-amd64 ./cmd/gantry
+# Unpredictable path: a predictable /tmp name lets another local user
+# pre-plant a symlink and redirect the build output over one of our files.
+BIN=$(mktemp "${TMPDIR:-/tmp}/gantry-linux-amd64.XXXXXX")
+trap 'rm -f -- "$BIN"' EXIT HUP INT TERM
+GOOS=linux GOARCH=amd64 go build -o "$BIN" ./cmd/gantry
 
 if [ ! -f "$ARTIFACTS/nerdbox-rootfs-gvisor-x86_64.erofs" ]; then
 	echo "== building gVisor rootfs variant (x86_64) =="
@@ -21,7 +25,7 @@ if [ ! -f "$ARTIFACTS/nerdbox-rootfs-gvisor-x86_64.erofs" ]; then
 fi
 
 echo "== uploading to s3://$BUCKET =="
-for f in /tmp/gantry-linux-amd64 "$ARTIFACTS/nerdbox-kernel-x86_64" "$ARTIFACTS/nerdbox-rootfs-x86_64.erofs" \
+for f in "$BIN" "$ARTIFACTS/nerdbox-kernel-x86_64" "$ARTIFACTS/nerdbox-rootfs-x86_64.erofs" \
          "$ARTIFACTS/nerdbox-rootfs-gvisor-x86_64.erofs" "$ARTIFACTS/debian-bookworm-amd64.erofs" "$ARTIFACTS/rwlayer-amd64.ext4"; do
 	[ -f "$f" ] || { echo "MISSING: $f" >&2; exit 1; }
 	aws s3 cp "$f" "s3://$BUCKET/$(basename "$f")" --quiet &
