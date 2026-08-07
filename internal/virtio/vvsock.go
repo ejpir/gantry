@@ -89,6 +89,8 @@ type vsockConn struct {
 	peerFwdCnt   uint32 // bytes guest has consumed
 	txCnt        uint32 // payload bytes we sent to guest
 	rxCnt        uint32 // payload bytes we consumed from guest (our fwd_cnt)
+	guestTx      uint32 // payload bytes the guest sent us (credit accounting)
+	outQBytes    int    // payload bytes currently sitting in outQ
 	closed       bool
 	established  bool          // host-originated conns wait for the guest's RESPONSE
 	outQ         [][]byte      // guest->host payloads awaiting socket write
@@ -267,7 +269,25 @@ func (v *Vsock) handleTx() {
 				// core.mu, and a blocking write (peer not draining) wedges
 				// the whole device — the next RPC is never delivered.
 				// Queue it; pumpOut writes + accounts credit off-lock.
+				//
+				// Enforce the receive credit we advertise: the guest may
+				// have at most vsockBufAlloc bytes in flight beyond what
+				// pumpOut consumed. A hostile guest that ignores credit
+				// would grow outQ without bound while a stalled host
+				// consumer holds pumpOut — RST the connection, and bound
+				// the queue in bytes AND packets regardless of the
+				// accounting (belt and braces, like maxExitTrailerHold).
+				c.guestTx += uint32(len(payload))
+				if c.guestTx-c.rxCnt > vsockBufAlloc ||
+					c.outQBytes+len(payload) > vsockBufAlloc ||
+					len(c.outQ) >= vsockOutQMaxPackets {
+					v.logf("RW beyond credit/queue bounds (guestTx=%d rxCnt=%d q=%d pkts/%dB) -> RST",
+						c.guestTx, c.rxCnt, len(c.outQ), c.outQBytes)
+					v.closeConn(c, hdr, true)
+					break
+				}
 				c.outQ = append(c.outQ, append([]byte(nil), payload...))
+				c.outQBytes += len(payload)
 				select {
 				case c.outSig <- struct{}{}:
 				default:
@@ -316,6 +336,7 @@ func (v *Vsock) pumpOut(c *vsockConn) {
 		}
 		payload := c.outQ[0]
 		c.outQ = c.outQ[1:]
+		c.outQBytes -= len(payload)
 		v.core.mu.Unlock()
 
 		if _, err := c.nc.Write(payload); err != nil {
@@ -382,6 +403,12 @@ func (v *Vsock) closeConn(c *vsockConn, trigger vsockHdr, sendRST bool) {
 // buffers or granting credit; without a cap a stuck or hostile guest
 // grows host memory without limit just by holding a stream open.
 const vsockMaxPending = virtioNetMaxQueue
+
+// vsockOutQMaxPackets caps the per-connection guest->host queue in
+// PACKETS (the byte side is bounded by vsockBufAlloc credit): without
+// it, a guest sending 1-byte RW frames within credit still forces one
+// slice allocation per packet without limit against a stalled consumer.
+const vsockOutQMaxPackets = 1024
 
 // pumpHost reads from the host unix socket and forwards to the guest.
 func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
