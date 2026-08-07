@@ -202,7 +202,7 @@ func guestServer(t *testing.T) *httptest.Server {
 			asset := strings.TrimSuffix(base, ".sha256")
 			if strings.HasPrefix(asset, "gantry-kernel-") || strings.HasPrefix(asset, "nerdbox-rootfs-") {
 				sum := sha256.Sum256([]byte("downloaded-" + asset))
-				fmt.Fprintf(w, "%x  %s\n", sum, asset)
+				_, _ = fmt.Fprintf(w, "%x  %s\n", sum, asset)
 				return
 			}
 		}
@@ -247,7 +247,7 @@ func kernelServer(t *testing.T) *httptest.Server {
 			asset := strings.TrimSuffix(base, ".sha256")
 			if strings.HasPrefix(asset, "gantry-kernel-") {
 				sum := sha256.Sum256([]byte("downloaded-kernel"))
-				fmt.Fprintf(w, "%x  %s\n", sum, asset)
+				_, _ = fmt.Fprintf(w, "%x  %s\n", sum, asset)
 				return
 			}
 		}
@@ -369,7 +369,7 @@ func TestResolveLayerSet(t *testing.T) {
 		}
 	}
 	manifest := filepath.Join(dir, "ls.json")
-	os.WriteFile(manifest, []byte(`{"fsmeta":"fsmeta.erofs","layers":["l1.erofs","l2.erofs"]}`), 0o644)
+	_ = os.WriteFile(manifest, []byte(`{"fsmeta":"fsmeta.erofs","layers":["l1.erofs","l2.erofs"]}`), 0o644)
 
 	parse := func(args ...string) (RunConfig, []string, error) {
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)

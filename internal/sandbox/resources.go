@@ -22,7 +22,7 @@ func setSandboxResources(name string, memMB uint, vcpus int) error {
 		if err != nil {
 			return fmt.Errorf("connect to running sandbox: %w", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Same deadline every other ctl.sock client sets: a wedged broker
 		// must not hang the CLI forever.
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))

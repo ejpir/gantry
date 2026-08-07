@@ -55,7 +55,7 @@ flags:`)
 			break
 		}
 	}
-	fs.Parse(argv)
+	_ = fs.Parse(argv)
 
 	cfg, warnings, err := rf.Resolve(fs, func(format string, a ...any) {
 		fmt.Printf("gantry exec: "+format+"\n", a...)
@@ -95,7 +95,7 @@ agent cannot send them anywhere.
 	keepTmp := false // startup failures keep the dir so logs survive
 	defer func() {
 		if !keepTmp {
-			os.RemoveAll(tmp)
+			_ = os.RemoveAll(tmp)
 		}
 	}()
 	fmt.Printf("gantry exec: work dir %s\n", tmp)
@@ -118,7 +118,7 @@ agent cannot send them anywhere.
 			fmt.Fprintln(os.Stderr, "gantry exec:", err)
 			return 1
 		}
-		defer logf.Close()
+		defer func() { _ = logf.Close() }()
 		consoleW = logf
 		fmt.Printf("gantry exec: guest console → %s (use -console to watch it live)\n", logf.Name())
 	}

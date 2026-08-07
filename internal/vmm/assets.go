@@ -102,7 +102,7 @@ func downloadAsset(dest string, progress func(string, ...any)) error {
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: %s", url, resp.Status)
 	}
@@ -114,7 +114,7 @@ func downloadAsset(dest string, progress func(string, ...any)) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	// Kernels are ~15-20 MB; cap well above that to catch truncated or
 	// wildly wrong responses (e.g. an HTML error page behind a proxy).
 	// Read one byte past the cap so an oversized response is an error
@@ -122,19 +122,19 @@ func downloadAsset(dest string, progress func(string, ...any)) error {
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, maxAssetSize+1))
 	if err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("download %s: %w", url, err)
 	}
 	if n > maxAssetSize {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("download %s: asset exceeds %d bytes", url, maxAssetSize)
 	}
 	if gotSum := hex.EncodeToString(h.Sum(nil)); gotSum != wantSum {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("download %s: sha256 mismatch (got %s, want %s)", url, gotSum, wantSum)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -163,7 +163,7 @@ func fetchSHA256(url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%s (refusing unverified download)", resp.Status)
 	}

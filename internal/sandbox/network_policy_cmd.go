@@ -89,7 +89,7 @@ func networkPolicyRPC(name, op string, request *brokerNetworkPolicyRequest) (Net
 	if err != nil {
 		return NetworkPolicyEntry{}, fmt.Errorf("broker: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	req := brokerRequest{Op: op, ID: fmt.Sprintf("netpolicy-%d", os.Getpid()), NetPolicy: request}
 	if err := json.NewEncoder(conn).Encode(&req); err != nil {
@@ -167,22 +167,22 @@ func printNetworkPolicyShow(output io.Writer, sandbox string, entry NetworkPolic
 	}
 
 	summary := newCLITable(output)
-	fmt.Fprintln(summary, "SANDBOX\tSTATE\tLOCAL NET\tPOLICY")
-	fmt.Fprintf(summary, "%s\t%s\t%s\t%s\n", sandbox, entry.State, local, path)
+	_, _ = fmt.Fprintln(summary, "SANDBOX\tSTATE\tLOCAL NET\tPOLICY")
+	_, _ = fmt.Fprintf(summary, "%s\t%s\t%s\t%s\n", sandbox, entry.State, local, path)
 	_ = summary.Flush()
 
 	if len(entry.Rules) == 0 {
 		return
 	}
-	fmt.Fprintln(output)
+	_, _ = fmt.Fprintln(output)
 	rules := newCLITable(output)
-	fmt.Fprintln(rules, "ACTION\tTARGET\tPROTO\tPORTS\tSOURCE")
+	_, _ = fmt.Fprintln(rules, "ACTION\tTARGET\tPROTO\tPORTS\tSOURCE")
 	for _, rule := range entry.Rules {
 		ports := rule.Ports
 		if ports == "" {
 			ports = "-"
 		}
-		fmt.Fprintf(rules, "%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(rules, "%s\t%s\t%s\t%s\t%s\n",
 			strings.ToUpper(rule.Action), rule.Target, rule.Protocol, ports, rule.Source)
 	}
 	_ = rules.Flush()

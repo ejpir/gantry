@@ -252,11 +252,11 @@ func flattenLayers(w *erofs.Writer, layers []*os.File, logf func(string, ...any)
 				return err
 			}
 			if _, err := io.Copy(f, io.NewSectionReader(layers[l.layer], l.off, l.size)); err != nil {
-				f.Close()
+				_ = f.Close()
 				return fmt.Errorf("%s: %w", name, err)
 			}
 			if err := f.Chmod(goFileMode(hdr.Mode)); err != nil {
-				f.Close()
+				_ = f.Close()
 				return err
 			}
 			if err := f.Close(); err != nil {
@@ -285,11 +285,11 @@ func flattenLayers(w *erofs.Writer, layers []*os.File, logf func(string, ...any)
 				return err
 			}
 			if _, err := io.Copy(f, io.NewSectionReader(layers[tgt.layer], tgt.off, tgt.size)); err != nil {
-				f.Close()
+				_ = f.Close()
 				return err
 			}
 			if err := f.Chmod(goFileMode(hdr.Mode)); err != nil {
-				f.Close()
+				_ = f.Close()
 				return err
 			}
 			if err := f.Close(); err != nil {

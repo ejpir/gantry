@@ -140,12 +140,8 @@ func canonicalWinSharePath(p string) (string, error) {
 
 func openWinRoot(p string) (windows.Handle, error) {
 	name := p
-	if strings.HasPrefix(name, `\\?\`) {
-		name = strings.TrimPrefix(name, `\\?\`)
-	}
-	if strings.HasPrefix(name, `\??\`) {
-		name = strings.TrimPrefix(name, `\??\`)
-	}
+	name = strings.TrimPrefix(name, `\\?\`)
+	name = strings.TrimPrefix(name, `\??\`)
 	ntName, err := windows.NewNTUnicodeString(`\??\` + name)
 	if err != nil {
 		return 0, err
@@ -492,12 +488,12 @@ func (b *winExportFS) lookup(parentRel, name string) (winFileInfo, syscall.Errno
 	if errno != 0 {
 		return winFileInfo{}, errno
 	}
-	defer windows.CloseHandle(parent)
+	defer func() { _ = windows.CloseHandle(parent) }()
 	h, err := b.ntOpen(parent, name, winMetadataAccess, windows.FILE_OPEN, winBaseOpenOpts)
 	if err != nil {
 		return winFileInfo{}, ntStatusErrno(err)
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	actual, err := actualWinBase(h)
 	if err != nil {
 		return winFileInfo{}, ntStatusErrno(err)
@@ -557,7 +553,7 @@ func (b *winExportFS) create(parentRel, name string, flags, mode uint32) (*winOp
 	if errno != 0 {
 		return nil, winFileInfo{}, errno
 	}
-	defer windows.CloseHandle(parent)
+	defer func() { _ = windows.CloseHandle(parent) }()
 	access := winOpenAccess(flags) | windows.FILE_GENERIC_WRITE
 	disposition := uint32(windows.FILE_OPEN)
 	switch {
@@ -607,7 +603,7 @@ func (b *winExportFS) mkdir(parentRel, name string) (winFileInfo, syscall.Errno)
 	if errno != 0 {
 		return winFileInfo{}, errno
 	}
-	defer windows.CloseHandle(parent)
+	defer func() { _ = windows.CloseHandle(parent) }()
 	h, err := b.ntOpen(parent, name,
 		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE,
 		windows.FILE_CREATE,
@@ -615,7 +611,7 @@ func (b *winExportFS) mkdir(parentRel, name string) (winFileInfo, syscall.Errno)
 	if err != nil {
 		return winFileInfo{}, ntStatusErrno(err)
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	return b.infoForHandle(h)
 }
 
@@ -626,7 +622,7 @@ func (b *winExportFS) delete(parentRel, name string, wantDir bool) syscall.Errno
 	if errno != 0 {
 		return errno
 	}
-	defer windows.CloseHandle(parent)
+	defer func() { _ = windows.CloseHandle(parent) }()
 	h, err := b.ntOpen(parent, name,
 		windows.DELETE|windows.FILE_GENERIC_READ,
 		windows.FILE_OPEN,
@@ -676,12 +672,12 @@ func (b *winExportFS) rename(oldParentRel, oldName, newParentRel, newName string
 	if errno != 0 {
 		return errno
 	}
-	defer windows.CloseHandle(oldParent)
+	defer func() { _ = windows.CloseHandle(oldParent) }()
 	newParent, _, errno := b.resolveDir(newParentRel)
 	if errno != 0 {
 		return errno
 	}
-	defer windows.CloseHandle(newParent)
+	defer func() { _ = windows.CloseHandle(newParent) }()
 	source, err := b.ntOpen(oldParent, oldName,
 		windows.DELETE|windows.FILE_GENERIC_READ,
 		windows.FILE_OPEN,
@@ -689,7 +685,7 @@ func (b *winExportFS) rename(oldParentRel, oldName, newParentRel, newName string
 	if err != nil {
 		return ntStatusErrno(err)
 	}
-	defer windows.CloseHandle(source)
+	defer func() { _ = windows.CloseHandle(source) }()
 	name16, err := windows.UTF16FromString(newName)
 	if err != nil {
 		return linuxErrno(fuse.EINVAL)
@@ -764,7 +760,7 @@ func (b *winExportFS) setattr(rel string, file *winOpenFile, in *fuse.SetAttrIn)
 		closeHandle = true
 	}
 	if closeHandle {
-		defer windows.CloseHandle(h)
+		defer func() { _ = windows.CloseHandle(h) }()
 	}
 	if size, ok := in.GetSize(); ok {
 		lo := int32(uint32(size))
@@ -829,7 +825,7 @@ func (b *winExportFS) readdir(rel string) ([]fuse.DirEntry, syscall.Errno) {
 	if errno != 0 {
 		return nil, errno
 	}
-	defer windows.CloseHandle(dir)
+	defer func() { _ = windows.CloseHandle(dir) }()
 	entries := []fuse.DirEntry{
 		{Name: ".", Mode: fuse.S_IFDIR, Ino: info.attr.Ino},
 		{Name: "..", Mode: fuse.S_IFDIR},

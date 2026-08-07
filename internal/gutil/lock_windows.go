@@ -27,7 +27,7 @@ func lockFile(path string, flags uint32) (*os.File, error) {
 	}
 	ol := new(windows.Overlapped)
 	if err := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, ol); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return f, nil

@@ -34,11 +34,11 @@ func setRawMode() {
 	raw := t
 	raw.Lflag &^= 0x2 | 0x8 // ICANON | ECHO
 	raw.Iflag &^= 0x1       // BRKINT-ish minimal: keep simple
-	syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tcsets, uintptr(unsafe.Pointer(&raw)))
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tcsets, uintptr(unsafe.Pointer(&raw)))
 }
 
 func restoreMode() {
 	if saved != nil {
-		syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tcsets, uintptr(unsafe.Pointer(saved)))
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tcsets, uintptr(unsafe.Pointer(saved)))
 	}
 }

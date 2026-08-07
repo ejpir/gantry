@@ -135,7 +135,7 @@ func shareControlRPC(name, op string, shareReq brokerShareRequest) (brokerShareR
 	if err != nil {
 		return brokerShareResponse{}, fmt.Errorf("broker: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	req := brokerRequest{
 		Op:    op,
@@ -273,13 +273,13 @@ func printShares(name string) int {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Tag < entries[j].Tag })
 	w := newCLITable(os.Stdout)
-	fmt.Fprintln(w, "TAG\tMODE\tSTATE\tHOST PATH\tCONTAINER PATH")
+	_, _ = fmt.Fprintln(w, "TAG\tMODE\tSTATE\tHOST PATH\tCONTAINER PATH")
 	for _, entry := range entries {
 		mode := "rw"
 		if entry.RO {
 			mode = "ro"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", entry.Tag, mode, defaultShareState(entry.State), entry.Path, entry.CtrPath)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", entry.Tag, mode, defaultShareState(entry.State), entry.Path, entry.CtrPath)
 	}
 	_ = w.Flush()
 	return 0

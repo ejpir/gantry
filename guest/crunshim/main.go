@@ -43,8 +43,8 @@ func main() {
 	debug := debugMode()
 	if debug {
 		if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
-			fmt.Fprintf(c, "crunshim: start args=%v\n", os.Args[1:])
-			c.Close()
+			_, _ = fmt.Fprintf(c, "crunshim: start args=%v\n", os.Args[1:])
+			_ = c.Close()
 		}
 	}
 	fixDev(debug)
@@ -213,8 +213,8 @@ func supervise(args []string, debug bool) int {
 		return 127
 	}
 	defer func() {
-		stdio.Close()
-		os.Remove(stdio.Name())
+		_ = stdio.Close()
+		_ = os.Remove(stdio.Name())
 	}()
 	cmd.Stdout, cmd.Stderr = stdio, stdio
 	if err := cmd.Start(); err != nil {
@@ -228,7 +228,7 @@ func supervise(args []string, debug bool) int {
 	go func() {
 		for s := range sigc {
 			if cmd.Process != nil {
-				cmd.Process.Signal(s)
+				_ = cmd.Process.Signal(s)
 			}
 		}
 	}()
@@ -255,14 +255,14 @@ func supervise(args []string, debug bool) int {
 					// SIGQUIT, taking the evidence with it
 					dumpProcState(c, pid)
 				}
-				fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", fileTail(stdio, 32<<10))
-				c.Close()
+				_, _ = fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", fileTail(stdio, 32<<10))
+				_ = c.Close()
 			}
 			if cmd.Process != nil {
-				cmd.Process.Signal(syscall.SIGQUIT)
+				_ = cmd.Process.Signal(syscall.SIGQUIT)
 			}
 			for _, pid := range findRunsc() {
-				syscall.Kill(pid, syscall.SIGQUIT)
+				_ = syscall.Kill(pid, syscall.SIGQUIT)
 			}
 		})
 		defer timed.Stop()
@@ -272,8 +272,8 @@ func supervise(args []string, debug bool) int {
 	replayStdio(stdio)
 	if err != nil {
 		if c, cerr := os.OpenFile("/dev/console", os.O_WRONLY, 0); cerr == nil {
-			fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, fileTail(stdio, 32<<10))
-			c.Close()
+			_, _ = fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, fileTail(stdio, 32<<10))
+			_ = c.Close()
 		}
 		if cmd.ProcessState != nil {
 			if code := cmd.ProcessState.ExitCode(); code >= 0 {
@@ -346,10 +346,10 @@ func fixDev(debug bool) {
 			}
 		}
 		// conventional symlinks some tools expect
-		os.Symlink("/proc/self/fd", "/dev/fd")
-		os.Symlink("/proc/self/fd/0", "/dev/stdin")
-		os.Symlink("/proc/self/fd/1", "/dev/stdout")
-		os.Symlink("/proc/self/fd/2", "/dev/stderr")
+		_ = os.Symlink("/proc/self/fd", "/dev/fd")
+		_ = os.Symlink("/proc/self/fd/0", "/dev/stdin")
+		_ = os.Symlink("/proc/self/fd/1", "/dev/stdout")
+		_ = os.Symlink("/proc/self/fd/2", "/dev/stderr")
 	}
 	if !exists("/dev/pts") {
 		_ = syscall.Mkdir("/dev/pts", 0o755)
@@ -364,7 +364,7 @@ func fixDev(debug bool) {
 		// runsc wires the sandbox child's stdin/stdout/stderr to /dev/null,
 		// so a boot process dying before logger init vanishes without a
 		// trace. Debug mode points /dev/null at the VM console.
-		os.Remove("/dev/null")
+		_ = os.Remove("/dev/null")
 		if err := os.Symlink("/dev/console", "/dev/null"); err != nil {
 			fmt.Fprintf(os.Stderr, "crunshim: /dev/null -> /dev/console: %v\n", err)
 		}
@@ -403,11 +403,11 @@ func findRunsc() []int {
 // runtime that hasn't installed signal handlers yet can't either).
 func dumpProcState(w io.Writer, pid int) {
 	p := fmt.Sprintf("/proc/%d", pid)
-	fmt.Fprintf(w, "\ncrunshim: --- /proc state for pid %d ---\n", pid)
+	_, _ = fmt.Fprintf(w, "\ncrunshim: --- /proc state for pid %d ---\n", pid)
 	for _, f := range []string{"cmdline", "status", "wchan", "syscall", "stack"} {
 		b, err := os.ReadFile(p + "/" + f)
 		if err != nil {
-			fmt.Fprintf(w, "%s: %v\n", f, err)
+			_, _ = fmt.Fprintf(w, "%s: %v\n", f, err)
 			continue
 		}
 		if f == "cmdline" {
@@ -424,7 +424,7 @@ func dumpProcState(w io.Writer, pid int) {
 			}
 			b = []byte(strings.Join(keep, "\n"))
 		}
-		fmt.Fprintf(w, "%s:\n%s\n", f, b)
+		_, _ = fmt.Fprintf(w, "%s:\n%s\n", f, b)
 	}
 }
 

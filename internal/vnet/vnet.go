@@ -107,7 +107,7 @@ func (s *Stack) Dial() (net.Conn, error) {
 	go func() {
 		// AcceptQemu blocks until the ctx is cancelled or the conn closes.
 		if err := s.vn.AcceptQemu(s.ctx, gw); err != nil {
-			dev.Close()
+			_ = dev.Close()
 		}
 	}()
 	return dev, nil

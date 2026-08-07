@@ -22,7 +22,7 @@ func TestForwardLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	local := l.Addr().String()
-	l.Close()
+	_ = l.Close()
 
 	if err := stack.Publish("tcp", local, GuestIP+":80"); err != nil {
 		t.Fatalf("publish: %v", err)
@@ -33,7 +33,7 @@ func TestForwardLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("host listener not accepting: %v", err)
 	}
-	probe.Close()
+	_ = probe.Close()
 
 	forwards, err := stack.Forwards()
 	if err != nil {
@@ -75,7 +75,7 @@ func TestStartWithForwards(t *testing.T) {
 		t.Fatal(err)
 	}
 	udpLocal := pc.LocalAddr().String()
-	pc.Close()
+	_ = pc.Close()
 
 	forwards := map[string]string{
 		"udp:" + udpLocal: GuestIP + ":53",
@@ -104,7 +104,7 @@ func TestStartWithForwards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer blocker.Close()
+	defer func() { _ = blocker.Close() }()
 	conflict := map[string]string{
 		"udp:" + blocker.LocalAddr().String(): GuestIP + ":53",
 	}

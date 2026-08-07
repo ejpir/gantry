@@ -67,7 +67,7 @@ func TestPolicyEnforcedOnWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 
 	conn := qemuFrameConn{conn: raw, pol: pol}
 
@@ -75,7 +75,7 @@ func TestPolicyEnforcedOnWire(t *testing.T) {
 	if _, err := conn.Write(dnsQueryFrame(t, "example.com")); err != nil {
 		t.Fatal(err)
 	}
-	conn.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 4096)
 	if n, err := conn.Read(buf); err == nil {
 		t.Fatalf("dropped query still got %d bytes of answer", n)
@@ -87,7 +87,7 @@ func TestPolicyEnforcedOnWire(t *testing.T) {
 	if _, err := conn.Write(dnsQueryFrame(t, "debian.org")); err != nil {
 		t.Fatal(err)
 	}
-	conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var payload []byte
 	for i := 0; i < 8 && payload == nil; i++ {
 		n, err := conn.Read(buf)
@@ -96,7 +96,7 @@ func TestPolicyEnforcedOnWire(t *testing.T) {
 		}
 		frame := buf[:n]
 		if et := binary.BigEndian.Uint16(frame[12:14]); et == 0x0806 {
-			conn.Write(arpReply(frame)) // keep the link conversation going
+			_, _ = conn.Write(arpReply(frame)) // keep the link conversation going
 			continue
 		}
 		if frame[14+9] == 17 && binary.BigEndian.Uint16(frame[14+20:14+22]) == 53 {
@@ -192,7 +192,7 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	conn := qemuFrameConn{conn: raw, pol: pol}
 	buf := make([]byte, 4096)
 
@@ -200,7 +200,7 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 	if _, err := conn.Write(tcpSYNFrame(t, "192.168.1.1", 443)); err != nil {
 		t.Fatal(err)
 	}
-	conn.conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	_ = conn.conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
 	if n, err := conn.Read(buf); err == nil {
 		t.Fatalf("LAN SYN got %d bytes back — policy did not drop it", n)
 	}
@@ -209,7 +209,7 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 	if _, err := conn.Write(tcpSYNFrame(t, "1.1.1.1", 443)); err != nil {
 		t.Fatal(err)
 	}
-	conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	gotSynAck := false
 	for i := 0; i < 8 && !gotSynAck; i++ {
 		n, err := conn.Read(buf)
@@ -218,7 +218,7 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 		}
 		f := buf[:n]
 		if binary.BigEndian.Uint16(f[12:14]) == 0x0806 {
-			conn.Write(arpReply(f))
+			_, _ = conn.Write(arpReply(f))
 			continue
 		}
 		if f[14+9] == 6 && f[14+20+13]&0x12 == 0x12 { // TCP SYN|ACK
@@ -233,7 +233,7 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 	if _, err := conn.Write(dnsQueryFrame(t, "debian.org")); err != nil {
 		t.Fatal(err)
 	}
-	conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for i := 0; i < 8; i++ {
 		n, err := conn.Read(buf)
 		if err != nil {
@@ -241,7 +241,7 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 		}
 		f := buf[:n]
 		if binary.BigEndian.Uint16(f[12:14]) == 0x0806 {
-			conn.Write(arpReply(f))
+			_, _ = conn.Write(arpReply(f))
 			continue
 		}
 		if f[14+9] == 17 && binary.BigEndian.Uint16(f[14+20:14+22]) == 53 {

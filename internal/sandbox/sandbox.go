@@ -60,7 +60,7 @@ func sandboxRoot() string {
 	// one-time migration after the project rename
 	if _, err := os.Stat(newRoot); os.IsNotExist(err) {
 		if _, err := os.Stat(oldRoot); err == nil {
-			os.MkdirAll(filepath.Dir(newRoot), 0o700)
+			_ = os.MkdirAll(filepath.Dir(newRoot), 0o700)
 			if err := os.Rename(oldRoot, newRoot); err == nil {
 				fmt.Println("gantry: migrated sandboxes ~/.minivm -> ~/.gantry")
 			}
@@ -107,7 +107,7 @@ func sandboxPID(name string) (int, bool) {
 		return 0, false
 	}
 	var pid int
-	fmt.Sscanf(string(b), "%d", &pid)
+	_, _ = fmt.Sscanf(string(b), "%d", &pid)
 	if pid <= 0 {
 		return 0, false
 	}
@@ -160,7 +160,7 @@ flags:`)
 	name, fargv := argv[0], argv[1:]
 
 	rf.Name = name
-	fs.Parse(fargv)
+	_ = fs.Parse(fargv)
 	cfg, warnings, err := rf.Resolve(fs, func(format string, a ...any) {
 		fmt.Printf("gantry start: "+format+"\n", a...)
 	})
@@ -257,7 +257,7 @@ func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, 
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
-	defer logf.Close()
+	defer func() { _ = logf.Close() }()
 	cmd := exec.Command(exe, "daemon", name)
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
@@ -267,7 +267,7 @@ func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, 
 		fmt.Fprintln(os.Stderr, "gantry start: spawn daemon:", err)
 		return 1
 	}
-	os.WriteFile(filepath.Join(dir, "vmm.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o600)
+	_ = os.WriteFile(filepath.Join(dir, "vmm.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o600)
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
@@ -313,7 +313,7 @@ func CmdDaemon(name string) int {
 
 	dir := sandboxDir(name)
 	// tighten dirs created before the 0700 hardening (best-effort)
-	os.Chmod(dir, 0o700)
+	_ = os.Chmod(dir, 0o700)
 	b, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
@@ -335,14 +335,14 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon: another daemon holds the sandbox lock:", err)
 		return 1
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 
 	console, err := os.Create(filepath.Join(dir, "console.log"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
-	defer console.Close()
+	defer func() { _ = console.Close() }()
 
 	nw, err := cfg.StartNetwork(dir)
 	if err != nil {
@@ -365,7 +365,7 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", err)
 		return 1
 	}
-	defer shareManager.Close()
+	defer func() { _ = shareManager.Close() }()
 	for _, warning := range shareWarnings {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
 	}
@@ -435,8 +435,8 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon: VM exited before guest RPC:", err)
 		return 1
 	}
-	defer rpc.Close()
-	os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o600)
+	defer func() { _ = rpc.Close() }()
+	_ = os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o600)
 	bootLog("guest RPC connected (READY)")
 	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
 
@@ -448,7 +448,7 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	// Belt and braces under any umask: the 0700 dir is the real barrier,
 	// but the socket inode should not be connectable on its own either
 	// (Linux requires write permission on it; macOS consults the dir).
@@ -471,7 +471,7 @@ func CmdDaemon(name string) int {
 	select {
 	case s := <-sigc:
 		fmt.Println("daemon: signal", s, "— shutting down")
-		ln.Close() // no new broker sessions
+		_ = ln.Close() // no new broker sessions
 		// Graceful stop (review finding 5): process exit is a power cut
 		// for the guest, so flush while the RPC connection is still
 		// held — guest filesystem sync first (bounded: the guest may be
@@ -534,9 +534,9 @@ func readSecretsHandshake(r *os.File) map[string]secret.Value {
 	if err != nil || st.Mode()&os.ModeCharDevice != 0 {
 		return nil
 	}
-	r.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = r.SetReadDeadline(time.Now().Add(5 * time.Second))
 	line, err := bufio.NewReader(r).ReadBytes('\n')
-	r.SetReadDeadline(time.Time{})
+	_ = r.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil
 	}
@@ -618,7 +618,7 @@ func (br *broker) serve(ln net.Listener) {
 		// relayed over TCP, real authentication (mTLS) is mandatory.
 		if !peerSameUser(c) {
 			fmt.Fprintln(os.Stderr, "daemon: rejected ctl.sock connection from a foreign UID")
-			c.Close()
+			_ = c.Close()
 			continue
 		}
 		go br.handle(c)
@@ -626,14 +626,14 @@ func (br *broker) serve(ln net.Listener) {
 }
 
 func (br *broker) handle(c net.Conn) {
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	line, err := bufio.NewReader(c).ReadBytes('\n')
 	if err != nil {
 		return
 	}
 	var req brokerRequest
 	if json.Unmarshal(line, &req) != nil || req.ID == "" {
-		fmt.Fprintln(c, `{"error":"bad request"}`)
+		_, _ = fmt.Fprintln(c, `{"error":"bad request"}`)
 		return
 	}
 	switch req.Op {
@@ -646,10 +646,10 @@ func (br *broker) handle(c net.Conn) {
 		}
 		br.mu.Unlock()
 		if !ok {
-			fmt.Fprintln(c, `{"error":"no such session"}`)
+			_, _ = fmt.Fprintln(c, `{"error":"no such session"}`)
 			return
 		}
-		fmt.Fprintln(c, `{"ok":true}`)
+		_, _ = fmt.Fprintln(c, `{"ok":true}`)
 	case "share.add", "share.remove", "share.list", "share.configure":
 		br.shareControl(c, req)
 	case "port.publish", "port.unpublish", "port.list":
@@ -661,7 +661,7 @@ func (br *broker) handle(c net.Conn) {
 	case "session":
 		br.session(c, req)
 	default:
-		fmt.Fprintln(c, `{"error":"unknown op"}`)
+		_, _ = fmt.Fprintln(c, `{"error":"unknown op"}`)
 	}
 }
 
@@ -799,7 +799,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	br.mu.Lock()
 	if _, dup := br.sessions[req.ID]; dup {
 		br.mu.Unlock()
-		fmt.Fprintln(c, `{"error":"duplicate session id"}`)
+		_, _ = fmt.Fprintln(c, `{"error":"duplicate session id"}`)
 		return
 	}
 	br.sessions[req.ID] = killCh
@@ -839,7 +839,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		ExitStatus:       &status,
 	}, c, c)
 	if err != nil {
-		fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
+		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
 		// The broker is the only process that still has the sandbox logs
 		// while an attach client is connected. Include their tails in the
 		// failure stream so CI and remote callers can diagnose guest boot
@@ -850,7 +850,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	// trailer for the attach client (cmdSandboxExec): the stream is raw at
 	// this point, so frame the exit status between NULs — impossible to
 	// confuse with terminal output.
-	fmt.Fprintf(c, "\x00GANTRY-EXIT %d\x00", status)
+	_, _ = fmt.Fprintf(c, "\x00GANTRY-EXIT %d\x00", status)
 }
 
 // ---------------- gantry exec <name> [-- CMD] -------------------------------
@@ -877,7 +877,7 @@ func CmdSandboxExec(name string, argv []string) int {
 		fmt.Fprintf(os.Stderr, "gantry exec: broker: %v\n", err)
 		return 1
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	id := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
 	req := brokerRequest{Op: "session", ID: id, Args: args}
@@ -908,7 +908,7 @@ func CmdSandboxExec(name string, argv []string) int {
 
 	if req.Terminal {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
-			defer term.Restore(int(os.Stdin.Fd()), old)
+			defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
 		}
 	}
 	// ctrl-C: ask the broker to kill the task, keep the session attached.
@@ -920,14 +920,14 @@ func CmdSandboxExec(name string, argv []string) int {
 		for range sigc {
 			kc, err := net.Dial("unix", filepath.Join(dir, "ctl.sock"))
 			if err == nil {
-				json.NewEncoder(kc).Encode(&brokerRequest{Op: "kill", ID: id})
-				kc.Close()
+				_ = json.NewEncoder(kc).Encode(&brokerRequest{Op: "kill", ID: id})
+				_ = kc.Close()
 			}
 		}
 	}()
 
 	done := make(chan struct{})
-	go func() { io.Copy(c, os.Stdin) }()
+	go func() { _, _ = io.Copy(c, os.Stdin) }()
 	statusCh := make(chan int, 1)
 	go func() {
 		// r (not c): the handshake line came through the bufio reader.
@@ -972,18 +972,18 @@ func copyStrippingExitTrailer(w io.Writer, r io.Reader) int {
 			data := append(hold, buf[:n]...)
 			hold = nil
 			if i := bytes.IndexByte(data, 0); i < 0 {
-				w.Write(data)
+				_, _ = w.Write(data)
 			} else {
-				w.Write(data[:i])
+				_, _ = w.Write(data[:i])
 				hold = append([]byte(nil), data[i:]...)
 				if len(hold) > maxExitTrailerHold {
-					w.Write(hold) // provably never becomes a trailer
+					_, _ = w.Write(hold) // provably never becomes a trailer
 					hold = nil
 				} else if st, ok, undecided := parseExitTrailer(hold); !undecided {
 					if ok {
 						status = st
 					} else {
-						w.Write(hold) // NUL turned out to be data
+						_, _ = w.Write(hold) // NUL turned out to be data
 					}
 					hold = nil
 				}
@@ -998,7 +998,7 @@ func copyStrippingExitTrailer(w io.Writer, r io.Reader) int {
 		if st, ok, _ := parseExitTrailer(hold); ok {
 			status = st
 		} else {
-			w.Write(hold)
+			_, _ = w.Write(hold)
 		}
 	}
 	return status
@@ -1083,7 +1083,7 @@ func CmdStop(name string) int {
 		fmt.Fprintf(os.Stderr, "gantry stop: sandbox %q is not running\n", name)
 		return 1
 	}
-	procTerminate(pid)
+	_ = procTerminate(pid)
 	// Grace window: the daemon's shutdown path syncs the guest and
 	// flushes devices (bounded internally at ~5s) — give it room before
 	// escalating to a power cut (review finding 5).
@@ -1094,15 +1094,15 @@ func CmdStop(name string) int {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if procAlive(pid) {
-		procKill(pid)
+		_ = procKill(pid)
 	}
 	// kill the sandbox's gvproxy too (defers don't run if the daemon was
 	// SIGKILLed, orphaning it)
 	dir := sandboxDir(name)
 	if b, err := os.ReadFile(filepath.Join(dir, "gvproxy.pid")); err == nil {
 		var gpid int
-		if fmt.Sscanf(string(b), "%d", &gpid); gpid > 0 {
-			procKill(gpid)
+		if _, _ = fmt.Sscanf(string(b), "%d", &gpid); gpid > 0 {
+			_ = procKill(gpid)
 		}
 	}
 	// Clean runtime files; sandbox.json stays so CmdResume and the dashboard
@@ -1154,5 +1154,5 @@ func dumpTailTo(w io.Writer, path string) {
 	if len(b) > 4096 {
 		b = b[len(b)-4096:]
 	}
-	fmt.Fprintf(w, "---- last bytes of %s ----\n%s\n----\n", filepath.Base(path), b)
+	_, _ = fmt.Fprintf(w, "---- last bytes of %s ----\n%s\n----\n", filepath.Base(path), b)
 }

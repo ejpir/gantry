@@ -108,7 +108,7 @@ func TestExitTrailerInteractiveEcho(t *testing.T) {
 	if _, err := pw.Write([]byte("\x00")); err != nil {
 		t.Fatal(err)
 	}
-	pw.Close()
+	_ = pw.Close()
 	if status := <-statusCh; status != 7 {
 		t.Fatalf("status = %d, want 7", status)
 	}
@@ -138,7 +138,7 @@ func TestExitTrailerRejectsOverlongStatus(t *testing.T) {
 	if got := out.String(); got != in+flood {
 		t.Fatalf("overlong possible trailer remained held: out = %q", got)
 	}
-	pw.Close()
+	_ = pw.Close()
 	if status := <-statusCh; status != 0 {
 		t.Fatalf("status = %d, want 0", status)
 	}
@@ -166,7 +166,7 @@ func TestExitTrailerDigitFloodStaysBounded(t *testing.T) {
 	if _, err := pw.Write([]byte(exitTrailerPrefix + "3\x00")); err != nil {
 		t.Fatal(err)
 	}
-	pw.Close()
+	_ = pw.Close()
 	if status := <-statusCh; status != 3 {
 		t.Fatalf("status = %d, want 3", status)
 	}

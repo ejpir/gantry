@@ -34,6 +34,6 @@ func setRawMode() {
 
 func restoreMode() {
 	if consoleWasRaw {
-		windows.SetConsoleMode(windows.Handle(os.Stdin.Fd()), savedConsoleMode)
+		_ = windows.SetConsoleMode(windows.Handle(os.Stdin.Fd()), savedConsoleMode)
 	}
 }

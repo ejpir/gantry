@@ -36,25 +36,25 @@ func StartGVProxy(binPath, dir string) (*exec.Cmd, string, error) {
 	// forward anyway.
 	sshPort, err := freeTCPPort()
 	if err != nil {
-		netLog.Close()
+		_ = netLog.Close()
 		return nil, "", fmt.Errorf("allocate gvproxy ssh port: %w", err)
 	}
 	cmd := exec.Command(gvPath, "-debug", "-ssh-port", fmt.Sprint(sshPort), "-listen", "unix://"+apiSock, "-listen-vfkit", "unixgram://"+netSock)
 	cmd.Stdout, cmd.Stderr = netLog, netLog
 	if err := cmd.Start(); err != nil {
-		netLog.Close()
+		_ = netLog.Close()
 		return nil, "", fmt.Errorf("start gvproxy: %w", err)
 	}
 	// Record the pid so `gantry stop` can clean up even if the daemon was
 	// SIGKILLed (defers don't run then, orphaning gvproxy on port 2222...).
-	os.WriteFile(filepath.Join(dir, "gvproxy.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "gvproxy.pid"), []byte(fmt.Sprint(cmd.Process.Pid)), 0o644)
 	for i := 0; i < 300 && !gutil.FileExists(netSock); i++ {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if !gutil.FileExists(netSock) {
-		netLog.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = netLog.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		return nil, "", fmt.Errorf("gvproxy did not create %s", netSock)
 	}
 	return cmd, netSock, nil
@@ -65,6 +65,6 @@ func freeTCPPort() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	return l.Addr().(*net.TCPAddr).Port, nil
 }

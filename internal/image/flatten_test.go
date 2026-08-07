@@ -67,7 +67,7 @@ func writeLayer(t *testing.T, entries ...tarEntry) *os.File {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { f.Close() })
+	t.Cleanup(func() { _ = f.Close() })
 	return f
 }
 
@@ -95,7 +95,7 @@ func flattenInto(t *testing.T, layers ...*os.File) (fs.FS, *mergeIndex) {
 	if err != nil {
 		t.Fatalf("open built image: %v", err)
 	}
-	t.Cleanup(func() { f.Close() })
+	t.Cleanup(func() { _ = f.Close() })
 	return img, idx
 }
 
@@ -328,7 +328,7 @@ func TestBuildAndVerify(t *testing.T) {
 		t.Errorf("resolved user = %d:%d", cfg.UID, cfg.GID)
 	}
 	f, _ := os.Open(out)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	img, err := erofs.Open(f)
 	if err != nil {
 		t.Fatal(err)

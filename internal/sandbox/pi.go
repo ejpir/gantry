@@ -159,7 +159,7 @@ flags:`)
 			break
 		}
 	}
-	fs.Parse(argv)
+	_ = fs.Parse(argv)
 
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -202,7 +202,7 @@ flags:`)
 	}
 	registerPiFlags(fs, &cfg)
 	proxy := fs.String("proxy", "", "write HTTPS_PROXY=<value> into the guest's /etc/pi-bridge.env (e.g. http://192.168.1.1:3128)")
-	fs.Parse(argv)
+	_ = fs.Parse(argv)
 
 	cwd, err := os.Getwd()
 	if err != nil {

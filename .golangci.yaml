@@ -1,0 +1,50 @@
+version: "2"
+
+# golangci-lint configuration for gantry.
+#
+# Linter set: the golangci-lint standard default (errcheck, govet,
+# ineffassign, staticcheck, unused). The existing backlog (~96 findings
+# across platforms) is intentionally NOT fixed in one sweep; enforcement
+# is incremental — CI runs with --new-from-rev=<push base>, so only code
+# touched by a change must be clean, and the backlog burns down as files
+# are edited.
+#
+# Platform awareness: there is no single "the code". Per-OS/arch build
+# tags select different files (10 windows, 7 linux, 6 darwin, plus
+# linux/amd64- and linux/arm64-only files), and findings differ per
+# platform — errcheck on syscall wrappers, unused helpers only referenced
+# from another platform's file, and so on. CI therefore runs the linter
+# once per supported target by setting GOOS/GOARCH:
+#
+#   linux/amd64, linux/arm64, darwin/arm64, windows/arm64
+#
+# (vsharehub_stub.go is a fallback for !linux && !darwin && !windows and
+# is never compiled on a supported target; it cannot be type-checked by
+# any of these runs.)
+#
+# Local usage:
+#   golangci-lint run ./...                          # full backlog
+#   golangci-lint run --new-from-rev=origin/main     # your changes only
+#   GOOS=windows GOARCH=arm64 golangci-lint run --new-from-rev=origin/main ./...
+
+run:
+  timeout: 5m
+
+# No issue-count caps: the defaults (50 per linter, 3 identical) silently
+# truncate output, which hides backlog both locally and in CI.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: standard
+  exclusions:
+    generated: lax # generated files (api/**/*.pb.go) carry the DO NOT EDIT marker
+    # No exclusion presets: the std-error-handling preset would hide
+    # unchecked Close/Fprintf/Remove returns — exactly the sloppy error
+    # handling a sandbox should be deliberate about. Everything the
+    # standard linters report must be fixed or explicitly discarded.
+    presets: []
+    paths:
+      # Vendored fork with its own module; lint it upstream, not here.
+      - third_party/

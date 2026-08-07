@@ -79,7 +79,7 @@ func TestVirtioFSShareEscape(t *testing.T) {
 	if err := os.WriteFile(secretPath, []byte("TOP SECRET\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Remove(secretPath) })
+	t.Cleanup(func() { _ = os.Remove(secretPath) })
 
 	dev, err := NewFS("escape", share)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestVirtioFSSymlinkEscapeBlocked(t *testing.T) {
 	if err := os.WriteFile(secretPath, []byte("TOP SECRET\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Remove(secretPath) })
+	t.Cleanup(func() { _ = os.Remove(secretPath) })
 
 	dev, err := NewFS("symlink-escape", share)
 	if err != nil {
@@ -172,7 +172,7 @@ func TestVirtioFSSymlinkEscapeBlocked(t *testing.T) {
 		t.Logf("create through symlink rejected (errno %d)", errno)
 	}
 	if _, err := os.Lstat(filepath.Join(parent, "pwned")); err == nil {
-		os.Remove(filepath.Join(parent, "pwned"))
+		_ = os.Remove(filepath.Join(parent, "pwned"))
 		t.Error("host file pwned exists outside the share")
 	}
 

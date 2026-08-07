@@ -243,7 +243,7 @@ func (h *ShareHub) Publish(p *PreparedShare) (*ShareExport, error) {
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
 	h.mu.Unlock()
-	h.root.NotifyEntry(exp.Tag)
+	_ = h.root.NotifyEntry(exp.Tag)
 	return exp, nil
 }
 
@@ -281,7 +281,7 @@ func (h *ShareHub) Swap(p *PreparedShare) (old, exp *ShareExport, err error) {
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
 	h.mu.Unlock()
-	h.root.NotifyEntry(exp.Tag)
+	_ = h.root.NotifyEntry(exp.Tag)
 	return old, exp, nil
 }
 
@@ -326,7 +326,7 @@ func (h *ShareHub) Remove(tag string, force bool) (*ShareExport, error) {
 		child.ForgetPersistent()
 	}
 	h.mu.Unlock()
-	h.root.NotifyEntry(tag)
+	_ = h.root.NotifyEntry(tag)
 	if child == nil {
 		exp.finish()
 	}

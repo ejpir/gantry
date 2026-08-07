@@ -17,7 +17,7 @@ func procAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	var code uint32
 	if err := windows.GetExitCodeProcess(h, &code); err != nil {
 		return false
@@ -38,7 +38,7 @@ func procKill(pid int) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(h)
+	defer func() { _ = windows.CloseHandle(h) }()
 	return windows.TerminateProcess(h, 1)
 }
 
@@ -62,7 +62,7 @@ func holdSandboxLock(dir string) (*os.File, error) {
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
 		0, 1, 0, ol)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return f, nil
@@ -74,7 +74,7 @@ func sandboxLockHeld(dir string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	ol := new(windows.Overlapped)
 	err = windows.LockFileEx(windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
@@ -82,6 +82,6 @@ func sandboxLockHeld(dir string) bool {
 	if err != nil {
 		return true // held by the daemon
 	}
-	windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
+	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
 	return false
 }

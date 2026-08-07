@@ -58,7 +58,7 @@ func TestSuperviseReturnsWithParkedGrandchild(t *testing.T) {
 	elapsed := time.Since(start)
 
 	os.Stderr = oldErr
-	w.Close()
+	_ = w.Close()
 	replayed := string(<-outc)
 
 	if rc != 0 {

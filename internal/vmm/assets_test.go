@@ -88,7 +88,7 @@ func assetServer(t *testing.T, name, payload string) *httptest.Server {
 			io_writeString(w, payload)
 		case name + ".sha256":
 			sum := sha256.Sum256([]byte(payload))
-			fmt.Fprintf(w, "%x  %s\n", sum, name)
+			_, _ = fmt.Fprintf(w, "%x  %s\n", sum, name)
 		default:
 			http.Error(w, "nope", http.StatusNotFound)
 		}

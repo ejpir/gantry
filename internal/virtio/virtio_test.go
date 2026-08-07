@@ -50,8 +50,8 @@ func setupQueue(mem mem, core *Core, qn, num uint32) {
 	core.MMIOWrite(0x0a0, ramBase+testUsedAddr+uint32(qn)*testStride)
 	core.MMIOWrite(0x044, 1) // QueueReady
 	// zero avail/used headers
-	mem.writeAt(ramBase+testAvailAddr+uint64(qn)*testStride, make([]byte, 8))
-	mem.writeAt(ramBase+testUsedAddr+uint64(qn)*testStride, make([]byte, 8))
+	_ = mem.writeAt(ramBase+testAvailAddr+uint64(qn)*testStride, make([]byte, 8))
+	_ = mem.writeAt(ramBase+testUsedAddr+uint64(qn)*testStride, make([]byte, 8))
 }
 
 func putDesc(mem mem, qn uint32, idx uint16, addr uint64, length uint32, flags uint16, next uint16) {
@@ -60,20 +60,20 @@ func putDesc(mem mem, qn uint32, idx uint16, addr uint64, length uint32, flags u
 	binary.LittleEndian.PutUint32(d[8:], length)
 	binary.LittleEndian.PutUint16(d[12:], flags)
 	binary.LittleEndian.PutUint16(d[14:], next)
-	mem.writeAt(ramBase+testDescAddr+uint64(qn)*testStride+uint64(idx)*16, d[:])
+	_ = mem.writeAt(ramBase+testDescAddr+uint64(qn)*testStride+uint64(idx)*16, d[:])
 }
 
 func availPush(mem mem, qn uint32, head uint16) {
 	base := ramBase + testAvailAddr + uint64(qn)*testStride
 	var idx [2]byte
-	mem.readAt(base+2, idx[:])
+	_ = mem.readAt(base+2, idx[:])
 	n := binary.LittleEndian.Uint16(idx[:])
 	var h [2]byte
 	binary.LittleEndian.PutUint16(h[:], head)
-	mem.writeAt(base+4+uint64(n%8)*2, h[:])
+	_ = mem.writeAt(base+4+uint64(n%8)*2, h[:])
 	n++
 	binary.LittleEndian.PutUint16(idx[:], n)
-	mem.writeAt(base+2, idx[:])
+	_ = mem.writeAt(base+2, idx[:])
 }
 
 type usedElem struct {
@@ -84,14 +84,14 @@ type usedElem struct {
 func usedIndex(mem mem, qn uint32) uint16 {
 	base := ramBase + testUsedAddr + uint64(qn)*testStride
 	var idx [2]byte
-	mem.readAt(base+2, idx[:])
+	_ = mem.readAt(base+2, idx[:])
 	return binary.LittleEndian.Uint16(idx[:])
 }
 
 func usedAt(mem mem, qn uint32, n uint16) usedElem {
 	base := ramBase + testUsedAddr + uint64(qn)*testStride
 	var e [8]byte
-	mem.readAt(base+4+uint64(n%8)*8, e[:])
+	_ = mem.readAt(base+4+uint64(n%8)*8, e[:])
 	return usedElem{binary.LittleEndian.Uint32(e[0:]), binary.LittleEndian.Uint32(e[4:])}
 }
 
@@ -141,7 +141,7 @@ func TestVirtioBlkRead(t *testing.T) {
 	hdr := make([]byte, 16)
 	binary.LittleEndian.PutUint32(hdr[0:], BlkTIn)
 	binary.LittleEndian.PutUint64(hdr[8:], 2)
-	mem.writeAt(ramBase+testDataAddr, hdr)
+	_ = mem.writeAt(ramBase+testDataAddr, hdr)
 	putDesc(mem, 0, 0, ramBase+testDataAddr, 16, vringDescFNext, 1)
 	putDesc(mem, 0, 1, ramBase+testDataAddr+0x100, 512, vringDescFNext|vringDescFWrite, 2)
 	putDesc(mem, 0, 2, ramBase+testDataAddr+0x300, 1, vringDescFWrite, 0)
@@ -156,12 +156,12 @@ func TestVirtioBlkRead(t *testing.T) {
 		t.Fatalf("used elem = %+v, want id 0 len 513", e)
 	}
 	var st [1]byte
-	mem.readAt(ramBase+testDataAddr+0x300, st[:])
+	_ = mem.readAt(ramBase+testDataAddr+0x300, st[:])
 	if st[0] != BlkSOK {
 		t.Fatalf("status = %d", st[0])
 	}
 	got := make([]byte, 512)
-	mem.readAt(ramBase+testDataAddr+0x100, got)
+	_ = mem.readAt(ramBase+testDataAddr+0x100, got)
 	for i := range got {
 		if got[i] != 2 {
 			t.Fatalf("data[%d] = %d, want 2", i, got[i])
@@ -257,7 +257,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer blk.file.Close()
+	defer func() { _ = blk.file.Close() }()
 	if f := blk.features(); f&(1<<BlkFRO) != 0 || f&(1<<BlkFFlush) == 0 {
 		t.Fatalf("writable features = %#x (want FLUSH, no RO)", f)
 	}
@@ -272,12 +272,12 @@ func TestVirtioBlkWrite(t *testing.T) {
 	hdr := make([]byte, 16)
 	binary.LittleEndian.PutUint32(hdr[0:], BlkTOut)
 	binary.LittleEndian.PutUint64(hdr[8:], 4)
-	mem.writeAt(ramBase+testDataAddr, hdr)
+	_ = mem.writeAt(ramBase+testDataAddr, hdr)
 	payload := make([]byte, 512)
 	for i := range payload {
 		payload[i] = 0xab
 	}
-	mem.writeAt(ramBase+testDataAddr+0x100, payload)
+	_ = mem.writeAt(ramBase+testDataAddr+0x100, payload)
 	putDesc(mem, 0, 0, ramBase+testDataAddr, 16, vringDescFNext, 1)
 	putDesc(mem, 0, 1, ramBase+testDataAddr+0x100, 512, vringDescFNext, 2)
 	putDesc(mem, 0, 2, ramBase+testDataAddr+0x300, 1, vringDescFWrite, 0)
@@ -289,7 +289,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 		t.Fatalf("used elem = %+v ok=%v, want len 1 (status only)", e, ok)
 	}
 	var st [1]byte
-	mem.readAt(ramBase+testDataAddr+0x300, st[:])
+	_ = mem.readAt(ramBase+testDataAddr+0x300, st[:])
 	if st[0] != BlkSOK {
 		t.Fatalf("write status = %d", st[0])
 	}
@@ -303,14 +303,14 @@ func TestVirtioBlkWrite(t *testing.T) {
 
 	// FLUSH succeeds on a writable device.
 	binary.LittleEndian.PutUint32(hdr[0:], BlkTFlush)
-	mem.writeAt(ramBase+testDataAddr, hdr)
+	_ = mem.writeAt(ramBase+testDataAddr, hdr)
 	putDesc(mem, 0, 0, ramBase+testDataAddr, 16, vringDescFNext, 2)
 	availPush(mem, 0, 0)
 	core.MMIOWrite(0x050, 0)
 	if e, ok := usedPop(mem, 0); !ok || e.id != 0 {
 		t.Fatalf("flush used elem = %+v ok=%v", e, ok)
 	}
-	mem.readAt(ramBase+testDataAddr+0x300, st[:])
+	_ = mem.readAt(ramBase+testDataAddr+0x300, st[:])
 	if st[0] != BlkSOK {
 		t.Fatalf("flush status = %d", st[0])
 	}
@@ -320,7 +320,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer roBlk.file.Close()
+	defer func() { _ = roBlk.file.Close() }()
 	if roBlk.features()&(1<<BlkFRO) == 0 {
 		t.Fatal("read-only device lost VIRTIO_BLK_F_RO")
 	}
@@ -344,7 +344,7 @@ func TestVirtioRNG(t *testing.T) {
 		t.Fatalf("used elem = %+v ok=%v, want len 64", e, ok)
 	}
 	out := make([]byte, 64)
-	mem.readAt(ramBase+testDataAddr, out)
+	_ = mem.readAt(ramBase+testDataAddr, out)
 	var nonzero int
 	for _, b := range out {
 		if b != 0 {
@@ -370,7 +370,7 @@ func TestVirtioRTC(t *testing.T) {
 	setupQueue(mem, core, 0, 8)
 
 	roundTrip := func(req []byte) (status byte, body []byte) {
-		mem.writeAt(ramBase+testDataAddr, req)
+		_ = mem.writeAt(ramBase+testDataAddr, req)
 		putDesc(mem, 0, 0, ramBase+testDataAddr, uint32(len(req)), vringDescFNext, 1)
 		putDesc(mem, 0, 1, ramBase+testDataAddr+0x100, RTCRespLen, vringDescFWrite, 0)
 		availPush(mem, 0, 0)
@@ -380,7 +380,7 @@ func TestVirtioRTC(t *testing.T) {
 			t.Fatalf("used elem = %+v ok=%v", e, ok)
 		}
 		out := make([]byte, RTCRespLen)
-		mem.readAt(ramBase+testDataAddr+0x100, out)
+		_ = mem.readAt(ramBase+testDataAddr+0x100, out)
 		return out[0], out[8:]
 	}
 
@@ -451,7 +451,7 @@ func TestVirtioFSTransport(t *testing.T) {
 
 	setupQueue(mem, core, virtioFSRequestQ, 8)
 	base := uint64(ramBase + testDataAddr)
-	mem.writeAt(base, make([]byte, 48))
+	_ = mem.writeAt(base, make([]byte, 48))
 	putDesc(mem, virtioFSRequestQ, 0, base, 40, vringDescFNext, 1)
 	putDesc(mem, virtioFSRequestQ, 1, base+0x100, 8, vringDescFNext, 2)
 	putDesc(mem, virtioFSRequestQ, 2, base+0x200, 16, vringDescFNext|vringDescFWrite, 3)
@@ -466,12 +466,12 @@ func TestVirtioFSTransport(t *testing.T) {
 		t.Fatalf("bad FUSE used elem: %+v ok=%v", e, ok)
 	}
 	got := make([]byte, 16)
-	mem.readAt(base+0x200, got)
+	_ = mem.readAt(base+0x200, got)
 	if string(got) != "response-header!" {
 		t.Fatalf("response header = %q", got)
 	}
 	got = make([]byte, 8)
-	mem.readAt(base+0x300, got)
+	_ = mem.readAt(base+0x300, got)
 	if string(got) != "payload!" {
 		t.Fatalf("response payload = %q", got)
 	}
@@ -500,17 +500,17 @@ func TestVirtioNetUnixgramVFKIT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	nic, err := NewNetUnixgram(path, [6]byte{2, 0, 0, 0, 0, 1}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		nic.conn.Close()
-		os.Remove(nic.localPath)
+		_ = nic.conn.Close()
+		_ = os.Remove(nic.localPath)
 	}()
-	server.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = server.SetReadDeadline(time.Now().Add(15 * time.Second))
 	buf := make([]byte, 16)
 	n, _, err := server.ReadFromUnix(buf)
 	if err != nil {
@@ -552,7 +552,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 	// Guest TX contains virtio_net_hdr_v1 followed by one Ethernet frame.
 	txFrame := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee, 0x08, 0x06, 1, 2, 3, 4}
 	txPacket := append(make([]byte, virtioNetHdrLen), txFrame...)
-	mem.writeAt(ramBase+testDataAddr, txPacket)
+	_ = mem.writeAt(ramBase+testDataAddr, txPacket)
 	putDesc(mem, virtioNetTxQ, 0, ramBase+testDataAddr, uint32(len(txPacket)), 0, 0)
 	availPush(mem, virtioNetTxQ, 0)
 	core.MMIOWrite(0x050, virtioNetTxQ)
@@ -583,7 +583,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 		core.mu.Lock()
 		e, ok := usedPop(mem, virtioNetRxQ)
 		if ok {
-			mem.readAt(rxAddr, got)
+			_ = mem.readAt(rxAddr, got)
 		}
 		core.mu.Unlock()
 		if ok {
@@ -612,7 +612,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 
 func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	hostSide, guestSide := net.Pipe()
-	defer hostSide.Close()
+	defer func() { _ = hostSide.Close() }()
 	// net.Pipe is synchronous; the host side needs a concurrent reader,
 	// like a real buffered unix socket would provide.
 	hostRx := make(chan []byte, 16)
@@ -656,7 +656,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	// guest sends REQUEST cid 3:1111 -> 2:1025
 	hdr := vsockHdr{srcCID: 3, dstCID: 2, srcPort: 1111, dstPort: 1025,
 		typ: vsockTypeStream, op: vsockOpRequest, bufAlloc: 8192}
-	mem.writeAt(ramBase+testDataAddr, hdr.marshal())
+	_ = mem.writeAt(ramBase+testDataAddr, hdr.marshal())
 	putDesc(mem, 1, 0, ramBase+testDataAddr, vsockHdrLen, 0, 0)
 	availPush(mem, 1, 0)
 	postRxBuf(0) // rx buffer for the RESPONSE
@@ -667,7 +667,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 		t.Fatal("no RESPONSE in rx used ring")
 	}
 	respBuf := make([]byte, vsockHdrLen)
-	mem.readAt(ramBase+testDataAddr, respBuf)
+	_ = mem.readAt(ramBase+testDataAddr, respBuf)
 	resp := parseVsockHdr(respBuf)
 	if resp.op != vsockOpResponse || resp.srcCID != 2 || resp.dstCID != 3 || resp.srcPort != 1025 || resp.dstPort != 1111 {
 		t.Fatalf("bad RESPONSE: %+v", resp)
@@ -678,7 +678,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	msg := append(hdr.marshal(), []byte("hello")...)
 	binary.LittleEndian.PutUint32(msg[24:], 5)
 	msg[30], msg[31] = byte(vsockOpRW), 0
-	mem.writeAt(ramBase+testDataAddr, msg)
+	_ = mem.writeAt(ramBase+testDataAddr, msg)
 	putDesc(mem, 1, 1, ramBase+testDataAddr, uint32(len(msg)), 0, 0)
 	availPush(mem, 1, 1)
 	core.MMIOWrite(0x050, vsockQueueTx)
@@ -718,8 +718,8 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 		for n := seenUsed; n != currentUsed; n++ {
 			e := usedAt(mem, vsockQueueRx, n)
 			if e.len > vsockHdrLen {
-				mem.readAt(ramBase+testDataAddr+0x800+uint64(e.id)*0x100, payload)
-				mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, hdrBuf)
+				_ = mem.readAt(ramBase+testDataAddr+0x800+uint64(e.id)*0x100, payload)
+				_ = mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, hdrBuf)
 				found = true
 				break
 			}
@@ -777,7 +777,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	deadline := time.Now().Add(15 * time.Second)
 	var e usedElem
@@ -791,7 +791,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 		e, ok = usedPop(mem, vsockQueueRx)
 		if ok {
 			hdrBuf = make([]byte, vsockHdrLen)
-			mem.readAt(ramBase+testDataAddr, hdrBuf)
+			_ = mem.readAt(ramBase+testDataAddr, hdrBuf)
 		}
 		core.mu.Unlock()
 		if ok {
@@ -811,7 +811,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	// guest accepts: RESPONSE on tx queue
 	resp := vsockHdr{srcCID: 3, dstCID: 2, srcPort: 1026, dstPort: req.srcPort,
 		typ: vsockTypeStream, op: vsockOpResponse, bufAlloc: 8192}
-	mem.writeAt(ramBase+testDataAddr, resp.marshal())
+	_ = mem.writeAt(ramBase+testDataAddr, resp.marshal())
 	putDesc(mem, 1, 0, ramBase+testDataAddr, vsockHdrLen, 0, 0)
 	availPush(mem, 1, 0)
 	core.MMIOWrite(0x050, vsockQueueTx)
@@ -825,12 +825,12 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	msg := append(resp.marshal(), []byte("ping")...)
 	binary.LittleEndian.PutUint32(msg[24:], 4)
 	msg[30], msg[31] = byte(vsockOpRW), 0
-	mem.writeAt(ramBase+testDataAddr, msg)
+	_ = mem.writeAt(ramBase+testDataAddr, msg)
 	putDesc(mem, 1, 1, ramBase+testDataAddr, uint32(len(msg)), 0, 0)
 	availPush(mem, 1, 1)
 	core.MMIOWrite(0x050, vsockQueueTx)
 
-	hc.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_ = hc.SetReadDeadline(time.Now().Add(15 * time.Second))
 	got := make([]byte, 4)
 	if _, err := io_ReadFull(hc, got); err != nil || string(got) != "ping" {
 		t.Fatalf("host client read: %q %v", got, err)

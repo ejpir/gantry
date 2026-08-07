@@ -23,7 +23,7 @@ func TestEmbeddedStackARP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Ethernet: broadcast ARP request, who-has 192.168.127.1 tell 192.168.127.2
 	gwIP := net.ParseIP(GatewayIP).To4()
@@ -47,7 +47,7 @@ func TestEmbeddedStackARP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var rhdr [4]byte
 	if _, err := readFull(conn, rhdr[:]); err != nil {
 		t.Fatal("no ARP reply:", err)

@@ -113,7 +113,7 @@ type Vsock struct {
 }
 
 func NewVsock(guestCID uint64, forwardDir string) *Vsock {
-	os.MkdirAll(forwardDir, 0o755)
+	_ = os.MkdirAll(forwardDir, 0o755)
 	return &Vsock{
 		guestCID:     guestCID,
 		forwardDir:   forwardDir,
@@ -133,7 +133,7 @@ func NewVsock(guestCID uint64, forwardDir string) *Vsock {
 // streaming service on 1026). Mirrors the reference VMM's vsock listen-port registration.
 func (v *Vsock) AddListen(guestPort uint32) (string, error) {
 	path := filepath.Join(v.forwardDir, fmt.Sprintf("listen-%d.sock", guestPort))
-	os.Remove(path)
+	_ = os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return "", err
@@ -173,7 +173,7 @@ func (v *Vsock) numQueues() int   { return 3 }
 func (v *Vsock) reset() {
 	for k, c := range v.conns {
 		c.closed = true
-		c.nc.Close()
+		_ = c.nc.Close()
 		close(c.done) // wake pumpOut so it doesn't leak on the socket
 		delete(v.conns, k)
 	}
@@ -387,7 +387,7 @@ func (v *Vsock) closeConn(c *vsockConn, trigger vsockHdr, sendRST bool) {
 		return
 	}
 	c.closed = true
-	c.nc.Close()
+	_ = c.nc.Close()
 	close(c.done) // release pumpOut; sending on outSig after this is a no-op
 	delete(v.conns, c.key)
 	if sendRST {
@@ -535,7 +535,7 @@ func (v *Vsock) maxChainBytes(qn int) uint64 { return vsockMaxChainBytes }
 // double-close c.done.
 func (v *Vsock) Close() error {
 	for _, l := range v.listeners {
-		l.Close()
+		_ = l.Close()
 	}
 	if v.core == nil {
 		return nil
@@ -543,7 +543,7 @@ func (v *Vsock) Close() error {
 	v.core.mu.Lock()
 	for k, c := range v.conns {
 		c.closed = true
-		c.nc.Close()
+		_ = c.nc.Close()
 		close(c.done)
 		delete(v.conns, k)
 	}

@@ -31,10 +31,10 @@ type pulled struct {
 // Close releases the decompressed layer temp files.
 func (p *pulled) Close() {
 	for _, f := range p.layers {
-		f.Close()
+		_ = f.Close()
 	}
 	if p.tmpDir != "" {
-		os.RemoveAll(p.tmpDir)
+		_ = os.RemoveAll(p.tmpDir)
 	}
 }
 
@@ -188,14 +188,14 @@ func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	tmp, err := os.MkdirTemp("", "gantry-image-")
 	if err != nil {
 		return nil, err
 	}
 	fail := func(err error) (*pulled, error) {
-		os.RemoveAll(tmp)
+		_ = os.RemoveAll(tmp)
 		return nil, err
 	}
 
@@ -299,7 +299,7 @@ func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
 			p.Close()
 			return nil, err
 		}
-		fmt.Fprintf(h, "\n%x", lh.Sum(nil))
+		_, _ = fmt.Fprintf(h, "\n%x", lh.Sum(nil))
 	}
 	p.digest = fmt.Sprintf("sha256:%x", h.Sum(nil))
 	p.config = &Config{
@@ -318,7 +318,7 @@ func extractTo(r io.Reader, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = io.Copy(f, r)
 	return err
 }
@@ -330,7 +330,7 @@ func decompressTo(src, wantDigest, tmp string, idx int) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	dst := filepath.Join(tmp, fmt.Sprintf("layer-%d.tar", idx))
 	out, err := os.Create(dst)
 	if err != nil {
@@ -341,7 +341,7 @@ func decompressTo(src, wantDigest, tmp string, idx int) (*os.File, error) {
 	// sniff gzip (OCI layers are usually gzip; docker save never is)
 	var magic [2]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
-		out.Close()
+		_ = out.Close()
 		return nil, err
 	}
 	r = io.MultiReader(readahead(magic[:]), r)
@@ -349,14 +349,14 @@ func decompressTo(src, wantDigest, tmp string, idx int) (*os.File, error) {
 	if magic[0] == 0x1f && magic[1] == 0x8b {
 		gz, err := gzip.NewReader(r)
 		if err != nil {
-			out.Close()
+			_ = out.Close()
 			return nil, err
 		}
-		defer gz.Close()
+		defer func() { _ = gz.Close() }()
 		plain = gz
 	}
 	if _, err := io.Copy(out, plain); err != nil {
-		out.Close()
+		_ = out.Close()
 		return nil, err
 	}
 	if err := out.Close(); err != nil {
@@ -364,7 +364,7 @@ func decompressTo(src, wantDigest, tmp string, idx int) (*os.File, error) {
 	}
 	if wantDigest != "" {
 		if got := fmt.Sprintf("sha256:%x", h.Sum(nil)); got != wantDigest {
-			os.Remove(dst)
+			_ = os.Remove(dst)
 			return nil, fmt.Errorf("layer blob %s: digest mismatch (got %s)", src, got)
 		}
 	}

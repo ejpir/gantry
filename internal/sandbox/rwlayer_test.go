@@ -42,7 +42,7 @@ func TestProbeExt4(t *testing.T) {
 	}
 	// non-ext file
 	plain := filepath.Join(t.TempDir(), "x.bin")
-	os.WriteFile(plain, []byte("hello"), 0o644)
+	_ = os.WriteFile(plain, []byte("hello"), 0o644)
 	if _, err := gutil.ProbeExt4(plain); err == nil {
 		t.Error("want magic error for non-ext file")
 	}
@@ -51,7 +51,7 @@ func TestProbeExt4(t *testing.T) {
 func TestRWLayerPairing(t *testing.T) {
 	dir := t.TempDir()
 	layer := filepath.Join(dir, "test.ext4")
-	os.WriteFile(layer, []byte("x"), 0o644)
+	_ = os.WriteFile(layer, []byte("x"), 0o644)
 
 	// no sidecar: recorded, no error
 	if err := checkRWLayerPairing(layer, "sha256:aaa"); err != nil {
@@ -102,7 +102,7 @@ func TestResolveUsesPerSandboxRWLayer(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	for _, f := range resolveAssets {
-		os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644)
 	}
 	fs := flag.NewFlagSet("t", flag.ContinueOnError)
 	rf := RegisterRunFlags(fs)

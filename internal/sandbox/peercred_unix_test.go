@@ -19,7 +19,7 @@ func TestPeerSameUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, err := ln.Accept()
@@ -31,9 +31,9 @@ func TestPeerSameUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	server := <-accepted
-	defer server.Close()
+	defer func() { _ = server.Close() }()
 
 	uid, err := peerUID(server)
 	if err != nil {

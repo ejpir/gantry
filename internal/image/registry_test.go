@@ -51,7 +51,7 @@ func newFakeRegistry(t *testing.T, wantUser string) *fakeRegistry {
 			} else {
 				r.anonTokens++
 			}
-			w.Write([]byte(fmt.Sprintf(`{"token":%q,"expires_in":300}`, r.token)))
+			_, _ = fmt.Fprintf(w, `{"token":%q,"expires_in":300}`, r.token)
 		case strings.Contains(req.URL.Path, "/manifests/") || strings.Contains(req.URL.Path, "/blobs/"):
 			authz := req.Header.Get("Authorization")
 			r.gotAuth = append(r.gotAuth, authz)
@@ -63,13 +63,13 @@ func newFakeRegistry(t *testing.T, wantUser string) *fakeRegistry {
 			}
 			if strings.Contains(req.URL.Path, "/manifests/") {
 				w.Header().Set("Docker-Content-Digest", r.manDigest)
-				w.Write(r.manifest)
+				_, _ = w.Write(r.manifest)
 				return
 			}
 			// blob
 			digest := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
 			if b, ok := r.blobs[digest]; ok {
-				w.Write(b)
+				_, _ = w.Write(b)
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
@@ -122,7 +122,7 @@ func TestRegistryStripsAuthOnCrossHostRedirect(t *testing.T) {
 	var cdnAuth []string
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		cdnAuth = append(cdnAuth, req.Header.Get("Authorization"))
-		w.Write(blobContent)
+		_, _ = w.Write(blobContent)
 	}))
 	defer cdn.Close()
 	// registry redirects the blob GET to the CDN
@@ -158,7 +158,7 @@ func newFakeRegistryHandler(r *fakeRegistry) http.HandlerFunc {
 		switch {
 		case strings.HasPrefix(req.URL.Path, "/token"):
 			r.anonTokens++
-			w.Write([]byte(fmt.Sprintf(`{"token":%q,"expires_in":300}`, r.token)))
+			_, _ = fmt.Fprintf(w, `{"token":%q,"expires_in":300}`, r.token)
 		case strings.Contains(req.URL.Path, "/manifests/") || strings.Contains(req.URL.Path, "/blobs/"):
 			authz := req.Header.Get("Authorization")
 			r.gotAuth = append(r.gotAuth, authz)
@@ -169,7 +169,7 @@ func newFakeRegistryHandler(r *fakeRegistry) http.HandlerFunc {
 				return
 			}
 			w.Header().Set("Docker-Content-Digest", r.manDigest)
-			w.Write(r.manifest)
+			_, _ = w.Write(r.manifest)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -248,12 +248,12 @@ func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
 	if err := tw.WriteHeader(&tar.Header{Name: "hello.txt", Mode: 0o644, Size: int64(len(data)), Typeflag: tar.TypeReg}); err != nil {
 		t.Fatal(err)
 	}
-	tw.Write(data)
-	tw.Close()
+	_, _ = tw.Write(data)
+	_ = tw.Close()
 	var gz bytes.Buffer
 	zw := gzip.NewWriter(&gz)
-	zw.Write([]byte(lb.String()))
-	zw.Close()
+	_, _ = zw.Write([]byte(lb.String()))
+	_ = zw.Close()
 	layer := gz.Bytes()
 	layerDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(layer))
 
@@ -296,7 +296,7 @@ func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
 			}
 			w.Header().Set("Docker-Content-Digest", digest)
 			w.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
-			w.Write([]byte(body))
+			_, _ = w.Write([]byte(body))
 		case strings.HasPrefix(p, "blobs/"):
 			r.blobGets++
 			b, ok := blobs[strings.TrimPrefix(p, "blobs/")]
@@ -307,7 +307,7 @@ func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
 			if r.oversizeBlobs {
 				b = append(b, 0x41) // one byte beyond the descriptor
 			}
-			w.Write(b)
+			_, _ = w.Write(b)
 		default:
 			http.Error(w, "unexpected", 404)
 		}
