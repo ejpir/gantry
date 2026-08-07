@@ -19,6 +19,7 @@ on:
       - 'integrations/**/*.ts'
       - 'integrations/**/Dockerfile'
       - 'scripts/**'
+      - '.golangci.yaml'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
@@ -34,6 +35,7 @@ on:
       - 'integrations/**/*.ts'
       - 'integrations/**/Dockerfile'
       - 'scripts/**'
+      - '.golangci.yaml'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
 
@@ -162,6 +164,33 @@ jobs:
           name: gantry-kernel-${{ matrix.arch }}
           path: ${{ runner.temp }}/kernels/
           if-no-files-found: error
+
+  lint:
+    name: lint/${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One run per supported target: build tags select different
+        # files per platform, and findings differ per GOOS/GOARCH (see
+        # .golangci.yaml). Cross-run from a single Linux runner.
+        include:
+          - { name: linux-amd64, goos: linux, goarch: amd64 }
+          - { name: linux-arm64, goos: linux, goarch: arm64 }
+          - { name: darwin-arm64, goos: darwin, goarch: arm64 }
+          - { name: windows-arm64, goos: windows, goarch: arm64 }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.5"
+      - name: golangci-lint
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          golangci-lint run ./...
 
   test:
     name: test/${{ matrix.name }}
