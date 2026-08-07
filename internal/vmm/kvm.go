@@ -37,10 +37,6 @@ const (
 	kvmExitFailEntry     = 9
 	kvmExitInternalError = 17
 	kvmExitSystemEvent   = 24
-
-	kvmSystemEventShutdown = 1
-	kvmSystemEventReset    = 2
-	kvmSystemEventCrash    = 3
 )
 
 func ioctl(fd uintptr, req uint, arg unsafe.Pointer) error {
@@ -59,24 +55,6 @@ type kvmUserspaceMemoryRegion struct {
 	guestPhysAddr uint64
 	memorySize    uint64
 	userspaceAddr uint64
-}
-
-type kvmCreateDeviceStruct struct {
-	typ   uint32
-	fd    uint32
-	flags uint32
-}
-
-type kvmDeviceAttr struct {
-	flags uint32
-	group uint32
-	attr  uint64
-	addr  uint64
-}
-
-type kvmOneReg struct {
-	id   uint64
-	addr uint64
 }
 
 // (kvmVcpuInit is arm64-only; see kvm_arm64.go)
@@ -99,17 +77,6 @@ func (r kvmRunStruct) mmioPhys() uint64   { return gutil.LE64(r.data[32:]) }
 func (r kvmRunStruct) mmioData() []byte   { return r.data[40:48] }
 func (r kvmRunStruct) mmioLen() uint32    { return gutil.LE32(r.data[48:]) }
 func (r kvmRunStruct) mmioIsWrite() bool  { return r.data[52] != 0 }
-func (r kvmRunStruct) sysEventType() uint32 {
-	return gutil.LE32(r.data[32:])
-}
-
-// Port-I/O exit fields (x86).
-func (r kvmRunStruct) ioDir() uint8      { return r.data[32] } // 0 = IN, 1 = OUT
-func (r kvmRunStruct) ioSize() uint8     { return r.data[33] }
-func (r kvmRunStruct) ioPort() uint16    { return uint16(gutil.LE32(r.data[34:])) }
-func (r kvmRunStruct) ioCount() uint32   { return gutil.LE32(r.data[36:]) }
-func (r kvmRunStruct) ioData() []byte    { return r.data[r.ioDataOff():] }
-func (r kvmRunStruct) ioDataOff() uint64 { return gutil.LE64(r.data[40:]) }
 
 // ---- thin wrappers ---------------------------------------------------------
 

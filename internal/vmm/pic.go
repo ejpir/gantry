@@ -1,3 +1,5 @@
+//go:build (linux && amd64) || windows
+
 package vmm
 
 // i8259 PIC stub: with the IO-APIC in use the kernel masks the legacy PIC

@@ -3,7 +3,6 @@ package vmm
 import (
 	"fmt"
 	"github.com/ejpir/gantry/internal/gutil"
-	"os"
 	"sync"
 )
 
@@ -46,14 +45,6 @@ func (u *pl011) dbg(format string, a ...any) {
 	if dbgUartIRQ {
 		fmt.Printf("[uart] "+format+"\n", a...)
 	}
-}
-
-// feed is called by the host stdin pump with typed bytes.
-func (u *pl011) feed(b []byte) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.rxBuf = append(u.rxBuf, b...)
-	u.updateIRQLocked()
 }
 
 // updateIRQLocked drives the IRQ line like real PL011 hardware:
@@ -133,22 +124,3 @@ func (u *pl011) mmio(isWrite bool, off uint64, data []byte, length uint32) uint3
 
 // pl011ID: PeriphID0-3 (0xfe0..0xfec), CellID0-3 (0xff0..0xffc) — same as QEMU.
 var pl011ID = [8]byte{0x11, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1}
-
-// stdinPump copies host stdin into the UART RX buffer.
-func (u *pl011) stdinPump(done <-chan struct{}) {
-	buf := make([]byte, 64)
-	for {
-		select {
-		case <-done:
-			return
-		default:
-		}
-		n, err := os.Stdin.Read(buf)
-		if n > 0 {
-			u.feed(buf[:n])
-		}
-		if err != nil {
-			return
-		}
-	}
-}

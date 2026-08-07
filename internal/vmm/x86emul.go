@@ -1,3 +1,5 @@
+//go:build (linux && amd64) || windows
+
 package vmm
 
 // Minimal x86-64 instruction decoder for MMIO emulation. WHPX MemoryAccess

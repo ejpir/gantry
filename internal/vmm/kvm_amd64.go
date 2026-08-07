@@ -241,7 +241,7 @@ func (b *kvmX86Backend) bootLoop() error {
 	fmt.Println("------------------------------------------------")
 
 	if m.consoleStdin {
-		go m.uartIO.stdinPump(m.stdinDone)
+		go m.x86.uartIO.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
 	return b.runVCPULoop(vc)

@@ -1,3 +1,5 @@
+//go:build (linux && amd64) || windows
+
 package vmm
 
 // Minimal 16550A UART for x86-64 guests: the kernel's 8250 driver probes
@@ -22,15 +24,14 @@ type uart16550 struct {
 	raise  func(level bool)
 	output func(b byte)
 
-	rx   []byte // host input waiting for the guest
-	ier  byte
-	fcr  byte
-	lcr  byte
-	mcr  byte
-	scr  byte
-	dll  byte
-	dlm  byte
-	iirN uint8 // read-sensitivity state for THRE interrupts
+	rx  []byte // host input waiting for the guest
+	ier byte
+	fcr byte
+	lcr byte
+	mcr byte
+	scr byte
+	dll byte
+	dlm byte
 }
 
 func newUART16550(raise func(level bool), output func(byte)) *uart16550 {

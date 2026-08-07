@@ -111,32 +111,6 @@ func (e *ShareExport) mutable() syscall.Errno {
 	return 0
 }
 
-// mapGuestOwner rewrites only the numeric ownership reported to the guest.
-// The host inode and all host-side access checks remain unchanged.
-func mapGuestOwner(e *ShareExport, attr *fuse.Attr) {
-	if e == nil || attr == nil {
-		return
-	}
-	if e.UID != nil {
-		attr.Uid = *e.UID
-	}
-	if e.GID != nil {
-		attr.Gid = *e.GID
-	}
-}
-
-func mapGuestStatxOwner(e *ShareExport, attr *fuse.Statx) {
-	if e == nil || attr == nil {
-		return
-	}
-	if e.UID != nil {
-		attr.Uid = *e.UID
-	}
-	if e.GID != nil {
-		attr.Gid = *e.GID
-	}
-}
-
 func (e *ShareExport) finish() {
 	if e == nil {
 		return

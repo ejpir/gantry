@@ -210,8 +210,8 @@ func (whpxPlatform) run(m *Machine) error {
 	}
 
 	// userspace irqchip: IO-APIC delivering via WHvRequestInterrupt
-	m.ioapic = newIOApic(b.deliverInterrupt)
-	m.irqLine = func(irq int, level bool) { m.ioapic.raise(irq, level) }
+	m.x86.ioapic = newIOApic(b.deliverInterrupt)
+	m.irqLine = func(irq int, level bool) { m.x86.ioapic.raise(irq, level) }
 
 	for i := 0; i < m.vcpus; i++ {
 		if err := whvCall("WHvCreateVirtualProcessor", procCreateVP,
@@ -262,7 +262,7 @@ func (b *whpxBackend) bootLoop() error {
 	fmt.Println("------------------------------------------------")
 
 	if m.consoleStdin {
-		go m.uartIO.stdinPump(m.stdinDone)
+		go m.x86.uartIO.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
 	return b.runVPLoop(0)

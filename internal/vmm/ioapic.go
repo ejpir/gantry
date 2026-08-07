@@ -1,3 +1,5 @@
+//go:build windows
+
 package vmm
 
 // Userspace I/O APIC (82093AA) for hypervisors without an in-kernel irqchip
