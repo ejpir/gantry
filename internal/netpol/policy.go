@@ -354,14 +354,15 @@ func (p *Policy) Describe() string {
 // frame inspection
 
 type parsedPacket struct {
-	src      [4]byte
-	dst      [4]byte
-	proto    uint8
-	sport    uint16
-	dport    uint16
-	l4       []byte // transport header (for DNS parsing)
-	isUDP    bool
-	srcIsDNS bool // RX: source port 53
+	src        [4]byte
+	dst        [4]byte
+	proto      uint8
+	sport      uint16
+	dport      uint16
+	l4         []byte // transport header (for DNS parsing)
+	isUDP      bool
+	srcIsDNS   bool // RX: source port 53
+	fragmented bool // IPv4: more-fragments bit set or non-zero fragment offset
 }
 
 // parseFrame extracts what policy needs from an Ethernet frame. ok=false
@@ -391,7 +392,9 @@ func parseFrame(frame []byte) (pp parsedPacket, arp, ok bool) {
 	// the default action. Known gap: under a default-ALLOW policy with
 	// port-scoped DENY rules, fragmenting evades those rules (under the
 	// far more common default-deny it fails closed).
-	off := int(binary.BigEndian.Uint16(ip[6:8])&0x1fff) * 8
+	frag := binary.BigEndian.Uint16(ip[6:8])
+	off := int(frag&0x1fff) * 8
+	pp.fragmented = frag&0x3fff != 0 // MF (0x2000) or any fragment offset
 	pp.l4 = ip[ihl:]
 	if off == 0 && len(pp.l4) >= 4 {
 		pp.sport = binary.BigEndian.Uint16(pp.l4[0:2])
@@ -432,6 +435,13 @@ func (p *Policy) matchGatewayService(pp parsedPacket) bool {
 	if pp.proto == protoUDP && (pp.dport == 67 || pp.dport == 68) {
 		return true // DHCP
 	}
+	// Policy inspects single frames; the netstack reassembles. Under a
+	// domain allowlist no single frame of a fragmented datagram can be
+	// attributed to a query name — and non-first fragments carry no ports
+	// at all — so fail closed or split queries walk around the filter.
+	if pp.fragmented && len(p.AllowDomains) > 0 && (pp.proto == protoUDP || pp.proto == protoTCP) {
+		return false
+	}
 	if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 && len(p.AllowDomains) > 0 {
 		return p.dnsQueryAllowed(pp)
 	}
@@ -440,14 +450,31 @@ func (p *Policy) matchGatewayService(pp parsedPacket) bool {
 
 // dnsQueryAllowed permits only DNS queries whose name matches the allowlist
 // (also blocking TXT-record exfiltration of unlisted names).
+//
+// Everything unparseable fails CLOSED: an incomplete message in a single
+// frame (TCP segmentation, truncation) must not pass the name filter. The
+// one exception is a TCP frame with no transport payload at all — SYN/ACK/
+// FIN/keepalive — which carries no DNS content; every DATA-bearing frame
+// must hold exactly one complete, allowlisted message (the stream framing
+// length must cover the whole segment, so pipelined messages and trailing
+// bytes — which dns.Msg.Unpack would silently ignore — are rejected too).
 func (p *Policy) dnsQueryAllowed(pp parsedPacket) bool {
-	payload := dnsPayload(pp)
+	payload, hasData := dnsPayload(pp)
+	if !hasData {
+		return true // TCP control frame: no DNS content to judge
+	}
 	if payload == nil {
-		return true // unparseable: let the resolver deal with it
+		return false // incomplete/truncated: must not bypass the filter
+	}
+	if pp.proto == protoTCP {
+		off := int(pp.l4[12]>>4) * 4
+		if int(binary.BigEndian.Uint16(pp.l4[off:off+2])) != len(payload) {
+			return false // partial or pipelined stream content
+		}
 	}
 	var msg dns.Msg
 	if err := msg.Unpack(payload); err != nil || len(msg.Question) == 0 {
-		return true
+		return false
 	}
 	for _, q := range msg.Question {
 		if !p.domainAllowed(q.Name) {
@@ -457,21 +484,31 @@ func (p *Policy) dnsQueryAllowed(pp parsedPacket) bool {
 	return true
 }
 
-func dnsPayload(pp parsedPacket) []byte {
+// dnsPayload returns the DNS payload of the frame and whether the frame
+// carries any transport payload at all (false only for payload-less TCP
+// control frames).
+func dnsPayload(pp parsedPacket) ([]byte, bool) {
 	if pp.proto == protoUDP {
 		if len(pp.l4) < 8 {
-			return nil
+			return nil, true // truncated datagram: unreadable data
 		}
-		return pp.l4[8:]
+		return pp.l4[8:], true
 	}
-	if pp.proto == protoTCP && len(pp.l4) >= 22 {
-		// DNS over TCP: 2-byte length prefix; data offset in l4[12]>>4
+	if pp.proto == protoTCP && len(pp.l4) >= 13 {
 		off := int(pp.l4[12]>>4) * 4
-		if len(pp.l4) >= off+2 {
-			return pp.l4[off+2:]
+		if off < 20 || len(pp.l4) < off {
+			return nil, true // malformed TCP header
 		}
+		if len(pp.l4) == off {
+			return nil, false // pure control: SYN/ACK/FIN/keepalive
+		}
+		// DNS over TCP: 2-byte length prefix, then the message.
+		if len(pp.l4) >= off+2 {
+			return pp.l4[off+2:], true
+		}
+		return nil, true // lone prefix byte: incomplete message
 	}
-	return nil
+	return nil, true
 }
 
 // Allows reports whether traffic to dst/proto/dport is permitted, in
@@ -536,7 +573,7 @@ func (p *Policy) ObserveRX(frame []byte) {
 	if !ok || !pp.srcIsDNS {
 		return
 	}
-	payload := dnsPayload(pp)
+	payload, _ := dnsPayload(pp)
 	if payload == nil {
 		return
 	}
