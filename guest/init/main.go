@@ -164,15 +164,6 @@ func poweroff() {
 	os.Exit(0)
 }
 
-func cstr(b []byte) string {
-	for i, c := range b {
-		if c == 0 {
-			return string(b[:i])
-		}
-	}
-	return string(b)
-}
-
 func cstr8(b []int8) string {
 	s := make([]byte, 0, len(b))
 	for _, c := range b {

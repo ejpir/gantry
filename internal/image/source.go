@@ -345,7 +345,7 @@ func decompressTo(src, wantDigest, tmp string, idx int) (*os.File, error) {
 		return nil, err
 	}
 	r = io.MultiReader(readahead(magic[:]), r)
-	var plain io.Reader = r
+	plain := r
 	if magic[0] == 0x1f && magic[1] == 0x8b {
 		gz, err := gzip.NewReader(r)
 		if err != nil {

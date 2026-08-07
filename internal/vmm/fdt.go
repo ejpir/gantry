@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/ejpir/gantry/internal/virtio"
-	"sort"
 )
 
 // This is a minimal Flattened Device Tree (DTB) writer. The VMM builds the
@@ -273,17 +272,4 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.endNode() // root
 
 	return f.build()
-}
-
-// sanity check that names in strings block were emitted uniquely & sorted for
-// reproducible builds (debug helper; not used on hot path).
-func (f *fdtBuilder) stringsUnique() bool {
-	cp := append([]string(nil), f.strs...)
-	sort.Strings(cp)
-	for i := 1; i < len(cp); i++ {
-		if cp[i] == cp[i-1] {
-			return false
-		}
-	}
-	return true
 }

@@ -862,15 +862,12 @@ func CmdSandboxExec(name string, argv []string) int {
 		return 1
 	}
 	args := argv
-	for i, a := range argv {
-		if a == "--" {
-			args = argv[i+1:]
-			break
-		}
-		if !strings.HasPrefix(a, "-") {
-			fmt.Fprintf(os.Stderr, "gantry exec: unexpected argument %q (want: gantry exec %s [-- CMD ...])\n", a, name)
-			return 2
-		}
+	if len(argv) > 0 && argv[0] == "--" {
+		args = argv[1:]
+	} else if len(argv) > 0 && !strings.HasPrefix(argv[0], "-") {
+		fmt.Fprintf(os.Stderr, "gantry exec: unexpected argument %q (want: gantry exec %s [-- CMD ...])\n", argv[0], name)
+		return 2
+	} else if len(argv) > 0 {
 		fmt.Fprintf(os.Stderr, "gantry exec: no flags supported in attach mode (want: gantry exec %s [-- CMD ...])\n", name)
 		return 2
 	}

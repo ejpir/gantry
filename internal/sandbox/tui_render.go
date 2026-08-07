@@ -385,9 +385,10 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	case tuiRulesPage:
 		allowed, denied := 0, 0
 		for _, rule := range m.rules {
-			if rule.Action == "allow" {
+			switch rule.Action {
+			case "allow":
 				allowed++
-			} else if rule.Action == "deny" {
+			case "deny":
 				denied++
 			}
 		}
@@ -898,7 +899,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"click", "select a card"},
 		{"double-click", "open or start"},
 	})
-	body := actions
+	var body string
 	if width >= 58 {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, navigation, strings.Repeat(" ", 3), actions, strings.Repeat(" ", 3), shareActions)
 		body += "\n\n" + application

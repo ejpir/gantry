@@ -56,9 +56,6 @@ func newExportNode(exp *ShareExport, path string, salt uint64) (fs.InodeEmbedder
 	}
 	ln.RootData.InoSalt = salt
 	rootData := ln.RootData
-	rootData.NewNode = func(rd *fs.LoopbackRoot, parent *fs.Inode, name string, st *syscall.Stat_t) fs.InodeEmbedder {
-		return &shareNode{LoopbackNode: fs.LoopbackNode{RootData: rd}, export: exp}
-	}
 	node := &shareNode{LoopbackNode: fs.LoopbackNode{RootData: rootData}, export: exp}
 	rootData.RootNode = node
 	release := func() { _ = rootFD.Close() }

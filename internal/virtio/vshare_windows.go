@@ -108,9 +108,7 @@ func canonicalWinSharePath(p string) (string, error) {
 	if strings.HasPrefix(abs, `\?\UNC\`) {
 		return "", fmt.Errorf("UNC/network share roots are not supported: %s", p)
 	}
-	if strings.HasPrefix(abs, `\\?\`) {
-		abs = strings.TrimPrefix(abs, `\\?\`)
-	}
+	abs = strings.TrimPrefix(abs, `\\?\`)
 	if strings.HasPrefix(abs, `\\`) {
 		return "", fmt.Errorf("UNC/network share roots are not supported: %s", p)
 	}
@@ -132,12 +130,8 @@ func canonicalWinSharePath(p string) (string, error) {
 	if strings.HasPrefix(resolved, `\?\UNC\`) {
 		return "", fmt.Errorf("UNC/network share roots are not supported: %s", p)
 	}
-	if strings.HasPrefix(resolved, `\\?\`) {
-		resolved = strings.TrimPrefix(resolved, `\\?\`)
-	}
-	if strings.HasPrefix(resolved, `\??\`) {
-		resolved = strings.TrimPrefix(resolved, `\??\`)
-	}
+	resolved = strings.TrimPrefix(resolved, `\\?\`)
+	resolved = strings.TrimPrefix(resolved, `\??\`)
 	if strings.HasPrefix(resolved, `\\`) {
 		return "", fmt.Errorf("UNC/network share roots are not supported: %s", p)
 	}
@@ -320,16 +314,6 @@ func actualWinBase(h windows.Handle) (string, error) {
 		return "", err
 	}
 	return filepath.Base(p), nil
-}
-
-func (b *winExportFS) rootInfo() (winFileInfo, syscall.Errno) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if b.closed || b.root == 0 {
-		return winFileInfo{}, linuxErrno(fuse.ESTALE)
-	}
-	info, err := winInfoFromHandle(b.root, b.salt)
-	return info, ntStatusErrno(err)
 }
 
 // resolve opens rel below the pinned root without following reparse points.
@@ -869,11 +853,7 @@ func (b *winExportFS) readdir(rel string) ([]fuse.DirEntry, syscall.Errno) {
 		if iosb.Information == 0 {
 			break
 		}
-		off := 0
-		for {
-			if off+winDirEntryName > int(iosb.Information) {
-				break
-			}
+		for off := 0; off+winDirEntryName <= int(iosb.Information); {
 			next := *(*uint32)(unsafe.Pointer(&buf[off]))
 			attrs := *(*uint32)(unsafe.Pointer(&buf[off+winDirEntryAttrs]))
 			nameLen := *(*uint32)(unsafe.Pointer(&buf[off+winDirEntryNameLen]))

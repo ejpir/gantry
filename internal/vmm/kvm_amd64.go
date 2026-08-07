@@ -268,9 +268,10 @@ func (b *kvmX86Backend) runVCPULoop(vc *kvmVCPU) error {
 			_ = ioctl(vc.fd, kvmGetRegs, unsafe.Pointer(&regs))
 			reason := vc.run.exitReason()
 			extra := ""
-			if reason == kvmExitIO {
+			switch reason {
+			case kvmExitIO:
 				extra = fmt.Sprintf(" port=%#x dir=%d size=%d", vc.run.ioPort(), vc.run.ioDir(), vc.run.ioSize())
-			} else if reason == kvmExitMMIO {
+			case kvmExitMMIO:
 				extra = fmt.Sprintf(" phys=%#x w=%v", vc.run.mmioPhys(), vc.run.mmioIsWrite())
 			}
 			fmt.Printf("[x86] cpu%d exit %d rip=%#x%s\n", vc.id, reason, regs.rip, extra)

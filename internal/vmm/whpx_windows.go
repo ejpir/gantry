@@ -33,7 +33,6 @@ var (
 	procMapGpaRange      = winhv.NewProc("WHvMapGpaRange")
 	procCreateVP         = winhv.NewProc("WHvCreateVirtualProcessor")
 	procRunVP            = winhv.NewProc("WHvRunVirtualProcessor")
-	procCancelVP         = winhv.NewProc("WHvCancelRunVirtualProcessor")
 	procGetVPRegs        = winhv.NewProc("WHvGetVirtualProcessorRegisters")
 	procSetVPRegs        = winhv.NewProc("WHvSetVirtualProcessorRegisters")
 	procRequestInterrupt = winhv.NewProc("WHvRequestInterrupt")

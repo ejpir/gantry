@@ -24,12 +24,6 @@ const (
 	// feature bits
 	virtioFVersion1 = 32
 
-	// status bits
-	virtioStatusAcknowledge = 1
-	virtioStatusDriver      = 2
-	virtioStatusDriverOK    = 4
-	virtioStatusFeaturesOK  = 8
-
 	// interrupt status bits
 	virtioIntUsedBuffer = 1
 	virtioIntConfig     = 2

@@ -106,11 +106,12 @@ func (p *pit8254) ioWrite(port uint16, val byte) {
 		return
 	}
 	c := &p.ch[idx]
-	if c.access == 1 {
+	switch c.access {
+	case 1:
 		c.reload = uint16(val)
-	} else if c.access == 2 {
+	case 2:
 		c.reload = uint16(val) << 8
-	} else { // lohi
+	default: // lohi
 		if c.writeLSB {
 			c.reload = c.reload&0xff00 | uint16(val)
 			c.writeLSB = false
