@@ -143,7 +143,24 @@ func Info(rpcSock string) error {
 // (vsock port 1026, forwarded by gantry to streamSock) and performs the
 // length-prefixed stream-ID handshake from nerdbox's vsock-streaming doc.
 func startStream(streamSock, id string) (net.Conn, error) {
-	c, err := net.DialTimeout("unix", streamSock, 30*time.Second)
+	return dialStream(func() (net.Conn, error) {
+		return net.DialTimeout("unix", streamSock, 30*time.Second)
+	}, id)
+}
+
+// startStream connects this session's stream: StreamDial (split VMM)
+// when set, else the StreamSock unix path.
+func (opts SessionOptions) startStream(id string) (net.Conn, error) {
+	if opts.StreamDial != nil {
+		return dialStream(opts.StreamDial, id)
+	}
+	return startStream(opts.StreamSock, id)
+}
+
+// dialStream connects via dial and performs the stream-ID handshake.
+// Split-VMM mode dials through the worker bridge instead of a host path.
+func dialStream(dial func() (net.Conn, error), id string) (net.Conn, error) {
+	c, err := dial()
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +352,9 @@ func awaitGone(ctx context.Context, tc task.TTRPCTaskService, id string) {
 // stdout.
 type SessionOptions struct {
 	StreamSock string
+	// StreamDial replaces the StreamSock unix dial (split VMM: streams
+	// cross the worker bridge; no host socket path exists).
+	StreamDial func() (net.Conn, error)
 	Shares     []ShareEntry
 	// ShareTransport, when non-nil, is the hub manifest's one virtio-fs
 	// device. Shares are logical children beneath it and may change while
@@ -453,7 +473,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	}
 	open := func(prefix string) (*stream, error) {
 		s := &stream{id: streamID(prefix)}
-		c, err := startStream(opts.StreamSock, s.id)
+		c, err := opts.startStream(s.id)
 		if err != nil {
 			return nil, err
 		}
@@ -653,7 +673,7 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	// stdio streams, same protocol as Session
 	open := func(prefix string) (net.Conn, string, error) {
 		sid := streamID(prefix)
-		c, err := startStream(opts.StreamSock, sid)
+		c, err := opts.startStream(sid)
 		return c, sid, err
 	}
 	stdinConn, stdinID, err := open("stdin")
@@ -828,6 +848,12 @@ func Shell(opts ShellOptions) error {
 // process is SIGKILLed and the caller proceeds to forced termination.
 // A no-op when the workload container never ran (nothing was mounted).
 func SyncGuest(client *ttrpc.Client, streamSock, containerID string, timeout time.Duration) {
+	SyncGuestDial(client, nil, streamSock, containerID, timeout)
+}
+
+// SyncGuestDial is SyncGuest with an optional stream dialer (split VMM:
+// the stream crosses the worker bridge; streamSock is unused then).
+func SyncGuestDial(client *ttrpc.Client, dial func() (net.Conn, error), streamSock, containerID string, timeout time.Duration) {
 	tc := task.NewTTRPCTaskClient(client)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	st, err := tc.State(ctx, &task.StateRequest{ID: containerID})
@@ -840,6 +866,7 @@ func SyncGuest(client *ttrpc.Client, streamSock, containerID string, timeout tim
 	go func() {
 		_ = Session(client, SessionOptions{
 			StreamSock:       streamSock,
+			StreamDial:       dial,
 			Args:             []string{"/bin/sync"},
 			ID:               containerID,
 			ExecIntoExisting: true,

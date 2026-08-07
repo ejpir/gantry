@@ -219,6 +219,15 @@ func (h *ShareHub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*
 	return &PreparedShare{export: exp}, exp.Path, nil
 }
 
+// NewShareExportMirror builds a bookkeeping-only export record for the
+// supervisor side of a worker-hosted hub: Tag/Path/ownership and the
+// reported state, without any serving node.
+func NewShareExportMirror(tag, path string, ro bool, uid, gid *uint32, state ShareExportState) *ShareExport {
+	exp := &ShareExport{Tag: tag, Path: path, RO: ro, UID: uid, GID: gid}
+	exp.state.Store(int32(state))
+	return exp
+}
+
 // Publish atomically exposes a prepared export as /<tag> in the hub root.
 func (h *ShareHub) Publish(p *PreparedShare) (*ShareExport, error) {
 	if p == nil || p.export == nil {
