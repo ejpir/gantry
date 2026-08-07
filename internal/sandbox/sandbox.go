@@ -932,6 +932,19 @@ func CmdSandboxExec(name string, argv []string) int {
 // stream (see broker.session). NULs can't appear in terminal output.
 const exitTrailerPrefix = "\x00GANTRY-EXIT "
 
+// maxExitStatusDigits bounds the decimal representation of a valid status:
+// 10 digits cover int32, 19 cover int64 (strconv.IntSize is 32 or 64).
+// Anything longer can never parse as a status, so parseExitTrailer rejects
+// it — which also bounds how much guest output the hold buffer below may
+// retain while waiting for the terminating NUL. A guest streaming
+// "\x00GANTRY-EXIT " + digits forever must not grow host memory without
+// limit (maxExitTrailerHold enforces the same ceiling at the buffer layer).
+const maxExitStatusDigits = 10 + (strconv.IntSize-32)*9/32
+
+// maxExitTrailerHold is the longest byte sequence that can still become a
+// valid trailer; copyStrippingExitTrailer flushes anything held beyond it.
+const maxExitTrailerHold = len(exitTrailerPrefix) + maxExitStatusDigits
+
 // copyStrippingExitTrailer copies r to w, stripping the broker's exit-status
 // trailer and returning the status (0 if absent). Bytes pass through
 // UNHELD until a NUL arrives — NULs never appear in terminal output, so
@@ -951,7 +964,10 @@ func copyStrippingExitTrailer(w io.Writer, r io.Reader) int {
 			} else {
 				w.Write(data[:i])
 				hold = append([]byte(nil), data[i:]...)
-				if st, ok, undecided := parseExitTrailer(hold); !undecided {
+				if len(hold) > maxExitTrailerHold {
+					w.Write(hold) // provably never becomes a trailer
+					hold = nil
+				} else if st, ok, undecided := parseExitTrailer(hold); !undecided {
 					if ok {
 						status = st
 					} else {
@@ -1005,6 +1021,9 @@ func parseExitTrailer(b []byte) (int, bool, bool) {
 		}
 		if c < '0' || c > '9' {
 			return 0, false, false
+		}
+		if i+1 > maxExitStatusDigits {
+			return 0, false, false // too many digits to ever parse as a status
 		}
 	}
 	return 0, false, true // digits so far, terminator not seen yet
