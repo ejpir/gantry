@@ -69,6 +69,11 @@ type Policy struct {
 	// but cannot poke the LAN/host unless the owner opts in (flag or file).
 	AllowLocal bool `json:"-"`
 
+	// hasPortScopedDeny caches "any deny rule with a Ports list" so
+	// MatchTX can fail closed on non-initial fragments (they carry no
+	// ports and could otherwise never match such a rule).
+	hasPortScopedDeny bool `json:"-"`
+
 	mu      sync.Mutex
 	dynamic map[[4]byte]time.Time // DNS-learned allowances: IPv4 -> expiry
 	active  atomic.Pointer[Policy]
@@ -223,6 +228,9 @@ func Parse(data []byte) (*Policy, error) {
 			}
 		}
 		p.Rules = append(p.Rules, r)
+		if r.Deny && len(r.Ports) > 0 {
+			p.hasPortScopedDeny = true
+		}
 	}
 	if fp.AllowLocal != nil {
 		p.AllowLocal = *fp.AllowLocal
@@ -387,11 +395,13 @@ func parseFrame(frame []byte) (pp parsedPacket, arp, ok bool) {
 	pp.proto = ip[9]
 	copy(pp.src[:], ip[12:16])
 	copy(pp.dst[:], ip[16:20])
-	// fragmented non-first fragments carry no ports: dport stays 0, so
-	// a rule with a Ports list can't match them and they fall through to
-	// the default action. Known gap: under a default-ALLOW policy with
-	// port-scoped DENY rules, fragmenting evades those rules (under the
-	// far more common default-deny it fails closed).
+	// Fragmented non-first fragments carry no ports (dport stays 0), so a
+	// rule with a Ports list can't match them; MatchTX drops them
+	// fail-closed when the policy is default-allow with port-scoped
+	// denies. Under the far more common default-deny they fail closed on
+	// their own. Reassembly still needs the first fragment, which is
+	// port-evaluated as usual (IPv4's minimum non-final fragment payload
+	// is 8 bytes, so the port pair always parses there).
 	frag := binary.BigEndian.Uint16(ip[6:8])
 	off := int(frag&0x1fff) * 8
 	pp.fragmented = frag&0x3fff != 0 // MF (0x2000) or any fragment offset
@@ -416,6 +426,12 @@ func (p *Policy) MatchTX(frame []byte) bool {
 	}
 	if !ok {
 		return false // policy active: no IPv6, no exotic ethertypes
+	}
+	// Close the fragmentation gap documented in parseFrame: a non-initial
+	// fragment (no ports parsed) can never match a port-scoped deny and
+	// would fall through to the default-allow verdict — drop it instead.
+	if pp.fragmented && pp.sport == 0 && pp.dport == 0 && p.DefaultAllow && p.hasPortScopedDeny {
+		return false
 	}
 	dst := net.IP(pp.dst[:])
 	// Only the sandbox's own gateway and broadcast (DHCP) get the

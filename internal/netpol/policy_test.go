@@ -436,3 +436,38 @@ func TestDomainAllowlistRejectsSplitAndFragmentedDNS(t *testing.T) {
 		t.Fatal("complete allowlisted UDP query should pass")
 	}
 }
+
+// Non-initial fragments carry no ports, so a port-scoped deny could never
+// match them — under a default-allow policy they used to slip through.
+// MatchTX must fail closed on exactly that combination while leaving
+// first fragments (which always carry the port pair) normally evaluated.
+func TestDefaultAllowPortDenyDropsNonFirstFragments(t *testing.T) {
+	p := mustParse(t, `{"default":"allow","rules":[{"action":"deny","proto":"tcp","ports":"443"}]}`)
+	fragOff := func(f []byte) { binary.BigEndian.PutUint16(f[14+6:14+8], 1) } // offset 8
+	mf := func(f []byte) { binary.BigEndian.PutUint16(f[14+6:14+8], 0x2000) }
+
+	tail := ipFrame(t, "203.0.113.9", protoTCP, 443, []byte("data"))
+	fragOff(tail)
+	if p.MatchTX(tail) {
+		t.Fatal("non-first fragment evaded the port-scoped deny")
+	}
+
+	first := ipFrame(t, "203.0.113.9", protoTCP, 443, nil)
+	mf(first)
+	if p.MatchTX(first) {
+		t.Fatal("first fragment to a denied port should be dropped")
+	}
+	ok := ipFrame(t, "203.0.113.9", protoTCP, 80, nil)
+	mf(ok)
+	if !p.MatchTX(ok) {
+		t.Fatal("first fragment to an allowed port should pass")
+	}
+
+	// No port-scoped deny anywhere: fragments keep the old behavior.
+	open := mustParse(t, `{"default":"allow","rules":[{"action":"deny","cidr":"203.0.113.0/24"}]}`)
+	tail2 := ipFrame(t, "198.51.100.7", protoTCP, 443, []byte("data"))
+	fragOff(tail2)
+	if !open.MatchTX(tail2) {
+		t.Fatal("fragment dropped although no port-scoped deny exists")
+	}
+}
