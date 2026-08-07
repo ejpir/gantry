@@ -29,13 +29,13 @@ func TestMessageRoundTrip(t *testing.T) {
 func TestMessageLengthBounds(t *testing.T) {
 	// zero length
 	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, uint32(0))
+	_ = binary.Write(&buf, binary.BigEndian, uint32(0))
 	if err := ReadMessage(&buf, &struct{}{}); err == nil {
 		t.Fatal("zero-length message accepted")
 	}
 	// oversized length prefix must fail BEFORE any large allocation
 	buf.Reset()
-	binary.Write(&buf, binary.BigEndian, uint32(MaxMessage+1))
+	_ = binary.Write(&buf, binary.BigEndian, uint32(MaxMessage+1))
 	if err := ReadMessage(&buf, &struct{}{}); err == nil {
 		t.Fatal("oversized message accepted")
 	}
@@ -43,7 +43,7 @@ func TestMessageLengthBounds(t *testing.T) {
 	buf.Reset()
 	payload := []byte(strings.Repeat(" ", MaxMessage-2))
 	payload[0], payload[len(payload)-1] = '[', ']'
-	binary.Write(&buf, binary.BigEndian, uint32(len(payload)))
+	_ = binary.Write(&buf, binary.BigEndian, uint32(len(payload)))
 	buf.Write(payload)
 	var arr []json.RawMessage
 	if err := ReadMessage(&buf, &arr); err != nil {
@@ -55,19 +55,19 @@ func TestFrameBounds(t *testing.T) {
 	buf := make([]byte, MaxFrame)
 	// zero-length frame
 	var w bytes.Buffer
-	binary.Write(&w, binary.BigEndian, uint32(0))
+	_ = binary.Write(&w, binary.BigEndian, uint32(0))
 	if _, err := ReadFrame(&w, buf); err == nil {
 		t.Fatal("zero-length frame accepted")
 	}
 	// oversized declared length: fail without allocating
 	w.Reset()
-	binary.Write(&w, binary.BigEndian, uint32(MaxFrame+1))
+	_ = binary.Write(&w, binary.BigEndian, uint32(MaxFrame+1))
 	if _, err := ReadFrame(&w, buf); err == nil {
 		t.Fatal("oversized frame accepted")
 	}
 	// truncated frame body
 	w.Reset()
-	binary.Write(&w, binary.BigEndian, uint32(60))
+	_ = binary.Write(&w, binary.BigEndian, uint32(60))
 	w.Write(make([]byte, 30))
 	if _, err := ReadFrame(&w, buf); err == nil {
 		t.Fatal("truncated frame accepted")
@@ -268,5 +268,27 @@ func TestResponseIDMismatch(t *testing.T) {
 	cl := NewClient(c)
 	if err := cl.Call("x", nil, nil); err == nil {
 		t.Fatal("mismatched response ID accepted")
+	}
+}
+
+func TestShutdownOpRespondsThenReturns(t *testing.T) {
+	c, s := handshakePair(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeRequests(s, map[string]Handler{
+			"shutdown": func(Request) (any, error) { return nil, ErrShutdown },
+		})
+	}()
+	cl := NewClient(c)
+	if err := cl.Call("shutdown", nil, nil); err != nil {
+		t.Fatalf("shutdown call: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeRequests after shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeRequests did not return after shutdown")
 	}
 }

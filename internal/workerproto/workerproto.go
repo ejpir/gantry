@@ -26,6 +26,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -250,7 +251,14 @@ func (c *Client) Close() error { return c.conn.Close() }
 // Handler answers one request; returning an error produces a
 // {ok:false,error} response. A panic is converted to the same shape so a
 // bad request can never kill the serve loop's protocol state.
+//
+// Returning ErrShutdown is special: the worker sends an OK response and
+// ServeRequests then returns nil — the graceful-stop op, with the reply
+// guaranteed to reach the supervisor before the loop unwinds.
 type Handler func(req Request) (any, error)
+
+// ErrShutdown: see Handler.
+var ErrShutdown = errors.New("workerproto: graceful shutdown")
 
 // ServeHandshake reads and validates the worker-side handshake, returning
 // the role-specific bootstrap config. It installs the handshake deadline
@@ -334,6 +342,12 @@ func ServeRequests(conn net.Conn, ops map[string]Handler) error {
 			}()
 			return handler(req)
 		}()
+		if herr == ErrShutdown {
+			if err := WriteMessage(conn, Response{ID: req.ID, OK: true}); err != nil {
+				return err
+			}
+			return nil
+		}
 		resp := Response{ID: req.ID, OK: herr == nil}
 		if herr != nil {
 			resp.Error = herr.Error()
