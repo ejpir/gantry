@@ -104,11 +104,16 @@ jobs:
   # Gantry's own hardened guest kernels (scripts/mkkernel.sh). These are
   # what the CLI downloads from the release page on first start, and what
   # the native smoke test boots. arm64 builds both the 16K default and the
-  # 4K runsc twin; x86_64 is 4K-only. Caching: the source tarball plus a
-  # ccache directory — the full build tree is too big for the 2 GB
-  # cache-entry limit on arm64 (two configs in one tree), and a job that
-  # overruns its timeout never reaches the post-job cache save at all.
-  # Keep /tmp/linux-VERSION paths in sync with VERSION in scripts/mkkernel.sh.
+  # 4K runsc twin; x86_64 is 4K-only.
+  #
+  # The kernel version is PINNED (VERSION in scripts/mkkernel.sh, with a
+  # pinned tarball sha256) — CI never floats to "latest". A bump touches
+  # ONLY the script; this job derives the version for its paths/keys.
+  #
+  # Caching: ccache only. The build tree is too big for the 2 GB
+  # cache-entry limit on arm64 (two configs in one tree), a job that
+  # overruns its timeout never reaches the post-job cache save at all,
+  # and the tarball is small enough to re-download per run.
   kernels:
     name: kernel/${{ matrix.arch }}
     strategy:
@@ -123,21 +128,28 @@ jobs:
       - uses: actions/checkout@v4
       - name: install build deps
         run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3 libelf-dev libssl-dev ccache
-      - name: cache kernel inputs
+      - name: read pinned kernel version
+        id: kver
+        run: echo "v=$(sed -n 's/^VERSION=\([0-9.]*\).*/\1/p' scripts/mkkernel.sh)" >> "$GITHUB_OUTPUT"
+      - name: cache ccache
         uses: actions/cache@v4
         with:
-          path: |
-            /tmp/linux-7.0.12.tar.xz
-            ~/.ccache
-          key: kernel-ccache-7.0.12-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
+          path: ~/.ccache
+          key: kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
           restore-keys: |
-            kernel-ccache-7.0.12-${{ matrix.arch }}-
+            kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-
+            kernel-ccache-${{ matrix.arch }}-
       - name: build kernels
         shell: bash
         run: |
           set -eu
           export GANTRY_ARTIFACTS="$RUNNER_TEMP/kernels"
           export CC="ccache gcc" HOSTCC="ccache gcc"
+          # One persistent tree for the whole job so the arm64 16k→4k
+          # pair builds incrementally. Not cached across runs (ccache
+          # carries the reuse); a fresh runner-owned dir passes the
+          # script's WORK safety validation.
+          export WORK="/tmp/linux-${{ steps.kver.outputs.v }}-build-${{ matrix.arch }}"
           ccache -M 1G
           ./scripts/mkkernel.sh ${{ matrix.arch }}
           if [ "${{ matrix.arch }}" = arm64 ]; then
