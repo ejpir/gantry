@@ -370,3 +370,69 @@ func TestLocalWallBeatsDNSSnoop(t *testing.T) {
 		t.Fatal("allowLocal should admit snooped LAN IPs")
 	}
 }
+
+// The policy inspects single frames while the netstack reassembles: no piece
+// of a fragmented or segmented DNS message may slip an unlisted name past
+// the allowlist by being unparseable on its own.
+func TestDomainAllowlistRejectsSplitAndFragmentedDNS(t *testing.T) {
+	const evil = "exfiltrate-secret.evil.example"
+
+	// DNS over TCP, one query split across two segments: neither segment is
+	// a complete message, both must be dropped — and the guest's TCP will
+	// wedge on retransmit, so the query can never reach the resolver.
+	p := mustParse(t, `{"default": "deny", "allowDomains": ["deb.debian.org"]}`)
+	q := dnsQuery(t, evil)
+	prefixed := append([]byte{0, byte(len(q))}, q...)
+	cut := len(prefixed) / 2
+	for i, part := range [][]byte{prefixed[:cut], prefixed[cut:]} {
+		if p.MatchTX(ipFrame(t, gatewayIP, protoTCP, 53, part)) {
+			t.Fatalf("split TCP DNS segment %d was allowed", i+1)
+		}
+	}
+
+	// Payload-less TCP control frames carry no DNS content: the handshake
+	// itself must not be broken by fail-closed payload checks.
+	if !p.MatchTX(ipFrame(t, gatewayIP, protoTCP, 53, nil)) {
+		t.Fatal("TCP control frame (SYN/ACK) to the resolver should pass")
+	}
+
+	// A single segment must hold exactly ONE message: the stream length
+	// prefix covering fewer bytes than the frame carries means pipelined
+	// content (Unpack silently ignores trailing bytes) — reject.
+	good := dnsQuery(t, "deb.debian.org")
+	pipeline := append([]byte{0, byte(len(good))}, good...)
+	pipeline = append(pipeline, 0, byte(len(q)))
+	pipeline = append(pipeline, q...)
+	if p.MatchTX(ipFrame(t, gatewayIP, protoTCP, 53, pipeline)) {
+		t.Fatal("pipelined second DNS message bypassed the filter")
+	}
+
+	// IPv4 fragmentation: first fragment (MF, offset 0, ports present) and
+	// non-first fragment (offset > 0, no ports) both fail closed.
+	first := ipFrame(t, gatewayIP, protoUDP, 53, q[:8])
+	binary.BigEndian.PutUint16(first[14+6:14+8], 0x2000) // MF set
+	if p.MatchTX(first) {
+		t.Fatal("first UDP DNS fragment was allowed")
+	}
+	second := ipFrame(t, gatewayIP, protoUDP, 53, q[8:])
+	binary.BigEndian.PutUint16(second[14+6:14+8], 1) // fragment offset 8
+	if p.MatchTX(second) {
+		t.Fatal("non-first UDP DNS fragment was allowed")
+	}
+
+	// Without a domain allowlist there is no name filter to bypass:
+	// fragmented gateway traffic follows the generic gateway pass.
+	open := mustParse(t, `{"default": "deny"}`)
+	if !open.MatchTX(second) {
+		t.Fatal("fragment dropped although no allowlist is configured")
+	}
+
+	// And the baseline still holds: a complete unlisted query is denied, a
+	// complete allowlisted one passes.
+	if p.MatchTX(ipFrame(t, gatewayIP, protoUDP, 53, q)) {
+		t.Fatal("complete unlisted UDP query should be dropped")
+	}
+	if !p.MatchTX(ipFrame(t, gatewayIP, protoUDP, 53, good)) {
+		t.Fatal("complete allowlisted UDP query should pass")
+	}
+}

@@ -313,7 +313,7 @@ func (r *TrafficRecorder) hostForLocked(ip [4]byte, now time.Time) string {
 }
 
 func (r *TrafficRecorder) observeDNSResponseLocked(pp parsedPacket, now time.Time) string {
-	payload := dnsPayload(pp)
+	payload, _ := dnsPayload(pp)
 	if payload == nil {
 		return ""
 	}
@@ -359,7 +359,7 @@ func (r *TrafficRecorder) observeDNSResponseLocked(pp parsedPacket, now time.Tim
 }
 
 func dnsQuestionHost(pp parsedPacket) string {
-	payload := dnsPayload(pp)
+	payload, _ := dnsPayload(pp)
 	if payload == nil {
 		return ""
 	}
