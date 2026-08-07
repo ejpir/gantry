@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vmm"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
@@ -150,6 +151,86 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerAsse
 		}
 	})
 	return h
+}
+
+// TestVMMWorkerNetPolicyEnforcement is the regression for the split-VMM
+// local-netstack policy drop: in the degraded topology (net-worker
+// failed in auto, VMM split succeeded) the worker's virtio-net device is
+// the ONLY egress enforcement point, so the policy must cross in the
+// boot config and net.policy must swap it live — a nil policy on the
+// device is allow-all, silently dropping every configured deny including
+// the default local-network wall.
+func TestVMMWorkerNetPolicyEnforcement(t *testing.T) {
+	raw, err := netpol.Marshal(netpol.DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trafficPath := filepath.Join(t.TempDir(), "traffic.json")
+	h := startVMMWorkerHarness(t, vmmBootConfig{
+		MemSize: 1 << 20, Policy: raw, TrafficPath: trafficPath,
+	}, testAssets(t))
+
+	fake := *h.fake
+	if fake.opts.NetPolicy == nil {
+		t.Fatal("worker booted without the local-netstack policy: device would be allow-all")
+	}
+	if fake.opts.NetTraffic == nil {
+		t.Fatal("worker booted without the traffic recorder")
+	}
+	// Boot policy: internet reachable, LAN walled off (DefaultPolicy).
+	if !fake.opts.NetPolicy.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+		t.Fatal("boot policy denies plain internet egress; want DefaultPolicy semantics")
+	}
+	if fake.opts.NetPolicy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
+		t.Fatal("boot policy allows the LAN; want the default local-network wall")
+	}
+	// A live swap via net.policy must reach the device's policy object.
+	if err := h.w.SetPolicy(&netpol.Policy{DefaultAllow: true, AllowLocal: true}); err != nil {
+		t.Fatalf("SetPolicy: %v", err)
+	}
+	if !fake.opts.NetPolicy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
+		t.Fatal("net.policy swap did not reach the device's policy")
+	}
+	// The worker's recorder publishes on the handed-over path.
+	if _, err := os.Stat(trafficPath); err != nil {
+		t.Fatalf("worker traffic recorder not publishing: %v", err)
+	}
+}
+
+// TestVMMWorkerRejectsBadPolicy: an unparseable boot policy must fail
+// the worker boot, never degrade into an allow-all device.
+func TestVMMWorkerRejectsBadPolicy(t *testing.T) {
+	ctrlSup, ctrlWrk := net.Pipe()
+	defer func() { _ = ctrlSup.Close() }()
+	bridgeSup, bridgeWrk := net.Pipe()
+	defer func() { _ = bridgeSup.Close() }()
+	fdSup, fdWrk, err := socketpairConns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fdSup.Close() }()
+	workerErr := make(chan error, 1)
+	go func() {
+		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+			return testAssets(t), nil
+		})
+	}()
+	nonce := make([]byte, 32)
+	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce,
+		vmmBootConfig{MemSize: 1 << 20, Policy: []byte("{not a policy")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-workerErr:
+		if err == nil || !strings.Contains(err.Error(), "network policy") {
+			t.Fatalf("worker exited with %v, want a network-policy failure", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker did not reject the bad policy")
+	}
 }
 
 // randReader avoids importing crypto/rand in two spots.
