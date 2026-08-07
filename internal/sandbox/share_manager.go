@@ -249,7 +249,10 @@ func (m *ShareManager) validateNewShare(share vmm.Share) error {
 func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry, error) {
 	m.muLock()
 	defer m.muUnlock()
-	if m.hub == nil {
+	if m.serving == nil {
+		// No serving backend: a platform without a virtio-fs hub. After a
+		// VMM split m.hub is nil BY DESIGN (the hub lives in the worker);
+		// the RPC serving backend is what matters here.
 		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
 	if !m.store.Snapshot().RW {
@@ -383,7 +386,7 @@ func (m *ShareManager) Remove(tag string, persistent, force bool) (shares.Entry,
 }
 
 func (m *ShareManager) removeLocked(tag string, persistent, force bool) (shares.Entry, error) {
-	if m.hub == nil {
+	if m.serving == nil {
 		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
 	ms := m.exports[tag]
@@ -502,7 +505,9 @@ func (m *ShareManager) publishLocked() error {
 		Generation: m.generation,
 		Shares:     m.entriesLocked(),
 	}
-	if m.hub != nil {
+	if m.hub != nil || m.serving != nil {
+		// The hub transport exists in both topologies: locally (m.hub)
+		// or in the vmm worker (m.serving after the split).
 		manifest.Transport = &shares.Transport{Tag: shares.HubTag, VMPath: shares.HubVMPath}
 	}
 	b, err := json.Marshal(manifest)
