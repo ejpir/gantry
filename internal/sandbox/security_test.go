@@ -116,3 +116,79 @@ func TestExitTrailerInteractiveEcho(t *testing.T) {
 		t.Fatalf("output = %q, trailer leaked", got)
 	}
 }
+
+// A guest streaming "\x00GANTRY-EXIT " + digits while withholding the
+// terminating NUL must not make the attach client retain unbounded memory:
+// more digits than an int can hold provably never parse as a status.
+func TestExitTrailerRejectsOverlongStatus(t *testing.T) {
+	pr, pw := io.Pipe()
+	var out syncBuffer
+	statusCh := make(chan int, 1)
+	go func() { statusCh <- copyStrippingExitTrailer(&out, pr) }()
+
+	flood := "99999999999999999999" // 20 digits > int64 max
+	in := exitTrailerPrefix + flood
+	if _, err := pw.Write([]byte(in + flood)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for out.Len() < len(in)+len(flood) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := out.String(); got != in+flood {
+		t.Fatalf("overlong possible trailer remained held: out = %q", got)
+	}
+	pw.Close()
+	if status := <-statusCh; status != 0 {
+		t.Fatalf("status = %d, want 0", status)
+	}
+}
+
+// The same flood drip-fed in chunks while the stream stays open: retained
+// bytes must stay bounded (everything flushes through as data), and a later
+// LEGITIMATE trailer still parses after the false alarm.
+func TestExitTrailerDigitFloodStaysBounded(t *testing.T) {
+	pr, pw := io.Pipe()
+	var out syncBuffer
+	statusCh := make(chan int, 1)
+	go func() { statusCh <- copyStrippingExitTrailer(&out, pr) }()
+
+	if _, err := pw.Write([]byte(exitTrailerPrefix)); err != nil {
+		t.Fatal(err)
+	}
+	chunk := []byte("99999999999999999999999999999999")
+	for i := 0; i < 64; i++ { // ~2 KiB of digits, stream stays open
+		if _, err := pw.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// a real trailer for the actual exit status
+	if _, err := pw.Write([]byte(exitTrailerPrefix + "3\x00")); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	if status := <-statusCh; status != 3 {
+		t.Fatalf("status = %d, want 3", status)
+	}
+	wantLen := len(exitTrailerPrefix) + 64*len(chunk)
+	if got := out.String(); len(got) != wantLen {
+		t.Fatalf("output length = %d, trailer bytes leaked", len(got))
+	}
+}
+
+// parseExitTrailer unit boundaries: max int64 digits parse, one more rejects.
+func TestParseExitTrailerDigitBound(t *testing.T) {
+	max := "9223372036854775807" // int64 max, 19 digits
+	if st, ok, undecided := parseExitTrailer([]byte(exitTrailerPrefix + max + "\x00")); !ok || undecided || st != 1<<63-1 {
+		t.Fatalf("int64 max trailer: st=%d ok=%v undecided=%v", st, ok, undecided)
+	}
+	if _, _, undecided := parseExitTrailer([]byte(exitTrailerPrefix + max)); !undecided {
+		t.Fatal("19 unterminated digits should still be undecided")
+	}
+	if _, _, undecided := parseExitTrailer([]byte(exitTrailerPrefix + max + "0")); undecided {
+		t.Fatal("20 digits must be rejected outright")
+	}
+	if _, ok, _ := parseExitTrailer([]byte(exitTrailerPrefix + max + "0\x00")); ok {
+		t.Fatal("20-digit terminated value must not parse as a status")
+	}
+}
