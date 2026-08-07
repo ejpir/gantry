@@ -177,9 +177,39 @@ func main() {
 		hostShares = append(hostShares, share)
 	}
 
+	// Boot assets are opened once, up front: the VM boots from exactly
+	// the validated files (no path swap between resolution and boot).
+	kernelF, err := os.Open(*kernel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gantry run: kernel %s: %v\n", *kernel, err)
+		os.Exit(1)
+	}
+	var initrdF, rootfsF *os.File
+	if *initrd != "" {
+		if initrdF, err = os.Open(*initrd); err != nil {
+			fmt.Fprintf(os.Stderr, "gantry run: initrd %s: %v\n", *initrd, err)
+			os.Exit(1)
+		}
+	}
+	if *rootfs != "" {
+		if rootfsF, err = os.Open(*rootfs); err != nil {
+			fmt.Fprintf(os.Stderr, "gantry run: rootfs %s: %v\n", *rootfs, err)
+			os.Exit(1)
+		}
+	}
+	var diskFs []*os.File
+	for _, d := range disks {
+		f, err := os.OpenFile(d, os.O_RDWR, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gantry run: disk %s: %v\n", d, err)
+			os.Exit(1)
+		}
+		diskFs = append(diskFs, f)
+	}
+
 	cmdline := *append_
 	if cmdline == "" {
-		arch, err := vmm.KernelArch(*kernel)
+		arch, err := vmm.KernelArchFile(kernelF)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gantry run: %v\n", err)
 			os.Exit(1)
@@ -199,10 +229,10 @@ func main() {
 
 	m, err := vmm.Prepare(vmm.Opts{
 		MemSize:     uint64(*memMB) << 20,
-		KernelPath:  *kernel,
-		InitrdPath:  *initrd,
-		RootfsPath:  *rootfs,
-		Disks:       disks,
+		Kernel:      kernelF,
+		Initrd:      initrdF,
+		Rootfs:      rootfsF,
+		Disks:       diskFs,
 		Shares:      hostShares,
 		NetEndpoint: *netEndpoint,
 		NetMAC:      netMAC,

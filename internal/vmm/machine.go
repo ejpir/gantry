@@ -58,6 +58,13 @@ func KernelArch(path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
+	return KernelArchFile(f)
+}
+
+// KernelArchFile is KernelArch for an already-open image: pread-only, so
+// the shared descriptor offset is untouched.
+func KernelArchFile(f *os.File) (string, error) {
+	path := f.Name()
 	var hdr [0x40]byte
 	if _, err := f.ReadAt(hdr[:], 0); err != nil {
 		return "", fmt.Errorf("%s: %w", path, err)
@@ -86,12 +93,17 @@ func KernelArch(path string) (string, error) {
 //	0x10 u64 image_size
 //	0x18 u64 flags (bits 1-2: page size: 1=4K, 2=16K, 3=64K)
 //	0x38 u32 magic "ARM\x64"
-func loadKernel(path string, ram []byte) (entry uint64, arch string, err error) {
-	img, err := os.ReadFile(path)
+func loadKernel(f *os.File, ram []byte) (entry uint64, arch string, err error) {
+	path := f.Name()
+	fi, err := f.Stat()
 	if err != nil {
 		return 0, "", err
 	}
-	arch, err = KernelArch(path)
+	img := make([]byte, fi.Size())
+	if _, err := f.ReadAt(img, 0); err != nil {
+		return 0, "", fmt.Errorf("%s: %w", path, err)
+	}
+	arch, err = KernelArchFile(f)
 	if err != nil {
 		return 0, "", err
 	}
@@ -122,10 +134,15 @@ func loadKernel(path string, ram []byte) (entry uint64, arch string, err error) 
 	return entry, arch, nil
 }
 
-func loadInitrd(path string, ram []byte) (start, end uint64, err error) {
-	blob, err := os.ReadFile(path)
+func loadInitrd(f *os.File, ram []byte) (start, end uint64, err error) {
+	path := f.Name()
+	fi, err := f.Stat()
 	if err != nil {
 		return 0, 0, err
+	}
+	blob := make([]byte, fi.Size())
+	if _, err := f.ReadAt(blob, 0); err != nil {
+		return 0, 0, fmt.Errorf("%s: %w", path, err)
 	}
 	start = ramBase + initrdOff
 	if uint64(len(blob)) > uint64(len(ram))-initrdOff {
@@ -254,13 +271,18 @@ func (m *Machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint
 }
 
 type Opts struct {
-	MemSize    uint64
-	KernelPath string
-	InitrdPath string   // optional when Disks are set
-	RootfsPath string   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
-	DisksRO    []string // extra virtio-blk images attached READ-ONLY (container images: vdb...)
-	Disks      []string // extra virtio-blk images, writable (rwlayers, scratch disks)
-	Shares     []Share
+	MemSize uint64
+	// Boot assets are OPEN DESCRIPTORS, not paths: the supervisor resolves
+	// and opens everything once (killing path-swap races between staging
+	// and boot), and a confined VMM worker can boot without any path
+	// resolution rights at all. Prepare consumes Kernel/Initrd (loads and
+	// closes them); the disks stay open for the VM's lifetime.
+	Kernel  *os.File
+	Initrd  *os.File   // optional when Disks are set
+	Rootfs  *os.File   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
+	DisksRO []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
+	Disks   []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
+	Shares  []Share
 	// ShareHub is the persistent-sandbox share transport: one multiplexed
 	// virtio-fs device instead of one MMIO device per Share. It is
 	// constructed by the sandbox daemon before Prepare so the broker can
@@ -298,7 +320,11 @@ func Prepare(o Opts) (*Machine, error) {
 	}
 	m.ram = ram
 
-	entry, arch, err := loadKernel(o.KernelPath, ram)
+	if o.Kernel == nil {
+		return nil, fmt.Errorf("vmm: a kernel image descriptor is required")
+	}
+	defer func() { _ = o.Kernel.Close() }()
+	entry, arch, err := loadKernel(o.Kernel, ram)
 	if err != nil {
 		return nil, err
 	}
@@ -311,8 +337,9 @@ func Prepare(o Opts) (*Machine, error) {
 	}
 
 	var is, ie uint64
-	if o.InitrdPath != "" {
-		is, ie, err = loadInitrd(o.InitrdPath, ram)
+	if o.Initrd != nil {
+		defer func() { _ = o.Initrd.Close() }()
+		is, ie, err = loadInitrd(o.Initrd, ram)
 		if err != nil {
 			return nil, err
 		}
@@ -328,22 +355,23 @@ func Prepare(o Opts) (*Machine, error) {
 	// rootfs) must NOT take the writable-disk flock: cached images are
 	// shared across sandboxes by design.
 	type disk struct {
-		path string
-		rw   bool
+		f  *os.File
+		rw bool
 	}
 	var allDisks []disk
-	if o.RootfsPath != "" {
-		allDisks = append(allDisks, disk{o.RootfsPath, false}) // /dev/vda first
+	if o.Rootfs != nil {
+		allDisks = append(allDisks, disk{o.Rootfs, false}) // /dev/vda first
 	}
-	for _, p := range o.DisksRO {
-		allDisks = append(allDisks, disk{p, false})
+	for _, f := range o.DisksRO {
+		allDisks = append(allDisks, disk{f, false})
 	}
-	for _, p := range o.Disks {
-		allDisks = append(allDisks, disk{p, true})
+	for _, f := range o.Disks {
+		allDisks = append(allDisks, disk{f, true})
 	}
 	for i, dsk := range allDisks {
-		path, writable := dsk.path, dsk.rw
-		blk, err := virtio.NewBlk(path, writable)
+		f, writable := dsk.f, dsk.rw
+		path := f.Name()
+		blk, err := virtio.NewBlkFile(f, writable)
 		if err != nil {
 			return nil, fmt.Errorf("disk %s: %w", path, err)
 		}

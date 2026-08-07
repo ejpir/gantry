@@ -460,3 +460,75 @@ func TestResolveShareOwnerRoundTrip(t *testing.T) {
 		t.Fatalf("composed spec lost options: %q -> %+v", cfg.Shares[0], parsed[0])
 	}
 }
+
+// TestOptsOpensBootAssets verifies that Opts resolves and opens every boot
+// asset up front: the returned vmm.Opts carries live descriptors whose
+// backing files are exactly the configured paths (path swaps after
+// resolution cannot affect what boots).
+func TestOptsOpensBootAssets(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string, size int) string {
+		p := filepath.Join(dir, name)
+		blob := make([]byte, size)
+		if name == "Image" {
+			blob = append(blob[:0x38], []byte("ARM\x64")...) // arm64 magic @ 0x38
+			blob = blob[:size]
+		}
+		if err := os.WriteFile(p, blob, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	kernel := mk("Image", 0x40)
+	rootfs := mk("rootfs.erofs", 1<<20)
+	layer := mk("layer.erofs", 1<<20)
+	rwlayer := mk("rwlayer.img", 1<<20)
+
+	cfg := RunConfig{
+		Kernel:  kernel,
+		Rootfs:  rootfs,
+		Image:   layer,
+		RW:      true,
+		RWLayer: rwlayer,
+		MemMB:   256,
+		VCPUs:   2,
+	}
+	o, err := cfg.Opts(nil, nil, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, f := range append(append([]*os.File{o.Kernel, o.Rootfs}, o.DisksRO...), o.Disks...) {
+			_ = f.Close()
+		}
+	}()
+	for path, f := range map[string]*os.File{
+		kernel:  o.Kernel,
+		rootfs:  o.Rootfs,
+		layer:   o.DisksRO[0],
+		rwlayer: o.Disks[0],
+	} {
+		if f == nil {
+			t.Fatalf("%s: not opened", path)
+		}
+		fi, err := f.Stat()
+		if err != nil || fi.Size() == 0 {
+			t.Fatalf("%s: descriptor not live: %v", path, err)
+		}
+		want, _ := filepath.EvalSymlinks(path)
+		got, _ := filepath.EvalSymlinks(f.Name())
+		if want != got {
+			t.Fatalf("descriptor for %s actually names %s", want, got)
+		}
+	}
+	if o.NetPolicy != nil || o.NetTraffic != nil || o.NetConn != nil {
+		t.Fatal("nil network should produce nil net opts")
+	}
+
+	// A missing asset fails the whole Opts and leaks nothing the caller
+	// could misuse (the error path closes what it opened).
+	cfg.Image = filepath.Join(dir, "gone.erofs")
+	if _, err := cfg.Opts(nil, nil, "", false); err == nil {
+		t.Fatal("Opts with a missing layer succeeded")
+	}
+}
