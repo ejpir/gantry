@@ -116,7 +116,16 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	if vmmWorkerSpawnHook != nil {
 		vmmWorkerSpawnHook(&argv, &env)
 	}
-	procFiles := append([]*os.File{os.Stdin, os.Stdout, os.Stderr}, childFiles...)
+	// The worker's stderr gets its own postmortem log next to the
+	// console; on open failure it inherits ours (never fatal).
+	workerStderr := os.Stderr
+	if dir != "" {
+		if f, err := os.OpenFile(filepath.Join(dir, "worker-vmm.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			defer func() { _ = f.Close() }()
+			workerStderr = f
+		}
+	}
+	procFiles := append([]*os.File{os.Stdin, os.Stdout, workerStderr}, childFiles...)
 	proc, err := os.StartProcess(exe, argv, &os.ProcAttr{
 		Env:   env,
 		Files: procFiles,

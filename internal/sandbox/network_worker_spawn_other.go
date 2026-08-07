@@ -11,7 +11,8 @@ import (
 // Split network workers are implemented for Unix socketpairs first
 // (docs/vmm-network-isolation.md Phase 1); Windows named-pipe handle
 // inheritance lands with its platform confinement spike (Phase 5).
-func spawnNetWorkerProcess() (control, data net.Conn, cmd *os.Process, err error) {
+func spawnNetWorkerProcess(stderrPath string) (control, data net.Conn, cmd *os.Process, err error) {
+	_ = stderrPath
 	return nil, nil, nil, fmt.Errorf("split network worker unavailable on this platform")
 }
 
