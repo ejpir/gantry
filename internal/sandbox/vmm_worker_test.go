@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -514,5 +515,43 @@ func TestVMMWorkerReExec(t *testing.T) {
 	}
 	if err := vw.Err(); err != nil {
 		t.Fatalf("worker exit: %v", err)
+	}
+}
+
+// TestShareManagerSplitServingLifecycle drives hot-add/remove through a
+// REAL ShareManager whose serving backend was detached and replaced by
+// the worker RPC (the post-split state): m.hub is nil by design, and
+// Add/Remove must flow through the worker's hub regardless.
+func TestShareManagerSplitServingLifecycle(t *testing.T) {
+	h := startVMMWorkerHarness(t, vmmBootConfig{}, testAssets(t))
+	manager, _ := newTestShareManager(t) // zero boot shares, RW
+
+	// Simulate the split: local serving detaches (hub -> nil), the worker
+	// RPC backend installs.
+	manager.DetachServing()
+	if manager.Hub() != nil {
+		t.Fatal("hub should be nil after detach")
+	}
+	manager.SetServing(workerShareServing{w: h.w})
+
+	root := t.TempDir()
+	entry, err := manager.Add("docs="+root+",ro", false, false)
+	if err != nil {
+		t.Fatalf("Add through the worker serving: %v", err)
+	}
+	if entry.State != "active" || !entry.RO || entry.CtrPath != "/host/docs" {
+		t.Fatalf("entry: %+v", entry)
+	}
+	// The manifest must still advertise the hub transport (the session
+	// client mounts /host from it) even though the hub is worker-hosted.
+	manifest, err := os.ReadFile(manager.dir + "/shares.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), `"transport"`) {
+		t.Fatalf("manifest lost its transport after the split: %s", manifest)
+	}
+	if _, err := manager.Remove("docs", false, true); err != nil {
+		t.Fatalf("Remove through the worker serving: %v", err)
 	}
 }

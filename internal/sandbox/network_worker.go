@@ -385,10 +385,9 @@ func startNetWorker(cfg netWorkerConfig) (*netWorker, net.Conn, error) {
 			w.done <- fmt.Errorf("exit status %s", state)
 		}()
 	}
-	client := workerproto.NewClient(ctrlSup)
 	nonce := workerproto.NewNonce()
 	fail := func(err error) (*netWorker, net.Conn, error) {
-		_ = client.Close()
+		_ = ctrlSup.Close()
 		_ = dataSup.Close()
 		if w.kill != nil {
 			_ = w.kill()
@@ -410,7 +409,13 @@ func startNetWorker(cfg netWorkerConfig) (*netWorker, net.Conn, error) {
 	if !ack.OK {
 		return fail(fmt.Errorf("net-worker bootstrap failed"))
 	}
-	w.client = client
+	// The Client's readLoop may only start AFTER the ready ack has been
+	// consumed: the ack is an unsolicited Response{ID:0}, and a running
+	// readLoop would race the explicit read for it (and treat the
+	// never-issued ID as fatal). First observed on macOS, where the
+	// readLoop won the race and the supervisor timed out waiting for a
+	// ready the worker had already sent.
+	w.client = workerproto.NewClient(ctrlSup)
 	return w, dataSup, nil
 }
 
