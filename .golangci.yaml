@@ -3,18 +3,15 @@ version: "2"
 # golangci-lint configuration for gantry.
 #
 # Linter set: the golangci-lint standard default (errcheck, govet,
-# ineffassign, staticcheck, unused). The existing backlog (~96 findings
-# across platforms) is intentionally NOT fixed in one sweep; enforcement
-# is incremental — CI runs with --new-from-rev=<push base>, so only code
-# touched by a change must be clean, and the backlog burns down as files
-# are edited.
+# ineffassign, staticcheck, unused). The historical backlog was cleared
+# in three sweeps (platform gating, dead code/staticcheck, errcheck);
+# CI now enforces the FULL tree on every change, so nothing can regress.
 #
 # Platform awareness: there is no single "the code". Per-OS/arch build
-# tags select different files (10 windows, 7 linux, 6 darwin, plus
-# linux/amd64- and linux/arm64-only files), and findings differ per
-# platform — errcheck on syscall wrappers, unused helpers only referenced
-# from another platform's file, and so on. CI therefore runs the linter
-# once per supported target by setting GOOS/GOARCH:
+# tags select different files, and findings differ per platform —
+# errcheck on syscall wrappers, helpers only referenced from another
+# platform's file, and so on. CI therefore runs the linter once per
+# supported target by setting GOOS/GOARCH:
 #
 #   linux/amd64, linux/arm64, darwin/arm64, windows/arm64
 #
@@ -23,9 +20,8 @@ version: "2"
 # any of these runs.)
 #
 # Local usage:
-#   golangci-lint run ./...                          # full backlog
-#   golangci-lint run --new-from-rev=origin/main     # your changes only
-#   GOOS=windows GOARCH=arm64 golangci-lint run --new-from-rev=origin/main ./...
+#   golangci-lint run ./...
+#   GOOS=windows GOARCH=arm64 golangci-lint run ./...
 
 run:
   timeout: 5m
