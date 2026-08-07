@@ -1,0 +1,18 @@
+version: v2
+# Mirrors containerd/nerdbox@v0.2.1 api/buf.gen.yaml, with the remote go
+# plugin replaced by a local pinned protoc-gen-go (same code, no BSR
+# network dependency). The module= strip MUST stay
+# github.com/containerd/nerdbox/api: it matches the proto's go_package
+# option, yields output under services/..., and keeps the generated files
+# byte-identical to upstream's — which is what makes our vendored copies
+# verifiable.
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt:
+      - module=github.com/containerd/nerdbox/api
+  - local: protoc-gen-go-ttrpc
+    out: .
+    opt:
+      - module=github.com/containerd/nerdbox/api
+      - prefix=TTRPC
