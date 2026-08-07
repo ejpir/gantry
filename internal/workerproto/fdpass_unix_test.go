@@ -308,3 +308,41 @@ func TestSendFDNonUnixRefused(t *testing.T) {
 		t.Fatal("RecvFD over net.Pipe succeeded")
 	}
 }
+
+// TestFDMuxSurvivesIdleChannel is the regression test for the macOS
+// field failure "share.prepare: recv fd: i/o timeout" minutes after
+// boot: the mux loop idled on a DEADLINED read and died with a sticky
+// error. The loop must block indefinitely; transfers long after boot
+// must work.
+func TestFDMuxSurvivesIdleChannel(t *testing.T) {
+	a, b := unixPair(t)
+	mux := NewFDMux(b)
+	// No mux close: the loop dies with the conn (unixPair cleanup).
+
+	// Idle longer than fdRecvTimeout: the loop must still be alive.
+	time.Sleep(fdRecvTimeout + 2*time.Second)
+
+	f, err := os.CreateTemp(t.TempDir(), "fd-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	var token [FDTokenLen]byte
+	token[0] = 0x77
+	if err := SendFD(a, token, f); err != nil {
+		t.Fatal(err)
+	}
+	ch, err := mux.Expect(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			t.Fatalf("recv after idle: %v", res.Err)
+		}
+		_ = res.F.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("no dispatch after idle period")
+	}
+}
