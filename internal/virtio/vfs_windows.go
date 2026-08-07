@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"

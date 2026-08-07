@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"gantry/internal/client"
-	"gantry/internal/sandbox"
-	"gantry/internal/secret"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/vmm"
 )
 
 // cmdExec is the single-command flow: boot a VM (with gvproxy

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"gantry/internal/shares"
-	"gantry/internal/virtio"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/vmm"
 )
 
 const maxManagedShares = 256

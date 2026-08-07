@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 func TestProbeExt4(t *testing.T) {

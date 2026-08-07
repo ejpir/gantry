@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"gantry/internal/vnet"
+	"github.com/ejpir/gantry/internal/vnet"
 )
 
 func newTestPortManager(t *testing.T) (*PortManager, string) {

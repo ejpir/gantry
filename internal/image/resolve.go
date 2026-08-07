@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gantry/internal/gutil"
-	"gantry/internal/image/auth"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/image/auth"
 )
 
 // resolve.go — turn an -image value into a usable rootfs disk plus the

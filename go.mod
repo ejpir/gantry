@@ -1,4 +1,4 @@
-module gantry
+module github.com/ejpir/gantry
 
 go 1.26.5
 

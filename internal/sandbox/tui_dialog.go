@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/shares"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"

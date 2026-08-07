@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode"
 
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/shares"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"

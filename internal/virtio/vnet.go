@@ -3,8 +3,8 @@ package virtio
 import (
 	"encoding/binary"
 	"fmt"
-	"gantry/internal/gutil"
-	"gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/netpol"
 	"io"
 	"net"
 	"os"

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // store.go — the on-disk image cache (design doc: "Store layout").

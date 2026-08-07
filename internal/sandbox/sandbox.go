@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"gantry/internal/gutil"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/vmm"
 	"io"
 	"net"
 	"os"
@@ -20,9 +20,9 @@ import (
 	"syscall"
 	"time"
 
-	"gantry/internal/client"
-	"gantry/internal/secret"
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/shares"
 
 	"github.com/containerd/ttrpc"
 	"golang.org/x/term"

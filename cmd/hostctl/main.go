@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"os"
 
-	"gantry/internal/client"
+	"github.com/ejpir/gantry/internal/client"
 )
 
 const (

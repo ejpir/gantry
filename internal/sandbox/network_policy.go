@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"gantry/internal/netpol"
-	"gantry/internal/vnet"
+	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/vnet"
 )
 
 type NetworkPolicyEntry struct {

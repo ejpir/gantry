@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/shares"
 )
 
 func TestParseShareSpec(t *testing.T) {

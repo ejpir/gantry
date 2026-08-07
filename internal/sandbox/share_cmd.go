@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"gantry/internal/shares"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/vmm"
 )
 
 // CmdShare implements `gantry share add|remove|ls` against a running

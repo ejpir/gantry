@@ -22,7 +22,7 @@ import (
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 const (

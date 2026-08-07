@@ -3,8 +3,8 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"gantry/internal/image"
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/shares"
 	"strings"
 	"testing"
 )

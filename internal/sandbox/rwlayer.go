@@ -22,7 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // blankRWLayer is a 512 MiB ext4 with /upper + /work, gzipped (~0.5 MB).

@@ -11,7 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 	"io"
 	"net/http"
 	"os"

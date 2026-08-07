@@ -5,7 +5,7 @@ package vmm
 import (
 	"fmt"
 
-	"gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/virtio"
 )
 
 // addShare attaches one host directory through the Windows native

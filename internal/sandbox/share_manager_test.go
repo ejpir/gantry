@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/shares"
 )
 
 func newTestShareManager(t *testing.T, specs ...string) (*ShareManager, string) {
