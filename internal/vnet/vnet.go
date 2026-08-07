@@ -110,8 +110,11 @@ func (s *Stack) Dial() (net.Conn, error) {
 // Attach runs the QEMU-framed link on the given connected pair: gw is the
 // netstack end, dev is returned for the virtio-net device. Split-VMM mode
 // passes a real socketpair (net.Pipe cannot cross process boundaries).
+// Attach takes OWNERSHIP of gw: it is closed when the stack stops (ctx
+// cancel) or the link dies; on success the caller owns dev only.
 func (s *Stack) Attach(dev, gw net.Conn) (net.Conn, error) {
 	go func() {
+		defer func() { _ = gw.Close() }()
 		// AcceptQemu blocks until the ctx is cancelled or the conn closes.
 		if err := s.vn.AcceptQemu(s.ctx, gw); err != nil {
 			_ = dev.Close()

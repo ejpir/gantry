@@ -546,9 +546,11 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 		// identically in-process if the split degrades.
 		sup, dev, err := crossProcNetConn()
 		if err == nil {
-			defer func() { _ = sup.Close() }()
+			// Attach owns sup (closed when the stack stops); dev stays
+			// ours and crosses into the VMM worker on split.
 			if _, err := stack.Attach(dev, sup); err != nil {
 				_ = dev.Close()
+				_ = sup.Close()
 				stack.Close()
 				return nil, err
 			}

@@ -367,7 +367,9 @@ func (w *netWorker) Done() <-chan error { return w.done }
 // nonce cross-check, and returns the ready backend plus the supervisor
 // end of the data channel (which the virtio-net device attaches to).
 func startNetWorker(cfg netWorkerConfig) (*netWorker, net.Conn, error) {
-	ctrlSup, dataSup, cmd, err := spawnNetWorkerProcess()
+	// The worker's stderr lands next to its traffic log: bootstrap
+	// failures leave their own postmortem (worker-net.log).
+	ctrlSup, dataSup, cmd, err := spawnNetWorkerProcess(filepath.Join(filepath.Dir(cfg.TrafficPath), "worker-net.log"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -551,4 +553,14 @@ func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool) 
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "isolation.json"), append(raw, '\n'), 0o600)
+}
+
+// DbgStartNetWorker is a TEMPORARY diagnostic export for cmd/dbgnetspawn:
+// the production spawn path with no test hooks.
+func DbgStartNetWorker(mac string, policyJSON []byte, dir string) (*netWorker, net.Conn, error) {
+	return startNetWorker(netWorkerConfig{
+		GuestMAC:    mac,
+		Policy:      policyJSON,
+		TrafficPath: filepath.Join(dir, netpol.TrafficFileName),
+	})
 }

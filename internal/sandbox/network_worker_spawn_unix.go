@@ -56,7 +56,10 @@ func inheritedConn(fd uintptr, name string) (net.Conn, error) {
 // ends as its only inherited descriptors. The role argument carries no
 // authority — the inherited channels do — and the environment is an
 // explicit allowlist so no daemon-held secret leaks into the child.
-func spawnNetWorkerProcess() (control, data net.Conn, cmd *os.Process, err error) {
+// stderrPath, when non-empty, captures the worker's stderr into a log
+// file (opened append) so a failed bootstrap leaves a postmortem; on
+// open failure the worker inherits our stderr (never fatal).
+func spawnNetWorkerProcess(stderrPath string) (control, data net.Conn, cmd *os.Process, err error) {
 	ctrlSup, ctrlWrk, err := socketpairConns()
 	if err != nil {
 		return nil, nil, nil, err
@@ -93,9 +96,16 @@ func spawnNetWorkerProcess() (control, data net.Conn, cmd *os.Process, err error
 	_ = ctrlWrk.Close()
 	_ = dataWrk.Close()
 
+	workerStderr := os.Stderr
+	if stderrPath != "" {
+		if f, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			defer func() { _ = f.Close() }()
+			workerStderr = f
+		}
+	}
 	proc, err := os.StartProcess(exe, argv, &os.ProcAttr{
 		Env:   env,
-		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr, childFiles[0], childFiles[1]},
+		Files: []*os.File{os.Stdin, os.Stdout, workerStderr, childFiles[0], childFiles[1]},
 		Sys:   workerSysProcAttr(),
 	})
 	_ = childFiles[0].Close()
