@@ -1,0 +1,7 @@
+version: v2
+# Minimal buf module for the vendored nerdbox system-Info service proto.
+# info.proto imports only google/protobuf/empty.proto (a well-known type
+# bundled with buf's compiler), so unlike upstream's api/buf.yaml we need
+# no BSR deps — generation works fully offline.
+modules:
+  - path: .
