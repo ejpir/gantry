@@ -498,7 +498,7 @@ func netWorkerTrafficDebug() bool { return gutil.EnvOr("GANTRY_DEBUG_NET", "MINI
 // claims yet; every "enforced" value arrives with later phases.
 type isolationState struct {
 	Version            int      `json:"version"`
-	Topology           string   `json:"topology"` // "monolithic" | "split-net"
+	Topology           string   `json:"topology"` // "monolithic" | "split-net" | "split-vmm" | "split-net+split-vmm"
 	Platform           string   `json:"platform"`
 	NetworkBoundary    string   `json:"networkBoundary"`
 	FilesystemBoundary string   `json:"filesystemBoundary"`
@@ -507,27 +507,42 @@ type isolationState struct {
 }
 
 // writeIsolationState persists the honest effective state for CLI/TUI and
-// runtime inspection.
-func writeIsolationState(dir string, cfg RunConfig, nw *Network) error {
+// runtime inspection. splitVMM reports whether the guest runs in a
+// _vmm-worker.
+func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool) error {
 	st := isolationState{
 		Version:            1,
 		Topology:           "monolithic",
 		Platform:           runtime.GOOS,
-		NetworkBoundary:    "unavailable", // Phase 2: VMM worker + confinement
+		NetworkBoundary:    "unavailable", // confinement lands in Phase 2b
 		FilesystemBoundary: "unavailable",
 		ProcessBoundary:    "unavailable",
 	}
 	degraded := append([]string(nil), nw.Degraded...)
-	switch {
-	case cfg.ProcessIsolation == "off":
+	switch cfg.ProcessIsolation {
+	case "off":
 		degraded = append(degraded, "process isolation disabled by configuration")
-	case nw.Split:
-		st.Topology = "split-net"
-		degraded = append(degraded, "vmm-worker split not yet implemented (Phase 2)",
-			"platform confinement not yet implemented (Phase 2)")
 	default:
-		if cfg.Net && cfg.GVProxy == "" && len(nw.Degraded) == 0 && !nw.Split {
+		if nw.Split {
+			st.Topology = "split-net"
+		}
+		if splitVMM {
+			if st.Topology == "split-net" {
+				st.Topology = "split-net+split-vmm"
+			} else {
+				st.Topology = "split-vmm"
+			}
+		}
+		// The process split alone is fault isolation, NOT a security
+		// boundary: platform confinement (Phase 2b) is what turns the
+		// split into an enforced boundary. Until then nothing here may
+		// report "enforced".
+		degraded = append(degraded, "platform confinement not yet implemented (Phase 2b)")
+		if !nw.Split && cfg.Net && cfg.GVProxy == "" {
 			degraded = append(degraded, "network worker not established")
+		}
+		if !splitVMM && cfg.ProcessIsolation != "" {
+			degraded = append(degraded, "vmm worker not established")
 		}
 	}
 	st.Degraded = degraded

@@ -104,6 +104,13 @@ func Start(guestMAC [6]byte, forwards map[string]string) (*Stack, error) {
 // length prefix + raw Ethernet frame — no handshake, unlike vfkit.
 func (s *Stack) Dial() (net.Conn, error) {
 	dev, gw := net.Pipe()
+	return s.Attach(dev, gw)
+}
+
+// Attach runs the QEMU-framed link on the given connected pair: gw is the
+// netstack end, dev is returned for the virtio-net device. Split-VMM mode
+// passes a real socketpair (net.Pipe cannot cross process boundaries).
+func (s *Stack) Attach(dev, gw net.Conn) (net.Conn, error) {
 	go func() {
 		// AcceptQemu blocks until the ctx is cancelled or the conn closes.
 		if err := s.vn.AcceptQemu(s.ctx, gw); err != nil {

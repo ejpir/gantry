@@ -28,9 +28,42 @@ const maxManagedShares = 256
 // touched. Every step before the hub mutation is reversible, so a failure
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
+// shareServing is the share-plane backend behind ShareManager: the
+// FUSE-serving hub lives either in this process (monolithic) or in the
+// _vmm-worker (split VMM), driven over RPC with descriptor transfers.
+// "prepared" tokens are opaque staging handles (a *virtio.PreparedShare
+// locally, an RPC token remotely).
+type shareServing interface {
+	PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (prepared any, canonical string, err error)
+	Publish(prepared any) (*virtio.ShareExport, error)
+	Swap(prepared any) (old, exp *virtio.ShareExport, err error)
+	Remove(tag string, force bool) (*virtio.ShareExport, error)
+	ClosePrepared(prepared any)
+	Close() error
+}
+
+// localShareServing adapts the in-process hub.
+type localShareServing struct{ hub *virtio.ShareHub }
+
+func (s localShareServing) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (any, string, error) {
+	return s.hub.PrepareMapped(tag, path, ro, uid, gid)
+}
+func (s localShareServing) Publish(p any) (*virtio.ShareExport, error) {
+	return s.hub.Publish(p.(*virtio.PreparedShare))
+}
+func (s localShareServing) Swap(p any) (old, exp *virtio.ShareExport, err error) {
+	return s.hub.Swap(p.(*virtio.PreparedShare))
+}
+func (s localShareServing) Remove(tag string, force bool) (*virtio.ShareExport, error) {
+	return s.hub.Remove(tag, force)
+}
+func (s localShareServing) ClosePrepared(p any) { p.(*virtio.PreparedShare).ClosePrepared() }
+func (s localShareServing) Close() error        { return s.hub.Close() }
+
 type ShareManager struct {
 	dir        string
-	hub        *virtio.ShareHub
+	hub        *virtio.ShareHub // nil when the hub lives in the vmm worker
+	serving    shareServing
 	store      *ConfigStore
 	mu         sync.Mutex
 	exports    map[string]*managedShare
@@ -64,6 +97,7 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 		return nil, nil, err
 	}
 	m.hub = hub
+	m.serving = localShareServing{hub: hub}
 	var warnings []string
 	seenTags := map[string]bool{}
 	for _, raw := range cfg.Shares {
@@ -85,14 +119,14 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 			_ = m.Close()
 			return nil, nil, err
 		}
-		prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
+		prepared, canonical, err := m.serving.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
 		if err != nil {
 			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
 		}
-		export, err := m.hub.Publish(prepared)
+		export, err := m.serving.Publish(prepared)
 		if err != nil {
-			prepared.ClosePrepared()
+			m.serving.ClosePrepared(prepared)
 			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
 		}
@@ -102,16 +136,35 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 	return m, warnings, nil
 }
 
-// Hub returns the device attached by vmm.Prepare. Nil means unsupported and
-// shareless.
+// Hub returns the device attached by vmm.Prepare. Nil means unsupported,
+// shareless, or worker-hosted (split VMM).
 func (m *ShareManager) Hub() *virtio.ShareHub { return m.hub }
 
 // Close releases all host-side export roots.
 func (m *ShareManager) Close() error {
-	if m == nil || m.hub == nil {
+	if m == nil || m.serving == nil {
 		return nil
 	}
-	return m.hub.Close()
+	return m.serving.Close()
+}
+
+// DetachServing drops the in-process hub for split-VMM mode: the serving
+// hub is built in the worker from transferred roots, and SetServing
+// installs the RPC backend after spawn. Boot-time bookkeeping (exports
+// map, canonical paths) stays valid — the mirror exports report state.
+func (m *ShareManager) DetachServing() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hub = nil
+	m.serving = nil
+}
+
+// SetServing installs the post-spawn share backend (split VMM: the
+// worker-hosted hub over RPC).
+func (m *ShareManager) SetServing(serving shareServing) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serving = serving
 }
 
 func defaultHubCtrPath(tag string) string { return shares.HubHostPath + "/" + tag }
@@ -249,7 +302,10 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	} else if err := m.validateNewShare(share); err != nil {
 		return shares.Entry{}, err
 	}
-	prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
+	if m.serving == nil {
+		return shares.Entry{}, fmt.Errorf("share backend unavailable")
+	}
+	prepared, canonical, err := m.serving.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
 	if err != nil {
 		return shares.Entry{}, err
 	}
@@ -266,7 +322,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 		// slice swap: shareSpecsReplacingTag drops the tag's old
 		// specs and appends the new one in one write.
 		if err := m.mutateSharesSnapshotLocked(share.Tag, shareConfigSpec(share), &oldConfig); err != nil {
-			prepared.ClosePrepared()
+			m.serving.ClosePrepared(prepared)
 			return shares.Entry{}, err
 		}
 	}
@@ -287,7 +343,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 			m.restoreSharesLocked(oldConfig)
 		}
 		_ = m.publishLocked()
-		prepared.ClosePrepared()
+		m.serving.ClosePrepared(prepared)
 		return shares.Entry{}, err
 	}
 	if err := m.publishLocked(); err != nil {
@@ -295,9 +351,9 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	}
 	var export *virtio.ShareExport
 	if existing != nil {
-		_, export, err = m.hub.Swap(prepared)
+		_, export, err = m.serving.Swap(prepared)
 	} else {
-		export, err = m.hub.Publish(prepared)
+		export, err = m.serving.Publish(prepared)
 	}
 	if err != nil {
 		return rollback(err)
@@ -366,7 +422,7 @@ func (m *ShareManager) removeLocked(tag string, persistent, force bool) (shares.
 	if err := m.publishLocked(); err != nil {
 		return rollback(err)
 	}
-	export, err := m.hub.Remove(tag, force)
+	export, err := m.serving.Remove(tag, force)
 	if err != nil {
 		return rollback(err)
 	}
@@ -414,10 +470,10 @@ func (m *ShareManager) entry(ms *managedShare) shares.Entry {
 		ctr = defaultHubCtrPath(ms.share.Tag)
 	}
 	state := "active"
-	if m.hub == nil {
-		state = "saved"
-	} else if ms.export != nil {
+	if ms.export != nil {
 		state = ms.export.State().String()
+	} else if m.hub == nil && m.serving == nil {
+		state = "saved"
 	}
 	return shares.Entry{
 		Tag:     ms.share.Tag,

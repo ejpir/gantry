@@ -146,25 +146,43 @@ func (v *Vsock) AddListen(guestPort uint32) (string, error) {
 			if err != nil {
 				return
 			}
-			v.core.mu.Lock()
-			srcPort := v.nextHostPort
-			v.nextHostPort++
-			key := connKey(guestPort, srcPort)
-			c := &vsockConn{key: key, nc: nc, peerBufAlloc: vsockBufAlloc, outSig: make(chan struct{}, 1), done: make(chan struct{})}
-			v.conns[key] = c
-			go v.pumpOut(c)
-			v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
-				srcCID: vsockHostCID, dstCID: v.guestCID,
-				srcPort: srcPort, dstPort: guestPort,
-				typ: vsockTypeStream, op: vsockOpRequest,
-				bufAlloc: vsockBufAlloc,
-			}})
-			v.tryFlush()
-			v.core.mu.Unlock()
-			v.logf("host-originated conn to guest port %d (srcPort %d)", guestPort, srcPort)
+			if err := v.InjectConn(guestPort, nc); err != nil {
+				v.logf("inject host-originated conn: %v", err)
+				_ = nc.Close()
+			}
 		}
 	}()
 	return path, nil
+}
+
+// SetDial replaces the guest->host connect-out function (split VMM: the
+// device runs in the worker, which bridges dial-backs to the supervisor
+// over RPC instead of opening host sockets).
+func (v *Vsock) SetDial(dial func(port uint32) (net.Conn, error)) { v.dial = dial }
+
+// InjectConn registers a host-originated stream connection to the guest's
+// listening port: a vsock REQUEST from host CID 2 to guestPort. It is the
+// AddListen accept-loop body minus the listener, so the split-VMM worker
+// can register conns that arrive as transferred descriptors instead of
+// unix-socket accepts.
+func (v *Vsock) InjectConn(guestPort uint32, nc net.Conn) error {
+	v.core.mu.Lock()
+	defer v.core.mu.Unlock()
+	srcPort := v.nextHostPort
+	v.nextHostPort++
+	key := connKey(guestPort, srcPort)
+	c := &vsockConn{key: key, nc: nc, peerBufAlloc: vsockBufAlloc, outSig: make(chan struct{}, 1), done: make(chan struct{})}
+	v.conns[key] = c
+	go v.pumpOut(c)
+	v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
+		srcCID: vsockHostCID, dstCID: v.guestCID,
+		srcPort: srcPort, dstPort: guestPort,
+		typ: vsockTypeStream, op: vsockOpRequest,
+		bufAlloc: vsockBufAlloc,
+	}})
+	v.tryFlush()
+	v.logf("host-originated conn to guest port %d (srcPort %d)", guestPort, srcPort)
+	return nil
 }
 
 func (v *Vsock) deviceID() uint32 { return VsockDeviceID }

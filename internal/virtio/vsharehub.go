@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/ejpir/gantry/internal/shares"
+
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -32,9 +34,24 @@ func newExportNode(exp *ShareExport, path string, salt uint64) (fs.InodeEmbedder
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("resolve share path: %w", err)
 	}
+	rootFD, err := OpenShareRootFD(path)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return newExportNodeFD(exp, abs, rootFD, salt)
+}
+
+// OpenShareRootFD pins a share root directory by descriptor (the split-VMM
+// supervisor pins roots and transfers the descriptors; the confined worker
+// never opens by path).
+func OpenShareRootFD(path string) (*os.File, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve share path: %w", err)
+	}
 	rootFD, err := os.Open(abs)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("open share root: %w", err)
+		return nil, fmt.Errorf("open share root: %w", err)
 	}
 	st, err := rootFD.Stat()
 	if err != nil || !st.IsDir() {
@@ -42,8 +59,33 @@ func newExportNode(exp *ShareExport, path string, salt uint64) (fs.InodeEmbedder
 		if err == nil {
 			err = fmt.Errorf("not a directory")
 		}
-		return nil, "", nil, fmt.Errorf("share root %s: %w", abs, err)
+		return nil, fmt.Errorf("share root %s: %w", abs, err)
 	}
+	return rootFD, nil
+}
+
+// PrepareMappedFD is PrepareMapped with an already-pinned root descriptor:
+// the split-VMM worker receives roots by descriptor transfer and never
+// resolves host paths. Takes ownership of root.
+func (h *ShareHub) PrepareMappedFD(tag, path string, ro bool, uid, gid *uint32, root *os.File) (*PreparedShare, string, error) {
+	if err := shares.ValidateShareTag(tag); err != nil {
+		return nil, "", err
+	}
+	exp := &ShareExport{Tag: tag, RO: ro, UID: uid, GID: gid}
+	exp.state.Store(int32(ShareExportActive))
+	node, finalPath, release, err := newExportNodeFD(exp, path, root, h.nextSalt.Add(1)<<32)
+	if err != nil {
+		return nil, "", err
+	}
+	exp.Path = finalPath
+	exp.node = node
+	exp.release = release
+	return &PreparedShare{export: exp}, exp.Path, nil
+}
+
+// newExportNodeFD is newExportNode with an already-pinned root descriptor;
+// takes ownership of rootFD (closed by the returned release).
+func newExportNodeFD(exp *ShareExport, abs string, rootFD *os.File, salt uint64) (fs.InodeEmbedder, string, func(), error) {
 	rootNode, err := fs.NewLoopbackRootFD(abs, int(rootFD.Fd()))
 	if err != nil {
 		_ = rootFD.Close()

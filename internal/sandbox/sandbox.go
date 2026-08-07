@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/ejpir/gantry/internal/gutil"
@@ -358,10 +359,6 @@ func CmdDaemon(name string) int {
 	if nw.Split {
 		bootLog("network worker: split process (data/control channels up)")
 	}
-	if err := writeIsolationState(dir, cfg, nw); err != nil {
-		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
-	}
-
 	configStore, err := LoadConfigStore(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: config store:", err)
@@ -391,14 +388,36 @@ func CmdDaemon(name string) int {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
 	}
-	opts.ShareHub = shareManager.Hub()
-	opts.Console = console
-	m, err := vmm.Prepare(opts)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "daemon:", err)
+	// Split VMM (Phase 2): the guest runs in a _vmm-worker process; the
+	// supervisor keeps ctl.sock, sessions, policy, and all host sockets.
+	// auto degrades to monolithic; required refuses the fallback.
+	var runner vmmRunner
+	vw, splitErr := tryStartVMMSplit(cfg, opts, nw, shareManager, dir, console)
+	switch {
+	case splitErr == nil:
+		runner = vw
+		defer func() { _ = runner.Close() }()
+		bootLog("vmm worker spawned (split topology)")
+	case cfg.ProcessIsolation == "required":
+		fmt.Fprintln(os.Stderr, "daemon: -process-isolation=required but the split VMM failed:", splitErr)
 		return 1
+	case !errors.Is(splitErr, errVMMSplitUnavailable):
+		fmt.Fprintf(os.Stderr, "daemon: split VMM failed (%v), falling back to monolithic\n", splitErr)
+	}
+	var m *vmm.Machine
+	if runner == nil {
+		opts.ShareHub = shareManager.Hub()
+		opts.Console = console
+		m, err = vmm.Prepare(opts)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "daemon:", err)
+			return 1
+		}
 	}
 	bootLog("machine prepared (RAM+kernel)")
+	if err := writeIsolationState(dir, cfg, nw, runner != nil); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
+	}
 	if err := shareManager.Publish(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: share manifest:", err)
 		return 1
@@ -414,7 +433,11 @@ func CmdDaemon(name string) int {
 	}
 
 	guestErr := make(chan error, 1)
-	go func() { guestErr <- vmm.Run(m) }()
+	if runner != nil {
+		go func() { guestErr <- runner.Wait() }()
+	} else {
+		go func() { guestErr <- vmm.Run(m) }()
+	}
 	bootLog("vCPUs running; guest booting")
 
 	// Hold the single dial-back connection for the VM's lifetime, while also
@@ -458,6 +481,10 @@ func CmdDaemon(name string) int {
 	if nw.Worker != nil {
 		workerDead = nw.Worker.Done()
 	}
+	var vmmDead <-chan struct{}
+	if runner != nil {
+		vmmDead = runner.Done()
+	}
 
 	ln, err := net.Listen("unix", filepath.Join(dir, "ctl.sock"))
 	if err != nil {
@@ -470,11 +497,18 @@ func CmdDaemon(name string) int {
 	// (Linux requires write permission on it; macOS consults the dir).
 	_ = os.Chmod(filepath.Join(dir, "ctl.sock"), 0o600)
 
+	var streamDial func() (net.Conn, error)
+	if runner != nil {
+		// Sessions cross the worker bridge: no host listen-1026.sock
+		// exists in the split topology.
+		streamDial = func() (net.Conn, error) { return runner.DialStream(1026) }
+	}
 	br := &broker{
 		cfg:        cfg,
 		dir:        dir,
 		rpc:        rpc,
 		streamSock: filepath.Join(dir, "listen-1026.sock"),
+		streamDial: streamDial,
 		secrets:    secrets,
 		store:      configStore,
 		shares:     shareManager,
@@ -494,14 +528,16 @@ func CmdDaemon(name string) int {
 		// held — guest filesystem sync first (bounded: the guest may be
 		// wedged, and gantry stop escalates to SIGKILL), then host-side
 		// device flush/close.
-		client.SyncGuest(rpc, br.streamSock, "sb", 5*time.Second)
+		client.SyncGuestDial(rpc, br.streamDial, br.streamSock, "sb", 5*time.Second)
 		// Stop an external gvproxy before closing the VM's packet socket;
 		// otherwise its normal peer EOF is logged as an ERROR during teardown.
 		if nw.Sock != "" {
 			nw.CloseBackend()
 		}
-		if err := m.Close(); err != nil {
-			fmt.Fprintln(os.Stderr, "daemon: device shutdown:", err)
+		if m != nil {
+			if err := m.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "daemon: device shutdown:", err)
+			}
 		}
 		fmt.Println("daemon: shutdown complete")
 		return 0
@@ -513,6 +549,10 @@ func CmdDaemon(name string) int {
 		// policy enforcement point is gone. Fail the sandbox rather than
 		// run unenforced; deferred cleanup reaps everything else.
 		fmt.Fprintln(os.Stderr, "daemon: network worker died:", err)
+		return 1
+	case <-vmmDead:
+		// The VMM worker died mid-run: the guest is gone (or never was).
+		fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", runner.Err())
 		return 1
 	}
 }
@@ -530,6 +570,9 @@ type broker struct {
 	dir        string
 	rpc        *ttrpc.Client
 	streamSock string
+	// streamDial replaces the streamSock unix dial in the split-VMM
+	// topology (streams cross the worker bridge).
+	streamDial func() (net.Conn, error)
 	store      *ConfigStore
 	shares     *ShareManager
 	ports      *PortManager
@@ -920,6 +963,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	var status int
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock:     br.streamSock,
+		StreamDial:     br.streamDial,
 		Shares:         manifest.Shares,
 		ShareTransport: manifest.Transport,
 		RW:             br.cfg.RW,

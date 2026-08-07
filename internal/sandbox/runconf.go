@@ -539,10 +539,28 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := stack.Dial()
-	if err != nil {
-		stack.Close()
-		return nil, err
+	var conn net.Conn
+	if vmmWorkerPlatform && c.ProcessIsolation != "off" {
+		// The VMM may move to a _vmm-worker: the net data channel must
+		// survive the crossing (net.Pipe cannot). A socketpair works
+		// identically in-process if the split degrades.
+		sup, dev, err := crossProcNetConn()
+		if err == nil {
+			defer func() { _ = sup.Close() }()
+			if _, err := stack.Attach(dev, sup); err != nil {
+				_ = dev.Close()
+				stack.Close()
+				return nil, err
+			}
+			conn = dev
+		}
+	}
+	if conn == nil {
+		conn, err = stack.Dial()
+		if err != nil {
+			stack.Close()
+			return nil, err
+		}
 	}
 	n.Conn = conn
 	n.Stack = stack
@@ -601,6 +619,21 @@ func (c RunConfig) imageIdentity() string {
 		return c.ImageDigest
 	}
 	return c.Image
+}
+
+// vmmRunner is the split-VMM execution handle: the guest runs in a
+// _vmm-worker process and every interaction crosses a channel. The
+// platform stubs make tryStartVMMSplit always fail where unsupported.
+type vmmRunner interface {
+	// Wait parks until the guest exits (the split-mode guestErr).
+	Wait() error
+	// Close flushes devices and stops the worker (idempotent).
+	Close() error
+	// Done closes when the worker process is reaped; Err reports how.
+	Done() <-chan struct{}
+	Err() error
+	// DialStream opens a host->guest stream to a guest listening port.
+	DialStream(guestPort uint32) (net.Conn, error)
 }
 
 // guestNetMAC is the fixed MAC the embedded netstack expects the guest to

@@ -115,6 +115,10 @@ func main() {
 		// Hidden worker role (docs/vmm-network-isolation.md): authority is
 		// the inherited bootstrap channels, never the argv.
 		os.Exit(sandbox.CmdNetWorker())
+	case "_vmm-worker":
+		// Hidden worker role (Phase 2): owns the hypervisor, guest RAM,
+		// devices, and the vsock data plane.
+		os.Exit(sandbox.CmdVMMWorker())
 	case "ls":
 		os.Exit(sandbox.CmdLs())
 	case "tui":

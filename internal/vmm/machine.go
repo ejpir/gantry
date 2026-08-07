@@ -169,6 +169,7 @@ type Machine struct {
 	// so arm64 builds carry no dead emulation code (x86devices.go).
 	x86       x86Devices
 	virtios   []*virtio.Core
+	vsock     *virtio.Vsock             // nil when no vsock device attached
 	irqLine   func(irq int, level bool) // installed by the backend
 	stdinDone chan struct{}
 	// consoleStdin wires host stdin into the guest UART (interactive `run`;
@@ -294,15 +295,35 @@ type Opts struct {
 	NetTraffic  *netpol.TrafficRecorder // persistent per-VM dashboard accounting
 	NetMAC      [6]byte
 	NetVFKIT    bool
-	VsockFwd    string // host dir for vsock forwarding; "" disables vsock
-	Interactive bool   // wire host stdin into the guest UART
-	VCPUs       int    // guest vCPU count (SMP); 0/1 = single vCPU
-	GuestCID    uint64
-	VsockListen []uint32 // guest ports accepting host-originated connections
-	Cmdline     string
+	VsockFwd    string // host dir for vsock forwarding; "" disables vsock (unless VsockDial is set)
+	// VsockDial overrides guest->host connect-out (split VMM: the device
+	// runs in the confined worker and bridges dial-backs to the
+	// supervisor over RPC; it must never open host sockets by path).
+	// VsockNoListen suppresses the AddListen unix listeners (host->guest
+	// conns then arrive via Machine.InjectVsockConn from transferred
+	// descriptors).
+	VsockDial     func(port uint32) (net.Conn, error)
+	VsockNoListen bool
+	Interactive   bool // wire host stdin into the guest UART
+	VCPUs         int  // guest vCPU count (SMP); 0/1 = single vCPU
+	GuestCID      uint64
+	VsockListen   []uint32 // guest ports accepting host-originated connections
+	Cmdline       string
 	// Console receives the guest serial console (default os.Stdout); the
 	// sandbox daemon points it at console.log, `exec -console` at stderr.
 	Console io.Writer
+}
+
+// InjectVsockConn registers a host-originated stream to the guest's
+// listening port (split VMM: the conn arrived as a transferred descriptor
+// from the supervisor, which owns all host sockets). The vsock device
+// must exist (Prepare attached it).
+func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
+	if m.vsock == nil {
+		_ = nc.Close()
+		return fmt.Errorf("no vsock device")
+	}
+	return m.vsock.InjectConn(guestPort, nc)
 }
 
 func Prepare(o Opts) (*Machine, error) {
@@ -423,17 +444,23 @@ func Prepare(o Opts) (*Machine, error) {
 			o.NetMAC[0], o.NetMAC[1], o.NetMAC[2], o.NetMAC[3], o.NetMAC[4], o.NetMAC[5],
 			core.Base(), core.IRQ(), how)
 	}
-	if o.VsockFwd != "" {
+	if o.VsockFwd != "" || o.VsockDial != nil {
 		vs := virtio.NewVsock(o.GuestCID, o.VsockFwd)
+		if o.VsockDial != nil {
+			vs.SetDial(o.VsockDial)
+		}
 		core, err := m.addVirtio(vs, "vsock")
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range o.VsockListen {
-			if _, err := vs.AddListen(p); err != nil {
-				fmt.Printf("[vsock] listen %d: %v\n", p, err)
+		if !o.VsockNoListen {
+			for _, p := range o.VsockListen {
+				if _, err := vs.AddListen(p); err != nil {
+					fmt.Printf("[vsock] listen %d: %v\n", p, err)
+				}
 			}
 		}
+		m.vsock = vs
 		fmt.Printf("virtio-vsock: guest cid %d @ %#x irq %d, host dir %s\n",
 			o.GuestCID, core.Base(), core.IRQ(), o.VsockFwd)
 	}

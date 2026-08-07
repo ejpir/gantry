@@ -37,7 +37,11 @@ import (
 const (
 	// Magic identifies protocol version 1 of the control handshake.
 	Magic = "GANTRY-WORKER/1"
-	// RoleNet is the only worker role implemented so far (Phase 1 of the
+	// RoleVMM owns the hypervisor, guest RAM, virtio devices, disk I/O,
+	// share serving, and the vsock data plane (Phase 2).
+	RoleVMM = "vmm"
+	// RoleNet owns the netstack, egress policy, traffic accounting, and
+	// port listeners (Phase 1 of the
 	// network-isolation design); a VMM worker role arrives with Phase 2.
 	RoleNet = "net"
 
@@ -272,7 +276,12 @@ func (c *Client) readLoop() {
 // is terminal for the worker relationship; a timeout abandons only this
 // call (the late response is dropped when it arrives).
 func (c *Client) Call(op string, body, out any) error {
-	timeout := c.Timeout
+	return c.CallWithTimeout(op, body, out, c.Timeout)
+}
+
+// CallWithTimeout is Call with an explicit per-call bound; zero uses the
+// client default. Long-parked operations (vm.wait) pass a generous bound.
+func (c *Client) CallWithTimeout(op string, body, out any, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
