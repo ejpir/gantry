@@ -27,6 +27,11 @@ ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
 mkdir -p "$ARTIFACTS"
 
 VERSION=7.0.12   # must match config/gantry-kernel-*.config lineage
+# Fail closed on the tarball content: the kernels built here are published
+# as release artifacts, so they must come from exactly the audited bytes —
+# TLS to cdn.kernel.org is transport security, not content provenance.
+# From https://cdn.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
+TAR_SHA256=57edc9a41efc1ca6b797afa8f4a587a30da2af6bca7356eb56e1e1a4ada265da
 ARCH=${1:-$(uname -m)}
 case "$ARCH" in
 aarch64|arm64) ARCH=arm64 ;;
@@ -49,6 +54,14 @@ cleanup() {
 	[ -z "$TEMP_WORK" ] || rm -rf -- "$TEMP_WORK"
 }
 trap cleanup EXIT HUP INT TERM
+
+verify_sha256() { # verify_sha256 <file> <expected-hex> — macOS has shasum, not sha256sum
+	if command -v sha256sum >/dev/null 2>&1; then
+		[ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ]
+	else
+		[ "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$2" ]
+	fi
+}
 
 if [ -z "${WORK+x}" ]; then
 	umask 077
@@ -126,6 +139,10 @@ if [ ! -f "$WORK/Makefile" ]; then
 	ARCHIVE=$(mktemp "${TMPDIR:-/tmp}/linux-$VERSION.XXXXXX.tar.xz")
 	curl -fsSL -o "$ARCHIVE" \
 		https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-$VERSION.tar.xz
+	verify_sha256 "$ARCHIVE" "$TAR_SHA256" || {
+		echo "kernel tarball sha256 mismatch (want $TAR_SHA256) — refusing to build" >&2
+		exit 1
+	}
 	echo "== extracting to $WORK"
 	tar -xJf "$ARCHIVE" -C "$WORK" --strip-components=1
 	rm -f -- "$ARCHIVE"
