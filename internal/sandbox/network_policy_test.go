@@ -28,7 +28,7 @@ func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
 	}
 
 	live := netpol.DefaultPolicy()
-	manager := NewNetworkPolicyManager(store, live, &vnet.Stack{})
+	manager := NewNetworkPolicyManager(store, newLocalBackend(&vnet.Stack{}, live), live)
 	entry, err := manager.Set(policyPath, false)
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +70,7 @@ func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
 		t.Fatalf("default policy was not persisted: %+v", cfg)
 	}
 
-	stopped := NewNetworkPolicyManager(store, live, nil)
+	stopped := NewNetworkPolicyManager(store, nil, live)
 	if _, err := stopped.Set(policyPath, false); err == nil || !strings.Contains(err.Error(), "running embedded netstack") {
 		t.Fatalf("manager without a stack returned %v", err)
 	}
@@ -88,7 +88,7 @@ func TestBrokerNetworkPolicyControl(t *testing.T) {
 	}
 	live := netpol.DefaultPolicy()
 	br := &broker{
-		netPolicy: NewNetworkPolicyManager(store, live, &vnet.Stack{}),
+		netPolicy: NewNetworkPolicyManager(store, newLocalBackend(&vnet.Stack{}, live), live),
 		sessions:  map[string]chan struct{}{},
 	}
 	request := `{"op":"netpolicy.set","id":"policy","net_policy":{"path":` + strconv.Quote(policyPath) + `}}` + "\n"

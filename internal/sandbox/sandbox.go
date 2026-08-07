@@ -367,7 +367,7 @@ func CmdDaemon(name string) int {
 	for _, warning := range shareWarnings {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
 	}
-	portManager := NewPortManager(configStore, nw.Stack)
+	portManager := NewPortManager(configStore, nw.Backend)
 
 	var hostShares []vmm.Share
 	if shareManager.Hub() == nil {
@@ -461,7 +461,7 @@ func CmdDaemon(name string) int {
 		store:      configStore,
 		shares:     shareManager,
 		ports:      portManager,
-		netPolicy:  NewNetworkPolicyManager(configStore, nw.Policy, nw.Stack),
+		netPolicy:  NewNetworkPolicyManager(configStore, nw.Backend, nw.Policy),
 		sessions:   map[string]chan struct{}{},
 		sessionCtl: map[string]net.Conn{},
 	}
