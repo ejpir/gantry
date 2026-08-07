@@ -47,14 +47,29 @@ func SendFD(conn net.Conn, token [FDTokenLen]byte, f *os.File) error {
 // sender's copy except for sharing the open file description (offset,
 // locks) — which is exactly what the vsock bridge and share pinning
 // rely on.
+// RecvFD receives one descriptor with its correlation token, bounded by
+// fdRecvTimeout (standalone one-shot callers).
 func RecvFD(conn net.Conn) ([FDTokenLen]byte, *os.File, error) {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return [FDTokenLen]byte{}, nil, fmt.Errorf("workerproto: fd passing needs a unix channel, got %T", conn)
+	}
+	_ = uc.SetReadDeadline(time.Now().Add(fdRecvTimeout))
+	defer func() { _ = uc.SetReadDeadline(time.Time{}) }()
+	return recvFDMsg(conn)
+}
+
+// recvFDMsg receives one descriptor with its correlation token and NO
+// deadline: the FDMux loop idles on it for the worker's whole lifetime,
+// so a bounded read here kills every transfer that arrives more than
+// fdRecvTimeout after boot (first observed on macOS: share add and exec
+// failed minutes in with the loop's sticky i/o timeout).
+func recvFDMsg(conn net.Conn) ([FDTokenLen]byte, *os.File, error) {
 	var token [FDTokenLen]byte
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return token, nil, fmt.Errorf("workerproto: fd passing needs a unix channel, got %T", conn)
 	}
-	_ = uc.SetReadDeadline(time.Now().Add(fdRecvTimeout))
-	defer func() { _ = uc.SetReadDeadline(time.Time{}) }()
 	oob := make([]byte, syscall.CmsgSpace(4))
 	_, oobn, _, _, err := uc.ReadMsgUnix(token[:], oob)
 	if err != nil {
@@ -129,7 +144,7 @@ func (m *FDMux) fail(err error) {
 
 func (m *FDMux) loop() {
 	for {
-		token, f, err := RecvFD(m.conn)
+		token, f, err := recvFDMsg(m.conn)
 		if err != nil {
 			m.fail(err)
 			return
