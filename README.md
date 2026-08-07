@@ -114,3 +114,10 @@ shared between live VMs.
 [go-erofs](https://github.com/erofs/go-erofs) ·
 [go-fuse](https://github.com/hanwen/go-fuse) ·
 [gVisor](https://gvisor.dev/)
+
+## Security & License
+
+Report vulnerabilities privately per [SECURITY.md](SECURITY.md) — please
+do not open public issues for boundary bugs. gantry is Apache-2.0
+licensed ([LICENSE](LICENSE)); vendored code under `third_party/` keeps
+its own license.
