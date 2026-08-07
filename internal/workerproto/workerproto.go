@@ -190,62 +190,147 @@ type Response struct {
 	Body  json.RawMessage `json:"body,omitempty"`
 }
 
-// Client is the supervisor's synchronous control endpoint. Calls are
-// serialized: one outstanding request at a time, IDs monotonically
-// increasing (the worker rejects anything else).
+// Client is the supervisor's control endpoint. Calls are concurrent —
+// a long-parked call (vm.wait) never blocks short operations — with
+// request IDs monotonically increasing (the worker rejects anything
+// else). Responses are matched by ID; a response for a timed-out call
+// is dropped, not fatal.
 type Client struct {
-	conn   net.Conn
-	mu     sync.Mutex
-	nextID uint64
-	// Timeout bounds one full call round-trip; zero uses the default.
-	Timeout time.Duration
+	conn net.Conn
+	wmu  sync.Mutex // serializes request writes
+
+	mu       sync.Mutex
+	nextID   uint64
+	pending  map[uint64]chan callResult
+	stickyEr error // terminal transport error
+
+	done     chan struct{} // closed when the read loop exits
+	doneOnce sync.Once
+	Timeout  time.Duration // bounds one call round-trip; zero = default
 }
 
-// NewClient wraps an established control connection.
-func NewClient(conn net.Conn) *Client { return &Client{conn: conn, Timeout: 30 * time.Second} }
+type callResult struct {
+	resp Response
+	err  error
+}
+
+// NewClient wraps an established control connection and starts its
+// response-dispatch loop.
+func NewClient(conn net.Conn) *Client {
+	c := &Client{conn: conn, pending: map[uint64]chan callResult{}, done: make(chan struct{}), Timeout: 30 * time.Second}
+	go c.readLoop()
+	return c
+}
+
+// failAll terminates every outstanding and future call: a transport
+// error ends the whole worker relationship (treated as worker death,
+// never as a retryable operation failure).
+func (c *Client) failAll(err error) {
+	c.doneOnce.Do(func() {
+		c.mu.Lock()
+		c.stickyEr = err
+		pending := c.pending
+		c.pending = map[uint64]chan callResult{}
+		c.mu.Unlock()
+		for _, ch := range pending {
+			ch <- callResult{err: err}
+		}
+		close(c.done)
+	})
+}
+
+func (c *Client) readLoop() {
+	for {
+		var resp Response
+		err := ReadMessage(c.conn, &resp)
+		if err != nil {
+			c.failAll(err)
+			return
+		}
+		c.mu.Lock()
+		ch, ok := c.pending[resp.ID]
+		if ok {
+			delete(c.pending, resp.ID)
+		}
+		maxIssued := c.nextID
+		c.mu.Unlock()
+		if ok {
+			ch <- callResult{resp: resp}
+			continue
+		}
+		// Not pending: either a stale response for a timed-out call
+		// (resp.ID <= maxIssued — drop it) or an ID the client never
+		// issued (worker bug — fatal to the channel).
+		if resp.ID > maxIssued {
+			c.failAll(fmt.Errorf("workerproto: response ID %d never issued (max %d)", resp.ID, maxIssued))
+			return
+		}
+	}
+}
 
 // Call issues one request and waits for its response. A transport error
-// is terminal for the worker relationship; callers treat it as worker
-// death, not as a retryable operation failure.
+// is terminal for the worker relationship; a timeout abandons only this
+// call (the late response is dropped when it arrives).
 func (c *Client) Call(op string, body, out any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.nextID++
-	id := c.nextID
-	req := Request{ID: id, Op: op}
-	if body != nil {
-		raw, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		req.Body = raw
-	}
 	timeout := c.Timeout
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	_ = c.conn.SetDeadline(time.Now().Add(timeout))
-	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
-	if err := WriteMessage(c.conn, req); err != nil {
+	var raw json.RawMessage
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		raw = b
+	}
+	// ID assignment and the write are atomic under wmu: the worker
+	// rejects non-increasing IDs, so wire order must match ID order
+	// even with concurrent callers.
+	c.wmu.Lock()
+	c.mu.Lock()
+	if c.stickyEr != nil {
+		err := c.stickyEr
+		c.mu.Unlock()
+		c.wmu.Unlock()
 		return err
 	}
-	var resp Response
-	if err := ReadMessage(c.conn, &resp); err != nil {
-		return err
+	c.nextID++
+	id := c.nextID
+	ch := make(chan callResult, 1)
+	c.pending[id] = ch
+	c.mu.Unlock()
+	werr := WriteMessage(c.conn, Request{ID: id, Op: op, Body: raw})
+	c.wmu.Unlock()
+	if werr != nil {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return werr
 	}
-	if resp.ID != id {
-		return fmt.Errorf("workerproto: response ID %d does not match request %d", resp.ID, id)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return r.err
+		}
+		if !r.resp.OK {
+			return fmt.Errorf("%s", r.resp.Error)
+		}
+		if out != nil && len(r.resp.Body) > 0 {
+			return json.Unmarshal(r.resp.Body, out)
+		}
+		return nil
+	case <-timer.C:
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return fmt.Errorf("workerproto: call %q timed out after %s", op, timeout)
 	}
-	if !resp.OK {
-		return fmt.Errorf("%s", resp.Error)
-	}
-	if out != nil && len(resp.Body) > 0 {
-		return json.Unmarshal(resp.Body, out)
-	}
-	return nil
 }
 
-// Close ends the control connection.
+// Close ends the control connection; outstanding calls fail.
 func (c *Client) Close() error { return c.conn.Close() }
 
 // Handler answers one request; returning an error produces a
@@ -313,12 +398,32 @@ func SendHandshake(conn net.Conn, role string, nonce []byte, config any) error {
 // (oversized message, malformed JSON, duplicate/out-of-order ID, unknown
 // op) terminates the loop with an error — fatal to the worker by design.
 // A clean peer EOF returns nil so shutdown-by-close is not an error path.
+//
+// Handlers run CONCURRENTLY (one goroutine per request) so a long-parked
+// op like vm.wait cannot starve short ones; response order is therefore
+// arbitrary and matched by request ID. Handler state must protect itself
+// (the net/vmm worker states do). A handler returning ErrShutdown gets
+// its OK response written first, then the loop returns nil — the
+// graceful-stop reply is guaranteed to reach the supervisor.
 func ServeRequests(conn net.Conn, ops map[string]Handler) error {
 	var lastID uint64
+	var wmu sync.Mutex
+	shutdown := make(chan struct{})
+	var shutdownOnce sync.Once
 	for {
+		select {
+		case <-shutdown:
+			return nil
+		default:
+		}
 		var req Request
 		err := ReadMessage(conn, &req)
 		if err != nil {
+			select {
+			case <-shutdown:
+				return nil // supervisor unwound after the OK response
+			default:
+			}
 			if ne, ok := err.(interface{ Unwrap() error }); ok {
 				if ue := ne.Unwrap(); ue == io.EOF || ue == io.ErrUnexpectedEOF {
 					return nil
@@ -334,33 +439,41 @@ func ServeRequests(conn net.Conn, ops map[string]Handler) error {
 		if !ok {
 			return fmt.Errorf("workerproto: unknown op %q", req.Op)
 		}
-		body, herr := func() (out any, err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					err = fmt.Errorf("handler panic: %v", r)
-				}
+		go func() {
+			body, herr := func() (out any, err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("handler panic: %v", r)
+					}
+				}()
+				return handler(req)
 			}()
-			return handler(req)
+			if herr == ErrShutdown {
+				wmu.Lock()
+				_ = WriteMessage(conn, Response{ID: req.ID, OK: true})
+				wmu.Unlock()
+				shutdownOnce.Do(func() { close(shutdown) })
+				// Unblock the read loop even if the supervisor lingers:
+				// the OK is already delivered, the relationship is over.
+				_ = conn.Close()
+				return
+			}
+			resp := Response{ID: req.ID, OK: herr == nil}
+			if herr != nil {
+				resp.Error = herr.Error()
+			} else if body != nil {
+				raw, err := json.Marshal(body)
+				if err != nil {
+					resp.OK = false
+					resp.Error = fmt.Sprintf("workerproto: encode response for %q: %v", req.Op, err)
+				} else {
+					resp.Body = raw
+				}
+			}
+			wmu.Lock()
+			_ = WriteMessage(conn, resp) // a dead conn ends the read loop next
+			wmu.Unlock()
 		}()
-		if herr == ErrShutdown {
-			if err := WriteMessage(conn, Response{ID: req.ID, OK: true}); err != nil {
-				return err
-			}
-			return nil
-		}
-		resp := Response{ID: req.ID, OK: herr == nil}
-		if herr != nil {
-			resp.Error = herr.Error()
-		} else if body != nil {
-			raw, err := json.Marshal(body)
-			if err != nil {
-				return fmt.Errorf("workerproto: encode response for %q: %w", req.Op, err)
-			}
-			resp.Body = raw
-		}
-		if err := WriteMessage(conn, resp); err != nil {
-			return err
-		}
 	}
 }
 
