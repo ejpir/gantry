@@ -2,6 +2,9 @@ package virtio
 
 import (
 	"encoding/binary"
+	"fmt"
+	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,9 +39,16 @@ const (
 type RTC struct {
 	core *Core
 	now  func() time.Time // test hook
+	// probes records the first queue activity for postmortems: when the
+	// guest clock stays at epoch, "rtc: first request" in the daemon log
+	// proves the kernel driver reached us (vs. never probing the node).
+	probes atomic.Int32
 }
 
 func NewRTC() *RTC { return &RTC{now: time.Now} }
+
+// rtcDebug gates the first-requests postmortem log.
+var rtcDebug = os.Getenv("GANTRY_DEBUG_RTC") != ""
 
 func (v *RTC) deviceID() uint32 { return RTCDeviceID }
 func (v *RTC) features() uint64 { return 0 } // no VIRTIO_RTC_F_ALARM
@@ -64,6 +74,9 @@ func (v *RTC) handleQueue(qn int) {
 		case err != nil || len(req) < 8:
 			resp[0] = RTCSEINVAL
 		default:
+			if rtcDebug && v.probes.Add(1) <= 4 {
+				fmt.Fprintf(os.Stderr, "virtio-rtc: request msg_type=%#x len=%d\n", binary.LittleEndian.Uint16(req[0:2]), len(req))
+			}
 			v.dispatch(binary.LittleEndian.Uint16(req[0:2]), req, &resp)
 		}
 

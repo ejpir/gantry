@@ -136,7 +136,9 @@ var netWorkerSpawnHook func(argv *[]string, env *[]string)
 // material, no GANTRY_* knobs (those travel in the bootstrap config).
 func workerEnv() []string {
 	out := make([]string, 0, 3)
-	for _, key := range []string{"PATH", "TMPDIR", "HOME"} {
+	// GANTRY_DEBUG_RTC is a debug pass-through (worker-side postmortem
+	// logging); it carries no secret material.
+	for _, key := range []string{"PATH", "TMPDIR", "HOME", "GANTRY_DEBUG_RTC"} {
 		if v, ok := os.LookupEnv(key); ok {
 			out = append(out, key+"="+v)
 		}
