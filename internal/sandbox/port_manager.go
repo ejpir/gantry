@@ -11,17 +11,20 @@ import (
 )
 
 // PortManager owns host→guest port publishing for one running sandbox:
-// live listeners in the embedded netstack plus the desired set persisted
+// live listeners in the network backend plus the desired set persisted
 // in sandbox.json (replayed at every boot as static forwards). Mutations
 // go live first, persist second, and roll the live side back if the write
 // fails — a crashed publish never leaves a phantom listener behind.
+//
+// The backend is the embedded netstack in-process (monolithic mode) or
+// the split network worker over RPC; the transaction shape is identical.
 //
 // Persistence goes through the broker-owned ConfigStore, so a port publish
 // can never clobber a concurrent (or earlier) share mutation: both managers
 // always mutate the latest configuration, under one lock.
 type PortManager struct {
-	store *ConfigStore
-	stack *vnet.Stack // nil: ports unavailable (gvproxy backend or -net=false)
+	store   *ConfigStore
+	backend NetworkBackend // nil: ports unavailable (gvproxy backend or -net=false)
 
 	mu sync.Mutex
 }
@@ -33,10 +36,11 @@ type PortEntry struct {
 	State   string      `json:"state"` // "bound" | "saved"
 }
 
-// NewPortManager binds the manager to the sandbox's netstack; stack may be
-// nil (ports then report unavailable, listing still shows the saved set).
-func NewPortManager(store *ConfigStore, stack *vnet.Stack) *PortManager {
-	return &PortManager{store: store, stack: stack}
+// NewPortManager binds the manager to the sandbox's network backend;
+// backend may be nil (ports then report unavailable, listing still shows
+// the saved set).
+func NewPortManager(store *ConfigStore, backend NetworkBackend) *PortManager {
+	return &PortManager{store: store, backend: backend}
 }
 
 var errPortsUnavailable = fmt.Errorf("port publishing requires the embedded netstack and networking enabled")
@@ -46,7 +50,7 @@ var errPortsUnavailable = fmt.Errorf("port publishing requires the embedded nets
 func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.stack == nil {
+	if m.backend == nil {
 		return PortEntry{}, errPortsUnavailable
 	}
 	normalized, err := NormalizePortSpec(spec)
@@ -54,7 +58,7 @@ func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 		return PortEntry{}, err
 	}
 	mapping, _ := ParsePortSpec(normalized)
-	live, err := m.stack.Forwards()
+	live, err := m.backend.Forwards()
 	if err != nil {
 		return PortEntry{}, err
 	}
@@ -63,13 +67,13 @@ func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 			return PortEntry{}, fmt.Errorf("%s is already published", mapping.Short())
 		}
 	}
-	if err := m.stack.Publish(mapping.Proto, mapping.Local(), mapping.Remote()); err != nil {
+	if err := m.backend.Publish(mapping.Proto, mapping.Local(), mapping.Remote()); err != nil {
 		return PortEntry{}, err
 	}
 	if persistent {
 		ports := append(append([]string(nil), m.store.Snapshot().Ports...), normalized)
 		if err := m.persistLocked(ports); err != nil {
-			_ = m.stack.Unpublish(mapping.Proto, mapping.Local())
+			_ = m.backend.Unpublish(mapping.Proto, mapping.Local())
 			return PortEntry{}, err
 		}
 	}
@@ -82,7 +86,7 @@ func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.stack == nil {
+	if m.backend == nil {
 		return PortEntry{}, errPortsUnavailable
 	}
 	mapping, err := ParsePortSpec(spec)
@@ -93,7 +97,7 @@ func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error)
 		return PortEntry{}, fmt.Errorf("unpublish needs the concrete host port (see: gantry ports ls)")
 	}
 	bound := false
-	live, err := m.stack.Forwards()
+	live, err := m.backend.Forwards()
 	if err != nil {
 		return PortEntry{}, err
 	}
@@ -103,7 +107,7 @@ func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error)
 		}
 	}
 	if bound {
-		if err := m.stack.Unpublish(mapping.Proto, mapping.Local()); err != nil {
+		if err := m.backend.Unpublish(mapping.Proto, mapping.Local()); err != nil {
 			return PortEntry{}, err
 		}
 	}
@@ -116,7 +120,7 @@ func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error)
 		}
 		if err := m.persistLocked(filtered); err != nil {
 			if bound { // restore the listener we just dropped
-				_ = m.stack.Publish(mapping.Proto, mapping.Local(), mapping.Remote())
+				_ = m.backend.Publish(mapping.Proto, mapping.Local(), mapping.Remote())
 			}
 			return PortEntry{}, err
 		}
@@ -132,8 +136,8 @@ func (m *PortManager) List() ([]PortEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	bound := map[string]PortEntry{}
-	if m.stack != nil {
-		live, err := m.stack.Forwards()
+	if m.backend != nil {
+		live, err := m.backend.Forwards()
 		if err != nil {
 			return nil, err
 		}

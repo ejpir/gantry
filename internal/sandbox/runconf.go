@@ -396,11 +396,15 @@ func (c RunConfig) ParsedShares() ([]vmm.Share, error) {
 
 // Network is a resolved network backend plus egress policy for one run.
 type Network struct {
-	Sock        string // external gvproxy endpoint ("" when embedded)
-	Conn        net.Conn
-	Stack       *vnet.Stack // nil for the gvproxy backend
-	Policy      *netpol.Policy
-	Traffic     *netpol.TrafficRecorder
+	Sock    string // external gvproxy endpoint ("" when embedded)
+	Conn    net.Conn
+	Stack   *vnet.Stack // nil for the gvproxy backend
+	Policy  *netpol.Policy
+	Traffic *netpol.TrafficRecorder
+	// Backend is the control surface for live policy/port mutations:
+	// the embedded stack in-process (monolithic) or the split network
+	// worker over RPC. Nil for the gvproxy backend and -net=false.
+	Backend     NetworkBackend
 	close       func()
 	backendOnce sync.Once
 	trafficOnce sync.Once
@@ -490,6 +494,7 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	}
 	n.Conn = conn
 	n.Stack = stack
+	n.Backend = newLocalBackend(stack, policy)
 	n.close = func() { _ = conn.Close(); stack.Close() }
 	n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 	return n, nil

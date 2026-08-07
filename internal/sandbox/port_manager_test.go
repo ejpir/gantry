@@ -19,7 +19,7 @@ func newTestPortManager(t *testing.T) (*PortManager, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(stack.Close)
-	return NewPortManager(store, stack), dir
+	return NewPortManager(store, newLocalBackend(stack, nil)), dir
 }
 
 func readSavedPorts(t *testing.T, dir string) []string {
@@ -134,7 +134,7 @@ func TestConfigStoreShareAndPortMutationsCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(stack.Close)
-	m := NewPortManager(store, stack)
+	m := NewPortManager(store, newLocalBackend(stack, nil))
 	shareManager, _, err := NewShareManager(dir, store)
 	if err != nil {
 		t.Fatal(err)

@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/ejpir/gantry/internal/netpol"
-	"github.com/ejpir/gantry/internal/vnet"
 )
 
 type NetworkPolicyEntry struct {
@@ -25,14 +24,18 @@ func makeNetworkPolicyEntry(path string, allowLocal bool, policy *netpol.Policy,
 }
 
 type NetworkPolicyManager struct {
-	store *ConfigStore
-	live  *netpol.Policy
-	stack *vnet.Stack
-	mu    sync.Mutex
+	store   *ConfigStore
+	backend NetworkBackend
+	// current is the last successfully applied policy: what Get reports
+	// for a running sandbox and what a persistence failure rolls the live
+	// state back to. In split mode it is the supervisor's copy of the
+	// policy the network worker enforces.
+	current *netpol.Policy
+	mu      sync.Mutex
 }
 
-func NewNetworkPolicyManager(store *ConfigStore, live *netpol.Policy, stack *vnet.Stack) *NetworkPolicyManager {
-	return &NetworkPolicyManager{store: store, live: live, stack: stack}
+func NewNetworkPolicyManager(store *ConfigStore, backend NetworkBackend, current *netpol.Policy) *NetworkPolicyManager {
+	return &NetworkPolicyManager{store: store, backend: backend, current: current}
 }
 
 func resolveNetworkPolicy(path string, allowLocal bool) (string, *netpol.Policy, error) {
@@ -63,22 +66,25 @@ func resolveNetworkPolicy(path string, allowLocal bool) (string, *netpol.Policy,
 func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.stack == nil || m.live == nil {
+	if m.backend == nil || m.current == nil {
 		return NetworkPolicyEntry{}, fmt.Errorf("live network policy updates require a running embedded netstack")
 	}
 	path, policy, err := resolveNetworkPolicy(path, allowLocal)
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
-	// Apply live FIRST and persist only on success: if Replace ever gains
-	// a real failure mode, the on-disk config must not claim a policy the
-	// running sandbox never enforced.
-	if err := m.live.Replace(policy); err != nil {
+	// Apply live FIRST and persist only on success, rolling the live
+	// state back if persistence fails: the on-disk config must never
+	// claim a policy the running sandbox does not enforce, and the
+	// running sandbox must not enforce a policy the config rejects.
+	if err := m.backend.SetPolicy(policy); err != nil {
 		return NetworkPolicyEntry{}, err
 	}
 	if err := m.store.SetNetworkPolicy(path, allowLocal); err != nil {
+		_ = m.backend.SetPolicy(m.current)
 		return NetworkPolicyEntry{}, err
 	}
+	m.current = policy
 	return makeNetworkPolicyEntry(path, allowLocal, policy, "active"), nil
 }
 
@@ -86,11 +92,11 @@ func (m *NetworkPolicyManager) Get() (NetworkPolicyEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cfg := m.store.Snapshot()
-	if m.stack != nil && m.live != nil {
+	if m.backend != nil && m.current != nil {
 		// The source file may be moved after boot. The running policy is already
 		// parsed and remains authoritative, so showing it must not depend on the
 		// file still being present.
-		return makeNetworkPolicyEntry(cfg.NetPol, cfg.AllowLN, m.live, "active"), nil
+		return makeNetworkPolicyEntry(cfg.NetPol, cfg.AllowLN, m.current, "active"), nil
 	}
 	_, policy, err := resolveNetworkPolicy(cfg.NetPol, cfg.AllowLN)
 	if err != nil {
