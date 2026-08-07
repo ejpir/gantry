@@ -143,7 +143,7 @@ func TestHelperFailureDegradesToAnonymous(t *testing.T) {
 func TestSecretRedaction(t *testing.T) {
 	s := Secret("hunter2")
 	for _, got := range []string{
-		fmt.Sprint(s), fmt.Sprintf("%s", s), fmt.Sprintf("%v", s), fmt.Sprintf("%#v", s),
+		fmt.Sprint(s), s.String(), fmt.Sprintf("%v", s), fmt.Sprintf("%#v", s),
 		fmt.Sprintf("cred=%v", struct{ S Secret }{s}),
 	} {
 		if strings.Contains(got, "hunter2") {

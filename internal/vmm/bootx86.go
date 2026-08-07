@@ -202,7 +202,6 @@ func writeMPS(ram []byte, ncpus int) {
 	e[5] = 0
 	e[6] = 0 // dest: LAPIC id 0 (BSP)
 	e[7] = 1 // dest LINT pin 1
-	p += 8
 
 	// header checksum
 	var sum byte

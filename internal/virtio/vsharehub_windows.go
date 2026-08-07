@@ -83,7 +83,7 @@ func (n *winShareNode) relPath() string {
 	if root == nil || root == n {
 		return ""
 	}
-	return n.Inode.Path(&root.Inode)
+	return n.Path(&root.Inode)
 }
 
 func (n *winShareNode) child() *winShareNode {

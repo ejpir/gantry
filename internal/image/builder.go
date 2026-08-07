@@ -90,7 +90,7 @@ func verify(finalPath, tmpPath string, layers []*os.File, idx *mergeIndex) error
 	var sample string
 	for _, name := range idx.order {
 		l, ok := idx.entries[name]
-		if ok && (l.hdr.Typeflag == tar.TypeReg || l.hdr.Typeflag == tar.TypeRegA) && l.size > 0 {
+		if ok && l.hdr.Typeflag == tar.TypeReg && l.size > 0 {
 			sample = name
 			break
 		}

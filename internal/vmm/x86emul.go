@@ -31,7 +31,7 @@ type x86MMIOOp struct {
 func decodeX86MMIO(ins []byte) (x86MMIOOp, error) {
 	op := x86MMIOOp{reg: -1}
 	i := 0
-	var rex, rexW, rexR, rexB byte
+	var rex, rexW, rexR byte
 	osz16 := false
 	// prefixes
 	for i < len(ins) {
@@ -41,7 +41,7 @@ func decodeX86MMIO(ins []byte) (x86MMIOOp, error) {
 			osz16 = true
 		case b >= 0x40 && b <= 0x4f:
 			rex = b
-			rexW, rexR, rexB = (b>>3)&1, (b>>2)&1, b&1
+			rexW, rexR = (b>>3)&1, (b>>2)&1
 		case b == 0xf0 || b == 0xf2 || b == 0xf3 ||
 			b == 0x26 || b == 0x2e || b == 0x36 || b == 0x3e || b == 0x64 || b == 0x65:
 			// lock/rep/segment overrides: irrelevant for MMIO
@@ -166,7 +166,7 @@ opcode:
 		op.imm = v
 		i += n
 	} else {
-		op.reg = modrmReg | int(rexB&0) // src/dest GPR (REX.R already folded)
+		op.reg = modrmReg // src/dest GPR (REX.R already folded)
 	}
 	op.length = i
 	return op, nil

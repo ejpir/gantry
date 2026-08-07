@@ -81,16 +81,6 @@ func ParseRef(s string) (Ref, error) {
 	return r, nil
 }
 
-// registryKey normalizes a registry name for credential lookup: all
-// docker.io spellings (and its legacy index URL) map to one key.
-func registryKey(reg string) string {
-	switch reg {
-	case "docker.io", "index.docker.io", DockerHub, "https://index.docker.io/v1/", "http://index.docker.io/v1/":
-		return DockerHub
-	}
-	return strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(reg, "https://"), "http://"), "/")
-}
-
 // isLoopbackRegistry reports whether the registry is a loopback address —
 // the one case where plain HTTP (and credentials over it) is acceptable,
 // matching Docker's own insecure exception.
