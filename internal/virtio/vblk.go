@@ -47,28 +47,38 @@ func (b *Blk) logf(format string, a ...any) {
 // the silent corruption behind "stale file handle" overlay failures.
 // The lock turns that into an immediate, honest error.
 func NewBlk(path string, writable bool) (*Blk, error) {
-	b := &Blk{debugLog: gutil.EnvOr("GANTRY_DEBUG_BLK", "MINIVM_DEBUG_BLK") != ""}
-	if writable {
-		lock, err := gutil.TryLockFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("%s is already attached to another gantry VM (a writable disk cannot be shared)", path)
-		}
-		b.lock = lock
-	}
 	flag := os.O_RDONLY
 	if writable {
 		flag = os.O_RDWR
 	}
 	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
-		if b.lock != nil {
-			_ = b.lock.Close()
-		}
 		return nil, err
+	}
+	b, err := NewBlkFile(f, writable)
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return b, nil
+}
+
+// NewBlkFile attaches an already-open disk image. The descriptor (not the
+// path) is authoritative: a VMM worker receives it by inheritance and can
+// never be tricked into opening a swapped path. Writable images are
+// flock'd on the descriptor itself — the lock rides the open file
+// description across fork/exec, so the handoff stays single-writer.
+func NewBlkFile(f *os.File, writable bool) (*Blk, error) {
+	b := &Blk{debugLog: gutil.EnvOr("GANTRY_DEBUG_BLK", "MINIVM_DEBUG_BLK") != ""}
+	if writable {
+		lock, err := gutil.TryLockFD(f)
+		if err != nil {
+			return nil, fmt.Errorf("%s is already attached to another gantry VM (a writable disk cannot be shared)", f.Name())
+		}
+		b.lock = lock
 	}
 	fi, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
 		if b.lock != nil {
 			_ = b.lock.Close()
 		}
