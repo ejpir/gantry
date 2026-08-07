@@ -47,4 +47,5 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-          govulncheck ./...
+          # setup-go puts the toolchain on PATH but not GOPATH/bin
+          "$(go env GOPATH)/bin/govulncheck" ./...
