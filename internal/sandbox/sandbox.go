@@ -2,7 +2,6 @@ package sandbox
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,7 +13,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -465,6 +463,7 @@ func CmdDaemon(name string) int {
 		ports:      portManager,
 		netPolicy:  NewNetworkPolicyManager(configStore, nw.Policy, nw.Stack),
 		sessions:   map[string]chan struct{}{},
+		sessionCtl: map[string]net.Conn{},
 	}
 	go br.serve(ln)
 
@@ -495,8 +494,13 @@ func CmdDaemon(name string) int {
 }
 
 // broker accepts ctl connections. Protocol: one JSON request line, then
-// (for "session") one JSON response line and the socket turns into raw
-// bidirectional stdio until the task exits.
+// one JSON response line. For "session" the socket then turns into a raw
+// bidirectional stdio pipe until the task exits — a PURE pipe: the exit
+// status travels out of band on the session-control channel (op
+// "sessionctl", parked by the client before the session starts) as a
+// versioned JSON event, so guest output can contain any byte sequence
+// without colliding with the protocol, and a missing event unambiguously
+// means the broker died (never exit 0).
 type broker struct {
 	cfg        RunConfig
 	dir        string
@@ -508,8 +512,9 @@ type broker struct {
 	netPolicy  *NetworkPolicyManager
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 
-	mu       sync.Mutex
-	sessions map[string]chan struct{}
+	mu         sync.Mutex
+	sessions   map[string]chan struct{}
+	sessionCtl map[string]net.Conn // parked control channels, session id -> conn
 }
 
 // secretsHandshakeJSON renders the CLI→daemon handshake: one line of
@@ -554,8 +559,9 @@ func readSecretsHandshake(r *os.File) map[string]secret.Value {
 }
 
 type brokerRequest struct {
-	Op        string                      `json:"op"` // "session" | "kill" | "share.*" | "port.*" | "resources.set"
+	Op        string                      `json:"op"` // "session" | "sessionctl" | "kill" | "share.*" | "port.*" | "resources.set"
 	ID        string                      `json:"id"`
+	V         int                         `json:"v,omitempty"` // sessionctl: sessionProtocolVersion
 	Args      []string                    `json:"args,omitempty"`
 	Cols      uint32                      `json:"cols,omitempty"`
 	Rows      uint32                      `json:"rows,omitempty"`
@@ -660,6 +666,8 @@ func (br *broker) handle(c net.Conn) {
 		br.networkPolicyControl(c, req)
 	case "session":
 		br.session(c, req)
+	case "sessionctl":
+		br.sessionctl(c, req)
 	default:
 		_, _ = fmt.Fprintln(c, `{"error":"unknown op"}`)
 	}
@@ -794,6 +802,63 @@ func (br *broker) portControl(c net.Conn, req brokerRequest) {
 	respond(brokerPortResponse{OK: true, Entry: &entry})
 }
 
+// sessionProtocolVersion versions the session-control channel: the
+// "sessionctl" request carries it and every sessionExitEvent echoes it,
+// so agent integrations have a stable, checkable contract. Bump on any
+// wire change.
+const sessionProtocolVersion = 1
+
+// sessionExitEvent is the single message a session-control channel
+// carries after the handshake: the task's exit status, delivered out of
+// band (never inline in the stdio stream).
+type sessionExitEvent struct {
+	V     int    `json:"v"`
+	Exit  int    `json:"exit"`
+	Error string `json:"error,omitempty"`
+}
+
+// sessionctl parks c as the control channel for the session with the
+// same id until that session ends (or the client goes away). The client
+// parks it BEFORE starting the session so an instant command can never
+// lose its exit event. The handler blocks for the channel's lifetime
+// because handle()'s deferred Close is the conn's owner.
+func (br *broker) sessionctl(c net.Conn, req brokerRequest) {
+	if req.V != sessionProtocolVersion {
+		_, _ = fmt.Fprintf(c, "{\"error\":\"unsupported session protocol version %d (want %d)\"}\n", req.V, sessionProtocolVersion)
+		return
+	}
+	br.mu.Lock()
+	if _, dup := br.sessionCtl[req.ID]; dup {
+		br.mu.Unlock()
+		_, _ = fmt.Fprintln(c, `{"error":"duplicate session control id"}`)
+		return
+	}
+	br.sessionCtl[req.ID] = c
+	br.mu.Unlock()
+	if _, err := fmt.Fprintln(c, `{"ok":true}`); err != nil {
+		br.mu.Lock()
+		delete(br.sessionCtl, req.ID)
+		br.mu.Unlock()
+		return
+	}
+	// A control channel carries no client bytes after the handshake, so a
+	// completed read means the client went away. If the session op has
+	// already taken ownership (entry deleted), cleanup is its job — this
+	// goroutine then only unwinds the handler.
+	done := make(chan struct{})
+	go func() {
+		var b [1]byte
+		_, _ = c.Read(b[:])
+		br.mu.Lock()
+		if br.sessionCtl[req.ID] == c {
+			delete(br.sessionCtl, req.ID)
+		}
+		br.mu.Unlock()
+		close(done)
+	}()
+	<-done
+}
+
 func (br *broker) session(c net.Conn, req brokerRequest) {
 	killCh := make(chan struct{})
 	br.mu.Lock()
@@ -802,8 +867,19 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		_, _ = fmt.Fprintln(c, `{"error":"duplicate session id"}`)
 		return
 	}
+	// The control channel must already be parked: the exit event is
+	// written there before the data conn closes, so a fast command can
+	// never lose it. Take ownership (the parked handler unwinds).
+	ctl, ok := br.sessionCtl[req.ID]
+	if !ok {
+		br.mu.Unlock()
+		_, _ = fmt.Fprintln(c, `{"error":"no session control channel: dial op sessionctl with v=1 first"}`)
+		return
+	}
+	delete(br.sessionCtl, req.ID)
 	br.sessions[req.ID] = killCh
 	br.mu.Unlock()
+	defer func() { _ = ctl.Close() }()
 	defer func() {
 		br.mu.Lock()
 		delete(br.sessions, req.ID)
@@ -847,10 +923,17 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		dumpTailTo(c, filepath.Join(br.dir, "daemon.log"))
 		dumpTailTo(c, filepath.Join(br.dir, "console.log"))
 	}
-	// trailer for the attach client (cmdSandboxExec): the stream is raw at
-	// this point, so frame the exit status between NULs — impossible to
-	// confuse with terminal output.
-	_, _ = fmt.Fprintf(c, "\x00GANTRY-EXIT %d\x00", status)
+	// Exit event on the control channel, BEFORE the data conn closes
+	// (handle()'s deferred Close runs when this handler returns): the
+	// attach client drains the full data stream, sees EOF, and the event
+	// is already queued for it. The deadline only bounds a wedged client
+	// that stopped reading its control channel.
+	ev := sessionExitEvent{V: sessionProtocolVersion, Exit: status}
+	if err != nil {
+		ev.Error = err.Error()
+	}
+	_ = ctl.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_ = json.NewEncoder(ctl).Encode(&ev)
 }
 
 // ---------------- gantry exec <name> [-- CMD] -------------------------------
@@ -872,6 +955,40 @@ func CmdSandboxExec(name string, argv []string) int {
 		return 2
 	}
 
+	id := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
+
+	// Control channel FIRST (the broker requires it parked before the
+	// session starts, so an instant command can never lose its exit
+	// event). The exit status arrives here as a versioned JSON event,
+	// leaving the session connection a pure byte pipe: guest output may
+	// contain any byte sequence (NULs, fake markers) without colliding
+	// with the protocol, and a missing event unambiguously means an
+	// abnormal end — never a silent exit 0.
+	ctl, err := net.Dial("unix", filepath.Join(dir, "ctl.sock"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gantry exec: broker: %v\n", err)
+		return 1
+	}
+	defer func() { _ = ctl.Close() }()
+	if err := json.NewEncoder(ctl).Encode(&brokerRequest{Op: "sessionctl", ID: id, V: sessionProtocolVersion}); err != nil {
+		fmt.Fprintf(os.Stderr, "gantry exec: %v\n", err)
+		return 1
+	}
+	ctlR := bufio.NewReader(ctl)
+	ctlLine, err := ctlR.ReadBytes('\n')
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gantry exec: broker control handshake: %v\n", err)
+		return 1
+	}
+	var ctlResp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(ctlLine, &ctlResp) != nil || !ctlResp.OK {
+		fmt.Fprintf(os.Stderr, "gantry exec: broker rejected control channel: %s\n", strings.TrimSpace(string(ctlLine)))
+		return 1
+	}
+
 	c, err := net.Dial("unix", filepath.Join(dir, "ctl.sock"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: broker: %v\n", err)
@@ -879,7 +996,6 @@ func CmdSandboxExec(name string, argv []string) int {
 	}
 	defer func() { _ = c.Close() }()
 
-	id := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()%1_000_000)
 	req := brokerRequest{Op: "session", ID: id, Args: args}
 	req.Terminal = term.IsTerminal(int(os.Stdin.Fd()))
 	if req.Terminal {
@@ -928,117 +1044,42 @@ func CmdSandboxExec(name string, argv []string) int {
 
 	done := make(chan struct{})
 	go func() { _, _ = io.Copy(c, os.Stdin) }()
-	statusCh := make(chan int, 1)
 	go func() {
 		// r (not c): the handshake line came through the bufio reader.
-		// Hold back a trailer's worth of tail bytes so the broker's
-		// "\x00GANTRY-EXIT <n>\x00" marker can be stripped and parsed.
-		statusCh <- copyStrippingExitTrailer(os.Stdout, r)
+		// The stream is a pure byte pipe now — no in-band status to strip.
+		_, _ = io.Copy(os.Stdout, r)
 		close(done)
 	}()
 	<-done
-	return <-statusCh
+	// The broker wrote the exit event before closing the data conn, so it
+	// is already queued in the normal case; the deadline only bounds a
+	// wedged broker. A missing or garbled event is an abnormal end.
+	_ = ctl.SetReadDeadline(time.Now().Add(30 * time.Second))
+	ev, err := readSessionExitEvent(ctlR)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\ngantry exec: session ended without an exit status (broker died?): %v\n", err)
+		return 255
+	}
+	return ev.Exit
 }
 
-// exitTrailer frames the task's exit status at the end of a broker session
-// stream (see broker.session). NULs can't appear in terminal output.
-const exitTrailerPrefix = "\x00GANTRY-EXIT "
-
-// maxExitStatusDigits bounds the decimal representation of a valid status:
-// 10 digits cover int32, 19 cover int64 (strconv.IntSize is 32 or 64).
-// Anything longer can never parse as a status, so parseExitTrailer rejects
-// it — which also bounds how much guest output the hold buffer below may
-// retain while waiting for the terminating NUL. A guest streaming
-// "\x00GANTRY-EXIT " + digits forever must not grow host memory without
-// limit (maxExitTrailerHold enforces the same ceiling at the buffer layer).
-const maxExitStatusDigits = 10 + (strconv.IntSize-32)*9/32
-
-// maxExitTrailerHold is the longest byte sequence that can still become a
-// valid trailer; copyStrippingExitTrailer flushes anything held beyond it.
-const maxExitTrailerHold = len(exitTrailerPrefix) + maxExitStatusDigits
-
-// copyStrippingExitTrailer copies r to w, stripping the broker's exit-status
-// trailer and returning the status (0 if absent). Bytes pass through
-// UNHELD until a NUL arrives — NULs never appear in terminal output, so
-// interactive per-character echo is not delayed (an earlier version held
-// back 32 bytes unconditionally and broke exactly that).
-func copyStrippingExitTrailer(w io.Writer, r io.Reader) int {
-	var hold []byte // bytes since an undecided NUL; empty in the common case
-	status := 0
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			data := append(hold, buf[:n]...)
-			hold = nil
-			if i := bytes.IndexByte(data, 0); i < 0 {
-				_, _ = w.Write(data)
-			} else {
-				_, _ = w.Write(data[:i])
-				hold = append([]byte(nil), data[i:]...)
-				if len(hold) > maxExitTrailerHold {
-					_, _ = w.Write(hold) // provably never becomes a trailer
-					hold = nil
-				} else if st, ok, undecided := parseExitTrailer(hold); !undecided {
-					if ok {
-						status = st
-					} else {
-						_, _ = w.Write(hold) // NUL turned out to be data
-					}
-					hold = nil
-				}
-			}
-		}
-		if err != nil {
-			break
-		}
+// readSessionExitEvent reads the single versioned JSON line the broker
+// sends on the session-control channel when a session ends. EOF, garbage,
+// or a version mismatch are all errors: callers must treat a missing
+// event as an abnormal end (never a silent exit 0).
+func readSessionExitEvent(r *bufio.Reader) (sessionExitEvent, error) {
+	line, err := r.ReadBytes('\n')
+	if err != nil {
+		return sessionExitEvent{}, err
 	}
-	// EOF: decide any remaining held bytes
-	if len(hold) > 0 {
-		if st, ok, _ := parseExitTrailer(hold); ok {
-			status = st
-		} else {
-			_, _ = w.Write(hold)
-		}
+	var ev sessionExitEvent
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return sessionExitEvent{}, fmt.Errorf("bad exit event: %w", err)
 	}
-	return status
-}
-
-// parseExitTrailer inspects bytes starting with NUL: it returns (status,
-// true, false) for a complete "\x00GANTRY-EXIT <n>\x00" trailer, (_, false,
-// true) while b could still be a prefix of one, and (_, false, false) once
-// b provably isn't one.
-func parseExitTrailer(b []byte) (int, bool, bool) {
-	magic := exitTrailerPrefix
-	if len(b) < len(magic) {
-		if string(b) == magic[:len(b)] {
-			return 0, false, true // could still become the trailer
-		}
-		return 0, false, false
+	if ev.V != sessionProtocolVersion {
+		return sessionExitEvent{}, fmt.Errorf("unsupported session protocol version %d", ev.V)
 	}
-	if string(b[:len(magic)]) != magic {
-		return 0, false, false
-	}
-	rest := b[len(magic):]
-	for i, c := range rest {
-		if c == 0 {
-			if i == 0 {
-				return 0, false, false // "GANTRY-EXIT \x00" is not a status
-			}
-			v, err := strconv.Atoi(string(rest[:i]))
-			if err != nil {
-				return 0, false, false
-			}
-			return v, true, false
-		}
-		if c < '0' || c > '9' {
-			return 0, false, false
-		}
-		if i+1 > maxExitStatusDigits {
-			return 0, false, false // too many digits to ever parse as a status
-		}
-	}
-	return 0, false, true // digits so far, terminator not seen yet
+	return ev, nil
 }
 
 // ---------------- gantry ls / stop / delete ---------------------------------
