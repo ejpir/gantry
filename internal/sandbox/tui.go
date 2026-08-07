@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"gantry/internal/netpol"
-	"gantry/internal/shares"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/vmm"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"

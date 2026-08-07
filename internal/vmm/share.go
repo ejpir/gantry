@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/shares"
 )
 
 // ErrGuestReset signals a guest-initiated reboot via the reset ports.

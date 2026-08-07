@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"gantry/internal/gutil"
-	"gantry/internal/image/auth"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/image/auth"
 )
 
 // registry.go — the read side of the OCI registry v2 protocol

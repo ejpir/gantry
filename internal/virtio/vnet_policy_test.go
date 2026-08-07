@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"gantry/internal/netpol"
-	"gantry/internal/vnet"
+	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/vnet"
 
 	"github.com/miekg/dns"
 )

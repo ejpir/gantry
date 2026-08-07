@@ -3,9 +3,9 @@ package vmm
 import (
 	"encoding/binary"
 	"fmt"
-	"gantry/internal/gutil"
-	"gantry/internal/netpol"
-	"gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/virtio"
 	"io"
 	"net"
 	"os"

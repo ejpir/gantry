@@ -3,9 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
-	"gantry/internal/gutil"
-	"gantry/internal/sandbox"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/vmm"
 	"io"
 	"net"
 	"os"

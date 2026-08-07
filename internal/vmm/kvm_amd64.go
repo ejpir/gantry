@@ -14,7 +14,7 @@ package vmm
 import (
 	"encoding/binary"
 	"fmt"
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 	"os"
 	"runtime"
 	"syscall"

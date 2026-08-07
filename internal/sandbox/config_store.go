@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"gantry/internal/shares"
-	"gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/vmm"
 )
 
 // ConfigStore is the single owner of sandbox.json for a running daemon.

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"gantry/internal/image/auth"
+	"github.com/ejpir/gantry/internal/image/auth"
 )
 
 // fakeRegistry implements the 401 → token → 200 dance.

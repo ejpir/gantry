@@ -14,9 +14,9 @@ import (
 	"strings"
 	"syscall"
 
-	"gantry/internal/gutil"
-	"gantry/internal/image"
-	"gantry/internal/image/auth"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/image/auth"
 
 	"golang.org/x/term"
 )

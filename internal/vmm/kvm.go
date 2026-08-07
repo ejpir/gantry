@@ -7,7 +7,7 @@ package vmm
 
 import (
 	"fmt"
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 	"syscall"
 	"unsafe"
 )

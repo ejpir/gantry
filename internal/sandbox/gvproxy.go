@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // StartGVProxy launches gvproxy with its API and vfkit unixgram sockets in

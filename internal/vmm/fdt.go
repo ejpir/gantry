@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/virtio"
 	"sort"
 )
 

@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"gantry/internal/image"
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/shares"
 
 	"github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/api/types"

@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"gantry/internal/gutil"
-	"gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/shares"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"

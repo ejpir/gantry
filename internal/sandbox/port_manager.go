@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"sync"
 
-	"gantry/internal/vnet"
+	"github.com/ejpir/gantry/internal/vnet"
 )
 
 // PortManager owns host→guest port publishing for one running sandbox:

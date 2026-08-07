@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/netpol"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"

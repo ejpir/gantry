@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/secret"
 )
 
 // docs/secrets.md rule 1: the value never lands on host disk. The only

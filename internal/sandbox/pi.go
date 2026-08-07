@@ -29,7 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // piSandboxName derives the per-project sandbox name from the directory

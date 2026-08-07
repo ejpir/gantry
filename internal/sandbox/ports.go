@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gantry/internal/vnet"
+	"github.com/ejpir/gantry/internal/vnet"
 )
 
 // PortMapping is one host→guest port forward. The zero HostPort means
