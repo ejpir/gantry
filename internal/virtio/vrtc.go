@@ -31,7 +31,13 @@ const (
 	RTCSENODEV     = 3
 	RTCSEINVAL     = 4
 
-	RTCClockUTC = 0
+	// RTCClockUTCSmeared is what the kernel's RTC class driver accepts:
+	// virtio_rtc_driver.c refuses to create the class device (and thus
+	// to run hctosys) for any clock that "may step on leap seconds",
+	// i.e. for plain VIRTIO_RTC_CLOCK_UTC. Host POSIX time never steps
+	// for leap seconds, so smeared UTC with an unspecified variant is
+	// the honest capability.
+	RTCClockUTCSmeared = 3 // VIRTIO_RTC_CLOCK_UTC_SMEARED
 
 	RTCRespLen = 16 // all responses we emit are header + 8 bytes
 )
@@ -108,9 +114,9 @@ func (v *RTC) dispatch(msgType uint16, req []byte, resp *[RTCRespLen]byte) {
 			_ = id
 		} else {
 			resp[0] = RTCSOK
-			resp[8] = RTCClockUTC // type
-			resp[9] = 0           // leap_second_smearing: UNSPECIFIED
-			resp[10] = 0          // flags: no alarm capability
+			resp[8] = RTCClockUTCSmeared // type: smeared UTC
+			resp[9] = 0                  // leap_second_smearing: UNSPECIFIED
+			resp[10] = 0                 // flags: no alarm capability
 		}
 	case RTCReqRead:
 		if clockID() != 0 {

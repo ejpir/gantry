@@ -389,9 +389,10 @@ func TestVirtioRTC(t *testing.T) {
 	if st != RTCSOK || binary.LittleEndian.Uint16(body) != 1 {
 		t.Fatalf("CFG: status=%d num_clocks=%d", st, binary.LittleEndian.Uint16(body))
 	}
-	// CLOCK_CAP clock 0 -> UTC
+	// CLOCK_CAP clock 0 -> smeared UTC (what the kernel's RTC class
+	// driver accepts for hctosys)
 	st, body = roundTrip([]byte{0x01, 0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
-	if st != RTCSOK || body[0] != 0 {
+	if st != RTCSOK || body[0] != 3 {
 		t.Fatalf("CLOCK_CAP: status=%d type=%d", st, body[0])
 	}
 	// READ clock 0 -> host time in ns
