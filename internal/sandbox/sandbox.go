@@ -449,6 +449,10 @@ func CmdDaemon(name string) int {
 		return 1
 	}
 	defer ln.Close()
+	// Belt and braces under any umask: the 0700 dir is the real barrier,
+	// but the socket inode should not be connectable on its own either
+	// (Linux requires write permission on it; macOS consults the dir).
+	_ = os.Chmod(filepath.Join(dir, "ctl.sock"), 0o600)
 
 	br := &broker{
 		cfg:        cfg,
@@ -605,6 +609,17 @@ func (br *broker) serve(ln net.Listener) {
 		c, err := ln.Accept()
 		if err != nil {
 			return
+		}
+		// ctl.sock has no request authentication: the 0700 sandbox dir
+		// plus this kernel-verified peer-UID check are the access
+		// control, and the trust domain is the user account (a same-UID
+		// process could present any credential we could issue — token or
+		// TLS would be ceremony, not security). If this socket is EVER
+		// relayed over TCP, real authentication (mTLS) is mandatory.
+		if !peerSameUser(c) {
+			fmt.Fprintln(os.Stderr, "daemon: rejected ctl.sock connection from a foreign UID")
+			c.Close()
+			continue
 		}
 		go br.handle(c)
 	}
