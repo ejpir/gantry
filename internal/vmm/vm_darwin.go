@@ -261,9 +261,9 @@ func (hvfPlatform) run(m *Machine) (err error) {
 				return
 			}
 			s := <-start // parked until PSCI CPU_ON
-			vc.setReg(hvRegX0, s.ctx)
-			vc.setReg(hvRegPC, s.entry)
-			vc.setReg(hvRegCPSR, pstateEL1hMask)
+			_ = vc.setReg(hvRegX0, s.ctx)
+			_ = vc.setReg(hvRegPC, s.entry)
+			_ = vc.setReg(hvRegCPSR, pstateEL1hMask)
 			if err := vc.runLoop(); err != nil && !isGuestHalt(err) {
 				fmt.Fprintf(os.Stderr, "\n[cpu%d] run loop: %v\n", vc.id, err)
 			}
@@ -285,9 +285,9 @@ func (hvfPlatform) run(m *Machine) (err error) {
 	// the kernel hung before console init.)
 
 	// boot protocol: x0 = FDT, PC = kernel entry, CPSR = EL1h+DAIF
-	vc0.setReg(hvRegX0, fdtAddr)
-	vc0.setReg(hvRegPC, m.entry)
-	vc0.setReg(hvRegCPSR, pstateEL1hMask)
+	_ = vc0.setReg(hvRegX0, fdtAddr)
+	_ = vc0.setReg(hvRegPC, m.entry)
+	_ = vc0.setReg(hvRegCPSR, pstateEL1hMask)
 
 	// All HVF calls are serialized on each vCPU's own run-loop thread:
 	// device models (possibly called from other goroutines, e.g. the stdin
@@ -395,7 +395,7 @@ func (vc *hvfVCPU) getReg(reg uint32) (uint64, error) {
 func (vc *hvfVCPU) advancePC() {
 	pc, err := vc.getReg(hvRegPC)
 	if err == nil {
-		vc.setReg(hvRegPC, pc+4)
+		_ = vc.setReg(hvRegPC, pc+4)
 	}
 }
 
@@ -504,7 +504,7 @@ func (vc *hvfVCPU) handleDataAbort(syn uint64) error {
 	} else {
 		val := uint64(vc.b.m.handleMMIO(false, phys, data[:], length))
 		if srt < 31 {
-			vc.setReg(hvRegX0+srt, val)
+			_ = vc.setReg(hvRegX0+srt, val)
 		}
 	}
 	// Device MMIO may have changed IRQ lines (e.g. UART FIFO drained by a
@@ -533,7 +533,7 @@ func (vc *hvfVCPU) handleSysreg(syn uint64) error {
 		map[bool]string{true: "MRS", false: "MSR"}[dir == 1],
 		op0, op1, crn, crm, op2, rt)
 	if dir == 1 && rt < 31 {
-		vc.setReg(hvRegX0+rt, 0)
+		_ = vc.setReg(hvRegX0+rt, 0)
 	}
 	vc.advancePC() // PC points at the trapping instruction; step over it
 	return nil
@@ -556,9 +556,9 @@ func (vc *hvfVCPU) handlePSCI() error {
 	)
 	switch uint32(fn) {
 	case psciVersion:
-		vc.setReg(hvRegX0, 0x00010002) // v0.2
+		_ = vc.setReg(hvRegX0, 0x00010002) // v0.2
 	case psciFeatures:
-		vc.setReg(hvRegX0, psciOK) // all our functions need no flags
+		_ = vc.setReg(hvRegX0, psciOK) // all our functions need no flags
 	case psciCPUOn64:
 		mpidr, _ := vc.getReg(hvRegX0 + 1)
 		entry, _ := vc.getReg(hvRegX0 + 2)
@@ -566,9 +566,9 @@ func (vc *hvfVCPU) handlePSCI() error {
 		targetID := int((mpidr >> 8) & 0xff) // Aff1, matches FDT cpu@N
 		if err := vc.b.startVCPU(targetID, entry, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[psci] CPU_ON cpu%d entry=%#x failed: %v\n", targetID, entry, err)
-			vc.setReg(hvRegX0, psciInvalid)
+			_ = vc.setReg(hvRegX0, psciInvalid)
 		} else {
-			vc.setReg(hvRegX0, psciOK)
+			_ = vc.setReg(hvRegX0, psciOK)
 		}
 	case psciCPUOff:
 		if vc.id != 0 {
@@ -586,7 +586,7 @@ func (vc *hvfVCPU) handlePSCI() error {
 		fmt.Println("guest powered off (PSCI SYSTEM_OFF)")
 		return errGuestHalt
 	default:
-		vc.setReg(hvRegX0, psciNotSupp)
+		_ = vc.setReg(hvRegX0, psciNotSupp)
 	}
 	// NOTE: do NOT advance PC here. For HVC/SVC exceptions the saved PC
 	// already points at the instruction AFTER the trap (unlike data-abort

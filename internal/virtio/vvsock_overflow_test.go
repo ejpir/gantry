@@ -33,7 +33,7 @@ type vsockFloodRig struct {
 func newVsockFloodRig(t *testing.T) *vsockFloodRig {
 	t.Helper()
 	hostSide, guestSide := net.Pipe()
-	t.Cleanup(func() { hostSide.Close() })
+	t.Cleanup(func() { _ = hostSide.Close() })
 	// guestSide intentionally unread: pumpOut blocks on its first write.
 
 	vs := NewVsock(3, t.TempDir())
@@ -60,7 +60,7 @@ func newVsockFloodRig(t *testing.T) *vsockFloodRig {
 		t.Fatal("no RESPONSE in rx used ring")
 	}
 	buf := make([]byte, vsockHdrLen)
-	m.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, buf)
+	_ = m.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, buf)
 	if resp := parseVsockHdr(buf); resp.op != vsockOpResponse {
 		t.Fatalf("expected RESPONSE, got %+v", resp)
 	}
@@ -101,7 +101,7 @@ func (r *vsockFloodRig) nextUsed(qn uint32, deadline time.Time) (usedElem, bool)
 func (r *vsockFloodRig) sendRaw(msg []byte, op uint16, payloadLen int) {
 	binary.LittleEndian.PutUint32(msg[24:], uint32(payloadLen))
 	msg[30], msg[31] = byte(op), 0
-	r.mem.writeAt(ramBase+testDataAddr, msg)
+	_ = r.mem.writeAt(ramBase+testDataAddr, msg)
 	putDesc(r.mem, 1, 0, ramBase+testDataAddr, uint32(len(msg)), 0, 0)
 	availPush(r.mem, 1, 0)
 	r.core.MMIOWrite(0x050, vsockQueueTx)
@@ -124,7 +124,7 @@ func (r *vsockFloodRig) pollRST() bool {
 			return false
 		}
 		buf := make([]byte, vsockHdrLen)
-		r.mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, buf)
+		_ = r.mem.readAt(ramBase+testDataAddr+uint64(e.id)*0x100, buf)
 		op := parseVsockHdr(buf).op
 		r.postRxBuf(uint16(e.id))
 		if op == vsockOpRST {

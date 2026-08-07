@@ -191,7 +191,7 @@ func (whpxPlatform) run(m *Machine) error {
 		return fmt.Errorf("%w (needs Windows 10 1809+ with the Hypervisor Platform enabled)", err)
 	}
 	b := &whpxBackend{h: h, m: m}
-	defer procDeletePartition.Call(uintptr(h))
+	defer func() { _, _, _ = procDeletePartition.Call(uintptr(h)) }()
 
 	prop := u64Value(uint64(m.vcpus))
 	if err := whvCall("WHvSetPartitionProperty(ProcessorCount)", procSetPartitionProp,

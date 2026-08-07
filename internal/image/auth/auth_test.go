@@ -26,16 +26,16 @@ func TestResolutionOrder(t *testing.T) {
 
 	// docker config: auths base64 for ghcr.io
 	dockerDir := filepath.Join(home, ".docker")
-	os.MkdirAll(dockerDir, 0o755)
+	_ = os.MkdirAll(dockerDir, 0o755)
 	b64 := base64.StdEncoding.EncodeToString([]byte("dockeruser:dockerpass"))
-	os.WriteFile(filepath.Join(dockerDir, "config.json"),
+	_ = os.WriteFile(filepath.Join(dockerDir, "config.json"),
 		[]byte(fmt.Sprintf(`{"auths":{"ghcr.io":{"auth":%q}}}`, b64)), 0o600)
 
 	// gantry credentials: quay.io
 	gd := filepath.Join(home, ".gantry")
-	os.MkdirAll(gd, 0o700)
+	_ = os.MkdirAll(gd, 0o700)
 	q64 := base64.StdEncoding.EncodeToString([]byte("gantryuser:gantrypass"))
-	os.WriteFile(filepath.Join(gd, "credentials.json"),
+	_ = os.WriteFile(filepath.Join(gd, "credentials.json"),
 		[]byte(fmt.Sprintf(`{"auths":{"quay.io":{"auth":%q}}}`, q64)), 0o600)
 
 	r := Resolve()
@@ -63,10 +63,10 @@ func TestResolutionOrder(t *testing.T) {
 func TestDockerIONormalization(t *testing.T) {
 	home := withHome(t)
 	dockerDir := filepath.Join(home, ".docker")
-	os.MkdirAll(dockerDir, 0o755)
+	_ = os.MkdirAll(dockerDir, 0o755)
 	b64 := base64.StdEncoding.EncodeToString([]byte("hubuser:hubpass"))
 	// docker writes the legacy index URL as the auths key
-	os.WriteFile(filepath.Join(dockerDir, "config.json"),
+	_ = os.WriteFile(filepath.Join(dockerDir, "config.json"),
 		[]byte(fmt.Sprintf(`{"auths":{"https://index.docker.io/v1/":{"auth":%q}}}`, b64)), 0o600)
 	r := Resolve()
 	for _, reg := range []string{"docker.io", "index.docker.io", "registry-1.docker.io"} {
@@ -99,8 +99,8 @@ store) exit 0 ;;
 erase) exit 0 ;;
 esac`)
 	dockerDir := filepath.Join(home, ".docker")
-	os.MkdirAll(dockerDir, 0o755)
-	os.WriteFile(filepath.Join(dockerDir, "config.json"),
+	_ = os.MkdirAll(dockerDir, 0o755)
+	_ = os.WriteFile(filepath.Join(dockerDir, "config.json"),
 		[]byte(`{"credHelpers":{"ghcr.io":"test"}}`), 0o600)
 
 	r := Resolve()
@@ -119,8 +119,8 @@ func TestHelperIdentityToken(t *testing.T) {
 get) cat > /dev/null; echo '{"ServerURL":"x","Username":"<token>","Secret":"id-token-123"}' ;;
 esac`)
 	dockerDir := filepath.Join(home, ".docker")
-	os.MkdirAll(dockerDir, 0o755)
-	os.WriteFile(filepath.Join(dockerDir, "config.json"), []byte(`{"credsStore":"test"}`), 0o600)
+	_ = os.MkdirAll(dockerDir, 0o755)
+	_ = os.WriteFile(filepath.Join(dockerDir, "config.json"), []byte(`{"credsStore":"test"}`), 0o600)
 	r := Resolve()
 	c := r.For("anything.example.com")
 	if c == nil || !c.IdentityToken || c.Secret.Raw() != "id-token-123" {
@@ -132,8 +132,8 @@ func TestHelperFailureDegradesToAnonymous(t *testing.T) {
 	home := withHome(t)
 	helperFixture(t, "broken", "exit 1")
 	dockerDir := filepath.Join(home, ".docker")
-	os.MkdirAll(dockerDir, 0o755)
-	os.WriteFile(filepath.Join(dockerDir, "config.json"), []byte(`{"credsStore":"broken"}`), 0o600)
+	_ = os.MkdirAll(dockerDir, 0o755)
+	_ = os.WriteFile(filepath.Join(dockerDir, "config.json"), []byte(`{"credsStore":"broken"}`), 0o600)
 	r := Resolve()
 	if c := r.For("ghcr.io"); c != nil {
 		t.Errorf("failing helper must degrade to anonymous, got %+v", c)

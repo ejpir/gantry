@@ -82,11 +82,11 @@ func TestLoadLayerSet(t *testing.T) {
 	dir := t.TempDir()
 	fsmeta := filepath.Join(dir, "fsmeta.erofs")
 	layer := filepath.Join(dir, "layer.erofs")
-	os.WriteFile(fsmeta, []byte("m"), 0o644)
-	os.WriteFile(layer, []byte("l"), 0o644)
+	_ = os.WriteFile(fsmeta, []byte("m"), 0o644)
+	_ = os.WriteFile(layer, []byte("l"), 0o644)
 	manifest := filepath.Join(dir, "ls.json")
 	b, _ := json.Marshal(map[string]any{"fsmeta": fsmeta, "layers": []string{layer}})
-	os.WriteFile(manifest, b, 0o644)
+	_ = os.WriteFile(manifest, b, 0o644)
 
 	ls, err := LoadLayerSet(manifest)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestLoadLayerSet(t *testing.T) {
 
 	// Missing layer file fails validation.
 	b, _ = json.Marshal(map[string]any{"fsmeta": fsmeta, "layers": []string{filepath.Join(dir, "gone.erofs")}})
-	os.WriteFile(manifest, b, 0o644)
+	_ = os.WriteFile(manifest, b, 0o644)
 	ls, err = LoadLayerSet(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestLoadLayerSet(t *testing.T) {
 
 	// Empty set fails to load.
 	b, _ = json.Marshal(map[string]any{"fsmeta": fsmeta})
-	os.WriteFile(manifest, b, 0o644)
+	_ = os.WriteFile(manifest, b, 0o644)
 	if _, err := LoadLayerSet(manifest); err == nil {
 		t.Fatal("want load error without layers")
 	}

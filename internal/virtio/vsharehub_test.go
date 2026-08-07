@@ -80,7 +80,7 @@ func TestShareHubMapsGuestOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	uid, gid := uint32(1000), uint32(1000)
 	prepared, _, err := hub.PrepareMapped("workspace", dir, false, &uid, &gid)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestShareHubStatxMapsGuestOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	uid, gid := uint32(1000), uint32(1001)
@@ -156,7 +156,7 @@ func TestShareHubDynamicNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	const (
@@ -223,7 +223,7 @@ func TestShareHubPinsRenamedHostRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	parent := t.TempDir()
@@ -283,7 +283,7 @@ func TestShareHubRenameWithinExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	dir := t.TempDir()
@@ -322,7 +322,7 @@ func TestShareHubCrossExportRenameRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	left, right := t.TempDir(), t.TempDir()
@@ -367,7 +367,7 @@ func TestShareHubDefaultDenyOps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	const (
@@ -459,7 +459,7 @@ func TestShareHubSwapRevokesReplacedExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	fuseInitHub(t, hub)
 
 	const estale = -116
@@ -543,7 +543,7 @@ func TestShareHubOwnerMappingRejectedWhereUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer hub.Close()
+	defer func() { _ = hub.Close() }()
 	uid, gid := uint32(1000), uint32(1000)
 	if _, _, err := hub.PrepareMapped("workspace", t.TempDir(), false, &uid, &gid); err == nil {
 		t.Fatal("want an explicit unsupported-platform error")

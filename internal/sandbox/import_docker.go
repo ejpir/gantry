@@ -229,7 +229,7 @@ func dockerFindContainer(sockPath, name string) (*dockerContainerSummary, error)
 	if err != nil {
 		return nil, fmt.Errorf("docker API at %s: %w", sockPath, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var list []dockerContainerSummary
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 		return nil, err
@@ -251,7 +251,7 @@ func dockerImageConfig(sockPath, containerID string) (*image.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var ins struct {
 		Config struct {
 			Env        []string `json:"Env"`

@@ -33,11 +33,11 @@ func setRawMode() {
 	saved = &t
 	raw := t
 	raw.Lflag &^= icanon | echo
-	syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tiocseta, uintptr(unsafe.Pointer(&raw)))
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tiocseta, uintptr(unsafe.Pointer(&raw)))
 }
 
 func restoreMode() {
 	if saved != nil {
-		syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tiocseta, uintptr(unsafe.Pointer(saved)))
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, os.Stdin.Fd(), tiocseta, uintptr(unsafe.Pointer(saved)))
 	}
 }

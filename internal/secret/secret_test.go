@@ -51,7 +51,7 @@ func TestParseForms(t *testing.T) {
 	}
 
 	f := filepath.Join(t.TempDir(), "tok")
-	os.WriteFile(f, []byte("file-value\n"), 0o600)
+	_ = os.WriteFile(f, []byte("file-value\n"), 0o600)
 	name, v, err = Parse("MY_TOKEN=@"+f, getenvFrom(env))
 	if err != nil || name != "MY_TOKEN" || v.Raw() != "file-value" {
 		t.Errorf("file form: %q %q %v", name, v.Raw(), err) // trailing \n trimmed
@@ -66,7 +66,7 @@ func TestParseForms(t *testing.T) {
 
 func TestParseFile(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "env")
-	os.WriteFile(f, []byte(`# comment
+	_ = os.WriteFile(f, []byte(`# comment
 GITHUB_TOKEN=ghp_x
 QUOTED="va lue"
 SINGLE='oth er'
@@ -82,7 +82,7 @@ EMPTY=
 		t.Errorf("parsed: %+v", m)
 	}
 
-	os.WriteFile(f, []byte("not-an-assignment\n"), 0o600)
+	_ = os.WriteFile(f, []byte("not-an-assignment\n"), 0o600)
 	if _, err := ParseFile(f); err == nil {
 		t.Error("malformed line must error")
 	}
@@ -90,7 +90,7 @@ EMPTY=
 
 func TestResolveAllOrderAndNames(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "env")
-	os.WriteFile(f, []byte("A=from-file\nB=from-file\n"), 0o600)
+	_ = os.WriteFile(f, []byte("A=from-file\nB=from-file\n"), 0o600)
 	values, names, err := ResolveAll(
 		[]string{"B", "C"}, []string{f},
 		getenvFrom(map[string]string{"B": "from-env", "C": "see"}))

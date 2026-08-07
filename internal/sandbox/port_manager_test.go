@@ -139,7 +139,7 @@ func TestConfigStoreShareAndPortMutationsCoexist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { shareManager.Close() })
+	t.Cleanup(func() { _ = shareManager.Close() })
 
 	if _, err := shareManager.Add("data="+shareDir, true, false); err != nil {
 		t.Fatal(err)
@@ -184,5 +184,5 @@ func TestNormalizePortSpecProbesRequestedBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assigned port not bindable on the wildcard address: %v", err)
 	}
-	ln.Close()
+	_ = ln.Close()
 }

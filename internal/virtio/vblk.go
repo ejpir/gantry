@@ -62,15 +62,15 @@ func NewBlk(path string, writable bool) (*Blk, error) {
 	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
 		if b.lock != nil {
-			b.lock.Close()
+			_ = b.lock.Close()
 		}
 		return nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		if b.lock != nil {
-			b.lock.Close()
+			_ = b.lock.Close()
 		}
 		return nil, err
 	}
@@ -96,7 +96,7 @@ func (b *Blk) Close() error {
 		}
 	}
 	if b.lock != nil {
-		b.lock.Close()
+		_ = b.lock.Close()
 	}
 	return err
 }

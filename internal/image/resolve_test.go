@@ -50,14 +50,14 @@ func ociFixture(t *testing.T, arch string, layerEntries []tarEntry, cfgJSON stri
 			t.Fatal(err)
 		}
 		if e.Body != "" {
-			tw.Write([]byte(e.Body))
+			_, _ = tw.Write([]byte(e.Body))
 		}
 	}
-	tw.Close()
+	_ = tw.Close()
 	var gz bytes.Buffer
 	gw := gzip.NewWriter(&gz)
-	gw.Write(tb.Bytes())
-	gw.Close()
+	_, _ = gw.Write(tb.Bytes())
+	_ = gw.Close()
 	layerDigest := putBlob(gz.Bytes())
 
 	if cfgJSON == "" {
@@ -115,7 +115,7 @@ func TestResolveOCILayoutEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	img, err := erofs.Open(f)
 	if err != nil {
 		t.Fatal(err)
@@ -148,19 +148,19 @@ func TestResolveDockerSave(t *testing.T) {
 		if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(b))}); err != nil {
 			t.Fatal(err)
 		}
-		tw.Write(b)
+		_, _ = tw.Write(b)
 	}
 	var lb bytes.Buffer
 	lw := tar.NewWriter(&lb)
-	lw.WriteHeader(&tar.Header{Name: "hello.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 5})
-	lw.Write([]byte("hello"))
-	lw.Close()
+	_ = lw.WriteHeader(&tar.Header{Name: "hello.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 5})
+	_, _ = lw.Write([]byte("hello"))
+	_ = lw.Close()
 	add("aaa111/layer.tar", lb.Bytes())
 	cfg := `{"architecture":"amd64","os":"linux","config":{"Cmd":["/bin/app"],"User":""}}`
 	add("ccc333.json", []byte(cfg))
 	man := `[{"Config":"ccc333.json","RepoTags":["app:latest"],"Layers":["aaa111/layer.tar"]}]`
 	add("manifest.json", []byte(man))
-	tw.Close()
+	_ = tw.Close()
 
 	savePath := filepath.Join(t.TempDir(), "save.tar")
 	if err := os.WriteFile(savePath, buf.Bytes(), 0o644); err != nil {
@@ -175,7 +175,7 @@ func TestResolveDockerSave(t *testing.T) {
 		t.Errorf("config = %+v", r.Config)
 	}
 	f, _ := os.Open(r.Path)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	img, err := erofs.Open(f)
 	if err != nil {
 		t.Fatal(err)
@@ -210,9 +210,9 @@ func TestResolveDockerSaveNamingVariants(t *testing.T) {
 	layerTar := func(content string) []byte {
 		var lb bytes.Buffer
 		lw := tar.NewWriter(&lb)
-		lw.WriteHeader(&tar.Header{Name: "hello.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))})
-		lw.Write([]byte(content))
-		lw.Close()
+		_ = lw.WriteHeader(&tar.Header{Name: "hello.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))})
+		_, _ = lw.Write([]byte(content))
+		_ = lw.Close()
 		return lb.Bytes()
 	}
 	cfg := `{"architecture":"amd64","os":"linux","config":{"Cmd":["/bin/app"]}}`
@@ -249,12 +249,12 @@ func TestResolveDockerSaveNamingVariants(t *testing.T) {
 				if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(b))}); err != nil {
 					t.Fatal(err)
 				}
-				tw.Write(b)
+				_, _ = tw.Write(b)
 			}
 			man := fmt.Sprintf(`[{"Config":%q,"RepoTags":["app:latest"],"Layers":[%q]}]`, tc.cfgName, tc.layer)
-			tw.WriteHeader(&tar.Header{Name: "manifest.json", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(man))})
-			tw.Write([]byte(man))
-			tw.Close()
+			_ = tw.WriteHeader(&tar.Header{Name: "manifest.json", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(man))})
+			_, _ = tw.Write([]byte(man))
+			_ = tw.Close()
 
 			savePath := filepath.Join(t.TempDir(), "save.tar")
 			if err := os.WriteFile(savePath, buf.Bytes(), 0o644); err != nil {
@@ -268,7 +268,7 @@ func TestResolveDockerSaveNamingVariants(t *testing.T) {
 				t.Errorf("config = %+v", r.Config)
 			}
 			f, _ := os.Open(r.Path)
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 			img, err := erofs.Open(f)
 			if err != nil {
 				t.Fatal(err)

@@ -90,7 +90,7 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 	_ = conn.SetWriteBuffer(7 << 20)
 	if vfkit {
 		if _, err := conn.Write([]byte("VFKT")); err != nil {
-			conn.Close()
+			_ = conn.Close()
 			_ = os.Remove(localPath)
 			return nil, fmt.Errorf("send VFKT handshake: %w", err)
 		}
@@ -351,7 +351,7 @@ func (v *Net) Close() error {
 		err = v.conn.Close()
 	}
 	if v.localPath != "" {
-		os.Remove(v.localPath)
+		_ = os.Remove(v.localPath)
 	}
 	return err
 }

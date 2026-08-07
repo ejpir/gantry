@@ -35,7 +35,7 @@ func (m *Machine) stdoutWrite(b byte) {
 	defer m.consoleMu.Unlock()
 	m.stdoutBuf = append(m.stdoutBuf, b)
 	if b == '\n' || len(m.stdoutBuf) >= 4096 {
-		m.consoleW.Write(m.stdoutBuf)
+		_, _ = m.consoleW.Write(m.stdoutBuf)
 		m.stdoutBuf = m.stdoutBuf[:0]
 	}
 }
@@ -44,7 +44,7 @@ func (m *Machine) stdoutFlush() {
 	m.consoleMu.Lock()
 	defer m.consoleMu.Unlock()
 	if len(m.stdoutBuf) > 0 {
-		m.consoleW.Write(m.stdoutBuf)
+		_, _ = m.consoleW.Write(m.stdoutBuf)
 		m.stdoutBuf = m.stdoutBuf[:0]
 	}
 }
@@ -57,7 +57,7 @@ func KernelArch(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var hdr [0x40]byte
 	if _, err := f.ReadAt(hdr[:], 0); err != nil {
 		return "", fmt.Errorf("%s: %w", path, err)

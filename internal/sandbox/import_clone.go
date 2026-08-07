@@ -25,14 +25,14 @@ func cloneImportedRWLayer(source, destination string) error {
 	}
 	tmpPath := tmp.Name()
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	// cloneFile expects to create its destination itself.
 	if err := os.Remove(tmpPath); err != nil {
 		return err
 	}
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	if err := cloneFile(source, tmpPath); err != nil {
 		return err
 	}

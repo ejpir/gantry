@@ -274,7 +274,7 @@ func (r *Resolver) Erase(registry string) error {
 		delete(r.gantryCfg.Auths, key)
 		b, err := json.MarshalIndent(r.gantryCfg, "", "  ")
 		if err == nil {
-			os.WriteFile(r.gantryPath, b, 0o600)
+			_ = os.WriteFile(r.gantryPath, b, 0o600)
 		}
 	}
 	return nil

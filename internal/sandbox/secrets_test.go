@@ -14,8 +14,8 @@ import (
 // nowhere in it while the NAME does.
 func TestSandboxJSONNamesOnly(t *testing.T) {
 	canary := "sk-canary-sandboxjson"
-	os.Setenv("GANTRY_TEST_CANARY", canary)
-	defer os.Unsetenv("GANTRY_TEST_CANARY")
+	_ = os.Setenv("GANTRY_TEST_CANARY", canary)
+	defer func() { _ = os.Unsetenv("GANTRY_TEST_CANARY") }()
 
 	cfg, _, _ := resolveSandbox(t, "-secret", "GANTRY_TEST_CANARY")
 	if len(cfg.SecretNames) != 1 || cfg.SecretNames[0] != "GANTRY_TEST_CANARY" {
@@ -45,18 +45,18 @@ func TestSecretLiteralRefused(t *testing.T) {
 // or empty stdin degrades to no secrets (manual `gantry daemon`).
 func TestSecretsHandshake(t *testing.T) {
 	r, w, _ := os.Pipe()
-	w.WriteString(secretsHandshakeJSON(map[string]secret.Value{
+	_, _ = w.WriteString(secretsHandshakeJSON(map[string]secret.Value{
 		"GITHUB_TOKEN": "ghp_canary",
 		"NPM":          "npm_canary",
 	}))
-	w.Close()
+	_ = w.Close()
 	got := readSecretsHandshake(r)
 	if len(got) != 2 || got["GITHUB_TOKEN"].Raw() != "ghp_canary" || got["NPM"].Raw() != "npm_canary" {
 		t.Errorf("round-trip = %v", got)
 	}
 
 	r2, w2, _ := os.Pipe()
-	w2.Close() // EOF, no handshake
+	_ = w2.Close() // EOF, no handshake
 	if got := readSecretsHandshake(r2); len(got) != 0 {
 		t.Errorf("EOF handshake = %v, want empty", got)
 	}

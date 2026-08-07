@@ -98,7 +98,7 @@ func ListenRPC(rpcSock string) (net.Listener, error) {
 // created before the VM started. The listener is closed after the connection
 // is accepted (or on error).
 func AcceptRPCListener(ln net.Listener, rpcSock string) (*ttrpc.Client, error) {
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	fmt.Printf("client: listening on %s — start the VM now\n", rpcSock)
 	conn, err := ln.Accept()
 	if err != nil {
@@ -126,7 +126,7 @@ func Info(rpcSock string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	resp, err := system.NewTTRPCSystemClient(client).Info(ctx, &emptypb.Empty{})
@@ -150,20 +150,20 @@ func startStream(streamSock, id string) (net.Conn, error) {
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(id)))
 	if _, err := c.Write(append(hdr[:], id...)); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, err
 	}
 	if _, err := io.ReadFull(c, hdr[:]); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, fmt.Errorf("stream %s: ack: %w", id, err)
 	}
 	ack := make([]byte, binary.BigEndian.Uint32(hdr[:]))
 	if _, err := io.ReadFull(c, ack); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, fmt.Errorf("stream %s: ack body: %w", id, err)
 	}
 	if string(ack) != id {
-		c.Close()
+		_ = c.Close()
 		return nil, fmt.Errorf("stream %s: rejected: %s", id, ack)
 	}
 	return c, nil
@@ -302,7 +302,7 @@ func unmountStack(ctx context.Context, mc mountapi.TTRPCMountService, bundlePath
 		bundlePath + "/mounts/1",
 		bundlePath + "/mounts/0",
 	} {
-		mc.Unmount(ctx, &mountapi.UnmountRequest{Target: target})
+		_, _ = mc.Unmount(ctx, &mountapi.UnmountRequest{Target: target})
 	}
 }
 
@@ -397,7 +397,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	}
 	logf := func(format string, a ...any) {
 		if !opts.Quiet {
-			fmt.Fprintf(stdout, "client: "+format+"\n", a...)
+			_, _ = fmt.Fprintf(stdout, "client: "+format+"\n", a...)
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -464,12 +464,12 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	if err != nil {
 		return fmt.Errorf("stdin stream: %w", err)
 	}
-	defer stdinStream.conn.Close()
+	defer func() { _ = stdinStream.conn.Close() }()
 	stdoutStream, err := open("stdout")
 	if err != nil {
 		return fmt.Errorf("stdout stream: %w", err)
 	}
-	defer stdoutStream.conn.Close()
+	defer func() { _ = stdoutStream.conn.Close() }()
 
 	// 3. create + start the task. Read-only mode mounts /dev/vdb (erofs)
 	// directly; RW stacks an ext4 rwlayer over it with overlayfs — the
@@ -505,7 +505,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		// works without restarting the sandbox.
 		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer dcancel()
-		tc.Delete(dctx, &task.DeleteRequest{ID: id})
+		_, _ = tc.Delete(dctx, &task.DeleteRequest{ID: id})
 		unmountStack(dctx, mountClient, bundlePath)
 		return fmt.Errorf("task Create: %w%s\n(see the VM console for vminitd logs)", err, rwlayerHint(err, opts.RW))
 	}
@@ -516,14 +516,14 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	logf("task started — shell is live (type 'exit' to leave)")
 
 	if opts.Terminal && opts.Cols > 0 && opts.Rows > 0 {
-		tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, Width: opts.Cols, Height: opts.Rows})
+		_, _ = tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, Width: opts.Cols, Height: opts.Rows})
 	}
 
 	// 4. relay IO
-	go io.Copy(stdinStream.conn, stdin)
+	go func() { _, _ = io.Copy(stdinStream.conn, stdin) }()
 	stdoutDone := make(chan struct{})
 	go func() {
-		io.Copy(stdout, stdoutStream.conn)
+		_, _ = io.Copy(stdout, stdoutStream.conn)
 		close(stdoutDone)
 	}()
 
@@ -532,7 +532,7 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	if opts.KillCh != nil {
 		go func() {
 			<-opts.KillCh
-			tc.Kill(context.Background(), &task.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true})
+			_, _ = tc.Kill(context.Background(), &task.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true})
 		}()
 	}
 
@@ -546,16 +546,16 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	case <-time.After(2 * time.Second):
 	}
 	if werr != nil {
-		fmt.Fprintf(stdout, "\nclient: Wait: %v\n", werr)
+		_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", werr)
 	} else {
-		fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", resp.ExitStatus)
+		_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", resp.ExitStatus)
 		if opts.ExitStatus != nil {
 			*opts.ExitStatus = int(resp.ExitStatus)
 		}
 	}
 	dctx, dcancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer dcancel()
-	tc.Delete(dctx, &task.DeleteRequest{ID: id})
+	_, _ = tc.Delete(dctx, &task.DeleteRequest{ID: id})
 	// Delete is asynchronous; the rootfs stack is only safe to unmount
 	// once the task is really gone, and it MUST be unmounted: erofs is
 	// single-instance, so a leftover mount makes the next Create fail
@@ -563,12 +563,12 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	awaitGone(dctx, tc, id)
 	if opts.ShareTransport != nil {
 		if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: opts.ShareTransport.VMPath}); err != nil {
-			fmt.Fprintf(stdout, "client: unmount share hub: %v\n", err)
+			_, _ = fmt.Fprintf(stdout, "client: unmount share hub: %v\n", err)
 		}
 	} else {
 		for i := len(shares) - 1; i >= 0; i-- {
 			if _, err := mountClient.Unmount(dctx, &mountapi.UnmountRequest{Target: shares[i].VMPath}); err != nil {
-				fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
+				_, _ = fmt.Fprintf(stdout, "client: unmount share %s: %v\n", shares[i].Tag, err)
 			}
 		}
 	}
@@ -596,7 +596,7 @@ func ensureSandboxContainer(client *ttrpc.Client, tc task.TTRPCTaskService, ctx 
 		// Stale task (e.g. its init was killed): remove and recreate.
 		logf("task %s exists but is %s; recreating the sandbox container", id, st.Status)
 		dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
-		tc.Delete(dctx, &task.DeleteRequest{ID: id})
+		_, _ = tc.Delete(dctx, &task.DeleteRequest{ID: id})
 		awaitGone(dctx, tc, id)
 		dcancel()
 	}
@@ -646,7 +646,7 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	defer cancel()
 	logf := func(format string, a ...any) {
 		if !opts.Quiet {
-			fmt.Fprintf(stdout, "client: "+format+"\n", a...)
+			_, _ = fmt.Fprintf(stdout, "client: "+format+"\n", a...)
 		}
 	}
 
@@ -660,12 +660,12 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	if err != nil {
 		return fmt.Errorf("stdin stream: %w", err)
 	}
-	defer stdinConn.Close()
+	defer func() { _ = stdinConn.Close() }()
 	stdoutConn, stdoutID, err := open("stdout")
 	if err != nil {
 		return fmt.Errorf("stdout stream: %w", err)
 	}
-	defer stdoutConn.Close()
+	defer func() { _ = stdoutConn.Close() }()
 	logf("exec: stdio streams open, sending Exec")
 
 	execID := fmt.Sprintf("%s-exec-%d", id, time.Now().UnixNano())
@@ -706,19 +706,19 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	logf("exec process started in container %s (type 'exit' to leave)", id)
 
 	if opts.Terminal && opts.Cols > 0 && opts.Rows > 0 {
-		tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, ExecID: execID, Width: opts.Cols, Height: opts.Rows})
+		_, _ = tc.ResizePty(ctx, &task.ResizePtyRequest{ID: id, ExecID: execID, Width: opts.Cols, Height: opts.Rows})
 	}
 
-	go io.Copy(stdinConn, stdin)
+	go func() { _, _ = io.Copy(stdinConn, stdin) }()
 	stdoutDone := make(chan struct{})
 	go func() {
-		io.Copy(stdout, stdoutConn)
+		_, _ = io.Copy(stdout, stdoutConn)
 		close(stdoutDone)
 	}()
 	if opts.KillCh != nil {
 		go func() {
 			<-opts.KillCh
-			tc.Kill(context.Background(), &task.KillRequest{ID: id, ExecID: execID, Signal: uint32(syscall.SIGKILL)})
+			_, _ = tc.Kill(context.Background(), &task.KillRequest{ID: id, ExecID: execID, Signal: uint32(syscall.SIGKILL)})
 		}()
 	}
 
@@ -728,9 +728,9 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 	case <-time.After(2 * time.Second):
 	}
 	if werr != nil {
-		fmt.Fprintf(stdout, "\nclient: Wait: %v\n", werr)
+		_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", werr)
 	} else {
-		fmt.Fprintf(stdout, "\nclient: exec exited, status %d\n", resp.ExitStatus)
+		_, _ = fmt.Fprintf(stdout, "\nclient: exec exited, status %d\n", resp.ExitStatus)
 		if opts.ExitStatus != nil {
 			*opts.ExitStatus = int(resp.ExitStatus)
 		}
@@ -783,14 +783,14 @@ func Shell(opts ShellOptions) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	sess := opts.sessionOptions(shares)
 	sess.Terminal = term.IsTerminal(int(os.Stdin.Fd()))
 	if sess.Terminal {
 		old, err := term.MakeRaw(int(os.Stdin.Fd()))
 		if err == nil {
-			defer term.Restore(int(os.Stdin.Fd()), old)
+			defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
 		}
 		if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
 			sess.Cols, sess.Rows = uint32(w), uint32(h)
@@ -838,7 +838,7 @@ func SyncGuest(client *ttrpc.Client, streamSock, containerID string, timeout tim
 	killCh := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
-		Session(client, SessionOptions{
+		_ = Session(client, SessionOptions{
 			StreamSock:       streamSock,
 			Args:             []string{"/bin/sync"},
 			ID:               containerID,

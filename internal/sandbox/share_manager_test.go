@@ -26,7 +26,7 @@ func newTestShareManager(t *testing.T, specs ...string) (*ShareManager, string) 
 	if manager.Hub() == nil {
 		t.Fatal("share hub unavailable")
 	}
-	t.Cleanup(func() { manager.Close() })
+	t.Cleanup(func() { _ = manager.Close() })
 	return manager, dir
 }
 
@@ -187,7 +187,7 @@ func TestShareManagerHostshareNormalizesToHubChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer manager.Close()
+	defer func() { _ = manager.Close() }()
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "/host/hostshare") {
 		t.Fatalf("warnings: %v", warnings)
 	}

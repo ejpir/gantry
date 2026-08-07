@@ -107,7 +107,7 @@ func openKVM() (*kvmFile, error) {
 	return k, nil
 }
 
-func (k *kvmFile) Close() { syscall.Close(int(k.fd)) }
+func (k *kvmFile) Close() { _ = syscall.Close(int(k.fd)) }
 
 func (k *kvmFile) getAPIVersion() (int, error) {
 	r, _, errno := syscall.Syscall(syscall.SYS_IOCTL, k.fd, kvmGetAPIVersion, 0)

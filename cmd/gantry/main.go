@@ -16,7 +16,7 @@ import (
 )
 
 func writeMainHelp(output io.Writer) {
-	fmt.Fprint(output, `gantry — a tiny microVM monitor (KVM on Linux arm64/x86-64, HVF on macOS).
+	_, _ = fmt.Fprint(output, `gantry — a tiny microVM monitor (KVM on Linux arm64/x86-64, HVF on macOS).
 
 usage:
   gantry run -kernel Image -initrd artifacts/initramfs.cpio.gz   # our guest init
@@ -146,7 +146,7 @@ func main() {
 		writeMainHelp(os.Stderr)
 		os.Exit(2)
 	}
-	run.Parse(os.Args[2:])
+	_ = run.Parse(os.Args[2:])
 	if *kernel == "" || (*initrd == "" && *rootfs == "") {
 		run.Usage()
 		os.Exit(2)

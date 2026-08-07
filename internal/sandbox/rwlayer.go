@@ -55,9 +55,9 @@ func defaultRWLayer(name, imageID string) (string, []string, error) {
 		// Layers hold persistent filesystem data: 0600/0700 now, but
 		// older gantry versions created them 0644/0755 — tighten on use
 		// (review finding 6). Best-effort.
-		os.Chmod(rwlayersRoot(), 0o700)
-		os.Chmod(p, 0o600)
-		os.Chmod(rwlayerPairingPath(p), 0o600)
+		_ = os.Chmod(rwlayersRoot(), 0o700)
+		_ = os.Chmod(p, 0o600)
+		_ = os.Chmod(rwlayerPairingPath(p), 0o600)
 		return p, nil, nil
 	}
 	if err := os.MkdirAll(rwlayersRoot(), 0o700); err != nil {
@@ -86,17 +86,17 @@ func createRWLayer(path string) ([]string, error) {
 			return nil, err
 		}
 		if err := f.Truncate(512 << 20); err != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, err
 		}
-		f.Close()
+		_ = f.Close()
 		if out, err := exec.Command(mkfs, "-q", "-F", "-L", "rwlayer", path).CombinedOutput(); err != nil {
-			os.Remove(path)
+			_ = os.Remove(path)
 			return nil, fmt.Errorf("mkfs.ext4: %v: %s", err, out)
 		}
 		for _, dir := range []string{"/upper", "/work"} {
 			if out, err := exec.Command(debugfs, "-w", "-R", "mkdir "+dir, path).CombinedOutput(); err != nil {
-				os.Remove(path)
+				_ = os.Remove(path)
 				return nil, fmt.Errorf("debugfs mkdir %s: %v: %s", dir, err, out)
 			}
 		}
@@ -116,7 +116,7 @@ func inflateBlankRWLayer(path string) error {
 	if err != nil {
 		return err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	out, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -129,23 +129,23 @@ func inflateBlankRWLayer(path string) error {
 			break
 		}
 		if err != nil && err != io.ErrUnexpectedEOF {
-			out.Close()
-			os.Remove(path)
+			_ = out.Close()
+			_ = os.Remove(path)
 			return err
 		}
 		chunk := buf[:n]
 		if !allZero(chunk) {
 			if _, werr := out.WriteAt(chunk, off); werr != nil {
-				out.Close()
-				os.Remove(path)
+				_ = out.Close()
+				_ = os.Remove(path)
 				return werr
 			}
 		}
 		off += int64(n)
 	}
 	if err := out.Truncate(off); err != nil {
-		out.Close()
-		os.Remove(path)
+		_ = out.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	return out.Close()
@@ -196,7 +196,7 @@ func writeRWLayerPairing(layer, imageID string) {
 	b, _ := json.Marshal(struct {
 		Image string `json:"image"`
 	}{imageID})
-	os.WriteFile(rwlayerPairingPath(layer), b, 0o600)
+	_ = os.WriteFile(rwlayerPairingPath(layer), b, 0o600)
 }
 
 // rwlayerHealthWarning reads the ext4 superblock and reports recorded
@@ -216,6 +216,6 @@ func rwlayerHealthWarning(path string) string {
 
 // forgetRWLayer removes a sandbox's default layer + sidecar (delete).
 func forgetRWLayer(name string) {
-	os.Remove(defaultRWLayerPath(name))
-	os.Remove(rwlayerPairingPath(defaultRWLayerPath(name)))
+	_ = os.Remove(defaultRWLayerPath(name))
+	_ = os.Remove(rwlayerPairingPath(defaultRWLayerPath(name)))
 }

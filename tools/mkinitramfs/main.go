@@ -107,13 +107,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz, _ := gzip.NewWriterLevel(f, gzip.BestCompression)
 	if _, err := io.Copy(gz, &b); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	gz.Close()
+	_ = gz.Close()
 	fi, _ := f.Stat()
 	fmt.Printf("wrote %s (%d bytes)\n", *out, fi.Size())
 }

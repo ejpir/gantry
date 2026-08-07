@@ -35,7 +35,7 @@ func ProbeExt4(path string) (*Ext4Info, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var sb [2048]byte
 	if _, err := f.ReadAt(sb[:], 1024); err != nil {
 		return nil, err

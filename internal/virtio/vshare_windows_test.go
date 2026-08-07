@@ -34,7 +34,7 @@ func TestWinExportFSNativePassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backend.Close()
+	defer func() { _ = backend.Close() }()
 
 	info, errno := backend.lookup("", "hello.txt")
 	if errno != 0 {
@@ -115,7 +115,7 @@ func TestWinExportFSRootRenameKeepsHandlePinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backend.Close()
+	defer func() { _ = backend.Close() }()
 	if err := os.Rename(original, moved); err != nil {
 		t.Fatal(err)
 	}

@@ -48,12 +48,12 @@ func TestSandboxPIDLifecycle(t *testing.T) {
 	if _, alive := sandboxPID(name); alive {
 		t.Fatal("phantom sandbox")
 	}
-	os.MkdirAll(sandboxDir(name), 0o755)
-	os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte("99999999"), 0o644)
+	_ = os.MkdirAll(sandboxDir(name), 0o755)
+	_ = os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte("99999999"), 0o644)
 	if _, alive := sandboxPID(name); alive {
 		t.Fatal("stale pid treated as alive")
 	}
-	os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	_ = os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
 	if _, alive := sandboxPID(name); !alive {
 		t.Fatal("current process not detected as alive")
 	}
@@ -62,12 +62,12 @@ func TestSandboxPIDLifecycle(t *testing.T) {
 func brokerPipe(t *testing.T, br *broker, req string) string {
 	t.Helper()
 	server, clientConn := net.Pipe()
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 	go br.handle(server)
 	if _, err := clientConn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
-	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	var resp map[string]any
 	if err := json.NewDecoder(clientConn).Decode(&resp); err != nil {
 		t.Fatal(err)

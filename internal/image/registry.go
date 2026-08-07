@@ -146,7 +146,7 @@ func (c *registryClient) do(ctx context.Context, method, rawurl, accept, scope s
 		return resp, nil
 	}
 	chal := resp.Header.Get("WWW-Authenticate")
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	// Registries answering Basic get Basic directly — HTTPS only, never
 	// over plaintext (loopback excepted, per isLoopbackRegistry).
 	if strings.HasPrefix(chal, "Basic") {
@@ -245,7 +245,7 @@ func (c *registryClient) acquireToken(ctx context.Context, challenge, wantScope 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("token request failed: %s", resp.Status)
 	}
@@ -294,7 +294,7 @@ func (c *registryClient) fetchManifest(ctx context.Context, repo, reference stri
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("manifest %s@%s: %s", repo, reference, resp.Status)
 	}
@@ -339,7 +339,7 @@ func (c *registryClient) headManifest(ctx context.Context, repo, reference strin
 	if err != nil {
 		return "", err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", &statusError{op: "HEAD", repo: repo, reference: reference, status: resp.Status, code: resp.StatusCode}
 	}
@@ -355,7 +355,7 @@ func (c *registryClient) fetchBlob(ctx context.Context, repo string, desc descri
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("blob %s: %s", desc.Digest, resp.Status)
 	}
@@ -372,14 +372,14 @@ func (c *registryClient) fetchBlob(ctx context.Context, repo string, desc descri
 	}
 	cerr := f.Close()
 	if err != nil {
-		os.Remove(dst)
+		_ = os.Remove(dst)
 		return 0, err
 	}
 	if cerr != nil {
 		return 0, cerr
 	}
 	if got := fmt.Sprintf("sha256:%x", h.Sum(nil)); got != desc.Digest {
-		os.Remove(dst)
+		_ = os.Remove(dst)
 		return 0, fmt.Errorf("blob %s: digest mismatch (got %s, size %d)", desc.Digest, got, n)
 	}
 	return n, nil
@@ -486,7 +486,7 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		if err != nil {
 			return fail(err)
 		}
-		os.Remove(blobPath)
+		_ = os.Remove(blobPath)
 		p.layers = append(p.layers, f)
 	}
 	p.config = &Config{

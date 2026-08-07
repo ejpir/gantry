@@ -32,16 +32,16 @@ func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...
 		return 0, err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp)
+	defer func() { _ = os.Remove(tmp) }()
 
 	w := erofs.Create(f, erofs.WithBlockSize(4096))
 	idx, err := flattenLayers(w, layers, logf)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return 0, fmt.Errorf("flatten: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return 0, fmt.Errorf("erofs finalize: %w", err)
 	}
 	if err := f.Close(); err != nil {
@@ -67,7 +67,7 @@ func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...
 	}
 	// CreateTemp's 0600 survives the rename; assert it for images built
 	// by an older gantry and re-verified here.
-	os.Chmod(outPath, 0o600)
+	_ = os.Chmod(outPath, 0o600)
 	return len(idx.entries), nil
 }
 
@@ -80,7 +80,7 @@ func verify(finalPath, tmpPath string, layers []*os.File, idx *mergeIndex) error
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	img, err := erofs.Open(f)
 	if err != nil {
 		return fmt.Errorf("open built image: %w", err)
@@ -107,7 +107,7 @@ func verify(finalPath, tmpPath string, layers []*os.File, idx *mergeIndex) error
 			if err != nil {
 				return err
 			}
-			defer rc.Close()
+			defer func() { _ = rc.Close() }()
 			h := sha256.New()
 			if _, err := io.Copy(h, rc); err != nil {
 				return err

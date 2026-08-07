@@ -105,8 +105,9 @@ func main() {
 	// if a virtio-blk rootfs was attached (gantry run -rootfs ...), mount
 	// the real nerdbox rootfs at /mnt for exploration
 	if _, err := os.Stat("/dev/vda"); err == nil {
-		os.MkdirAll("/mnt", 0o755)
-		if err := syscall.Mount("/dev/vda", "/mnt", "erofs", syscall.MS_RDONLY|syscall.MS_NOSUID|syscall.MS_NODEV, ""); err != nil {
+		if err := os.MkdirAll("/mnt", 0o755); err != nil {
+			fmt.Printf("[init] mkdir /mnt: %v\n", err)
+		} else if err := syscall.Mount("/dev/vda", "/mnt", "erofs", syscall.MS_RDONLY|syscall.MS_NOSUID|syscall.MS_NODEV, ""); err != nil {
 			fmt.Printf("[init] mount /dev/vda: %v\n", err)
 		} else {
 			fmt.Println("[init] nerdbox rootfs mounted at /mnt (erofs, ro)")

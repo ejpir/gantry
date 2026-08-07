@@ -127,9 +127,9 @@ func (s *Store) writeIndex(refs map[string]string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -150,7 +150,7 @@ func (s *Store) indexTransaction(fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("index lock: %w", err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	return fn()
 }
 
@@ -170,7 +170,7 @@ func (s *Store) cleanDigestLitter(digest string) {
 	for _, e := range ents {
 		n := e.Name()
 		if n == base+".tmp" || (strings.HasPrefix(n, base+".") && strings.HasSuffix(n, ".tmp")) {
-			os.Remove(filepath.Join(s.root, n))
+			_ = os.Remove(filepath.Join(s.root, n))
 		}
 	}
 }
@@ -180,14 +180,14 @@ func (s *Store) cleanDigestLitter(digest string) {
 // by older gantry versions carry 0644/0755 (review finding 6).
 // Best-effort; called from ensure.
 func (s *Store) tightenPerms() {
-	os.Chmod(s.root, 0o700)
+	_ = os.Chmod(s.root, 0o700)
 	ents, err := os.ReadDir(s.root)
 	if err != nil {
 		return
 	}
 	for _, e := range ents {
 		if n := e.Name(); strings.HasSuffix(n, ".erofs") || strings.HasSuffix(n, ".json") {
-			os.Chmod(filepath.Join(s.root, n), 0o600)
+			_ = os.Chmod(filepath.Join(s.root, n), 0o600)
 		}
 	}
 }
@@ -203,15 +203,15 @@ func (s *Store) ensure(digest string, build func(outPath string) (*Meta, error))
 	s.tightenPerms()
 	if m, err := s.ReadMeta(digest); err == nil {
 		if gutil.FileExists(s.ErofsPath(digest)) {
-			s.indexRef(m, digest) // migrate legacy arch-less entries
-			return m, nil         // cached
+			_ = s.indexRef(m, digest) // migrate legacy arch-less entries
+			return m, nil             // cached
 		}
 	}
 	lock, err := gutil.LockFile(s.lockPath(digest))
 	if err != nil {
 		return nil, fmt.Errorf("another gantry process is building %s", digest[:19])
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	// re-check under the lock
 	if m, err := s.ReadMeta(digest); err == nil && gutil.FileExists(s.ErofsPath(digest)) {
 		return m, nil
@@ -264,10 +264,10 @@ func (s *Store) SetRefDigest(digest, refDigest string) {
 		if err != nil {
 			return
 		}
-		defer os.Remove(tmp.Name())
+		defer func() { _ = os.Remove(tmp.Name()) }()
 		if _, err := tmp.Write(b); err == nil {
 			if err := tmp.Close(); err == nil {
-				os.Rename(tmp.Name(), s.metaPath(digest))
+				_ = os.Rename(tmp.Name(), s.metaPath(digest))
 			}
 		}
 	}
@@ -312,9 +312,9 @@ func (s *Store) Remove(refOrDigest string) error {
 			return fmt.Errorf("no cached image for %q", refOrDigest)
 		}
 		for d := range digests {
-			os.Remove(s.ErofsPath(d))
-			os.Remove(s.metaPath(d))
-			os.Remove(s.lockPath(d))
+			_ = os.Remove(s.ErofsPath(d))
+			_ = os.Remove(s.metaPath(d))
+			_ = os.Remove(s.lockPath(d))
 		}
 		for k, d := range refs {
 			if digests[d] {

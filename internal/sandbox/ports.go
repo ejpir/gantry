@@ -159,13 +159,13 @@ func freePortForProto(proto, addr string) (uint16, error) {
 		if err != nil {
 			return 0, err
 		}
-		defer pc.Close()
+		defer func() { _ = pc.Close() }()
 		return uint16(pc.LocalAddr().(*net.UDPAddr).Port), nil
 	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(addr, "0"))
 	if err != nil {
 		return 0, err
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	return uint16(ln.Addr().(*net.TCPAddr).Port), nil
 }

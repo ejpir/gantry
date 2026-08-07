@@ -475,7 +475,7 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 			return nil, err
 		}
 		n.Sock = sock
-		n.close = func() { gv.Process.Kill(); gv.Wait() }
+		n.close = func() { _ = gv.Process.Kill(); _ = gv.Wait() }
 		n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 		return n, nil
 	}
@@ -490,7 +490,7 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	}
 	n.Conn = conn
 	n.Stack = stack
-	n.close = func() { conn.Close(); stack.Close() }
+	n.close = func() { _ = conn.Close(); stack.Close() }
 	n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 	return n, nil
 }

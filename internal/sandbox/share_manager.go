@@ -69,7 +69,7 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 	for _, raw := range cfg.Shares {
 		share, err := vmm.ParseShareSpec(raw, seenTags)
 		if err != nil {
-			m.Close()
+			_ = m.Close()
 			return nil, nil, fmt.Errorf("bad configured share %q: %w", raw, err)
 		}
 		seenTags[share.Tag] = true
@@ -78,22 +78,22 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 			warnings = append(warnings, `share "hostshare" now appears at /host/hostshare (the hub root owns /host; use an explicit @/host alias for the legacy path)`)
 		}
 		if !filepath.IsAbs(share.Path) {
-			m.Close()
+			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s path must be absolute (got %q)", share.Tag, share.Path)
 		}
 		if err := m.validateNewShare(share); err != nil {
-			m.Close()
+			_ = m.Close()
 			return nil, nil, err
 		}
 		prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
 		if err != nil {
-			m.Close()
+			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
 		}
 		export, err := m.hub.Publish(prepared)
 		if err != nil {
 			prepared.ClosePrepared()
-			m.Close()
+			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
 		}
 		share.Path = canonical
@@ -524,7 +524,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err

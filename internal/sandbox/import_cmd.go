@@ -60,7 +60,7 @@ flags:`)
 			rest = append(rest, a)
 		}
 	}
-	fs.Parse(rest)
+	_ = fs.Parse(rest)
 
 	if len(args) == 0 {
 		return listDockerSandboxes(*root)
@@ -75,7 +75,7 @@ func listDockerSandboxes(root string) int {
 		return 1
 	}
 	w := newCLITable(os.Stdout)
-	fmt.Fprintln(w, "SANDBOX\tIMAGE\tWORKSPACE\tPORTS")
+	_, _ = fmt.Fprintln(w, "SANDBOX\tIMAGE\tWORKSPACE\tPORTS")
 	names := []string{}
 	byName := map[string]string{}
 	for _, e := range entries {
@@ -100,22 +100,22 @@ func listDockerSandboxes(root string) int {
 				ports = strings.Join(specs, ",")
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", rt.Spec.RuntimeName, rt.Spec.Template, rt.Spec.WorkspaceDir, ports)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", rt.Spec.RuntimeName, rt.Spec.Template, rt.Spec.WorkspaceDir, ports)
 	}
 	_ = w.Flush()
-	fmt.Fprintln(os.Stdout)
+	_, _ = fmt.Fprintln(os.Stdout)
 	writeImportCommands(os.Stdout)
 	return 0
 }
 
 func writeImportCommands(output io.Writer) {
 	w := newCLITable(output)
-	fmt.Fprintln(w, "COMMAND\tDESCRIPTION")
-	fmt.Fprintln(w, "gantry import <name>\tImport and start a discovered sandbox")
-	fmt.Fprintln(w, "gantry import <name> --dry-run\tPreview the resolved configuration without changing anything")
-	fmt.Fprintln(w, "gantry import <name> --as <new-name>\tImport under a different Gantry sandbox name")
-	fmt.Fprintln(w, "gantry import <name> --workspace-owner <owner>\tChoose auto, host, or UID:GID ownership")
-	fmt.Fprintln(w, "gantry import --help\tShow every flag and example")
+	_, _ = fmt.Fprintln(w, "COMMAND\tDESCRIPTION")
+	_, _ = fmt.Fprintln(w, "gantry import <name>\tImport and start a discovered sandbox")
+	_, _ = fmt.Fprintln(w, "gantry import <name> --dry-run\tPreview the resolved configuration without changing anything")
+	_, _ = fmt.Fprintln(w, "gantry import <name> --as <new-name>\tImport under a different Gantry sandbox name")
+	_, _ = fmt.Fprintln(w, "gantry import <name> --workspace-owner <owner>\tChoose auto, host, or UID:GID ownership")
+	_, _ = fmt.Fprintln(w, "gantry import --help\tShow every flag and example")
 	_ = w.Flush()
 }
 
@@ -192,7 +192,7 @@ func importDockerSandbox(root, name, as, logPath, workspaceOwner string, dryRun 
 		fmt.Fprintf(os.Stderr, "gantry import: source writable layer is locked by another gantry process: %v\n", err)
 		return 1
 	}
-	defer sourceLock.Close()
+	defer func() { _ = sourceLock.Close() }()
 	if info, err := gutil.ProbeExt4(sourceRWLayer); err != nil {
 		fmt.Fprintf(os.Stderr, "gantry import: writable layer: %v\n", err)
 		return 1

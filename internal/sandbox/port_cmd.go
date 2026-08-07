@@ -102,7 +102,7 @@ func portControlRPC(name, op string, portReq brokerPortRequest) (brokerPortRespo
 	if err != nil {
 		return brokerPortResponse{}, fmt.Errorf("broker: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	req := brokerRequest{
 		Op:   op,
@@ -160,9 +160,9 @@ func printPorts(name string) int {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Mapping.Key() < entries[j].Mapping.Key() })
 	w := newCLITable(os.Stdout)
-	fmt.Fprintln(w, "BIND\tGUEST\tPROTO\tSTATE")
+	_, _ = fmt.Fprintln(w, "BIND\tGUEST\tPROTO\tSTATE")
 	for _, e := range entries {
-		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", net.JoinHostPort(e.Mapping.HostIP, fmt.Sprint(e.Mapping.HostPort)),
+		_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", net.JoinHostPort(e.Mapping.HostIP, fmt.Sprint(e.Mapping.HostPort)),
 			e.Mapping.GuestPort, e.Mapping.Proto, e.State)
 	}
 	_ = w.Flush()
