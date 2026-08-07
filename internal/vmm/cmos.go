@@ -1,3 +1,5 @@
+//go:build (linux && amd64) || windows
+
 package vmm
 
 // Tiny MC146818 CMOS/RTC emulation for x86-64 guests: ports 0x70 (index) /

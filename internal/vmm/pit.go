@@ -1,3 +1,5 @@
+//go:build (linux && amd64) || windows
+
 package vmm
 
 // Minimal i8254 PIT for hypervisors without an in-kernel one (WHPX).

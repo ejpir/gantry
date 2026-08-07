@@ -686,3 +686,29 @@ func (d *shareDirHandle) Ioctl(ctx context.Context, cmd uint32, arg uint64, inpu
 	// host-side with the VMM's credentials.
 	return 0, syscall.ENOTSUP
 }
+
+// mapGuestOwner rewrites only the numeric ownership reported to the guest.
+// The host inode and all host-side access checks remain unchanged.
+func mapGuestOwner(e *ShareExport, attr *fuse.Attr) {
+	if e == nil || attr == nil {
+		return
+	}
+	if e.UID != nil {
+		attr.Uid = *e.UID
+	}
+	if e.GID != nil {
+		attr.Gid = *e.GID
+	}
+}
+
+func mapGuestStatxOwner(e *ShareExport, attr *fuse.Statx) {
+	if e == nil || attr == nil {
+		return
+	}
+	if e.UID != nil {
+		attr.Uid = *e.UID
+	}
+	if e.GID != nil {
+		attr.Gid = *e.GID
+	}
+}

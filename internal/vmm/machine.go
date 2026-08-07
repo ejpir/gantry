@@ -140,17 +140,17 @@ func loadInitrd(path string, ram []byte) (start, end uint64, err error) {
 // model. Backends (KVM on Linux, Hypervisor.framework on macOS) only provide
 // vCPU execution, MMIO exits, and IRQ injection.
 type Machine struct {
-	ram       []byte
-	mem       *virtio.RAM
-	entry     uint64
-	arch      string // "arm64" | "amd64"
-	fdt       []byte
-	uart      *pl011     // arm64 console (MMIO)
-	uartIO    *uart16550 // x86 console (port I/O 0x3f8)
-	cmos      *cmosRTC   // x86 only
-	ioapic    *ioApic    // x86, WHPX only (KVM has it in-kernel)
-	pit       *pit8254   // x86, WHPX only
-	pic       *pic8259   // x86, WHPX only
+	ram   []byte
+	mem   *virtio.RAM
+	entry uint64
+	arch  string // "arm64" | "amd64"
+	fdt   []byte
+	uart  *pl011 // arm64 console (MMIO)
+	// x86 clusters the legacy PC devices (16550 console, CMOS RTC, PIT,
+	// PIC, I/O APIC): they exist only on the x86 boot paths (KVM on
+	// linux/amd64, WHPX on Windows) and the whole cluster is build-gated
+	// so arm64 builds carry no dead emulation code (x86devices.go).
+	x86       x86Devices
 	virtios   []*virtio.Core
 	irqLine   func(irq int, level bool) // installed by the backend
 	stdinDone chan struct{}
@@ -247,51 +247,10 @@ func (m *Machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint
 			return vc.MMIORead(off, length)
 		}
 	}
-	if m.ioapic != nil && phys >= ioApicMMIOBase && phys < ioApicMMIOBase+ioApicMMIOSize {
-		var v uint32
-		if isWrite {
-			v = gutil.LE32(data)
-		}
-		return m.ioapic.mmio(isWrite, phys-ioApicMMIOBase, v)
+	if v, ok := m.x86.mmioX86(isWrite, phys, data); ok {
+		return v
 	}
 	return 0 // unassigned: reads-as-zero, writes ignored
-}
-
-var dbgIO = gutil.EnvOr("GANTRY_DEBUG", "MINIVM_DEBUG") != ""
-
-// handleIO routes one x86 port-I/O access (16550 console, CMOS RTC; other
-// legacy ports read as 1s / drop writes like an empty bus).
-func (m *Machine) handleIO(isWrite bool, port uint16, val uint32, size int) uint32 {
-	switch {
-	case port >= x86SerialPort && port < x86SerialPort+x86SerialSize && m.uartIO != nil:
-		if isWrite {
-			m.uartIO.ioWrite(port, byte(val))
-			return 0
-		}
-		return uint32(m.uartIO.ioRead(port))
-	case port == cmosIndexPort || port == cmosDataPort:
-		if isWrite {
-			m.cmos.ioWrite(port, byte(val))
-			return 0
-		}
-		return uint32(m.cmos.ioRead(port))
-	case m.pit != nil && ((port >= 0x40 && port <= 0x43) || port == 0x61):
-		if isWrite {
-			m.pit.ioWrite(port, byte(val))
-			return 0
-		}
-		return uint32(m.pit.ioRead(port))
-	case m.pic != nil && (port == 0x20 || port == 0x21 || port == 0xa0 || port == 0xa1):
-		if isWrite {
-			m.pic.ioWrite(port, byte(val))
-			return 0
-		}
-		return uint32(m.pic.ioRead(port))
-	}
-	if dbgIO && !isWrite {
-		fmt.Printf("[io] unhandled read port %#x\n", port)
-	}
-	return 0xffffffff
 }
 
 type Opts struct {
@@ -360,12 +319,7 @@ func Prepare(o Opts) (*Machine, error) {
 	}
 
 	if arch == "amd64" {
-		m.uartIO = newUART16550(func(level bool) { m.raise(x86SerialIRQ, level) },
-			func(b byte) { m.stdoutWrite(b) })
-		m.cmos = &cmosRTC{}
-		m.pit = newPIT(func(level bool) { m.raise(0, level) })
-		m.pic = &pic8259{}
-		fmt.Printf("serial: %s (console=ttyS0)\n", m.uartIO)
+		m.initX86()
 	} else {
 		m.uart = newPL011(m.raise, func(b byte) { m.stdoutWrite(b) })
 	}
@@ -537,5 +491,4 @@ func Run(m *Machine) error {
 	return err
 }
 
-// PSTATE at boot: EL1h (0b0101), all exceptions masked (D A I F = 0x3c0).
-const pstateEL1hMask = 0x3c5
+// PSTATE at boot lives in pstate.go (arm64 backends only).
