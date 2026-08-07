@@ -59,3 +59,28 @@ func (b *localBackend) Forwards() ([]vnet.Forward, error) { return b.stack.Forwa
 func (b *localBackend) SetPolicy(policy *netpol.Policy) error {
 	return b.live.Replace(policy)
 }
+
+// vmmPolicyPusher is the slice of the _vmm-worker the policy fan-out
+// needs; an interface keeps this file platform-neutral (the concrete
+// worker type only exists on unix).
+type vmmPolicyPusher interface {
+	SetPolicy(*netpol.Policy) error
+}
+
+// vmmPolicyBackend fans live policy swaps out to a split _vmm-worker
+// that enforces the local netstack's policy (degraded topology: the
+// net-worker failed, the VMM split succeeded). The supervisor-side swap
+// keeps display and rollback state consistent; the worker push is the
+// actual enforcement. Rollback works because the manager re-invokes
+// SetPolicy with the previous policy, which re-pushes it.
+type vmmPolicyBackend struct {
+	NetworkBackend
+	vw vmmPolicyPusher
+}
+
+func (b *vmmPolicyBackend) SetPolicy(policy *netpol.Policy) error {
+	if err := b.NetworkBackend.SetPolicy(policy); err != nil {
+		return err
+	}
+	return b.vw.SetPolicy(policy)
+}

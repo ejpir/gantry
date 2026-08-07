@@ -36,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/virtio"
 	"github.com/ejpir/gantry/internal/vmm"
 	"github.com/ejpir/gantry/internal/workerproto"
@@ -53,6 +54,15 @@ type vmmBootConfig struct {
 	NDisksRO int            `json:"nDisksRO"`
 	NDisks   int            `json:"nDisks"`
 	Shares   []vmmShareMeta `json:"shares"`
+	// Policy/TrafficPath carry the LOCAL-netstack enforcement state: in
+	// the degraded topology (net-worker failed in auto, VMM split
+	// succeeded) the guest's frames land on the supervisor's embedded
+	// netstack, which enforces nothing — the virtio-net device in THIS
+	// worker is the only enforcement point, and a nil policy there is
+	// allow-all. Empty Policy means the split-net topology owns
+	// enforcement instead.
+	Policy      []byte `json:"policy,omitempty"`
+	TrafficPath string `json:"trafficPath,omitempty"`
 }
 
 // vmmShareMeta is one hub export minus its root descriptor (which travels
@@ -161,6 +171,21 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		}
 	}
 
+	// Local-netstack policy: fail CLOSED. A policy that cannot be parsed
+	// must never degrade into an allow-all device.
+	var policy *netpol.Policy
+	if len(cfg.Policy) > 0 {
+		policy, err = netpol.Parse(cfg.Policy)
+		if err != nil {
+			return fmt.Errorf("network policy: %w", err)
+		}
+	}
+	var traffic *netpol.TrafficRecorder
+	if cfg.TrafficPath != "" {
+		// Resumes the snapshot the supervisor's recorder published.
+		traffic = netpol.NewTrafficRecorder(cfg.TrafficPath)
+	}
+
 	opts := vmm.Opts{
 		MemSize:   cfg.MemSize,
 		Kernel:    assets.Kernel,
@@ -170,6 +195,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		ShareHub:  hub,
 		NetConn:   assets.NetConn,
 		NetMAC:    cfg.NetMAC,
+		NetPolicy: policy, NetTraffic: traffic,
 		GuestCID:  cfg.GuestCID,
 		VCPUs:     cfg.VCPUs,
 		Cmdline:   cfg.Cmdline,
@@ -189,7 +215,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	if err := workerproto.WriteMessage(control, map[string]any{"ok": true}); err != nil {
 		return fmt.Errorf("boot ack: %w", err)
 	}
-	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, pending: map[string]*virtio.PreparedShare{}}
+	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, pending: map[string]*virtio.PreparedShare{}}
 	vmErr := make(chan error, 1)
 	go func() { vmErr <- runner.Run() }()
 	state.vmErr = vmErr
@@ -203,6 +229,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		"share.swap":    state.shareSwap,
 		"share.remove":  state.shareRemove,
 		"share.drop":    state.shareDrop,
+		"net.policy":    state.netPolicy,
 		"shutdown":      func(workerproto.Request) (any, error) { return nil, workerproto.ErrShutdown },
 	})
 }
@@ -214,9 +241,33 @@ type vmmWorkerState struct {
 	runner  vmmRunnerImpl
 	hub     *virtio.ShareHub
 	fds     *workerproto.FDMux
+	policy  *netpol.Policy // non-nil only in the local-netstack topology
 	vmErr   chan error
 	mu      sync.Mutex
 	pending map[string]*virtio.PreparedShare
+}
+
+// netPolicyRequest carries one marshaled egress policy.
+type netPolicyRequest struct {
+	Policy []byte `json:"policy"`
+}
+
+// netPolicy swaps the live enforcement copy. The device reads through
+// the same *Policy (Replace swaps the internal pointer), exactly like
+// the monolithic localBackend path.
+func (s *vmmWorkerState) netPolicy(req workerproto.Request) (any, error) {
+	if s.policy == nil {
+		return nil, fmt.Errorf("net.policy: no local netstack policy in this topology")
+	}
+	var body netPolicyRequest
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, fmt.Errorf("net.policy: %w", err)
+	}
+	next, err := netpol.Parse(body.Policy)
+	if err != nil {
+		return nil, fmt.Errorf("net.policy: %w", err)
+	}
+	return nil, s.policy.Replace(next)
 }
 
 // vsockForwardDial bridges one guest->host vsock dial-back: the worker
@@ -534,6 +585,17 @@ func (w *vmmWorker) Close() error {
 		}
 	})
 	return w.closeErr
+}
+
+// SetPolicy pushes a live egress-policy swap to the worker (local-
+// netstack topology only; the split-net topology uses the net-worker's
+// prepare/commit RPCs instead).
+func (w *vmmWorker) SetPolicy(policy *netpol.Policy) error {
+	raw, err := netpol.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	return w.client.Call("net.policy", netPolicyRequest{Policy: raw}, nil)
 }
 
 // sendFD serializes a token-correlated descriptor transfer.

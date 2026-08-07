@@ -397,6 +397,14 @@ func CmdDaemon(name string) int {
 	case splitErr == nil:
 		runner = vw
 		defer func() { _ = runner.Close() }()
+		if nw != nil && !nw.Split && nw.Backend != nil {
+			// Degraded topology (local netstack + split VMM): the
+			// worker's device enforces egress policy — fan live
+			// swaps out to it.
+			if pusher, ok := vw.(vmmPolicyPusher); ok {
+				nw.Backend = &vmmPolicyBackend{NetworkBackend: nw.Backend, vw: pusher}
+			}
+		}
 		bootLog("vmm worker spawned (split topology)")
 	case cfg.ProcessIsolation == "required":
 		fmt.Fprintln(os.Stderr, "daemon: -process-isolation=required but the split VMM failed:", splitErr)

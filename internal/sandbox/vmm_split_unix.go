@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/virtio"
 	"github.com/ejpir/gantry/internal/vmm"
 )
@@ -71,6 +72,22 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		NDisks:   len(opts.Disks),
 		Shares:   metas,
 	}
+	// Local-netstack topology (net-worker degraded, VMM split proceeds):
+	// the worker's virtio-net device is the ONLY egress enforcement
+	// point — hand it the policy, or a nil policy there is allow-all and
+	// every configured deny (including the default local-network wall)
+	// silently vanishes. Split-net topology: opts.NetPolicy is nil and
+	// the net-worker owns enforcement.
+	if opts.NetPolicy != nil {
+		raw, err := netpol.Marshal(opts.NetPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("marshal network policy for worker: %w", err)
+		}
+		bootCfg.Policy = raw
+		if opts.NetTraffic != nil {
+			bootCfg.TrafficPath = filepath.Join(dir, netpol.TrafficFileName)
+		}
+	}
 	vw, err := spawnVMMWorker(bootCfg, vmmWorkerAssets{
 		NetConn:    opts.NetConn,
 		Console:    console,
@@ -85,6 +102,11 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 			_ = r.Close()
 		}
 		return nil, err
+	}
+	if bootCfg.TrafficPath != "" {
+		// The worker's recorder now owns traffic.json; stop the
+		// supervisor's copy or both tick over the same file.
+		opts.NetTraffic.Close()
 	}
 	if shareManager != nil && shareManager.Hub() != nil {
 		// The local hub's pinned roots are superseded by the worker's
