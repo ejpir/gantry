@@ -184,14 +184,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.5"
+      # The tool must build for the RUNNER (linux/amd64): with GOOS/
+      # GOARCH set on the same step, go install cross-compiles it into
+      # bin/<goos>_<goarch>/ (or .exe) and it cannot run. Install first
+      # with a clean environment...
+      - name: install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+      # ...then cross-LINT for the matrix target: GOOS/GOARCH apply only
+      # to this step.
       - name: golangci-lint
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
-          # setup-go puts the toolchain on PATH but not GOPATH/bin
-          "$(go env GOPATH)/bin/golangci-lint" run ./...
+        # setup-go puts the toolchain on PATH but not GOPATH/bin
+        run: '"$(go env GOPATH)/bin/golangci-lint" run ./...'
+
 
   test:
     name: test/${{ matrix.name }}

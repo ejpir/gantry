@@ -41,11 +41,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.5"
+      # Install with a CLEAN environment (see ci.yml lint job): GOOS/
+      # GOARCH on the same step would cross-compile the tool for the
+      # scan target into bin/<goos>_<goarch>/ instead of a runnable
+      # runner binary.
+      - name: install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
       - name: govulncheck
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-          # setup-go puts the toolchain on PATH but not GOPATH/bin
-          "$(go env GOPATH)/bin/govulncheck" ./...
+        # setup-go puts the toolchain on PATH but not GOPATH/bin
+        run: '"$(go env GOPATH)/bin/govulncheck" ./...'

@@ -42,7 +42,10 @@ PAGES=${PAGES:-16k}   # arm64 only; x86_64 is always 4K
 
 # Build tree. Never default to a predictable /tmp path: the script cd's
 # into WORK and executes its scripts/config and Makefiles, so a shared or
-# pre-created directory is cross-user local code execution. Unset WORK →
+# pre-created directory is cross-user local code execution. (The
+# permission scan skips symlinks: their mode is always 777 and conveys
+# no access — the target's own entry carries the meaningful bits. A
+# kernel tree contains thousands of source symlinks.) Unset WORK →
 # fresh private mktemp tree, removed on exit. An explicit WORK is reused
 # only after proving it is entirely owned by and writable only by this
 # user (a freshly created one is re-validated after mkdir to close the
@@ -71,12 +74,17 @@ else
 	[ -e "$WORK" ] || { umask 077; mkdir -p -- "$WORK"; }
 	if [ -L "$WORK" ] || [ ! -d "$WORK" ] ||
 		[ -n "$(find "$WORK" ! -user "$(id -un)" -print -quit)" ] ||
-		[ -n "$(find "$WORK" \( -perm -020 -o -perm -002 \) -print -quit)" ]; then
+		[ -n "$(find "$WORK" ! -type l \( -perm -020 -o -perm -002 \) -print -quit)" ]; then
 		echo "refusing unsafe WORK directory: $WORK" >&2
 		echo "WORK must be a real directory whose contents are all owned by and writable only by $(id -un)" >&2
 		exit 1
 	fi
 fi
+# Enforce the same invariant for everything this script CREATES: an
+# ambient umask of 0002 (common on CI runners) would leave the tree
+# group-writable and a later invocation's validation above would refuse
+# its own previous output (the arm64 16k->4k pair shares WORK).
+umask 022
 
 # Output + make target per arch: arm64 boots the raw Image (ARM\x64 magic),
 # x86-64 boots the vmlinux ELF (see bootx86.go). KARCH is the kernel tree's
