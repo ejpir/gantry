@@ -61,6 +61,12 @@ type RunConfig struct {
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1).
 	SecretNames []string `json:"secret_names,omitempty"`
+	// ProcessIsolation selects the supervisor/worker topology
+	// (docs/vmm-network-isolation.md): "auto" (strongest available,
+	// currently the split network worker on Unix), "required" (fail
+	// startup unless the split is established), "off" (monolithic).
+	// Empty behaves as auto, so pre-existing sandbox configs upgrade.
+	ProcessIsolation string `json:"process_isolation,omitempty"`
 }
 
 // RunFlags holds the CLI flag pointers shared by `gantry exec` and
@@ -80,6 +86,7 @@ type RunFlags struct {
 	Net                                     *bool
 	GVProxy, NetPol                         *string
 	AllowLN                                 *bool
+	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
 	Secrets, SecretFiles                    *gutil.StrList
@@ -93,19 +100,20 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 		Image: fs.String("image", "", `container image: a reference to pull ("debian:bookworm-slim",
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
-		RWLayer:     fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
-		LayerSet:    fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
-		RW:          fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
-		Net:         fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
-		GVProxy:     fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
-		NetPol:      fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
-		AllowLN:     fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
-		MemMB:       fs.Uint("mem", 512, "guest RAM in MiB"),
-		VCPUs:       fs.Int("cpus", 1, "guest vCPU count (max 8)"),
-		Shares:      &gutil.StrList{},
-		Publish:     &gutil.StrList{},
-		Secrets:     &gutil.StrList{},
-		SecretFiles: &gutil.StrList{},
+		RWLayer:          fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
+		LayerSet:         fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
+		RW:               fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
+		Net:              fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
+		GVProxy:          fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
+		NetPol:           fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
+		AllowLN:          fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
+		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
+		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
+		VCPUs:            fs.Int("cpus", 1, "guest vCPU count (max 8)"),
+		Shares:           &gutil.StrList{},
+		Publish:          &gutil.StrList{},
+		Secrets:          &gutil.StrList{},
+		SecretFiles:      &gutil.StrList{},
 	}
 	f.Runtime = fs.String("runtime", func() string {
 		if v := gutil.EnvOr("GANTRY_RUNTIME", "MINIVM_RUNTIME"); v != "" {
@@ -312,6 +320,12 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		cfg.SecretNames = names
 	}
 
+	cfg.ProcessIsolation = *f.ProcessIsolation
+	switch cfg.ProcessIsolation {
+	case "", "auto", "required", "off":
+	default:
+		return RunConfig{}, nil, fmt.Errorf("-process-isolation must be auto, required, or off, got %q", cfg.ProcessIsolation)
+	}
 	cfg.NetPol = *f.NetPol
 	cfg.AllowLN = *f.AllowLN
 	cfg.MemMB = *f.MemMB
@@ -404,7 +418,18 @@ type Network struct {
 	// Backend is the control surface for live policy/port mutations:
 	// the embedded stack in-process (monolithic) or the split network
 	// worker over RPC. Nil for the gvproxy backend and -net=false.
-	Backend     NetworkBackend
+	Backend NetworkBackend
+	// Split reports that networking runs in a separate _net-worker
+	// process: Conn is the supervisor end of the framed data channel.
+	// Policy stays as the supervisor's authoritative copy for display
+	// and rollback (Opts does NOT attach it to the device — enforcement
+	// is the worker's), and Traffic is nil: the worker owns the
+	// recorder writing traffic.json.
+	Split  bool
+	Worker *netWorker
+	// Degraded lists isolation properties requested but not established
+	// (auto mode only; required fails instead). Surfaced by the daemon.
+	Degraded    []string
 	close       func()
 	backendOnce sync.Once
 	trafficOnce sync.Once
@@ -483,6 +508,33 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 		n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 		return n, nil
 	}
+	if c.splitNetWorkerWanted() {
+		worker, conn, err := startNetWorker(netWorkerConfig{
+			GuestMAC:    net.HardwareAddr(guestNetMAC[:]).String(),
+			Forwards:    portForwards(c.Ports),
+			Policy:      mustMarshalPolicy(policy),
+			TrafficPath: filepath.Join(workdir, netpol.TrafficFileName),
+			Debug:       netWorkerTrafficDebug(),
+			PcapPath:    gutil.EnvOr("GANTRY_NET_PCAP", "MINIVM_NET_PCAP"),
+		})
+		if err == nil {
+			n.Conn = conn
+			n.Backend = worker
+			n.Split = true
+			n.Worker = worker
+			// The worker owns policy, traffic accounting (writing the
+			// same traffic.json the TUI reads), and the stack; Close
+			// shuts it down and reaps it.
+			n.close = func() { _ = worker.Close() }
+			return n, nil
+		}
+		if c.ProcessIsolation == "required" {
+			return nil, fmt.Errorf("process isolation required but unavailable: %w", err)
+		}
+		n.Degraded = append(n.Degraded, "network-worker: "+err.Error())
+		// auto: fall through to the monolithic embedded stack
+	}
+
 	stack, err := vnet.Start(guestNetMAC, portForwards(c.Ports))
 	if err != nil {
 		return nil, err
@@ -498,6 +550,24 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	n.close = func() { _ = conn.Close(); stack.Close() }
 	n.Traffic = netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 	return n, nil
+}
+
+// splitNetWorkerWanted reports whether StartNetwork should attempt the
+// split network worker: networking on, embedded stack (gvproxy stays a
+// monolithic compatibility path), and isolation not explicitly off.
+func (c RunConfig) splitNetWorkerWanted() bool {
+	return c.Net && c.GVProxy == "" && c.ProcessIsolation != "off"
+}
+
+// mustMarshalPolicy serializes the boot policy for the worker handshake.
+// StartNetwork guarantees a non-nil, parsed policy on the split path, so
+// a marshal failure is a bug, not user error.
+func mustMarshalPolicy(policy *netpol.Policy) []byte {
+	raw, err := netpol.Marshal(policy)
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 // portForwards translates canonical publish specs into the netstack's
@@ -553,8 +623,14 @@ func (c RunConfig) Opts(n *Network, hostShares []vmm.Share, vsockFwd string, env
 	var conn net.Conn
 	var policy *netpol.Policy
 	var traffic *netpol.TrafficRecorder
-	if n != nil {
+	if n != nil && !n.Split {
 		sock, conn, policy, traffic = n.Sock, n.Conn, n.Policy, n.Traffic
+	} else if n != nil {
+		// Split mode: the data channel crosses to the worker, which owns
+		// enforcement and accounting — the device must not re-enforce or
+		// double-count. The raw conn still flows (framing is the device's
+		// job), policy and traffic stay nil.
+		sock, conn = n.Sock, n.Conn
 	}
 	cmdline := vmm.DefaultCmdline(arch, c.Rootfs, "", 3, NetMarker(sock, conn), guestNetMAC, true)
 	if envExtra {

@@ -111,6 +111,10 @@ func main() {
 			os.Exit(2)
 		}
 		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2])))
+	case "_net-worker":
+		// Hidden worker role (docs/vmm-network-isolation.md): authority is
+		// the inherited bootstrap channels, never the argv.
+		os.Exit(sandbox.CmdNetWorker())
 	case "ls":
 		os.Exit(sandbox.CmdLs())
 	case "tui":

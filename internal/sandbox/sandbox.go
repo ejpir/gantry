@@ -352,6 +352,15 @@ func CmdDaemon(name string) int {
 	if nw.Policy != nil {
 		fmt.Fprintln(os.Stderr, "daemon: network policy:", nw.Policy.Describe())
 	}
+	for _, d := range nw.Degraded {
+		fmt.Fprintln(os.Stderr, "daemon: process isolation degraded:", d)
+	}
+	if nw.Split {
+		bootLog("network worker: split process (data/control channels up)")
+	}
+	if err := writeIsolationState(dir, cfg, nw); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
+	}
 
 	configStore, err := LoadConfigStore(dir)
 	if err != nil {
@@ -441,6 +450,15 @@ func CmdDaemon(name string) int {
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 
+	// A network-worker exit is fatal to the sandbox (Phase 1 recovery is
+	// whole-sandbox restart — policy/NAT/DNS/connection state cannot be
+	// reconstructed in place). A nil channel blocks forever, so the
+	// monolithic path is unaffected.
+	var workerDead <-chan error
+	if nw.Worker != nil {
+		workerDead = nw.Worker.Done()
+	}
+
 	ln, err := net.Listen("unix", filepath.Join(dir, "ctl.sock"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
@@ -489,6 +507,12 @@ func CmdDaemon(name string) int {
 		return 0
 	case err := <-guestErr:
 		fmt.Fprintln(os.Stderr, "daemon: VM exited:", err)
+		return 1
+	case err := <-workerDead:
+		// The worker died mid-run: the guest has no network path and the
+		// policy enforcement point is gone. Fail the sandbox rather than
+		// run unenforced; deferred cleanup reaps everything else.
+		fmt.Fprintln(os.Stderr, "daemon: network worker died:", err)
 		return 1
 	}
 }

@@ -64,6 +64,10 @@ flags:`)
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
 		return 1
 	}
+	// One-shot exec stays monolithic in Phase 1 of the network-isolation
+	// rollout; Phase 3 converts it to the same supervisor/worker path as
+	// persistent sandboxes so both share one security posture.
+	cfg.ProcessIsolation = "off"
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "gantry exec:", w)
 	}

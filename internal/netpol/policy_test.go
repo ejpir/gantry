@@ -471,3 +471,63 @@ func TestDefaultAllowPortDenyDropsNonFirstFragments(t *testing.T) {
 		t.Fatal("fragment dropped although no port-scoped deny exists")
 	}
 }
+
+func TestMarshalRoundTrip(t *testing.T) {
+	src := `{
+		"default": "deny",
+		"allowLocal": true,
+		"rules": [
+			{"action":"allow","cidr":"203.0.113.0/24","proto":"tcp","ports":"443,8000-9000"},
+			{"action":"deny","cidr":"192.0.2.0/24"},
+			{"action":"allow","proto":"udp","ports":"53"}
+		],
+		"allowDomains": ["Example.COM.", "api.github.com"]
+	}`
+	p1, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw1, err := Marshal(p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := Parse(raw1)
+	if err != nil {
+		t.Fatalf("re-parse of marshaled policy: %v (%s)", err, raw1)
+	}
+	// Marshal is a fixpoint: marshal(parse(marshal(p))) == marshal(p)
+	raw2, err := Marshal(p2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw1) != string(raw2) {
+		t.Fatalf("marshal not a fixpoint:\n%s\n%s", raw1, raw2)
+	}
+	// behavioral equality over a frame matrix
+	for _, tc := range []struct {
+		dst   string
+		proto uint8
+		port  uint16
+	}{
+		{"203.0.113.7", protoTCP, 443},
+		{"203.0.113.7", protoTCP, 8443},
+		{"203.0.113.7", protoTCP, 22},
+		{"192.0.2.9", protoICMP, 0},
+		{"198.51.100.4", protoTCP, 443},
+		{"8.8.8.8", protoUDP, 53},
+		{"10.0.0.8", protoTCP, 443},
+	} {
+		frame := ipFrame(t, tc.dst, tc.proto, tc.port, nil)
+		if p1.MatchTX(frame) != p2.MatchTX(frame) {
+			t.Fatalf("MatchTX mismatch %v: %v vs %v", tc, p1.MatchTX(frame), p2.MatchTX(frame))
+		}
+	}
+	// default policy marshals into something that re-parses identically
+	raw, err := Marshal(DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(raw); err != nil {
+		t.Fatalf("default policy round trip: %v (%s)", err, raw)
+	}
+}

@@ -684,3 +684,59 @@ func Summarize(frame []byte) string {
 	}
 	return fmt.Sprintf("%s %s", proto, net.IP(pp.dst[:]))
 }
+
+// Marshal renders a policy back into normalized file-form JSON — the
+// wire format for handing a policy to the split network worker, which
+// re-Parses (and thereby re-validates) it before enforcement. The active
+// generation is marshaled, so Marshal is safe on a stable holder that
+// has been Replaced.
+func Marshal(p *Policy) ([]byte, error) {
+	cur := p.current()
+	if cur == nil {
+		return nil, fmt.Errorf("network policy: cannot marshal nil policy")
+	}
+	fp := filePolicy{AllowDomains: cur.AllowDomains}
+	if !cur.DefaultAllow {
+		fp.Default = "deny"
+	}
+	if cur.AllowLocal {
+		allow := true
+		fp.AllowLocal = &allow
+	}
+	for _, r := range cur.Rules {
+		fr := fileRule{}
+		if r.Deny {
+			fr.Action = "deny"
+		}
+		if r.CIDR != nil {
+			fr.CIDR = r.CIDR.String()
+		}
+		switch r.Proto {
+		case protoTCP:
+			fr.Proto = "tcp"
+		case protoUDP:
+			fr.Proto = "udp"
+		case protoICMP:
+			fr.Proto = "icmp"
+		}
+		if len(r.Ports) > 0 {
+			parts := make([]string, 0, len(r.Ports))
+			for _, pr := range r.Ports {
+				if pr.Lo == pr.Hi {
+					parts = append(parts, strconv.Itoa(int(pr.Lo)))
+				} else {
+					parts = append(parts, fmt.Sprintf("%d-%d", pr.Lo, pr.Hi))
+				}
+			}
+			fr.Ports = strings.Join(parts, ",")
+		}
+		fp.Rules = append(fp.Rules, fr)
+	}
+	if fp.Rules == nil {
+		fp.Rules = []fileRule{} // round-trips as "rules": [], never null
+	}
+	if fp.AllowDomains == nil {
+		fp.AllowDomains = []string{}
+	}
+	return json.Marshal(fp)
+}
