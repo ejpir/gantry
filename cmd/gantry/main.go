@@ -107,10 +107,14 @@ func main() {
 		}
 		os.Exit(sandbox.CmdResume(mustName(os.Args[2])))
 	case "daemon":
-		if len(os.Args) != 3 {
+		if len(os.Args) < 3 || len(os.Args) > 4 {
 			os.Exit(2)
 		}
-		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2])))
+		readySocket := ""
+		if len(os.Args) == 4 {
+			readySocket = os.Args[3]
+		}
+		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2]), readySocket))
 	case "_net-worker":
 		// Hidden worker role (docs/vmm-network-isolation.md): authority is
 		// the inherited bootstrap channels, never the argv.

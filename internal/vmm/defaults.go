@@ -113,12 +113,23 @@ func bootLogLevel() string {
 // sysctls. KEXEC is not covered here: both supported kernels compile it
 // out, so the sysctl would only print "parameter not found" (the dev
 // guest init sets it silently instead). GANTRY_NO_CMDLINE_HARDENING=1
-// drops the whole set — a bisect knob for guest boot problems.
+// drops the sysctl set and explicitly disables allocation/free clearing — a
+// bisect knob for guest boot problems. Zero-on-allocation remains enabled in
+// production: it prevents stale kernel heap/page contents from reaching a new
+// user. Zero-on-free is default-off because it duplicated that confidentiality
+// guarantee at reuse time while adding about 80 ms to a 512 MiB arm64 HVF boot;
+// GANTRY_STRICT_MEMORY_INIT=1 restores it as extra use-after-free hardening.
+// Explicit values also override older Gantry kernels that compiled both
+// INIT_ON_*_DEFAULT_ON options in.
 func guestHardeningParams() string {
 	if gutil.EnvOr("GANTRY_NO_CMDLINE_HARDENING") != "" {
-		return ""
+		return " init_on_alloc=0 init_on_free=0"
 	}
-	return " init_on_alloc=1 init_on_free=1" +
+	initOnFree := "0"
+	if gutil.EnvOr("GANTRY_STRICT_MEMORY_INIT") != "" {
+		initOnFree = "1"
+	}
+	return " init_on_alloc=1 init_on_free=" + initOnFree +
 		" sysctl.kernel.kptr_restrict=2" +
 		" sysctl.kernel.dmesg_restrict=1" +
 		" sysctl.kernel.unprivileged_bpf_disabled=1" +
