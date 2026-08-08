@@ -130,6 +130,21 @@ func probeRuntimeState(globalFlags []string, id string) runtimeState {
 	return runtimeStateAbsent
 }
 
+// platformChoice resolves the sentry platform: the cmdline knob
+// crunshim.platform=<name> wins (bisect/testing), else the per-arch
+// default compiled into this shim (platform_*.go).
+func platformChoice() string {
+	b, err := os.ReadFile("/proc/cmdline")
+	if err == nil {
+		for _, f := range strings.Fields(string(b)) {
+			if p, ok := strings.CutPrefix(f, "crunshim.platform="); ok {
+				return p
+			}
+		}
+	}
+	return defaultPlatform
+}
+
 // insertFlags adjusts runsc's global flags (before the subcommand).
 //
 //	--debug + --log→/dev/console (debug mode only): runsc propagates
@@ -157,15 +172,22 @@ func insertFlags(args []string, debug bool) []string {
 	// EPERM. The gofer keeps CAP_DAC_OVERRIDE/FOWNER, so route all fs
 	// access through it.
 	inject := []string{"--network=host", "--directfs=false"}
+	if p := platformChoice(); p != "" {
+		inject = append(inject, "--platform="+p)
+	}
 	if debug {
 		// In runsc >= 2026, --log is only the fatal-error logger; real
 		// debug logs go to --debug-log and are discarded when unset.
 		inject = append(inject, "--debug", "--debug-log", "/dev/console")
 	}
 	for _, f := range inject {
+		// Presence is decided by flag NAME: a caller-supplied
+		// --directfs=true must not be second-guessed by our
+		// --directfs=false (runsc would see the flag twice).
+		name, _, _ := strings.Cut(f, "=")
 		present := false
 		for _, a := range args[1:] {
-			if a == f || strings.HasPrefix(a, f+"=") {
+			if a == name || strings.HasPrefix(a, name+"=") {
 				present = true
 				break
 			}
@@ -207,16 +229,38 @@ func supervise(args []string, debug bool) int {
 	cmd := exec.Command(realRuntime, args[1:]...)
 	cmd.Args[0] = args[0]
 	cmd.Stdin = os.Stdin
-	stdio, err := os.CreateTemp("", "crunshim-stdio-*.log")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "crunshim: temp log: %v\n", err)
-		return 127
+	// `exec` is the session-stdio path: the exec'd process inherits OUR
+	// stdio (the vminitd session pipes) so its output reaches the user
+	// live. Inherited fds are *os.File, so os/exec spawns no copy
+	// goroutines and Wait returns the instant runsc-exec exits even
+	// though the parked gofer/sandbox grandchildren hold the same fds —
+	// the very property the temp file buys for create, without
+	// black-holing the session (the temp file swallowed exec output and
+	// the post-Wait replay went to the runtime-error chain, not the
+	// session).
+	isExec := false
+	for _, a := range args[1:] {
+		if a == "exec" {
+			isExec = true
+			break
+		}
 	}
-	defer func() {
-		_ = stdio.Close()
-		_ = os.Remove(stdio.Name())
-	}()
-	cmd.Stdout, cmd.Stderr = stdio, stdio
+	var stdio *os.File
+	if isExec {
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	} else {
+		var err error
+		stdio, err = os.CreateTemp("", "crunshim-stdio-*.log")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "crunshim: temp log: %v\n", err)
+			return 127
+		}
+		defer func() {
+			_ = stdio.Close()
+			_ = os.Remove(stdio.Name())
+		}()
+		cmd.Stdout, cmd.Stderr = stdio, stdio
+	}
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "crunshim: start %s: %v\n", realRuntime, err)
 		return 127
@@ -255,7 +299,7 @@ func supervise(args []string, debug bool) int {
 					// SIGQUIT, taking the evidence with it
 					dumpProcState(c, pid)
 				}
-				_, _ = fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", fileTail(stdio, 32<<10))
+				_, _ = fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", stdioTail(stdio))
 				_ = c.Close()
 			}
 			if cmd.Process != nil {
@@ -267,12 +311,12 @@ func supervise(args []string, debug bool) int {
 		})
 		defer timed.Stop()
 	}
-	err = cmd.Wait()
+	err := cmd.Wait()
 	signal.Stop(sigc)
 	replayStdio(stdio)
 	if err != nil {
 		if c, cerr := os.OpenFile("/dev/console", os.O_WRONLY, 0); cerr == nil {
-			_, _ = fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, fileTail(stdio, 32<<10))
+			_, _ = fmt.Fprintf(c, "\ncrunshim: runsc failed: %v\n----- runsc output tail -----\n%s\n----- end -----\n", err, stdioTail(stdio))
 			_ = c.Close()
 		}
 		if cmd.ProcessState != nil {
@@ -301,9 +345,22 @@ func fileTail(f *os.File, limit int64) string {
 	return string(buf[:n])
 }
 
+// stdioTail is fileTail over the captured runtime stdio, or the empty
+// string in exec mode (no capture — the session pipes carry it live).
+func stdioTail(f *os.File) string {
+	if f == nil {
+		return ""
+	}
+	return fileTail(f, 32<<10)
+}
+
 // replayStdio forwards the child's captured output to our stderr so
 // containerd's task errors keep the runtime's diagnostics (bounded).
+// A nil f means exec mode: nothing was captured, nothing to replay.
 func replayStdio(f *os.File) {
+	if f == nil {
+		return
+	}
 	const maxReplay = 256 << 10
 	st, err := f.Stat()
 	if err != nil || st.Size() == 0 {

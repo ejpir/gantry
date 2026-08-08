@@ -61,3 +61,38 @@ func TestSecretsHandshake(t *testing.T) {
 		t.Errorf("EOF handshake = %v, want empty", got)
 	}
 }
+
+// The daemon spawn scrubs exactly the injected secret keys from the
+// environment it inherits: /proc/<pid>/environ is host state readable
+// by the same uid, and the handshake already delivered the values.
+// Everything else (HOME, proxy vars, GANTRY_* knobs) passes through.
+func TestScrubbedEnv(t *testing.T) {
+	environ := []string{
+		"HOME=/home/u",
+		"HTTPS_PROXY=http://proxy:3128",
+		"GITHUB_TOKEN=ghp_canary",
+		"NPM=npm_canary",
+		"GANTRY_BOOT_TIMING=1",
+		"EMPTYSECRET=",
+	}
+	got := scrubbedEnv(environ, map[string]secret.Value{
+		"GITHUB_TOKEN": "ghp_canary",
+		"NPM":          "npm_canary",
+		"EMPTYSECRET":  "",
+	})
+	joined := strings.Join(got, "\n")
+	for _, leaked := range []string{"GITHUB_TOKEN", "NPM=", "EMPTYSECRET"} {
+		if strings.Contains(joined, leaked) {
+			t.Errorf("scrubbed env still carries %q: %v", leaked, got)
+		}
+	}
+	for _, kept := range []string{"HOME=/home/u", "HTTPS_PROXY=http://proxy:3128", "GANTRY_BOOT_TIMING=1"} {
+		if !strings.Contains(joined, kept) {
+			t.Errorf("scrubbed env lost %q: %v", kept, got)
+		}
+	}
+	// No secrets: the block passes through untouched.
+	if got := scrubbedEnv(environ, nil); len(got) != len(environ) {
+		t.Errorf("no-secret scrub changed the block: %v", got)
+	}
+}

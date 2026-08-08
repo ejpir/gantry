@@ -471,7 +471,7 @@ func Prepare(o Opts) (*Machine, error) {
 		fmt.Printf("virtio-vsock: guest cid %d @ %#x irq %d, host dir %s\n",
 			o.GuestCID, core.Base(), core.IRQ(), o.VsockFwd)
 	}
-	// Always attach virtio-rng + virtio-rtc devices. The nerdbox kernel
+	// Always attach virtio-rng. The nerdbox kernel
 	// seeds crng from the rng at probe (CONFIG_HW_RANDOM_VIRTIO): without
 	// it, boot entropy is a coin flip and vminitd's DHCP can time out in
 	// getrandom(), killing PID 1. The rtc gives hctosys + PTP time sync.
@@ -481,12 +481,31 @@ func Prepare(o Opts) (*Machine, error) {
 		return nil, err
 	}
 	fmt.Printf("virtio-rng: entropy @ %#x irq %d\n", rngCore.Base(), rngCore.IRQ())
-	rtc := virtio.NewRTC()
-	rtcCore, err := m.addVirtio(rtc, "rtc")
-	if err != nil {
-		return nil, err
+	// The RTC is attached on arm64 (HVF exposes no kvm-clock; the
+	// smeared-UTC advertisement fixed epoch-boot there). On amd64 it is
+	// OFF by default: KVM guests take time from kvm-clock/ptp_kvm (the
+	// whole July x86 stack ran with the device unregistered), and a
+	// registered rtc0 wedges gVisor's sentry — its CalibratedClock never
+	// reports ready, the startup watchdog kills the sandbox, and
+	// `runsc start` then fails with "state stopped" (field-proven on
+	// c5.metal; with the device absent the same sentry boots in ~26s).
+	// GANTRY_RTC=1 force-attaches on amd64, GANTRY_NO_RTC=1 suppresses
+	// everywhere (bisect knobs).
+	attachRTC := arch != "amd64"
+	if gutil.EnvOr("GANTRY_RTC") != "" {
+		attachRTC = true
 	}
-	fmt.Printf("virtio-rtc: UTC (host time) @ %#x irq %d\n", rtcCore.Base(), rtcCore.IRQ())
+	if gutil.EnvOr("GANTRY_NO_RTC") != "" {
+		attachRTC = false
+	}
+	if attachRTC {
+		rtc := virtio.NewRTC()
+		rtcCore, err := m.addVirtio(rtc, "rtc")
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("virtio-rtc: UTC (host time) @ %#x irq %d\n", rtcCore.Base(), rtcCore.IRQ())
+	}
 
 	m.vcpus = max(o.VCPUs, 1)
 	cmdline := o.Cmdline
