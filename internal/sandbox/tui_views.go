@@ -345,7 +345,7 @@ func (m sandboxTUIModel) renderMountsView(theme tuiTheme, layout tuiDashboardLay
 		return m.renderTableLoading(theme, layout, "Loading mounts…")
 	}
 	if len(m.mounts) == 0 {
-		return m.renderTableEmpty(theme, layout, "No host mounts", "Press a to attach a live share, or start with -share TAG=PATH[@CTRPATH][,ro].")
+		return m.renderTableEmpty(theme, layout, "No host mounts", "Press a to add a share now or save one for the next start.")
 	}
 	inner := maxInt(1, layout.width-4)
 	lines := []string{m.renderMountsHeader(theme, inner), m.renderTableSeparator(theme, inner)}

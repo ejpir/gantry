@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/vmm"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -196,6 +197,59 @@ func TestSandboxTUIShareDialogActions(t *testing.T) {
 	m = *model.(*sandboxTUIModel)
 	if m.dialog != tuiShareRemoveDialog {
 		t.Fatalf("remove dialog = %v", m.dialog)
+	}
+}
+
+func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	if err := os.MkdirAll(sandboxDir("stopped"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = newTestConfigStore(t, sandboxDir("stopped"), RunConfig{RW: true})
+
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.animating = true // make submit return the configuration command directly
+	m.width, m.height = 100, 42
+	m.page = tuiMountsPage
+	m.sandboxes = []tuiSandbox{
+		{Name: "running", State: tuiRunning},
+		{Name: "stopped", State: tuiStopped},
+	}
+	m.cursor = 1
+	m.openShareAddDialog(false)
+	if m.dialog != tuiShareAddDialog || m.shareSandbox.Value() != "stopped" {
+		t.Fatalf("stopped share target: dialog=%v target=%q", m.dialog, m.shareSandbox.Value())
+	}
+	if len(m.shareSandbox.options) != 2 {
+		t.Fatalf("share targets = %v, want running and stopped", m.shareSandbox.options)
+	}
+	plain := ansi.Strip(m.renderShareAddDialog(tuiThemeFor(m.dark), 62))
+	if !strings.Contains(plain, "Add Share") || !strings.Contains(plain, "next starts") || !strings.Contains(plain, "Save") {
+		t.Fatalf("stopped share copy does not explain deferred attachment:\n%s", plain)
+	}
+
+	m.shareTag.SetValue("code")
+	m.sharePath.SetValue(t.TempDir())
+	model, cmd := m.submitShare()
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.busyAction != "share configure" || m.busyName != "stopped/code" {
+		t.Fatalf("stopped share action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
+	}
+	done, ok := cmd().(tuiProcessDoneMsg)
+	if !ok || done.err != nil || !strings.Contains(done.output, "applies on next start") {
+		t.Fatalf("stopped share result = %#v", done)
+	}
+	cfg, err := readSandboxConfig(sandboxDir("stopped"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 1 {
+		t.Fatalf("saved shares = %v", cfg.Shares)
+	}
+	share, err := vmm.ParseShareSpec(cfg.Shares[0], map[string]bool{})
+	if err != nil || share.Tag != "code" || !share.RO {
+		t.Fatalf("saved share = %+v (%v)", share, err)
 	}
 }
 

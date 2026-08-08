@@ -888,7 +888,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"r", "refresh"},
 	})
 	shareActions := column("MOUNT ACTIONS", [][2]string{
-		{"a", "add a live share"},
+		{"a", "add a host share"},
 		{"d", "remove selected share"},
 		{"r", "replace selected share"},
 		{"e (Rules)", "edit network policy"},
@@ -1103,13 +1103,20 @@ func (m sandboxTUIModel) renderShareAddDialog(theme tuiTheme, width int) string 
 }
 
 func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
+	target := m.sandboxNamed(m.shareSandbox.Value())
+	running := target == nil || target.State == tuiRunning
 	title = "Add Live Share"
 	description = "Attach a host directory without restarting the sandbox."
 	button = "Add"
+	if !running {
+		title = "Add Share"
+		description = "Save this share; it will be attached when the sandbox next starts."
+		button = "Save"
+	}
 	tag := strings.TrimSpace(m.shareTag.Value())
 	mountpoint := strings.TrimSpace(m.shareMount.Value())
 	customMount := mountpoint != "" && mountpoint != shares.HubHostPath+"/"+tag
-	if customMount {
+	if customMount && running {
 		title = "Add Share"
 		description = "Save this container mount point; restart the sandbox to apply it."
 		button = "Save"
@@ -1118,7 +1125,10 @@ func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
 		title = "Replace Share"
 		description = "Replace the selected share while the sandbox keeps running."
 		button = "Replace"
-		if customMount {
+		if !running {
+			description = "Save this replacement; it will apply when the sandbox next starts."
+			button = "Save"
+		} else if customMount {
 			description = "Save this container mount point; restart the sandbox to apply it."
 			button = "Save"
 		}

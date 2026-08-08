@@ -8,9 +8,9 @@ import (
 
 const sandboxPickerMaxVisible = 5
 
-// sandboxPicker is shared by forms whose action belongs to one running
-// sandbox. Keeping the state and rendering here prevents Mount and Port from
-// developing subtly different target-selection behavior.
+// sandboxPicker is shared by forms whose action belongs to one sandbox.
+// Each form supplies its own eligibility rule so saved configuration may
+// target a stopped sandbox while live-only actions remain running-only.
 type sandboxPicker struct {
 	options []string
 	cursor  int
@@ -83,7 +83,7 @@ func (p *sandboxPicker) HandleKey(key string) bool {
 		p.Move(1)
 	case "enter", " ", "space":
 		// Opening an empty picker renders a pointless bordered menu under
-		// a field already showing "no running sandbox".
+		// a field already showing that no sandbox is eligible.
 		if len(p.options) > 0 {
 			p.open = true
 		}
@@ -119,7 +119,7 @@ func (p *sandboxPicker) chooseVisible(index int) bool {
 func (p sandboxPicker) View(theme tuiTheme, width int, focused bool) string {
 	value := p.Value()
 	if value == "" {
-		value = "no running sandbox"
+		value = "no eligible sandbox"
 	}
 	arrow := "▾"
 	if p.open {
