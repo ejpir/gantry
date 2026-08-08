@@ -291,7 +291,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	if err := workerproto.WriteMessage(control, map[string]any{"ok": true, "confinement": conf}); err != nil {
 		return fmt.Errorf("boot ack: %w", err)
 	}
-	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, traffic: traffic, pending: map[string]*virtio.PreparedShare{}}
+	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, traffic: traffic, pending: map[string]*virtio.PreparedShare{}, conf: conf}
 	vmErr := make(chan error, 1)
 	go func() { vmErr <- runner.Run() }()
 	state.vmErr = vmErr
@@ -314,6 +314,24 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 // vmmWorkerState is the worker's mutable serving state. Prepare/publish
 // tokens let the supervisor stage a share atomically (prepare + FD, then
 // publish or drop) exactly as the local hub does.
+// shareHotAddUnavailable explains why a live share-add cannot be
+// served, or "". Seatbelt profiles are immutable once applied: a share
+// added after boot was never baked into the profile, and macOS
+// path-checks every openat below the passed root descriptor against
+// the resolved absolute path, so serving it returns EPERM for
+// everything (the tag even shows up in listings — only access fails).
+// Boot-time shares are in the profile and unaffected; the linux
+// enforcer has no path filters and hot-add works confined. The
+// planned fix is sandbox extensions (docs/worker-confinement.md).
+func shareHotAddUnavailable(conf workerconf.Report) string {
+	if conf.Applied && conf.Platform == "darwin" {
+		return "share hot-add is unavailable while the VMM worker is " +
+			"Seatbelt-confined (macOS sandbox profiles are immutable once " +
+			"applied); restart the sandbox to serve new shares"
+	}
+	return ""
+}
+
 type vmmWorkerState struct {
 	runner  vmmRunnerImpl
 	hub     *virtio.ShareHub
@@ -323,6 +341,7 @@ type vmmWorkerState struct {
 	vmErr   chan error
 	mu      sync.Mutex
 	pending map[string]*virtio.PreparedShare
+	conf    workerconf.Report // this worker's own confinement outcome
 }
 
 // netPolicyRequest carries one marshaled egress policy.
@@ -487,6 +506,9 @@ type shareRemoveRequest struct {
 func (s *vmmWorkerState) sharePrepare(req workerproto.Request) (any, error) {
 	if s.hub == nil {
 		return nil, fmt.Errorf("share hub unavailable")
+	}
+	if msg := shareHotAddUnavailable(s.conf); msg != "" {
+		return nil, fmt.Errorf("share.prepare: %s", msg)
 	}
 	var body sharePrepareRequest
 	if err := json.Unmarshal(req.Body, &body); err != nil {

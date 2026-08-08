@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+	"unsafe"
 
 	"github.com/ebitengine/purego"
 	"github.com/ejpir/gantry/internal/workerconf"
@@ -43,6 +44,14 @@ type probe struct {
 }
 
 func main() {
+	if isExtChild() {
+		runExtChild(os.Args[2])
+		return
+	}
+	if isExtSpike() {
+		runExtSpike()
+		return
+	}
 	fmt.Printf("seatbeltspike — M2 probe on %s/%s (docs/worker-confinement.md)\n\n", runtime.GOOS, runtime.GOARCH)
 
 	// ---- setup (pre-Apply): a fake state dir, RO + RW "exports", and
@@ -213,3 +222,151 @@ func errString(err error) string {
 	}
 	return err.Error()
 }
+
+// ---------------------------------------------------------------- M2.5
+// sandbox extensions: the candidate fix for share hot-add under
+// Seatbelt. Production flow, reproduced here: the UNSANDBOXED
+// supervisor issues an extension token for the new share path; the
+// CONFINED worker consumes it and only then can open below the passed
+// root descriptor. Answers: can a non-root unsandboxed process issue?
+// Does consumption work under our deny-default profile? Does it lift
+// the dirfd-relative openat path check?
+//
+// Run: /tmp/seatbeltspike -extensions
+
+var (
+	sandboxExtensionIssueFile func(path *byte, flags uint64) *byte
+	sandboxExtensionConsume   func(token *byte) int64
+	sandboxExtensionRelease   func(handle int64)
+)
+
+func extInit() error {
+	lib, err := purego.Dlopen("/usr/lib/libSystem.B.dylib", purego.RTLD_LAZY|purego.RTLD_GLOBAL)
+	if err != nil {
+		return err
+	}
+	for sym, fn := range map[string]any{
+		"sandbox_extension_issue_file": &sandboxExtensionIssueFile,
+		"sandbox_extension_consume":    &sandboxExtensionConsume,
+		"sandbox_extension_release":    &sandboxExtensionRelease,
+	} {
+		p, err := purego.Dlsym(lib, sym)
+		if err != nil {
+			return fmt.Errorf("dlsym %s: %w", sym, err)
+		}
+		purego.RegisterFunc(fn, p)
+	}
+	return nil
+}
+
+func cstr(s string) *byte { b := append([]byte(s), 0); return &b[0] }
+
+// readCStr reads a NUL-terminated C string returned by libSystem.
+func readCStr(p *byte) string {
+	if p == nil {
+		return ""
+	}
+	var buf []byte
+	for i := uintptr(0); ; i++ {
+		c := *(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(p)) + i))
+		if c == 0 {
+			break
+		}
+		buf = append(buf, c)
+	}
+	return string(buf)
+}
+
+// runExtChild is the confined consumer. fd 3 carries the token; argv
+// holds the target dir. The profile contains NO allowance for the dir:
+// without the extension, every open below it must fail.
+func runExtChild(dir string) {
+	if err := extInit(); err != nil {
+		fmt.Printf("child: ext symbols: %v\n", err)
+		os.Exit(2)
+	}
+	spec := workerconf.DefaultSpec(64, "")
+	rep, err := workerconf.Apply(spec)
+	if err != nil {
+		fmt.Printf("child: apply: %v (%+v)\n", err, rep)
+		os.Exit(2)
+	}
+	// sanity: without the extension, create must fail
+	if f, err := os.Create(filepath.Join(dir, "pre-token")); err == nil {
+		_ = f.Close()
+		fmt.Println("child: PRE-TOKEN CREATE SUCCEEDED — profile too weak, test invalid")
+		os.Exit(2)
+	}
+	tok := make([]byte, 0, 4096)
+	buf := make([]byte, 4096)
+	f := os.NewFile(3, "tok")
+	n, err := f.Read(buf)
+	if err != nil {
+		fmt.Printf("child: read token: %v\n", err)
+		os.Exit(2)
+	}
+	tok = append(tok, buf[:n]...)
+	token := string(tok[:len(tok)-1]) // strip \n
+	h := sandboxExtensionConsume(cstr(token))
+	if h < 0 {
+		fmt.Printf("child: CONSUME FAILED (handle %d)\n", h)
+		os.Exit(1)
+	}
+	out, err := os.Create(filepath.Join(dir, "via-extension"))
+	switch {
+	case err != nil:
+		fmt.Printf("child: EXTENSION-CREATE: DENIED (%v)\n", err)
+		os.Exit(1)
+	default:
+		_ = out.Close()
+		fmt.Println("child: EXTENSION-CREATE: OK — extension lifted the path check")
+	}
+	sandboxExtensionRelease(h)
+}
+
+// runExtSpike is the unsandboxed issuer/parent.
+func runExtSpike() {
+	if err := extInit(); err != nil {
+		fmt.Printf("extensions unavailable: %v\n", err)
+		os.Exit(1)
+	}
+	base, err := os.MkdirTemp("", "seatbeltext-*")
+	must("tempdir", err)
+	defer func() { _ = os.RemoveAll(base) }()
+	dir, err := filepath.EvalSymlinks(base) // issue against the canonical path
+	must("canonicalize", err)
+
+	exe, err := os.Executable()
+	must("executable", err)
+	rp, wp, err := os.Pipe()
+	must("pipe", err)
+	cmd := exec.Command(exe, "-ext-child", dir)
+	cmd.ExtraFiles = []*os.File{wp} // child fd 3
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		must("start child", err)
+	}
+	_ = rp.Close()
+
+	token := sandboxExtensionIssueFile(cstr(dir), 0)
+	if token == nil {
+		fmt.Println("ISSUE FAILED: sandbox_extension_issue_file returned nil (non-root unsandboxed issue unsupported?)")
+		_ = wp.Close()
+		_ = cmd.Wait()
+		os.Exit(1)
+	}
+	fmt.Printf("issued extension for %s\n", dir)
+	if _, err := wp.WriteString(readCStr(token) + "\n"); err != nil {
+		must("send token", err)
+	}
+	_ = wp.Close()
+	err = cmd.Wait()
+	if err != nil {
+		fmt.Printf("\nextension verdict: CHILD FAILED (%v) — sandbox extensions do NOT solve hot-add; keep the restart-required refusal\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("\nextension verdict: WORKS — wire issue/consume into share hot-add (M2.5)")
+}
+
+func isExtChild() bool { return len(os.Args) > 2 && os.Args[1] == "-ext-child" }
+func isExtSpike() bool { return len(os.Args) > 1 && os.Args[1] == "-extensions" }
