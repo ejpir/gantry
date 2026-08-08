@@ -235,9 +235,10 @@ func errString(err error) string {
 // Run: /tmp/seatbeltspike -extensions
 
 var (
-	sandboxExtensionIssueFile func(path *byte, flags uint64) *byte
-	sandboxExtensionConsume   func(token *byte) int64
-	sandboxExtensionRelease   func(handle int64)
+	sandboxExtensionIssueFile          func(path *byte, flags uint64) *byte
+	sandboxExtensionIssueFileToProcess func(path *byte, flags uint64, pid int32) *byte
+	sandboxExtensionConsume            func(token *byte) int64
+	sandboxExtensionRelease            func(handle int64)
 )
 
 func extInit() error {
@@ -246,9 +247,10 @@ func extInit() error {
 		return err
 	}
 	for sym, fn := range map[string]any{
-		"sandbox_extension_issue_file": &sandboxExtensionIssueFile,
-		"sandbox_extension_consume":    &sandboxExtensionConsume,
-		"sandbox_extension_release":    &sandboxExtensionRelease,
+		"sandbox_extension_issue_file":            &sandboxExtensionIssueFile,
+		"sandbox_extension_issue_file_to_process": &sandboxExtensionIssueFileToProcess,
+		"sandbox_extension_consume":               &sandboxExtensionConsume,
+		"sandbox_extension_release":               &sandboxExtensionRelease,
 	} {
 		p, err := purego.Dlsym(lib, sym)
 		if err != nil {
@@ -350,10 +352,17 @@ func runExtSpike() {
 
 	token := sandboxExtensionIssueFile(cstr(dir), 0)
 	if token == nil {
-		fmt.Println("ISSUE FAILED: sandbox_extension_issue_file returned nil (non-root unsandboxed issue unsupported?)")
-		_ = wp.Close()
-		_ = cmd.Wait()
-		os.Exit(1)
+		// Same class, targeted variant — last chance before declaring
+		// the mechanism root-only.
+		token = sandboxExtensionIssueFileToProcess(cstr(dir), 0, int32(cmd.Process.Pid))
+		if token == nil {
+			fmt.Println("ISSUE FAILED: sandbox_extension_issue_file and _to_process both returned nil")
+			fmt.Println("\nextension verdict: ROOT-ONLY — extensions cannot solve hot-add for a user-space daemon; the restart-required refusal stands")
+			_ = wp.Close()
+			_ = cmd.Wait()
+			os.Exit(1)
+		}
+		fmt.Println("issue_file failed but issue_file_to_process WORKED — using the targeted variant")
 	}
 	fmt.Printf("issued extension for %s\n", dir)
 	if _, err := wp.WriteString(readCStr(token) + "\n"); err != nil {
