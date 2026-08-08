@@ -81,7 +81,7 @@ func main() {
 
 	// ---- Apply EXACTLY the worker's spec.
 	spec := workerconf.DefaultSpec(64, "")
-	spec.StateDir = stateDir
+	spec.WriteFiles = []string{filepath.Join(stateDir, "console.log")}
 	spec.FileAllow = []workerconf.FileAllowance{
 		{Path: roDir, Write: false},
 		{Path: rwDir, Write: true},
@@ -150,6 +150,15 @@ func main() {
 		probes = append(probes, probe{"statedir write", "ALLOWED", "console/stderr logs viable"})
 	} else {
 		probes = append(probes, probe{"statedir write", "DENIED (!!)", errString(err)})
+	}
+
+	// Config tamper (the Codex finding's attack path): anything else
+	// under the state dir — sandbox.json above all — must be DENIED.
+	if f, err := os.Create(filepath.Join(stateDir, "sandbox.json")); err == nil {
+		_ = f.Close()
+		probes = append(probes, probe{"config tamper", "ALLOWED (!!)", "worker can rewrite trusted sandbox state"})
+	} else {
+		probes = append(probes, probe{"config tamper", "DENIED", "sandbox.json protected (" + errString(err) + ")"})
 	}
 
 	// Exec: must be denied.

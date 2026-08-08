@@ -49,9 +49,14 @@ func buildSeatbeltProfile(spec Spec) string {
 	// for this worker.
 	b.WriteString(`(allow file-read* file-write* (literal "/dev/null") (literal "/dev/urandom"))` + "\n")
 	// Console log + stderr postmortem log: both are pre-opened fds
-	// whose writes are path-checked per op under Seatbelt.
-	if spec.StateDir != "" {
-		b.WriteString(`(allow file-write* (subpath "` + sbplEscape(sbplPath(spec.StateDir)) + `"))` + "\n")
+	// whose writes are path-checked per op under Seatbelt. Literal
+	// paths only — their parent directory holds trusted state
+	// (sandbox.json); a subpath grant there would be a config-tamper
+	// primitive.
+	for _, p := range spec.WriteFiles {
+		if p != "" {
+			b.WriteString(`(allow file-write* (literal "` + sbplEscape(sbplPath(p)) + `"))` + "\n")
+		}
 	}
 	// Share export roots, split by writability: a RO export never
 	// appears in a write rule (defense in depth behind the hub's own

@@ -16,13 +16,13 @@ type Spec struct {
 	KeepFDs    int    // descriptors 0..KeepFDs survive Apply (the fd table is dense)
 	ConfRoot   string // linux: supervisor-created mountpoint for the private root
 
-	// StateDir is the sandbox state directory: the worker's console
-	// and stderr postmortem log live here, so path-checked write
-	// filters (Seatbelt) must allow writes under it. Tradeoff recorded
-	// in docs/worker-confinement.md: the worker could tamper with
-	// state-dir files (display-only impact; the supervisor is the
-	// writer of record).
-	StateDir string
+	// WriteFiles lists the pre-opened log files whose writes Seatbelt
+	// path-checks on every operation. They are LITERAL paths, never
+	// directory subtrees: the logs' parent directory also holds trusted
+	// state (sandbox.json — shares, ports, net policy), so a subpath
+	// grant there would let a compromised worker rewrite the sandbox
+	// configuration a later resume trusts.
+	WriteFiles []string
 
 	// FileAllow lists the host paths the worker may touch — the share
 	// export roots it serves via dirfd-relative ops. Seatbelt bakes

@@ -88,7 +88,10 @@ func TestDefaultSpec(t *testing.T) {
 
 func TestBuildSeatbeltProfile(t *testing.T) {
 	spec := DefaultSpec(12, "")
-	spec.StateDir = "/Users/test/.gantry/sandboxes/dev"
+	spec.WriteFiles = []string{
+		"/Users/test/.gantry/sandboxes/dev/console.log",
+		"/Users/test/.gantry/sandboxes/dev/worker-vmm.log",
+	}
 	spec.FileAllow = []FileAllowance{
 		{Path: "/Users/test/project", Write: true},
 		{Path: "/Users/test/shared refs", Write: false},
@@ -102,7 +105,8 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 		"(allow mach-lookup)",
 		"(allow sysctl-read)",
 		`(literal "/dev/null")`,
-		`(allow file-write* (subpath "/Users/test/.gantry/sandboxes/dev"))`,
+		`(allow file-write* (literal "/Users/test/.gantry/sandboxes/dev/console.log"))`,
+		`(allow file-write* (literal "/Users/test/.gantry/sandboxes/dev/worker-vmm.log"))`,
 		`(subpath "/Users/test/project")`,
 		`(subpath "/Users/test/shared refs")`,
 	} {
@@ -110,13 +114,18 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 			t.Fatalf("profile missing %q:\n%s", want, p)
 		}
 	}
+	// The logs' parent directory — trusted state (sandbox.json) — must
+	// carry NO grant of any kind.
+	if strings.Contains(p, `(subpath "/Users/test/.gantry/sandboxes/dev")`) || strings.Contains(p, "sandbox.json") {
+		t.Fatalf("profile grants access to trusted sandbox state:\n%s", p)
+	}
 	// Escaping: quotes and backslashes must not break the SBPL literal.
 	if !strings.Contains(p, `/Users/test/we\"ird\\path`) {
 		t.Fatalf("profile escaping wrong:\n%s", p)
 	}
 	// RO root must never appear under a write rule: the only
-	// file-write* rules are the /dev literals, the state dir, and the
-	// RW export block.
+	// file-write* rules are the /dev literals, the two log literals,
+	// and the RW export block.
 	writeLines := 0
 	for _, line := range strings.Split(p, "\n") {
 		if strings.HasPrefix(line, "(allow file-read* file-write*") {
