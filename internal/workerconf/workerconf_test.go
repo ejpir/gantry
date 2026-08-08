@@ -3,6 +3,7 @@ package workerconf
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -143,5 +144,30 @@ func TestBuildSeatbeltProfileEmpty(t *testing.T) {
 	p := buildSeatbeltProfile(DefaultSpec(8, ""))
 	if strings.Contains(p, "subpath") {
 		t.Fatalf("no allowances expected:\n%s", p)
+	}
+}
+
+// TestBuildSeatbeltProfileCanonicalizes: macOS matches rules against
+// REAL paths and /var, /tmp are symlinks — a spec path behind a
+// symlink must land in the profile resolved (the M2 spike's rw-export
+// DENIED (!!) without this).
+func TestBuildSeatbeltProfileCanonicalizes(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "linked-export")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	spec := DefaultSpec(8, "")
+	spec.FileAllow = []FileAllowance{{Path: link, Write: true}}
+	p := buildSeatbeltProfile(spec)
+	resolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p, `(subpath "`+resolved+`")`) {
+		t.Fatalf("profile lacks the resolved path %q:\n%s", resolved, p)
+	}
+	if strings.Contains(p, "linked-export") && resolved != link {
+		t.Fatalf("profile kept the symlink form:\n%s", p)
 	}
 }

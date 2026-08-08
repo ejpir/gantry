@@ -4,12 +4,28 @@
 
 package workerconf
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // sbplEscape quotes a path for embedding in an SBPL string literal.
 func sbplEscape(p string) string {
 	p = strings.ReplaceAll(p, `\`, `\\`)
 	p = strings.ReplaceAll(p, `"`, `\"`)
+	return p
+}
+
+// sbplPath canonicalizes a path for a Seatbelt rule: the kernel
+// matches against REAL paths and macOS staples are symlink farms
+// (/var -> /private/var, /tmp -> /private/tmp — the M2 spike's rw
+// export under $TMPDIR was DENIED until this). Unresolvable paths fall
+// back to the raw form (the rule then simply never matches, which
+// fails closed).
+func sbplPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		return r
+	}
 	return p
 }
 
@@ -35,7 +51,7 @@ func buildSeatbeltProfile(spec Spec) string {
 	// Console log + stderr postmortem log: both are pre-opened fds
 	// whose writes are path-checked per op under Seatbelt.
 	if spec.StateDir != "" {
-		b.WriteString(`(allow file-write* (subpath "` + sbplEscape(spec.StateDir) + `"))` + "\n")
+		b.WriteString(`(allow file-write* (subpath "` + sbplEscape(sbplPath(spec.StateDir)) + `"))` + "\n")
 	}
 	// Share export roots, split by writability: a RO export never
 	// appears in a write rule (defense in depth behind the hub's own
@@ -46,9 +62,9 @@ func buildSeatbeltProfile(spec Spec) string {
 			continue
 		}
 		if fa.Write {
-			rw = append(rw, fa.Path)
+			rw = append(rw, sbplPath(fa.Path))
 		} else {
-			ro = append(ro, fa.Path)
+			ro = append(ro, sbplPath(fa.Path))
 		}
 	}
 	writeAllow := func(ops string, paths []string) {
