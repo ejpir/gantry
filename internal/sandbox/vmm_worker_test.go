@@ -165,9 +165,8 @@ func TestVMMWorkerNetPolicyEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trafficPath := filepath.Join(t.TempDir(), "traffic.json")
 	h := startVMMWorkerHarness(t, vmmBootConfig{
-		MemSize: 1 << 20, Policy: raw, TrafficPath: trafficPath,
+		MemSize: 1 << 20, Policy: raw,
 	}, testAssets(t))
 
 	fake := *h.fake
@@ -191,9 +190,17 @@ func TestVMMWorkerNetPolicyEnforcement(t *testing.T) {
 	if !fake.opts.NetPolicy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
 		t.Fatal("net.policy swap did not reach the device's policy")
 	}
-	// The worker's recorder publishes on the handed-over path.
-	if _, err := os.Stat(trafficPath); err != nil {
-		t.Fatalf("worker traffic recorder not publishing: %v", err)
+	// Counters accumulate in the worker (no host paths under
+	// confinement); the supervisor pulls them over traffic.snapshot and
+	// merges into its own recorder.
+	snap, err := h.w.TrafficSnapshot()
+	if err != nil {
+		t.Fatalf("TrafficSnapshot: %v", err)
+	}
+	sup := netpol.NewTrafficRecorder("")
+	sup.SyncSnapshot(snap)
+	if got := sup.Snapshot(); got.Version == 0 {
+		t.Fatal("supervisor recorder did not merge the worker snapshot")
 	}
 }
 

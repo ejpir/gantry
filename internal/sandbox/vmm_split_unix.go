@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/virtio"
@@ -84,9 +85,6 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 			return nil, fmt.Errorf("marshal network policy for worker: %w", err)
 		}
 		bootCfg.Policy = raw
-		if opts.NetTraffic != nil {
-			bootCfg.TrafficPath = filepath.Join(dir, netpol.TrafficFileName)
-		}
 	}
 	vw, err := spawnVMMWorker(bootCfg, vmmWorkerAssets{
 		NetConn:    opts.NetConn,
@@ -103,10 +101,11 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		}
 		return nil, err
 	}
-	if bootCfg.TrafficPath != "" {
-		// The worker's recorder now owns traffic.json; stop the
-		// supervisor's copy or both tick over the same file.
-		opts.NetTraffic.Close()
+	if bootCfg.Policy != nil && opts.NetTraffic != nil {
+		// Enforcement counters accumulate inside the worker (no host
+		// paths under confinement); pull them into the supervisor's
+		// recorder, which owns traffic.json.
+		go syncWorkerTraffic(vw, opts.NetTraffic)
 	}
 	if shareManager != nil && shareManager.Hub() != nil {
 		// The local hub's pinned roots are superseded by the worker's
@@ -115,6 +114,27 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		shareManager.SetServing(workerShareServing{w: vw})
 	}
 	return vw, nil
+}
+
+// syncWorkerTraffic pulls enforcement counters from the worker into the
+// supervisor's recorder until the worker dies. Monotonic-max merge, so
+// retries and the final pull never double-count.
+func syncWorkerTraffic(vw *vmmWorker, rec *netpol.TrafficRecorder) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-vw.Done():
+			if snap, err := vw.TrafficSnapshot(); err == nil {
+				rec.SyncSnapshot(snap)
+			}
+			return
+		case <-ticker.C:
+			if snap, err := vw.TrafficSnapshot(); err == nil {
+				rec.SyncSnapshot(snap)
+			}
+		}
+	}
 }
 
 // SplitBootAssets pins one root descriptor per configured export for the

@@ -54,15 +54,16 @@ type vmmBootConfig struct {
 	NDisksRO int            `json:"nDisksRO"`
 	NDisks   int            `json:"nDisks"`
 	Shares   []vmmShareMeta `json:"shares"`
-	// Policy/TrafficPath carry the LOCAL-netstack enforcement state: in
-	// the degraded topology (net-worker failed in auto, VMM split
-	// succeeded) the guest's frames land on the supervisor's embedded
-	// netstack, which enforces nothing — the virtio-net device in THIS
-	// worker is the only enforcement point, and a nil policy there is
-	// allow-all. Empty Policy means the split-net topology owns
-	// enforcement instead.
-	Policy      []byte `json:"policy,omitempty"`
-	TrafficPath string `json:"trafficPath,omitempty"`
+	// Policy carries the LOCAL-netstack enforcement state: in the
+	// degraded topology (net-worker failed in auto, VMM split succeeded)
+	// the guest's frames land on the supervisor's embedded netstack,
+	// which enforces nothing — the virtio-net device in THIS worker is
+	// the only enforcement point, and a nil policy there is allow-all.
+	// Empty Policy means the split-net topology owns enforcement instead.
+	// Traffic counters accumulate in an in-memory recorder (the worker
+	// owns no host paths — confinement kills path ops); the supervisor
+	// pulls them over traffic.snapshot and merges into its own recorder.
+	Policy []byte `json:"policy,omitempty"`
 }
 
 // vmmShareMeta is one hub export minus its root descriptor (which travels
@@ -181,9 +182,10 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		}
 	}
 	var traffic *netpol.TrafficRecorder
-	if cfg.TrafficPath != "" {
-		// Resumes the snapshot the supervisor's recorder published.
-		traffic = netpol.NewTrafficRecorder(cfg.TrafficPath)
+	if len(cfg.Policy) > 0 {
+		// Pure in-memory: confinement makes path ops impossible by
+		// design; the supervisor syncs via the traffic.snapshot RPC.
+		traffic = netpol.NewTrafficRecorder("")
 	}
 
 	opts := vmm.Opts{
@@ -215,22 +217,23 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	if err := workerproto.WriteMessage(control, map[string]any{"ok": true}); err != nil {
 		return fmt.Errorf("boot ack: %w", err)
 	}
-	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, pending: map[string]*virtio.PreparedShare{}}
+	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, traffic: traffic, pending: map[string]*virtio.PreparedShare{}}
 	vmErr := make(chan error, 1)
 	go func() { vmErr <- runner.Run() }()
 	state.vmErr = vmErr
 
 	return workerproto.ServeRequests(control, map[string]workerproto.Handler{
-		"vm.wait":       state.vmWait,
-		"vm.close":      state.vmClose,
-		"vsock.connect": state.vsockConnect,
-		"share.prepare": state.sharePrepare,
-		"share.publish": state.sharePublish,
-		"share.swap":    state.shareSwap,
-		"share.remove":  state.shareRemove,
-		"share.drop":    state.shareDrop,
-		"net.policy":    state.netPolicy,
-		"shutdown":      func(workerproto.Request) (any, error) { return nil, workerproto.ErrShutdown },
+		"vm.wait":          state.vmWait,
+		"vm.close":         state.vmClose,
+		"vsock.connect":    state.vsockConnect,
+		"share.prepare":    state.sharePrepare,
+		"share.publish":    state.sharePublish,
+		"share.swap":       state.shareSwap,
+		"share.remove":     state.shareRemove,
+		"share.drop":       state.shareDrop,
+		"net.policy":       state.netPolicy,
+		"traffic.snapshot": state.trafficSnapshot,
+		"shutdown":         func(workerproto.Request) (any, error) { return nil, workerproto.ErrShutdown },
 	})
 }
 
@@ -241,7 +244,8 @@ type vmmWorkerState struct {
 	runner  vmmRunnerImpl
 	hub     *virtio.ShareHub
 	fds     *workerproto.FDMux
-	policy  *netpol.Policy // non-nil only in the local-netstack topology
+	policy  *netpol.Policy          // non-nil only in the local-netstack topology
+	traffic *netpol.TrafficRecorder // in-memory; paired with policy
 	vmErr   chan error
 	mu      sync.Mutex
 	pending map[string]*virtio.PreparedShare
@@ -268,6 +272,14 @@ func (s *vmmWorkerState) netPolicy(req workerproto.Request) (any, error) {
 		return nil, fmt.Errorf("net.policy: %w", err)
 	}
 	return nil, s.policy.Replace(next)
+}
+
+// trafficSnapshot hands the supervisor the worker's in-memory counters.
+func (s *vmmWorkerState) trafficSnapshot(workerproto.Request) (any, error) {
+	if s.traffic == nil {
+		return nil, fmt.Errorf("traffic.snapshot: no local netstack recorder in this topology")
+	}
+	return s.traffic.Snapshot(), nil
 }
 
 // vsockForwardDial bridges one guest->host vsock dial-back: the worker
@@ -585,6 +597,14 @@ func (w *vmmWorker) Close() error {
 		}
 	})
 	return w.closeErr
+}
+
+// TrafficSnapshot pulls the worker's in-memory enforcement counters
+// (local-netstack topology only).
+func (w *vmmWorker) TrafficSnapshot() (netpol.TrafficSnapshot, error) {
+	var snap netpol.TrafficSnapshot
+	err := w.client.Call("traffic.snapshot", struct{}{}, &snap)
+	return snap, err
 }
 
 // SetPolicy pushes a live egress-policy swap to the worker (local-

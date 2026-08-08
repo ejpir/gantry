@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func inboundFrame(t *testing.T, sourceIP string, protocol uint8, sourcePort uint16, payload []byte) []byte {
@@ -102,5 +103,52 @@ func TestTrafficRecorderResumesSnapshot(t *testing.T) {
 	second.Close()
 	if snapshot.TXPackets != 2 || len(snapshot.Entries) != 1 || snapshot.Entries[0].TXPackets != 2 {
 		t.Fatalf("resumed snapshot = %#v", snapshot)
+	}
+}
+
+func TestSyncSnapshot(t *testing.T) {
+	now := time.Now()
+	worker := TrafficSnapshot{
+		Version: trafficSnapshotVersion, Updated: now,
+		TXBytes: 1000, TXPackets: 10, DroppedBytes: 60, DroppedPackets: 2,
+		Entries: []TrafficEntry{
+			{Host: "example.com", Address: "93.184.216.34", Protocol: "tcp", Port: 443, Allowed: true,
+				TXBytes: 900, TXPackets: 9, FirstSeen: now.Add(-time.Hour), LastSeen: now},
+			{Address: "192.168.1.20", Protocol: "tcp", Port: 22,
+				TXBytes: 100, TXPackets: 1, FirstSeen: now.Add(-time.Minute), LastSeen: now},
+		},
+	}
+	sup := NewTrafficRecorder("")
+	sup.SyncSnapshot(worker)
+	got := sup.Snapshot()
+	if got.TXBytes != 1000 || got.DroppedPackets != 2 {
+		t.Fatalf("top-level counters: %+v", got)
+	}
+	if len(got.Entries) != 2 {
+		t.Fatalf("entries: %+v", got.Entries)
+	}
+	// Monotonic merge: a stale pull never shrinks counters.
+	stale := worker
+	stale.TXBytes = 10
+	stale.Entries[0].TXBytes = 1
+	sup.SyncSnapshot(stale)
+	got = sup.Snapshot()
+	if got.TXBytes != 1000 {
+		t.Fatalf("stale pull shrank TXBytes: %+v", got)
+	}
+	for _, e := range got.Entries {
+		if e.Host == "example.com" && e.TXBytes != 900 {
+			t.Fatalf("stale pull shrank entry: %+v", e)
+		}
+		if e.Host == "example.com" && e.FirstSeen != now.Add(-time.Hour) {
+			t.Fatalf("FirstSeen not preserved: %+v", e)
+		}
+	}
+	// A later pull advances counters.
+	later := worker
+	later.TXBytes = 2000
+	sup.SyncSnapshot(later)
+	if got := sup.Snapshot(); got.TXBytes != 2000 {
+		t.Fatalf("later pull did not advance: %+v", got)
 	}
 }
