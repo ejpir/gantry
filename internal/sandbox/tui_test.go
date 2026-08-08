@@ -490,7 +490,8 @@ func TestSandboxTUIRendersShareHubMountsAndDialog(t *testing.T) {
 	m.shareTag.SetValue("data")
 	m.sharePath.SetValue("/tmp/data")
 	plain := ansi.Strip(m.View().Content)
-	for _, want := range []string{"STATE", "ACTIVE", "Add Live Share", "Sandbox", "Host path", "read-only"} {
+	shareTitle, _, _ := m.shareDialogCopy()
+	for _, want := range []string{"STATE", "ACTIVE", shareTitle, "Sandbox", "Host path", "read-only"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("render missing %q:\n%s", want, plain)
 		}
@@ -826,9 +827,14 @@ func TestSandboxTUIMountAndPortButtonHitboxes(t *testing.T) {
 	m.openShareAddDialog(false)
 	m.shareTag.SetValue("code")
 	m.sharePath.SetValue(t.TempDir())
-	m = *clickLabel(t, &m, "Add")
-	if m.busyAction != "share add" || m.busyName != "dev/code" {
-		t.Fatalf("Add click missed: busy=%q name=%q", m.busyAction, m.busyName)
+	_, _, shareButton := m.shareDialogCopy()
+	wantAction := "share add"
+	if !shareCanApplyLiveOn(m.sandboxNamed("dev"), runtime.GOOS) {
+		wantAction = "share configure"
+	}
+	m = *clickLabel(t, &m, shareButton)
+	if m.busyAction != wantAction || m.busyName != "dev/code" {
+		t.Fatalf("%s click missed: busy=%q name=%q", shareButton, m.busyAction, m.busyName)
 	}
 
 	m.busyAction = ""
