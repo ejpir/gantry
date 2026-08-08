@@ -73,6 +73,9 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		NDisks:   len(opts.Disks),
 		Shares:   metas,
 	}
+	if !opts.BootTimingStart.IsZero() {
+		bootCfg.BootTimingStartUnixNano = opts.BootTimingStart.UnixNano()
+	}
 	// Worker confinement (docs/worker-confinement.md): auto/required
 	// self-confines the worker after the descriptor table is consumed.
 	// The supervisor pre-creates the private-root mountpoint and passes

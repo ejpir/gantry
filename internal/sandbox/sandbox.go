@@ -398,9 +398,10 @@ func CmdDaemon(name, readySocket string) int {
 	// cost can be attributed (host setup vs. network vs. vmm.Prepare vs.
 	// the guest boot up to the vsock dial-back). See scripts/bench-boot.sh.
 	t0 := time.Now()
+	bootTimingEnabled := gutil.EnvOr("GANTRY_BOOT_TIMING", "MINIVM_BOOT_TIMING") != ""
 	bootLog := func(phase string) {
-		if gutil.EnvOr("GANTRY_BOOT_TIMING") != "" {
-			fmt.Fprintf(os.Stderr, "boot-timing: %-28s %8d ms\n", phase, time.Since(t0).Milliseconds())
+		if bootTimingEnabled {
+			fmt.Fprintf(os.Stderr, "boot-timing: %-36s %9.3f ms\n", phase, float64(time.Since(t0))/float64(time.Millisecond))
 		}
 	}
 	bootLog("daemon started")
@@ -485,6 +486,11 @@ func CmdDaemon(name, readySocket string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon:", err)
 		return 1
+	}
+	if bootTimingEnabled {
+		// The same origin travels into a split VMM worker, letting its
+		// low-overhead device milestones line up with daemon readiness.
+		opts.BootTimingStart = t0
 	}
 	// Split VMM (Phase 2): the guest runs in a _vmm-worker process; the
 	// supervisor keeps ctl.sock, sessions, policy, and all host sockets.
@@ -574,6 +580,7 @@ func CmdDaemon(name, readySocket string) int {
 			return 1
 		}
 		rpc = result.client
+		bootLog("guest RPC connected (READY)")
 	case err := <-guestErr:
 		_ = rpcListener.Close()
 		fmt.Fprintln(os.Stderr, "daemon: VM exited before guest RPC:", err)
@@ -581,7 +588,6 @@ func CmdDaemon(name, readySocket string) int {
 	}
 	defer func() { _ = rpc.Close() }()
 	_ = os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o600)
-	bootLog("guest RPC connected (READY)")
 	if err := notifyDaemonReady(readySocket); err != nil {
 		// The parent may have exited or fallen back to ready-file polling;
 		// readiness notification is never a reason to stop a healthy VM.
