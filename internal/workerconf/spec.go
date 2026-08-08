@@ -9,12 +9,19 @@ package workerconf
 // Spec is the worker's declared ambient-authority requirement. One
 // definition, consumed by every platform enforcer.
 type Spec struct {
-	NoNetwork  bool   // no inbound/outbound sockets ever
-	NoExec     bool   // no exec/spawn of any program
-	NoNewPaths bool   // no open-by-path after Apply (empty private root on linux)
-	NoProcX    bool   // no cross-process ptrace/signal/enumeration
-	KeepFDs    int    // descriptors 0..KeepFDs survive Apply (the fd table is dense)
-	ConfRoot   string // linux: supervisor-created mountpoint for the private root
+	NoNetwork  bool // no inbound/outbound sockets ever
+	NoExec     bool // no exec/spawn of any program
+	NoNewPaths bool // no open-by-path after Apply (empty private root on linux)
+	NoProcX    bool // no cross-process ptrace/signal/enumeration
+	KeepFDs    int  // descriptors 0..KeepFDs survive Apply (the fd table is dense)
+	// KeepFDExtra lists additional LIVE descriptors that must survive
+	// the close tier: the net.FileConn dups of the inherited channel
+	// conns land ABOVE the dense table (a dup takes the first free fd),
+	// and closing them severs the control/data channels mid-boot
+	// (AL2023 field failure: close_range killed the control dup, the
+	// supervisor EOF'd and SIGKILLed the healthy worker).
+	KeepFDExtra []int
+	ConfRoot    string // linux: supervisor-created mountpoint for the private root
 
 	// WriteFiles lists the pre-opened log files whose writes Seatbelt
 	// path-checks on every operation. They are LITERAL paths, never

@@ -27,14 +27,15 @@ $G start c1 -process-isolation=required -kernel nerdbox-kernel-x86_64 \
   -rootfs nerdbox-rootfs-x86_64.erofs -image debian-bookworm-amd64.erofs 2>&1 | tail -2
 sleep 1
 
-ISO=$(cat "$SBX"/c1/isolation.json 2>/dev/null)
+ISO=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do ISO=$(tr -d ' \n' < "$SBX"/c1/isolation.json 2>/dev/null); [ -n "$ISO" ] && break; sleep 0.5; done
 chk "required: isolation.json exists"      "topology"                 "$ISO"
 chk "required: split-net+split-vmm"        "split-net+split-vmm"      "$ISO"
 chk "required: confinement applied"        '"applied":true'           "$ISO"
 chk "required: mode required"              '"mode":"required"'        "$ISO"
-chk "required: all boundaries enforced"    '"filesystem":"enforced"'  "$ISO"
-chk "required: network boundary enforced"  '"network":"enforced"'     "$ISO"
-chk "required: process boundary enforced"  '"process":"enforced"'     "$ISO"
+chk "required: all boundaries enforced"    '"filesystemBoundary":"enforced"' "$ISO"
+chk "required: network boundary enforced"  '"networkBoundary":"enforced"'    "$ISO"
+chk "required: process boundary enforced"  '"processBoundary":"enforced"'    "$ISO"
 # enforced is the only acceptable probe verdict under required
 if printf '%s' "$ISO" | grep -qa '"state":"unenforced"'; then bad "required: no unenforced probes"; else ok "required: no unenforced probes"; fi
 
@@ -48,8 +49,8 @@ if [ -z "$WPID" ]; then bad "worker: _vmm-worker running"; else
   ok "worker: _vmm-worker running (pid $WPID)"
   SC=$(awk '/^Seccomp:/{print $2}' /proc/$WPID/status 2>/dev/null)
   [ "$SC" = "2" ] && ok "worker: seccomp filter active (Seccomp: 2)" || bad "worker: seccomp filter active (Seccomp: $SC)"
-  NF=$(ls /proc/$WPID/seccomp_filter 2>/dev/null | wc -l)
-  [ "$NF" -ge 1 ] && ok "worker: $NF seccomp filter(s) installed" || bad "worker: seccomp filters installed"
+  NF=$(awk '/^Seccomp_filters:/{print $2}' /proc/$WPID/status 2>/dev/null)
+  [ "${NF:-0}" -ge 1 ] && ok "worker: $NF seccomp filter(s) installed" || bad "worker: seccomp filters installed"
   # private mount root: the worker's / must NOT see the host /etc
   WETC=$(ls /proc/$WPID/root/etc 2>/dev/null | wc -l)
   [ "$WETC" = "0" ] && ok "worker: private root (empty /etc)" || bad "worker: private root (/etc has $WETC entries)"
@@ -64,7 +65,8 @@ $G start c2 -process-isolation=auto -kernel nerdbox-kernel-x86_64 \
   -rootfs nerdbox-rootfs-x86_64.erofs -image debian-bookworm-amd64.erofs \
   -share boot=/tmp/hottest,ro >/dev/null 2>&1
 sleep 1
-ISO2=$(cat "$SBX"/c2/isolation.json 2>/dev/null)
+ISO2=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do ISO2=$(tr -d ' \n' < "$SBX"/c2/isolation.json 2>/dev/null); [ -n "$ISO2" ] && break; sleep 0.5; done
 chk "auto: confinement applied"           '"applied":true'            "$ISO2"
 R=$(xe c2 'cat /host/boot/hot.txt');      chk "auto: boot share read" "hotcontent" "$R"
 R=$(xe c2 'echo x > /host/boot/evil 2>/dev/null && echo RO-BROKEN || echo RO-WALLED')
@@ -76,7 +78,8 @@ R=$(xe c2 'echo x > /host/boot/evil 2>/dev/null && echo RO-BROKEN || echo RO-WAL
 # visible WITHOUT a remount.
 mkdir -p /tmp/hottest2 && echo liveadd > /tmp/hottest2/live.txt
 $G share add c2 live=/tmp/hottest2 2>&1 | tail -1
-R=$(xe c2 'ls /host/')
+R=""
+for _ in 1 2 3 4 5 6; do R=$(xe c2 'ls /host/'); printf '%s' "$R" | grep -qa "live" && break; sleep 1; done
 chk "auto: hot-added tag visible live"    "live"   "$R"
 R=$(xe c2 'cat /host/live/live.txt')
 chk "auto: hot-added share serves"        "liveadd" "$R"

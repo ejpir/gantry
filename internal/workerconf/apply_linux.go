@@ -23,7 +23,13 @@ import (
 func Apply(spec Spec) (*Report, error) {
 	rep := &Report{Platform: "linux"}
 
+	// The close tier's keep set is computed FIRST: /proc/self/fd (the
+	// only way to discover the runtime's anon fds) vanishes when the
+	// mount tier pivots the root.
+	keep := fdKeepSet(spec)
+
 	if spec.ConfRoot != "" {
+		_, _ = fmt.Fprintf(os.Stderr, "workerconf: mount tier: confineMounts(%s)\n", spec.ConfRoot)
 		if err := confineMounts(spec.ConfRoot); err != nil {
 			rep.Notes = append(rep.Notes, "mount tier unavailable: "+err.Error())
 		} else {
@@ -34,15 +40,22 @@ func Apply(spec Spec) (*Report, error) {
 		rep.Notes = append(rep.Notes, "mount tier skipped: no ConfRoot")
 	}
 
-	if err := closeFrom(spec.KeepFDs + 1); err != nil {
-		rep.Notes = append(rep.Notes, "close_range: "+err.Error())
+	// The close tier kills every fd the worker cannot justify. The
+	// keep set is the dense table (0..KeepFDs), the live conn dups
+	// (KeepFDExtra), and kernel-internal runtime plumbing
+	// (epoll/eventfd/timerfd anon inodes).
+	if err := closeExcept(keep); err != nil {
+		rep.Notes = append(rep.Notes, "close tier: "+err.Error())
 	} else {
 		rep.Applied = true
+		rep.Notes = append(rep.Notes, fmt.Sprintf("close tier: unjustified fds closed (kept %d)", len(keep)))
 	}
 
+	_, _ = fmt.Fprintln(os.Stderr, "workerconf: installing seccomp filter")
 	if err := installSeccomp(); err != nil {
 		rep.Notes = append(rep.Notes, "seccomp tier unavailable: "+err.Error())
 	} else {
+		_, _ = fmt.Fprintln(os.Stderr, "workerconf: seccomp filter installed")
 		rep.Applied = true
 		rep.Notes = append(rep.Notes, "seccomp tier: syscall whitelist (TSYNC)")
 	}
@@ -86,20 +99,48 @@ func confineMounts(root string) error {
 	return nil
 }
 
-// closeFrom closes every descriptor >= first. The worker's descriptor
-// table is dense (0..KeepFDs), so one close_range covers all strays;
-// kernels without close_range(2) (<5.9) get a bounded fallback loop.
-func closeFrom(first int) error {
-	_, _, errno := unix.RawSyscall(unix.SYS_CLOSE_RANGE, uintptr(first), ^uintptr(0), 0)
-	switch errno {
-	case 0:
-		return nil
-	case unix.ENOSYS:
-		for fd := first; fd < 4096; fd++ {
-			_ = unix.Close(fd) // EBADF on gaps is expected
-		}
-		return nil
-	default:
-		return fmt.Errorf("close_range: %w", errno)
+// fdKeepSet computes the descriptors the worker may keep: the dense
+// inherited table (0..KeepFDs), the live conn dups (KeepFDExtra), and
+// kernel-internal runtime plumbing (epoll/eventfd/timerfd anon inodes,
+// discovered via /proc/self/fd — closing the Go runtime's poller fd
+// would silently break its netpoll-driven channel I/O).
+func fdKeepSet(spec Spec) map[int]bool {
+	keep := map[int]bool{}
+	for fd := 0; fd <= spec.KeepFDs; fd++ {
+		keep[fd] = true
 	}
+	for _, fd := range spec.KeepFDExtra {
+		keep[fd] = true
+	}
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "workerconf: /proc/self/fd survey unavailable: %v\n", err)
+		return keep
+	}
+	for _, e := range entries {
+		link, err := os.Readlink("/proc/self/fd/" + e.Name())
+		if err != nil {
+			continue
+		}
+		switch link {
+		case "anon_inode:[eventpoll]", "anon_inode:[eventfd]", "anon_inode:[timerfd]":
+			var fd int
+			if _, err := fmt.Sscanf(e.Name(), "%d", &fd); err == nil {
+				keep[fd] = true
+			}
+		}
+	}
+	return keep
+}
+
+// closeExcept closes every descriptor outside the keep set (bounded
+// loop; close_range(2) has no exclusion mechanism). EBADF on gaps is
+// expected.
+func closeExcept(keep map[int]bool) error {
+	for fd := 0; fd < 4096; fd++ {
+		if !keep[fd] {
+			_ = unix.Close(fd)
+		}
+	}
+	return nil
 }

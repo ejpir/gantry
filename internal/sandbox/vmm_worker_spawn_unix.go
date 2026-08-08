@@ -161,9 +161,12 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		return nil, fmt.Errorf("spawn vmm worker: %w", err)
 	}
 
+	// waitErr captures the authoritative death cause (signal vs exit
+	// code) the first time the child is reaped.
+	var waitErr error
 	killProc := func() {
 		_ = proc.Kill()
-		_, _ = proc.Wait()
+		_, waitErr = proc.Wait()
 	}
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
@@ -189,7 +192,7 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
 		killProc()
-		return nil, fmt.Errorf("vmm worker boot ack: %w", err)
+		return nil, fmt.Errorf("vmm worker boot ack: %w (worker wait: %v)", err, waitErr)
 	}
 	_ = ctrlSup.SetReadDeadline(time.Time{})
 	if !ack.OK {
@@ -344,8 +347,9 @@ func CmdVMMWorker() int {
 		}
 		return a, nil
 	}
-	if err := runVMMWorker(control, bridge, fdChan, assetsFn); err != nil {
-		fmt.Fprintln(os.Stderr, "vmm worker:", err)
+	err = runVMMWorker(control, bridge, fdChan, assetsFn)
+	fmt.Fprintf(os.Stderr, "_vmm-worker: runVMMWorker returned: %v\n", err)
+	if err != nil {
 		return 1
 	}
 	return 0

@@ -35,6 +35,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
@@ -193,6 +194,15 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	conf := workerconf.DisabledReport(runtime.GOOS, cfg.Confinement)
 	if cfg.Confinement != "" && cfg.Confinement != "off" {
 		spec := workerconf.DefaultSpec(vmmKeepFDs(cfg), cfg.ConfRoot)
+		// The close tier must not sever the channels this worker runs
+		// on: net.FileConn DUPS each inherited conn fd, and the dup
+		// (not the table slot) is the live descriptor.
+		for _, c := range []net.Conn{control, bridge, fdChan, assets.NetConn} {
+			if fd, ok := workerConnFD(c); ok {
+				spec.KeepFDExtra = append(spec.KeepFDExtra, fd)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "_vmm-worker: confinement %s: applying (KeepFDs=%d extra=%v ConfRoot=%q)\n", cfg.Confinement, vmmKeepFDs(cfg), spec.KeepFDExtra, cfg.ConfRoot)
 		spec.WriteFiles = cfg.WriteFiles
 		for _, sh := range cfg.Shares {
 			spec.FileAllow = append(spec.FileAllow,
@@ -207,7 +217,10 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		} else if applyErr != nil {
 			conf.Notes = append(conf.Notes, "apply: "+applyErr.Error())
 		}
+		fmt.Fprintf(os.Stderr, "_vmm-worker: confinement applied: %v; verifying\n", conf.Notes)
 		workerconfVerifyFn(spec, &conf)
+		fmt.Fprintf(os.Stderr, "_vmm-worker: confinement verified: fs-read=%s net-dial=%s exec=%s\n",
+			conf.Property(workerconf.PropFSRead).State, conf.Property(workerconf.PropNetDial).State, conf.Property(workerconf.PropExec).State)
 		if conf.Applied && shareHotAddUnavailable(conf) != "" {
 			conf.Notes = append(conf.Notes, "share hot-add unavailable (immutable profile); new shares activate at boot")
 		}
@@ -318,6 +331,24 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 // vmmWorkerState is the worker's mutable serving state. Prepare/publish
 // tokens let the supervisor stage a share atomically (prepare + FD, then
 // publish or drop) exactly as the local hub does.
+// workerConnFD resolves the live descriptor behind a net.Conn (the
+// net.FileConn dup), for the confinement close tier's keep list.
+func workerConnFD(c net.Conn) (int, bool) {
+	sc, ok := c.(syscall.Conn)
+	if !ok || sc == nil {
+		return 0, false
+	}
+	raw, err := sc.SyscallConn()
+	if err != nil {
+		return 0, false
+	}
+	fd := -1
+	if err := raw.Control(func(f uintptr) { fd = int(f) }); err != nil || fd < 0 {
+		return 0, false
+	}
+	return fd, true
+}
+
 // shareHotAddUnavailable explains why a live share-add cannot be
 // served, or "". Seatbelt profiles are immutable once applied: a share
 // added after boot was never baked into the profile, and macOS

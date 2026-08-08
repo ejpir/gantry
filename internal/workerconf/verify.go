@@ -17,12 +17,20 @@ import (
 // then honestly read "unenforced") and it never upgrades an
 // indeterminate probe to enforced.
 func Verify(spec Spec, report *Report) {
+	// Stage prints: worker postmortem tooling — a mid-Verify death
+	// (observed once on AL2023) names its probe here.
+	staged := func(name string, fn func() PropertyResult) PropertyResult {
+		_, _ = fmt.Fprintln(os.Stderr, "workerconf: probe "+name)
+		r := fn()
+		_, _ = fmt.Fprintf(os.Stderr, "workerconf: probe %s -> %s (%s)\n", name, r.State, r.Detail)
+		return r
+	}
 	report.Results = []PropertyResult{
-		probeFSRead(),
-		probeFSWrite(),
-		probeNetDial(spec.NoNetwork),
-		probeExec(spec.NoExec),
-		probeProcEnum(),
+		staged("fs-read", probeFSRead),
+		staged("fs-write", probeFSWrite),
+		staged("net-dial", func() PropertyResult { return probeNetDial(spec.NoNetwork) }),
+		staged("exec", func() PropertyResult { return probeExec(spec.NoExec) }),
+		staged("proc-enum", probeProcEnum),
 	}
 }
 
