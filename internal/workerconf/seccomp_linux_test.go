@@ -1,6 +1,12 @@
 package workerconf
 
-import "testing"
+import (
+	"testing"
+
+	"golang.org/x/sys/unix"
+)
+
+func sysIoctlNr() int { return unix.SYS_IOCTL }
 
 // TestBuildFilterOffsets validates the assembled BPF program
 // structurally: every jump must land on an instruction inside the
@@ -28,4 +34,17 @@ func TestBuildFilterOffsets(t *testing.T) {
 			}
 		}
 	}
+	// The ioctl argument check must read the REQUEST (args[1], offset
+	// 24), never the fd (args[0], offset 16) — the AL2023 KVM
+	// regression. Find the instruction after the SYS_IOCTL dispatch and
+	// pin its load offset.
+	for i, ins := range prog {
+		if ins.Code == bpfJMP|bpfJEQ|bpfK && ins.K == uint32(sysIoctlNr()) {
+			if i+1 >= len(prog) || prog[i+1].Code != bpfLD|bpfW|bpfABS || prog[i+1].K != 24 {
+				t.Fatalf("ioctl arg check does not load args[1] (offset 24) after dispatch at %d", i)
+			}
+			return
+		}
+	}
+	t.Fatal("no SYS_IOCTL dispatch in filter")
 }

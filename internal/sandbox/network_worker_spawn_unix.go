@@ -138,7 +138,7 @@ func workerEnv() []string {
 	out := make([]string, 0, 3)
 	// GANTRY_DEBUG_RTC is a debug pass-through (worker-side postmortem
 	// logging); it carries no secret material.
-	for _, key := range []string{"PATH", "TMPDIR", "HOME", "GANTRY_DEBUG_RTC"} {
+	for _, key := range []string{"PATH", "TMPDIR", "HOME", "GANTRY_DEBUG_RTC", "WORKERCONF_NOSECCOMP"} {
 		if v, ok := os.LookupEnv(key); ok {
 			out = append(out, key+"="+v)
 		}

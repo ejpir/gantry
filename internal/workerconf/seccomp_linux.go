@@ -1,11 +1,15 @@
 package workerconf
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+var errDebugSkipped = errors.New("WORKERCONF_NOSECCOMP=1: filter skipped (debug)")
 
 // Hand-rolled seccomp-bpf whitelist (no libseccomp cgo dependency — the
 // list is small and static). Design notes:
@@ -42,9 +46,9 @@ const (
 	sysEPERM             = 1
 	seccompSetModeFilter = 1
 	seccompFlagTSYNC     = 1
-	offArch              = 4 // seccomp_data.arch
-	offNr                = 0 // seccomp_data.nr
-	offArg0              = 16
+	offArch              = 4  // seccomp_data.arch
+	offNr                = 0  // seccomp_data.nr
+	offArg1              = 24 // seccomp_data.args[1] (args[0] is at 16)
 )
 
 // whitelist is the syscall set a VMM worker needs post-Apply: the Go
@@ -83,6 +87,11 @@ var whitelist = []uint32{
 	unix.SYS_FREMOVEXATTR,
 	unix.SYS_RECVMSG, unix.SYS_SENDMSG, unix.SYS_SHUTDOWN,
 	unix.SYS_GETSOCKNAME, unix.SYS_GETPEERNAME,
+	// getsockopt/setsockopt are fd-scoped: net.FileConn probes SO_TYPE
+	// on every descriptor it wraps (the vsock.forward path wraps each
+	// guest-brokered socket post-Apply — the AL2023 RST regression).
+	// They cannot create connectivity (socket/connect stay denied).
+	unix.SYS_GETSOCKOPT, unix.SYS_SETSOCKOPT,
 	unix.SYS_GETUID, unix.SYS_GETEUID, unix.SYS_GETGID, unix.SYS_GETEGID,
 }
 
@@ -120,7 +129,10 @@ func buildFilter() []unix.SockFilter {
 	i3 := ioctlBlock + 3
 	i4 := ioctlBlock + 4
 	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, unix.SYS_IOCTL, 0, uint8(denyIdx-i0-1)))
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArg0)) // i1
+	// The ioctl REQUEST is the second syscall argument (fd, req, ...):
+	// seccomp_data.args[1]. The AL2023 KVM soak caught this reading
+	// args[0] (the fd, 12) and denying the whole KVM range.
+	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArg1)) // i1
 	prog = append(prog, stmt(bpfALU|bpfAND|bpfK, 0xFFFF)) // i2
 	prog = append(prog, jump(bpfJMP|bpfJGE|bpfK, 0xAE00, 0, uint8(denyIdx-i3-1)))
 	prog = append(prog, jump(bpfJMP|bpfJGT|bpfK, 0xAEFF, uint8(denyIdx-i4-1), 0))
@@ -134,15 +146,24 @@ func buildFilter() []unix.SockFilter {
 // it is reported as a full failure of the tier rather than a partial
 // success.
 func installSeccomp() error {
+	if os.Getenv("WORKERCONF_NOSECCOMP") == "1" {
+		// Debug escape hatch (worker postmortem tooling): skip the
+		// filter entirely. Never set in production; the report note
+		// makes the degradation explicit.
+		return errDebugSkipped
+	}
 	prog := buildFilter()
+	_, _ = fmt.Fprintf(os.Stderr, "workerconf: filter built (%d insns); PR_SET_NO_NEW_PRIVS\n", len(prog))
 	if _, _, errno := unix.RawSyscall(unix.SYS_PRCTL, unix.PR_SET_NO_NEW_PRIVS, 1, 0); errno != 0 {
 		return fmt.Errorf("no_new_privs: %w", errno)
 	}
+	_, _ = fmt.Fprintln(os.Stderr, "workerconf: NNP set; seccomp(SET_MODE_FILTER|TSYNC)")
 	fprog := unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
 	_, _, errno := unix.RawSyscall(unix.SYS_SECCOMP, seccompSetModeFilter, seccompFlagTSYNC,
 		uintptr(unsafe.Pointer(&fprog)))
 	if errno != 0 {
 		return fmt.Errorf("seccomp load (TSYNC): %w", errno)
 	}
+	_, _ = fmt.Fprintln(os.Stderr, "workerconf: seccomp(2) returned 0")
 	return nil
 }
