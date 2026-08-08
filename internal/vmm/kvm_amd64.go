@@ -117,7 +117,7 @@ func (kvmX86Platform) run(m *Machine) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	k, err := openKVM()
+	k, err := openKVM(m.kvmFD)
 	if err != nil {
 		return err
 	}

@@ -33,12 +33,14 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/virtio"
 	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -64,6 +66,15 @@ type vmmBootConfig struct {
 	// owns no host paths — confinement kills path ops); the supervisor
 	// pulls them over traffic.snapshot and merges into its own recorder.
 	Policy []byte `json:"policy,omitempty"`
+	// Confinement is the worker confinement mode: "auto" | "required" |
+	// "off" ("" = off: tests and the no-confinement fallback). ConfRoot
+	// is a supervisor-created mountpoint dir for the worker's private
+	// root (linux). HasKVM marks a pre-opened /dev/kvm descriptor as
+	// the LAST entry of the descriptor table (confinement makes the
+	// worker's /dev empty, so the hypervisor handle must be passed).
+	Confinement string `json:"confinement,omitempty"`
+	ConfRoot    string `json:"confRoot,omitempty"`
+	HasKVM      bool   `json:"hasKVM,omitempty"`
 }
 
 // vmmShareMeta is one hub export minus its root descriptor (which travels
@@ -86,6 +97,7 @@ type vmmWorkerAssets struct {
 	DisksRO    []*os.File
 	Disks      []*os.File
 	ShareRoots []*os.File // len == len(cfg.Shares)
+	KVM        *os.File   // pre-opened /dev/kvm; last table slot when cfg.HasKVM
 }
 
 // vmmRunnerImpl abstracts the booted machine inside the worker so tests
@@ -112,6 +124,28 @@ var vmmWorkerBoot = func(opts vmm.Opts) (vmmRunnerImpl, error) {
 		return nil, err
 	}
 	return realVMM{m: m}, nil
+}
+
+// Confinement hooks (tests substitute fakes; production is workerconf).
+var (
+	workerconfApplyFn  = workerconf.Apply
+	workerconfVerifyFn = workerconf.Verify
+)
+
+// vmmKeepFDs computes the descriptor-table high-water mark: fds 0..7 are
+// stdio plus the fixed slots; the asset table follows densely (kernel,
+// rootfs?, DisksRO..., Disks..., share roots..., kvm?).
+func vmmKeepFDs(cfg vmmBootConfig) int {
+	n := 8 // fds 0..7
+	n++    // kernel
+	if cfg.HasRoot {
+		n++
+	}
+	n += cfg.NDisksRO + cfg.NDisks + len(cfg.Shares)
+	if cfg.HasKVM {
+		n++
+	}
+	return n - 1 // highest surviving fd (fds are 0-indexed)
 }
 
 // ---------------------------------------------------------------- worker
@@ -145,6 +179,37 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	if err := workerproto.ReadNonce(fdChan, nonce); err != nil {
 		return fmt.Errorf("fd channel nonce: %w", err)
 	}
+
+	// Worker confinement (docs/worker-confinement.md): everything the
+	// worker needs is already open as descriptors, so Apply can deny
+	// the rest. The report rides the boot ack into isolation.json;
+	// "required" refuses the boot when a core property is not verified
+	// enforced. Fail-closed: an apply/verify error in required mode is
+	// a boot refusal, never a silent degrade.
+	conf := workerconf.DisabledReport(runtime.GOOS, cfg.Confinement)
+	if cfg.Confinement != "" && cfg.Confinement != "off" {
+		spec := workerconf.DefaultSpec(vmmKeepFDs(cfg), cfg.ConfRoot)
+		if rep, applyErr := workerconfApplyFn(spec); rep != nil {
+			conf = *rep
+			conf.Mode = cfg.Confinement
+			if applyErr != nil {
+				conf.Notes = append(conf.Notes, "apply: "+applyErr.Error())
+			}
+		} else if applyErr != nil {
+			conf.Notes = append(conf.Notes, "apply: "+applyErr.Error())
+		}
+		workerconfVerifyFn(spec, &conf)
+		if cfg.Confinement == "required" {
+			failed := conf.Failed(workerconf.PropFSRead, workerconf.PropFSWrite,
+				workerconf.PropNetDial, workerconf.PropExec)
+			if len(failed) > 0 {
+				msg := fmt.Sprintf("process isolation required but confinement not enforced: %v", failed)
+				_ = workerproto.WriteMessage(control, map[string]any{"ok": false, "error": msg, "confinement": conf})
+				return fmt.Errorf("%s", msg)
+			}
+		}
+	}
+
 	fds := workerproto.NewFDMux(fdChan)
 	bridgeClient := workerproto.NewClient(bridge)
 	defer func() { _ = bridgeClient.Close() }()
@@ -198,6 +263,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		NetConn:   assets.NetConn,
 		NetMAC:    cfg.NetMAC,
 		NetPolicy: policy, NetTraffic: traffic,
+		KVM:       assets.KVM,
 		GuestCID:  cfg.GuestCID,
 		VCPUs:     cfg.VCPUs,
 		Cmdline:   cfg.Cmdline,
@@ -214,7 +280,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		_ = workerproto.WriteMessage(control, map[string]any{"ok": false, "error": err.Error()})
 		return err
 	}
-	if err := workerproto.WriteMessage(control, map[string]any{"ok": true}); err != nil {
+	if err := workerproto.WriteMessage(control, map[string]any{"ok": true, "confinement": conf}); err != nil {
 		return fmt.Errorf("boot ack: %w", err)
 	}
 	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, traffic: traffic, pending: map[string]*virtio.PreparedShare{}}
@@ -544,6 +610,8 @@ type vmmWorker struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	confReport workerconf.Report // from the boot ack
 }
 
 // Done closes when the worker process is reaped (Err reports how).
@@ -617,6 +685,11 @@ func (w *vmmWorker) SetPolicy(policy *netpol.Policy) error {
 	}
 	return w.client.Call("net.policy", netPolicyRequest{Policy: raw}, nil)
 }
+
+// ConfinementReport returns the worker's confinement report as carried
+// by the boot ack (platform-neutral via a method so shared files never
+// name the unix-only concrete type in field positions).
+func (w *vmmWorker) ConfinementReport() workerconf.Report { return w.confReport }
 
 // sendFD serializes a token-correlated descriptor transfer.
 func (w *vmmWorker) sendFD(token [workerproto.FDTokenLen]byte, f *os.File) error {

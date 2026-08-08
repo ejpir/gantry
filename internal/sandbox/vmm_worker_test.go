@@ -15,6 +15,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -108,8 +109,9 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerAsse
 		t.Fatal(err)
 	}
 	var ack struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK          bool              `json:"ok"`
+		Error       string            `json:"error"`
+		Confinement workerconf.Report `json:"confinement"`
 	}
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(15 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
@@ -121,11 +123,12 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerAsse
 	}
 
 	w := &vmmWorker{
-		client:  workerproto.NewClient(ctrlSup),
-		fdChan:  fdSup,
-		bridge:  bridgeSup,
-		bridgeE: make(chan error, 1),
-		dead:    make(chan struct{}),
+		client:     workerproto.NewClient(ctrlSup),
+		fdChan:     fdSup,
+		bridge:     bridgeSup,
+		bridgeE:    make(chan error, 1),
+		dead:       make(chan struct{}),
+		confReport: ack.Confinement,
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{
@@ -641,5 +644,115 @@ func TestShareManagerSplitServingLifecycle(t *testing.T) {
 	}
 	if _, err := manager.Remove("docs", false, true); err != nil {
 		t.Fatalf("Remove through the worker serving: %v", err)
+	}
+}
+
+func TestVMMKeepFDs(t *testing.T) {
+	base := vmmKeepFDs(vmmBootConfig{})
+	if base != 8 { // fds 0..7 fixed + kernel at 8
+		t.Fatalf("base keepFDs: %d", base)
+	}
+	full := vmmKeepFDs(vmmBootConfig{HasRoot: true, NDisksRO: 2, NDisks: 1, Shares: []vmmShareMeta{{Tag: "a"}, {Tag: "b"}}, HasKVM: true})
+	if full != base+1+2+1+2+1 {
+		t.Fatalf("full keepFDs: %d", full)
+	}
+}
+
+// TestVMMWorkerConfinementReport: the worker applies confinement after
+// the descriptor table is consumed, and the verified report rides the
+// boot ack to the supervisor.
+func TestVMMWorkerConfinementReport(t *testing.T) {
+	oldA, oldV := workerconfApplyFn, workerconfVerifyFn
+	t.Cleanup(func() { workerconfApplyFn, workerconfVerifyFn = oldA, oldV })
+	var sawSpec workerconf.Spec
+	workerconfApplyFn = func(spec workerconf.Spec) (*workerconf.Report, error) {
+		sawSpec = spec
+		rep := &workerconf.Report{Platform: "linux", Applied: true, Notes: []string{"fake tier"}}
+		return rep, nil
+	}
+	workerconfVerifyFn = func(spec workerconf.Spec, rep *workerconf.Report) {
+		rep.Results = []workerconf.PropertyResult{
+			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced, Detail: "fake"},
+			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced, Detail: "fake"},
+			{Property: workerconf.PropExec, State: workerconf.StateEnforced, Detail: "fake"},
+		}
+	}
+	cfg := vmmBootConfig{MemSize: 1 << 20, Confinement: "auto", ConfRoot: t.TempDir()}
+	h := startVMMWorkerHarness(t, cfg, testAssets(t))
+	if sawSpec.ConfRoot == "" {
+		t.Fatal("worker did not receive the confinement spec")
+	}
+	if sawSpec.KeepFDs != vmmKeepFDs(cfg) {
+		t.Fatalf("spec KeepFDs %d, want %d", sawSpec.KeepFDs, vmmKeepFDs(cfg))
+	}
+	rep := h.w.ConfinementReport()
+	if !rep.Applied || rep.Mode != "auto" {
+		t.Fatalf("supervisor-side report: %+v", rep)
+	}
+	if rep.Property(workerconf.PropNetDial).State != workerconf.StateEnforced {
+		t.Fatalf("report lost verify results: %+v", rep)
+	}
+}
+
+// TestVMMWorkerConfinementRequiredRefused: required mode fails the boot
+// (with a structured error ack) when a core property is not enforced.
+func TestVMMWorkerConfinementRequiredRefused(t *testing.T) {
+	oldA, oldV := workerconfApplyFn, workerconfVerifyFn
+	t.Cleanup(func() { workerconfApplyFn, workerconfVerifyFn = oldA, oldV })
+	workerconfApplyFn = func(workerconf.Spec) (*workerconf.Report, error) {
+		return &workerconf.Report{Platform: "linux", Applied: true}, nil
+	}
+	workerconfVerifyFn = func(_ workerconf.Spec, rep *workerconf.Report) {
+		rep.Results = []workerconf.PropertyResult{
+			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
+			{Property: workerconf.PropNetDial, State: workerconf.StateUnenforced, Detail: "connection refused"},
+			{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+		}
+	}
+	ctrlSup, ctrlWrk := net.Pipe()
+	defer func() { _ = ctrlSup.Close() }()
+	bridgeSup, bridgeWrk := net.Pipe()
+	defer func() { _ = bridgeSup.Close() }()
+	fdSup, fdWrk, err := socketpairConns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fdSup.Close() }()
+	workerErr := make(chan error, 1)
+	go func() {
+		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+			return testAssets(t), nil
+		})
+	}()
+	nonce := make([]byte, 32)
+	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce,
+		vmmBootConfig{MemSize: 1 << 20, Confinement: "required", ConfRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
+		t.Fatal(err)
+	}
+	var ack struct {
+		OK          bool              `json:"ok"`
+		Error       string            `json:"error"`
+		Confinement workerconf.Report `json:"confinement"`
+	}
+	_ = ctrlSup.SetReadDeadline(time.Now().Add(15 * time.Second))
+	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
+		t.Fatalf("refusal ack: %v", err)
+	}
+	if ack.OK || !strings.Contains(ack.Error, "required") {
+		t.Fatalf("ack: %+v", ack)
+	}
+	if ack.Confinement.Property(workerconf.PropNetDial).State != workerconf.StateUnenforced {
+		t.Fatalf("refusal ack lost the report: %+v", ack.Confinement)
+	}
+	select {
+	case err := <-workerErr:
+		if err == nil || !strings.Contains(err.Error(), "required") {
+			t.Fatalf("worker exited %v, want a required-confinement refusal", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker did not refuse the boot")
 	}
 }

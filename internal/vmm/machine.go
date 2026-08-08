@@ -171,6 +171,7 @@ type Machine struct {
 	virtios   []*virtio.Core
 	vsock     *virtio.Vsock             // nil when no vsock device attached
 	irqLine   func(irq int, level bool) // installed by the backend
+	kvmFD     *os.File                  // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
 	stdinDone chan struct{}
 	// consoleStdin wires host stdin into the guest UART (interactive `run`;
 	// off for `exec`, where the terminal belongs to the container session).
@@ -278,9 +279,15 @@ type Opts struct {
 	// and boot), and a confined VMM worker can boot without any path
 	// resolution rights at all. Prepare consumes Kernel/Initrd (loads and
 	// closes them); the disks stay open for the VM's lifetime.
-	Kernel  *os.File
-	Initrd  *os.File   // optional when Disks are set
-	Rootfs  *os.File   // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
+	Kernel *os.File
+	Initrd *os.File // optional when Disks are set
+	Rootfs *os.File // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
+	// KVM is a pre-opened /dev/kvm descriptor (Linux only): a confined
+	// _vmm-worker cannot open device paths — its private /dev is empty —
+	// so the supervisor passes the hypervisor handle in the descriptor
+	// table. Nil means "open /dev/kvm by path" (monolithic). The backend
+	// keeps it open for the VM's lifetime. Ignored on darwin/windows.
+	KVM     *os.File
 	DisksRO []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
 	Disks   []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
 	Shares  []Share
@@ -328,7 +335,7 @@ func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 
 func Prepare(o Opts) (*Machine, error) {
 	m := &Machine{stdinDone: make(chan struct{}), consoleStdin: o.Interactive,
-		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096)}
+		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096), kvmFD: o.KVM}
 	if m.consoleW == nil {
 		m.consoleW = os.Stdout
 	}

@@ -8,6 +8,7 @@ package vmm
 import (
 	"fmt"
 	"github.com/ejpir/gantry/internal/gutil"
+	"os"
 	"syscall"
 	"unsafe"
 )
@@ -87,14 +88,29 @@ type kvmVCPU struct {
 	run kvmRunStruct
 }
 
-type kvmFile struct{ fd uintptr }
+// kvmFile owns the /dev/kvm handle: either a raw fd it opened itself,
+// or a pre-opened *os.File handed over by the supervisor (confined
+// worker — the file field keeps single ownership so Close never
+// double-closes).
+type kvmFile struct {
+	fd   uintptr
+	file *os.File
+}
 
-func openKVM() (*kvmFile, error) {
-	fd, err := syscall.Open("/dev/kvm", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open /dev/kvm: %w (need --device /dev/kvm or host access)", err)
+// openKVM validates the KVM API version on the device. When dev is nil
+// it opens /dev/kvm by path (monolithic); otherwise it adopts the
+// pre-opened descriptor (confined worker — its private /dev is empty).
+func openKVM(dev *os.File) (*kvmFile, error) {
+	var k *kvmFile
+	if dev != nil {
+		k = &kvmFile{fd: dev.Fd(), file: dev}
+	} else {
+		fd, err := syscall.Open("/dev/kvm", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, fmt.Errorf("open /dev/kvm: %w (need --device /dev/kvm or host access)", err)
+		}
+		k = &kvmFile{fd: uintptr(fd)}
 	}
-	k := &kvmFile{fd: uintptr(fd)}
 	v, err := k.getAPIVersion()
 	if err != nil {
 		k.Close()
@@ -107,7 +123,13 @@ func openKVM() (*kvmFile, error) {
 	return k, nil
 }
 
-func (k *kvmFile) Close() { _ = syscall.Close(int(k.fd)) }
+func (k *kvmFile) Close() {
+	if k.file != nil {
+		_ = k.file.Close()
+		return
+	}
+	_ = syscall.Close(int(k.fd))
+}
 
 func (k *kvmFile) getAPIVersion() (int, error) {
 	r, _, errno := syscall.Syscall(syscall.SYS_IOCTL, k.fd, kvmGetAPIVersion, 0)
