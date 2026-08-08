@@ -86,7 +86,15 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 			return nil, fmt.Errorf("worker confinement root: %w", err)
 		}
 		bootCfg.ConfRoot = confRoot
-		bootCfg.StateDir = dir
+		// Pre-opened logs Seatbelt allows by literal path. The sandbox
+		// directory itself stays denied: sandbox.json (shares, ports,
+		// net policy) lives there and is trusted on resume — a
+		// directory grant would hand a compromised worker a
+		// config-tamper primitive (Codex security finding 2026-08).
+		bootCfg.WriteFiles = []string{
+			filepath.Join(dir, "console.log"),
+			filepath.Join(dir, "worker-vmm.log"),
+		}
 	}
 	var kvm *os.File
 	if f, err := openHypervisorDevice(); err == nil && f != nil {
