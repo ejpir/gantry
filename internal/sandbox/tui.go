@@ -740,10 +740,14 @@ func setSandboxNetworkPolicyCmd(name, path string, allowLocal bool) tea.Cmd {
 	}
 }
 
-func configureSandboxShareCmd(name, tag, spec, mountpoint string, replace bool) tea.Cmd {
+func configureSandboxShareCmd(name, tag, spec, mountpoint string, replace, running bool) tea.Cmd {
 	return func() tea.Msg {
 		err := configureSandboxShare(name, spec, replace)
-		body := fmt.Sprintf("%s → %s · restart to apply", tag, mountpoint)
+		applyNote := "applies on next start"
+		if running {
+			applyNote = "restart to apply"
+		}
+		body := fmt.Sprintf("%s → %s · %s", tag, mountpoint, applyNote)
 		return tuiProcessDoneMsg{action: "share configure", name: name + "/" + tag, output: body, err: err}
 	}
 }
@@ -815,6 +819,21 @@ func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
 }
 
 func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
+	if selected := m.selected(); selected != nil && selected.State != tuiStarting {
+		return selected
+	}
+	if running := m.runningTargetSandbox(); running != nil {
+		return running
+	}
+	for i := range m.sandboxes {
+		if m.sandboxes[i].State == tuiStopped {
+			return &m.sandboxes[i]
+		}
+	}
+	return nil
+}
+
+func (m *sandboxTUIModel) runningTargetSandbox() *tuiSandbox {
 	if selected := m.selected(); selected != nil && selected.State == tuiRunning {
 		return selected
 	}

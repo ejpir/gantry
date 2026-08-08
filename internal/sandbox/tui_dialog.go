@@ -505,7 +505,7 @@ func (m *sandboxTUIModel) updateShareDialogKey(msg tea.KeyPressMsg) (tea.Model, 
 func (m *sandboxTUIModel) openShareAddDialog(replace bool) tea.Cmd {
 	target := m.shareTargetSandbox()
 	if target == nil {
-		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before adding a live share.")
+		return m.showToast(tuiToastInfo, "No eligible sandbox", "Wait for a starting sandbox to finish, or create one first.")
 	}
 	m.dialog = tuiShareAddDialog
 	m.formError = ""
@@ -530,7 +530,9 @@ func (m *sandboxTUIModel) openShareAddDialog(replace bool) tea.Cmd {
 			}
 		}
 	}
-	m.shareSandbox.Reset(m.sandboxes, preferred)
+	m.shareSandbox.ResetWhere(m.sandboxes, preferred, func(sandbox tuiSandbox) bool {
+		return sandbox.State == tuiRunning || sandbox.State == tuiStopped
+	})
 	m.resizeInputs()
 	return m.focusShare(0)
 }
@@ -605,7 +607,7 @@ func (m *sandboxTUIModel) updatePortDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 }
 
 func (m *sandboxTUIModel) openPortPublishDialog() tea.Cmd {
-	target := m.shareTargetSandbox() // same selection rule as live shares
+	target := m.runningTargetSandbox()
 	if target == nil {
 		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before publishing a port.")
 	}
@@ -822,8 +824,9 @@ func (m *sandboxTUIModel) unpublishSelectedPort() (tea.Model, tea.Cmd) {
 
 func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 	targetName := m.shareSandbox.Value()
-	if targetName == "" {
-		m.formError = "no running sandbox available"
+	target := m.sandboxNamed(targetName)
+	if target == nil || target.State == tuiStarting {
+		m.formError = "no eligible sandbox available"
 		return m, m.focusShare(0)
 	}
 	tag := strings.TrimSpace(m.shareTag.Value())
@@ -865,7 +868,7 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 		return m, m.focusShare(4)
 	}
 	spec += ownerSuffix
-	requiresRestart := customMount
+	requiresRestart := customMount || target.State != tuiRunning
 	if m.shareReplace {
 		if row := m.selectedMount(); row != nil && row.Guest != "" && row.Guest != shares.HubHostPath+"/"+row.Tag {
 			requiresRestart = true
@@ -880,7 +883,7 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 		m.busyAction = "share configure"
 		m.busyName = targetName + "/" + tag
 		return m, tea.Batch(
-			configureSandboxShareCmd(targetName, tag, spec, desiredMount, m.shareReplace),
+			configureSandboxShareCmd(targetName, tag, spec, desiredMount, m.shareReplace, target.State == tuiRunning),
 			m.ensureAnimation(),
 		)
 	}
