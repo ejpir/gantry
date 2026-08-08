@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Guest physical layout inside RAM:
@@ -167,12 +168,14 @@ type Machine struct {
 	// PIC, I/O APIC): they exist only on the x86 boot paths (KVM on
 	// linux/amd64, WHPX on Windows) and the whole cluster is build-gated
 	// so arm64 builds carry no dead emulation code (x86devices.go).
-	x86       x86Devices
-	virtios   []*virtio.Core
-	vsock     *virtio.Vsock             // nil when no vsock device attached
-	irqLine   func(irq int, level bool) // installed by the backend
-	kvmFD     *os.File                  // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
-	stdinDone chan struct{}
+	x86         x86Devices
+	virtios     []*virtio.Core
+	rootBlkCore *virtio.Core              // boot rootfs (/dev/vda), for first-request timing
+	vsockCore   *virtio.Core              // transport slot, for first-packet timing
+	vsock       *virtio.Vsock             // nil when no vsock device attached
+	irqLine     func(irq int, level bool) // installed by the backend
+	kvmFD       *os.File                  // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
+	stdinDone   chan struct{}
 	// consoleStdin wires host stdin into the guest UART (interactive `run`;
 	// off for `exec`, where the terminal belongs to the container session).
 	consoleStdin bool
@@ -180,6 +183,7 @@ type Machine struct {
 	consoleMu    sync.Mutex
 	consoleW     io.Writer
 	stdoutBuf    []byte
+	bootTiming   *bootTimeline
 	closeOnce    sync.Once
 	closeErr     error
 }
@@ -247,6 +251,9 @@ var dbgMMIO = gutil.EnvOr("GANTRY_DEBUG_UART", "MINIVM_DEBUG_UART") != ""
 // A flat sequence of range checks; unassigned space reads-as-zero.
 func (m *Machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint32) uint32 {
 	if m.uart != nil && phys >= uartBase && phys < uartBase+uartSize {
+		if m.bootTiming != nil {
+			m.bootTiming.mark(bootFirstUART, "first UART access")
+		}
 		if dbgMMIO {
 			op := "R"
 			if isWrite {
@@ -259,8 +266,20 @@ func (m *Machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint
 	for _, vc := range m.virtios {
 		if phys >= vc.Base() && phys < vc.Base()+virtio.MMIOSize {
 			off := phys - vc.Base()
+			if m.bootTiming != nil {
+				m.bootTiming.mark(bootFirstVirtioMMIO, "first virtio-mmio access")
+			}
 			if isWrite {
-				vc.MMIOWrite(off, gutil.LE32(data))
+				val := gutil.LE32(data)
+				if m.bootTiming != nil && off == 0x050 {
+					switch {
+					case vc == m.rootBlkCore && val == 0:
+						m.bootTiming.mark(bootFirstRootBlock, "first root-block request")
+					case vc == m.vsockCore && val == 1: // virtio-vsock transmit queue
+						m.bootTiming.mark(bootFirstVsockTraffic, "first vsock traffic")
+					}
+				}
+				vc.MMIOWrite(off, val)
 				return 0
 			}
 			return vc.MMIORead(off, length)
@@ -319,6 +338,11 @@ type Opts struct {
 	// Console receives the guest serial console (default os.Stdout); the
 	// sandbox daemon points it at console.log, `exec -console` at stderr.
 	Console io.Writer
+	// BootTimingStart enables first-occurrence guest milestones and anchors
+	// their total times to the daemon's boot clock. Split workers reconstruct
+	// this timestamp from the bootstrap config; vCPU-relative times remain
+	// monotonic and are the authoritative fine-grained measurements.
+	BootTimingStart time.Time
 }
 
 // InjectVsockConn registers a host-originated stream to the guest's
@@ -334,8 +358,14 @@ func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 }
 
 func Prepare(o Opts) (*Machine, error) {
+	bootTimingStart := o.BootTimingStart
+	if bootTimingStart.IsZero() && gutil.EnvOr("GANTRY_BOOT_TIMING", "MINIVM_BOOT_TIMING") != "" {
+		// Direct `gantry run` and one-shot exec have no daemon clock to pass.
+		bootTimingStart = time.Now()
+	}
 	m := &Machine{stdinDone: make(chan struct{}), consoleStdin: o.Interactive,
-		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096), kvmFD: o.KVM}
+		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096), kvmFD: o.KVM,
+		bootTiming: newBootTimeline(bootTimingStart, nil)}
 	if m.consoleW == nil {
 		m.consoleW = os.Stdout
 	}
@@ -407,6 +437,9 @@ func Prepare(o Opts) (*Machine, error) {
 		if err != nil {
 			return nil, err
 		}
+		if i == 0 && o.Rootfs != nil {
+			m.rootBlkCore = core
+		}
 		mode := "rw"
 		if !writable {
 			mode = "ro"
@@ -468,6 +501,7 @@ func Prepare(o Opts) (*Machine, error) {
 			}
 		}
 		m.vsock = vs
+		m.vsockCore = core
 		fmt.Printf("virtio-vsock: guest cid %d @ %#x irq %d, host dir %s\n",
 			o.GuestCID, core.Base(), core.IRQ(), o.VsockFwd)
 	}

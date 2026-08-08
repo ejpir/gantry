@@ -156,6 +156,18 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerAsse
 	return h
 }
 
+func TestVMMWorkerBootTimingOrigin(t *testing.T) {
+	origin := time.Unix(1234, 5678)
+	h := startVMMWorkerHarness(t, vmmBootConfig{
+		MemSize:                 1 << 20,
+		BootTimingStartUnixNano: origin.UnixNano(),
+	}, testAssets(t))
+
+	if got := (*h.fake).opts.BootTimingStart; !got.Equal(origin) {
+		t.Fatalf("worker boot timing origin = %s, want %s", got, origin)
+	}
+}
+
 // TestVMMWorkerNetPolicyEnforcement is the regression for the split-VMM
 // local-netstack policy drop: in the degraded topology (net-worker
 // failed in auto, VMM split succeeded) the worker's virtio-net device is

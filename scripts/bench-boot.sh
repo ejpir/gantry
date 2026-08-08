@@ -9,7 +9,8 @@
 #                  container + graceful shutdown, the one-shot flow)
 #
 # Phase attribution: run one boot with GANTRY_BOOT_TIMING=1 and read
-# daemon.log; in-guest time is in console.log (kernel printk stamps).
+# daemon.log. It includes daemon phases plus first HVF/MMIO/block/vsock
+# milestones; in-guest time is in console.log (kernel printk stamps).
 #
 # usage: ./scripts/bench-boot.sh [runs] [image]
 # env:   GANTRY=./artifacts/gantry-darwin-arm64  (binary to test)
@@ -70,6 +71,7 @@ Phase breakdown of one cold boot:
   grep boot-timing ~/.gantry/sandboxes/$name/daemon.log
   $gantry delete $name
 
+  # "total" shares the daemon clock; "vCPU +" isolates guest execution.
   # in-guest: kernel boot to userspace from printk stamps
   grep -E '^\\[' ~/.gantry/sandboxes/$name/console.log | tail -5
 EOF

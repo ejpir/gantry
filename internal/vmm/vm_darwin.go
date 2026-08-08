@@ -402,8 +402,16 @@ func (vc *hvfVCPU) advancePC() {
 func (vc *hvfVCPU) runLoop() error {
 	vc.inLoop.Store(true)
 	defer vc.inLoop.Store(false)
+	firstRun := true
 	for {
 		vc.b.applyPendingIRQs()
+		if firstRun {
+			if vc.id == 0 {
+				// Capture immediately before the boot vCPU's first hv_vcpu_run.
+				vc.b.m.bootTiming.start("vCPU entered HVF")
+			}
+			firstRun = false
+		}
 		if ret := hvVcpuRun(vc.vcpu); ret != hvSuccess {
 			vc.dumpFullState()
 			return fmt.Errorf("hv_vcpu_run: %s", hvReturnString(ret))

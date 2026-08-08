@@ -48,15 +48,18 @@ import (
 // vmmBootConfig travels in the workerproto handshake. Counts define the
 // descriptor table layout after the fixed slots.
 type vmmBootConfig struct {
-	MemSize  uint64         `json:"memSize"`
-	VCPUs    int            `json:"vcpus"`
-	Cmdline  string         `json:"cmdline"`
-	NetMAC   [6]byte        `json:"netMAC"`
-	GuestCID uint64         `json:"guestCID"`
-	HasRoot  bool           `json:"hasRootfs"`
-	NDisksRO int            `json:"nDisksRO"`
-	NDisks   int            `json:"nDisks"`
-	Shares   []vmmShareMeta `json:"shares"`
+	MemSize  uint64  `json:"memSize"`
+	VCPUs    int     `json:"vcpus"`
+	Cmdline  string  `json:"cmdline"`
+	NetMAC   [6]byte `json:"netMAC"`
+	GuestCID uint64  `json:"guestCID"`
+	HasRoot  bool    `json:"hasRootfs"`
+	// BootTimingStartUnixNano carries the daemon's diagnostic clock into
+	// the split worker. Zero disables guest milestone collection.
+	BootTimingStartUnixNano int64          `json:"bootTimingStartUnixNano,omitempty"`
+	NDisksRO                int            `json:"nDisksRO"`
+	NDisks                  int            `json:"nDisks"`
+	Shares                  []vmmShareMeta `json:"shares"`
 	// Policy carries the LOCAL-netstack enforcement state: in the
 	// degraded topology (net-worker failed in auto, VMM split succeeded)
 	// the guest's frames land on the supervisor's embedded netstack,
@@ -278,6 +281,10 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		traffic = netpol.NewTrafficRecorder("")
 	}
 
+	var bootTimingStart time.Time
+	if cfg.BootTimingStartUnixNano != 0 {
+		bootTimingStart = time.Unix(0, cfg.BootTimingStartUnixNano)
+	}
 	opts := vmm.Opts{
 		MemSize:   cfg.MemSize,
 		Kernel:    assets.Kernel,
@@ -288,12 +295,13 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		NetConn:   assets.NetConn,
 		NetMAC:    cfg.NetMAC,
 		NetPolicy: policy, NetTraffic: traffic,
-		KVM:       assets.KVM,
-		GuestCID:  cfg.GuestCID,
-		VCPUs:     cfg.VCPUs,
-		Cmdline:   cfg.Cmdline,
-		Console:   assets.Console,
-		VsockDial: func(port uint32) (net.Conn, error) { return vsockForwardDial(bridgeClient, fds, port) },
+		KVM:             assets.KVM,
+		GuestCID:        cfg.GuestCID,
+		VCPUs:           cfg.VCPUs,
+		Cmdline:         cfg.Cmdline,
+		Console:         assets.Console,
+		BootTimingStart: bootTimingStart,
+		VsockDial:       func(port uint32) (net.Conn, error) { return vsockForwardDial(bridgeClient, fds, port) },
 		// Host->guest streams arrive as descriptors (vsock.connect), not
 		// unix listeners: the worker owns no host sockets.
 		VsockNoListen: true,
