@@ -147,6 +147,13 @@ type ShareHub struct {
 	root    *shareHubRoot
 	verbose bool
 
+	// rootVer is the namespace mutation stamp, reported as the hub
+	// root's mtime. The guest kernel invalidates its cached READDIR of
+	// the mount root only when the directory mtime changes — a static
+	// mtime made hot-added tags invisible until remount (FUSE
+	// NotifyEntry is a no-op over virtio-fs: no notify virtqueue).
+	rootVer atomic.Int64
+
 	mu       sync.RWMutex
 	exports  map[string]*ShareExport
 	all      map[*ShareExport]struct{}
@@ -252,6 +259,7 @@ func (h *ShareHub) Publish(p *PreparedShare) (*ShareExport, error) {
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
 	h.mu.Unlock()
+	h.bumpRootVer()
 	_ = h.root.NotifyEntry(exp.Tag)
 	return exp, nil
 }
@@ -290,6 +298,7 @@ func (h *ShareHub) Swap(p *PreparedShare) (old, exp *ShareExport, err error) {
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
 	h.mu.Unlock()
+	h.bumpRootVer()
 	_ = h.root.NotifyEntry(exp.Tag)
 	return old, exp, nil
 }
@@ -335,6 +344,7 @@ func (h *ShareHub) Remove(tag string, force bool) (*ShareExport, error) {
 		child.ForgetPersistent()
 	}
 	h.mu.Unlock()
+	h.bumpRootVer()
 	_ = h.root.NotifyEntry(tag)
 	if child == nil {
 		exp.finish()
@@ -422,10 +432,18 @@ var _ fs.NodeGetattrer = (*shareHubRoot)(nil)
 
 func (n *shareHubRoot) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = fuse.S_IFDIR | 0o755
-	out.Nlink = 2
+	out.Nlink = uint32(2 + len(n.hub.Exports()))
+	ver := n.hub.rootVer.Load()
+	out.Mtime = uint64(ver / int64(time.Second))
+	out.Mtimensec = uint32(ver % int64(time.Second))
+	out.Ctime, out.Ctimensec = out.Mtime, out.Mtimensec
 	out.SetTimeout(0)
 	return 0
 }
+
+// bumpRootVer stamps a namespace mutation so the next guest GETATTR of
+// the mount root sees a new mtime and drops its cached listing.
+func (h *ShareHub) bumpRootVer() { h.rootVer.Store(time.Now().UnixNano()) }
 
 // The hub root is a namespace, not a writable host directory.
 func (n *shareHubRoot) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {

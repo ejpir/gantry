@@ -154,6 +154,24 @@ func lstatRel(rootFD int, rel string) (syscall.Stat_t, syscall.Errno) {
 // descriptor.
 func (n *LoopbackNode) pinned() bool { return n.RootData.RootFD >= 0 }
 
+// HostStat stats the node for policy checks. Pinned exports stat
+// fd-relative through the root descriptor — the only variant that
+// works inside a confined worker, where every absolute-path syscall
+// is denied (Seatbelt EPERM / empty mount root ENOENT). Unpinned
+// exports keep the absolute Lstat. Callers must not fail open on an
+// error: a failed stat means the node is gone and the subsequent
+// operation will fail the same way.
+func (n *LoopbackNode) HostStat() (syscall.Stat_t, syscall.Errno) {
+	if n.pinned() {
+		return lstatRel(n.RootData.RootFD, n.relPath())
+	}
+	var st syscall.Stat_t
+	if err := syscall.Lstat(n.path(), &st); err != nil {
+		return syscall.Stat_t{}, ToErrno(err)
+	}
+	return st, 0
+}
+
 // relPath is the node's path relative to the pinned root, slash-separated.
 func (n *LoopbackNode) relPath() string {
 	return filepathToSlashTrim(n.relativePath())

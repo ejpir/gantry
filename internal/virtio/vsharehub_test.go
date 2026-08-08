@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -547,5 +548,41 @@ func TestShareHubOwnerMappingRejectedWhereUnsupported(t *testing.T) {
 	uid, gid := uint32(1000), uint32(1000)
 	if _, _, err := hub.PrepareMapped("workspace", t.TempDir(), false, &uid, &gid); err == nil {
 		t.Fatal("want an explicit unsupported-platform error")
+	}
+}
+
+func TestShareHubRootMtimeTracksNamespace(t *testing.T) {
+	// The guest kernel invalidates its cached READDIR of the mount
+	// root only on mtime change; a static mtime made hot-added tags
+	// invisible until remount (FUSE NotifyEntry is a no-op over
+	// virtio-fs: no notify virtqueue).
+	hub, err := NewShareHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+
+	before := hub.rootVer.Load()
+	time.Sleep(2 * time.Millisecond)
+	publishHubShare(t, hub, "fresh", t.TempDir(), true)
+	after := hub.rootVer.Load()
+	if after <= before {
+		t.Fatalf("namespace version did not advance on publish: before=%d after=%d", before, after)
+	}
+	var out fuse.AttrOut
+	if errno := hub.root.Getattr(context.Background(), nil, &out); errno != 0 {
+		t.Fatalf("root getattr errno %d", errno)
+	}
+	if out.Mtime != uint64(after/int64(time.Second)) || out.Mtimensec != uint32(after%int64(time.Second)) {
+		t.Fatalf("root getattr reports mtime %d.%09d, want %d", out.Mtime, out.Mtimensec, after)
+	}
+	// Removal advances it too.
+	before = after
+	time.Sleep(2 * time.Millisecond)
+	if _, err := hub.Remove("fresh", false); err != nil {
+		t.Fatal(err)
+	}
+	if hub.rootVer.Load() <= before {
+		t.Fatal("namespace version did not advance on remove")
 	}
 }

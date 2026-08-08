@@ -291,9 +291,11 @@ func (n *shareNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint
 	// Reject pre-existing special files before opening: opening a host
 	// device node has side effects and must never be reachable from the
 	// guest, and FIFOs/sockets are equally out of policy. Shares may
-	// carry regular files, directories and symlinks only.
-	var st syscall.Stat_t
-	if err := syscall.Lstat(n.HostPath(), &st); err == nil {
+	// carry regular files, directories and symlinks only. HostStat is
+	// fd-relative for pinned exports — an absolute Lstat here would be
+	// denied inside a confined worker and this check would silently
+	// fail open.
+	if st, errno := n.HostStat(); errno == 0 {
 		switch st.Mode & syscall.S_IFMT {
 		case syscall.S_IFREG, syscall.S_IFDIR, syscall.S_IFLNK:
 		default:
