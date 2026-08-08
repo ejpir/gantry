@@ -73,6 +73,25 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		NDisks:   len(opts.Disks),
 		Shares:   metas,
 	}
+	// Worker confinement (docs/worker-confinement.md): auto/required
+	// self-confines the worker after the descriptor table is consumed.
+	// The supervisor pre-creates the private-root mountpoint and passes
+	// the hypervisor handle in the table (confinement empties /dev).
+	// The KVM open is best-effort: without it the worker's Prepare fails
+	// exactly like the monolithic path would.
+	bootCfg.Confinement = cfg.ProcessIsolation
+	if bootCfg.Confinement != "" && bootCfg.Confinement != "off" {
+		confRoot := filepath.Join(dir, "vmmroot")
+		if err := os.MkdirAll(confRoot, 0o700); err != nil {
+			return nil, fmt.Errorf("worker confinement root: %w", err)
+		}
+		bootCfg.ConfRoot = confRoot
+	}
+	var kvm *os.File
+	if f, err := openHypervisorDevice(); err == nil && f != nil {
+		kvm = f
+		bootCfg.HasKVM = true
+	}
 	// Local-netstack topology (net-worker degraded, VMM split proceeds):
 	// the worker's virtio-net device is the ONLY egress enforcement
 	// point — hand it the policy, or a nil policy there is allow-all and
@@ -94,6 +113,7 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		DisksRO:    opts.DisksRO,
 		Disks:      opts.Disks,
 		ShareRoots: roots,
+		KVM:        kvm,
 	}, dir)
 	if err != nil {
 		for _, r := range roots {

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vnet"
+	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -511,12 +513,17 @@ type isolationState struct {
 	FilesystemBoundary string   `json:"filesystemBoundary"`
 	ProcessBoundary    string   `json:"processBoundary"`
 	Degraded           []string `json:"degraded"`
+	// Confinement is the _vmm-worker's VERIFIED confinement report
+	// (docs/worker-confinement.md schema v2): per-property states as
+	// probed inside the confined process, never platform claims. Nil
+	// for monolithic boots and workers too old to report.
+	Confinement *workerconf.Report `json:"confinement,omitempty"`
 }
 
 // writeIsolationState persists the honest effective state for CLI/TUI and
 // runtime inspection. splitVMM reports whether the guest runs in a
 // _vmm-worker.
-func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool) error {
+func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool, conf *workerconf.Report) error {
 	st := isolationState{
 		Version:            1,
 		Topology:           "monolithic",
@@ -526,6 +533,14 @@ func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool) 
 		ProcessBoundary:    "unavailable",
 	}
 	degraded := append([]string(nil), nw.Degraded...)
+	if conf != nil {
+		st.Confinement = conf
+		// Fill the boundary fields from the worker's verified probe
+		// states instead of the blanket "unavailable".
+		st.NetworkBoundary = conf.Property(workerconf.PropNetDial).State
+		st.FilesystemBoundary = conf.Property(workerconf.PropFSRead).State
+		st.ProcessBoundary = conf.Property(workerconf.PropExec).State
+	}
 	switch cfg.ProcessIsolation {
 	case "off":
 		degraded = append(degraded, "process isolation disabled by configuration")
@@ -541,10 +556,20 @@ func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool) 
 			}
 		}
 		// The process split alone is fault isolation, NOT a security
-		// boundary: platform confinement (Phase 2b) is what turns the
-		// split into an enforced boundary. Until then nothing here may
-		// report "enforced".
-		degraded = append(degraded, "platform confinement not yet implemented (Phase 2b)")
+		// boundary: platform confinement is what turns the split into an
+		// enforced boundary. Report the verified per-property outcome.
+		switch {
+		case conf == nil:
+			degraded = append(degraded, "worker confinement report unavailable")
+		case !conf.Applied:
+			degraded = append(degraded, "worker confinement not applied: "+strings.Join(conf.Notes, "; "))
+		default:
+			for _, p := range conf.Results {
+				if p.State != workerconf.StateEnforced && p.State != workerconf.StateDisabled {
+					degraded = append(degraded, "worker confinement: "+p.Property+" "+p.State)
+				}
+			}
+		}
 		if !nw.Split && cfg.Net && cfg.GVProxy == "" {
 			degraded = append(degraded, "network worker not established")
 		}

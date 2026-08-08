@@ -11,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -460,5 +462,58 @@ func TestStartNetworkSplitModes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWriteIsolationStateConfinement(t *testing.T) {
+	dir := t.TempDir()
+	nw := &Network{}
+	conf := &workerconf.Report{
+		Platform: "linux", Mode: "auto", Applied: true,
+		Results: []workerconf.PropertyResult{
+			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
+			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced},
+			{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+			{Property: workerconf.PropFSWrite, State: workerconf.StateUnenforced, Detail: "probe"},
+		},
+	}
+	if err := writeIsolationState(dir, RunConfig{ProcessIsolation: "auto"}, nw, true, conf); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st isolationState
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Confinement == nil || !st.Confinement.Applied {
+		t.Fatalf("report not persisted: %s", data)
+	}
+	if st.FilesystemBoundary != "enforced" || st.NetworkBoundary != "enforced" {
+		t.Fatalf("boundaries not filled from report: %+v", st)
+	}
+	// The one unenforced property must surface in Degraded.
+	found := false
+	for _, d := range st.Degraded {
+		if strings.Contains(d, workerconf.PropFSWrite) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unenforced property not reported degraded: %v", st.Degraded)
+	}
+	// Monolithic boot: no report, honest unavailable everywhere.
+	if err := writeIsolationState(dir, RunConfig{ProcessIsolation: "auto"}, nw, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(filepath.Join(dir, "isolation.json"))
+	var st2 isolationState
+	if err := json.Unmarshal(data, &st2); err != nil {
+		t.Fatal(err)
+	}
+	if st2.Confinement != nil || st2.FilesystemBoundary != "unavailable" {
+		t.Fatalf("monolithic state not honestly unavailable: %+v", st2)
 	}
 }

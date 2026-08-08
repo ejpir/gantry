@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/workerconf"
 	"io"
 	"net"
 	"os"
@@ -423,7 +424,15 @@ func CmdDaemon(name string) int {
 		}
 	}
 	bootLog("machine prepared (RAM+kernel)")
-	if err := writeIsolationState(dir, cfg, nw, runner != nil); err != nil {
+	// The worker's verified confinement report rides the boot ack; the
+	// interface keeps this shared file free of the unix-only concrete
+	// worker type (windows typecheck).
+	var confRep *workerconf.Report
+	if reporter, ok := vw.(interface{ ConfinementReport() workerconf.Report }); splitErr == nil && ok {
+		r := reporter.ConfinementReport()
+		confRep = &r
+	}
+	if err := writeIsolationState(dir, cfg, nw, runner != nil, confRep); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
 	}
 	if err := shareManager.Publish(); err != nil {

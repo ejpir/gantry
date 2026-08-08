@@ -21,12 +21,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
+	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -105,6 +108,9 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	assetFiles = append(assetFiles, assets.Disks...)
 	assetFiles = append(assetFiles, assets.ShareRoots...)
+	if assets.KVM != nil {
+		assetFiles = append(assetFiles, assets.KVM) // LAST slot (cfg.HasKVM)
+	}
 	childFiles := append(append([]*os.File{}, dupFiles...), assetFiles...)
 
 	exe, err := os.Executable()
@@ -126,11 +132,27 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		}
 	}
 	procFiles := append([]*os.File{os.Stdin, os.Stdout, workerStderr}, childFiles...)
-	proc, err := os.StartProcess(exe, argv, &os.ProcAttr{
-		Env:   env,
-		Files: procFiles,
-		Sys:   workerSysProcAttr(),
-	})
+	startProc := func(confine bool) (*os.Process, error) {
+		sys := workerSysProcAttr()
+		if confine {
+			workerConfineProcAttr(sys)
+		}
+		return os.StartProcess(exe, argv, &os.ProcAttr{
+			Env:   env,
+			Files: procFiles,
+			Sys:   sys,
+		})
+	}
+	confine := cfg.Confinement != "" && cfg.Confinement != "off"
+	proc, err := startProc(confine)
+	if err != nil && confine && cfg.Confinement == "auto" && isEPERM(err) {
+		// Ubuntu 24.04+ AppArmor blocks unprivileged user namespaces for
+		// unconfined binaries: degrade to a namespace-less spawn (the
+		// worker still self-confines via seccomp; isolation.json reports
+		// the honest tier) instead of failing the boot.
+		fmt.Fprintf(os.Stderr, "vmm worker: confined spawn denied (%v); retrying without namespaces\n", err)
+		proc, err = startProc(false)
+	}
 	closeDups() // the child has its own table entries now
 	if err != nil {
 		_ = ctrlSup.Close()
@@ -160,8 +182,9 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	// missing /dev/kvm or a bad asset surfaces HERE, not as a dead VM
 	// minutes later.
 	var ack struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK          bool              `json:"ok"`
+		Error       string            `json:"error"`
+		Confinement workerconf.Report `json:"confinement"`
 	}
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
@@ -180,12 +203,13 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	}
 
 	w := &vmmWorker{
-		proc:    proc,
-		client:  workerproto.NewClient(ctrlSup),
-		fdChan:  fdSup,
-		bridge:  bridgeSup,
-		bridgeE: make(chan error, 1),
-		dead:    make(chan struct{}),
+		proc:       proc,
+		client:     workerproto.NewClient(ctrlSup),
+		fdChan:     fdSup,
+		bridge:     bridgeSup,
+		bridgeE:    make(chan error, 1),
+		dead:       make(chan struct{}),
+		confReport: ack.Confinement,
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{
@@ -313,6 +337,11 @@ func CmdVMMWorker() int {
 			}
 			a.ShareRoots = append(a.ShareRoots, f)
 		}
+		if cfg.HasKVM {
+			if a.KVM, err = next("kvm"); err != nil {
+				return a, err
+			}
+		}
 		return a, nil
 	}
 	if err := runVMMWorker(control, bridge, fdChan, assetsFn); err != nil {
@@ -320,4 +349,11 @@ func CmdVMMWorker() int {
 		return 1
 	}
 	return 0
+}
+
+// isEPERM reports whether a spawn failure was a permission denial
+// (AppArmor userns restriction, container policy), which auto mode
+// degrades around.
+func isEPERM(err error) bool {
+	return errors.Is(err, syscall.EPERM)
 }
