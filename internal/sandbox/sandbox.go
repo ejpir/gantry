@@ -262,6 +262,13 @@ func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, 
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.Stdin = strings.NewReader(secretsHandshakeJSON(secrets))
+	// The daemon receives secrets via the stdin handshake; it must not
+	// ALSO inherit them through the environment — /proc/<pid>/environ is
+	// host state readable by the same uid, so an inherited copy would
+	// break docs/secrets.md rule 1 (values live in memory only). Scrub
+	// exactly the injected keys; everything else (HOME, PATH, proxy vars
+	// for image pulls, GANTRY_* knobs) passes through unchanged.
+	cmd.Env = scrubbedEnv(os.Environ(), secrets)
 	detachDaemon(cmd)
 	if err := cmd.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start: spawn daemon:", err)
@@ -613,6 +620,26 @@ func secretsHandshakeJSON(secrets map[string]secret.Value) string {
 		Secrets map[string]string `json:"secrets"`
 	}{m})
 	return string(b) + "\n"
+}
+
+// scrubbedEnv removes exactly the keys that carry injected secret
+// values from an environment block. Used for the daemon spawn: the
+// handshake delivers the values, so the environment copy would only
+// exist to leak via /proc/<pid>/environ (host state, same-uid
+// readable). With no secrets the block passes through unchanged.
+func scrubbedEnv(environ []string, secrets map[string]secret.Value) []string {
+	if len(secrets) == 0 {
+		return environ
+	}
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		key, _, _ := strings.Cut(kv, "=")
+		if _, isSecret := secrets[key]; isSecret {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // readSecretsHandshake is the daemon side: read the one-line JSON object

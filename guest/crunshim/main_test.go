@@ -72,6 +72,74 @@ func TestSuperviseReturnsWithParkedGrandchild(t *testing.T) {
 	}
 }
 
+// TestSuperviseExecStdioPassthrough pins the 2026-08 session regression:
+// in exec mode the child's stdio must reach OUR stdout/stderr live (the
+// vminitd session pipes) — the temp-file capture used for create/start
+// black-holed every interactive session. And supervise must still
+// return at child exit despite the parked grandchild holding the same
+// fds (inherited *os.File -> no copy goroutines -> Wait doesn't wait
+// for pipe EOF).
+func TestSuperviseExecStdioPassthrough(t *testing.T) {
+	switch os.Getenv("CRUNSHIM_TEST_HELPER") {
+	case "child":
+		self, err := os.Executable()
+		if err != nil {
+			os.Exit(2)
+		}
+		gc := exec.Command(self)
+		gc.Env = append(os.Environ(), "CRUNSHIM_TEST_HELPER=grandchild")
+		gc.Stdout, gc.Stderr = os.Stdout, os.Stderr
+		if err := gc.Start(); err != nil {
+			os.Exit(2)
+		}
+		fmt.Println("crunshim-test-marker") // must reach the session live
+		os.Exit(0)
+	case "grandchild":
+		time.Sleep(60 * time.Second)
+		os.Exit(0)
+	}
+
+	old := realRuntime
+	realRuntime = os.Args[0]
+	defer func() { realRuntime = old }()
+	t.Setenv("CRUNSHIM_TEST_HELPER", "child")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both ends: anything but a swapped fd here is inherited by the
+	// child AND its parked grandchild — the grandchild would hold the
+	// test binary's real stderr pipe open for its 60s lifetime and the
+	// go-test driver then fails the package with "Test I/O incomplete".
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+
+	start := time.Now()
+	rc := supervise([]string{"crun", "exec", "sb"}, false)
+	elapsed := time.Since(start)
+
+	os.Stdout, os.Stderr = oldOut, oldErr
+	// The parked grandchild holds the write end for a minute, so do NOT
+	// wait for EOF: read what arrived, with a deadline.
+	_ = r.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	live := string(buf[:n])
+	_ = w.Close()
+	_ = r.Close()
+
+	if rc != 0 {
+		t.Fatalf("supervise rc = %d, want 0", rc)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("exec supervise blocked for %v on the parked grandchild", elapsed)
+	}
+	if !strings.Contains(live, "crunshim-test-marker") {
+		t.Fatalf("exec stdio did not reach our stdout live: %q", live)
+	}
+}
+
 func TestInsertFlags(t *testing.T) {
 	in := []string{"/sbin/crun", "--root", "/run/runc", "--debug", "--log", "/run/bundles/sb/log.json", "--log-format", "json", "create", "--bundle", "/run/bundles/sb", "--pid-file", "/run/bundles/sb/init.pid", "--console-socket", "/tmp/pty/pty.sock", "sb"}
 	out := insertFlags(append([]string(nil), in...), true)
@@ -83,6 +151,24 @@ func TestInsertFlags(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(out2, " "), "--log /run/bundles/sb/log.json") {
 		t.Errorf("debug=false: --log must stay: %v", out2)
+	}
+	// The per-arch default platform is injected (amd64 pins ptrace — the
+	// slim guest kernel hangs systrap's newSubprocess) unless the caller
+	// already chose one. /proc/cmdline on the test host has no
+	// crunshim.platform= knob, so platformChoice() == defaultPlatform.
+	joined := strings.Join(out2, " ")
+	if defaultPlatform != "" && !strings.Contains(joined, "--platform="+defaultPlatform) {
+		t.Errorf("default platform not injected: %v", out2)
+	}
+	withPlatform := insertFlags(append(append([]string(nil), in...), "--platform=systrap"), false)
+	if n := strings.Count(strings.Join(withPlatform, " "), "--platform="); n != 1 {
+		t.Errorf("caller platform must win, got %d --platform flags: %v", n, withPlatform)
+	}
+	// Presence is by flag NAME: a caller --directfs=true must not be
+	// second-guessed by our --directfs=false.
+	withDirectfs := insertFlags(append(append([]string(nil), in...), "--directfs=true"), false)
+	if strings.Contains(strings.Join(withDirectfs, " "), "--directfs=false") {
+		t.Errorf("caller --directfs=true overridden: %v", withDirectfs)
 	}
 }
 
