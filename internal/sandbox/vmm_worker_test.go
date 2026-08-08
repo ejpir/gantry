@@ -756,3 +756,39 @@ func TestVMMWorkerConfinementRequiredRefused(t *testing.T) {
 		t.Fatal("worker did not refuse the boot")
 	}
 }
+
+// TestVMMWorkerShareHotAddRefusedWhenSeatbeltConfined: a
+// Seatbelt-confined worker cannot serve paths added after boot (the
+// profile is immutable), so share.prepare is refused with an honest
+// error instead of publishing a share that EPERMs on every access.
+func TestVMMWorkerShareHotAddRefusedWhenSeatbeltConfined(t *testing.T) {
+	oldA, oldV := workerconfApplyFn, workerconfVerifyFn
+	t.Cleanup(func() { workerconfApplyFn, workerconfVerifyFn = oldA, oldV })
+	workerconfApplyFn = func(workerconf.Spec) (*workerconf.Report, error) {
+		return &workerconf.Report{Platform: "darwin", Applied: true}, nil
+	}
+	workerconfVerifyFn = func(workerconf.Spec, *workerconf.Report) {}
+	h := startVMMWorkerHarness(t, vmmBootConfig{MemSize: 1 << 20, Confinement: "auto"}, testAssets(t))
+
+	serving := workerShareServing{w: h.w}
+	if _, _, err := serving.PrepareMapped("docs", t.TempDir(), true, nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "hot-add") {
+		t.Fatalf("share.prepare under Seatbelt confinement: %v, want a hot-add refusal", err)
+	}
+}
+
+func TestShareHotAddUnavailable(t *testing.T) {
+	if msg := shareHotAddUnavailable(workerconf.Report{}); msg != "" {
+		t.Fatalf("unconfined: %q", msg)
+	}
+	if msg := shareHotAddUnavailable(workerconf.Report{Platform: "linux", Applied: true}); msg != "" {
+		t.Fatalf("linux confined must allow hot-add: %q", msg)
+	}
+	if msg := shareHotAddUnavailable(workerconf.Report{Platform: "darwin", Applied: true}); !strings.Contains(msg, "restart") {
+		t.Fatalf("darwin confined must refuse with guidance: %q", msg)
+	}
+	// Boot continues unconfined (auto degrade): hot-add fine.
+	if msg := shareHotAddUnavailable(workerconf.Report{Platform: "darwin", Applied: false}); msg != "" {
+		t.Fatalf("darwin unconfined must allow hot-add: %q", msg)
+	}
+}
