@@ -218,7 +218,7 @@ func TestReleaseBaseVersionPinned(t *testing.T) {
 func TestDefaultCmdlineHardening(t *testing.T) {
 	cmd := DefaultCmdline("arm64", "/x/rootfs.erofs", "", 3, "", [6]byte{}, false)
 	for _, want := range []string{
-		"init_on_alloc=1", "init_on_free=1",
+		"init_on_alloc=1", "init_on_free=0",
 		"sysctl.kernel.kptr_restrict=2", "sysctl.kernel.dmesg_restrict=1",
 		"sysctl.kernel.unprivileged_bpf_disabled=1",
 		"sysctl.kernel.yama.ptrace_scope=1",
@@ -233,9 +233,18 @@ func TestDefaultCmdlineHardening(t *testing.T) {
 	if strings.Contains(cmd, "kexec") {
 		t.Errorf("cmdline carries kexec sysctl noise:\n%s", cmd)
 	}
-	// GANTRY_NO_CMDLINE_HARDENING drops the set (bisect knob)
+	// Strict memory initialization restores zero-on-free hardening.
+	t.Setenv("GANTRY_STRICT_MEMORY_INIT", "1")
+	if strict := DefaultCmdline("arm64", "/x/rootfs.erofs", "", 3, "", [6]byte{}, false); !strings.Contains(strict, "init_on_alloc=1") || !strings.Contains(strict, "init_on_free=1") {
+		t.Errorf("GANTRY_STRICT_MEMORY_INIT cmdline lacks strict memory initialization:\n%s", strict)
+	}
+	t.Setenv("GANTRY_STRICT_MEMORY_INIT", "")
+
+	// GANTRY_NO_CMDLINE_HARDENING drops the sysctls and overrides the
+	// hardened kernel's compile-time memory-initialization defaults.
 	t.Setenv("GANTRY_NO_CMDLINE_HARDENING", "1")
-	if off := DefaultCmdline("arm64", "/x/rootfs.erofs", "", 3, "", [6]byte{}, false); strings.Contains(off, "sysctl.") || strings.Contains(off, "init_on_") {
+	off := DefaultCmdline("arm64", "/x/rootfs.erofs", "", 3, "", [6]byte{}, false)
+	if strings.Contains(off, "sysctl.") || !strings.Contains(off, "init_on_alloc=0") || !strings.Contains(off, "init_on_free=0") {
 		t.Errorf("GANTRY_NO_CMDLINE_HARDENING cmdline still hardened:\n%s", off)
 	}
 	// debug boots (initrd combo / bare kernel) stay pristine

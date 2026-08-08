@@ -24,7 +24,7 @@ func TestValidSandboxName(t *testing.T) {
 
 func TestCleanupSandboxRuntimePreservesConfiguration(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{"sandbox.json", "network-traffic.json", "vmm.pid", "ready", "ctl.sock", "shares.json"} {
+	for _, name := range []string{"sandbox.json", "network-traffic.json", "vmm.pid", "ready", daemonReadySocketName, "ctl.sock", "shares.json"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("test"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -35,10 +35,36 @@ func TestCleanupSandboxRuntimePreservesConfiguration(t *testing.T) {
 			t.Fatalf("persistent file %s was removed: %v", name, err)
 		}
 	}
-	for _, name := range []string{"vmm.pid", "ready", "ctl.sock", "shares.json"} {
+	for _, name := range []string{"vmm.pid", "ready", daemonReadySocketName, "ctl.sock", "shares.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Errorf("runtime file %s still exists (err=%v)", name, err)
 		}
+	}
+}
+
+func TestDaemonReadyNotification(t *testing.T) {
+	ready, err := newDaemonReadyListener(t.TempDir())
+	if err != nil {
+		t.Skipf("local readiness sockets unavailable: %v", err)
+	}
+	defer ready.Close()
+
+	if err := notifyDaemonReady(ready.path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ready.result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for readiness event")
+	}
+}
+
+func TestDaemonReadyNotificationDisabled(t *testing.T) {
+	if err := notifyDaemonReady(""); err != nil {
+		t.Fatal(err)
 	}
 }
 

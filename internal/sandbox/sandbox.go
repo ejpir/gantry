@@ -214,6 +214,68 @@ func CmdResume(name string) int {
 	return launchSandbox(name, cfg, secrets, false)
 }
 
+const daemonReadySocketName = "start-ready.sock"
+
+type daemonReadyListener struct {
+	listener net.Listener
+	path     string
+	result   <-chan error
+}
+
+// newDaemonReadyListener creates a one-shot, event-driven readiness channel.
+// The ready file remains the durable state marker and polling fallback, but
+// the normal start path no longer waits for its next 100 ms poll interval.
+func newDaemonReadyListener(dir string) (*daemonReadyListener, error) {
+	path := filepath.Join(dir, daemonReadySocketName)
+	_ = os.Remove(path)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = listener.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	result := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+			var signal [1]byte
+			_, err = io.ReadFull(conn, signal[:])
+			if err == nil && signal[0] != 1 {
+				err = fmt.Errorf("invalid daemon readiness signal %d", signal[0])
+			}
+		}
+		result <- err
+	}()
+	return &daemonReadyListener{listener: listener, path: path, result: result}, nil
+}
+
+func (r *daemonReadyListener) Close() {
+	if r == nil {
+		return
+	}
+	_ = r.listener.Close()
+	_ = os.Remove(r.path)
+}
+
+func notifyDaemonReady(path string) error {
+	if path == "" {
+		return nil
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+	_, err = conn.Write([]byte{1})
+	return err
+}
+
 func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, replaceConfig bool) int {
 	if _, alive := sandboxPID(name); alive {
 		fmt.Fprintf(os.Stderr, "gantry start: sandbox %q is already running\n", name)
@@ -258,7 +320,21 @@ func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, 
 		return 1
 	}
 	defer func() { _ = logf.Close() }()
-	cmd := exec.Command(exe, "daemon", name)
+
+	// Prefer a one-shot readiness socket over polling. AF_UNIX is available on
+	// the primary platforms; if a host cannot create it, the ready-file ticker
+	// below remains a fully functional fallback.
+	readyListener, _ := newDaemonReadyListener(dir)
+	if readyListener != nil {
+		defer readyListener.Close()
+	}
+	daemonArgs := []string{"daemon", name}
+	var readySignal <-chan error
+	if readyListener != nil {
+		daemonArgs = append(daemonArgs, readyListener.path)
+		readySignal = readyListener.result
+	}
+	cmd := exec.Command(exe, daemonArgs...)
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.Stdin = strings.NewReader(secretsHandshakeJSON(secrets))
@@ -279,31 +355,45 @@ func launchSandbox(name string, cfg RunConfig, secrets map[string]secret.Value, 
 	go func() { exited <- cmd.Wait() }()
 
 	fmt.Printf("gantry start: sandbox %q booting (vmm pid %d)\n", name, cmd.Process.Pid)
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if gutil.FileExists(filepath.Join(dir, "ready")) {
-			fmt.Printf("gantry start: sandbox %q is up — attach with: gantry exec %s\n", name, name)
-			return 0
-		}
+	readyPath := filepath.Join(dir, "ready")
+	announceReady := func() int {
+		fmt.Printf("gantry start: sandbox %q is up — attach with: gantry exec %s\n", name, name)
+		return 0
+	}
+	timeout := time.NewTimer(20 * time.Second)
+	defer timeout.Stop()
+	fallbackPoll := time.NewTicker(100 * time.Millisecond)
+	defer fallbackPoll.Stop()
+	for {
 		select {
+		case err := <-readySignal:
+			if err == nil {
+				return announceReady()
+			}
+			// A failed or malformed event does not make boot fail: the ready
+			// file remains the compatibility fallback.
+			readySignal = nil
+		case <-fallbackPoll.C:
+			if gutil.FileExists(readyPath) {
+				return announceReady()
+			}
 		case err := <-exited:
 			fmt.Fprintf(os.Stderr, "gantry start: daemon exited during boot: %v\n", err)
 			dumpTail(filepath.Join(dir, "console.log"))
 			dumpTail(filepath.Join(dir, "daemon.log"))
 			return 1
-		default:
+		case <-timeout.C:
+			fmt.Fprintf(os.Stderr, "gantry start: timed out waiting for the guest RPC connection; see %s\n", dir)
+			dumpTail(filepath.Join(dir, "console.log"))
+			dumpTail(filepath.Join(dir, "daemon.log"))
+			return 1
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
-	fmt.Fprintf(os.Stderr, "gantry start: timed out waiting for the guest RPC connection; see %s\n", dir)
-	dumpTail(filepath.Join(dir, "console.log"))
-	dumpTail(filepath.Join(dir, "daemon.log"))
-	return 1
 }
 
 // ---------------- gantry daemon <name> (hidden, foreground) -----------------
 
-func CmdDaemon(name string) int {
+func CmdDaemon(name, readySocket string) int {
 	// GANTRY_BOOT_TIMING=1: stamp boot phases into daemon.log so cold-boot
 	// cost can be attributed (host setup vs. network vs. vmm.Prepare vs.
 	// the guest boot up to the vsock dial-back). See scripts/bench-boot.sh.
@@ -492,6 +582,11 @@ func CmdDaemon(name string) int {
 	defer func() { _ = rpc.Close() }()
 	_ = os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0o600)
 	bootLog("guest RPC connected (READY)")
+	if err := notifyDaemonReady(readySocket); err != nil {
+		// The parent may have exited or fallen back to ready-file polling;
+		// readiness notification is never a reason to stop a healthy VM.
+		fmt.Fprintln(os.Stderr, "daemon: parent readiness notification:", err)
+	}
 	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
 
 	sigc := make(chan os.Signal, 1)
@@ -1266,7 +1361,7 @@ func CmdStop(name string) int {
 }
 
 func cleanupSandboxRuntime(dir string) {
-	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", "ctl.sock", "1025.sock", "listen-1026.sock", "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
+	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", daemonReadySocketName, "ctl.sock", "1025.sock", "listen-1026.sock", "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
 		_ = os.Remove(filepath.Join(dir, f))
 	}
 }

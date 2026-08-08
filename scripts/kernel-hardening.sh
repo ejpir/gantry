@@ -18,7 +18,6 @@ GANTRY_HARDENING_ENABLES="
 HARDENED_USERCOPY          # bounds-check copy_to/from_user against slab/stack
 FORTIFY_SOURCE             # __builtin_object_size checks on copy/str/mem fns
 INIT_ON_ALLOC_DEFAULT_ON   # zero heap/page allocations by default
-INIT_ON_FREE_DEFAULT_ON    # poison freed memory (use-after-free mitigation)
 SLAB_FREELIST_RANDOM       # randomize freelist order (heap-layout control)
 SLAB_FREELIST_HARDENED     # freelist pointer obfuscation + double-free checks
 SHUFFLE_PAGE_ALLOCATOR     # randomize page allocator freelists
@@ -40,6 +39,14 @@ KEXEC KEXEC_FILE           # no kexec from inside the guest
 MODULES                    # no loadable modules (unsigned module = full bypass)
 "
 
+# Supported hardening whose compile-time default is deliberately off.
+# Zero-on-allocation still prevents stale contents reaching a new owner;
+# zero-on-free adds use-after-free defense but measured about 80 ms on every
+# 512 MiB arm64 HVF boot. GANTRY_STRICT_MEMORY_INIT=1 enables it at runtime.
+GANTRY_HARDENING_DEFAULT_OFF="
+INIT_ON_FREE_DEFAULT_ON
+"
+
 # Best-effort: kept when toolchain/hardware support exists, warned about
 # otherwise (olddefconfig drops symbols whose dependencies are missing).
 GANTRY_HARDENING_TRY="
@@ -53,7 +60,7 @@ apply_kernel_hardening() {
 	for sym in $(printf '%s\n' "$GANTRY_HARDENING_ENABLES" | sed 's/#.*//'); do
 		scripts/config --enable "$sym"
 	done
-	for sym in $(printf '%s\n' "$GANTRY_HARDENING_DISABLES" | sed 's/#.*//'); do
+	for sym in $(printf '%s\n' "$GANTRY_HARDENING_DISABLES $GANTRY_HARDENING_DEFAULT_OFF" | sed 's/#.*//'); do
 		scripts/config --disable "$sym"
 	done
 	for sym in $(printf '%s\n' "$GANTRY_HARDENING_TRY" | sed 's/#.*//'); do
@@ -77,7 +84,7 @@ verify_kernel_hardening() {
 		grep -q "^CONFIG_$sym=y" .config || \
 			echo "note: best-effort hardening $sym not available (toolchain/arch), continuing"
 	done
-	for sym in $(printf '%s\n' "$GANTRY_HARDENING_DISABLES" | sed 's/#.*//'); do
+	for sym in $(printf '%s\n' "$GANTRY_HARDENING_DISABLES $GANTRY_HARDENING_DEFAULT_OFF" | sed 's/#.*//'); do
 		if grep -q "^CONFIG_$sym=y" .config; then
 			echo "hardening disable failed: CONFIG_$sym=y still present" >&2
 			exit 1
