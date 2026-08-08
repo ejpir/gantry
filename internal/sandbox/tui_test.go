@@ -175,8 +175,12 @@ func TestSandboxTUIShareDialogActions(t *testing.T) {
 	m.shareRO = true
 	model, _ := m.submitShare()
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "share add" || m.busyName != "dev/code" {
-		t.Fatalf("busy action = %q %q", m.busyAction, m.busyName)
+	wantAction := "share add"
+	if !shareCanApplyLiveOn(m.sandboxNamed("dev"), runtime.GOOS) {
+		wantAction = "share configure"
+	}
+	if m.busyAction != wantAction || m.busyName != "dev/code" {
+		t.Fatalf("busy action = %q %q, want %q", m.busyAction, m.busyName, wantAction)
 	}
 
 	m.dialog = tuiNoDialog
@@ -974,13 +978,15 @@ func TestSandboxTUIFormFooterSeparatesActionAndHints(t *testing.T) {
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	m.openShareAddDialog(false)
+	_, _, shareButton := m.shareDialogCopy()
 	theme := tuiThemeFor(m.dark)
 	for _, tc := range []struct {
 		name, button, hint, rendered string
 	}{
 		{name: "create", button: "Create", hint: "tab next", rendered: m.renderCreateDialog(theme, 58)},
 		{name: "edit", button: "Save", hint: "adjust", rendered: m.renderEditDialog(theme, 58)},
-		{name: "mount", button: "Add", hint: "tab next", rendered: m.renderShareAddDialog(theme, 62)},
+		{name: "mount", button: shareButton, hint: "tab next", rendered: m.renderShareAddDialog(theme, 62)},
 		{name: "port", button: "Publish", hint: "tab next", rendered: m.renderPortPublishDialog(theme, 62)},
 		{name: "policy", button: "Apply", hint: "tab next", rendered: m.renderNetworkPolicyDialog(theme, 62)},
 	} {
