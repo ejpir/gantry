@@ -67,9 +67,12 @@ func TestVerifyUnconfined(t *testing.T) {
 	if got := rep.Property(PropExec).State; got != StateUnenforced {
 		t.Errorf("exec unconfined: %q, want unenforced", got)
 	}
-	// Loopback port 1 refuses on any ordinary host.
-	if got := rep.Property(PropNetDial).State; got != StateUnenforced {
-		t.Errorf("net-dial unconfined: %q, want unenforced", got)
+	// Loopback port 1 refuses on any ordinary host; filtered CI
+	// environments may silently drop instead (dial timeout reports
+	// indeterminate). Either is honest — the lie would be "enforced",
+	// asserted above.
+	if got := rep.Property(PropNetDial).State; got != StateUnenforced && got != StateIndeterminate {
+		t.Errorf("net-dial unconfined: %q, want unenforced or indeterminate", got)
 	}
 }
 
@@ -164,7 +167,9 @@ func TestBuildSeatbeltProfileCanonicalizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(p, `(subpath "`+resolved+`")`) {
+	// The profile text carries the SBPL-escaped form of the resolved
+	// path (backslashes doubled on windows).
+	if !strings.Contains(p, `(subpath "`+sbplEscape(resolved)+`")`) {
 		t.Fatalf("profile lacks the resolved path %q:\n%s", resolved, p)
 	}
 	if strings.Contains(p, "linked-export") && resolved != link {

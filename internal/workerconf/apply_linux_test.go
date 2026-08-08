@@ -56,6 +56,20 @@ func TestApplyConfined(t *testing.T) {
 	if !rep.Applied {
 		t.Fatalf("nothing applied: %+v\n%s", rep, text)
 	}
+	// Restricted userns (Ubuntu 24.04+ AppArmor blocks mounts inside an
+	// unprivileged userns — exactly what CI runners enforce): the mount
+	// tier is unavailable but the seccomp tier MUST hold. Assert the
+	// seccomp-covered probes, then skip-with-report — never fake a
+	// pass, never demand what the environment cannot give.
+	mountOK := !strings.Contains(strings.Join(rep.Notes, " "), "mount tier unavailable")
+	if !mountOK {
+		for _, name := range []string{PropNetDial, PropExec} {
+			if got := rep.Property(name).State; got != StateEnforced {
+				t.Errorf("%s = %q (%s), want enforced even in the degraded tier", name, got, rep.Property(name).Detail)
+			}
+		}
+		t.Skipf("mount tier unavailable in this environment (restricted userns); seccomp tier verified, notes: %v", rep.Notes)
+	}
 	for _, name := range []string{PropFSRead, PropFSWrite, PropNetDial, PropExec, PropProcEnum} {
 		if got := rep.Property(name).State; got != StateEnforced {
 			t.Errorf("%s = %q (%s), want enforced\nnotes: %v", name, got, rep.Property(name).Detail, rep.Notes)
