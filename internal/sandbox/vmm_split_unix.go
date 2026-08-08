@@ -86,6 +86,7 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 			return nil, fmt.Errorf("worker confinement root: %w", err)
 		}
 		bootCfg.ConfRoot = confRoot
+		bootCfg.StateDir = dir
 	}
 	var kvm *os.File
 	if f, err := openHypervisorDevice(); err == nil && f != nil {
