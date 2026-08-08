@@ -866,7 +866,14 @@ func NewLoopbackRoot(rootPath string) (InodeEmbedder, error) {
 func NewLoopbackRootFD(rootPath string, rootFD int) (InodeEmbedder, error) {
 	resolved, err := filepath.EvalSymlinks(rootPath)
 	if err != nil {
-		return nil, err
+		// A confined worker (docs/worker-confinement.md) has NO path
+		// access: EPERM under Seatbelt, ENOENT in the empty mount root.
+		// Identity comes from the pinned descriptor either way, so
+		// derive the canonical path from the fd (F_GETPATH on darwin)
+		// and fall back to the raw path — for pinned roots RootPrefix
+		// is display-only (the escape re-resolution in securePath is
+		// gated on RootFD < 0).
+		resolved = loopbackRootFDPath(rootFD, rootPath)
 	}
 	fdPath := filepath.Join("/proc/self/fd", fmt.Sprint(rootFD))
 	if runtime.GOOS == "darwin" {
