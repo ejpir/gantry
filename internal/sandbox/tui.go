@@ -752,6 +752,13 @@ func configureSandboxShareCmd(name, tag, spec, mountpoint string, replace, runni
 	}
 }
 
+func removeSandboxShareCmd(row tuiMountRow) tea.Cmd {
+	return func() tea.Msg {
+		err := removeSandboxShare(row.Sandbox, row.Tag, shareRemovalNeedsForce(row))
+		return tuiProcessDoneMsg{action: "share remove", name: row.Sandbox + "/" + row.Tag, err: err}
+	}
+}
+
 func (m *sandboxTUIModel) needsAnimation() bool {
 	if m.loading || m.refreshVisible || m.busyAction != "" {
 		return true

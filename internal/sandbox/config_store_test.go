@@ -127,6 +127,34 @@ func TestConfigStoreSetShareForRestart(t *testing.T) {
 	}
 }
 
+func TestConfigStoreRemoveShareForRestart(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{
+		Shares: []string{"code=/tmp/code,ro", "data=/tmp/data@/workspace"},
+		Ports:  []string{"127.0.0.1:8080:80"},
+	})
+	removed, err := store.RemoveShareForRestart("code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.Tag != "code" || !removed.RO {
+		t.Fatalf("removed share = %+v", removed)
+	}
+	cfg, err := readSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 1 || cfg.Shares[0] != "data=/tmp/data@/workspace" || len(cfg.Ports) != 1 {
+		t.Fatalf("persisted config = %+v", cfg)
+	}
+	if _, err := store.RemoveShareForRestart("missing"); err == nil {
+		t.Fatal("missing share removal succeeded")
+	}
+	if got := store.Snapshot().Shares; len(got) != 1 || got[0] != "data=/tmp/data@/workspace" {
+		t.Fatalf("failed removal changed shares: %v", got)
+	}
+}
+
 func TestConfigStoreShareRestartHubConfinement(t *testing.T) {
 	// regression: the hub guard was exact-equality only; a container alias
 	// that is a parent (/run/gantry, /) or child of the hub mount shadows

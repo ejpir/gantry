@@ -185,6 +185,38 @@ func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (vmm.Share, 
 	return share, nil
 }
 
+// RemoveShareForRestart removes a persisted share without touching a live
+// hub. Stopped sandboxes use this path; a running sandbox delegates removal to
+// its broker instead so the live namespace and desired configuration move as
+// one transaction.
+func (s *ConfigStore) RemoveShareForRestart(tag string) (vmm.Share, error) {
+	if err := shares.ValidateShareTag(tag); err != nil {
+		return vmm.Share{}, err
+	}
+	var removed vmm.Share
+	err := s.Mutate(func(cfg *RunConfig) error {
+		seen := map[string]bool{}
+		found := false
+		for _, raw := range cfg.Shares {
+			share, parseErr := vmm.ParseShareSpec(raw, seen)
+			if parseErr != nil {
+				return fmt.Errorf("bad configured share %q: %w", raw, parseErr)
+			}
+			seen[share.Tag] = true
+			if share.Tag == tag {
+				removed = share
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("share tag %q not found", tag)
+		}
+		cfg.Shares = shareSpecsReplacingTag(cfg.Shares, tag, "")
+		return nil
+	})
+	return removed, err
+}
+
 func configuredShareTarget(share vmm.Share) string {
 	if share.CtrPath != "" {
 		return share.CtrPath

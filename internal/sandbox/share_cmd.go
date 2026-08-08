@@ -183,6 +183,29 @@ func configureSandboxShare(name, spec string, replace bool) error {
 	return err
 }
 
+// removeSandboxShare removes a live share through the broker or, when the
+// sandbox is stopped, removes its persisted configuration for the next boot.
+func removeSandboxShare(name, tag string, force bool) error {
+	if err := ValidateSandboxName(name); err != nil {
+		return err
+	}
+	if err := shares.ValidateShareTag(tag); err != nil {
+		return err
+	}
+	if _, alive := sandboxPID(name); alive {
+		_, err := shareControlRPC(name, "share.remove", brokerShareRequest{
+			Tag: tag, Persistent: true, Force: force,
+		})
+		return err
+	}
+	store, err := LoadConfigStore(sandboxDir(name))
+	if err != nil {
+		return err
+	}
+	_, err = store.RemoveShareForRestart(tag)
+	return err
+}
+
 func normalizeShareSpecForClient(spec string) (string, error) {
 	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
 	if err != nil {
