@@ -186,10 +186,12 @@ func dialStream(dial func() (net.Conn, error), id string) (net.Conn, error) {
 	return c, nil
 }
 
-func streamID(prefix string) string {
+func streamID(prefix string) (string, error) {
 	var b [4]byte
-	rand.Read(b[:])
-	return fmt.Sprintf("%s-%s", prefix, base64.RawURLEncoding.EncodeToString(b[:]))
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate stream ID: %w", err)
+	}
+	return fmt.Sprintf("%s-%s", prefix, base64.RawURLEncoding.EncodeToString(b[:])), nil
 }
 
 // vminitd returns plain ttrpc "Unknown" errors — there are no typed
@@ -472,7 +474,11 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 		conn net.Conn
 	}
 	open := func(prefix string) (*stream, error) {
-		s := &stream{id: streamID(prefix)}
+		sid, err := streamID(prefix)
+		if err != nil {
+			return nil, err
+		}
+		s := &stream{id: sid}
 		c, err := opts.startStream(s.id)
 		if err != nil {
 			return nil, err
@@ -672,7 +678,10 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 
 	// stdio streams, same protocol as Session
 	open := func(prefix string) (net.Conn, string, error) {
-		sid := streamID(prefix)
+		sid, err := streamID(prefix)
+		if err != nil {
+			return nil, "", err
+		}
 		c, err := opts.startStream(sid)
 		return c, sid, err
 	}
