@@ -163,6 +163,56 @@ func (r *TrafficRecorder) Close() {
 	<-r.done
 }
 
+// SyncSnapshot merges another recorder's snapshot into this one. Worker
+// confinement means enforcement counters accumulate in the confined
+// process (which owns no host paths); the supervisor pulls snapshots
+// over RPC and merges them here. Counters are monotonic from boot, so
+// the merge takes the max per counter (retries and restarts never
+// double-count), the earliest FirstSeen and the latest LastSeen.
+func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	maxU64 := func(a, b uint64) uint64 {
+		if b > a {
+			return b
+		}
+		return a
+	}
+	r.snapshot.TXBytes = maxU64(r.snapshot.TXBytes, other.TXBytes)
+	r.snapshot.RXBytes = maxU64(r.snapshot.RXBytes, other.RXBytes)
+	r.snapshot.TXPackets = maxU64(r.snapshot.TXPackets, other.TXPackets)
+	r.snapshot.RXPackets = maxU64(r.snapshot.RXPackets, other.RXPackets)
+	r.snapshot.DroppedBytes = maxU64(r.snapshot.DroppedBytes, other.DroppedBytes)
+	r.snapshot.DroppedPackets = maxU64(r.snapshot.DroppedPackets, other.DroppedPackets)
+	for _, e := range other.Entries {
+		key := trafficEntryKey(e.Address, e.Host, e.Protocol, e.Port, e.Allowed)
+		cur, ok := r.entries[key]
+		if !ok {
+			dup := e
+			r.entries[key] = &dup
+			r.dirty = true
+			continue
+		}
+		cur.TXBytes = maxU64(cur.TXBytes, e.TXBytes)
+		cur.RXBytes = maxU64(cur.RXBytes, e.RXBytes)
+		cur.TXPackets = maxU64(cur.TXPackets, e.TXPackets)
+		cur.RXPackets = maxU64(cur.RXPackets, e.RXPackets)
+		if e.FirstSeen.Before(cur.FirstSeen) {
+			cur.FirstSeen = e.FirstSeen
+		}
+		if e.LastSeen.After(cur.LastSeen) {
+			cur.LastSeen = e.LastSeen
+		}
+		if cur.Host == "" {
+			cur.Host = e.Host
+		}
+		r.dirty = true
+	}
+}
+
 // Snapshot returns a stable in-memory copy, primarily for tests and callers
 // that live in the VMM process.
 func (r *TrafficRecorder) Snapshot() TrafficSnapshot {
@@ -453,6 +503,11 @@ func (r *TrafficRecorder) flush() {
 	r.dirty = false
 	r.mu.Unlock()
 
+	if r.path == "" {
+		// In-memory recorder (confined worker): publishing is the
+		// supervisor's job via SyncSnapshot; path ops do not exist here.
+		return
+	}
 	data, err := json.Marshal(snapshot)
 	if err == nil {
 		err = writeTrafficSnapshot(r.path, append(data, '\n'))
