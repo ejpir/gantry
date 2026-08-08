@@ -253,6 +253,71 @@ func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
 	}
 }
 
+func TestSandboxTUIShareDialogSavesRunningDarwinShareForRestart(t *testing.T) {
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.animating = true
+	m.width, m.height = 100, 42
+	m.page = tuiMountsPage
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	m.openShareAddDialog(false)
+	m.shareTag.SetValue("code")
+	m.sharePath.SetValue(t.TempDir())
+
+	title, description, button := m.shareDialogCopyForOS("darwin")
+	if title != "Add Share" || button != "Save" || !strings.Contains(description, "restart") {
+		t.Fatalf("darwin share copy = %q %q %q", title, description, button)
+	}
+	if !shareCanApplyLiveOn(m.sandboxNamed("dev"), "linux") || shareCanApplyLiveOn(m.sandboxNamed("dev"), "darwin") {
+		t.Fatal("live-share platform classification is wrong")
+	}
+	model, cmd := m.submitShareForOS("darwin")
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.busyAction != "share configure" || m.busyName != "dev/code" {
+		t.Fatalf("darwin share action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
+	}
+}
+
+func TestSandboxTUIRemovesShareFromStoppedSandbox(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	if err := os.MkdirAll(sandboxDir("stopped"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	host := t.TempDir()
+	_ = newTestConfigStore(t, sandboxDir("stopped"), RunConfig{Shares: []string{"code=" + host + ",ro"}})
+
+	m := newSandboxTUIModel()
+	m.loading = false
+	m.animating = true // make removal return the persistence command directly
+	m.sandboxes = []tuiSandbox{{Name: "stopped", State: tuiStopped}}
+	m.mounts = []tuiMountRow{{
+		Sandbox: "stopped", Tag: "code", Host: host, Guest: "/host/code", ReadOnly: true, State: "saved",
+	}}
+	m.mountCursor = 0
+	m.dialog = tuiShareRemoveDialog
+	plain := ansi.Strip(m.renderShareRemoveDialog(tuiThemeFor(m.dark), 62))
+	if !strings.Contains(plain, "no longer be attached") || !strings.Contains(plain, "next start") {
+		t.Fatalf("stopped removal copy does not explain persistence:\n%s", plain)
+	}
+
+	model, cmd := m.removeSelectedShare()
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "share remove" || m.busyName != "stopped/code" {
+		t.Fatalf("stopped removal action = dialog %v busy %q %q cmd=%v", m.dialog, m.busyAction, m.busyName, cmd)
+	}
+	done, ok := cmd().(tuiProcessDoneMsg)
+	if !ok || done.err != nil {
+		t.Fatalf("stopped removal result = %#v", done)
+	}
+	cfg, err := readSandboxConfig(sandboxDir("stopped"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 0 {
+		t.Fatalf("saved shares after removal = %v", cfg.Shares)
+	}
+}
+
 func TestSandboxTUIFormsSelectSandboxAndCustomMount(t *testing.T) {
 	m := newSandboxTUIModel()
 	m.loading = false
@@ -401,12 +466,12 @@ func TestSandboxTUIShareOwner(t *testing.T) {
 
 func TestTUIShareRemoveForcesExplicitContainerAlias(t *testing.T) {
 	normal := tuiMountRow{Sandbox: "dev", Tag: "code", Guest: "/host/code"}
-	if got := strings.Join(shareRemoveArgv(normal), " "); got != "share remove dev code" {
-		t.Fatalf("normal remove argv = %q", got)
+	if shareRemovalNeedsForce(normal) {
+		t.Fatal("default hub mount requires force")
 	}
-	imported := tuiMountRow{Sandbox: "codex-dev", Tag: "workspace", Guest: "/Users/eh04xk"}
-	if got := strings.Join(shareRemoveArgv(imported), " "); got != "share remove --force codex-dev workspace" {
-		t.Fatalf("aliased remove argv = %q", got)
+	aliased := tuiMountRow{Sandbox: "imported", Tag: "workspace", Guest: "/workspace"}
+	if !shareRemovalNeedsForce(aliased) {
+		t.Fatal("explicit container alias does not require force")
 	}
 }
 

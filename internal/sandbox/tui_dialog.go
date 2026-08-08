@@ -823,6 +823,10 @@ func (m *sandboxTUIModel) unpublishSelectedPort() (tea.Model, tea.Cmd) {
 }
 
 func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
+	return m.submitShareForOS(runtime.GOOS)
+}
+
+func (m *sandboxTUIModel) submitShareForOS(goos string) (tea.Model, tea.Cmd) {
 	targetName := m.shareSandbox.Value()
 	target := m.sandboxNamed(targetName)
 	if target == nil || target.State == tuiStarting {
@@ -868,7 +872,7 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 		return m, m.focusShare(4)
 	}
 	spec += ownerSuffix
-	requiresRestart := customMount || target.State != tuiRunning
+	requiresRestart := customMount || !shareCanApplyLiveOn(target, goos)
 	if m.shareReplace {
 		if row := m.selectedMount(); row != nil && row.Guest != "" && row.Guest != shares.HubHostPath+"/"+row.Tag {
 			requiresRestart = true
@@ -899,6 +903,10 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 	return m.beginAction(action, targetName+"/"+tag, argv, false)
 }
 
+func shareCanApplyLiveOn(target *tuiSandbox, goos string) bool {
+	return target != nil && target.State == tuiRunning && goos != "darwin"
+}
+
 func shareOwnerSuffix(raw string) (string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" || value == "host" {
@@ -925,20 +933,19 @@ func (m *sandboxTUIModel) removeSelectedShare() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	return m.beginAction("share remove", row.Sandbox+"/"+row.Tag, shareRemoveArgv(*row), false)
+	m.closeDialog()
+	m.busyAction = "share remove"
+	m.busyName = row.Sandbox + "/" + row.Tag
+	return m, tea.Batch(removeSandboxShareCmd(*row), m.ensureAnimation())
 }
 
 // Explicit @CTRPATH aliases are bind-mounted when the container is created.
 // Removing their host export live therefore requires revocation; otherwise
-// ShareManager correctly refuses the request and asks for --force. The TUI's
-// confirmation dialog already warns that existing processes may lose access,
-// so make that selected-row operation complete without a second CLI-only step.
-func shareRemoveArgv(row tuiMountRow) []string {
-	argv := []string{"share", "remove"}
-	if row.Guest != "" && row.Guest != shares.HubHostPath+"/"+row.Tag {
-		argv = append(argv, "--force")
-	}
-	return append(argv, row.Sandbox, row.Tag)
+// ShareManager correctly refuses the request and asks for --force. Stopped
+// sandboxes have no live export, but using the same classification is harmless
+// when the operation races a start and is delegated to the broker.
+func shareRemovalNeedsForce(row tuiMountRow) bool {
+	return row.Guest != "" && row.Guest != shares.HubHostPath+"/"+row.Tag
 }
 
 func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {

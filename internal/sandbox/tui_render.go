@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"image/color"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
@@ -1053,7 +1054,11 @@ func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) stri
 	label := lipgloss.NewStyle().Foreground(theme.secondary).Render("Share: ")
 	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Tag)
 	path := lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(row.Host, width))
-	warning := lipgloss.NewStyle().Foreground(theme.error).Render("Existing processes using the share may lose access.")
+	warningText := "Existing processes using the share may lose access."
+	if sandbox := m.sandboxNamed(row.Sandbox); sandbox != nil && sandbox.State == tuiStopped {
+		warningText = "This share will no longer be attached on the next start."
+	}
+	warning := lipgloss.NewStyle().Foreground(theme.error).Render(warningText)
 	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("Remove %q?", row.Tag))
 	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
 	remove := renderDialogButton(theme, "Remove", m.confirmRemove, true)
@@ -1103,20 +1108,28 @@ func (m sandboxTUIModel) renderShareAddDialog(theme tuiTheme, width int) string 
 }
 
 func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
+	return m.shareDialogCopyForOS(runtime.GOOS)
+}
+
+func (m sandboxTUIModel) shareDialogCopyForOS(goos string) (title, description, button string) {
 	target := m.sandboxNamed(m.shareSandbox.Value())
 	running := target == nil || target.State == tuiRunning
+	live := target == nil || shareCanApplyLiveOn(target, goos)
 	title = "Add Live Share"
 	description = "Attach a host directory without restarting the sandbox."
 	button = "Add"
-	if !running {
+	if !live {
 		title = "Add Share"
-		description = "Save this share; it will be attached when the sandbox next starts."
+		description = "Save this share; restart the sandbox to attach it."
 		button = "Save"
+		if !running {
+			description = "Save this share; it will be attached when the sandbox next starts."
+		}
 	}
 	tag := strings.TrimSpace(m.shareTag.Value())
 	mountpoint := strings.TrimSpace(m.shareMount.Value())
 	customMount := mountpoint != "" && mountpoint != shares.HubHostPath+"/"+tag
-	if customMount && running {
+	if customMount && live {
 		title = "Add Share"
 		description = "Save this container mount point; restart the sandbox to apply it."
 		button = "Save"
@@ -1125,9 +1138,12 @@ func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
 		title = "Replace Share"
 		description = "Replace the selected share while the sandbox keeps running."
 		button = "Replace"
-		if !running {
-			description = "Save this replacement; it will apply when the sandbox next starts."
+		if !live {
+			description = "Save this replacement; restart the sandbox to apply it."
 			button = "Save"
+			if !running {
+				description = "Save this replacement; it will apply when the sandbox next starts."
+			}
 		} else if customMount {
 			description = "Save this container mount point; restart the sandbox to apply it."
 			button = "Save"
