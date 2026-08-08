@@ -15,6 +15,28 @@ type Spec struct {
 	NoProcX    bool   // no cross-process ptrace/signal/enumeration
 	KeepFDs    int    // descriptors 0..KeepFDs survive Apply (the fd table is dense)
 	ConfRoot   string // linux: supervisor-created mountpoint for the private root
+
+	// StateDir is the sandbox state directory: the worker's console
+	// and stderr postmortem log live here, so path-checked write
+	// filters (Seatbelt) must allow writes under it. Tradeoff recorded
+	// in docs/worker-confinement.md: the worker could tamper with
+	// state-dir files (display-only impact; the supervisor is the
+	// writer of record).
+	StateDir string
+
+	// FileAllow lists the host paths the worker may touch — the share
+	// export roots it serves via dirfd-relative ops. Seatbelt bakes
+	// them into the profile as subpath rules (share serving is
+	// path-checked per op, not just at open). Linux ignores this v1
+	// (dirfd ops survive because path neutrality is structural, not
+	// filtered); it is the seam a future landlock tier would consume.
+	FileAllow []FileAllowance
+}
+
+// FileAllowance is one allowed host-path subtree.
+type FileAllowance struct {
+	Path  string
+	Write bool // false = read-only export
 }
 
 // DefaultSpec is the full deny-everything contract for a VMM worker:

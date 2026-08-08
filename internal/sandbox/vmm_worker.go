@@ -75,6 +75,9 @@ type vmmBootConfig struct {
 	Confinement string `json:"confinement,omitempty"`
 	ConfRoot    string `json:"confRoot,omitempty"`
 	HasKVM      bool   `json:"hasKVM,omitempty"`
+	// StateDir is the sandbox state directory; Seatbelt's path-checked
+	// write filter allows the console + stderr logs under it.
+	StateDir string `json:"stateDir,omitempty"`
 }
 
 // vmmShareMeta is one hub export minus its root descriptor (which travels
@@ -189,6 +192,11 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	conf := workerconf.DisabledReport(runtime.GOOS, cfg.Confinement)
 	if cfg.Confinement != "" && cfg.Confinement != "off" {
 		spec := workerconf.DefaultSpec(vmmKeepFDs(cfg), cfg.ConfRoot)
+		spec.StateDir = cfg.StateDir
+		for _, sh := range cfg.Shares {
+			spec.FileAllow = append(spec.FileAllow,
+				workerconf.FileAllowance{Path: sh.Path, Write: !sh.RO})
+		}
 		if rep, applyErr := workerconfApplyFn(spec); rep != nil {
 			conf = *rep
 			conf.Mode = cfg.Confinement

@@ -3,6 +3,7 @@ package workerconf
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,69 @@ func TestDefaultSpec(t *testing.T) {
 	}
 	if os.Getenv("WORKERCONF_HELPER") == "1" {
 		t.Fatal("helper leaked into the test body")
+	}
+}
+
+func TestBuildSeatbeltProfile(t *testing.T) {
+	spec := DefaultSpec(12, "")
+	spec.StateDir = "/Users/test/.gantry/sandboxes/dev"
+	spec.FileAllow = []FileAllowance{
+		{Path: "/Users/test/project", Write: true},
+		{Path: "/Users/test/shared refs", Write: false},
+		{Path: `/Users/test/we"ird\path`, Write: false},
+	}
+	p := buildSeatbeltProfile(spec)
+	for _, want := range []string{
+		"(version 1)",
+		"(deny default)",
+		"(allow signal (target self))",
+		"(allow mach-lookup)",
+		"(allow sysctl-read)",
+		`(literal "/dev/null")`,
+		`(allow file-write* (subpath "/Users/test/.gantry/sandboxes/dev"))`,
+		`(subpath "/Users/test/project")`,
+		`(subpath "/Users/test/shared refs")`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("profile missing %q:\n%s", want, p)
+		}
+	}
+	// Escaping: quotes and backslashes must not break the SBPL literal.
+	if !strings.Contains(p, `/Users/test/we\"ird\\path`) {
+		t.Fatalf("profile escaping wrong:\n%s", p)
+	}
+	// RO root must never appear under a write rule: the only
+	// file-write* rules are the /dev literals, the state dir, and the
+	// RW export block.
+	writeLines := 0
+	for _, line := range strings.Split(p, "\n") {
+		if strings.HasPrefix(line, "(allow file-read* file-write*") {
+			writeLines++
+			if strings.Contains(line, "shared refs") {
+				t.Fatalf("RO export in a write rule: %s", line)
+			}
+		}
+	}
+	if writeLines != 2 { // /dev line + rw-exports block header
+		t.Fatalf("unexpected write rules (%d):\n%s", writeLines, p)
+	}
+	// Rule order: (deny default) is the ONLY deny rule line and comes
+	// first; nothing but allows and comments may follow (SBPL
+	// later-wins).
+	var denyLines []string
+	for _, line := range strings.Split(p, "\n") {
+		if strings.HasPrefix(line, "(deny") {
+			denyLines = append(denyLines, line)
+		}
+	}
+	if len(denyLines) != 1 || denyLines[0] != "(deny default)" {
+		t.Fatalf("a deny rule follows an allow (SBPL later-wins): %v\n%s", denyLines, p)
+	}
+}
+
+func TestBuildSeatbeltProfileEmpty(t *testing.T) {
+	p := buildSeatbeltProfile(DefaultSpec(8, ""))
+	if strings.Contains(p, "subpath") {
+		t.Fatalf("no allowances expected:\n%s", p)
 	}
 }
