@@ -59,31 +59,31 @@ attestation — verify with
 
 ## Features
 
-- **Images** — OCI reference, OCI layout, Docker-save tar, or EROFS file;
-  flattened and cached automatically. `gantry image pull alpine:latest`,
-  `gantry image ls`.
-- **Host shares** — export directories over virtio-fs:
-  `-share repo="$PWD@/workspace,ro"`. Hot-add without a restart:
-  `gantry share add dev data="$PWD/data,ro"` (also `ls`/`remove`; the
-  dashboard's Mounts view does the same).
-- **Networking** — embedded netstack; public internet allowed, local networks
-  blocked by default (`-allow-local-net` to opt in). Egress policies with
-  CIDR/proto/port/DNS rules: `-net-policy examples/llm-only.json`. Replace a
-  running sandbox's policy without restarting it with
-  `gantry net-policy set dev examples/llm-only.json`; use `show` to inspect it
-  or `default dev` to restore Gantry's built-in policy. The Rules view exposes
-  the same live editor with `e`.
-- **Port publishing** — expose guest services on the host:
-  `-p 8080:80` (loopback by default; `-p 0.0.0.0:8080:80` opts into LAN,
-  `/udp` for UDP). Hot publish on a running sandbox:
-  `gantry ports publish dev 8081:8080` (also `ls`/`unpublish`; the
-  dashboard's Ports view does the same).
-- **Runtimes** — `crun` by default; in-VM gVisor with `-runtime runsc`
-  (rootfs via `./scripts/mkrootfs-gvisor.sh`).
-- **Secrets** — `-secret GITHUB_TOKEN` injects from the environment, never
-  via argv or sandbox state.
-- **Persistence** — named sandboxes get a private writable layer at
-  `~/.gantry/rwlayers/<name>.ext4` (`-rw=false` to disable).
+- **VM + process isolation** — one VM per sandbox, with separate supervisor,
+  network, and VMM processes. The guest-facing VMM worker is confined by Linux
+  namespaces/seccomp or macOS Seatbelt; `-process-isolation=required` fails
+  closed and `isolation.json` records the verified boundary.
+- **Images** — OCI reference/layout, Docker-save tar, or EROFS; verified,
+  flattened, and cached by digest. Private registries use standard credential
+  helpers (`gantry image pull|login|ls`).
+- **Runtimes and sessions** — `crun` by default or in-VM gVisor with
+  `-runtime runsc`; concurrent exec sessions and exact exit statuses.
+- **Host shares** — host-enforced read-only virtio-fs exports, including
+  `@/container/path` aliases. `gantry share add|remove|ls` is live on Linux;
+  adding a new host path to a confined macOS VM requires a restart.
+- **Networking** — embedded netstack, local networks blocked by default, and
+  CIDR/proto/port/DNS egress rules. Policies are replaceable live with
+  `gantry net-policy set`; Traffic and Rules views show activity and policy.
+- **Port publishing** — TCP/UDP host-to-guest forwards, loopback by default:
+  `-p 8080:80`; publish/unpublish live with `gantry ports` or the dashboard.
+- **Secrets** — `-secret NAME`, `NAME=@file`, or `-secret-file`; values travel
+  memory-only to per-exec process specs, never argv, sandbox state, or the
+  daemon environment.
+- **Persistence and resources** — named sandboxes get private locked writable
+  layers plus configurable memory/vCPUs; dashboard edits apply on next boot.
+- **Dashboard and import** — create/start/stop/exec plus Traffic, Rules,
+  Mounts, and Ports views; `gantry import` adopts compatible sandbox state
+  without re-pulling or flattening immutable image layers.
 
 ## Build from source
 
@@ -97,15 +97,15 @@ go test ./...
 | Host | Backend | Status |
 |---|---|---|
 | Linux arm64 | KVM | Implemented; requires `/dev/kvm` |
-| Linux x86-64 | KVM | Verified on EC2 `m6i.metal` |
+| Linux x86-64 | KVM | Verified on EC2 `c5.metal` |
 | macOS arm64 | Hypervisor.framework | Verified; macOS 13+ |
 | Windows x86-64 | WHPX | Cross-build only, not boot-verified |
 
 ## Limitations
 
-Not (yet): Windows boot verification, snapshots. The VMM
-runs with the launching user's host privileges; writable layers must not be
-shared between live VMs.
+Not (yet): Windows boot verification, snapshots. The trusted supervisor runs
+with the launching user's privileges; the guest-facing VMM worker is confined
+on Linux and macOS. Writable layers must not be shared between live VMs.
 
 ## Acknowledgements
 
