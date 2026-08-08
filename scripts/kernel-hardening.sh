@@ -37,6 +37,7 @@ RANDOMIZE_KSTACK_OFFSET_DEFAULT  # per-syscall kernel stack randomization
 GANTRY_HARDENING_DISABLES="
 KEXEC KEXEC_FILE           # no kexec from inside the guest
 MODULES                    # no loadable modules (unsigned module = full bypass)
+SECURITY_SELINUX           # no policy is shipped; idle hooks added attack surface and ~50 ms on arm64 HVF
 "
 
 # Supported hardening whose compile-time default is deliberately off.
@@ -66,6 +67,9 @@ apply_kernel_hardening() {
 	for sym in $(printf '%s\n' "$GANTRY_HARDENING_TRY" | sed 's/#.*//'); do
 		scripts/config --enable "$sym"
 	done
+	# Yama is the only policy LSM Gantry enables. Keep the activation list
+	# equally narrow instead of probing disabled policy engines at boot.
+	scripts/config --set-str LSM "yama"
 }
 
 # verify_kernel_hardening: run after olddefconfig. Critical symbols must be
@@ -90,4 +94,8 @@ verify_kernel_hardening() {
 			exit 1
 		fi
 	done
+	if ! grep -q '^CONFIG_LSM="yama"$' .config; then
+		echo "hardening LSM list is not limited to yama" >&2
+		exit 1
+	fi
 }
