@@ -207,6 +207,9 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 			conf.Notes = append(conf.Notes, "apply: "+applyErr.Error())
 		}
 		workerconfVerifyFn(spec, &conf)
+		if conf.Applied && shareHotAddUnavailable(conf) != "" {
+			conf.Notes = append(conf.Notes, "share hot-add unavailable (immutable profile); new shares activate at boot")
+		}
 		if cfg.Confinement == "required" {
 			failed := conf.Failed(workerconf.PropFSRead, workerconf.PropFSWrite,
 				workerconf.PropNetDial, workerconf.PropExec)
