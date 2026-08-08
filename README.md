@@ -6,6 +6,8 @@ Hypervisor.framework on Apple Silicon, experimental WHPX on Windows.
 
 > Experimental. Linux and Apple Silicon macOS are the supported targets.
 
+[![Gantry terminal dashboard demo](assets/gantry-tui.gif)](assets/gantry-tui.gif)
+
 ## Install
 
 Download the latest release binary:
