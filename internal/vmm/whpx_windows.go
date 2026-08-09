@@ -70,11 +70,12 @@ const (
 )
 
 const (
-	whvPropProcessorCount = 0x00001fff
-	whvMapRead            = 0x1
-	whvMapWrite           = 0x2
-	whvMapExecute         = 0x4
-	whvExitContextSize    = 224
+	whvPropProcessorCount         = 0x00001fff
+	whvPropLocalApicEmulationMode = 0x00001005
+	whvMapRead                    = 0x1
+	whvMapWrite                   = 0x2
+	whvMapExecute                 = 0x4
+	whvExitContextSize            = 224
 )
 
 func whvCall(name string, proc *windows.LazyProc, args ...uintptr) error {
@@ -199,6 +200,16 @@ func (whpxPlatform) run(m *Machine) error {
 		uintptr(unsafe.Pointer(&prop)), 16); err != nil {
 		return err
 	}
+	// Enable the emulated local APIC (WHvX64LocalApicEmulationModeXApic).
+	// Without it WHvRequestInterrupt — the delivery path for the userspace
+	// IO-APIC below — has nothing to deliver into, and guest LAPIC MMIO
+	// reads at 0xfee00000 return zero while the MPS table advertises one.
+	apicMode := u64Value(1) // WHvX64LocalApicEmulationModeXApic
+	if err := whvCall("WHvSetPartitionProperty(LocalApicEmulationMode)", procSetPartitionProp,
+		uintptr(h), uintptr(whvPropLocalApicEmulationMode),
+		uintptr(unsafe.Pointer(&apicMode)), 16); err != nil {
+		return err
+	}
 	if err := whvCall("WHvSetupPartition", procSetupPartition, uintptr(h)); err != nil {
 		return err
 	}
@@ -219,7 +230,15 @@ func (whpxPlatform) run(m *Machine) error {
 		}
 	}
 
-	// APs: WHPX holds non-boot processors until the guest's INIT/SIPI.
+	// APs: unlike KVM, WHPX places every VP in the architectural reset
+	// state — it does not hold APs for the guest's INIT/SIPI. An AP thread
+	// started before the BSP has populated the trampoline would execute
+	// the reset vector in zeroed RAM and triple-fault. Until this is
+	// validated on real Windows, warn and let the caller use -cpus 1.
+	if m.vcpus > 1 {
+		fmt.Fprintf(os.Stderr, "whpx: %d vCPUs requested; WHPX AP bring-up is unvalidated "+
+			"and APs may triple-fault — prefer -cpus 1 on Windows\n", m.vcpus)
+	}
 	for i := 1; i < m.vcpus; i++ {
 		go func(vp uint32) {
 			runtime.LockOSThread()
@@ -379,9 +398,19 @@ func (b *whpxBackend) handleIOExit(vp uint32, buf []byte) error {
 		return ErrGuestReset
 	}
 
+	// WHPX does not complete the intercepted IN/OUT: RIP must be advanced
+	// past the instruction manually (InstructionByteCount @ union offset 0
+	// of the exit context, i.e. buf[48]). Without this the guest
+	// re-executes the same port access forever — the CMOS/PIT reads in
+	// early boot hang silently before the console comes up.
+	advance := func() error {
+		rip := binary.LittleEndian.Uint64(buf[32:])
+		return b.writeGPR(vp, whvRegRip, rip+uint64(buf[48]))
+	}
+
 	if isWrite {
 		m.handleIO(true, port, uint32(rax), size)
-		return nil
+		return advance()
 	}
 	v := m.handleIO(false, port, 0, size)
 	// IN modifies only AL/AX/EAX of RAX
@@ -393,7 +422,10 @@ func (b *whpxBackend) handleIOExit(vp uint32, buf []byte) error {
 	default:
 		rax = uint64(v)
 	}
-	return b.writeGPR(vp, whvRegRax, rax)
+	if err := b.writeGPR(vp, whvRegRax, rax); err != nil {
+		return err
+	}
+	return advance()
 }
 
 // platformBackend selects the hypervisor backend for this build target.
