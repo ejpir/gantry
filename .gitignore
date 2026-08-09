@@ -1,6 +1,7 @@
 # build artifacts (regenerate: ./scripts/build.sh)
 /artifacts/
 /gantry
+/seatbeltspike
 /hostctl
 /cmd/hostctl/hostctl
 /minivm
