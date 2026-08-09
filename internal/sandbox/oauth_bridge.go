@@ -59,8 +59,8 @@ import (
 type oauthBridge struct {
 	br *broker
 	// replay executes one HTTP GET against guest loopback and returns the
-	// raw response; a field so tests can substitute a local fake guest.
-	replay func(port int, requestURI string) (status int, body []byte, err error)
+	// parsed response; a field so tests can substitute a local fake guest.
+	replay func(port int, requestURI string) (oauthReplayResult, error)
 	// logf defaults to the daemon log; tests capture it.
 	logf func(format string, a ...any)
 
@@ -232,7 +232,7 @@ func (b *oauthBridge) handleCallback(l *oauthListener) func(http.ResponseWriter,
 			http.Error(w, "gantry oauth bridge: callback URL too long", http.StatusRequestURITooLong)
 			return
 		}
-		status, body, err := b.replayIntoGuest(l.port, uri)
+		res, err := b.replayIntoGuest(l.port, uri)
 		if err != nil {
 			b.logf("replay into sandbox failed (port %d): %v", l.port, err)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -243,9 +243,19 @@ func (b *oauthBridge) handleCallback(l *oauthListener) func(http.ResponseWriter,
 				`then retry. Details are in the sandbox daemon log.</p></body></html>`, err)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(status)
-		_, _ = w.Write(body)
+		ct := res.contentType
+		if ct == "" {
+			ct = "text/html; charset=utf-8"
+		}
+		w.Header().Set("Content-Type", ct)
+		if res.location != "" {
+			// Codex answers /auth/callback with a 302 to its result page;
+			// the browser follows it back through this listener, which
+			// replays the target into the guest like any other GET.
+			w.Header().Set("Location", res.location)
+		}
+		w.WriteHeader(res.status)
+		_, _ = w.Write(res.body)
 		if q := r.URL.Query(); q.Get("code") != "" || q.Get("error") != "" {
 			// OAuth flows are one-shot: the CLI exchanges the code and
 			// shuts its listener. Free the host port for the next login.
@@ -254,9 +264,20 @@ func (b *oauthBridge) handleCallback(l *oauthListener) func(http.ResponseWriter,
 	}
 }
 
+// oauthReplayResult is the guest listener's answer to a replayed
+// callback. Location matters: CLIs like codex answer /auth/callback with
+// a 302 to their success/error page, and a Location-less 302 renders as
+// a blank browser page — the exact symptom seen in field testing.
+type oauthReplayResult struct {
+	status      int
+	contentType string // guest Content-Type; the handler default applies when empty
+	location    string // guest Location redirect target, forwarded verbatim
+	body        []byte
+}
+
 // replayIntoGuest performs the callback GET inside the sandbox through the
 // configured replay function (the real one execs bash /dev/tcp).
-func (b *oauthBridge) replayIntoGuest(port int, requestURI string) (int, []byte, error) {
+func (b *oauthBridge) replayIntoGuest(port int, requestURI string) (oauthReplayResult, error) {
 	if b.replay != nil {
 		return b.replay(port, requestURI)
 	}
@@ -277,13 +298,13 @@ cat <&3
 
 // replayViaDevTCP execs the replay script in the sandbox container and
 // parses the CLI listener's raw HTTP response.
-func (b *oauthBridge) replayViaDevTCP(port int, requestURI string) (int, []byte, error) {
+func (b *oauthBridge) replayViaDevTCP(port int, requestURI string) (oauthReplayResult, error) {
 	stdout, status, err := b.br.oauthExec([]string{"bash", "-c", devTCPReplayScript, "--", strconv.Itoa(port), requestURI})
 	if err != nil {
-		return 0, nil, fmt.Errorf("in-sandbox replay exec: %w", err)
+		return oauthReplayResult{}, fmt.Errorf("in-sandbox replay exec: %w", err)
 	}
 	if status != 0 {
-		return 0, nil, fmt.Errorf("in-sandbox replay exited %d: %s", status, strings.TrimSpace(string(tailBytes(stdout, 512))))
+		return oauthReplayResult{}, fmt.Errorf("in-sandbox replay exited %d: %s", status, strings.TrimSpace(string(tailBytes(stdout, 512))))
 	}
 	// sessionExec appends a "client: exec exited, status N" trailer to
 	// stdout (it is not Quiet-gated); strip it so it can never corrupt
@@ -296,44 +317,50 @@ func (b *oauthBridge) replayViaDevTCP(port int, requestURI string) (int, []byte,
 }
 
 // parseRawHTTPResponse splits a raw HTTP/1.x response (as printed by cat)
-// into status code and body. A trailing "client: exec exited" line from
-// the session layer is tolerated: Content-Length bodies are sliced exactly;
-// close-delimited bodies keep the trailer harmlessly at the end.
-func parseRawHTTPResponse(raw []byte) (int, []byte, error) {
+// into status, the headers worth relaying (Content-Type, Location), and
+// body. Content-Length bodies are sliced exactly; chunked bodies are
+// unfolded.
+func parseRawHTTPResponse(raw []byte) (oauthReplayResult, error) {
 	head, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
 	if !ok {
-		return 0, nil, fmt.Errorf("no HTTP response from the in-sandbox listener: %.200s", raw)
+		return oauthReplayResult{}, fmt.Errorf("no HTTP response from the in-sandbox listener: %.200s", raw)
 	}
 	statusLine, headers, _ := bytes.Cut(head, []byte("\r\n"))
 	fields := bytes.Fields(statusLine)
 	if len(fields) < 2 || !bytes.HasPrefix(fields[0], []byte("HTTP/")) {
-		return 0, nil, fmt.Errorf("malformed HTTP status line: %.100s", statusLine)
+		return oauthReplayResult{}, fmt.Errorf("malformed HTTP status line: %.100s", statusLine)
 	}
 	status, err := strconv.Atoi(string(fields[1]))
 	if err != nil {
-		return 0, nil, fmt.Errorf("malformed HTTP status code: %.100s", statusLine)
+		return oauthReplayResult{}, fmt.Errorf("malformed HTTP status code: %.100s", statusLine)
 	}
+	res := oauthReplayResult{status: status, body: body}
 	var chunked bool
 	for _, line := range bytes.Split(headers, []byte("\r\n")) {
 		k, v, ok := bytes.Cut(line, []byte(":"))
 		if !ok {
 			continue
 		}
+		v = bytes.TrimSpace(v)
 		switch {
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Length")):
-			if n, err := strconv.Atoi(string(bytes.TrimSpace(v))); err == nil && n >= 0 && n <= len(body) {
-				body = body[:n]
+			if n, err := strconv.Atoi(string(v)); err == nil && n >= 0 && n <= len(res.body) {
+				res.body = res.body[:n]
 			}
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Transfer-Encoding")):
 			chunked = bytes.Contains(bytes.ToLower(v), []byte("chunked"))
+		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Type")):
+			res.contentType = string(v)
+		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Location")):
+			res.location = string(v)
 		}
 	}
 	if chunked {
-		if decoded, err := decodeChunkedBody(body); err == nil {
-			body = decoded
+		if decoded, err := decodeChunkedBody(res.body); err == nil {
+			res.body = decoded
 		}
 	}
-	return status, body, nil
+	return res, nil
 }
 
 // decodeChunkedBody unfolds a Transfer-Encoding: chunked body. CLI OAuth

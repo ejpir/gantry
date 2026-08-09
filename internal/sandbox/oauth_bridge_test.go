@@ -88,7 +88,7 @@ func TestOAuthCallbackPortsLocalhostHealthNotCallback(t *testing.T) {
 	}
 }
 
-func testBridge(t *testing.T, replay func(port int, uri string) (int, []byte, error)) *oauthBridge {
+func testBridge(t *testing.T, replay func(port int, uri string) (oauthReplayResult, error)) *oauthBridge {
 	t.Helper()
 	b := &oauthBridge{
 		replay:    replay,
@@ -121,14 +121,22 @@ func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
 	}))
 	defer guest.Close()
 
-	b := testBridge(t, func(port int, uri string) (int, []byte, error) {
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
 		resp, err := http.Get(guest.URL + uri)
 		if err != nil {
-			return 0, nil, err
+			return oauthReplayResult{}, err
 		}
 		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
-		return resp.StatusCode, body, err
+		if err != nil {
+			return oauthReplayResult{}, err
+		}
+		return oauthReplayResult{
+			status:      resp.StatusCode,
+			contentType: resp.Header.Get("Content-Type"),
+			location:    resp.Header.Get("Location"),
+			body:        body,
+		}, nil
 	})
 
 	// Sniff a codex-style authorize URL; the bridge must bind 1455-equivalent.
@@ -199,9 +207,30 @@ func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
 	}
 }
 
+func TestBridgeForwardsGuestRedirect(t *testing.T) {
+	// Codex answers /auth/callback with a 302 to its result page. The
+	// Location header must reach the browser, or it renders a blank page.
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
+		return oauthReplayResult{status: 302, location: "/auth/success", contentType: "text/plain; charset=utf-8"}, nil
+	})
+	l := &oauthListener{port: 1, done: make(chan struct{})}
+	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state=s", nil)
+	rec := httptest.NewRecorder()
+	b.handleCallback(l)(rec, req)
+	if rec.Code != 302 {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/auth/success" {
+		t.Fatalf("Location = %q, want /auth/success (blank-page regression)", loc)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, guest type not preserved", ct)
+	}
+}
+
 func TestBridgeReplayFailureReturnsBadGateway(t *testing.T) {
-	b := testBridge(t, func(port int, uri string) (int, []byte, error) {
-		return 0, nil, fmt.Errorf("in-sandbox replay exited 97: cannot connect")
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
+		return oauthReplayResult{}, fmt.Errorf("in-sandbox replay exited 97: cannot connect")
 	})
 	l := &oauthListener{port: 1, done: make(chan struct{})}
 	req := httptest.NewRequest(http.MethodGet, "/callback?code=x", nil)
@@ -216,9 +245,9 @@ func TestBridgeReplayFailureReturnsBadGateway(t *testing.T) {
 }
 
 func TestBridgeRejectsNonGET(t *testing.T) {
-	b := testBridge(t, func(port int, uri string) (int, []byte, error) {
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
 		t.Fatal("replay must not run for POST")
-		return 0, nil, nil
+		return oauthReplayResult{}, nil
 	})
 	l := &oauthListener{port: 1, done: make(chan struct{})}
 	req := httptest.NewRequest(http.MethodPost, "/callback", strings.NewReader("x"))
@@ -231,43 +260,45 @@ func TestBridgeRejectsNonGET(t *testing.T) {
 
 func TestParseRawHTTPResponse(t *testing.T) {
 	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: exec exited, status 0\n"
-	status, body, err := parseRawHTTPResponse([]byte(raw))
+	res, err := parseRawHTTPResponse([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != 200 {
-		t.Fatalf("status = %d", status)
+	if res.status != 200 {
+		t.Fatalf("status = %d", res.status)
 	}
-	if string(body) != "Hello, world!" {
-		t.Fatalf("body = %q (session trailer leaked into Content-Length body)", body)
+	if string(res.body) != "Hello, world!" {
+		t.Fatalf("body = %q (session trailer leaked into Content-Length body)", res.body)
+	}
+	if res.contentType != "text/html" {
+		t.Fatalf("contentType = %q", res.contentType)
 	}
 
-	// Close-delimited body without Content-Length: trailer is stripped
-	// by replayViaDevTCP; the parser sees it only if it leaked.
-	raw2 := "HTTP/1.0 302 Found\r\nLocation: /\r\n\r\nbye\n"
-	status, body, err = parseRawHTTPResponse([]byte(raw2))
-	if err != nil || status != 302 {
-		t.Fatalf("status %d err %v", status, err)
+	// Close-delimited body without Content-Length.
+	raw2 := "HTTP/1.0 302 Found\r\nLocation: /auth/success\r\n\r\n"
+	res, err = parseRawHTTPResponse([]byte(raw2))
+	if err != nil || res.status != 302 {
+		t.Fatalf("status %d err %v", res.status, err)
 	}
-	if !strings.HasPrefix(string(body), "bye") {
-		t.Fatalf("body = %q", body)
+	if res.location != "/auth/success" {
+		t.Fatalf("location = %q (redirect target lost)", res.location)
 	}
 
 	// Node-style chunked response (claude/pi listeners).
 	raw3 := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n" +
 		"8\r\nSign-in \r\n8\r\ncomplete\r\n0\r\n\r\n"
-	status, body, err = parseRawHTTPResponse([]byte(raw3))
-	if err != nil || status != 200 {
-		t.Fatalf("chunked: status %d err %v", status, err)
+	res, err = parseRawHTTPResponse([]byte(raw3))
+	if err != nil || res.status != 200 {
+		t.Fatalf("chunked: status %d err %v", res.status, err)
 	}
-	if string(body) != "Sign-in complete" {
-		t.Fatalf("chunked body = %q", body)
+	if string(res.body) != "Sign-in complete" {
+		t.Fatalf("chunked body = %q", res.body)
 	}
 
-	if _, _, err := parseRawHTTPResponse([]byte("garbage")); err == nil {
+	if _, err := parseRawHTTPResponse([]byte("garbage")); err == nil {
 		t.Fatal("expected error for non-HTTP input")
 	}
-	if _, _, err := parseRawHTTPResponse([]byte("oops\r\n\r\nbody")); err == nil {
+	if _, err := parseRawHTTPResponse([]byte("oops\r\n\r\nbody")); err == nil {
 		t.Fatal("expected error for malformed status line")
 	}
 }
