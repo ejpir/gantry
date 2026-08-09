@@ -2,9 +2,11 @@ package netpol
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,5 +152,89 @@ func TestSyncSnapshot(t *testing.T) {
 	sup.SyncSnapshot(later)
 	if got := sup.Snapshot(); got.TXBytes != 2000 {
 		t.Fatalf("later pull did not advance: %+v", got)
+	}
+}
+
+func TestSyncSnapshotCapsRotatingWorkerEntries(t *testing.T) {
+	now := time.Now()
+	entry := func(prefix string, i int) TrafficEntry {
+		return TrafficEntry{
+			Host: prefix + ".example", Address: fmt.Sprintf("2001:db8::%x", i),
+			Protocol: "tcp6", Port: 443, Allowed: true, TXPackets: 1,
+			FirstSeen: now, LastSeen: now,
+		}
+	}
+	recorder := NewTrafficRecorder("")
+	defer recorder.Close()
+	first := TrafficSnapshot{Version: trafficSnapshotVersion, Entries: make([]TrafficEntry, maxTrafficEntries+64)}
+	for i := range first.Entries {
+		first.Entries[i] = entry("first", i)
+	}
+	recorder.SyncSnapshot(first)
+	if got := len(recorder.Snapshot().Entries); got != maxTrafficEntries {
+		t.Fatalf("first merge retained %d entries, want %d", got, maxTrafficEntries)
+	}
+
+	// At capacity, existing keys still advance while new keys—and a later
+	// pull containing an entirely new key set—cannot grow the map.
+	existing := first.Entries[0]
+	existing.TXPackets = 99
+	second := TrafficSnapshot{Version: trafficSnapshotVersion, Entries: []TrafficEntry{existing}}
+	for i := 0; i < maxTrafficEntries; i++ {
+		second.Entries = append(second.Entries, entry("second", i))
+	}
+	recorder.SyncSnapshot(second)
+	rotated := TrafficSnapshot{Version: trafficSnapshotVersion, Entries: make([]TrafficEntry, maxTrafficEntries)}
+	for i := range rotated.Entries {
+		rotated.Entries[i] = entry("rotated", i)
+	}
+	recorder.SyncSnapshot(rotated)
+	got := recorder.Snapshot()
+	if len(got.Entries) != maxTrafficEntries {
+		t.Fatalf("rotating merges retained %d entries, want %d", len(got.Entries), maxTrafficEntries)
+	}
+	var found bool
+	for _, e := range got.Entries {
+		if e.Host == existing.Host && e.Address == existing.Address {
+			found = true
+			if e.TXPackets != 99 {
+				t.Fatalf("existing entry did not advance at capacity: %+v", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("existing entry disappeared at capacity")
+	}
+}
+
+func TestSyncSnapshotValidatesWorkerTelemetry(t *testing.T) {
+	recorder := NewTrafficRecorder("")
+	defer recorder.Close()
+	valid := TrafficEntry{Host: "example.com", Address: "192.0.2.1", Protocol: "tcp", Port: 443}
+	recorder.SyncSnapshot(TrafficSnapshot{
+		Version: trafficSnapshotVersion + 1, TXPackets: 99, Entries: []TrafficEntry{valid},
+	})
+	if got := recorder.Snapshot(); got.TXPackets != 0 || len(got.Entries) != 0 {
+		t.Fatalf("wrong-version worker snapshot was merged: %+v", got)
+	}
+
+	recorder.SyncSnapshot(TrafficSnapshot{
+		Version: trafficSnapshotVersion, TXPackets: 7,
+		Entries: []TrafficEntry{
+			{Host: strings.Repeat("h", maxTrafficHostBytes+1), Address: "192.0.2.2", Protocol: "tcp"},
+			{Host: "bad\x1bhost", Address: "192.0.2.3", Protocol: "tcp"},
+			{Address: strings.Repeat("a", maxTrafficAddressBytes+1), Protocol: "tcp"},
+			{Address: "", Protocol: "tcp"},
+			{Address: "192.0.2.4", Protocol: strings.Repeat("p", maxTrafficProtocolBytes+1)},
+			{Address: "192.0.2.5", Protocol: ""},
+			valid,
+		},
+	})
+	got := recorder.Snapshot()
+	if got.TXPackets != 7 {
+		t.Fatalf("valid top-level counters were not merged: %+v", got)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Host != valid.Host {
+		t.Fatalf("invalid worker entries were retained: %+v", got.Entries)
 	}
 }

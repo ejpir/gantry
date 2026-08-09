@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/miekg/dns"
 )
@@ -18,10 +20,13 @@ import (
 const (
 	// TrafficFileName is stored in each sandbox directory and intentionally
 	// survives stop/resume cycles alongside sandbox.json.
-	TrafficFileName        = "network-traffic.json"
-	trafficSnapshotVersion = 1
-	maxTrafficEntries      = 512
-	maxTrafficDNSNames     = 4096
+	TrafficFileName         = "network-traffic.json"
+	trafficSnapshotVersion  = 1
+	maxTrafficEntries       = 512
+	maxTrafficDNSNames      = 4096
+	maxTrafficHostBytes     = 253
+	maxTrafficAddressBytes  = 64
+	maxTrafficProtocolBytes = 16
 )
 
 // TrafficSnapshot is the on-disk, read-only dashboard view of one VM's
@@ -170,7 +175,7 @@ func (r *TrafficRecorder) Close() {
 // the merge takes the max per counter (retries and restarts never
 // double-count), the earliest FirstSeen and the latest LastSeen.
 func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
-	if r == nil {
+	if r == nil || other.Version != trafficSnapshotVersion {
 		return
 	}
 	r.mu.Lock()
@@ -187,10 +192,20 @@ func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
 	r.snapshot.RXPackets = maxU64(r.snapshot.RXPackets, other.RXPackets)
 	r.snapshot.DroppedBytes = maxU64(r.snapshot.DroppedBytes, other.DroppedBytes)
 	r.snapshot.DroppedPackets = maxU64(r.snapshot.DroppedPackets, other.DroppedPackets)
-	for _, e := range other.Entries {
+	entries := other.Entries
+	if len(entries) > maxTrafficEntries {
+		entries = entries[:maxTrafficEntries]
+	}
+	for _, e := range entries {
+		if !validMergedTrafficEntry(e) {
+			continue
+		}
 		key := trafficEntryKey(e.Address, e.Host, e.Protocol, e.Port, e.Allowed)
 		cur, ok := r.entries[key]
 		if !ok {
+			if len(r.entries) >= maxTrafficEntries {
+				continue
+			}
 			dup := e
 			r.entries[key] = &dup
 			r.dirty = true
@@ -211,6 +226,23 @@ func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
 		}
 		r.dirty = true
 	}
+}
+
+// validMergedTrafficEntry validates the retained, peer-controlled strings in
+// a worker snapshot. The control frame is itself bounded, but without field
+// limits a worker could rotate near-frame-sized unique strings through pulls
+// and make the supervisor retain hundreds of megabytes indefinitely.
+func validMergedTrafficEntry(e TrafficEntry) bool {
+	return validTrafficText(e.Host, maxTrafficHostBytes, true) &&
+		validTrafficText(e.Address, maxTrafficAddressBytes, false) &&
+		validTrafficText(e.Protocol, maxTrafficProtocolBytes, false)
+}
+
+func validTrafficText(value string, maxBytes int, allowEmpty bool) bool {
+	if (!allowEmpty && value == "") || len(value) > maxBytes || !utf8.ValidString(value) {
+		return false
+	}
+	return strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
 // Snapshot returns a stable in-memory copy, primarily for tests and callers
