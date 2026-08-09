@@ -1025,7 +1025,10 @@ func (br *broker) portControl(c net.Conn, req brokerRequest) {
 // "sessionctl" request carries it and every sessionExitEvent echoes it,
 // so agent integrations have a stable, checkable contract. Bump on any
 // wire change.
-const sessionProtocolVersion = 1
+const (
+	sessionProtocolVersion  = 1
+	sessionAbnormalExitCode = 255
+)
 
 // sessionExitEvent is the single message a session-control channel
 // carries after the handshake: the task's exit status, delivered out of
@@ -1034,6 +1037,15 @@ type sessionExitEvent struct {
 	V     int    `json:"v"`
 	Exit  int    `json:"exit"`
 	Error string `json:"error,omitempty"`
+}
+
+func newSessionExitEvent(status int, err error) sessionExitEvent {
+	ev := sessionExitEvent{V: sessionProtocolVersion, Exit: status}
+	if err != nil {
+		ev.Error = err.Error()
+		ev.Exit = sessionAbnormalExitCode
+	}
+	return ev
 }
 
 // sessionctl parks c as the control channel for the session with the
@@ -1155,10 +1167,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	// attach client drains the full data stream, sees EOF, and the event
 	// is already queued for it. The deadline only bounds a wedged client
 	// that stopped reading its control channel.
-	ev := sessionExitEvent{V: sessionProtocolVersion, Exit: status}
-	if err != nil {
-		ev.Error = err.Error()
-	}
+	ev := newSessionExitEvent(status, err)
 	_ = ctl.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	_ = json.NewEncoder(ctl).Encode(&ev)
 }
@@ -1285,7 +1294,17 @@ func CmdSandboxExec(name string, argv []string) int {
 	ev, err := readSessionExitEvent(ctlR)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\ngantry exec: session ended without an exit status (broker died?): %v\n", err)
-		return 255
+		return sessionAbnormalExitCode
+	}
+	if ev.Error != "" {
+		fmt.Fprintf(os.Stderr, "\ngantry exec: session infrastructure failure: %s\n", ev.Error)
+	}
+	return sessionExitCode(ev)
+}
+
+func sessionExitCode(ev sessionExitEvent) int {
+	if ev.Error != "" {
+		return sessionAbnormalExitCode
 	}
 	return ev.Exit
 }

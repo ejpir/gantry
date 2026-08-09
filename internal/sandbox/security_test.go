@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -65,6 +66,29 @@ func TestReadSessionExitEvent(t *testing.T) {
 	}
 	if _, err := readSessionExitEvent(bufio.NewReader(strings.NewReader(`{"v":1,"exit":255,"error":"boom"}` + "\n"))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A client/session transport failure is distinct from a command that exited
+// successfully. Even a malformed or older broker event that pairs an error
+// with exit 0 must never make automation report success.
+func TestSessionInfrastructureErrorIsAbnormalExit(t *testing.T) {
+	brokerEvent := newSessionExitEvent(0, errors.New("session transport failed"))
+	if brokerEvent.Exit != sessionAbnormalExitCode || brokerEvent.Error == "" {
+		t.Fatalf("broker event = %+v, want nonzero abnormal infrastructure failure", brokerEvent)
+	}
+
+	ev, err := readSessionExitEvent(bufio.NewReader(strings.NewReader(
+		`{"v":1,"exit":0,"error":"task Wait: connection reset"}` + "\n",
+	)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Error == "" {
+		t.Fatal("error field was dropped")
+	}
+	if got := sessionExitCode(ev); got != sessionAbnormalExitCode {
+		t.Fatalf("exit = %d, want abnormal exit %d", got, sessionAbnormalExitCode)
 	}
 }
 
