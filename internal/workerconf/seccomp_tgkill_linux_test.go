@@ -69,8 +69,8 @@ func tgkillHelper() {
 		fmt.Fprintln(os.Stderr, "socketpair:", err)
 		os.Exit(2)
 	}
-	defer unix.Close(fds[0])
-	defer unix.Close(fds[1])
+	defer func(fd int) { _ = unix.Close(fd) }(fds[0])
+	defer func(fd int) { _ = unix.Close(fd) }(fds[1])
 	if _, err := unix.FcntlInt(uintptr(fds[0]), unix.F_SETOWN, target); err != nil {
 		fmt.Fprintln(os.Stderr, "pre-filter F_SETOWN:", err)
 		os.Exit(2)
