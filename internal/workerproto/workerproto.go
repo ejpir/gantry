@@ -22,6 +22,7 @@ package workerproto
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -37,8 +38,9 @@ import (
 const (
 	// Magic identifies protocol version 1 of the control handshake.
 	Magic = "GANTRY-WORKER/1"
-	// RoleVMM owns the hypervisor, guest RAM, virtio devices, disk I/O,
-	// share serving, and the vsock data plane (Phase 2).
+	// RoleVMM owns the hypervisor, guest RAM, virtio device frontends,
+	// disk I/O, and the vsock data plane. Host share serving remains in
+	// the trusted supervisor behind a bounded request relay (Phase 2).
 	RoleVMM = "vmm"
 	// RoleNet owns the netstack, egress policy, traffic accounting, and
 	// port listeners (Phase 1 of the
@@ -53,6 +55,11 @@ const (
 	// virtioNetMaxFrame in internal/virtio (65562): the largest frame
 	// the device model will ever emit or accept.
 	MaxFrame = 65562
+	// MaxConcurrentHandlers bounds handler goroutines retained by one
+	// control connection. One slot may remain parked for vm.wait; the
+	// rest absorb normal control bursts without allowing a compromised
+	// peer to grow supervisor goroutines and resources without bound.
+	MaxConcurrentHandlers = 32
 
 	// nonceLen is the raw byte length of the launch nonce.
 	nonceLen = 32
@@ -197,7 +204,7 @@ type Response struct {
 // Client is the supervisor's control endpoint. Calls are concurrent —
 // a long-parked call (vm.wait) never blocks short operations — with
 // request IDs monotonically increasing (the worker rejects anything
-// else). Responses are matched by ID; a response for a timed-out call
+// else). Responses are matched by ID; a response for an abandoned call
 // is dropped, not fatal.
 type Client struct {
 	conn net.Conn
@@ -262,7 +269,7 @@ func (c *Client) readLoop() {
 			ch <- callResult{resp: resp}
 			continue
 		}
-		// Not pending: either a stale response for a timed-out call
+		// Not pending: either a stale response for an abandoned call
 		// (resp.ID <= maxIssued — drop it) or an ID the client never
 		// issued (worker bug — fatal to the channel).
 		if resp.ID > maxIssued {
@@ -280,11 +287,26 @@ func (c *Client) Call(op string, body, out any) error {
 }
 
 // CallWithTimeout is Call with an explicit per-call bound; zero uses the
-// client default. Long-parked operations (vm.wait) pass a generous bound.
+// client default.
 func (c *Client) CallWithTimeout(op string, body, out any, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := c.CallContext(ctx, op, body, out); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("workerproto: call %q timed out after %s", op, timeout)
+		}
+		return err
+	}
+	return nil
+}
+
+// CallContext issues one request and waits without an implicit deadline.
+// Canceling ctx abandons only this call; a late response is dropped. Closing
+// the Client or losing the control connection still fails all calls.
+func (c *Client) CallContext(ctx context.Context, op string, body, out any) error {
 	var raw json.RawMessage
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -293,10 +315,17 @@ func (c *Client) CallWithTimeout(op string, body, out any, timeout time.Duration
 		}
 		raw = b
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// ID assignment and the write are atomic under wmu: the worker
 	// rejects non-increasing IDs, so wire order must match ID order
 	// even with concurrent callers.
 	c.wmu.Lock()
+	if err := ctx.Err(); err != nil {
+		c.wmu.Unlock()
+		return err
+	}
 	c.mu.Lock()
 	if c.stickyEr != nil {
 		err := c.stickyEr
@@ -317,8 +346,6 @@ func (c *Client) CallWithTimeout(op string, body, out any, timeout time.Duration
 		c.mu.Unlock()
 		return werr
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 	select {
 	case r := <-ch:
 		if r.err != nil {
@@ -331,11 +358,11 @@ func (c *Client) CallWithTimeout(op string, body, out any, timeout time.Duration
 			return json.Unmarshal(r.resp.Body, out)
 		}
 		return nil
-	case <-timer.C:
+	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return fmt.Errorf("workerproto: call %q timed out after %s", op, timeout)
+		return ctx.Err()
 	}
 }
 
@@ -346,9 +373,10 @@ func (c *Client) Close() error { return c.conn.Close() }
 // {ok:false,error} response. A panic is converted to the same shape so a
 // bad request can never kill the serve loop's protocol state.
 //
-// Returning ErrShutdown is special: the worker sends an OK response and
-// ServeRequests then returns nil — the graceful-stop op, with the reply
-// guaranteed to reach the supervisor before the loop unwinds.
+// Returning ErrShutdown is special: the worker sends an OK response (and
+// encodes a non-nil body) before ServeRequests returns nil. This lets a
+// graceful-stop op furnish final state while the reply is still guaranteed
+// to reach the supervisor before the control channel unwinds.
 type Handler func(req Request) (any, error)
 
 // ErrShutdown: see Handler.
@@ -402,23 +430,42 @@ func SendHandshake(conn net.Conn, role string, nonce []byte, config any) error {
 	})
 }
 
-// ServeRequests is the worker-side control loop. It enforces strictly
+// ServeOptions selects operations that must execute serially in wire order.
+// Other operations remain concurrent, so a parked vm.wait cannot starve
+// vm.close. OrderedOps is read-only for the duration of ServeRequests.
+type ServeOptions struct {
+	OrderedOps map[string]bool
+}
+
+// ServeRequests is the control-channel server loop (worker-side for the main
+// channel and supervisor-side for the reverse bridge). It enforces strictly
 // increasing request IDs and dispatches known ops; any protocol violation
 // (oversized message, malformed JSON, duplicate/out-of-order ID, unknown
 // op) terminates the loop with an error — fatal to the worker by design.
 // A clean peer EOF returns nil so shutdown-by-close is not an error path.
 //
-// Handlers run CONCURRENTLY (one goroutine per request) so a long-parked
-// op like vm.wait cannot starve short ones; response order is therefore
-// arbitrary and matched by request ID. Handler state must protect itself
-// (the net/vmm worker states do). A handler returning ErrShutdown gets
-// its OK response written first, then the loop returns nil — the
-// graceful-stop reply is guaranteed to reach the supervisor.
+// Handlers run concurrently, up to MaxConcurrentHandlers per connection, so
+// a long-parked op like vm.wait cannot starve short ones. Further requests
+// receive socket backpressure until a slot is released. Response order is
+// arbitrary and matched by request ID; unordered handlers must protect shared
+// state. A handler returning ErrShutdown gets its OK response (including any
+// non-nil body) written first, then the loop returns nil — the graceful-stop
+// reply is guaranteed to reach the peer.
 func ServeRequests(conn net.Conn, ops map[string]Handler) error {
+	return ServeRequestsWithOptions(conn, ops, ServeOptions{})
+}
+
+// ServeRequestsWithOptions is ServeRequests with optional wire-order
+// serialization for related operations. All calls retain the same mandatory
+// per-connection concurrency bound.
+func ServeRequestsWithOptions(conn net.Conn, ops map[string]Handler, options ServeOptions) error {
 	var lastID uint64
 	var wmu sync.Mutex
 	shutdown := make(chan struct{})
 	var shutdownOnce sync.Once
+	slots := make(chan struct{}, MaxConcurrentHandlers)
+	orderedTail := make(chan struct{})
+	close(orderedTail)
 	for {
 		select {
 		case <-shutdown:
@@ -448,7 +495,32 @@ func ServeRequests(conn net.Conn, ops map[string]Handler) error {
 		if !ok {
 			return fmt.Errorf("workerproto: unknown op %q", req.Op)
 		}
-		go func() {
+		select {
+		case slots <- struct{}{}:
+		case <-shutdown:
+			return nil
+		}
+		var orderedAfter, orderedDone chan struct{}
+		if options.OrderedOps[req.Op] {
+			orderedAfter = orderedTail
+			orderedDone = make(chan struct{})
+			orderedTail = orderedDone
+		}
+		go func(req Request, handler Handler, orderedAfter, orderedDone chan struct{}) {
+			defer func() { <-slots }()
+			if orderedDone != nil {
+				defer close(orderedDone)
+				select {
+				case <-orderedAfter:
+				case <-shutdown:
+					return
+				}
+				select {
+				case <-shutdown:
+					return
+				default:
+				}
+			}
 			body, herr := func() (out any, err error) {
 				defer func() {
 					if r := recover(); r != nil {
@@ -458,8 +530,18 @@ func ServeRequests(conn net.Conn, ops map[string]Handler) error {
 				return handler(req)
 			}()
 			if herr == ErrShutdown {
+				resp := Response{ID: req.ID, OK: true}
+				if body != nil {
+					raw, err := json.Marshal(body)
+					if err != nil {
+						resp.OK = false
+						resp.Error = fmt.Sprintf("workerproto: encode response for %q: %v", req.Op, err)
+					} else {
+						resp.Body = raw
+					}
+				}
 				wmu.Lock()
-				_ = WriteMessage(conn, Response{ID: req.ID, OK: true})
+				_ = WriteMessage(conn, resp)
 				wmu.Unlock()
 				shutdownOnce.Do(func() { close(shutdown) })
 				// Unblock the read loop even if the supervisor lingers:
@@ -482,7 +564,7 @@ func ServeRequests(conn net.Conn, ops map[string]Handler) error {
 			wmu.Lock()
 			_ = WriteMessage(conn, resp) // a dead conn ends the read loop next
 			wmu.Unlock()
-		}()
+		}(req, handler, orderedAfter, orderedDone)
 	}
 }
 
