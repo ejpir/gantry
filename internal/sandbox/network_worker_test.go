@@ -4,14 +4,18 @@ package sandbox
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +27,19 @@ import (
 // testMAC mirrors the production guest MAC (runconf guestNetMAC is
 // unexported package state; the worker only needs SOME fixed address).
 var testWorkerMAC = "5a:94:ef:e4:0c:ee"
+
+type closeCountingConn struct {
+	net.Conn
+	count  atomic.Int32
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *closeCountingConn) Close() error {
+	c.count.Add(1)
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
 
 // workerTestFrame builds a minimal Ethernet+IPv4(+TCP/UDP) frame from the
 // guest to dstIP:dstPort — the shape netpol.MatchTX parses.
@@ -95,7 +112,7 @@ func startInProcessWorker(t *testing.T, cfg netWorkerConfig, expectDeath ...bool
 	w := &netWorker{
 		client: workerproto.NewClient(ctrlSup),
 		data:   dataSup,
-		done:   make(chan error, 1),
+		dead:   make(chan struct{}),
 	}
 	tolerate := len(expectDeath) > 0 && expectDeath[0]
 	t.Cleanup(func() {
@@ -152,6 +169,103 @@ func TestNetWorkerLifecycleAndPorts(t *testing.T) {
 	}
 	if snap.TXPackets != 0 || snap.DroppedPackets != 0 {
 		t.Fatalf("unexpected counters: %+v", snap)
+	}
+}
+
+// TestNetWorkerDoneConsumptionDoesNotBlockClose is the failure-teardown
+// regression. Done used to carry one buffered error value: the daemon consumed
+// it in its fatal-worker select, then deferred Close waited forever for a
+// second value after trying to kill an already-reaped process. A closed channel
+// must broadcast death independently of Err retrieval.
+func TestNetWorkerDoneConsumptionDoesNotBlockClose(t *testing.T) {
+	want := errors.New("worker failed")
+	var kills atomic.Int32
+	w := &netWorker{
+		dead: make(chan struct{}),
+		kill: func() error {
+			kills.Add(1)
+			return nil
+		},
+	}
+	w.setDead(want)
+
+	// Model the daemon selecting the death notification before deferred
+	// cleanup calls Close.
+	<-w.Done()
+	select {
+	case <-w.Done(): // a second observer must see the same terminal event
+	default:
+		t.Fatal("Done is not a closed broadcast channel")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- w.Close() }()
+	select {
+	case err := <-closed:
+		if !errors.Is(err, want) {
+			t.Fatalf("Close error = %v, want %v", err, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked after Done had already been consumed")
+	}
+	if got := kills.Load(); got != 0 {
+		t.Fatalf("Close killed an already-reaped worker %d time(s)", got)
+	}
+}
+
+// TestNetWorkerCloseConcurrentIdempotent exercises the teardown races that can
+// stack in production (fatal worker notification, Network.Close, and deferred
+// daemon cleanup). Exactly one caller owns channel teardown; every caller sees
+// the same stored exit error.
+func TestNetWorkerCloseConcurrentIdempotent(t *testing.T) {
+	a, b := net.Pipe()
+	defer func() { _ = b.Close() }()
+	data := &closeCountingConn{Conn: a, closed: make(chan struct{})}
+	want := errors.New("worker exited")
+	var kills atomic.Int32
+	w := &netWorker{
+		data: data,
+		dead: make(chan struct{}),
+		kill: func() error {
+			kills.Add(1)
+			return nil
+		},
+	}
+
+	const callers = 32
+	results := make(chan error, callers)
+	observed := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-w.Done()
+			observed <- w.Err()
+		}()
+		go func() { results <- w.Close() }()
+	}
+
+	select {
+	case <-data.closed:
+	case <-time.After(time.Second):
+		t.Fatal("no Close caller began channel teardown")
+	}
+	w.setDead(want)
+	// A duplicate terminal publication must neither panic nor replace the
+	// authoritative first result.
+	w.setDead(errors.New("late duplicate result"))
+
+	for i := 0; i < callers; i++ {
+		if err := <-results; !errors.Is(err, want) {
+			t.Errorf("Close caller %d error = %v, want %v", i, err, want)
+		}
+		if err := <-observed; !errors.Is(err, want) {
+			t.Errorf("Done observer %d error = %v, want %v", i, err, want)
+		}
+	}
+	if got := data.count.Load(); got != 1 {
+		t.Fatalf("data channel closed %d times, want once", got)
+	}
+	if got := kills.Load(); got != 0 {
+		t.Fatalf("already-dead worker killed %d times", got)
 	}
 }
 
@@ -280,11 +394,204 @@ func TestNetWorkerPolicyGenerationOrder(t *testing.T) {
 	}
 	// Worker-side out-of-order prepare is rejected
 	raw, _ := netpol.Marshal(deny)
-	err := w.client.Call("policy.prepare", policyPrepareRequest{Generation: 99, Policy: raw}, nil)
+	err := w.client.Call("policy.prepare", policyPrepareRequest{Generation: 99, Transaction: "out-of-order", Policy: raw}, nil)
 	if err == nil {
 		t.Fatal("out-of-order generation accepted")
 	}
 }
+
+func newPolicyTransactionState(t *testing.T) (*netWorkerState, *netpol.Policy) {
+	t.Helper()
+	initial := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)
+	raw, err := netpol.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &netWorkerState{
+		policy: initial, currentDigest: sha256.Sum256(raw),
+	}, initial
+}
+
+func startPolicyTransactionRPC(t *testing.T, state *netWorkerState, overrides map[string]workerproto.Handler) *netWorker {
+	t.Helper()
+	sup, worker := net.Pipe()
+	handlers := map[string]workerproto.Handler{
+		"policy.prepare": state.preparePolicy,
+		"policy.commit":  state.commitPolicy,
+		"policy.abort":   state.abortPolicy,
+		"policy.status":  state.policyStatus,
+	}
+	for op, handler := range overrides {
+		handlers[op] = handler
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- workerproto.ServeRequestsWithOptions(worker, handlers, workerproto.ServeOptions{
+			OrderedOps: map[string]bool{
+				"policy.prepare": true,
+				"policy.commit":  true,
+				"policy.abort":   true,
+				"policy.status":  true,
+			},
+		})
+	}()
+	client := workerproto.NewClient(sup)
+	client.Timeout = wPolicyTestTimeout
+	w := &netWorker{client: client, dead: make(chan struct{})}
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = worker.Close()
+		select {
+		case <-serveErr:
+		case <-time.After(time.Second):
+			t.Error("policy RPC server did not stop")
+		}
+	})
+	return w
+}
+
+func TestNetWorkerPolicyTransactionsRecoverFromFailures(t *testing.T) {
+	deny := mustTestPolicy(t, `{"default":"deny"}`)
+	allow := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)
+
+	t.Run("rejected prepare does not consume generation", func(t *testing.T) {
+		state, live := newPolicyTransactionState(t)
+		var reject atomic.Bool
+		reject.Store(true)
+		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
+			"policy.prepare": func(req workerproto.Request) (any, error) {
+				if reject.Swap(false) {
+					return nil, errors.New("injected prepare rejection")
+				}
+				return state.preparePolicy(req)
+			},
+		})
+		if err := w.SetPolicy(deny); err == nil {
+			t.Fatal("rejected prepare reported success")
+		}
+		if state.gen != 0 || w.gen != 0 || !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("failed prepare changed generation/policy: worker=%d supervisor=%d", state.gen, w.gen)
+		}
+		if err := w.SetPolicy(deny); err != nil {
+			t.Fatalf("retry after rejected prepare: %v", err)
+		}
+		if state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("retry did not commit generation 1: worker=%d supervisor=%d", state.gen, w.gen)
+		}
+	})
+
+	t.Run("commit error retries same transaction", func(t *testing.T) {
+		state, live := newPolicyTransactionState(t)
+		var commits atomic.Int32
+		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
+			"policy.commit": func(req workerproto.Request) (any, error) {
+				if commits.Add(1) == 1 {
+					return nil, errors.New("injected commit failure")
+				}
+				return state.commitPolicy(req)
+			},
+		})
+		if err := w.SetPolicy(deny); err != nil {
+			t.Fatal(err)
+		}
+		if commits.Load() != 2 || state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("commit retry did not converge: calls=%d worker=%d supervisor=%d", commits.Load(), state.gen, w.gen)
+		}
+	})
+
+	t.Run("lost commit response resolved by status", func(t *testing.T) {
+		state, live := newPolicyTransactionState(t)
+		var first atomic.Bool
+		first.Store(true)
+		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
+			"policy.commit": func(req workerproto.Request) (any, error) {
+				out, err := state.commitPolicy(req)
+				if first.Swap(false) {
+					time.Sleep(5 * wPolicyTestTimeout / 4)
+				}
+				return out, err
+			},
+		})
+		if err := w.SetPolicy(deny); err != nil {
+			t.Fatalf("lost commit response: %v", err)
+		}
+		if state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("status did not confirm committed generation: worker=%d supervisor=%d", state.gen, w.gen)
+		}
+		// Let the deliberately late response arrive; Client must drop it and
+		// remain usable for the next generation.
+		time.Sleep(2 * wPolicyTestTimeout)
+		if err := w.SetPolicy(allow); err != nil {
+			t.Fatalf("call after late response: %v", err)
+		}
+		if state.gen != 2 || w.gen != 2 || !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("post-timeout transaction did not converge: worker=%d supervisor=%d", state.gen, w.gen)
+		}
+	})
+
+	t.Run("abort readback recognizes a committed transaction", func(t *testing.T) {
+		state, live := newPolicyTransactionState(t)
+		var commits atomic.Int32
+		var statuses atomic.Int32
+		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
+			"policy.commit": func(req workerproto.Request) (any, error) {
+				if commits.Add(1) == 1 {
+					return nil, errors.New("injected commit rejection")
+				}
+				out, err := state.commitPolicy(req)
+				// Apply the retry but lose its response. The following status
+				// failure forces the supervisor to resolve through abort.
+				time.Sleep(5 * wPolicyTestTimeout / 4)
+				return out, err
+			},
+			"policy.status": func(req workerproto.Request) (any, error) {
+				if statuses.Add(1) == 3 {
+					return nil, errors.New("injected status response loss")
+				}
+				return state.policyStatus(req)
+			},
+		})
+		if err := w.SetPolicy(deny); err != nil {
+			t.Fatalf("committed transaction reported failure: %v", err)
+		}
+		if state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("abort readback did not recognize commit: worker=%d supervisor=%d", state.gen, w.gen)
+		}
+	})
+
+	t.Run("failed commits abort and next call reuses generation", func(t *testing.T) {
+		state, live := newPolicyTransactionState(t)
+		var fail atomic.Bool
+		fail.Store(true)
+		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
+			"policy.commit": func(req workerproto.Request) (any, error) {
+				if fail.Load() {
+					return nil, errors.New("injected persistent commit failure")
+				}
+				return state.commitPolicy(req)
+			},
+		})
+		if err := w.SetPolicy(deny); err == nil {
+			t.Fatal("failed commits reported success")
+		}
+		if state.gen != 0 || state.pending != nil || !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+			t.Fatalf("failed commit did not preserve generation zero: gen=%d pending=%v", state.gen, state.pending != nil)
+		}
+		fail.Store(false)
+		if err := w.SetPolicy(deny); err != nil {
+			t.Fatalf("retry after aborted commit: %v", err)
+		}
+		if state.gen != 1 || w.gen != 1 {
+			t.Fatalf("retry skipped generation: worker=%d supervisor=%d", state.gen, w.gen)
+		}
+	})
+}
+
+// The transaction tests intentionally cross a client deadline to model a
+// lost response. Keep the bound generous enough for the race detector and
+// loaded CI; handler delays are derived from it, so the timeout behavior stays
+// deterministic rather than depending on a tiny scheduler window.
+const wPolicyTestTimeout = 200 * time.Millisecond
 
 // TestNetWorkerHelperProcess IS the worker when re-executed by
 // TestNetWorkerReExec (helper-process pattern): it serves on the real
@@ -474,6 +781,7 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
 			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced},
 			{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+			{Property: workerconf.PropProcEnum, State: workerconf.StateUnenforced, Detail: "/proc readable"},
 			{Property: workerconf.PropFSWrite, State: workerconf.StateUnenforced, Detail: "probe"},
 		},
 	}
@@ -493,6 +801,9 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 	}
 	if st.FilesystemBoundary != "enforced" || st.NetworkBoundary != "enforced" {
 		t.Fatalf("boundaries not filled from report: %+v", st)
+	}
+	if st.ProcessBoundary != workerconf.StateUnenforced {
+		t.Fatalf("Linux process boundary ignored proc-enum: %+v", st)
 	}
 	// The one unenforced property must surface in Degraded.
 	found := false
@@ -515,5 +826,34 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 	}
 	if st2.Confinement != nil || st2.FilesystemBoundary != "unavailable" {
 		t.Fatalf("monolithic state not honestly unavailable: %+v", st2)
+	}
+}
+
+func TestWriteIsolationStateDarwinAggregatesSignalBoundary(t *testing.T) {
+	dir := t.TempDir()
+	conf := &workerconf.Report{
+		Platform: "darwin", Mode: "auto", Applied: true,
+		Results: []workerconf.PropertyResult{
+			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
+			{Property: workerconf.PropFSWrite, State: workerconf.StateEnforced},
+			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced},
+			{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+			{Property: workerconf.PropProcEnum, State: workerconf.StateUnavailable},
+			{Property: workerconf.PropProcSignal, State: workerconf.StateUnenforced},
+		},
+	}
+	if err := writeIsolationState(dir, RunConfig{ProcessIsolation: "auto"}, &Network{}, true, conf); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state isolationState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.ProcessBoundary != workerconf.StateUnenforced {
+		t.Fatalf("Darwin process boundary ignored proc-signal: %+v", state)
 	}
 }

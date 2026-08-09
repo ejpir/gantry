@@ -20,7 +20,10 @@ package sandbox
 // still shares the supervisor process); Linux confinement is Phase 2.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -160,19 +163,28 @@ func runNetWorker(control, data net.Conn) (retErr error) {
 		dead()
 	}()
 
-	state := &netWorkerState{stack: stack, policy: policy, current: policy, traffic: traffic}
+	state := &netWorkerState{
+		stack: stack, policy: policy, traffic: traffic,
+		currentDigest: sha256.Sum256(cfg.Policy),
+	}
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- workerproto.ServeRequests(control, map[string]workerproto.Handler{
+		serveErr <- workerproto.ServeRequestsWithOptions(control, map[string]workerproto.Handler{
 			"policy.prepare":   state.preparePolicy,
 			"policy.commit":    state.commitPolicy,
-			"policy.rollback":  state.rollbackPolicy,
+			"policy.abort":     state.abortPolicy,
+			"policy.status":    state.policyStatus,
 			"port.publish":     state.publishPort,
 			"port.unpublish":   state.unpublishPort,
 			"port.list":        state.listPorts,
 			"traffic.snapshot": state.trafficSnapshot,
 			"shutdown":         state.shutdown,
-		})
+		}, workerproto.ServeOptions{OrderedOps: map[string]bool{
+			"policy.prepare": true,
+			"policy.commit":  true,
+			"policy.abort":   true,
+			"policy.status":  true,
+		}})
 	}()
 	select {
 	case err := <-serveErr:
@@ -218,18 +230,19 @@ func pumpFrames(dst, src net.Conn, admit func(frame []byte) bool) {
 }
 
 // netWorkerState holds the worker's mutable live state behind one mutex:
-// the policy transaction (prepare/commit/rollback by generation) must be
-// atomic with respect to concurrent control requests, and ServeRequests
-// is sequential anyway.
+// the policy transaction (prepare/commit/abort by generation) must be
+// atomic with respect to concurrent control requests.
 type netWorkerState struct {
-	stack   *vnet.Stack
-	policy  *netpol.Policy // stable holder attached to the pumps
-	current *netpol.Policy // active generation's policy
-	pending *netpol.Policy // prepared, awaiting commit
-	rolled  *netpol.Policy // previous generation, for rollback
-	gen     uint64
-	pendGen uint64
-	traffic *netpol.TrafficRecorder
+	stack         *vnet.Stack
+	policy        *netpol.Policy // stable holder attached to the pumps
+	currentTxn    string
+	currentDigest [sha256.Size]byte
+	pending       *netpol.Policy // prepared, awaiting commit
+	pendingTxn    string
+	pendingDigest [sha256.Size]byte
+	gen           uint64
+	pendGen       uint64
+	traffic       *netpol.TrafficRecorder
 	// shutdownRequested distinguishes a supervisor's graceful stop from
 	// a torn data link when both race the serve loop below.
 	shutdownRequested atomic.Bool
@@ -237,12 +250,22 @@ type netWorkerState struct {
 }
 
 type policyPrepareRequest struct {
-	Generation uint64          `json:"generation"`
-	Policy     json.RawMessage `json:"policy"`
+	Generation  uint64          `json:"generation"`
+	Transaction string          `json:"transaction"`
+	Policy      json.RawMessage `json:"policy"`
 }
 
 type policyGenerationRequest struct {
-	Generation uint64 `json:"generation"`
+	Generation  uint64 `json:"generation,omitempty"`
+	Transaction string `json:"transaction,omitempty"`
+}
+
+type policyStatusResponse struct {
+	State              string `json:"state"` // current | prepared | committed | unknown
+	Generation         uint64 `json:"generation"`
+	Transaction        string `json:"transaction,omitempty"`
+	PendingGeneration  uint64 `json:"pending_generation,omitempty"`
+	PendingTransaction string `json:"pending_transaction,omitempty"`
 }
 
 func (s *netWorkerState) preparePolicy(req workerproto.Request) (any, error) {
@@ -251,6 +274,28 @@ func (s *netWorkerState) preparePolicy(req workerproto.Request) (any, error) {
 	var body policyPrepareRequest
 	if err := workerproto.DecodeBody(req, &body); err != nil {
 		return nil, err
+	}
+	if body.Transaction == "" || len(body.Transaction) > 128 {
+		return nil, fmt.Errorf("invalid policy transaction ID")
+	}
+	digest := sha256.Sum256(body.Policy)
+	// A retried request whose response was lost is a no-op only when both
+	// its identity and content match. Reusing an ID for different policy
+	// bytes is a protocol error, never an accidental commit.
+	if body.Generation == s.gen && body.Transaction == s.currentTxn {
+		if digest != s.currentDigest {
+			return nil, fmt.Errorf("policy transaction %q reused with different content", body.Transaction)
+		}
+		return s.statusLocked(body.Transaction), nil
+	}
+	if s.pending != nil && body.Generation == s.pendGen && body.Transaction == s.pendingTxn {
+		if digest != s.pendingDigest {
+			return nil, fmt.Errorf("policy transaction %q reused with different content", body.Transaction)
+		}
+		return s.statusLocked(body.Transaction), nil
+	}
+	if s.pending != nil {
+		return nil, fmt.Errorf("policy transaction %q generation %d already prepared", s.pendingTxn, s.pendGen)
 	}
 	if body.Generation != s.gen+1 {
 		return nil, fmt.Errorf("policy generation %d out of order (current %d)", body.Generation, s.gen)
@@ -261,7 +306,9 @@ func (s *netWorkerState) preparePolicy(req workerproto.Request) (any, error) {
 	}
 	s.pending = next
 	s.pendGen = body.Generation
-	return nil, nil
+	s.pendingTxn = body.Transaction
+	s.pendingDigest = digest
+	return s.statusLocked(body.Transaction), nil
 }
 
 func (s *netWorkerState) commitPolicy(req workerproto.Request) (any, error) {
@@ -271,37 +318,78 @@ func (s *netWorkerState) commitPolicy(req workerproto.Request) (any, error) {
 	if err := workerproto.DecodeBody(req, &body); err != nil {
 		return nil, err
 	}
-	if s.pending == nil || body.Generation != s.pendGen {
-		return nil, fmt.Errorf("no prepared policy for generation %d", body.Generation)
+	if body.Transaction == "" || len(body.Transaction) > 128 {
+		return nil, fmt.Errorf("invalid policy transaction ID")
+	}
+	if body.Generation == s.gen && body.Transaction == s.currentTxn {
+		return s.statusLocked(body.Transaction), nil // idempotent replay
+	}
+	if s.pending == nil || body.Generation != s.pendGen || body.Transaction != s.pendingTxn {
+		return nil, fmt.Errorf("no prepared policy transaction %q generation %d", body.Transaction, body.Generation)
 	}
 	if err := s.policy.Replace(s.pending); err != nil {
 		return nil, err
 	}
-	s.rolled = s.current
-	s.current = s.pending
+	s.currentTxn = s.pendingTxn
+	s.currentDigest = s.pendingDigest
 	s.pending = nil
+	s.pendingTxn = ""
+	s.pendingDigest = [sha256.Size]byte{}
 	s.gen = body.Generation
-	return nil, nil
+	s.pendGen = 0
+	return s.statusLocked(body.Transaction), nil
 }
 
-func (s *netWorkerState) rollbackPolicy(req workerproto.Request) (any, error) {
+// abortPolicy drops a prepared transaction without touching the active
+// generation. It is idempotent for an already-committed or absent transaction;
+// the supervisor uses status readback to distinguish those outcomes.
+func (s *netWorkerState) abortPolicy(req workerproto.Request) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.pending != nil {
-		// Roll back a prepared-but-uncommitted policy: just drop it.
-		s.pending = nil
-		return nil, nil
-	}
-	if s.rolled == nil {
-		return nil, fmt.Errorf("no previous policy generation to roll back to")
-	}
-	if err := s.policy.Replace(s.rolled); err != nil {
+	var body policyGenerationRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
 		return nil, err
 	}
-	s.current = s.rolled
-	s.rolled = nil
-	s.gen++
-	return nil, nil
+	if s.pending != nil && body.Generation == s.pendGen && body.Transaction == s.pendingTxn {
+		s.pending = nil
+		s.pendingTxn = ""
+		s.pendingDigest = [sha256.Size]byte{}
+		s.pendGen = 0
+		return s.statusLocked(body.Transaction), nil
+	}
+	if s.pending != nil {
+		return nil, fmt.Errorf("different policy transaction %q generation %d is prepared", s.pendingTxn, s.pendGen)
+	}
+	return s.statusLocked(body.Transaction), nil
+}
+
+func (s *netWorkerState) policyStatus(req workerproto.Request) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var body policyGenerationRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
+		return nil, err
+	}
+	return s.statusLocked(body.Transaction), nil
+}
+
+func (s *netWorkerState) statusLocked(transaction string) policyStatusResponse {
+	status := policyStatusResponse{
+		State:              "unknown",
+		Generation:         s.gen,
+		Transaction:        s.currentTxn,
+		PendingGeneration:  s.pendGen,
+		PendingTransaction: s.pendingTxn,
+	}
+	switch {
+	case transaction == "":
+		status.State = "current"
+	case transaction == s.currentTxn && s.currentTxn != "":
+		status.State = "committed"
+	case transaction == s.pendingTxn && s.pendingTxn != "":
+		status.State = "prepared"
+	}
+	return status
 }
 
 type portPublishRequest struct {
@@ -355,15 +443,38 @@ type netWorker struct {
 	client *workerproto.Client
 	data   net.Conn
 	gen    uint64
-	done   chan error // process exit / wait result; closed semantics via buffer 1
 	kill   func() error
-	mu     sync.Mutex // gen counter; Call itself is serialized internally
+	mu     sync.Mutex // serializes each complete policy transaction
+
+	dead     chan struct{} // closed when the process is reaped
+	deadErr  error
+	deadMu   sync.RWMutex
+	deadOnce sync.Once
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
-// Done reports a channel that receives the worker's exit cause (nil for a
-// clean shutdown). The daemon treats any early delivery as fatal to the
-// sandbox: a network-worker exit is never survivable in-place.
-func (w *netWorker) Done() <-chan error { return w.done }
+// Done closes when the worker process is reaped. The daemon treats an early
+// close as fatal to the sandbox: a network-worker exit is never survivable
+// in-place. Err reports the exit cause without consuming the notification.
+func (w *netWorker) Done() <-chan struct{} { return w.dead }
+
+// Err reports the worker's exit state after Done closes.
+func (w *netWorker) Err() error {
+	w.deadMu.RLock()
+	defer w.deadMu.RUnlock()
+	return w.deadErr
+}
+
+func (w *netWorker) setDead(err error) {
+	w.deadOnce.Do(func() {
+		w.deadMu.Lock()
+		w.deadErr = err
+		w.deadMu.Unlock()
+		close(w.dead)
+	})
+}
 
 // startNetWorker spawns the worker process, performs the handshake and
 // nonce cross-check, and returns the ready backend plus the supervisor
@@ -375,16 +486,15 @@ func startNetWorker(cfg netWorkerConfig) (*netWorker, net.Conn, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	w := &netWorker{cmd: cmd, data: dataSup, done: make(chan error, 1)}
+	w := &netWorker{cmd: cmd, data: dataSup, dead: make(chan struct{})}
 	if cmd != nil {
 		w.kill = func() error { return cmd.Kill() }
 		go func() {
 			state, err := cmd.Wait()
-			if err != nil {
-				w.done <- err
-				return
+			if err == nil && state != nil && !state.Success() {
+				err = fmt.Errorf("net-worker %s", state)
 			}
-			w.done <- fmt.Errorf("exit status %s", state)
+			w.setDead(err)
 		}()
 	}
 	nonce := workerproto.NewNonce()
@@ -426,26 +536,150 @@ func startNetWorker(cfg netWorkerConfig) (*netWorker, net.Conn, error) {
 // just keeps the signature explicit.
 func clientConn(c net.Conn) net.Conn { return c }
 
-// SetPolicy runs the design doc's transaction as prepare+commit in one
-// supervisor-serialized sequence; the manager's rollback path simply
-// calls SetPolicy again with the previous policy (one more generation).
+// SetPolicy runs an idempotent prepare+commit transaction. The complete
+// exchange is supervisor-serialized; generation advances only after a commit
+// response or status readback proves that exact transaction committed.
 func (w *netWorker) SetPolicy(policy *netpol.Policy) error {
 	raw, err := netpol.Marshal(policy)
 	if err != nil {
 		return err
 	}
 	w.mu.Lock()
-	w.gen++
-	gen := w.gen
-	w.mu.Unlock()
-	if err := w.client.Call("policy.prepare", policyPrepareRequest{Generation: gen, Policy: raw}, nil); err != nil {
-		return fmt.Errorf("policy prepare: %w", err)
+	defer w.mu.Unlock()
+
+	if err := w.syncPolicyState(); err != nil {
+		return fmt.Errorf("policy status: %w", err)
 	}
-	if err := w.client.Call("policy.commit", policyGenerationRequest{Generation: gen}, nil); err != nil {
-		_ = w.client.Call("policy.rollback", nil, nil) // drop the dangling prepare
-		return fmt.Errorf("policy commit: %w", err)
+	gen := w.gen + 1
+	txn := hex.EncodeToString(workerproto.NewNonce())
+	prepare := policyPrepareRequest{Generation: gen, Transaction: txn, Policy: raw}
+	if err := w.client.Call("policy.prepare", prepare, nil); err != nil {
+		// A timeout can lose the response after prepare succeeded. Read the
+		// transaction state before deciding whether the active policy changed.
+		status, statusErr := w.readPolicyStatus(txn)
+		if statusErr != nil {
+			return errors.Join(fmt.Errorf("policy prepare: %w", err),
+				fmt.Errorf("policy status after prepare: %w", statusErr))
+		}
+		w.gen = status.Generation
+		switch status.State {
+		case "committed":
+			return nil
+		case "prepared":
+			// Continue with the same transaction ID and generation.
+		default:
+			return fmt.Errorf("policy prepare: %w", err)
+		}
+	}
+	return w.commitPolicyTransaction(gen, txn)
+}
+
+// syncPolicyState reconciles the supervisor generation with the worker and
+// clears a prepared transaction left by a prior failed call. Preparation does
+// not mutate the active policy, so aborting it preserves failure atomicity.
+func (w *netWorker) syncPolicyState() error {
+	status, err := w.readPolicyStatus("")
+	if err != nil {
+		return err
+	}
+	w.gen = status.Generation
+	if status.PendingTransaction == "" {
+		return nil
+	}
+	abort := policyGenerationRequest{
+		Generation: status.PendingGeneration, Transaction: status.PendingTransaction,
+	}
+	if err := w.client.Call("policy.abort", abort, nil); err != nil {
+		after, statusErr := w.readPolicyStatus("")
+		if statusErr == nil {
+			w.gen = after.Generation
+			if after.PendingTransaction == "" {
+				return nil // abort response was lost
+			}
+		}
+		return errors.Join(fmt.Errorf("abort stale policy transaction: %w", err), statusErr)
 	}
 	return nil
+}
+
+func (w *netWorker) readPolicyStatus(transaction string) (policyStatusResponse, error) {
+	var status policyStatusResponse
+	err := w.client.Call("policy.status", policyGenerationRequest{Transaction: transaction}, &status)
+	return status, err
+}
+
+func (w *netWorker) commitPolicyTransaction(gen uint64, txn string) error {
+	req := policyGenerationRequest{Generation: gen, Transaction: txn}
+	var failures []error
+	var lastStatus *policyStatusResponse
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := w.client.Call("policy.commit", req, nil); err == nil {
+			w.gen = gen
+			return nil
+		} else {
+			failures = append(failures, fmt.Errorf("policy commit: %w", err))
+		}
+		status, err := w.readPolicyStatus(txn)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("policy status after commit: %w", err))
+			continue
+		}
+		lastStatus = &status
+		w.gen = status.Generation
+		switch status.State {
+		case "committed":
+			return nil // commit response was lost
+		case "prepared":
+			continue // retry the same idempotent commit
+		case "unknown":
+			if status.Generation < gen {
+				return errors.Join(failures...) // previous policy is still active
+			}
+			return w.stopAfterAmbiguousPolicy(errors.Join(failures...))
+		default:
+			return w.stopAfterAmbiguousPolicy(errors.Join(failures...))
+		}
+	}
+
+	if lastStatus != nil && lastStatus.State == "prepared" {
+		// Both commit attempts failed before applying. An acknowledged abort
+		// normally proves the previous generation remains active. Decode its
+		// status as well: a commit response and its immediate status response
+		// can both be lost even though the commit applied, in which case abort
+		// is an idempotent readback of the committed transaction.
+		var status policyStatusResponse
+		if err := w.client.Call("policy.abort", req, &status); err != nil {
+			failures = append(failures, fmt.Errorf("abort failed policy transaction: %w", err))
+			var statusErr error
+			status, statusErr = w.readPolicyStatus(txn)
+			if statusErr != nil {
+				failures = append(failures, fmt.Errorf("policy status after abort: %w", statusErr))
+				return w.stopAfterAmbiguousPolicy(errors.Join(failures...))
+			}
+		}
+		w.gen = status.Generation
+		switch {
+		case status.State == "committed":
+			return nil
+		case status.State == "unknown" && status.Generation < gen:
+			return errors.Join(failures...)
+		default:
+			failures = append(failures, fmt.Errorf(
+				"policy transaction %q remained %s after abort (generation %d)",
+				txn, status.State, status.Generation))
+			return w.stopAfterAmbiguousPolicy(errors.Join(failures...))
+		}
+	}
+	return w.stopAfterAmbiguousPolicy(errors.Join(failures...))
+}
+
+// stopAfterAmbiguousPolicy fails closed. If neither commit nor status replies,
+// the supervisor cannot honestly claim which policy the worker enforces; the
+// sandbox lifecycle will observe worker death and terminate instead of running
+// with divergent control-plane state.
+func (w *netWorker) stopAfterAmbiguousPolicy(cause error) error {
+	stopErr := w.Close()
+	return errors.Join(cause, fmt.Errorf("network policy state ambiguous; network worker stopped"), stopErr)
 }
 
 func (w *netWorker) Publish(proto, local, remote string) error {
@@ -472,25 +706,37 @@ func (w *netWorker) TrafficSnapshot() (netpol.TrafficSnapshot, error) {
 
 // Close asks the worker to shut down gracefully (it flushes traffic and
 // tears the stack down), then closes both channels and reaps the process,
-// escalating to a kill after a bounded wait.
+// escalating to a kill after a bounded wait. It is idempotent: failure
+// handling and deferred sandbox cleanup may call it concurrently.
 func (w *netWorker) Close() error {
-	if w.client != nil {
-		w.client.Timeout = 5 * time.Second
-		_ = w.client.Call("shutdown", nil, nil)
-		_ = w.client.Close()
-	}
-	if w.data != nil {
-		_ = w.data.Close()
-	}
-	if w.kill != nil {
-		select {
-		case <-w.done:
-		case <-time.After(5 * time.Second):
-			_ = w.kill()
-			<-w.done
+	w.closeOnce.Do(func() {
+		if w.client != nil {
+			_ = w.client.CallWithTimeout("shutdown", nil, nil, 5*time.Second)
+			_ = w.client.Close()
 		}
-	}
-	return nil
+		if w.data != nil {
+			_ = w.data.Close()
+		}
+		if w.kill != nil {
+			select {
+			case <-w.dead:
+				w.closeErr = w.Err()
+			case <-time.After(5 * time.Second):
+				_ = w.kill()
+				<-w.dead
+				w.closeErr = w.Err()
+			}
+		} else if w.dead != nil {
+			// In-process tests have no process to reap. Preserve a published
+			// terminal error without waiting forever on a live helper.
+			select {
+			case <-w.dead:
+				w.closeErr = w.Err()
+			default:
+			}
+		}
+	})
+	return w.closeErr
 }
 
 // netWorkerTrafficDebug mirrors GANTRY_DEBUG_NET into the bootstrap config.
@@ -540,6 +786,17 @@ func writeIsolationState(dir string, cfg RunConfig, nw *Network, splitVMM bool, 
 		st.NetworkBoundary = conf.Property(workerconf.PropNetDial).State
 		st.FilesystemBoundary = conf.Property(workerconf.PropFSRead).State
 		st.ProcessBoundary = conf.Property(workerconf.PropExec).State
+		if st.ProcessBoundary == workerconf.StateEnforced {
+			// Executing a new image and reaching an existing process are
+			// separate authorities. Aggregate only the process-access property
+			// each platform actually probes.
+			switch conf.Platform {
+			case "linux":
+				st.ProcessBoundary = conf.Property(workerconf.PropProcEnum).State
+			case "darwin":
+				st.ProcessBoundary = conf.Property(workerconf.PropProcSignal).State
+			}
+		}
 	}
 	switch cfg.ProcessIsolation {
 	case "off":

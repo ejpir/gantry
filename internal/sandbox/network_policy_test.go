@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -76,6 +77,49 @@ func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
 	}
 	if cfg := store.Snapshot(); cfg.NetPol != "" || !cfg.AllowLN {
 		t.Fatalf("failed live update changed persisted policy: %+v", cfg)
+	}
+}
+
+func TestNetworkPolicyManagerPersistenceFailureRestoresSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{Net: true})
+	policyPath := filepath.Join(dir, "deny.json")
+	if err := os.WriteFile(policyPath, []byte(`{"default":"deny"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// live is the stable holder mutated by localBackend.Replace. The manager
+	// must retain an immutable old-policy snapshot rather than aliasing it.
+	live := netpol.DefaultPolicy()
+	manager := NewNetworkPolicyManager(store, newLocalBackend(&vnet.Stack{}, live), live)
+	store.path = filepath.Join(t.TempDir(), "missing", "sandbox.json")
+	if _, err := manager.Set(policyPath, false); err == nil {
+		t.Fatal("unwritable config path reported success")
+	}
+	if !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+		t.Fatal("persistence failure left the attempted deny policy active")
+	}
+	if cfg := store.Snapshot(); cfg.NetPol != "" || cfg.AllowLN {
+		t.Fatalf("persistence failure changed config: %+v", cfg)
+	}
+}
+
+func TestNetworkPolicyManagerReportsFailedPersistenceRollback(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{Net: true})
+	policyPath := filepath.Join(dir, "deny.json")
+	if err := os.WriteFile(policyPath, []byte(`{"default":"deny"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := netpol.DefaultPolicy()
+	backend := &policyBackendStub{
+		policy: mustPolicySnapshot(old), failAt: 2, failAtErr: fmt.Errorf("injected rollback failure"),
+	}
+	manager := NewNetworkPolicyManager(store, backend, old)
+	store.path = filepath.Join(t.TempDir(), "missing", "sandbox.json")
+	_, err := manager.Set(policyPath, false)
+	if err == nil || !strings.Contains(err.Error(), "restore previous live network policy") {
+		t.Fatalf("persistence rollback error = %v", err)
 	}
 }
 

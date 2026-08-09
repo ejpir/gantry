@@ -1,6 +1,10 @@
 package sandbox
 
 import (
+	"errors"
+	"fmt"
+	"sync"
+
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vnet"
 )
@@ -65,6 +69,7 @@ func (b *localBackend) SetPolicy(policy *netpol.Policy) error {
 // worker type only exists on unix).
 type vmmPolicyPusher interface {
 	SetPolicy(*netpol.Policy) error
+	Close() error
 }
 
 // vmmPolicyBackend fans live policy swaps out to a split _vmm-worker
@@ -75,12 +80,60 @@ type vmmPolicyPusher interface {
 // SetPolicy with the previous policy, which re-pushes it.
 type vmmPolicyBackend struct {
 	NetworkBackend
-	vw vmmPolicyPusher
+	vw      vmmPolicyPusher
+	current *netpol.Policy // immutable snapshot of the last common policy
+	mu      sync.Mutex
+}
+
+func newVMMPolicyBackend(backend NetworkBackend, vw vmmPolicyPusher, current *netpol.Policy) (*vmmPolicyBackend, error) {
+	if backend == nil || vw == nil {
+		return nil, fmt.Errorf("network policy fan-out backend is nil")
+	}
+	snapshot, err := cloneNetworkPolicy(current)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot current network policy: %w", err)
+	}
+	return &vmmPolicyBackend{NetworkBackend: backend, vw: vw, current: snapshot}, nil
 }
 
 func (b *vmmPolicyBackend) SetPolicy(policy *netpol.Policy) error {
-	if err := b.NetworkBackend.SetPolicy(policy); err != nil {
+	next, err := cloneNetworkPolicy(policy)
+	if err != nil {
 		return err
 	}
-	return b.vw.SetPolicy(policy)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// The VMM is the enforcement point in this degraded topology. Push it
+	// first so a worker failure cannot mutate the supervisor's display and
+	// rollback holder. If the local mirror then fails, restore the VMM before
+	// reporting failure; callers may rely on "error leaves previous policy".
+	if err := b.vw.SetPolicy(next); err != nil {
+		// The RPC may have applied in the worker and lost its response. With no
+		// VMM-side status protocol, continuing would make the enforcement state
+		// unknowable. Stop the worker so the sandbox fails closed.
+		return errors.Join(err, errors.New("VMM policy update unconfirmed; VMM stopped"), b.vw.Close())
+	}
+	if err := b.NetworkBackend.SetPolicy(next); err != nil {
+		rollbackErr := b.vw.SetPolicy(b.current)
+		if rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rollback VMM policy: %w", rollbackErr),
+				errors.New("VMM policy rollback unconfirmed; VMM stopped"), b.vw.Close())
+		}
+		return err
+	}
+	b.current = next
+	return nil
+}
+
+// cloneNetworkPolicy snapshots the currently effective immutable policy.
+// This is deliberately a marshal/parse round trip: a Policy may be the stable
+// holder attached to a device, whose active pointer changes on Replace. Keeping
+// that holder as "previous" would make rollback silently point at the new state.
+func cloneNetworkPolicy(policy *netpol.Policy) (*netpol.Policy, error) {
+	raw, err := netpol.Marshal(policy)
+	if err != nil {
+		return nil, err
+	}
+	return netpol.Parse(raw)
 }

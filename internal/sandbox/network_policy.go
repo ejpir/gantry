@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -35,6 +36,12 @@ type NetworkPolicyManager struct {
 }
 
 func NewNetworkPolicyManager(store *ConfigStore, backend NetworkBackend, current *netpol.Policy) *NetworkPolicyManager {
+	// current must not alias the stable holder mutated by localBackend.Replace:
+	// persistence rollback needs an immutable snapshot of the policy that was
+	// active before the attempted update.
+	if snapshot, err := cloneNetworkPolicy(current); err == nil {
+		current = snapshot
+	}
 	return &NetworkPolicyManager{store: store, backend: backend, current: current}
 }
 
@@ -81,7 +88,10 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 		return NetworkPolicyEntry{}, err
 	}
 	if err := m.store.SetNetworkPolicy(path, allowLocal); err != nil {
-		_ = m.backend.SetPolicy(m.current)
+		if rollbackErr := m.backend.SetPolicy(m.current); rollbackErr != nil {
+			return NetworkPolicyEntry{}, errors.Join(err,
+				fmt.Errorf("restore previous live network policy: %w", rollbackErr))
+		}
 		return NetworkPolicyEntry{}, err
 	}
 	m.current = policy

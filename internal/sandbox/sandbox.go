@@ -506,7 +506,12 @@ func CmdDaemon(name, readySocket string) int {
 			// worker's device enforces egress policy — fan live
 			// swaps out to it.
 			if pusher, ok := vw.(vmmPolicyPusher); ok {
-				nw.Backend = &vmmPolicyBackend{NetworkBackend: nw.Backend, vw: pusher}
+				fanout, err := newVMMPolicyBackend(nw.Backend, pusher, nw.Policy)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "daemon: initialize VMM policy fan-out:", err)
+					return 1
+				}
+				nw.Backend = fanout
 			}
 		}
 		bootLog("vmm worker spawned (split topology)")
@@ -602,7 +607,7 @@ func CmdDaemon(name, readySocket string) int {
 	// whole-sandbox restart — policy/NAT/DNS/connection state cannot be
 	// reconstructed in place). A nil channel blocks forever, so the
 	// monolithic path is unaffected.
-	var workerDead <-chan error
+	var workerDead <-chan struct{}
 	if nw.Worker != nil {
 		workerDead = nw.Worker.Done()
 	}
@@ -670,11 +675,11 @@ func CmdDaemon(name, readySocket string) int {
 	case err := <-guestErr:
 		fmt.Fprintln(os.Stderr, "daemon: VM exited:", err)
 		return 1
-	case err := <-workerDead:
+	case <-workerDead:
 		// The worker died mid-run: the guest has no network path and the
 		// policy enforcement point is gone. Fail the sandbox rather than
 		// run unenforced; deferred cleanup reaps everything else.
-		fmt.Fprintln(os.Stderr, "daemon: network worker died:", err)
+		fmt.Fprintln(os.Stderr, "daemon: network worker died:", nw.Worker.Err())
 		return 1
 	case <-vmmDead:
 		// The VMM worker died mid-run: the guest is gone (or never was).
