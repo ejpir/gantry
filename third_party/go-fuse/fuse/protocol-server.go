@@ -169,6 +169,18 @@ func NewProtocolServer(fs RawFileSystem, opts *MountOptions) *ProtocolServer {
 	}
 }
 
+// GantryResourceUsage forwards optional live inode/file-handle accounting
+// from the raw filesystem. GANTRY PATCH: this is consumed by gantry's
+// process-boundary share broker; other protocol-server users are unaffected.
+func (ps *ProtocolServer) GantryResourceUsage() (nodes, handles int) {
+	if reporter, ok := ps.fileSystem.(interface {
+		GantryResourceUsage() (nodes, handles int)
+	}); ok {
+		return reporter.GantryResourceUsage()
+	}
+	return 0, 0
+}
+
 func iovLen(iov [][]byte) int {
 	var r int
 	for _, e := range iov {

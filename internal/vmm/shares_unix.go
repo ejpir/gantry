@@ -38,3 +38,15 @@ func (m *Machine) addShareHub(hub *virtio.ShareHub) error {
 		hub.Tag(), core.Base(), core.IRQ(), len(hub.Exports()))
 	return nil
 }
+
+// addShareProxy attaches the split worker's request-only frontend. Host
+// export details deliberately are not available on this side of the relay.
+func (m *Machine) addShareProxy(proxy *virtio.ShareHubProxy) error {
+	core, err := m.addVirtio(proxy.VirtioDevice(), "fs")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("virtio-fs: tag %s brokered share hub @ %#x irq %d\n",
+		proxy.Tag(), core.Base(), core.IRQ())
+	return nil
+}

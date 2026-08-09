@@ -3,33 +3,37 @@
 package sandbox
 
 // Phase 2a-iii of docs/vmm-network-isolation.md: the _vmm-worker process.
-// The hypervisor, guest RAM, all virtio devices, disk image I/O, share
-// serving, and the vsock data plane move out of the supervisor into a
-// re-executed worker. The supervisor keeps ctl.sock, CLI sessions, the
-// config store, network policy, and all host sockets.
+// The hypervisor, guest RAM, virtio device frontends, disk image I/O, and
+// the vsock data plane move out of the supervisor into a re-executed
+// worker. The supervisor keeps ctl.sock, CLI sessions, network policy,
+// host sockets, and the trusted share broker that owns host roots.
 //
 // Channels (fixed descriptor slots, socketpairs):
 //
 //	fd 3  control — supervisor -> worker RPC (workerproto):
-//	      vm.wait, vm.close, vsock.connect, share.*, shutdown
+//	      vm.wait, vm.close, vsock.connect, shutdown
 //	fd 4  bridge — worker -> supervisor RPC: vsock.forward (guest
 //	      dial-back needs a supervisor-owned host socket)
 //	fd 5  fd channel — SCM_RIGHTS transfers, ALL supervisor -> worker,
 //	      token-correlated with RPCs on either RPC channel; the first
 //	      32 bytes are the launch nonce (cross-wiring check)
-//	fd 6  net data — QEMU-framed Ethernet to the net-worker (or the
+//	fd 6  share data — bounded FUSE request/response relay to the trusted
+//	      supervisor; the worker receives no host share roots or paths
+//	fd 7  net data — QEMU-framed Ethernet to the net-worker (or the
 //	      supervisor's in-process netstack in the degraded topology)
-//	fd 7  console log (append-only)
-//	fd 8+ kernel, rootfs?, DisksRO..., Disks..., share roots...
+//	fd 8  console log (append-only)
+//	fd 9+ kernel, rootfs?, DisksRO..., Disks...
 //
 // The worker owns no host paths: boot assets arrive as descriptors,
 // vsock dial-backs are brokered by the supervisor, host->guest streams
 // arrive as descriptors. This is what Phase 2b confinement builds on.
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -56,10 +60,9 @@ type vmmBootConfig struct {
 	HasRoot  bool    `json:"hasRootfs"`
 	// BootTimingStartUnixNano carries the daemon's diagnostic clock into
 	// the split worker. Zero disables guest milestone collection.
-	BootTimingStartUnixNano int64          `json:"bootTimingStartUnixNano,omitempty"`
-	NDisksRO                int            `json:"nDisksRO"`
-	NDisks                  int            `json:"nDisks"`
-	Shares                  []vmmShareMeta `json:"shares"`
+	BootTimingStartUnixNano int64 `json:"bootTimingStartUnixNano,omitempty"`
+	NDisksRO                int   `json:"nDisksRO"`
+	NDisks                  int   `json:"nDisks"`
 	// Policy carries the LOCAL-netstack enforcement state: in the
 	// degraded topology (net-worker failed in auto, VMM split succeeded)
 	// the guest's frames land on the supervisor's embedded netstack,
@@ -85,27 +88,17 @@ type vmmBootConfig struct {
 	WriteFiles []string `json:"writeFiles,omitempty"`
 }
 
-// vmmShareMeta is one hub export minus its root descriptor (which travels
-// in the descriptor table, in the same order).
-type vmmShareMeta struct {
-	Tag  string  `json:"tag"`
-	Path string  `json:"path"` // display/logging only — never opened by the worker
-	RO   bool    `json:"ro"`
-	UID  *uint32 `json:"uid,omitempty"`
-	GID  *uint32 `json:"gid,omitempty"`
-}
-
 // vmmWorkerAssets are the already-open descriptors of the descriptor
 // table (fd 6 onward), opened by the spawn code or the test harness.
 type vmmWorkerAssets struct {
-	NetConn    net.Conn
-	Console    *os.File
-	Kernel     *os.File
-	Rootfs     *os.File
-	DisksRO    []*os.File
-	Disks      []*os.File
-	ShareRoots []*os.File // len == len(cfg.Shares)
-	KVM        *os.File   // pre-opened /dev/kvm; last table slot when cfg.HasKVM
+	ShareConn net.Conn // request-only capability; no host roots cross into the worker
+	NetConn   net.Conn
+	Console   *os.File
+	Kernel    *os.File
+	Rootfs    *os.File
+	DisksRO   []*os.File
+	Disks     []*os.File
+	KVM       *os.File // pre-opened /dev/kvm; last table slot when cfg.HasKVM
 }
 
 // vmmRunnerImpl abstracts the booted machine inside the worker so tests
@@ -140,16 +133,16 @@ var (
 	workerconfVerifyFn = workerconf.Verify
 )
 
-// vmmKeepFDs computes the descriptor-table high-water mark: fds 0..7 are
+// vmmKeepFDs computes the descriptor-table high-water mark: fds 0..8 are
 // stdio plus the fixed slots; the asset table follows densely (kernel,
-// rootfs?, DisksRO..., Disks..., share roots..., kvm?).
+// rootfs?, DisksRO..., Disks..., kvm?).
 func vmmKeepFDs(cfg vmmBootConfig) int {
-	n := 8 // fds 0..7
+	n := 9 // fds 0..8
 	n++    // kernel
 	if cfg.HasRoot {
 		n++
 	}
-	n += cfg.NDisksRO + cfg.NDisks + len(cfg.Shares)
+	n += cfg.NDisksRO + cfg.NDisks
 	if cfg.HasKVM {
 		n++
 	}
@@ -179,13 +172,20 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	if err != nil {
 		return fmt.Errorf("descriptor table: %w", err)
 	}
+	if assets.ShareConn == nil {
+		return fmt.Errorf("descriptor table: share relay is required")
+	}
+	defer func() { _ = assets.ShareConn.Close() }()
 	if assets.NetConn != nil {
 		defer func() { _ = assets.NetConn.Close() }()
 	}
-	// The fd channel's first bytes are the launch nonce: cross-wired
-	// descriptor tables die here, before any RPC or frame.
+	// Both independent data channels carry the launch nonce first:
+	// cross-wired descriptor tables die before any RPC or guest frame.
 	if err := workerproto.ReadNonce(fdChan, nonce); err != nil {
 		return fmt.Errorf("fd channel nonce: %w", err)
+	}
+	if err := workerproto.ReadNonce(assets.ShareConn, nonce); err != nil {
+		return fmt.Errorf("share channel nonce: %w", err)
 	}
 
 	// Worker confinement (docs/worker-confinement.md): everything the
@@ -200,17 +200,13 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		// The close tier must not sever the channels this worker runs
 		// on: net.FileConn DUPS each inherited conn fd, and the dup
 		// (not the table slot) is the live descriptor.
-		for _, c := range []net.Conn{control, bridge, fdChan, assets.NetConn} {
+		for _, c := range []net.Conn{control, bridge, fdChan, assets.ShareConn, assets.NetConn} {
 			if fd, ok := workerConnFD(c); ok {
 				spec.KeepFDExtra = append(spec.KeepFDExtra, fd)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "_vmm-worker: confinement %s: applying (KeepFDs=%d extra=%v ConfRoot=%q)\n", cfg.Confinement, vmmKeepFDs(cfg), spec.KeepFDExtra, cfg.ConfRoot)
 		spec.WriteFiles = cfg.WriteFiles
-		for _, sh := range cfg.Shares {
-			spec.FileAllow = append(spec.FileAllow,
-				workerconf.FileAllowance{Path: sh.Path, Write: !sh.RO})
-		}
 		if rep, applyErr := workerconfApplyFn(spec); rep != nil {
 			conf = *rep
 			conf.Mode = cfg.Confinement
@@ -224,12 +220,8 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		workerconfVerifyFn(spec, &conf)
 		fmt.Fprintf(os.Stderr, "_vmm-worker: confinement verified: fs-read=%s net-dial=%s exec=%s\n",
 			conf.Property(workerconf.PropFSRead).State, conf.Property(workerconf.PropNetDial).State, conf.Property(workerconf.PropExec).State)
-		if conf.Applied && shareHotAddUnavailable(conf) != "" {
-			conf.Notes = append(conf.Notes, "share hot-add unavailable (immutable profile); new shares activate at boot")
-		}
 		if cfg.Confinement == "required" {
-			failed := conf.Failed(workerconf.PropFSRead, workerconf.PropFSWrite,
-				workerconf.PropNetDial, workerconf.PropExec)
+			failed := conf.Failed(requiredWorkerConfinementProperties(conf.Platform)...)
 			if len(failed) > 0 {
 				msg := fmt.Sprintf("process isolation required but confinement not enforced: %v", failed)
 				_ = workerproto.WriteMessage(control, map[string]any{"ok": false, "error": msg, "confinement": conf})
@@ -242,28 +234,15 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	bridgeClient := workerproto.NewClient(bridge)
 	defer func() { _ = bridgeClient.Close() }()
 
-	// The share hub ALWAYS lives in the worker (even with zero boot
-	// exports, so post-boot hot-add works); the supervisor's ShareManager
-	// drives it over share.* RPCs. Boot exports arrive as descriptors.
-	hub, err := virtio.NewShareHub()
+	// Only the virtio-fs device frontend lives in the worker. The trusted
+	// supervisor owns the real ShareHub and every host root/handle; this
+	// proxy can exchange bounded FUSE IOVs but cannot issue host syscalls
+	// against a delegated directory on its own.
+	shareProxy, err := virtio.NewShareHubProxy(assets.ShareConn)
 	if err != nil {
-		return fmt.Errorf("share hub: %w", err)
+		return fmt.Errorf("share proxy: %w", err)
 	}
-	if len(assets.ShareRoots) != len(cfg.Shares) {
-		_ = hub.Close()
-		return fmt.Errorf("descriptor table: %d share roots for %d shares", len(assets.ShareRoots), len(cfg.Shares))
-	}
-	for i, sh := range cfg.Shares {
-		prepared, _, err := hub.PrepareMappedFD(sh.Tag, sh.Path, sh.RO, sh.UID, sh.GID, assets.ShareRoots[i])
-		if err != nil {
-			_ = hub.Close()
-			return fmt.Errorf("share %s: %w", sh.Tag, err)
-		}
-		if _, err := hub.Publish(prepared); err != nil {
-			_ = hub.Close()
-			return fmt.Errorf("share %s: %w", sh.Tag, err)
-		}
-	}
+	defer func() { _ = shareProxy.Close() }()
 
 	// Local-netstack policy: fail CLOSED. A policy that cannot be parsed
 	// must never degrade into an allow-all device.
@@ -279,6 +258,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		// Pure in-memory: confinement makes path ops impossible by
 		// design; the supervisor syncs via the traffic.snapshot RPC.
 		traffic = netpol.NewTrafficRecorder("")
+		defer traffic.Close()
 	}
 
 	var bootTimingStart time.Time
@@ -286,15 +266,15 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		bootTimingStart = time.Unix(0, cfg.BootTimingStartUnixNano)
 	}
 	opts := vmm.Opts{
-		MemSize:   cfg.MemSize,
-		Kernel:    assets.Kernel,
-		Rootfs:    assets.Rootfs,
-		DisksRO:   assets.DisksRO,
-		Disks:     assets.Disks,
-		ShareHub:  hub,
-		NetConn:   assets.NetConn,
-		NetMAC:    cfg.NetMAC,
-		NetPolicy: policy, NetTraffic: traffic,
+		MemSize:    cfg.MemSize,
+		Kernel:     assets.Kernel,
+		Rootfs:     assets.Rootfs,
+		DisksRO:    assets.DisksRO,
+		Disks:      assets.Disks,
+		ShareProxy: shareProxy,
+		NetConn:    assets.NetConn,
+		NetMAC:     cfg.NetMAC,
+		NetPolicy:  policy, NetTraffic: traffic,
 		KVM:             assets.KVM,
 		GuestCID:        cfg.GuestCID,
 		VCPUs:           cfg.VCPUs,
@@ -316,7 +296,7 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 	if err := workerproto.WriteMessage(control, map[string]any{"ok": true, "confinement": conf}); err != nil {
 		return fmt.Errorf("boot ack: %w", err)
 	}
-	state := &vmmWorkerState{runner: runner, hub: hub, fds: fds, policy: policy, traffic: traffic, pending: map[string]*virtio.PreparedShare{}, conf: conf}
+	state := &vmmWorkerState{runner: runner, fds: fds, policy: policy, traffic: traffic}
 	vmErr := make(chan error, 1)
 	go func() { vmErr <- runner.Run() }()
 	state.vmErr = vmErr
@@ -325,20 +305,32 @@ func runVMMWorker(control, bridge, fdChan net.Conn, assetsFn func(cfg vmmBootCon
 		"vm.wait":          state.vmWait,
 		"vm.close":         state.vmClose,
 		"vsock.connect":    state.vsockConnect,
-		"share.prepare":    state.sharePrepare,
-		"share.publish":    state.sharePublish,
-		"share.swap":       state.shareSwap,
-		"share.remove":     state.shareRemove,
-		"share.drop":       state.shareDrop,
 		"net.policy":       state.netPolicy,
 		"traffic.snapshot": state.trafficSnapshot,
 		"shutdown":         func(workerproto.Request) (any, error) { return nil, workerproto.ErrShutdown },
 	})
 }
 
-// vmmWorkerState is the worker's mutable serving state. Prepare/publish
-// tokens let the supervisor stage a share atomically (prepare + FD, then
-// publish or drop) exactly as the local hub does.
+func requiredWorkerConfinementProperties(platform string) []string {
+	required := []string{
+		workerconf.PropFSRead,
+		workerconf.PropFSWrite,
+		workerconf.PropNetDial,
+		workerconf.PropExec,
+	}
+	// Process access is platform-specific and must be backed by a real
+	// in-worker probe. Linux verifies process enumeration after entering its
+	// PID namespace; Darwin verifies Seatbelt's self-only signal rule against
+	// the live supervisor parent. Neither result substitutes for the other.
+	switch platform {
+	case "linux":
+		required = append(required, workerconf.PropProcEnum)
+	case "darwin":
+		required = append(required, workerconf.PropProcSignal)
+	}
+	return required
+}
+
 // workerConnFD resolves the live descriptor behind a net.Conn (the
 // net.FileConn dup), for the confinement close tier's keep list.
 func workerConnFD(c net.Conn) (int, bool) {
@@ -357,34 +349,12 @@ func workerConnFD(c net.Conn) (int, bool) {
 	return fd, true
 }
 
-// shareHotAddUnavailable explains why a live share-add cannot be
-// served, or "". Seatbelt profiles are immutable once applied: a share
-// added after boot was never baked into the profile, and macOS
-// path-checks every openat below the passed root descriptor against
-// the resolved absolute path, so serving it returns EPERM for
-// everything (the tag even shows up in listings — only access fails).
-// Boot-time shares are in the profile and unaffected; the linux
-// enforcer has no path filters and hot-add works confined. The
-// planned fix is sandbox extensions (docs/worker-confinement.md).
-func shareHotAddUnavailable(conf workerconf.Report) string {
-	if conf.Applied && conf.Platform == "darwin" {
-		return "share hot-add is unavailable while the VMM worker is " +
-			"Seatbelt-confined (macOS sandbox profiles are immutable once " +
-			"applied); restart the sandbox to serve new shares"
-	}
-	return ""
-}
-
 type vmmWorkerState struct {
 	runner  vmmRunnerImpl
-	hub     *virtio.ShareHub
 	fds     *workerproto.FDMux
 	policy  *netpol.Policy          // non-nil only in the local-netstack topology
 	traffic *netpol.TrafficRecorder // in-memory; paired with policy
 	vmErr   chan error
-	mu      sync.Mutex
-	pending map[string]*virtio.PreparedShare
-	conf    workerconf.Report // this worker's own confinement outcome
 }
 
 // netPolicyRequest carries one marshaled egress policy.
@@ -474,11 +444,21 @@ type vsockConnectRequest struct {
 // a VM that exits before vm.wait arrives is still reported.
 func (s *vmmWorkerState) vmWait(workerproto.Request) (any, error) {
 	err := <-s.vmErr
-	return vmWaitResponse{Err: errString(err)}, nil
+	out := vmWaitResponse{Err: errString(err)}
+	if s.traffic != nil {
+		snapshot := s.traffic.Snapshot()
+		out.Traffic = &snapshot
+	}
+	return out, nil
 }
 
 type vmWaitResponse struct {
-	Err string `json:"err,omitempty"`
+	Err     string                  `json:"err,omitempty"`
+	Traffic *netpol.TrafficSnapshot `json:"traffic,omitempty"`
+}
+
+type vmCloseResponse struct {
+	Traffic *netpol.TrafficSnapshot `json:"traffic,omitempty"`
 }
 
 func errString(err error) string {
@@ -488,13 +468,19 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// vmClose flushes devices (the review-finding-5 graceful stop) and then
-// unwinds the worker: OK response, serve loop stops, process exits.
+// vmClose flushes devices (the review-finding-5 graceful stop) and returns
+// the final traffic counters while the control channel is still alive. The
+// worker protocol then sends the response before unwinding the serve loop.
 func (s *vmmWorkerState) vmClose(workerproto.Request) (any, error) {
 	if err := s.runner.Close(); err != nil {
 		return nil, err
 	}
-	return nil, workerproto.ErrShutdown
+	out := vmCloseResponse{}
+	if s.traffic != nil {
+		snapshot := s.traffic.Snapshot()
+		out.Traffic = &snapshot
+	}
+	return out, workerproto.ErrShutdown
 }
 
 // vsockConnect registers a host->guest stream: the descriptor (a
@@ -526,156 +512,32 @@ func (s *vmmWorkerState) vsockConnect(req workerproto.Request) (any, error) {
 	return nil, nil
 }
 
-type sharePrepareRequest struct {
-	Tag   string  `json:"tag"`
-	Path  string  `json:"path"`
-	RO    bool    `json:"ro"`
-	UID   *uint32 `json:"uid,omitempty"`
-	GID   *uint32 `json:"gid,omitempty"`
-	Token string  `json:"token"`
-}
-
-type shareTokenRequest struct {
-	Token string `json:"token"`
-}
-
-type shareRemoveRequest struct {
-	Tag   string `json:"tag"`
-	Force bool   `json:"force"`
-}
-
-// sharePrepare receives a pinned root descriptor and stages the export;
-// the prepared token is parked until share.publish/swap or a drop.
-func (s *vmmWorkerState) sharePrepare(req workerproto.Request) (any, error) {
-	if s.hub == nil {
-		return nil, fmt.Errorf("share hub unavailable")
-	}
-	if msg := shareHotAddUnavailable(s.conf); msg != "" {
-		return nil, fmt.Errorf("share.prepare: %s", msg)
-	}
-	var body sharePrepareRequest
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, fmt.Errorf("share.prepare: %w", err)
-	}
-	token, err := hex.DecodeString(body.Token)
-	if err != nil || len(token) != workerproto.FDTokenLen {
-		return nil, fmt.Errorf("share.prepare: bad token")
-	}
-	var tok [workerproto.FDTokenLen]byte
-	copy(tok[:], token)
-	f, err := s.fds.Recv(tok)
-	if err != nil {
-		return nil, fmt.Errorf("share.prepare: %w", err)
-	}
-	prepared, finalPath, err := s.hub.PrepareMappedFD(body.Tag, body.Path, body.RO, body.UID, body.GID, f)
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("share.prepare: %w", err)
-	}
-	s.mu.Lock()
-	if s.pending == nil {
-		s.pending = map[string]*virtio.PreparedShare{}
-	}
-	if s.pending[body.Token] != nil {
-		s.mu.Unlock()
-		prepared.ClosePrepared()
-		return nil, fmt.Errorf("share.prepare: duplicate token")
-	}
-	s.pending[body.Token] = prepared
-	s.mu.Unlock()
-	return sharePrepareResponse{FinalPath: finalPath}, nil
-}
-
-type sharePrepareResponse struct {
-	FinalPath string `json:"finalPath"`
-}
-
-// dropPrepared unparks and releases a staged share (rollback path).
-func (s *vmmWorkerState) dropPrepared(token string) *virtio.PreparedShare {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p := s.pending[token]
-	delete(s.pending, token)
-	return p
-}
-
-func (s *vmmWorkerState) sharePublish(req workerproto.Request) (any, error) {
-	var body shareTokenRequest
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, fmt.Errorf("share.publish: %w", err)
-	}
-	p := s.dropPrepared(body.Token)
-	if p == nil {
-		return nil, fmt.Errorf("share.publish: unknown token")
-	}
-	exp, err := s.hub.Publish(p)
-	if err != nil {
-		p.ClosePrepared()
-		return nil, fmt.Errorf("share.publish: %w", err)
-	}
-	return shareRecordResponse{Tag: exp.Tag, Path: exp.Path, RO: exp.RO}, nil
-}
-
-func (s *vmmWorkerState) shareSwap(req workerproto.Request) (any, error) {
-	var body shareTokenRequest
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, fmt.Errorf("share.swap: %w", err)
-	}
-	p := s.dropPrepared(body.Token)
-	if p == nil {
-		return nil, fmt.Errorf("share.swap: unknown token")
-	}
-	_, exp, err := s.hub.Swap(p)
-	if err != nil {
-		p.ClosePrepared()
-		return nil, fmt.Errorf("share.swap: %w", err)
-	}
-	return shareRecordResponse{Tag: exp.Tag, Path: exp.Path, RO: exp.RO}, nil
-}
-
-func (s *vmmWorkerState) shareRemove(req workerproto.Request) (any, error) {
-	var body shareRemoveRequest
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, fmt.Errorf("share.remove: %w", err)
-	}
-	exp, err := s.hub.Remove(body.Tag, body.Force)
-	if err != nil {
-		return nil, fmt.Errorf("share.remove: %w", err)
-	}
-	return shareRecordResponse{Tag: exp.Tag, Path: exp.Path, RO: exp.RO}, nil
-}
-
-type shareRecordResponse struct {
-	Tag  string `json:"tag"`
-	Path string `json:"path"`
-	RO   bool   `json:"ro"`
-}
-
-// shareDrop abandons a staged (prepared, never published) share — the
-// ShareManager rollback path when persisting fails after prepare.
-func (s *vmmWorkerState) shareDrop(req workerproto.Request) (any, error) {
-	var body shareTokenRequest
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, fmt.Errorf("share.drop: %w", err)
-	}
-	if p := s.dropPrepared(body.Token); p != nil {
-		p.ClosePrepared()
-	}
-	return nil, nil
-}
-
 // ------------------------------------------------------------ supervisor
 
 // vmmWorker is the supervisor's handle on the worker process: control
 // client, fd channel (send side), bridge serve loop, and lifecycle. It
 // implements vmmRunner.
 type vmmWorker struct {
-	proc    *os.Process
-	client  *workerproto.Client // control (fd 3)
-	fdChan  net.Conn            // fd 5, send side
-	fdSend  sync.Mutex          // serialize SCM_RIGHTS sends
-	bridge  net.Conn
-	bridgeE chan error
+	proc       *os.Process
+	client     *workerproto.Client // control (fd 3)
+	fdChan     net.Conn            // fd 5, send side
+	fdSend     sync.Mutex          // serialize SCM_RIGHTS sends
+	bridge     net.Conn
+	bridgeE    chan error
+	share      net.Conn // fd 6 peer: supervisor side of the FUSE relay
+	shareE     chan error
+	stopping   chan struct{} // closed before an intentional relay teardown
+	stopOnce   sync.Once
+	waitMu     sync.Mutex // protects lazy lifecycle-context initialization
+	waitCtx    context.Context
+	waitCancel context.CancelFunc
+	// Local-netstack counters live in the confined worker. Periodic pulls
+	// are cancellable; vm.wait/vm.close responses furnish the final snapshot
+	// before the control channel dies.
+	trafficRec      *netpol.TrafficRecorder
+	trafficCancel   context.CancelFunc
+	trafficDone     chan struct{}
+	trafficStopOnce sync.Once
 
 	dead    chan struct{} // closed when the process is reaped
 	deadErr error
@@ -701,15 +563,150 @@ func (w *vmmWorker) setDead(err error) {
 	w.deadMu.Lock()
 	w.deadErr = err
 	w.deadMu.Unlock()
+	// Publish the stopping marker before closing the relay. ServeBroker
+	// wakes because of that close and must distinguish process teardown
+	// from an unexpected loss of the share channel.
+	w.markStopping()
+	if w.share != nil {
+		_ = w.share.Close()
+	}
 	close(w.dead)
+	w.cancelWait()
+}
+
+func (w *vmmWorker) markStopping() {
+	if w != nil && w.stopping != nil {
+		w.stopOnce.Do(func() { close(w.stopping) })
+	}
+}
+
+func (w *vmmWorker) waitContext() context.Context {
+	w.waitMu.Lock()
+	defer w.waitMu.Unlock()
+	if w.waitCtx == nil {
+		w.waitCtx, w.waitCancel = context.WithCancel(context.Background())
+	}
+	return w.waitCtx
+}
+
+func (w *vmmWorker) cancelWait() {
+	if w == nil {
+		return
+	}
+	w.waitMu.Lock()
+	if w.waitCtx == nil {
+		w.waitCtx, w.waitCancel = context.WithCancel(context.Background())
+	}
+	cancel := w.waitCancel
+	w.waitMu.Unlock()
+	cancel()
+}
+
+const workerTrafficSyncInterval = 2 * time.Second
+
+func (w *vmmWorker) startTrafficSync(rec *netpol.TrafficRecorder) {
+	w.startTrafficSyncEvery(rec, workerTrafficSyncInterval)
+}
+
+// startTrafficSyncEvery exists so the short-lived-worker regression can
+// choose an interval that provably cannot tick during the test.
+func (w *vmmWorker) startTrafficSyncEvery(rec *netpol.TrafficRecorder, interval time.Duration) {
+	if w == nil || rec == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w.trafficRec = rec
+	w.trafficCancel = cancel
+	w.trafficDone = make(chan struct{})
+	go syncWorkerTraffic(ctx, w, rec, interval, w.trafficDone)
+}
+
+func (w *vmmWorker) stopTrafficSync() {
+	if w == nil {
+		return
+	}
+	w.trafficStopOnce.Do(func() {
+		if w.trafficCancel != nil {
+			w.trafficCancel()
+		}
+		if w.trafficDone != nil {
+			<-w.trafficDone
+		}
+	})
+}
+
+func (w *vmmWorker) mergeFinalTraffic(snapshot *netpol.TrafficSnapshot) {
+	w.stopTrafficSync()
+	if w != nil && w.trafficRec != nil && snapshot != nil {
+		w.trafficRec.SyncSnapshot(*snapshot)
+	}
+}
+
+// startShareBroker connects the worker's request-only virtio-fs proxy to
+// the supervisor-owned hub. The hub remains the sole owner of host paths,
+// pinned directory descriptors, and Windows directory handles.
+func (w *vmmWorker) startShareBroker(hub *virtio.ShareHub) error {
+	if w == nil || w.share == nil {
+		return fmt.Errorf("share relay unavailable")
+	}
+	if hub == nil {
+		return fmt.Errorf("share hub unavailable")
+	}
+	if w.shareE != nil {
+		return fmt.Errorf("share broker already started")
+	}
+	if w.stopping == nil {
+		w.stopping = make(chan struct{})
+	}
+	w.shareE = make(chan error, 1)
+	go func() {
+		err := hub.ServeBroker(w.share)
+		select {
+		case <-w.stopping:
+			return
+		case <-w.dead:
+			return
+		default:
+		}
+		if err == nil {
+			err = fmt.Errorf("share broker: share relay closed unexpectedly")
+		}
+		w.shareE <- err
+		// FUSE operations are stateful and may mutate the host. Never
+		// reconnect or replay after a truncated/malformed exchange.
+		_ = w.Close()
+	}()
+	return nil
 }
 
 // Wait parks until the guest exits (the split-mode guestErr).
 func (w *vmmWorker) Wait() error {
+	ctx := w.waitContext()
 	var out vmWaitResponse
-	if err := w.client.CallWithTimeout("vm.wait", nil, &out, 24*time.Hour); err != nil {
+	if err := w.client.CallContext(ctx, "vm.wait", nil, &out); err != nil {
+		if errors.Is(err, context.Canceled) {
+			// An unexpected share-relay failure initiates Close. Prefer its
+			// actionable cause over the lifecycle cancellation it triggered.
+			select {
+			case shareErr := <-w.shareE:
+				if shareErr == nil {
+					shareErr = fmt.Errorf("share broker: share relay closed unexpectedly")
+				}
+				return shareErr
+			default:
+			}
+			// setDead publishes the process result and closes dead before it
+			// cancels this call, so a death-triggered cancellation retains
+			// the authoritative process error.
+			select {
+			case <-w.dead:
+				return w.Err()
+			default:
+			}
+		}
 		return err
 	}
+	w.mergeFinalTraffic(out.Traffic)
 	if out.Err != "" {
 		return fmt.Errorf("%s", out.Err)
 	}
@@ -720,12 +717,27 @@ func (w *vmmWorker) Wait() error {
 // Idempotent: teardown paths may stack (explicit stop + defer).
 func (w *vmmWorker) Close() error {
 	w.closeOnce.Do(func() {
+		// vm.wait is deliberately unbounded during normal operation. Stop
+		// it synchronously before beginning the bounded shutdown RPC.
+		w.cancelWait()
+		w.markStopping()
+		w.stopTrafficSync()
 		if w.client != nil {
-			_ = w.client.CallWithTimeout("vm.close", nil, nil, 15*time.Second)
+			var out vmCloseResponse
+			if err := w.client.CallWithTimeout("vm.close", nil, &out, 15*time.Second); err == nil {
+				w.mergeFinalTraffic(out.Traffic)
+			}
 			_ = w.client.Close()
 		}
-		_ = w.bridge.Close()
-		_ = w.fdChan.Close()
+		if w.bridge != nil {
+			_ = w.bridge.Close()
+		}
+		if w.fdChan != nil {
+			_ = w.fdChan.Close()
+		}
+		if w.share != nil {
+			_ = w.share.Close()
+		}
 		select {
 		case <-w.dead:
 			w.closeErr = w.Err()
@@ -745,6 +757,12 @@ func (w *vmmWorker) Close() error {
 func (w *vmmWorker) TrafficSnapshot() (netpol.TrafficSnapshot, error) {
 	var snap netpol.TrafficSnapshot
 	err := w.client.Call("traffic.snapshot", struct{}{}, &snap)
+	return snap, err
+}
+
+func (w *vmmWorker) trafficSnapshotContext(ctx context.Context) (netpol.TrafficSnapshot, error) {
+	var snap netpol.TrafficSnapshot
+	err := w.client.CallContext(ctx, "traffic.snapshot", struct{}{}, &snap)
 	return snap, err
 }
 
@@ -805,85 +823,4 @@ func (w *vmmWorker) DialStream(guestPort uint32) (net.Conn, error) {
 		return nil, fmt.Errorf("vsock.connect: %w", err)
 	}
 	return sup, nil
-}
-
-// workerShareServing adapts ShareManager's hub operations to the
-// worker-hosted hub. Tokens correlate the prepare/FD stage with the
-// publish/swap commit.
-type workerShareServing struct {
-	w *vmmWorker
-}
-
-type workerPreparedShare struct {
-	token string
-}
-
-func (s workerShareServing) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (any, string, error) {
-	root, err := virtio.OpenShareRootFD(path)
-	if err != nil {
-		return nil, "", err
-	}
-	var token [workerproto.FDTokenLen]byte
-	if _, err := rand.Read(token[:]); err != nil {
-		_ = root.Close()
-		return nil, "", err
-	}
-	tokenHex := hex.EncodeToString(token[:])
-	if err := s.w.sendFD(token, root); err != nil {
-		_ = root.Close()
-		return nil, "", fmt.Errorf("share.prepare: %w", err)
-	}
-	_ = root.Close()
-	var out sharePrepareResponse
-	err = s.w.client.Call("share.prepare", sharePrepareRequest{
-		Tag: tag, Path: path, RO: ro, UID: uid, GID: gid, Token: tokenHex,
-	}, &out)
-	if err != nil {
-		return nil, "", err
-	}
-	return workerPreparedShare{token: tokenHex}, out.FinalPath, nil
-}
-
-func (s workerShareServing) Publish(p any) (*virtio.ShareExport, error) {
-	prep, ok := p.(workerPreparedShare)
-	if !ok {
-		return nil, fmt.Errorf("bad prepared share token %T", p)
-	}
-	var out shareRecordResponse
-	if err := s.w.client.Call("share.publish", shareTokenRequest{Token: prep.token}, &out); err != nil {
-		return nil, err
-	}
-	return virtio.NewShareExportMirror(out.Tag, out.Path, out.RO, nil, nil, virtio.ShareExportActive), nil
-}
-
-func (s workerShareServing) Swap(p any) (old, exp *virtio.ShareExport, err error) {
-	prep, ok := p.(workerPreparedShare)
-	if !ok {
-		return nil, nil, fmt.Errorf("bad prepared share token %T", p)
-	}
-	var out shareRecordResponse
-	if err := s.w.client.Call("share.swap", shareTokenRequest{Token: prep.token}, &out); err != nil {
-		return nil, nil, err
-	}
-	return nil, virtio.NewShareExportMirror(out.Tag, out.Path, out.RO, nil, nil, virtio.ShareExportActive), nil
-}
-
-func (s workerShareServing) Remove(tag string, force bool) (*virtio.ShareExport, error) {
-	var out shareRecordResponse
-	if err := s.w.client.Call("share.remove", shareRemoveRequest{Tag: tag, Force: force}, &out); err != nil {
-		return nil, err
-	}
-	return virtio.NewShareExportMirror(out.Tag, out.Path, out.RO, nil, nil, virtio.ShareExportGone), nil
-}
-
-func (s workerShareServing) Close() error { return nil } // owned by vmmWorker.Close
-
-// ClosePrepared abandons a staged share (ShareManager rollback path).
-func (s workerShareServing) ClosePrepared(p any) {
-	prep, ok := p.(workerPreparedShare)
-	if !ok {
-		return
-	}
-	// The worker drops the parked prepared share; best-effort.
-	_ = s.w.client.Call("share.drop", shareTokenRequest{Token: prep.token}, nil)
 }

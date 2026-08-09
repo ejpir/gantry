@@ -6,15 +6,14 @@ package sandbox
 // re-exec all exist here. See docs/vmm-network-isolation.md phase 2.
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
-	"github.com/ejpir/gantry/internal/virtio"
 	"github.com/ejpir/gantry/internal/vmm"
 )
 
@@ -33,34 +32,28 @@ func crossProcNetConn() (sup, dev net.Conn, err error) { return socketpairConns(
 // vmmSplitPossible reports whether the split-VMM topology can run:
 // networking must be the embedded netstack (the QEMU-framed conn crosses
 // as a descriptor; gvproxy's unixgram endpoint cannot), and shares must
-// be hub-served (legacy per-device shares resolve host paths).
+// be hub-served. The real hub stays in the trusted supervisor; the worker
+// receives only a request relay, never host share roots.
 func vmmSplitPossible(mode string, nw *Network, shareManager *ShareManager) bool {
 	if mode == "off" || nw == nil || nw.Conn == nil {
 		return false
 	}
-	if shareManager != nil && shareManager.Hub() == nil && len(shareManager.Entries()) > 0 {
+	if shareManager == nil || shareManager.Hub() == nil {
 		return false
 	}
 	return true
 }
 
-// tryStartVMMSplit spawns the _vmm-worker and rewires the share backend.
+// tryStartVMMSplit spawns the _vmm-worker and starts its share relay.
 // On success the boot asset descriptors in opts are CONSUMED (closed —
 // the worker owns them); on failure they stay open for the monolithic
-// fallback. The ShareManager gains mirror bookkeeping plus the RPC
-// backend for post-boot hot-adds.
+// fallback. The ShareManager and its pinned roots stay in the trusted
+// supervisor in both topologies; the worker gets only bounded FUSE request
+// and response bytes over its dedicated share channel. Consequently a
+// compromised worker has no host directory descriptor/handle to bypass.
 func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *ShareManager, dir string, console *os.File) (vmmRunner, error) {
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, errVMMSplitUnavailable
-	}
-	var metas []vmmShareMeta
-	var roots []*os.File
-	if shareManager != nil && shareManager.Hub() != nil {
-		var err error
-		metas, roots, err = shareManager.SplitBootAssets()
-		if err != nil {
-			return nil, fmt.Errorf("share boot assets: %w", err)
-		}
 	}
 	bootCfg := vmmBootConfig{
 		MemSize:  opts.MemSize,
@@ -71,7 +64,6 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		HasRoot:  opts.Rootfs != nil,
 		NDisksRO: len(opts.DisksRO),
 		NDisks:   len(opts.Disks),
-		Shares:   metas,
 	}
 	if !opts.BootTimingStart.IsZero() {
 		bootCfg.BootTimingStartUnixNano = opts.BootTimingStart.UnixNano()
@@ -118,89 +110,51 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		bootCfg.Policy = raw
 	}
 	vw, err := spawnVMMWorker(bootCfg, vmmWorkerAssets{
-		NetConn:    opts.NetConn,
-		Console:    console,
-		Kernel:     opts.Kernel,
-		Rootfs:     opts.Rootfs,
-		DisksRO:    opts.DisksRO,
-		Disks:      opts.Disks,
-		ShareRoots: roots,
-		KVM:        kvm,
+		NetConn: opts.NetConn,
+		Console: console,
+		Kernel:  opts.Kernel,
+		Rootfs:  opts.Rootfs,
+		DisksRO: opts.DisksRO,
+		Disks:   opts.Disks,
+		KVM:     kvm,
 	}, dir)
 	if err != nil {
-		for _, r := range roots {
-			_ = r.Close()
+		if kvm != nil {
+			_ = kvm.Close()
 		}
 		return nil, err
 	}
 	if bootCfg.Policy != nil && opts.NetTraffic != nil {
-		// Enforcement counters accumulate inside the worker (no host
-		// paths under confinement); pull them into the supervisor's
-		// recorder, which owns traffic.json.
-		go syncWorkerTraffic(vw, opts.NetTraffic)
+		// Attach the host recorder before starting any other lifecycle
+		// goroutine: an immediately-failing share relay can initiate Close.
+		vw.startTrafficSync(opts.NetTraffic)
 	}
-	if shareManager != nil && shareManager.Hub() != nil {
-		// The local hub's pinned roots are superseded by the worker's
-		// (transferred) ones; bookkeeping moves to mirror records.
-		shareManager.DetachServing()
-		shareManager.SetServing(workerShareServing{w: vw})
+	if err := vw.startShareBroker(shareManager.Hub()); err != nil {
+		_ = vw.Close()
+		return nil, fmt.Errorf("share broker: %w", err)
 	}
 	return vw, nil
 }
 
 // syncWorkerTraffic pulls enforcement counters from the worker into the
-// supervisor's recorder until the worker dies. Monotonic-max merge, so
-// retries and the final pull never double-count.
-func syncWorkerTraffic(vw *vmmWorker, rec *netpol.TrafficRecorder) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+// supervisor's recorder until lifecycle completion or worker death. The
+// lifecycle RPC response carries the final snapshot; a post-Done RPC cannot.
+func syncWorkerTraffic(ctx context.Context, vw *vmmWorker, rec *netpol.TrafficRecorder, interval time.Duration, done chan<- struct{}) {
+	ticker := time.NewTicker(interval)
+	defer func() {
+		ticker.Stop()
+		close(done)
+	}()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-vw.Done():
-			if snap, err := vw.TrafficSnapshot(); err == nil {
-				rec.SyncSnapshot(snap)
-			}
 			return
 		case <-ticker.C:
-			if snap, err := vw.TrafficSnapshot(); err == nil {
+			if snap, err := vw.trafficSnapshotContext(ctx); err == nil {
 				rec.SyncSnapshot(snap)
 			}
 		}
 	}
-}
-
-// SplitBootAssets pins one root descriptor per configured export for the
-// vmm worker's descriptor table and installs mirror bookkeeping. Path
-// strings are canonicalized for the manifest; serving resolves through
-// the descriptors themselves, never the strings. Order is deterministic
-// (sorted by tag).
-func (m *ShareManager) SplitBootAssets() ([]vmmShareMeta, []*os.File, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	tags := make([]string, 0, len(m.exports))
-	for tag := range m.exports {
-		tags = append(tags, tag)
-	}
-	sort.Strings(tags)
-	var metas []vmmShareMeta
-	var roots []*os.File
-	for _, tag := range tags {
-		ms := m.exports[tag]
-		root, err := virtio.OpenShareRootFD(ms.share.Path)
-		if err != nil {
-			for _, r := range roots {
-				_ = r.Close()
-			}
-			return nil, nil, fmt.Errorf("share %s: %w", tag, err)
-		}
-		canon := ms.share.Path
-		if resolved, err := filepath.EvalSymlinks(canon); err == nil {
-			canon = resolved
-		}
-		ms.share.Path = canon
-		ms.export = virtio.NewShareExportMirror(tag, canon, ms.share.RO, ms.share.UID, ms.share.GID, virtio.ShareExportActive)
-		metas = append(metas, vmmShareMeta{Tag: tag, Path: canon, RO: ms.share.RO, UID: ms.share.UID, GID: ms.share.GID})
-		roots = append(roots, root)
-	}
-	return metas, roots, nil
 }

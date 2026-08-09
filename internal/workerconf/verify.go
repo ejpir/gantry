@@ -25,13 +25,20 @@ func Verify(spec Spec, report *Report) {
 		_, _ = fmt.Fprintf(os.Stderr, "workerconf: probe %s -> %s (%s)\n", name, r.State, r.Detail)
 		return r
 	}
-	report.Results = []PropertyResult{
+	results := []PropertyResult{
 		staged("fs-read", probeFSRead),
 		staged("fs-write", probeFSWrite),
 		staged("net-dial", func() PropertyResult { return probeNetDial(spec.NoNetwork) }),
 		staged("exec", func() PropertyResult { return probeExec(spec.NoExec) }),
 		staged("proc-enum", probeProcEnum),
 	}
+	// proc-signal is a Darwin Seatbelt property. Omitting it elsewhere keeps
+	// Linux reports from treating a deliberately unavailable platform probe as
+	// a degraded applied property; Property still reports it unavailable.
+	if runtime.GOOS == "darwin" {
+		results = append(results, staged("proc-signal", func() PropertyResult { return probeProcSignal(spec.NoProcX) }))
+	}
+	report.Results = results
 }
 
 // probeFSRead opens a well-known host file. Under confinement the open
@@ -116,6 +123,57 @@ func probeProcEnum() PropertyResult {
 	}
 	_ = f.Close()
 	return PropertyResult{Property: PropProcEnum, State: StateUnenforced, Detail: "/proc readable"}
+}
+
+// evaluateProcSignalProbe classifies the Darwin signal(0) probe. signal(0)
+// performs permission and liveness checks without delivering a signal. The
+// self call is a positive control: without it, a broken probe could be
+// mistaken for cross-process confinement.
+func evaluateProcSignalProbe(noProcX bool, selfPID, parentPID int, signal0 func(int) error) PropertyResult {
+	if !noProcX {
+		return PropertyResult{Property: PropProcSignal, State: StateDisabled}
+	}
+	if selfPID <= 0 {
+		return PropertyResult{Property: PropProcSignal, State: StateIndeterminate, Detail: "invalid self PID"}
+	}
+	if err := signal0(selfPID); err != nil {
+		return PropertyResult{
+			Property: PropProcSignal, State: StateIndeterminate,
+			Detail: fmt.Sprintf("self kill(%d, 0) positive control: %s", selfPID, errString(err)),
+		}
+	}
+	// A worker's live supervisor parent is a distinct, same-UID process.
+	// PID 1 instead indicates reparenting and cannot prove Seatbelt policy:
+	// ordinary discretionary permissions may reject signaling launchd.
+	if parentPID <= 1 || parentPID == selfPID {
+		return PropertyResult{
+			Property: PropProcSignal, State: StateIndeterminate,
+			Detail: fmt.Sprintf("no distinct live parent PID (got %d)", parentPID),
+		}
+	}
+	err := signal0(parentPID)
+	switch {
+	case err == nil:
+		return PropertyResult{
+			Property: PropProcSignal, State: StateUnenforced,
+			Detail: fmt.Sprintf("kill(parent PID %d, 0) succeeded", parentPID),
+		}
+	case errors.Is(err, syscall.EPERM):
+		return PropertyResult{
+			Property: PropProcSignal, State: StateEnforced,
+			Detail: fmt.Sprintf("kill(parent PID %d, 0): %s", parentPID, errString(err)),
+		}
+	case errors.Is(err, syscall.ESRCH):
+		return PropertyResult{
+			Property: PropProcSignal, State: StateIndeterminate,
+			Detail: fmt.Sprintf("parent PID %d disappeared: %s", parentPID, errString(err)),
+		}
+	default:
+		return PropertyResult{
+			Property: PropProcSignal, State: StateIndeterminate,
+			Detail: fmt.Sprintf("kill(parent PID %d, 0): %s", parentPID, errString(err)),
+		}
+	}
 }
 
 func errString(err error) string {

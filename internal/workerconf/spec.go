@@ -31,12 +31,10 @@ type Spec struct {
 	// configuration a later resume trusts.
 	WriteFiles []string
 
-	// FileAllow lists the host paths the worker may touch — the share
-	// export roots it serves via dirfd-relative ops. Seatbelt bakes
-	// them into the profile as subpath rules (share serving is
-	// path-checked per op, not just at open). Linux ignores this v1
-	// (dirfd ops survive because path neutrality is structural, not
-	// filtered); it is the seam a future landlock tier would consume.
+	// FileAllow is retained for worker roles that intentionally need host
+	// path access. The VMM worker leaves it empty: shares are served by the
+	// trusted supervisor over a request-only relay. Seatbelt bakes any
+	// entries into its immutable profile; Linux ignores this v1.
 	FileAllow []FileAllowance
 }
 
@@ -73,11 +71,12 @@ const (
 // Property names. The same names appear on every platform so
 // isolation.json and the TUI can render a uniform matrix.
 const (
-	PropFSRead   = "fs-read"
-	PropFSWrite  = "fs-write"
-	PropNetDial  = "net-dial"
-	PropExec     = "exec"
-	PropProcEnum = "proc-enum"
+	PropFSRead     = "fs-read"
+	PropFSWrite    = "fs-write"
+	PropNetDial    = "net-dial"
+	PropExec       = "exec"
+	PropProcEnum   = "proc-enum"
+	PropProcSignal = "proc-signal"
 )
 
 // PropertyResult is one verified confinement property.
@@ -129,6 +128,7 @@ func DisabledReport(platform, mode string) Report {
 		{Property: PropNetDial, State: StateDisabled},
 		{Property: PropExec, State: StateDisabled},
 		{Property: PropProcEnum, State: StateDisabled},
+		{Property: PropProcSignal, State: StateDisabled},
 	}
 	return Report{Platform: platform, Mode: mode, Results: results}
 }

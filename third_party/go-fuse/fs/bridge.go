@@ -346,6 +346,16 @@ func (b *rawBridge) String() string {
 	return "rawBridge"
 }
 
+// GantryResourceUsage reports the live state retained on behalf of a FUSE
+// client. GANTRY PATCH: the split-VMM broker uses this after every request to
+// keep a compromised client from exhausting the trusted supervisor by
+// withholding RELEASE or FORGET operations.
+func (b *rawBridge) GantryResourceUsage() (nodes, handles int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.kernelNodeIds), len(b.files) - 1 - len(b.freeFiles)
+}
+
 func (b *rawBridge) inode(id uint64, fh uint64) (*Inode, *fileEntry) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

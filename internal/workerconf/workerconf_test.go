@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -44,8 +46,11 @@ func TestReportJSONRoundTrip(t *testing.T) {
 
 func TestDisabledReport(t *testing.T) {
 	rep := DisabledReport("darwin", "off")
-	if len(rep.Failed(PropFSRead, PropNetDial, PropExec, PropFSWrite, PropProcEnum)) != 5 {
+	if len(rep.Failed(PropFSRead, PropNetDial, PropExec, PropFSWrite, PropProcEnum, PropProcSignal)) != 6 {
 		t.Fatalf("disabled report must fail every required property: %+v", rep)
+	}
+	if got := rep.Property(PropProcSignal).State; got != StateDisabled {
+		t.Fatalf("disabled report proc-signal = %q, want disabled", got)
 	}
 }
 
@@ -73,6 +78,58 @@ func TestVerifyUnconfined(t *testing.T) {
 	// asserted above.
 	if got := rep.Property(PropNetDial).State; got != StateUnenforced && got != StateIndeterminate {
 		t.Errorf("net-dial unconfined: %q, want unenforced or indeterminate", got)
+	}
+	if runtime.GOOS == "darwin" {
+		if got := rep.Property(PropProcSignal).State; got != StateUnenforced && got != StateIndeterminate {
+			t.Errorf("proc-signal unconfined: %q, want unenforced or indeterminate", got)
+		}
+	} else {
+		if got := rep.Property(PropProcSignal).State; got != StateUnavailable {
+			t.Errorf("proc-signal on %s: %q, want unavailable", runtime.GOOS, got)
+		}
+		for _, result := range rep.Results {
+			if result.Property == PropProcSignal {
+				t.Errorf("proc-signal must be omitted from %s Verify results: %+v", runtime.GOOS, result)
+			}
+		}
+	}
+}
+
+func TestEvaluateProcSignalProbe(t *testing.T) {
+	tests := []struct {
+		name      string
+		noProcX   bool
+		parentPID int
+		selfErr   error
+		parentErr error
+		want      string
+		wantCalls int
+	}{
+		{name: "disabled", parentPID: 200, want: StateDisabled, wantCalls: 0},
+		{name: "self positive control denied", noProcX: true, parentPID: 200, selfErr: syscall.EPERM, want: StateIndeterminate, wantCalls: 1},
+		{name: "parent permitted", noProcX: true, parentPID: 200, want: StateUnenforced, wantCalls: 2},
+		{name: "parent denied", noProcX: true, parentPID: 200, parentErr: syscall.EPERM, want: StateEnforced, wantCalls: 2},
+		{name: "parent disappeared", noProcX: true, parentPID: 200, parentErr: syscall.ESRCH, want: StateIndeterminate, wantCalls: 2},
+		{name: "unexpected error", noProcX: true, parentPID: 200, parentErr: syscall.EIO, want: StateIndeterminate, wantCalls: 2},
+		{name: "reparented", noProcX: true, parentPID: 1, want: StateIndeterminate, wantCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []int
+			got := evaluateProcSignalProbe(tc.noProcX, 100, tc.parentPID, func(pid int) error {
+				calls = append(calls, pid)
+				if pid == 100 {
+					return tc.selfErr
+				}
+				return tc.parentErr
+			})
+			if got.Property != PropProcSignal || got.State != tc.want {
+				t.Fatalf("result = %+v, want %s", got, tc.want)
+			}
+			if len(calls) != tc.wantCalls {
+				t.Fatalf("signal calls = %v, want %d calls", calls, tc.wantCalls)
+			}
+		})
 	}
 }
 
@@ -113,6 +170,15 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 		if !strings.Contains(p, want) {
 			t.Fatalf("profile missing %q:\n%s", want, p)
 		}
+	}
+	var signalRules []string
+	for _, line := range strings.Split(p, "\n") {
+		if strings.HasPrefix(line, "(allow signal") {
+			signalRules = append(signalRules, line)
+		}
+	}
+	if len(signalRules) != 1 || signalRules[0] != "(allow signal (target self))" {
+		t.Fatalf("profile must allow only self-signaling, got %v:\n%s", signalRules, p)
 	}
 	// The logs' parent directory — trusted state (sandbox.json) — must
 	// carry NO grant of any kind.

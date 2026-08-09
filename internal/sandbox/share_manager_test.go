@@ -4,12 +4,14 @@ package sandbox
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/virtio"
 )
 
 func newTestShareManager(t *testing.T, specs ...string) (*ShareManager, string) {
@@ -254,6 +256,70 @@ func TestShareManagerReplaceIsTransactional(t *testing.T) {
 	// Revoke of the swapped-out export is asserted wire-level in
 	// TestShareHubSwapRevokesReplacedExport; without a FUSE session the
 	// old export drains instantly and leaves no retired entry here.
+}
+
+// TestShareManagerBrokeredReplaceKeepsOneActiveExport pins the split-VMM
+// ownership model: starting the request relay must not detach the manager's
+// hub or replace its local serving backend. A later replacement therefore
+// updates the one supervisor-owned namespace and cannot leave a second
+// bookkeeping-only export claiming to be active.
+func TestShareManagerBrokeredReplaceKeepsOneActiveExport(t *testing.T) {
+	oldDir := t.TempDir()
+	manager, _ := newTestShareManager(t, "code="+oldDir)
+	hub := manager.Hub()
+	oldExport := hub.Export("code")
+	if oldExport == nil {
+		t.Fatal("boot export missing")
+	}
+
+	server, client := net.Pipe()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- hub.ServeBroker(server) }()
+	proxy, err := virtio.NewShareHubProxy(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proxy.Close() }()
+
+	// This is the invariant the removed workerShareServing path violated:
+	// split mode serves the same hub; it does not exchange the manager's
+	// backend for a remote mirror.
+	local, ok := manager.serving.(localShareServing)
+	if !ok || local.hub != hub || manager.Hub() != hub {
+		t.Fatalf("broker detached supervisor hub: serving=%T hub=%p want=%p", manager.serving, manager.Hub(), hub)
+	}
+
+	newDir := t.TempDir()
+	entry, err := manager.Add("code="+newDir+",ro", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.State != "active" || !entry.RO {
+		t.Fatalf("replacement entry: %+v", entry)
+	}
+	if oldExport.State() == virtio.ShareExportActive {
+		t.Fatalf("replaced export remained active: %+v", oldExport)
+	}
+	exports := hub.Exports()
+	if len(exports) != 1 || exports[0].Tag != "code" || exports[0] == oldExport || exports[0].State() != virtio.ShareExportActive {
+		t.Fatalf("live hub exports after replacement: %+v", exports)
+	}
+	active := 0
+	for _, got := range manager.Entries() {
+		if got.Tag == "code" && got.State == "active" {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active code entries after brokered replacement = %d, want 1: %+v", active, manager.Entries())
+	}
+
+	if err := proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serveErr; err != nil {
+		t.Fatalf("ServeBroker after peer close: %v", err)
+	}
 }
 
 // TestShareManagerPromoteEphemeralToPersistent: re-adding an identical

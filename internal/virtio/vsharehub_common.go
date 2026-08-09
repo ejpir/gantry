@@ -4,7 +4,6 @@ package virtio
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"sort"
 	"sync"
@@ -38,6 +37,7 @@ const (
 	virtioFSHiprioQ  = 0
 	virtioFSRequestQ = 1
 	fsMaxChainBytes  = 256 << 10
+	shareHubTag      = "gantry-shares"
 	// FSTagLen lives in share.go (needed on all platforms)
 )
 
@@ -141,11 +141,8 @@ func (p *PreparedShare) ClosePrepared() {
 // dynamically managed set of independently confined exports. It is the
 // hot-add alternative to attaching a new virtio-mmio device per share.
 type ShareHub struct {
-	core    *Core
-	tag     string
-	handler fuseRequestHandler
-	root    *shareHubRoot
-	verbose bool
+	*fsTransportDevice
+	root *shareHubRoot
 
 	// rootVer is the namespace mutation stamp, reported as the hub
 	// root's mtime. The guest kernel invalidates its cached READDIR of
@@ -166,17 +163,15 @@ type ShareHub struct {
 func NewShareHub() (*ShareHub, error) {
 	debug := gutil.EnvOr("GANTRY_DEBUG_FS", "MINIVM_DEBUG_FS") != ""
 	h := &ShareHub{
-		tag:     "gantry-shares",
 		exports: map[string]*ShareExport{},
 		all:     map[*ShareExport]struct{}{},
-		verbose: debug,
 	}
 	h.root = &shareHubRoot{hub: h}
 	zero := time.Duration(0)
 	raw := fs.NewNodeFS(h.root, &fs.Options{
 		MountOptions: fuse.MountOptions{
 			Debug:                debug,
-			FsName:               h.tag,
+			FsName:               shareHubTag,
 			Name:                 "virtiofs",
 			MaxWrite:             128 << 10,
 			IgnoreSecurityLabels: true,
@@ -185,13 +180,13 @@ func NewShareHub() (*ShareHub, error) {
 		AttrTimeout:     &zero,
 		NegativeTimeout: &zero,
 	})
-	h.handler = fuse.NewProtocolServer(raw, &fuse.MountOptions{
+	h.fsTransportDevice = newFSTransportDevice(shareHubTag, fuse.NewProtocolServer(raw, &fuse.MountOptions{
 		Debug:                debug,
-		FsName:               h.tag,
+		FsName:               shareHubTag,
 		Name:                 "virtiofs",
 		MaxWrite:             128 << 10,
 		IgnoreSecurityLabels: true,
-	})
+	}), debug)
 	return h, nil
 }
 
@@ -224,15 +219,6 @@ func (h *ShareHub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*
 	exp.node = node
 	exp.release = release
 	return &PreparedShare{export: exp}, exp.Path, nil
-}
-
-// NewShareExportMirror builds a bookkeeping-only export record for the
-// supervisor side of a worker-hosted hub: Tag/Path/ownership and the
-// reported state, without any serving node.
-func NewShareExportMirror(tag, path string, ro bool, uid, gid *uint32, state ShareExportState) *ShareExport {
-	exp := &ShareExport{Tag: tag, Path: path, RO: ro, UID: uid, GID: gid}
-	exp.state.Store(int32(state))
-	return exp
 }
 
 // Publish atomically exposes a prepared export as /<tag> in the hub root.
@@ -470,123 +456,8 @@ func (n *shareHubRoot) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.Se
 	return syscall.EROFS
 }
 
-// Device transport: two virtio queues and one logical request queue
-// regardless of export count. Identical on every platform.
-func (h *ShareHub) deviceID() uint32 { return virtioFSDeviceID }
-func (h *ShareHub) features() uint64 { return 0 }
-func (h *ShareHub) numQueues() int   { return 2 }
-func (h *ShareHub) reset()           {}
-func (h *ShareHub) setCore(c *Core)  { h.core = c }
+// The virtio transport is supplied by the embedded fsTransportDevice. A
+// supervisor-hosted hub can instead expose the same handler through
+// ServeBroker while a ShareHubProxy owns the VMM-side transport.
 
-func (h *ShareHub) configRead(off uint64, p []byte) {
-	var cfg [FSTagLen + 4]byte
-	copy(cfg[:FSTagLen], []byte(h.tag))
-	binary.LittleEndian.PutUint32(cfg[FSTagLen:], 1)
-	if off < uint64(len(cfg)) {
-		copy(p, cfg[off:])
-	}
-}
-func (h *ShareHub) configWrite(off uint64, p []byte) {}
-
-func (h *ShareHub) logf(format string, args ...any) {
-	if h.verbose {
-		fmt.Printf("[fs %s] "+format+"\n", append([]any{h.tag}, args...)...)
-	}
-}
-
-func (h *ShareHub) handleQueue(qn int) {
-	if qn != virtioFSHiprioQ && qn != virtioFSRequestQ {
-		return
-	}
-	q := &h.core.queues[qn]
-	for {
-		head, chain, ok := h.core.availChain(qn)
-		if !ok {
-			return
-		}
-		readable, writable := splitChain(chain)
-		in, err := h.readIOV(readable)
-		if err != nil {
-			h.logf("read request descriptors: %v", err)
-			h.core.pushUsed(q, head, 0)
-			continue
-		}
-		out := make([][]byte, len(writable))
-		for i, d := range writable {
-			out[i] = make([]byte, d.len)
-		}
-		n, status := h.handler.HandleRequest(in, out)
-		if status != fuse.OK {
-			h.logf("protocol request failed: %v", status)
-			n = h.writeProtocolError(in, out, status)
-		}
-		if len(writable) == 0 {
-			n = 0
-		}
-		if n < 0 {
-			n = 0
-		}
-		capacity := 0
-		for _, b := range out {
-			capacity += len(b)
-		}
-		if n > capacity {
-			n = capacity
-		}
-		written, err := h.writeIOV(writable, out, n)
-		if err != nil {
-			h.logf("write response descriptors: %v", err)
-			written = 0
-		}
-		h.core.pushUsed(q, head, written)
-	}
-}
-
-func (h *ShareHub) readIOV(ds []desc) ([][]byte, error) {
-	out := make([][]byte, len(ds))
-	for i, d := range ds {
-		out[i] = make([]byte, d.len)
-		if err := h.core.mem.readAt(d.addr, out[i]); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
-func (h *ShareHub) writeIOV(ds []desc, bufs [][]byte, limit int) (uint32, error) {
-	var written uint32
-	remaining := limit
-	for i, d := range ds {
-		if remaining <= 0 || i >= len(bufs) {
-			break
-		}
-		b := bufs[i]
-		if len(b) > remaining {
-			b = b[:remaining]
-		}
-		if len(b) > int(d.len) {
-			b = b[:d.len]
-		}
-		if err := h.core.mem.writeAt(d.addr, b); err != nil {
-			return written, err
-		}
-		written += uint32(len(b))
-		remaining -= len(b)
-	}
-	return written, nil
-}
-
-func (h *ShareHub) writeProtocolError(in, out [][]byte, status fuse.Status) int {
-	if len(out) == 0 || len(out[0]) < 16 {
-		return 0
-	}
-	buf := out[0][:16]
-	binary.LittleEndian.PutUint32(buf[0:4], 16)
-	binary.LittleEndian.PutUint32(buf[4:8], uint32(-int32(status)))
-	if len(in) > 0 && len(in[0]) >= 16 {
-		copy(buf[8:16], in[0][8:16])
-	}
-	return 16
-}
-
-func (h *ShareHub) maxChainBytes(qn int) uint64 { return fsMaxChainBytes }
+var _ Device = (*ShareHub)(nil)

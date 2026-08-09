@@ -6,13 +6,10 @@ import "golang.org/x/sys/unix"
 // build's filter accepts.
 const auditArch = 0xC000003E
 
-// archWhitelist adds amd64-only syscall numbers: the runtime's TLS
-// setup (arch_prctl) and the legacy names Go's syscall wrappers use on
-// amd64 (newfstatat, faccessat).
+// archWhitelist adds the amd64-only TLS setup syscall used by the runtime.
+// Path-based newfstatat/faccessat are intentionally excluded.
 func archWhitelist() []uint32 {
 	return []uint32{
 		unix.SYS_ARCH_PRCTL,
-		unix.SYS_NEWFSTATAT,
-		unix.SYS_FACCESSAT,
 	}
 }

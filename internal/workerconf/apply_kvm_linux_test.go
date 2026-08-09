@@ -33,13 +33,16 @@ func TestApplyKVMIoctl(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run", "TestApplyKVMIoctl")
 	cmd.Env = append(os.Environ(), "WORKERCONF_HELPER=1", "WORKERCONF_ROOT="+root)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 	}
 	out, err := cmd.CombinedOutput()
 	t.Logf("helper:\n%s", out)
 	if err != nil {
+		if namespaceTestUnavailable(err, string(out)) {
+			t.Skipf("worker namespaces unavailable on this host: %v\n%s", err, out)
+		}
 		t.Fatalf("helper failed: %v", err)
 	}
 	if !strings.Contains(string(out), "KVM-IOCTL-OK") {

@@ -11,11 +11,12 @@ package sandbox
 //	3      control      (workerproto RPC, supervisor -> worker)
 //	4      bridge       (workerproto RPC, worker -> supervisor)
 //	5      fd channel   (SCM_RIGHTS, nonce first)
-//	6      net data     (QEMU-framed Ethernet)
-//	7      console log
-//	8      kernel
-//	9      rootfs (when cfg.HasRoot)
-//	...    DisksRO, Disks, share roots
+//	6      share data   (bounded FUSE relay, nonce first)
+//	7      net data     (QEMU-framed Ethernet)
+//	8      console log
+//	9      kernel
+//	10     rootfs (when cfg.HasRoot)
+//	...    DisksRO, Disks
 
 import (
 	"crypto/rand"
@@ -37,16 +38,16 @@ const (
 	vmmFDControl = 3
 	vmmFDBridge  = 4
 	vmmFDChannel = 5
-	vmmFDNet     = 6
-	vmmFDConsole = 7
-	vmmFDKernel  = 8
+	vmmFDShare   = 6
+	vmmFDNet     = 7
+	vmmFDConsole = 8
+	vmmFDKernel  = 9
 )
 
 // spawnVMMWorker re-execs the binary as _vmm-worker with the descriptor
 // table and performs the handshake + nonce exchange. cfg counts must
-// match the assets (HasRoot ↔ Rootfs, NDisksRO/NDisks, Shares ↔
-// ShareRoots) — the worker validates too, but failing here keeps the
-// error local.
+// match the assets (HasRoot ↔ Rootfs and NDisksRO/NDisks) — the worker
+// validates too, but failing here keeps the error local.
 func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmmWorker, error) {
 	ctrlSup, ctrlWrk, err := socketpairConns()
 	if err != nil {
@@ -54,19 +55,57 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	}
 	bridgeSup, bridgeWrk, err := socketpairConns()
 	if err != nil {
+		_ = ctrlSup.Close()
+		_ = ctrlWrk.Close()
 		return nil, err
 	}
 	fdSup, fdWrk, err := socketpairConns()
 	if err != nil {
+		_ = ctrlSup.Close()
+		_ = ctrlWrk.Close()
+		_ = bridgeSup.Close()
+		_ = bridgeWrk.Close()
 		return nil, err
 	}
+	shareSup, shareWrk, err := socketpairConns()
+	if err != nil {
+		_ = ctrlSup.Close()
+		_ = ctrlWrk.Close()
+		_ = bridgeSup.Close()
+		_ = bridgeWrk.Close()
+		_ = fdSup.Close()
+		_ = fdWrk.Close()
+		return nil, err
+	}
+	keepSup := false
+	defer func() {
+		if keepSup {
+			return
+		}
+		_ = ctrlSup.Close()
+		_ = bridgeSup.Close()
+		_ = fdSup.Close()
+		_ = shareSup.Close()
+	}()
+	workerEnds := []net.Conn{ctrlWrk, bridgeWrk, fdWrk, shareWrk}
+	defer func() {
+		for _, c := range workerEnds {
+			_ = c.Close()
+		}
+	}()
 	// The child duplicates each end into its table slot; the originals
 	// close after spawn. dupFiles are supervisor-side duplicates (always
 	// closed here); assetFiles are the SUPERVISOR'S OWN copies of the
 	// boot assets — closed only after a fully successful handshake, so a
 	// failed spawn can degrade to monolithic with the assets intact.
 	var dupFiles []*os.File
-	for _, c := range []net.Conn{ctrlWrk, bridgeWrk, fdWrk} {
+	closeDups := func() {
+		for _, f := range dupFiles {
+			_ = f.Close()
+		}
+	}
+	defer closeDups()
+	for _, c := range workerEnds {
 		f, err := connFile(c)
 		_ = c.Close()
 		if err != nil {
@@ -74,23 +113,18 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		}
 		dupFiles = append(dupFiles, f)
 	}
-	closeDups := func() {
-		for _, f := range dupFiles {
-			_ = f.Close()
-		}
-	}
 	if assets.NetConn == nil || assets.Console == nil || assets.Kernel == nil {
 		closeDups()
 		return nil, fmt.Errorf("descriptor table: net conn, console and kernel are required")
 	}
-	// The net data end is dup'd into the child's slot; the supervisor
-	// keeps no copy (the channel belongs to the two workers).
+	// The net data end is dup'd into the child's slot. Keep the caller's
+	// original open until the boot ack: auto mode must be able to reuse it
+	// for the monolithic fallback after any spawn/handshake failure.
 	netFile, err := connFile(assets.NetConn)
 	if err != nil {
 		closeDups()
 		return nil, err
 	}
-	_ = assets.NetConn.Close()
 	dupFiles = append(dupFiles, netFile)
 	assetFiles := []*os.File{assets.Console, assets.Kernel}
 	if cfg.HasRoot {
@@ -100,14 +134,13 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		}
 		assetFiles = append(assetFiles, assets.Rootfs)
 	}
-	if len(assets.DisksRO) != cfg.NDisksRO || len(assets.Disks) != cfg.NDisks || len(assets.ShareRoots) != len(cfg.Shares) {
+	if len(assets.DisksRO) != cfg.NDisksRO || len(assets.Disks) != cfg.NDisks {
 		closeDups()
-		return nil, fmt.Errorf("descriptor table: counts mismatch (disksRO %d/%d, disks %d/%d, shares %d/%d)",
-			len(assets.DisksRO), cfg.NDisksRO, len(assets.Disks), cfg.NDisks, len(assets.ShareRoots), len(cfg.Shares))
+		return nil, fmt.Errorf("descriptor table: counts mismatch (disksRO %d/%d, disks %d/%d)",
+			len(assets.DisksRO), cfg.NDisksRO, len(assets.Disks), cfg.NDisks)
 	}
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	assetFiles = append(assetFiles, assets.Disks...)
-	assetFiles = append(assetFiles, assets.ShareRoots...)
 	if assets.KVM != nil {
 		assetFiles = append(assetFiles, assets.KVM) // LAST slot (cfg.HasKVM)
 	}
@@ -145,7 +178,7 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	}
 	confine := cfg.Confinement != "" && cfg.Confinement != "off"
 	proc, err := startProc(confine)
-	if err != nil && confine && cfg.Confinement == "auto" && isEPERM(err) {
+	if err != nil && confine && cfg.Confinement == "auto" && isNamespaceUnavailable(err) {
 		// Ubuntu 24.04+ AppArmor blocks unprivileged user namespaces for
 		// unconfined binaries: degrade to a namespace-less spawn (the
 		// worker still self-confines via seccomp; isolation.json reports
@@ -179,7 +212,11 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	}
 	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
 		killProc()
-		return nil, fmt.Errorf("vmm worker nonce: %w", err)
+		return nil, fmt.Errorf("vmm worker fd nonce: %w", err)
+	}
+	if err := workerproto.WriteNonce(shareSup, nonce); err != nil {
+		killProc()
+		return nil, fmt.Errorf("vmm worker share nonce: %w", err)
 	}
 	// Boot ack: the worker answers after Prepare (machine built) — a
 	// missing /dev/kvm or a bad asset surfaces HERE, not as a dead VM
@@ -204,6 +241,7 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	for _, f := range assetFiles {
 		_ = f.Close()
 	}
+	_ = assets.NetConn.Close()
 
 	w := &vmmWorker{
 		proc:       proc,
@@ -211,6 +249,8 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		fdChan:     fdSup,
 		bridge:     bridgeSup,
 		bridgeE:    make(chan error, 1),
+		share:      shareSup,
+		stopping:   make(chan struct{}),
 		dead:       make(chan struct{}),
 		confReport: ack.Confinement,
 	}
@@ -223,6 +263,7 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		_, err := proc.Wait()
 		w.setDead(err)
 	}()
+	keepSup = true
 	return w, nil
 }
 
@@ -288,8 +329,13 @@ func CmdVMMWorker() int {
 		fmt.Fprintln(os.Stderr, "vmm worker fd channel:", err)
 		return 2
 	}
+	shareConn, err := inheritedConn(vmmFDShare, "share channel")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "vmm worker share channel:", err)
+		return 2
+	}
 	assetsFn := func(cfg vmmBootConfig) (vmmWorkerAssets, error) {
-		var a vmmWorkerAssets
+		a := vmmWorkerAssets{ShareConn: shareConn}
 		slot := vmmFDNet
 		next := func(what string) (*os.File, error) {
 			f := os.NewFile(uintptr(slot), what)
@@ -333,13 +379,6 @@ func CmdVMMWorker() int {
 			}
 			a.Disks = append(a.Disks, f)
 		}
-		for i := range cfg.Shares {
-			f, err := next("share-" + cfg.Shares[i].Tag)
-			if err != nil {
-				return a, err
-			}
-			a.ShareRoots = append(a.ShareRoots, f)
-		}
 		if cfg.HasKVM {
 			if a.KVM, err = next("kvm"); err != nil {
 				return a, err
@@ -355,9 +394,13 @@ func CmdVMMWorker() int {
 	return 0
 }
 
-// isEPERM reports whether a spawn failure was a permission denial
-// (AppArmor userns restriction, container policy), which auto mode
-// degrades around.
-func isEPERM(err error) bool {
-	return errors.Is(err, syscall.EPERM)
+// isNamespaceUnavailable reports failures that mean the requested namespace
+// tier cannot be created on this host. Besides policy denials, Linux can
+// return ENOSPC or EUSERS when user/PID namespace quotas are exhausted. Auto
+// mode may honestly degrade around those host constraints; required mode
+// still fails closed. EINVAL is intentionally excluded because it can also
+// identify malformed spawn attributes rather than an unavailable facility.
+func isNamespaceUnavailable(err error) bool {
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EUSERS)
 }

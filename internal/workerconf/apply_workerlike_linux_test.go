@@ -29,14 +29,14 @@ func TestApplyPreservesLiveConnDups(t *testing.T) {
 	cmd := exec.Command(exe, "-test.run", "TestApplyPreservesLiveConnDups")
 	cmd.Env = append(os.Environ(), "WORKERCONF_HELPER=1", "WORKERCONF_ROOT="+root)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID,
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 	}
 	out, err := cmd.CombinedOutput()
 	text := string(out)
 	if err != nil {
-		if strings.Contains(text, "operation not permitted") || strings.Contains(text, "permission denied") {
+		if namespaceTestUnavailable(err, text) {
 			t.Skipf("unprivileged userns unavailable on this host: %v\n%s", err, text)
 		}
 		t.Fatalf("helper failed: %v\n%s", err, text)

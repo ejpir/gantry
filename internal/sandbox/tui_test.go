@@ -257,7 +257,7 @@ func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
 	}
 }
 
-func TestSandboxTUIShareDialogSavesRunningDarwinShareForRestart(t *testing.T) {
+func TestSandboxTUIShareDialogAppliesRunningDarwinShareLive(t *testing.T) {
 	m := newSandboxTUIModel()
 	m.loading = false
 	m.animating = true
@@ -269,15 +269,15 @@ func TestSandboxTUIShareDialogSavesRunningDarwinShareForRestart(t *testing.T) {
 	m.sharePath.SetValue(t.TempDir())
 
 	title, description, button := m.shareDialogCopyForOS("darwin")
-	if title != "Add Share" || button != "Save" || !strings.Contains(description, "restart") {
+	if title != "Add Live Share" || button != "Add" || description != "Attach a host directory without restarting the sandbox." {
 		t.Fatalf("darwin share copy = %q %q %q", title, description, button)
 	}
-	if !shareCanApplyLiveOn(m.sandboxNamed("dev"), "linux") || shareCanApplyLiveOn(m.sandboxNamed("dev"), "darwin") {
+	if !shareCanApplyLiveOn(m.sandboxNamed("dev"), "linux") || !shareCanApplyLiveOn(m.sandboxNamed("dev"), "darwin") {
 		t.Fatal("live-share platform classification is wrong")
 	}
 	model, cmd := m.submitShareForOS("darwin")
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.busyAction != "share configure" || m.busyName != "dev/code" {
+	if cmd == nil || m.busyAction != "share add" || m.busyName != "dev/code" {
 		t.Fatalf("darwin share action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
 	}
 }

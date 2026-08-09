@@ -28,11 +28,9 @@ const maxManagedShares = 256
 // touched. Every step before the hub mutation is reversible, so a failure
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
-// shareServing is the share-plane backend behind ShareManager: the
-// FUSE-serving hub lives either in this process (monolithic) or in the
-// _vmm-worker (split VMM), driven over RPC with descriptor transfers.
-// "prepared" tokens are opaque staging handles (a *virtio.PreparedShare
-// locally, an RPC token remotely).
+// shareServing is the share-plane backend behind ShareManager. The real
+// FUSE-serving hub always remains in this trusted process; split VMMs see
+// only its bounded request relay and never receive a share root.
 type shareServing interface {
 	PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (prepared any, canonical string, err error)
 	Publish(prepared any) (*virtio.ShareExport, error)
@@ -62,7 +60,7 @@ func (s localShareServing) Close() error        { return s.hub.Close() }
 
 type ShareManager struct {
 	dir        string
-	hub        *virtio.ShareHub // nil when the hub lives in the vmm worker
+	hub        *virtio.ShareHub
 	serving    shareServing
 	store      *ConfigStore
 	mu         sync.Mutex
@@ -136,8 +134,8 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 	return m, warnings, nil
 }
 
-// Hub returns the device attached by vmm.Prepare. Nil means unsupported,
-// shareless, or worker-hosted (split VMM).
+// Hub returns the trusted serving hub. Monolithic VMMs attach it directly;
+// split VMMs attach a request-only proxy while this hub stays here.
 func (m *ShareManager) Hub() *virtio.ShareHub { return m.hub }
 
 // Close releases all host-side export roots.
@@ -146,25 +144,6 @@ func (m *ShareManager) Close() error {
 		return nil
 	}
 	return m.serving.Close()
-}
-
-// DetachServing drops the in-process hub for split-VMM mode: the serving
-// hub is built in the worker from transferred roots, and SetServing
-// installs the RPC backend after spawn. Boot-time bookkeeping (exports
-// map, canonical paths) stays valid — the mirror exports report state.
-func (m *ShareManager) DetachServing() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.hub = nil
-	m.serving = nil
-}
-
-// SetServing installs the post-spawn share backend (split VMM: the
-// worker-hosted hub over RPC).
-func (m *ShareManager) SetServing(serving shareServing) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.serving = serving
 }
 
 func defaultHubCtrPath(tag string) string { return shares.HubHostPath + "/" + tag }
@@ -250,9 +229,7 @@ func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry,
 	m.muLock()
 	defer m.muUnlock()
 	if m.serving == nil {
-		// No serving backend: a platform without a virtio-fs hub. After a
-		// VMM split m.hub is nil BY DESIGN (the hub lives in the worker);
-		// the RPC serving backend is what matters here.
+		// No serving backend: a platform without a virtio-fs hub.
 		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
 	if !m.store.Snapshot().RW {
@@ -505,9 +482,9 @@ func (m *ShareManager) publishLocked() error {
 		Generation: m.generation,
 		Shares:     m.entriesLocked(),
 	}
-	if m.hub != nil || m.serving != nil {
-		// The hub transport exists in both topologies: locally (m.hub)
-		// or in the vmm worker (m.serving after the split).
+	if m.hub != nil {
+		// The same hub is attached directly in monolithic mode and served
+		// through the bounded relay in split mode.
 		manifest.Transport = &shares.Transport{Tag: shares.HubTag, VMPath: shares.HubVMPath}
 	}
 	b, err := json.Marshal(manifest)

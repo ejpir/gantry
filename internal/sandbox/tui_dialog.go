@@ -903,8 +903,12 @@ func (m *sandboxTUIModel) submitShareForOS(goos string) (tea.Model, tea.Cmd) {
 	return m.beginAction(action, targetName+"/"+tag, argv, false)
 }
 
-func shareCanApplyLiveOn(target *tuiSandbox, goos string) bool {
-	return target != nil && target.State == tuiRunning && goos != "darwin"
+func shareCanApplyLiveOn(target *tuiSandbox, _ string) bool {
+	// Host paths now stay in the supervisor-owned broker, so a live add
+	// does not require mutating the macOS worker's immutable Seatbelt
+	// profile. Custom container aliases remain restart-only above because
+	// they change the container's bind-mount layout, not the share hub.
+	return target != nil && target.State == tuiRunning
 }
 
 func shareOwnerSuffix(raw string) (string, error) {

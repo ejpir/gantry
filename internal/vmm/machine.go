@@ -225,7 +225,13 @@ func (m *Machine) addVirtio(dev virtio.Device, name string) (*virtio.Core, error
 	var irq int
 	if m.arch == "amd64" {
 		if idx >= len(x86MMIOIRQs) {
-			return nil, fmt.Errorf("virtio-%s: x86-64 supports at most %d virtio-mmio devices (%d legacy IRQ lines)", name, len(x86MMIOIRQs), len(x86MMIOIRQs))
+			attachErr := fmt.Errorf("virtio-%s: x86-64 supports at most %d virtio-mmio devices (%d legacy IRQ lines)", name, len(x86MMIOIRQs), len(x86MMIOIRQs))
+			if closer, ok := dev.(io.Closer); ok {
+				if closeErr := closer.Close(); closeErr != nil {
+					return nil, fmt.Errorf("%w; close rejected device: %v", attachErr, closeErr)
+				}
+			}
+			return nil, attachErr
 		}
 		base = x86MMIOBase + uint64(idx)*x86MMIOStride
 		irq = x86MMIOIRQs[idx]
@@ -314,7 +320,11 @@ type Opts struct {
 	// virtio-fs device instead of one MMIO device per Share. It is
 	// constructed by the sandbox daemon before Prepare so the broker can
 	// keep mutating its namespace while the VM runs.
-	ShareHub    *virtio.ShareHub
+	ShareHub *virtio.ShareHub
+	// ShareProxy is the split-VMM frontend for ShareHub. It carries only
+	// bounded FUSE request/response bytes to the supervisor-side broker;
+	// it owns no host path, directory descriptor, or directory handle.
+	ShareProxy  *virtio.ShareHubProxy
 	NetEndpoint string                  // Unix datagram raw-Ethernet endpoint; "" disables NIC
 	NetConn     net.Conn                // QEMU-framed in-process link (embedded netstack); takes precedence over NetEndpoint
 	NetPolicy   *netpol.Policy          // egress policy on the NetConn link; nil = unrestricted
@@ -357,7 +367,7 @@ func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 	return m.vsock.InjectConn(guestPort, nc)
 }
 
-func Prepare(o Opts) (*Machine, error) {
+func Prepare(o Opts) (result *Machine, resultErr error) {
 	bootTimingStart := o.BootTimingStart
 	if bootTimingStart.IsZero() && gutil.EnvOr("GANTRY_BOOT_TIMING", "MINIVM_BOOT_TIMING") != "" {
 		// Direct `gantry run` and one-shot exec have no daemon clock to pass.
@@ -369,6 +379,16 @@ func Prepare(o Opts) (*Machine, error) {
 	if m.consoleW == nil {
 		m.consoleW = os.Stdout
 	}
+	// Once a device is attached, Machine owns it. Any later preparation
+	// error must unwind those devices (disk descriptors and writable flocks,
+	// packet endpoints, shares, and forwarded sockets) just like normal VM
+	// teardown. addVirtio separately closes the one device it rejects before
+	// it can enter m.virtios.
+	defer func() {
+		if resultErr != nil {
+			_ = m.Close()
+		}
+	}()
 
 	// guest RAM is allocated by the backend (it must be mapped into the
 	// hypervisor); here we only fill it.
@@ -447,11 +467,21 @@ func Prepare(o Opts) (*Machine, error) {
 		fmt.Printf("virtio-blk: %s @ %#x irq %d (%s, %d MiB) -> /dev/vd%c\n",
 			path, core.Base(), core.IRQ(), mode, blk.Size()>>20, 'a'+i)
 	}
+	if o.ShareHub != nil && o.ShareProxy != nil {
+		return nil, fmt.Errorf("virtio-fs: ShareHub and ShareProxy are mutually exclusive")
+	}
 	if o.ShareHub != nil {
 		if len(o.Shares) != 0 {
 			return nil, fmt.Errorf("virtio-fs: ShareHub and per-share devices are mutually exclusive")
 		}
 		if err := m.addShareHub(o.ShareHub); err != nil {
+			return nil, err
+		}
+	} else if o.ShareProxy != nil {
+		if len(o.Shares) != 0 {
+			return nil, fmt.Errorf("virtio-fs: ShareProxy and per-share devices are mutually exclusive")
+		}
+		if err := m.addShareProxy(o.ShareProxy); err != nil {
 			return nil, err
 		}
 	} else {
