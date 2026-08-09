@@ -556,9 +556,16 @@ func Session(client *ttrpc.Client, opts SessionOptions, stdin io.Reader, stdout 
 	// a kill signal (ctrl-C in one-shot mode, daemon RPC in sandbox mode)
 	// kills the task rather than just dropping the connection
 	if opts.KillCh != nil {
+		sessionDone := make(chan struct{})
+		defer close(sessionDone)
 		go func() {
-			<-opts.KillCh
-			_, _ = tc.Kill(context.Background(), &task.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true})
+			select {
+			case <-opts.KillCh:
+				killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, _ = tc.Kill(killCtx, &task.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true})
+			case <-sessionDone:
+			}
 		}()
 	}
 
@@ -745,9 +752,16 @@ func sessionExec(client *ttrpc.Client, tc task.TTRPCTaskService, opts SessionOpt
 		close(stdoutDone)
 	}()
 	if opts.KillCh != nil {
+		sessionDone := make(chan struct{})
+		defer close(sessionDone)
 		go func() {
-			<-opts.KillCh
-			_, _ = tc.Kill(context.Background(), &task.KillRequest{ID: id, ExecID: execID, Signal: uint32(syscall.SIGKILL)})
+			select {
+			case <-opts.KillCh:
+				killCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_, _ = tc.Kill(killCtx, &task.KillRequest{ID: id, ExecID: execID, Signal: uint32(syscall.SIGKILL)})
+			case <-sessionDone:
+			}
 		}()
 	}
 

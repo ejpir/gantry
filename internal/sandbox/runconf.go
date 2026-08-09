@@ -55,8 +55,12 @@ type RunConfig struct {
 	GVProxy  string           `json:"gvproxy,omitempty"`
 	NetPol   string           `json:"net_policy,omitempty"`
 	AllowLN  bool             `json:"allow_local_net,omitempty"`
-	MemMB    uint             `json:"memMB"`
-	VCPUs    int              `json:"vcpus,omitempty"`
+	// OAuthBridge controls the bounded host loopback callback bridge. Nil
+	// means enabled, preserving the default for configs written before this
+	// field existed; a non-nil false value is the persisted opt-out.
+	OAuthBridge *bool `json:"oauth_bridge,omitempty"`
+	MemMB       uint  `json:"memMB"`
+	VCPUs       int   `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1).
@@ -86,6 +90,7 @@ type RunFlags struct {
 	Net                                     *bool
 	GVProxy, NetPol                         *string
 	AllowLN                                 *bool
+	OAuthBridge                             *bool
 	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
@@ -107,6 +112,7 @@ or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
 		GVProxy:          fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
 		NetPol:           fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
 		AllowLN:          fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
+		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, "guest vCPU count (max 8)"),
@@ -143,6 +149,9 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	}
 	set := map[string]bool{}
 	fs.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	if set["oauth-bridge"] && *f.OAuthBridge && f.Name == "" {
+		return cfg, nil, fmt.Errorf("-oauth-bridge requires a named sandbox (use gantry start, then gantry exec)")
+	}
 
 	cfg.Runtime = *f.Runtime
 	cfg.Kernel, cfg.Rootfs = *f.Kernel, *f.Rootfs
@@ -328,6 +337,10 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 	}
 	cfg.NetPol = *f.NetPol
 	cfg.AllowLN = *f.AllowLN
+	if f.Name != "" {
+		enabled := *f.OAuthBridge
+		cfg.OAuthBridge = &enabled
+	}
 	cfg.MemMB = *f.MemMB
 	cfg.VCPUs = min(*f.VCPUs, 8)
 
@@ -383,6 +396,12 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (cfg
 		}
 	}
 	return cfg, warnings, nil
+}
+
+// OAuthBridgeEnabled resolves the default-on persisted setting. A pointer is
+// used so configs written before oauth_bridge existed also inherit the default.
+func (c RunConfig) OAuthBridgeEnabled() bool {
+	return c.OAuthBridge == nil || *c.OAuthBridge
 }
 
 // ResolveSecrets parses -secret/-secret-file into the value map (CLI

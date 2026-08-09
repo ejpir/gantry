@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -54,6 +55,11 @@ func TestOAuthCallbackPorts(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "arbitrary application port ignored",
+			text: `redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fcallback`,
+			want: nil,
+		},
+		{
 			name: "unrelated noise",
 			text: "npm warn deprecated foo@1.2.3\nserver on http://localhost:3000/health",
 			want: nil,
@@ -81,20 +87,26 @@ func TestOAuthCallbackPorts(t *testing.T) {
 }
 
 func TestOAuthCallbackPortsLocalhostHealthNotCallback(t *testing.T) {
-	// A bare http://localhost:PORT/<non-callback> URL must not arm the
-	// bridge: only redirect_uri params or *callback* paths count.
+	// A loopback URL with a non-callback path must not arm the bridge,
+	// whether it is bare or appears as a redirect_uri parameter.
 	if got := oauthCallbackPorts("curl http://localhost:3000/health && break"); len(got) != 0 {
 		t.Fatalf("ports = %v, want none", got)
+	}
+	if got := oauthCallbackPorts("redirect_uri=http%3A%2F%2Flocalhost%3A55000%2Fhealth"); len(got) != 0 {
+		t.Fatalf("non-callback redirect_uri ports = %v, want none", got)
 	}
 }
 
 func testBridge(t *testing.T, replay func(port int, uri string) (oauthReplayResult, error)) *oauthBridge {
 	t.Helper()
 	b := &oauthBridge{
-		replay:    replay,
-		logf:      func(string, ...any) {},
-		listeners: map[int]*oauthListener{},
-		failed:    map[int]bool{},
+		replay:           replay,
+		logf:             func(string, ...any) {},
+		listeners:        map[int]*oauthListener{},
+		failed:           map[int]bool{},
+		replaySlots:      make(chan struct{}, oauthMaxConcurrentReplays),
+		replayTimeout:    time.Second,
+		listenerLifetime: time.Minute,
 	}
 	t.Cleanup(func() {
 		b.mu.Lock()
@@ -108,6 +120,20 @@ func testBridge(t *testing.T, replay func(port int, uri string) (oauthReplayResu
 		}
 	})
 	return b
+}
+
+func freeAllowedOAuthPort(t *testing.T) int {
+	t.Helper()
+	for port := 55000; port < 65000; port++ {
+		ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return port
+	}
+	t.Fatal("no free OAuth callback port")
+	return 0
 }
 
 func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
@@ -141,12 +167,7 @@ func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
 
 	// Sniff a codex-style authorize URL; the bridge must bind 1455-equivalent.
 	// Use a free port instead of 1455 to avoid host collisions in CI.
-	freeLn, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := freeLn.Addr().(*net.TCPAddr).Port
-	_ = freeLn.Close()
+	port := freeAllowedOAuthPort(t)
 
 	var out strings.Builder
 	w := b.sniffWriter(&out)
@@ -213,7 +234,7 @@ func TestBridgeForwardsGuestRedirect(t *testing.T) {
 	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
 		return oauthReplayResult{status: 302, location: "/auth/success", contentType: "text/plain; charset=utf-8"}, nil
 	})
-	l := &oauthListener{port: 1, done: make(chan struct{})}
+	l := &oauthListener{port: 1}
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state=s", nil)
 	rec := httptest.NewRecorder()
 	b.handleCallback(l)(rec, req)
@@ -232,7 +253,7 @@ func TestBridgeReplayFailureReturnsBadGateway(t *testing.T) {
 	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
 		return oauthReplayResult{}, fmt.Errorf("in-sandbox replay exited 97: cannot connect")
 	})
-	l := &oauthListener{port: 1, done: make(chan struct{})}
+	l := &oauthListener{port: 1}
 	req := httptest.NewRequest(http.MethodGet, "/callback?code=x", nil)
 	rec := httptest.NewRecorder()
 	b.handleCallback(l)(rec, req)
@@ -249,7 +270,7 @@ func TestBridgeRejectsNonGET(t *testing.T) {
 		t.Fatal("replay must not run for POST")
 		return oauthReplayResult{}, nil
 	})
-	l := &oauthListener{port: 1, done: make(chan struct{})}
+	l := &oauthListener{port: 1}
 	req := httptest.NewRequest(http.MethodPost, "/callback", strings.NewReader("x"))
 	rec := httptest.NewRecorder()
 	b.handleCallback(l)(rec, req)
@@ -257,6 +278,159 @@ func TestBridgeRejectsNonGET(t *testing.T) {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }
+
+func TestBridgeCapsConcurrentReplays(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, oauthMaxConcurrentReplays)
+	var calls atomic.Int32
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return oauthReplayResult{status: http.StatusOK, body: []byte("ok")}, nil
+	})
+	l := &oauthListener{port: 1455}
+	done := make(chan struct{}, oauthMaxConcurrentReplays)
+	for i := 0; i < oauthMaxConcurrentReplays; i++ {
+		go func(i int) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/callback?attempt=%d", i), nil)
+			b.handleCallback(l)(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Errorf("replay %d status = %d, want 200", i, rec.Code)
+			}
+			done <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < oauthMaxConcurrentReplays; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("replay did not start")
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/callback?attempt=overflow", nil)
+	b.handleCallback(l)(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("overflow replay status = %d, want 429", rec.Code)
+	}
+	if got := calls.Load(); got != oauthMaxConcurrentReplays {
+		t.Fatalf("replay calls = %d, want capped at %d", got, oauthMaxConcurrentReplays)
+	}
+	close(release)
+	for i := 0; i < oauthMaxConcurrentReplays; i++ {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("replay did not unwind")
+		}
+	}
+}
+
+func TestBridgeReplayTimeoutKeepsSlotCharged(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
+		close(started)
+		<-release
+		return oauthReplayResult{status: http.StatusOK}, nil
+	})
+	b.replayTimeout = 20 * time.Millisecond
+	l := &oauthListener{port: 1455}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/callback?code=slow", nil)
+	begin := time.Now()
+	b.handleCallback(l)(rec, req)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("timeout status = %d, want 504", rec.Code)
+	}
+	if elapsed := time.Since(begin); elapsed > time.Second {
+		t.Fatalf("timeout response took %s", elapsed)
+	}
+	<-started
+	if got := len(b.replaySlots); got != 1 {
+		t.Fatalf("timed-out replay released slot while still running: %d", got)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for len(b.replaySlots) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("replay slot was not released after underlying replay stopped")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestBridgeRejectsOversizeReplayResponse(t *testing.T) {
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
+		return oauthReplayResult{
+			status: http.StatusOK,
+			body:   []byte(strings.Repeat("x", oauthMaxReplayResponseSize+1)),
+		}, nil
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/callback?code=large", nil)
+	b.handleCallback(&oauthListener{port: 1455})(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("oversize response status = %d, want 502", rec.Code)
+	}
+	if rec.Body.Len() >= oauthMaxReplayResponseSize {
+		t.Fatalf("oversize guest body was relayed: %d bytes", rec.Body.Len())
+	}
+
+	var capture oauthCapture
+	payload := []byte(strings.Repeat("y", oauthMaxReplayResponseSize+4096))
+	if n, err := capture.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("bounded capture write = %d, %v", n, err)
+	}
+	if !capture.overflow || capture.buf.Len() != oauthMaxReplayResponseSize {
+		t.Fatalf("bounded capture: overflow=%v retained=%d", capture.overflow, capture.buf.Len())
+	}
+	if _, err := parseRawHTTPResponse(payload); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversize raw response error = %v", err)
+	}
+}
+
+func TestBridgeRejectsOversizeCallbackURI(t *testing.T) {
+	b := testBridge(t, func(port int, uri string) (oauthReplayResult, error) {
+		t.Fatal("oversize callback must be rejected before replay")
+		return oauthReplayResult{}, nil
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/callback?state="+strings.Repeat("x", oauthMaxRequestURIBytes), nil)
+	b.handleCallback(&oauthListener{port: 1455})(rec, req)
+	if rec.Code != http.StatusRequestURITooLong {
+		t.Fatalf("oversize callback status = %d, want 414", rec.Code)
+	}
+}
+
+func TestBridgeListenerLimit(t *testing.T) {
+	b := testBridge(t, nil)
+	for i := 0; i < oauthMaxActiveListeners; i++ {
+		port := 55000 + i
+		b.listeners[port] = &oauthListener{port: port, ln: closedTestListener{}}
+	}
+	target := 56000
+	b.ensureListener(target)
+	b.mu.Lock()
+	_, added := b.listeners[target]
+	count := len(b.listeners)
+	// The fake listeners were not started by serve; remove them before
+	// testBridge's cleanup attempts to close the map.
+	b.listeners = map[int]*oauthListener{}
+	b.mu.Unlock()
+	if added || count != oauthMaxActiveListeners {
+		t.Fatalf("listeners after overflow: added=%v count=%d", added, count)
+	}
+}
+
+type closedTestListener struct{}
+
+func (closedTestListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (closedTestListener) Close() error              { return nil }
+func (closedTestListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
 func TestParseRawHTTPResponse(t *testing.T) {
 	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: exec exited, status 0\n"
@@ -303,16 +477,26 @@ func TestParseRawHTTPResponse(t *testing.T) {
 	}
 }
 
+func TestDecodeChunkedBodyRejectsOverflowSize(t *testing.T) {
+	if _, err := decodeChunkedBody([]byte("7fffffffffffffff\r\nx\r\n")); err == nil {
+		t.Fatal("MaxInt64 chunk size must be rejected")
+	}
+	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffffffffffff\r\nx\r\n"
+	if _, err := parseRawHTTPResponse([]byte(raw)); err == nil || !strings.Contains(err.Error(), "decode chunked") {
+		t.Fatalf("malformed chunked response error = %v", err)
+	}
+}
+
 func TestSniffWriterDedupesAndBindFailure(t *testing.T) {
 	b := testBridge(t, nil)
 
 	// Bind a port ourselves so the bridge's bind fails.
-	freeLn, err := net.Listen("tcp4", "127.0.0.1:0")
+	port := freeAllowedOAuthPort(t)
+	freeLn, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = freeLn.Close() }()
-	port := freeLn.Addr().(*net.TCPAddr).Port
 
 	b.ensureListener(port)
 	b.ensureListener(port) // idempotent, no panic, no double log
@@ -329,14 +513,22 @@ func TestSniffWriterDedupesAndBindFailure(t *testing.T) {
 	}
 }
 
-func TestNewOAuthBridgeDisabled(t *testing.T) {
-	t.Setenv("GANTRY_OAUTH_BRIDGE", "0")
-	if newOAuthBridge(&broker{}) != nil {
-		t.Fatal("bridge must be nil when GANTRY_OAUTH_BRIDGE=0")
-	}
+func TestNewOAuthBridgeDefaultsOnWithExplicitOverrides(t *testing.T) {
 	t.Setenv("GANTRY_OAUTH_BRIDGE", "")
 	if newOAuthBridge(&broker{}) == nil {
-		t.Fatal("bridge must default to enabled")
+		t.Fatal("bridge must default on for legacy and default configs")
+	}
+	disabled := false
+	if newOAuthBridge(&broker{cfg: RunConfig{OAuthBridge: &disabled}}) != nil {
+		t.Fatal("persisted oauth_bridge=false did not disable bridge")
+	}
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "1")
+	if newOAuthBridge(&broker{cfg: RunConfig{OAuthBridge: &disabled}}) == nil {
+		t.Fatal("GANTRY_OAUTH_BRIDGE=1 must override a persisted opt-out")
+	}
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "0")
+	if newOAuthBridge(&broker{}) != nil {
+		t.Fatal("GANTRY_OAUTH_BRIDGE=0 must override default activation")
 	}
 }
 

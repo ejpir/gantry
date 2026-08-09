@@ -1125,9 +1125,9 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	// used to live here predates image configs)
 	manifest := client.LoadShareManifest(br.dir)
 	var status int
-	// Session stdout flows through the broker; tee it through the OAuth
-	// bridge sniffer so a CLI's printed authorize URL transparently arms
-	// the host-side callback listener (noop when the bridge is disabled).
+	// Session stdout flows through the broker. The default-on OAuth bridge
+	// sniffer can arm only bounded, approved host-side callback listeners;
+	// per-sandbox and global settings can disable it.
 	stdout := io.Writer(c)
 	if br.oauth != nil {
 		stdout = br.oauth.sniffWriter(stdout)

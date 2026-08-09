@@ -27,12 +27,12 @@ package sandbox
 //     to the browser and closes the listener once a callback carrying
 //     code=/error= has been delivered.
 //
-// Security posture: host listener binds 127.0.0.1 only; only GET requests
-// are replayed; only the request path+query crosses the boundary (never
-// browser headers/cookies); the replay target is guest loopback. A guest
-// that prints fake URLs can only cause binds of host loopback ports it
-// could already reach from inside the sandbox. Disable with
-// GANTRY_OAUTH_BRIDGE=0.
+// Security posture: the bridge is enabled by default, with per-sandbox and
+// global opt-outs. Host listeners bind 127.0.0.1 only and are restricted to
+// the documented fixed callback ports or the dynamic OAuth range. Listener
+// count, replay concurrency, duration, request size, and response size are all
+// bounded. Only GET path+query is replayed to guest loopback; browser headers
+// and cookies never cross the boundary.
 //
 // This mirrors the reference sandbox stack's behavior (host-side callback
 // listener + replay via in-sandbox exec) without its TLS-intercepting
@@ -41,6 +41,7 @@ package sandbox
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -50,9 +51,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
+)
+
+const (
+	oauthMaxActiveListeners    = 4
+	oauthMaxFailedPorts        = 64
+	oauthMaxPortsPerSession    = 4
+	oauthMaxConcurrentReplays  = 2
+	oauthMaxRequestURIBytes    = 8 << 10
+	oauthMaxReplayResponseSize = 256 << 10
+	oauthReplayTimeout         = 15 * time.Second
+	oauthListenerLifetime      = 10 * time.Minute
 )
 
 // oauthBridge owns the host-side listeners for one sandbox daemon.
@@ -67,13 +80,21 @@ type oauthBridge struct {
 	mu        sync.Mutex
 	listeners map[int]*oauthListener // port -> active host listener
 	failed    map[int]bool           // ports we could not bind (stop retrying)
+
+	// replaySlots is a non-blocking semaphore. A full semaphore returns
+	// 429 rather than accumulating browser-handler goroutines behind a
+	// wedged guest callback listener.
+	replaySlots chan struct{}
+	// Tests shorten these; zero selects the production defaults.
+	replayTimeout    time.Duration
+	listenerLifetime time.Duration
 }
 
 // oauthListener is one bound host port.
 type oauthListener struct {
 	port int
 	ln   net.Listener
-	done chan struct{}
+	ttl  *time.Timer
 }
 
 var (
@@ -87,19 +108,38 @@ var (
 	reOAuthLoopbackURL = regexp.MustCompile(`http://(?:localhost|127\.0\.0\.1):(\d{1,5})/[^\s"'\)]*callback`)
 )
 
-// newOAuthBridge creates the bridge for a broker, or nil when disabled via
-// GANTRY_OAUTH_BRIDGE=0/false/no/off.
+// newOAuthBridge creates the default-on, resource-bounded bridge. The persisted
+// sandbox setting can opt out; GANTRY_OAUTH_BRIDGE is a global override.
 func newOAuthBridge(br *broker) *oauthBridge {
+	if br == nil {
+		return nil
+	}
+	enabled := br.cfg.OAuthBridgeEnabled()
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_OAUTH_BRIDGE"))) {
+	case "1", "true", "yes", "on":
+		enabled = true
 	case "0", "false", "no", "off":
 		return nil
 	}
-	return &oauthBridge{
-		br:        br,
-		logf:      func(format string, a ...any) { fmt.Printf("daemon: oauth bridge: "+format+"\n", a...) },
-		listeners: map[int]*oauthListener{},
-		failed:    map[int]bool{},
+	if !enabled {
+		return nil
 	}
+	return &oauthBridge{
+		br:               br,
+		logf:             func(format string, a ...any) { fmt.Printf("daemon: oauth bridge: "+format+"\n", a...) },
+		listeners:        map[int]*oauthListener{},
+		failed:           map[int]bool{},
+		replaySlots:      make(chan struct{}, oauthMaxConcurrentReplays),
+		replayTimeout:    oauthReplayTimeout,
+		listenerLifetime: oauthListenerLifetime,
+	}
+}
+
+// allowedOAuthCallbackPort keeps stdout-derived binds away from arbitrary
+// host services. Codex and pi use the two fixed ports; Claude-style dynamic
+// callbacks use the IANA dynamic/private range.
+func allowedOAuthCallbackPort(port int) bool {
+	return port == 1455 || port == 53692 || port >= 49152 && port <= 65535
 }
 
 // oauthCallbackPorts extracts host-side ports of OAuth loopback redirect
@@ -108,7 +148,7 @@ func newOAuthBridge(br *broker) *oauthBridge {
 func oauthCallbackPorts(text string) []int {
 	seen := map[int]bool{}
 	add := func(p int) {
-		if p > 1024 && p < 65536 { // skip privileged + invalid
+		if allowedOAuthCallbackPort(p) {
 			seen[p] = true
 		}
 	}
@@ -122,6 +162,9 @@ func oauthCallbackPorts(text string) []int {
 			continue
 		}
 		if h := u.Hostname(); h != "localhost" && h != "127.0.0.1" {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(u.Path), "callback") {
 			continue
 		}
 		if p, err := strconv.Atoi(u.Port()); err == nil {
@@ -144,13 +187,16 @@ func oauthCallbackPorts(text string) []int {
 // scanning for OAuth callback URLs. Safe for terminal byte streams: the
 // scan is read-only over a rolling window.
 func (b *oauthBridge) sniffWriter(w io.Writer) io.Writer {
-	return &oauthSniffWriter{w: w, b: b}
+	return &oauthSniffWriter{w: w, b: b, seen: map[int]bool{}}
 }
 
 type oauthSniffWriter struct {
 	w   io.Writer
 	b   *oauthBridge
 	buf []byte // rolling tail window for URLs split across writes
+	// A declared session may arm a small number of flows, not walk the
+	// entire dynamic port range by printing synthetic authorize URLs.
+	seen map[int]bool
 }
 
 func (s *oauthSniffWriter) Write(p []byte) (int, error) {
@@ -161,6 +207,10 @@ func (s *oauthSniffWriter) Write(p []byte) (int, error) {
 			s.buf = s.buf[len(s.buf)-16384:]
 		}
 		for _, port := range oauthCallbackPorts(string(s.buf)) {
+			if s.seen[port] || len(s.seen) >= oauthMaxPortsPerSession {
+				continue
+			}
+			s.seen[port] = true
 			s.b.ensureListener(port)
 		}
 	}
@@ -170,23 +220,34 @@ func (s *oauthSniffWriter) Write(p []byte) (int, error) {
 // ensureListener binds 127.0.0.1:port on the host once. Bind failures are
 // remembered so repeated prints of the same URL don't spam.
 func (b *oauthBridge) ensureListener(port int) {
+	if !allowedOAuthCallbackPort(port) {
+		return
+	}
 	b.mu.Lock()
 	if _, ok := b.listeners[port]; ok || b.failed[port] {
 		b.mu.Unlock()
 		return
 	}
-	b.mu.Unlock()
-
+	if len(b.listeners) >= oauthMaxActiveListeners {
+		b.mu.Unlock()
+		b.logf("listener limit reached (%d); ignoring callback port %d", oauthMaxActiveListeners, port)
+		return
+	}
+	// Keep the lock across bind so concurrent output cannot race the same
+	// port or exceed the listener limit between check and publication.
 	ln, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
-		b.mu.Lock()
+		if len(b.failed) >= oauthMaxFailedPorts {
+			b.failed = map[int]bool{}
+		}
 		b.failed[port] = true
 		b.mu.Unlock()
 		b.logf("cannot bind host 127.0.0.1:%d (%v) — is something already using it?", port, err)
 		return
 	}
-	l := &oauthListener{port: port, ln: ln, done: make(chan struct{})}
-	b.mu.Lock()
+	l := &oauthListener{port: port, ln: ln}
+	// A flow the user abandons must not hold the host port forever.
+	l.ttl = time.AfterFunc(b.lifetime(), func() { b.closeExactListener(l) })
 	b.listeners[port] = l
 	b.mu.Unlock()
 	b.logf("OAuth callback detected: listening on host http://127.0.0.1:%d (replaying into the sandbox)", port)
@@ -195,27 +256,73 @@ func (b *oauthBridge) ensureListener(port int) {
 
 // serve accepts browser connections until the listener closes.
 func (b *oauthBridge) serve(l *oauthListener) {
+	replayTimeout := b.timeout()
 	srv := &http.Server{
 		Handler:           http.HandlerFunc(b.handleCallback(l)),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      replayTimeout + 5*time.Second,
+		IdleTimeout:       15 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
-	// Idle safety: a flow the user abandons (never redirects) must not hold
-	// the host port forever. Ten minutes matches common OAuth timeouts.
-	time.AfterFunc(10*time.Minute, func() { b.closeListener(l.port) })
 	_ = srv.Serve(l.ln)
+	b.closeExactListener(l)
 }
 
 // closeListener unbinds and forgets a port. Safe to call repeatedly.
 func (b *oauthBridge) closeListener(port int) {
 	b.mu.Lock()
-	l, ok := b.listeners[port]
-	delete(b.listeners, port)
+	l := b.listeners[port]
 	b.mu.Unlock()
-	if ok {
-		_ = l.ln.Close()
-		b.logf("closed host listener on 127.0.0.1:%d", port)
+	if l != nil {
+		b.closeExactListener(l)
 	}
 }
+
+// closeExactListener prevents an old TTL/callback timer from closing a new
+// listener that later reused the same port.
+func (b *oauthBridge) closeExactListener(l *oauthListener) {
+	b.mu.Lock()
+	if b.listeners[l.port] != l {
+		b.mu.Unlock()
+		return
+	}
+	// Close before making the port available for reuse. Otherwise a scanner
+	// can observe the deleted map entry, race the still-open socket, and
+	// permanently cache an EADDRINUSE failure for this bridge.
+	if l.ttl != nil {
+		l.ttl.Stop()
+	}
+	_ = l.ln.Close()
+	delete(b.listeners, l.port)
+	b.mu.Unlock()
+	b.logf("closed host listener on 127.0.0.1:%d", l.port)
+}
+
+func (b *oauthBridge) timeout() time.Duration {
+	if b.replayTimeout > 0 {
+		return b.replayTimeout
+	}
+	return oauthReplayTimeout
+}
+
+func (b *oauthBridge) lifetime() time.Duration {
+	if b.listenerLifetime > 0 {
+		return b.listenerLifetime
+	}
+	return oauthListenerLifetime
+}
+
+func (b *oauthBridge) acquireReplay() bool {
+	select {
+	case b.replaySlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *oauthBridge) releaseReplay() { <-b.replaySlots }
 
 // handleCallback serves one browser request: replay the path+query into the
 // sandbox's loopback listener and relay the response. After a request
@@ -228,11 +335,54 @@ func (b *oauthBridge) handleCallback(l *oauthListener) func(http.ResponseWriter,
 			return
 		}
 		uri := r.URL.RequestURI()
-		if len(uri) > 8192 {
+		if len(uri) > oauthMaxRequestURIBytes {
 			http.Error(w, "gantry oauth bridge: callback URL too long", http.StatusRequestURITooLong)
 			return
 		}
-		res, err := b.replayIntoGuest(l.port, uri)
+		if !b.acquireReplay() {
+			http.Error(w, "gantry oauth bridge: too many callbacks are already being replayed", http.StatusTooManyRequests)
+			return
+		}
+		type outcome struct {
+			res oauthReplayResult
+			err error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			var out outcome
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					out = outcome{err: fmt.Errorf("callback replay panic: %v", recovered)}
+				}
+				done <- out
+			}()
+			out.res, out.err = b.replayIntoGuest(l.port, uri)
+		}()
+		timer := time.NewTimer(b.timeout())
+		var out outcome
+		select {
+		case out = <-done:
+			timer.Stop()
+			b.releaseReplay()
+		case <-timer.C:
+			// Keep the slot charged until the underlying replay actually
+			// unwinds. Even a guest/RPC bug that ignores cancellation can
+			// therefore strand at most oauthMaxConcurrentReplays goroutines.
+			go func() {
+				<-done
+				b.releaseReplay()
+			}()
+			http.Error(w, "gantry oauth bridge: callback replay timed out", http.StatusGatewayTimeout)
+			return
+		case <-r.Context().Done():
+			timer.Stop()
+			go func() {
+				<-done
+				b.releaseReplay()
+			}()
+			return
+		}
+		res, err := out.res, out.err
 		if err != nil {
 			b.logf("replay into sandbox failed (port %d): %v", l.port, err)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -240,7 +390,17 @@ func (b *oauthBridge) handleCallback(l *oauthListener) func(http.ResponseWriter,
 			_, _ = fmt.Fprintf(w, `<html><body style="font-family:sans-serif;max-width:40em;margin:3em auto">`+
 				`<h2>Sign-in could not be completed</h2><p>Gantry could not deliver the OAuth callback `+
 				`to the CLI inside the sandbox: %s</p><p>Check that the CLI is still waiting for sign-in, `+
-				`then retry. Details are in the sandbox daemon log.</p></body></html>`, err)
+				`then retry. Details are in the sandbox daemon log.</p></body></html>`, html.EscapeString(err.Error()))
+			return
+		}
+		if len(res.body) > oauthMaxReplayResponseSize {
+			b.logf("replay response from sandbox port %d exceeded %d bytes", l.port, oauthMaxReplayResponseSize)
+			http.Error(w, "gantry oauth bridge: callback response too large", http.StatusBadGateway)
+			return
+		}
+		if res.status < 200 || res.status > 599 {
+			b.logf("replay response from sandbox port %d used invalid status %d", l.port, res.status)
+			http.Error(w, "gantry oauth bridge: invalid callback response", http.StatusBadGateway)
 			return
 		}
 		ct := res.contentType
@@ -259,7 +419,7 @@ func (b *oauthBridge) handleCallback(l *oauthListener) func(http.ResponseWriter,
 		if q := r.URL.Query(); q.Get("code") != "" || q.Get("error") != "" {
 			// OAuth flows are one-shot: the CLI exchanges the code and
 			// shuts its listener. Free the host port for the next login.
-			time.AfterFunc(2*time.Second, func() { b.closeListener(l.port) })
+			time.AfterFunc(2*time.Second, func() { b.closeExactListener(l) })
 		}
 	}
 }
@@ -299,7 +459,10 @@ cat <&3
 // replayViaDevTCP execs the replay script in the sandbox container and
 // parses the CLI listener's raw HTTP response.
 func (b *oauthBridge) replayViaDevTCP(port int, requestURI string) (oauthReplayResult, error) {
-	stdout, status, err := b.br.oauthExec([]string{"bash", "-c", devTCPReplayScript, "--", strconv.Itoa(port), requestURI})
+	stdout, status, err := b.br.oauthExec(
+		[]string{"bash", "-c", devTCPReplayScript, "--", strconv.Itoa(port), requestURI},
+		b.timeout(),
+	)
 	if err != nil {
 		return oauthReplayResult{}, fmt.Errorf("in-sandbox replay exec: %w", err)
 	}
@@ -321,6 +484,9 @@ func (b *oauthBridge) replayViaDevTCP(port int, requestURI string) (oauthReplayR
 // body. Content-Length bodies are sliced exactly; chunked bodies are
 // unfolded.
 func parseRawHTTPResponse(raw []byte) (oauthReplayResult, error) {
+	if len(raw) > oauthMaxReplayResponseSize {
+		return oauthReplayResult{}, fmt.Errorf("HTTP response exceeds %d bytes", oauthMaxReplayResponseSize)
+	}
 	head, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
 	if !ok {
 		return oauthReplayResult{}, fmt.Errorf("no HTTP response from the in-sandbox listener: %.200s", raw)
@@ -334,6 +500,9 @@ func parseRawHTTPResponse(raw []byte) (oauthReplayResult, error) {
 	if err != nil {
 		return oauthReplayResult{}, fmt.Errorf("malformed HTTP status code: %.100s", statusLine)
 	}
+	if status < 200 || status > 599 {
+		return oauthReplayResult{}, fmt.Errorf("invalid HTTP status code %d", status)
+	}
 	res := oauthReplayResult{status: status, body: body}
 	var chunked bool
 	for _, line := range bytes.Split(headers, []byte("\r\n")) {
@@ -344,7 +513,13 @@ func parseRawHTTPResponse(raw []byte) (oauthReplayResult, error) {
 		v = bytes.TrimSpace(v)
 		switch {
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Length")):
-			if n, err := strconv.Atoi(string(v)); err == nil && n >= 0 && n <= len(res.body) {
+			if n, err := strconv.Atoi(string(v)); err == nil && n >= 0 {
+				if n > oauthMaxReplayResponseSize {
+					return oauthReplayResult{}, fmt.Errorf("HTTP response Content-Length %d exceeds %d bytes", n, oauthMaxReplayResponseSize)
+				}
+				if n > len(res.body) {
+					return oauthReplayResult{}, fmt.Errorf("truncated HTTP response body: got %d bytes, want %d", len(res.body), n)
+				}
 				res.body = res.body[:n]
 			}
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Transfer-Encoding")):
@@ -356,9 +531,11 @@ func parseRawHTTPResponse(raw []byte) (oauthReplayResult, error) {
 		}
 	}
 	if chunked {
-		if decoded, err := decodeChunkedBody(res.body); err == nil {
-			res.body = decoded
+		decoded, err := decodeChunkedBody(res.body)
+		if err != nil {
+			return oauthReplayResult{}, fmt.Errorf("decode chunked HTTP response: %w", err)
 		}
+		res.body = decoded
 	}
 	return res, nil
 }
@@ -384,10 +561,15 @@ func decodeChunkedBody(raw []byte) ([]byte, error) {
 		if n == 0 {
 			return out, nil // last-chunk; trailers ignored
 		}
-		if int64(len(tail)) < n+2 {
+		// Spell this without n+2: a malicious MaxInt64 chunk size would
+		// overflow that addition and turn the subsequent slice into a panic.
+		if len(tail) < 2 || n > int64(len(tail)-2) {
 			return nil, fmt.Errorf("truncated chunk data")
 		}
 		out = append(out, tail[:n]...)
+		if !bytes.Equal(tail[n:n+2], []byte("\r\n")) {
+			return nil, fmt.Errorf("malformed chunk terminator")
+		}
 		rest = tail[n+2:] // skip data + CRLF
 	}
 }
@@ -400,13 +582,54 @@ func tailBytes(b []byte, n int) []byte {
 	return b
 }
 
+// oauthCapture drains all stdout so the guest process cannot block on a full
+// pipe, but retains only the bounded prefix needed to parse the callback
+// response. overflow is reported after the internal exec unwinds.
+type oauthCapture struct {
+	mu       sync.Mutex
+	buf      bytes.Buffer
+	overflow bool
+}
+
+func (c *oauthCapture) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	remaining := oauthMaxReplayResponseSize - c.buf.Len()
+	if remaining > 0 {
+		keep := len(p)
+		if keep > remaining {
+			keep = remaining
+		}
+		_, _ = c.buf.Write(p[:keep])
+	}
+	if len(p) > remaining {
+		c.overflow = true
+	}
+	return len(p), nil
+}
+
+func (c *oauthCapture) snapshot() ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.buf.Bytes()...), c.overflow
+}
+
 // oauthExec runs a one-shot command inside the sandbox container and
 // captures its stdout. It is a normal session exec, multiplexed over the
 // daemon's single guest RPC connection like any concurrent `gantry exec`.
 // User secrets are deliberately NOT injected into this internal process.
-func (br *broker) oauthExec(args []string) ([]byte, int, error) {
-	var buf bytes.Buffer
+func (br *broker) oauthExec(args []string, timeout time.Duration) ([]byte, int, error) {
+	var capture oauthCapture
 	var status int
+	if timeout <= 0 {
+		timeout = oauthReplayTimeout
+	}
+	killCh := make(chan struct{}, 1)
+	var expired atomic.Bool
+	timer := time.AfterFunc(timeout, func() {
+		expired.Store(true)
+		killCh <- struct{}{}
+	})
 	manifest := client.LoadShareManifest(br.dir)
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock:       br.streamSock,
@@ -421,6 +644,15 @@ func (br *broker) oauthExec(args []string) ([]byte, int, error) {
 		ImgCfg:           br.cfg.ImageCfg,
 		Quiet:            true,
 		ExitStatus:       &status,
-	}, strings.NewReader(""), &buf)
-	return buf.Bytes(), status, err
+		KillCh:           killCh,
+	}, strings.NewReader(""), &capture)
+	_ = timer.Stop()
+	stdout, overflow := capture.snapshot()
+	if expired.Load() {
+		return nil, status, fmt.Errorf("callback replay exceeded %s", timeout)
+	}
+	if overflow {
+		return nil, status, fmt.Errorf("callback response exceeds %d bytes", oauthMaxReplayResponseSize)
+	}
+	return stdout, status, err
 }

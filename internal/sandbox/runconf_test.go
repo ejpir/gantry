@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -24,6 +25,10 @@ var resolveAssets = []string{
 
 // touch the asset files Resolve requires, in a temp cwd
 func resolveSandbox(t *testing.T, args ...string) (RunConfig, []string, error) {
+	return resolveNamedSandbox(t, "", args...)
+}
+
+func resolveNamedSandbox(t *testing.T, name string, args ...string) (RunConfig, []string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -34,6 +39,7 @@ func resolveSandbox(t *testing.T, args ...string) (RunConfig, []string, error) {
 	}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	rf := RegisterRunFlags(fs)
+	rf.Name = name
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
@@ -103,6 +109,43 @@ func TestResolveRWWithLayer(t *testing.T) {
 func TestResolveRuntimeSwitch(t *testing.T) {
 	if _, _, err := resolveSandbox(t, "-runtime", "bogus"); err == nil || !strings.Contains(err.Error(), "crun or runsc") {
 		t.Errorf("bogus runtime: want switch error, got %v", err)
+	}
+}
+
+func TestResolveOAuthBridgeDefaultsOnAndPersistsOptOut(t *testing.T) {
+	cfg, _, err := resolveNamedSandbox(t, "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.OAuthBridgeEnabled() {
+		t.Fatal("OAuth bridge must default on")
+	}
+	cfg, _, err = resolveNamedSandbox(t, "agent", "-oauth-bridge=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OAuthBridge == nil || cfg.OAuthBridgeEnabled() {
+		t.Fatal("-oauth-bridge=false did not persist the opt-out")
+	}
+	if !(RunConfig{}).OAuthBridgeEnabled() {
+		t.Fatal("legacy config without oauth_bridge must default on")
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip RunConfig
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.OAuthBridge == nil || roundTrip.OAuthBridgeEnabled() {
+		t.Fatalf("persisted opt-out did not survive JSON round trip: %s", raw)
+	}
+	if _, _, err := resolveSandbox(t, "-oauth-bridge"); err == nil || !strings.Contains(err.Error(), "named sandbox") {
+		t.Fatalf("one-shot -oauth-bridge error = %v", err)
+	}
+	if _, _, err := resolveSandbox(t); err != nil {
+		t.Fatalf("one-shot default unexpectedly failed: %v", err)
 	}
 }
 

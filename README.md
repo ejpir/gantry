@@ -81,10 +81,12 @@ attestation — verify with
 - **Secrets** — `-secret NAME`, `NAME=@file`, or `-secret-file`; values travel
   memory-only to per-exec process specs, never argv, sandbox state, or the
   daemon environment.
-- **OAuth sign-in bridge** — agent CLIs (codex, claude, pi) that sign in via
-  a localhost callback just work: the daemon spots the printed authorize URL,
-  binds the same loopback port on the host, and replays the browser's
-  callback into the sandbox. Disable with `GANTRY_OAUTH_BRIDGE=0`.
+- **OAuth sign-in bridge** — enabled by default for agent CLIs (codex, claude,
+  pi) that sign in via a localhost callback. The daemon spots the printed
+  authorize URL, binds a bounded/approved loopback port on the host, and
+  replays the browser callback into the sandbox. Use
+  `gantry start NAME -oauth-bridge=false` to opt out;
+  `GANTRY_OAUTH_BRIDGE=1|0` is the global enable/disable override.
 - **Persistence and resources** — named sandboxes get private locked writable
   layers plus configurable memory/vCPUs; dashboard edits apply on next boot.
 - **Dashboard and import** — create/start/stop/exec plus Traffic, Rules,
