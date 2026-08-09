@@ -642,6 +642,7 @@ func CmdDaemon(name, readySocket string) int {
 		sessions:   map[string]chan struct{}{},
 		sessionCtl: map[string]net.Conn{},
 	}
+	br.oauth = newOAuthBridge(br)
 	go br.serve(ln)
 
 	select {
@@ -707,6 +708,7 @@ type broker struct {
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
 	sessionCtl map[string]net.Conn // parked control channels, session id -> conn
+	oauth      *oauthBridge        // OAuth loopback callback bridge (nil when disabled)
 }
 
 // secretsHandshakeJSON renders the CLI→daemon handshake: one line of
@@ -1106,6 +1108,13 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 	// used to live here predates image configs)
 	manifest := client.LoadShareManifest(br.dir)
 	var status int
+	// Session stdout flows through the broker; tee it through the OAuth
+	// bridge sniffer so a CLI's printed authorize URL transparently arms
+	// the host-side callback listener (noop when the bridge is disabled).
+	stdout := io.Writer(c)
+	if br.oauth != nil {
+		stdout = br.oauth.sniffWriter(stdout)
+	}
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock:     br.streamSock,
 		StreamDial:     br.streamDial,
@@ -1126,7 +1135,7 @@ func (br *broker) session(c net.Conn, req brokerRequest) {
 		Terminal:         req.Terminal,
 		KillCh:           killCh,
 		ExitStatus:       &status,
-	}, c, c)
+	}, c, stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
 		// The broker is the only process that still has the sandbox logs

@@ -81,6 +81,10 @@ attestation — verify with
 - **Secrets** — `-secret NAME`, `NAME=@file`, or `-secret-file`; values travel
   memory-only to per-exec process specs, never argv, sandbox state, or the
   daemon environment.
+- **OAuth sign-in bridge** — agent CLIs (codex, claude, pi) that sign in via
+  a localhost callback just work: the daemon spots the printed authorize URL,
+  binds the same loopback port on the host, and replays the browser's
+  callback into the sandbox. Disable with `GANTRY_OAUTH_BRIDGE=0`.
 - **Persistence and resources** — named sandboxes get private locked writable
   layers plus configurable memory/vCPUs; dashboard edits apply on next boot.
 - **Dashboard and import** — create/start/stop/exec plus Traffic, Rules,
