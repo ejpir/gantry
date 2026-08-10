@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vnet"
 )
@@ -101,6 +103,35 @@ func TestNetworkPolicyManagerPersistenceFailureRestoresSnapshot(t *testing.T) {
 	}
 	if cfg := store.Snapshot(); cfg.NetPol != "" || cfg.AllowLN {
 		t.Fatalf("persistence failure changed config: %+v", cfg)
+	}
+}
+
+func TestNetworkPolicyManagerKeepsCommittedPolicyOnDurabilityError(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{Net: true})
+	policyPath := filepath.Join(dir, "deny.json")
+	if err := os.WriteFile(policyPath, []byte(`{"default":"deny"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("directory sync failed")
+	store.write = func(path string, data []byte, mode os.FileMode) error {
+		if err := os.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return &atomicfile.CommitError{Err: wantErr}
+	}
+
+	live := netpol.DefaultPolicy()
+	manager := NewNetworkPolicyManager(store, newLocalBackend(&vnet.Stack{}, live), live)
+	entry, err := manager.Set(policyPath, false)
+	if !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
+		t.Fatalf("Set error = %v, want committed durability error", err)
+	}
+	if entry.State != "active" || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+		t.Fatalf("committed live policy = %+v", entry)
+	}
+	if cfg := store.Snapshot(); cfg.NetPol == "" {
+		t.Fatalf("committed configuration was rolled back: %+v", cfg)
 	}
 }
 

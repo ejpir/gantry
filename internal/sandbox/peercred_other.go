@@ -4,9 +4,9 @@ package sandbox
 
 import "net"
 
-// peerSameUser: AF_UNIX on Windows exposes no peer-credential mechanism,
-// so the access control is the sandbox directory ACL (the user profile
-// keeps other local users out). Same trust domain as on unix: the user
-// account itself — per-process authentication between same-account
-// processes is not a primitive any of our platforms offers.
+// peerSameUser: AF_UNIX on Windows exposes no peer-credential mechanism.
+// Before the broker starts, both its directory and endpoint receive protected
+// DACLs that are read back and verified to admit only the process user plus
+// trusted operating-system principals. Same-account processes remain one
+// trust domain, as they are on Unix.
 func peerSameUser(net.Conn) bool { return true }

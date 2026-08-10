@@ -6,6 +6,66 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func runFilter(t *testing.T, program []unix.SockFilter, nr uint32, args ...uint64) uint32 {
+	t.Helper()
+	valueAt := func(offset uint32) uint32 {
+		switch offset {
+		case offNr:
+			return nr
+		case offArch:
+			return auditArch
+		}
+		if offset < offArg0 || offset >= offArg0+6*8 {
+			t.Fatalf("unsupported seccomp_data offset %d", offset)
+		}
+		arg := int((offset - offArg0) / 8)
+		if arg >= len(args) {
+			return 0
+		}
+		if (offset-offArg0)%8 == 4 {
+			return uint32(args[arg] >> 32)
+		}
+		return uint32(args[arg])
+	}
+
+	var accumulator uint32
+	for pc := 0; pc < len(program); {
+		instruction := program[pc]
+		switch instruction.Code {
+		case bpfLD | bpfW | bpfABS:
+			accumulator = valueAt(instruction.K)
+			pc++
+		case bpfALU | bpfAND | bpfK:
+			accumulator &= instruction.K
+			pc++
+		case bpfJMP | bpfJEQ | bpfK:
+			if accumulator == instruction.K {
+				pc += int(instruction.Jt) + 1
+			} else {
+				pc += int(instruction.Jf) + 1
+			}
+		case bpfJMP | bpfJGE | bpfK:
+			if accumulator >= instruction.K {
+				pc += int(instruction.Jt) + 1
+			} else {
+				pc += int(instruction.Jf) + 1
+			}
+		case bpfJMP | bpfJGT | bpfK:
+			if accumulator > instruction.K {
+				pc += int(instruction.Jt) + 1
+			} else {
+				pc += int(instruction.Jf) + 1
+			}
+		case bpfRET | bpfK:
+			return instruction.K
+		default:
+			t.Fatalf("unsupported BPF instruction %#x at %d", instruction.Code, pc)
+		}
+	}
+	t.Fatal("seccomp filter fell off the program")
+	return 0
+}
+
 func sysIoctlNr() int { return unix.SYS_IOCTL }
 
 // TestBuildFilterOffsets validates the assembled BPF program
@@ -43,37 +103,41 @@ func TestBuildFilterOffsets(t *testing.T) {
 		switch ins.K {
 		case uint32(unix.SYS_SCHED_GETAFFINITY):
 			sawAffinity = true
-			if i+2 >= len(prog) || prog[i+1].Code != bpfLD|bpfW|bpfABS || prog[i+1].K != offArg0 {
+			block := i + 1 + int(ins.Jt)
+			if block+1 >= len(prog) || prog[block].Code != bpfLD|bpfW|bpfABS || prog[block].K != offArg0 {
 				t.Fatalf("sched_getaffinity check does not load args[0] after dispatch at %d", i)
 			}
-			if prog[i+2].Code != bpfJMP|bpfJEQ|bpfK || prog[i+2].K != 0 {
+			if prog[block+1].Code != bpfJMP|bpfJEQ|bpfK || prog[block+1].K != 0 {
 				t.Fatalf("sched_getaffinity check does not compare pid zero after dispatch at %d", i)
 			}
 		case uint32(unix.SYS_TGKILL):
 			sawTGKill = true
-			if i+2 >= len(prog) || prog[i+1].Code != bpfLD|bpfW|bpfABS || prog[i+1].K != offArg0 {
+			block := i + 1 + int(ins.Jt)
+			if block+1 >= len(prog) || prog[block].Code != bpfLD|bpfW|bpfABS || prog[block].K != offArg0 {
 				t.Fatalf("tgkill check does not load args[0] after dispatch at %d", i)
 			}
-			if prog[i+2].Code != bpfJMP|bpfJEQ|bpfK || prog[i+2].K != selfTGID {
+			if prog[block+1].Code != bpfJMP|bpfJEQ|bpfK || prog[block+1].K != selfTGID {
 				t.Fatalf("tgkill check does not compare the self TGID after dispatch at %d", i)
 			}
 		case uint32(unix.SYS_FCNTL):
 			sawFcntl = true
-			if i+1+len(safeFcntlCommands) >= len(prog) ||
-				prog[i+1].Code != bpfLD|bpfW|bpfABS || prog[i+1].K != offArg1 {
+			block := i + 1 + int(ins.Jt)
+			if block+len(safeFcntlCommands) >= len(prog) ||
+				prog[block].Code != bpfLD|bpfW|bpfABS || prog[block].K != offArg1 {
 				t.Fatalf("fcntl check does not load args[1] after dispatch at %d", i)
 			}
 			for j, cmd := range safeFcntlCommands {
-				got := prog[i+2+j]
+				got := prog[block+1+j]
 				if got.Code != bpfJMP|bpfJEQ|bpfK || got.K != cmd {
 					t.Fatalf("fcntl safe command %d = %#x/%d, want JEQ/%d", j, got.Code, got.K, cmd)
 				}
 			}
 		case uint32(sysIoctlNr()):
 			sawIOCTL = true
+			block := i + 1 + int(ins.Jt)
 			// The ioctl argument check must read the REQUEST (args[1]),
 			// never the fd (args[0]) — the AL2023 KVM regression.
-			if i+1 >= len(prog) || prog[i+1].Code != bpfLD|bpfW|bpfABS || prog[i+1].K != 24 {
+			if block >= len(prog) || prog[block].Code != bpfLD|bpfW|bpfABS || prog[block].K != offArg1 {
 				t.Fatalf("ioctl arg check does not load args[1] (offset 24) after dispatch at %d", i)
 			}
 		}
@@ -108,6 +172,81 @@ func TestFcntlSignalCommandsExcluded(t *testing.T) {
 	}
 }
 
+func TestRoleFiltersEnforceCapabilities(t *testing.T) {
+	const selfTGID = uint32(1234)
+	network := buildFilterFor(NetworkSpec(4, ""), selfTGID)
+	vmm := buildFilter(selfTGID)
+
+	for name, test := range map[string]struct {
+		nr   uint32
+		args []uint64
+	}{
+		"IPv4 TCP": {unix.SYS_SOCKET, []uint64{unix.AF_INET, unix.SOCK_STREAM | unix.SOCK_CLOEXEC, 0}},
+		"IPv6 UDP": {unix.SYS_SOCKET, []uint64{unix.AF_INET6, unix.SOCK_DGRAM | unix.SOCK_NONBLOCK, unix.IPPROTO_UDP}},
+		"connect":  {unix.SYS_CONNECT, nil},
+		"accept4":  {unix.SYS_ACCEPT4, nil},
+		"read config": {unix.SYS_OPENAT, []uint64{
+			0, 0, unix.O_RDONLY | unix.O_CLOEXEC,
+		}},
+	} {
+		t.Run("network allows "+name, func(t *testing.T) {
+			if got := runFilter(t, network, test.nr, test.args...); got != retAllow {
+				t.Fatalf("result %#x, want allow", got)
+			}
+		})
+	}
+
+	for name, test := range map[string]struct {
+		nr   uint32
+		args []uint64
+	}{
+		"Unix socket":   {unix.SYS_SOCKET, []uint64{unix.AF_UNIX, unix.SOCK_STREAM, 0}},
+		"raw socket":    {unix.SYS_SOCKET, []uint64{unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_TCP}},
+		"packet socket": {unix.SYS_SOCKET, []uint64{unix.AF_PACKET, unix.SOCK_DGRAM, 0}},
+		"write config":  {unix.SYS_OPENAT, []uint64{0, 0, unix.O_WRONLY | unix.O_CREAT | unix.O_CLOEXEC}},
+		"KVM ioctl":     {unix.SYS_IOCTL, []uint64{9, 0xAE01}},
+		"SCM receive":   {unix.SYS_RECVMSG, nil},
+		"SCM send":      {unix.SYS_SENDMSG, nil},
+	} {
+		t.Run("network denies "+name, func(t *testing.T) {
+			if got := runFilter(t, network, test.nr, test.args...); got != retErrno|sysEPERM {
+				t.Fatalf("result %#x, want EPERM", got)
+			}
+		})
+	}
+
+	if got := runFilter(t, vmm, unix.SYS_SOCKET, unix.AF_INET, unix.SOCK_STREAM, 0); got != retErrno|sysEPERM {
+		t.Fatalf("VMM socket result %#x, want EPERM", got)
+	}
+	if got := runFilter(t, vmm, unix.SYS_IOCTL, 9, 0xAE01); got != retAllow {
+		t.Fatalf("VMM KVM ioctl result %#x, want allow", got)
+	}
+	if got := runFilter(t, network, unix.SYS_CLONE3); got != retErrno|sysENOSYS {
+		t.Fatalf("clone3 result %#x, want ENOSYS", got)
+	}
+	if got := runFilter(t, network, unix.SYS_CLONE, uint64(unix.SIGCHLD)); got != retErrno|sysEPERM {
+		t.Fatalf("process clone result %#x, want EPERM", got)
+	}
+	threadFlags := uint64(unix.CLONE_VM | unix.CLONE_FS | unix.CLONE_FILES | unix.CLONE_SIGHAND | unix.CLONE_THREAD)
+	if got := runFilter(t, network, unix.SYS_CLONE, threadFlags); got != retAllow {
+		t.Fatalf("thread clone result %#x, want allow", got)
+	}
+	if got := runFilter(t, network, unix.SYS_PRLIMIT64, 0, unix.RLIMIT_NPROC, 0, 1); got != retAllow {
+		t.Fatalf("self RLIMIT_NPROC query result %#x, want allow", got)
+	}
+	for name, args := range map[string][]uint64{
+		"outside pid": {1, unix.RLIMIT_NPROC, 0, 1},
+		"new limit":   {0, unix.RLIMIT_NPROC, 1, 0},
+		"other limit": {0, unix.RLIMIT_NOFILE, 0, 1},
+	} {
+		t.Run("prlimit denies "+name, func(t *testing.T) {
+			if got := runFilter(t, network, unix.SYS_PRLIMIT64, args...); got != retErrno|sysEPERM {
+				t.Fatalf("result %#x, want EPERM", got)
+			}
+		})
+	}
+}
+
 func TestVMMWhitelistHasNoPathAuthority(t *testing.T) {
 	allowed := make(map[uint32]bool, len(whitelist)+len(archWhitelist()))
 	for _, nr := range append(append([]uint32(nil), whitelist...), archWhitelist()...) {
@@ -126,6 +265,25 @@ func TestVMMWhitelistHasNoPathAuthority(t *testing.T) {
 	} {
 		if allowed[nr] {
 			t.Errorf("%s remains in the VMM seccomp whitelist", name)
+		}
+	}
+}
+
+func TestVMMWhitelistHasNoFileShapeOrLockMutation(t *testing.T) {
+	allowed := make(map[uint32]bool, len(whitelist)+len(archWhitelist()))
+	for _, nr := range append(append([]uint32(nil), whitelist...), archWhitelist()...) {
+		allowed[nr] = true
+	}
+	for name, nr := range map[string]uint32{
+		"ftruncate": unix.SYS_FTRUNCATE,
+		"fallocate": unix.SYS_FALLOCATE,
+		"flock":     unix.SYS_FLOCK,
+	} {
+		if allowed[nr] {
+			t.Errorf("%s remains in the VMM seccomp whitelist", name)
+		}
+		if got := runFilter(t, buildFilter(1234), nr); got != retErrno|sysEPERM {
+			t.Errorf("%s filter result %#x, want EPERM", name, got)
 		}
 	}
 }

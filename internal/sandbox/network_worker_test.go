@@ -4,11 +4,11 @@ package sandbox
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -16,10 +16,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
@@ -33,6 +36,15 @@ type closeCountingConn struct {
 	count  atomic.Int32
 	closed chan struct{}
 	once   sync.Once
+}
+
+func testWorkerNonce(t *testing.T) []byte {
+	t.Helper()
+	nonce, err := workerproto.NewNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return nonce
 }
 
 func (c *closeCountingConn) Close() error {
@@ -81,19 +93,19 @@ func workerTestFrame(t *testing.T, dstIP string, proto uint8, dport uint16) []by
 	return frame
 }
 
-// startInProcessWorker drives runNetWorker on net.Pipe channels and
+// startInProcessWorker drives networkworker.Run on net.Pipe channels and
 // performs the supervisor-side handshake + nonce, returning the ready
 // backend. The worker goroutine exits when the backend is closed.
 // expectDeath tolerates an error exit in cleanup (the malformed-frame
 // test kills the worker on purpose).
-func startInProcessWorker(t *testing.T, cfg netWorkerConfig, expectDeath ...bool) (*netWorker, net.Conn) {
+func startInProcessWorker(t *testing.T, cfg networkworker.Config, expectDeath ...bool) (*netWorker, net.Conn) {
 	t.Helper()
 	ctrlSup, ctrlWrk := net.Pipe()
 	dataSup, dataWrk := net.Pipe()
 	workerErr := make(chan error, 1)
-	go func() { workerErr <- runNetWorker(ctrlWrk, dataWrk) }()
+	go func() { workerErr <- networkworker.Run(ctrlWrk, dataWrk) }()
 
-	nonce := workerproto.NewNonce()
+	nonce := testWorkerNonce(t)
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleNet, nonce, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +122,9 @@ func startInProcessWorker(t *testing.T, cfg netWorkerConfig, expectDeath ...bool
 		t.Fatal("worker bootstrap refused")
 	}
 	w := &netWorker{
-		client: workerproto.NewClient(ctrlSup),
-		data:   dataSup,
-		dead:   make(chan struct{}),
+		client:    workerproto.NewClient(ctrlSup),
+		data:      dataSup,
+		lifecycle: newWorkerLifecycle(),
 	}
 	tolerate := len(expectDeath) > 0 && expectDeath[0]
 	t.Cleanup(func() {
@@ -131,12 +143,12 @@ func startInProcessWorker(t *testing.T, cfg netWorkerConfig, expectDeath ...bool
 	return w, dataSup
 }
 
-func testWorkerConfig(t *testing.T, policyJSON string) netWorkerConfig {
+func testWorkerConfig(t *testing.T, policyJSON string) networkworker.Config {
 	t.Helper()
-	return netWorkerConfig{
+	return networkworker.Config{
 		GuestMAC:    testWorkerMAC,
 		Policy:      json.RawMessage(policyJSON),
-		TrafficPath: filepath.Join(t.TempDir(), "traffic.json"),
+		Confinement: "off",
 	}
 }
 
@@ -172,6 +184,57 @@ func TestNetWorkerLifecycleAndPorts(t *testing.T) {
 	}
 }
 
+func TestNetWorkerPortTransactionsAreIdempotent(t *testing.T) {
+	w, _ := startInProcessWorker(t, testWorkerConfig(t, `{"default":"allow"}`))
+	port, err := freePortForProto("tcp", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := networkworker.PortPublishRequest{
+		Transaction: "publish-once",
+		Proto:       "tcp",
+		Local:       fmt.Sprintf("127.0.0.1:%d", port),
+		Remote:      "192.168.127.2:8080",
+	}
+	for i := 0; i < 2; i++ {
+		var response networkworker.PortStatusResponse
+		if err := w.client.Call(networkworker.OpPortPublish, request, &response); err != nil {
+			t.Fatalf("publish replay %d: %v", i+1, err)
+		}
+		if response.Transaction != request.Transaction || response.State != networkworker.PortStateApplied {
+			t.Fatalf("publish replay %d response = %+v", i+1, response)
+		}
+	}
+	forwards, err := w.Forwards()
+	if err != nil || len(forwards) != 1 {
+		t.Fatalf("idempotent publish forwards = %+v, err=%v", forwards, err)
+	}
+
+	reused := request
+	reused.Remote = "192.168.127.2:9090"
+	if err := w.client.Call(networkworker.OpPortPublish, reused, nil); err == nil {
+		t.Fatal("transaction ID reuse with different content succeeded")
+	}
+
+	unpublish := networkworker.PortUnpublishRequest{
+		Transaction: "unpublish-once",
+		Proto:       request.Proto,
+		Local:       request.Local,
+	}
+	for i := 0; i < 2; i++ {
+		var response networkworker.PortStatusResponse
+		if err := w.client.Call(networkworker.OpPortUnpublish, unpublish, &response); err != nil {
+			t.Fatalf("unpublish replay %d: %v", i+1, err)
+		}
+		if response.State != networkworker.PortStateApplied {
+			t.Fatalf("unpublish replay %d response = %+v", i+1, response)
+		}
+	}
+	if forwards, err := w.Forwards(); err != nil || len(forwards) != 0 {
+		t.Fatalf("idempotent unpublish forwards = %+v, err=%v", forwards, err)
+	}
+}
+
 // TestNetWorkerDoneConsumptionDoesNotBlockClose is the failure-teardown
 // regression. Done used to carry one buffered error value: the daemon consumed
 // it in its fatal-worker select, then deferred Close waited forever for a
@@ -181,7 +244,7 @@ func TestNetWorkerDoneConsumptionDoesNotBlockClose(t *testing.T) {
 	want := errors.New("worker failed")
 	var kills atomic.Int32
 	w := &netWorker{
-		dead: make(chan struct{}),
+		lifecycle: newWorkerLifecycle(),
 		kill: func() error {
 			kills.Add(1)
 			return nil
@@ -213,6 +276,20 @@ func TestNetWorkerDoneConsumptionDoesNotBlockClose(t *testing.T) {
 	}
 }
 
+func TestNetWorkerCloseReportsShutdownRPCFailure(t *testing.T) {
+	supervisor, peer := net.Pipe()
+	client := workerproto.NewClient(supervisor)
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	worker := &netWorker{client: client, lifecycle: newWorkerLifecycle()}
+
+	err := worker.Close()
+	if err == nil || !strings.Contains(err.Error(), "network worker shutdown") {
+		t.Fatalf("Close error = %v, want shutdown RPC failure", err)
+	}
+}
+
 // TestNetWorkerCloseConcurrentIdempotent exercises the teardown races that can
 // stack in production (fatal worker notification, Network.Close, and deferred
 // daemon cleanup). Exactly one caller owns channel teardown; every caller sees
@@ -224,8 +301,8 @@ func TestNetWorkerCloseConcurrentIdempotent(t *testing.T) {
 	want := errors.New("worker exited")
 	var kills atomic.Int32
 	w := &netWorker{
-		data: data,
-		dead: make(chan struct{}),
+		data:      data,
+		lifecycle: newWorkerLifecycle(),
 		kill: func() error {
 			kills.Add(1)
 			return nil
@@ -328,6 +405,48 @@ func TestNetWorkerPolicyEnforcedAcrossChannel(t *testing.T) {
 	}
 }
 
+func TestNetWorkerTrafficPersistsAcrossWorkerEpochsAndFinalSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), netpol.TrafficFileName)
+	supervisor := netpol.NewTrafficRecorder(path)
+
+	for boot := 0; boot < 2; boot++ {
+		w, data := startInProcessWorker(t, testWorkerConfig(t, `{"default":"allow"}`))
+		// Ensure the periodic pull cannot fire. Close must obtain the final
+		// cumulative snapshot in the graceful shutdown response.
+		w.startTrafficSyncEvery(supervisor, time.Hour)
+		if err := workerproto.WriteFrame(data,
+			workerTestFrame(t, "203.0.113.7", 6, uint16(443+boot))); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			snapshot, err := w.TrafficSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.TXPackets == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("boot %d traffic was not observed: %+v", boot+1, snapshot)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("close boot %d: %v", boot+1, err)
+		}
+	}
+
+	supervisor.Close()
+	got, err := netpol.ReadTrafficSnapshot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TXPackets != 2 || len(got.Entries) != 2 {
+		t.Fatalf("lifetime traffic after two workers = %+v", got)
+	}
+}
+
 func TestNetWorkerMalformedFrameTearsDownLink(t *testing.T) {
 	w, data := startInProcessWorker(t, testWorkerConfig(t, `{"default":"allow"}`), true)
 
@@ -355,19 +474,19 @@ func TestNetWorkerNonceMismatchRefused(t *testing.T) {
 	ctrlSup, ctrlWrk := net.Pipe()
 	dataSup, dataWrk := net.Pipe()
 	workerErr := make(chan error, 1)
-	go func() { workerErr <- runNetWorker(ctrlWrk, dataWrk) }()
+	go func() { workerErr <- networkworker.Run(ctrlWrk, dataWrk) }()
 	defer func() {
 		_ = ctrlSup.Close()
 		_ = dataSup.Close()
 	}()
 
-	nonce := workerproto.NewNonce()
+	nonce := testWorkerNonce(t)
 	cfg := testWorkerConfig(t, `{"default":"allow"}`)
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleNet, nonce, cfg); err != nil {
 		t.Fatal(err)
 	}
 	// Wrong nonce on the data channel: cross-wiring must be fatal.
-	if err := workerproto.WriteNonce(dataSup, workerproto.NewNonce()); err != nil {
+	if err := workerproto.WriteNonce(dataSup, testWorkerNonce(t)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -394,50 +513,273 @@ func TestNetWorkerPolicyGenerationOrder(t *testing.T) {
 	}
 	// Worker-side out-of-order prepare is rejected
 	raw, _ := netpol.Marshal(deny)
-	err := w.client.Call("policy.prepare", policyPrepareRequest{Generation: 99, Transaction: "out-of-order", Policy: raw}, nil)
+	err := w.client.Call(networkworker.OpPolicyPrepare, networkworker.PolicyPrepareRequest{Generation: 99, Transaction: "out-of-order", Policy: raw}, nil)
 	if err == nil {
 		t.Fatal("out-of-order generation accepted")
 	}
 }
 
-func newPolicyTransactionState(t *testing.T) (*netWorkerState, *netpol.Policy) {
-	t.Helper()
-	initial := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)
-	raw, err := netpol.Marshal(initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &netWorkerState{
-		policy: initial, currentDigest: sha256.Sum256(raw),
-	}, initial
+type policyRPCStep struct {
+	op     string
+	handle func(workerproto.Request) (any, error)
 }
 
-func startPolicyTransactionRPC(t *testing.T, state *netWorkerState, overrides map[string]workerproto.Handler) *netWorker {
+type portRPCStep struct {
+	op     string
+	handle func(workerproto.Request) (any, error)
+}
+
+const wPortTestTimeout = 500 * time.Millisecond
+
+func startPortTransactionRPC(t *testing.T, steps []portRPCStep) *netWorker {
 	t.Helper()
 	sup, worker := net.Pipe()
-	handlers := map[string]workerproto.Handler{
-		"policy.prepare": state.preparePolicy,
-		"policy.commit":  state.commitPolicy,
-		"policy.abort":   state.abortPolicy,
-		"policy.status":  state.policyStatus,
+	var mu sync.Mutex
+	next := 0
+	dispatch := func(op string) workerproto.Handler {
+		return func(req workerproto.Request) (any, error) {
+			mu.Lock()
+			if next >= len(steps) {
+				mu.Unlock()
+				return nil, fmt.Errorf("unexpected port operation %s", op)
+			}
+			stepIndex := next
+			step := steps[stepIndex]
+			next++
+			mu.Unlock()
+			if step.op != op {
+				return nil, fmt.Errorf("port operation %d = %s, want %s", stepIndex+1, op, step.op)
+			}
+			return step.handle(req)
+		}
 	}
-	for op, handler := range overrides {
-		handlers[op] = handler
+	handlers := make(map[string]workerproto.Handler)
+	ordered := make(map[string]bool)
+	for _, op := range []string{
+		networkworker.OpPortPublish,
+		networkworker.OpPortUnpublish,
+		networkworker.OpPortStatus,
+		networkworker.OpPortList,
+	} {
+		handlers[op] = dispatch(op)
+		ordered[op] = true
 	}
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- workerproto.ServeRequestsWithOptions(worker, handlers, workerproto.ServeOptions{
-			OrderedOps: map[string]bool{
-				"policy.prepare": true,
-				"policy.commit":  true,
-				"policy.abort":   true,
-				"policy.status":  true,
-			},
+		serveErr <- workerproto.ServeRequestsWithOptions(worker, handlers,
+			workerproto.ServeOptions{OrderedOps: ordered})
+	}()
+	client := workerproto.NewClient(sup)
+	client.Timeout = wPortTestTimeout
+	w := &netWorker{client: client, lifecycle: newWorkerLifecycle()}
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = worker.Close()
+		select {
+		case <-serveErr:
+		case <-time.After(time.Second):
+			t.Error("port RPC server did not stop")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if next != len(steps) {
+			t.Errorf("port script consumed %d/%d steps", next, len(steps))
+		}
+	})
+	return w
+}
+
+func decodePortPublish(t *testing.T, req workerproto.Request) networkworker.PortPublishRequest {
+	t.Helper()
+	var body networkworker.PortPublishRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
+		t.Errorf("decode port publish: %v", err)
+	}
+	return body
+}
+
+func decodePortStatus(t *testing.T, req workerproto.Request) networkworker.PortStatusRequest {
+	t.Helper()
+	var body networkworker.PortStatusRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
+		t.Errorf("decode port status: %v", err)
+	}
+	return body
+}
+
+func decodePortUnpublish(t *testing.T, req workerproto.Request) networkworker.PortUnpublishRequest {
+	t.Helper()
+	var body networkworker.PortUnpublishRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
+		t.Errorf("decode port unpublish: %v", err)
+	}
+	return body
+}
+
+func TestNetWorkerPortTransactionsRecoverLostResponses(t *testing.T) {
+	const local = "127.0.0.1:18090"
+	const remote = "192.168.127.2:8080"
+
+	t.Run("status confirms lost publish response", func(t *testing.T) {
+		var transaction string
+		w := startPortTransactionRPC(t, []portRPCStep{
+			{op: networkworker.OpPortPublish, handle: func(req workerproto.Request) (any, error) {
+				body := decodePortPublish(t, req)
+				transaction = body.Transaction
+				return nil, errors.New("simulated lost publish response after apply")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePortStatus(t, req).Transaction; got != transaction {
+					t.Errorf("status transaction = %q, want %q", got, transaction)
+				}
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateApplied}, nil
+			}},
 		})
+		if err := w.Publish("tcp", local, remote); err != nil {
+			t.Fatalf("lost publish response: %v", err)
+		}
+	})
+
+	t.Run("lost status response retries same transaction", func(t *testing.T) {
+		var transaction string
+		w := startPortTransactionRPC(t, []portRPCStep{
+			{op: networkworker.OpPortPublish, handle: func(req workerproto.Request) (any, error) {
+				transaction = decodePortPublish(t, req).Transaction
+				return nil, errors.New("simulated lost publish response after apply")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePortStatus(t, req).Transaction; got != transaction {
+					t.Errorf("status transaction = %q, want %q", got, transaction)
+				}
+				return nil, errors.New("simulated lost status response")
+			}},
+			{op: networkworker.OpPortPublish, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePortPublish(t, req).Transaction; got != transaction {
+					t.Errorf("retried transaction = %q, want %q", got, transaction)
+				}
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateApplied}, nil
+			}},
+		})
+		if err := w.Publish("tcp", local, remote); err != nil {
+			t.Fatalf("lost status response: %v", err)
+		}
+	})
+
+	t.Run("status confirms lost unpublish response", func(t *testing.T) {
+		var transaction string
+		w := startPortTransactionRPC(t, []portRPCStep{
+			{op: networkworker.OpPortUnpublish, handle: func(req workerproto.Request) (any, error) {
+				body := decodePortUnpublish(t, req)
+				transaction = body.Transaction
+				return nil, errors.New("simulated lost unpublish response after apply")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePortStatus(t, req).Transaction; got != transaction {
+					t.Errorf("status transaction = %q, want %q", got, transaction)
+				}
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateApplied}, nil
+			}},
+		})
+		if err := w.Unpublish("tcp", local); err != nil {
+			t.Fatalf("lost unpublish response: %v", err)
+		}
+	})
+
+	t.Run("list reconciles lost replies", func(t *testing.T) {
+		var transaction string
+		w := startPortTransactionRPC(t, []portRPCStep{
+			{op: networkworker.OpPortPublish, handle: func(req workerproto.Request) (any, error) {
+				transaction = decodePortPublish(t, req).Transaction
+				return nil, errors.New("injected response loss")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateUnknown}, nil
+			}},
+			{op: networkworker.OpPortPublish, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePortPublish(t, req).Transaction; got != transaction {
+					t.Errorf("retried transaction = %q, want %q", got, transaction)
+				}
+				return nil, errors.New("injected retry response loss")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateUnknown}, nil
+			}},
+			{op: networkworker.OpPortList, handle: func(workerproto.Request) (any, error) {
+				return []vnet.Forward{{Protocol: "tcp", Local: local, Remote: remote}}, nil
+			}},
+		})
+		if err := w.Publish("tcp", local, remote); err != nil {
+			t.Fatalf("list reconciliation: %v", err)
+		}
+	})
+
+	t.Run("list proves failed publish left prior state", func(t *testing.T) {
+		var transaction string
+		w := startPortTransactionRPC(t, []portRPCStep{
+			{op: networkworker.OpPortPublish, handle: func(req workerproto.Request) (any, error) {
+				transaction = decodePortPublish(t, req).Transaction
+				return nil, errors.New("injected publish failure")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateUnknown}, nil
+			}},
+			{op: networkworker.OpPortPublish, handle: func(workerproto.Request) (any, error) {
+				return nil, errors.New("injected publish retry failure")
+			}},
+			{op: networkworker.OpPortStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PortStatusResponse{Transaction: transaction, State: networkworker.PortStateUnknown}, nil
+			}},
+			{op: networkworker.OpPortList, handle: func(workerproto.Request) (any, error) {
+				return []vnet.Forward{}, nil
+			}},
+		})
+		if err := w.Publish("tcp", local, remote); err == nil {
+			t.Fatal("failed publish reported success")
+		}
+	})
+}
+
+func startPolicyTransactionRPC(t *testing.T, steps []policyRPCStep) *netWorker {
+	t.Helper()
+	sup, worker := net.Pipe()
+	var mu sync.Mutex
+	next := 0
+	dispatch := func(op string) workerproto.Handler {
+		return func(req workerproto.Request) (any, error) {
+			mu.Lock()
+			if next >= len(steps) {
+				mu.Unlock()
+				return nil, fmt.Errorf("unexpected policy operation %s", op)
+			}
+			stepIndex := next
+			step := steps[stepIndex]
+			next++
+			mu.Unlock()
+			if step.op != op {
+				return nil, fmt.Errorf("policy operation %d = %s, want %s", stepIndex+1, op, step.op)
+			}
+			return step.handle(req)
+		}
+	}
+	handlers := map[string]workerproto.Handler{}
+	ordered := map[string]bool{}
+	for _, op := range []string{
+		networkworker.OpPolicyPrepare,
+		networkworker.OpPolicyCommit,
+		networkworker.OpPolicyAbort,
+		networkworker.OpPolicyStatus,
+	} {
+		handlers[op] = dispatch(op)
+		ordered[op] = true
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- workerproto.ServeRequestsWithOptions(worker, handlers,
+			workerproto.ServeOptions{OrderedOps: ordered})
 	}()
 	client := workerproto.NewClient(sup)
 	client.Timeout = wPolicyTestTimeout
-	w := &netWorker{client: client, dead: make(chan struct{})}
+	w := &netWorker{client: client, lifecycle: newWorkerLifecycle()}
 	t.Cleanup(func() {
 		_ = client.Close()
 		_ = worker.Close()
@@ -446,8 +788,31 @@ func startPolicyTransactionRPC(t *testing.T, state *netWorkerState, overrides ma
 		case <-time.After(time.Second):
 			t.Error("policy RPC server did not stop")
 		}
+		mu.Lock()
+		defer mu.Unlock()
+		if next != len(steps) {
+			t.Errorf("policy script consumed %d/%d steps", next, len(steps))
+		}
 	})
 	return w
+}
+
+func decodePolicyPrepare(t *testing.T, req workerproto.Request) networkworker.PolicyPrepareRequest {
+	t.Helper()
+	var body networkworker.PolicyPrepareRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
+		t.Errorf("decode policy prepare: %v", err)
+	}
+	return body
+}
+
+func decodePolicyGeneration(t *testing.T, req workerproto.Request) networkworker.PolicyGenerationRequest {
+	t.Helper()
+	var body networkworker.PolicyGenerationRequest
+	if err := workerproto.DecodeBody(req, &body); err != nil {
+		t.Errorf("decode policy generation: %v", err)
+	}
+	return body
 }
 
 func TestNetWorkerPolicyTransactionsRecoverFromFailures(t *testing.T) {
@@ -455,143 +820,291 @@ func TestNetWorkerPolicyTransactionsRecoverFromFailures(t *testing.T) {
 	allow := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)
 
 	t.Run("rejected prepare does not consume generation", func(t *testing.T) {
-		state, live := newPolicyTransactionState(t)
-		var reject atomic.Bool
-		reject.Store(true)
-		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
-			"policy.prepare": func(req workerproto.Request) (any, error) {
-				if reject.Swap(false) {
-					return nil, errors.New("injected prepare rejection")
+		var rejectedTxn, committedTxn string
+		steps := []policyRPCStep{
+			{op: networkworker.OpPolicyStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != "" {
+					t.Errorf("initial status transaction = %q", got)
 				}
-				return state.preparePolicy(req)
-			},
-		})
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyPrepare(t, req)
+				rejectedTxn = body.Transaction
+				if body.Generation != 1 || rejectedTxn == "" {
+					t.Errorf("rejected prepare = %+v", body)
+				}
+				return nil, errors.New("injected prepare rejection")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != rejectedTxn {
+					t.Errorf("prepare readback transaction = %q, want %q", got, rejectedTxn)
+				}
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateUnknown}, nil
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(req workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyPrepare(t, req)
+				committedTxn = body.Transaction
+				if body.Generation != 1 || committedTxn == "" || committedTxn == rejectedTxn {
+					t.Errorf("retry prepare = %+v after %q", body, rejectedTxn)
+				}
+				return networkworker.PolicyStatusResponse{
+					State: networkworker.PolicyStatePrepared, PendingGeneration: 1,
+					PendingTransaction: committedTxn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyGeneration(t, req)
+				if body.Generation != 1 || body.Transaction != committedTxn {
+					t.Errorf("retry commit = %+v", body)
+				}
+				return networkworker.PolicyStatusResponse{
+					State: networkworker.PolicyStateCommitted, Generation: 1,
+					Transaction: committedTxn,
+				}, nil
+			}},
+		}
+		w := startPolicyTransactionRPC(t, steps)
 		if err := w.SetPolicy(deny); err == nil {
 			t.Fatal("rejected prepare reported success")
 		}
-		if state.gen != 0 || w.gen != 0 || !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("failed prepare changed generation/policy: worker=%d supervisor=%d", state.gen, w.gen)
+		if w.gen != 0 {
+			t.Fatalf("failed prepare advanced supervisor generation to %d", w.gen)
 		}
 		if err := w.SetPolicy(deny); err != nil {
 			t.Fatalf("retry after rejected prepare: %v", err)
 		}
-		if state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("retry did not commit generation 1: worker=%d supervisor=%d", state.gen, w.gen)
+		if w.gen != 1 {
+			t.Fatalf("retry generation = %d, want 1", w.gen)
 		}
 	})
 
 	t.Run("commit error retries same transaction", func(t *testing.T) {
-		state, live := newPolicyTransactionState(t)
-		var commits atomic.Int32
-		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
-			"policy.commit": func(req workerproto.Request) (any, error) {
-				if commits.Add(1) == 1 {
-					return nil, errors.New("injected commit failure")
+		var txn string
+		steps := []policyRPCStep{
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyPrepare(t, req)
+				txn = body.Transaction
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStatePrepared}, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != txn {
+					t.Errorf("first commit transaction = %q, want %q", got, txn)
 				}
-				return state.commitPolicy(req)
-			},
-		})
+				return nil, errors.New("injected commit failure")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != txn {
+					t.Errorf("commit readback transaction = %q, want %q", got, txn)
+				}
+				return networkworker.PolicyStatusResponse{
+					State:             networkworker.PolicyStatePrepared,
+					PendingGeneration: 1, PendingTransaction: txn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyGeneration(t, req)
+				if body.Generation != 1 || body.Transaction != txn {
+					t.Errorf("retry commit = %+v", body)
+				}
+				return nil, nil
+			}},
+		}
+		w := startPolicyTransactionRPC(t, steps)
 		if err := w.SetPolicy(deny); err != nil {
 			t.Fatal(err)
 		}
-		if commits.Load() != 2 || state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("commit retry did not converge: calls=%d worker=%d supervisor=%d", commits.Load(), state.gen, w.gen)
+		if w.gen != 1 {
+			t.Fatalf("generation = %d, want 1", w.gen)
 		}
 	})
 
 	t.Run("lost commit response resolved by status", func(t *testing.T) {
-		state, live := newPolicyTransactionState(t)
-		var first atomic.Bool
-		first.Store(true)
-		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
-			"policy.commit": func(req workerproto.Request) (any, error) {
-				out, err := state.commitPolicy(req)
-				if first.Swap(false) {
-					time.Sleep(5 * wPolicyTestTimeout / 4)
+		var firstTxn, secondTxn string
+		steps := []policyRPCStep{
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				firstTxn = decodePolicyPrepare(t, req).Transaction
+				return nil, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != firstTxn {
+					t.Errorf("delayed commit transaction = %q, want %q", got, firstTxn)
 				}
-				return out, err
-			},
-		})
+				return nil, errors.New("simulated lost commit response after apply")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != firstTxn {
+					t.Errorf("lost commit readback = %q, want %q", got, firstTxn)
+				}
+				return networkworker.PolicyStatusResponse{
+					State:      networkworker.PolicyStateCommitted,
+					Generation: 1, Transaction: firstTxn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{
+					State:      networkworker.PolicyStateCurrent,
+					Generation: 1, Transaction: firstTxn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyPrepare(t, req)
+				secondTxn = body.Transaction
+				if body.Generation != 2 || secondTxn == firstTxn {
+					t.Errorf("second prepare = %+v after %q", body, firstTxn)
+				}
+				return nil, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyGeneration(t, req)
+				if body.Generation != 2 || body.Transaction != secondTxn {
+					t.Errorf("second commit = %+v", body)
+				}
+				return nil, nil
+			}},
+		}
+		w := startPolicyTransactionRPC(t, steps)
 		if err := w.SetPolicy(deny); err != nil {
 			t.Fatalf("lost commit response: %v", err)
 		}
-		if state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("status did not confirm committed generation: worker=%d supervisor=%d", state.gen, w.gen)
-		}
-		// Let the deliberately late response arrive; Client must drop it and
-		// remain usable for the next generation.
-		time.Sleep(2 * wPolicyTestTimeout)
 		if err := w.SetPolicy(allow); err != nil {
-			t.Fatalf("call after late response: %v", err)
+			t.Fatalf("call after reconciled response loss: %v", err)
 		}
-		if state.gen != 2 || w.gen != 2 || !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("post-timeout transaction did not converge: worker=%d supervisor=%d", state.gen, w.gen)
+		if w.gen != 2 {
+			t.Fatalf("post-timeout generation = %d, want 2", w.gen)
 		}
 	})
 
 	t.Run("abort readback recognizes a committed transaction", func(t *testing.T) {
-		state, live := newPolicyTransactionState(t)
-		var commits atomic.Int32
-		var statuses atomic.Int32
-		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
-			"policy.commit": func(req workerproto.Request) (any, error) {
-				if commits.Add(1) == 1 {
-					return nil, errors.New("injected commit rejection")
+		var txn string
+		steps := []policyRPCStep{
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				txn = decodePolicyPrepare(t, req).Transaction
+				return nil, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(workerproto.Request) (any, error) {
+				return nil, errors.New("injected commit rejection")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{
+					State:             networkworker.PolicyStatePrepared,
+					PendingGeneration: 1, PendingTransaction: txn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != txn {
+					t.Errorf("delayed retry transaction = %q, want %q", got, txn)
 				}
-				out, err := state.commitPolicy(req)
-				// Apply the retry but lose its response. The following status
-				// failure forces the supervisor to resolve through abort.
-				time.Sleep(5 * wPolicyTestTimeout / 4)
-				return out, err
-			},
-			"policy.status": func(req workerproto.Request) (any, error) {
-				if statuses.Add(1) == 3 {
-					return nil, errors.New("injected status response loss")
+				return nil, errors.New("simulated lost retry response after apply")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return nil, errors.New("injected status response loss")
+			}},
+			{op: networkworker.OpPolicyAbort, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyGeneration(t, req)
+				if body.Generation != 1 || body.Transaction != txn {
+					t.Errorf("abort readback = %+v", body)
 				}
-				return state.policyStatus(req)
-			},
-		})
+				return networkworker.PolicyStatusResponse{
+					State:      networkworker.PolicyStateCommitted,
+					Generation: 1, Transaction: txn,
+				}, nil
+			}},
+		}
+		w := startPolicyTransactionRPC(t, steps)
 		if err := w.SetPolicy(deny); err != nil {
 			t.Fatalf("committed transaction reported failure: %v", err)
 		}
-		if state.gen != 1 || w.gen != 1 || live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("abort readback did not recognize commit: worker=%d supervisor=%d", state.gen, w.gen)
+		if w.gen != 1 {
+			t.Fatalf("generation = %d, want 1", w.gen)
 		}
 	})
 
 	t.Run("failed commits abort and next call reuses generation", func(t *testing.T) {
-		state, live := newPolicyTransactionState(t)
-		var fail atomic.Bool
-		fail.Store(true)
-		w := startPolicyTransactionRPC(t, state, map[string]workerproto.Handler{
-			"policy.commit": func(req workerproto.Request) (any, error) {
-				if fail.Load() {
-					return nil, errors.New("injected persistent commit failure")
+		var firstTxn, secondTxn string
+		steps := []policyRPCStep{
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				firstTxn = decodePolicyPrepare(t, req).Transaction
+				return nil, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(workerproto.Request) (any, error) {
+				return nil, errors.New("injected persistent commit failure")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{
+					State:             networkworker.PolicyStatePrepared,
+					PendingGeneration: 1, PendingTransaction: firstTxn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(workerproto.Request) (any, error) {
+				return nil, errors.New("injected persistent commit failure")
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{
+					State:             networkworker.PolicyStatePrepared,
+					PendingGeneration: 1, PendingTransaction: firstTxn,
+				}, nil
+			}},
+			{op: networkworker.OpPolicyAbort, handle: func(req workerproto.Request) (any, error) {
+				if got := decodePolicyGeneration(t, req).Transaction; got != firstTxn {
+					t.Errorf("abort transaction = %q, want %q", got, firstTxn)
 				}
-				return state.commitPolicy(req)
-			},
-		})
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateUnknown}, nil
+			}},
+			{op: networkworker.OpPolicyStatus, handle: func(workerproto.Request) (any, error) {
+				return networkworker.PolicyStatusResponse{State: networkworker.PolicyStateCurrent}, nil
+			}},
+			{op: networkworker.OpPolicyPrepare, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyPrepare(t, req)
+				secondTxn = body.Transaction
+				if body.Generation != 1 || secondTxn == firstTxn {
+					t.Errorf("retry prepare = %+v after %q", body, firstTxn)
+				}
+				return nil, nil
+			}},
+			{op: networkworker.OpPolicyCommit, handle: func(req workerproto.Request) (any, error) {
+				body := decodePolicyGeneration(t, req)
+				if body.Generation != 1 || body.Transaction != secondTxn {
+					t.Errorf("retry commit = %+v", body)
+				}
+				return nil, nil
+			}},
+		}
+		w := startPolicyTransactionRPC(t, steps)
 		if err := w.SetPolicy(deny); err == nil {
 			t.Fatal("failed commits reported success")
 		}
-		if state.gen != 0 || state.pending != nil || !live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
-			t.Fatalf("failed commit did not preserve generation zero: gen=%d pending=%v", state.gen, state.pending != nil)
+		if w.gen != 0 {
+			t.Fatalf("failed commits advanced generation to %d", w.gen)
 		}
-		fail.Store(false)
 		if err := w.SetPolicy(deny); err != nil {
 			t.Fatalf("retry after aborted commit: %v", err)
 		}
-		if state.gen != 1 || w.gen != 1 {
-			t.Fatalf("retry skipped generation: worker=%d supervisor=%d", state.gen, w.gen)
+		if w.gen != 1 {
+			t.Fatalf("retry generation = %d, want 1", w.gen)
 		}
 	})
 }
 
-// The transaction tests intentionally cross a client deadline to model a
-// lost response. Keep the bound generous enough for the race detector and
-// loaded CI; handler delays are derived from it, so the timeout behavior stays
-// deterministic rather than depending on a tiny scheduler window.
-const wPolicyTestTimeout = 200 * time.Millisecond
+// Transport-level late-response discard is covered in workerproto. These
+// transaction tests inject the resulting ambiguous error directly, keeping
+// policy reconciliation deterministic under the race detector and loaded CI.
+const wPolicyTestTimeout = 500 * time.Millisecond
 
 // TestNetWorkerHelperProcess IS the worker when re-executed by
 // TestNetWorkerReExec (helper-process pattern): it serves on the real
@@ -600,21 +1113,34 @@ func TestNetWorkerHelperProcess(t *testing.T) {
 	if os.Getenv("GANTRY_TEST_NET_WORKER") != "1" {
 		return
 	}
-	control, err := inheritedConn(3, "control")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	assertWorkerStdinUnreadable()
+	os.Exit(networkworker.Cmd())
+}
+
+func assertWorkerStdinUnreadable() {
+	if os.Getenv("GANTRY_TEST_WORKER_STDIN_UNREADABLE") != "1" {
+		return
 	}
-	data, err := inheritedConn(4, "data")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	var one [1]byte
+	if n, err := syscall.Read(0, one[:]); !errors.Is(err, syscall.EBADF) {
+		_, _ = fmt.Fprintf(os.Stderr, "worker stdin is readable: read=%d err=%v\n", n, err)
+		os.Exit(97)
 	}
-	if err := runNetWorker(control, data); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	for _, fd := range []int{1, 2} {
+		var stat syscall.Stat_t
+		if err := syscall.Fstat(fd, &stat); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "worker diagnostic fd %d stat: %v\n", fd, err)
+			os.Exit(98)
+		}
+		if stat.Mode&syscall.S_IFMT == syscall.S_IFREG {
+			_, _ = fmt.Fprintf(os.Stderr, "worker diagnostic fd %d is a regular file\n", fd)
+			os.Exit(99)
+		}
+		if err := syscall.Ftruncate(fd, 1<<30); err == nil {
+			_, _ = fmt.Fprintf(os.Stderr, "worker diagnostic fd %d accepted ftruncate\n", fd)
+			os.Exit(100)
+		}
 	}
-	os.Exit(0)
 }
 
 // TestNetWorkerReExec validates the real descriptor-inheritance path:
@@ -655,7 +1181,7 @@ func TestNetWorkerReExec(t *testing.T) {
 	_ = ctrlFile.Close()
 	_ = dataFile.Close()
 
-	nonce := workerproto.NewNonce()
+	nonce := testWorkerNonce(t)
 	cfg := testWorkerConfig(t, `{"default":"allow"}`)
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleNet, nonce, cfg); err != nil {
 		t.Fatalf("handshake: %v\n%s", err, outBuf.String())
@@ -673,16 +1199,80 @@ func TestNetWorkerReExec(t *testing.T) {
 	}
 
 	client := workerproto.NewClient(ctrlSup)
-	if err := client.Call("port.publish", portPublishRequest{Proto: "tcp", Local: "127.0.0.1:18082", Remote: "192.168.127.2:8082"}, nil); err != nil {
+	var published networkworker.PortStatusResponse
+	if err := client.Call(networkworker.OpPortPublish, networkworker.PortPublishRequest{
+		Transaction: "reexec-publish",
+		Proto:       "tcp",
+		Local:       "127.0.0.1:18082",
+		Remote:      "192.168.127.2:8082",
+	}, &published); err != nil {
 		t.Fatalf("publish over re-exec: %v\n%s", err, outBuf.String())
 	}
-	if err := client.Call("shutdown", nil, nil); err != nil {
+	if published.State != networkworker.PortStateApplied {
+		t.Fatalf("publish result = %+v", published)
+	}
+	if err := client.Call(networkworker.OpShutdown, nil, nil); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
 	_ = ctrlSup.Close()
 	_ = dataSup.Close()
 	if err := cmd.Wait(); err != nil {
 		t.Fatalf("worker exit: %v\n%s", err, outBuf.String())
+	}
+}
+
+func TestDupConnFilesClosesSourcesAndPartialDuplicates(t *testing.T) {
+	source, sourcePeer, err := socketpairConns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sourcePeer.Close() }()
+	unsupported, unsupportedPeer := net.Pipe()
+	defer func() { _ = unsupportedPeer.Close() }()
+
+	files, err := dupConnFiles(source, unsupported)
+	if err == nil {
+		t.Fatal("partial duplication unexpectedly succeeded")
+	}
+	if files != nil {
+		t.Fatalf("partial duplication returned files: %v", files)
+	}
+	for name, peer := range map[string]net.Conn{
+		"real socket source and duplicate": sourcePeer,
+		"unsupported source":               unsupportedPeer,
+	} {
+		_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+		var one [1]byte
+		n, readErr := peer.Read(one[:])
+		if n != 0 || !errors.Is(readErr, io.EOF) {
+			t.Errorf("%s not closed: read n=%d err=%v", name, n, readErr)
+		}
+	}
+}
+
+func TestSpawnNetWorkerRejectsUnusableDiagnosticSink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "worker-net.log")
+	control, data, process, diagnostics, err := spawnNetWorkerProcess(path, "off")
+	if control != nil || data != nil || process != nil || diagnostics != nil {
+		t.Fatalf("failed spawn returned resources: control=%v data=%v process=%v diagnostics=%v", control, data, process, diagnostics)
+	}
+	if err == nil || !strings.Contains(err.Error(), "open network worker log") {
+		t.Fatalf("spawn error = %v, want diagnostic-sink failure", err)
+	}
+}
+
+func TestWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
+	t.Setenv("PATH", "/host/tools")
+	t.Setenv("HOME", "/host/home")
+	t.Setenv("TMPDIR", "/host/tmp")
+	t.Setenv("GANTRY_SECRET_TEST", "must-not-cross")
+	t.Setenv("GANTRY_DEBUG_RTC", "1")
+
+	if got := workerEnv(); len(got) != 1 || got[0] != "GANTRY_DEBUG_RTC=1" {
+		t.Fatalf("worker environment = %v, want only non-secret debug switch", got)
+	}
+	if got := networkWorkerEnv(); len(got) != 2 || got[0] != "GANTRY_DEBUG_RTC=1" || got[1] != "GODEBUG=netdns=go" {
+		t.Fatalf("network worker environment = %v, want debug + pure-Go resolver", got)
 	}
 }
 
@@ -693,7 +1283,7 @@ func hookNetWorkerSpawnForTests(t *testing.T) {
 	old := netWorkerSpawnHook
 	netWorkerSpawnHook = func(argv *[]string, env *[]string) {
 		*argv = []string{(*argv)[0], "-test.run", "^TestNetWorkerHelperProcess$"}
-		*env = append(*env, "GANTRY_TEST_NET_WORKER=1")
+		*env = append(*env, "GANTRY_TEST_NET_WORKER=1", "GANTRY_TEST_WORKER_STDIN_UNREADABLE=1")
 	}
 	t.Cleanup(func() { netWorkerSpawnHook = old })
 }
@@ -735,8 +1325,8 @@ func TestStartNetworkSplitModes(t *testing.T) {
 			if err := n.Backend.Unpublish("tcp", "127.0.0.1:18083"); err != nil {
 				t.Fatal(err)
 			}
-			// split: the worker owns enforcement + the traffic recorder;
-			// the supervisor keeps only its display/rollback policy copy,
+			// split: the worker owns enforcement + per-boot counters;
+			// the supervisor keeps display/rollback policy and durable traffic,
 			// which Opts must NOT attach to the device. (Fake kernel: just
 			// enough header for KernelArch's ARM64 magic at 0x38.)
 			kernel := filepath.Join(t.TempDir(), "Image")
@@ -746,13 +1336,13 @@ func TestStartNetworkSplitModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.Kernel = kernel
-			opts, err := cfg.Opts(n, nil, t.TempDir(), false)
+			opts, err := cfg.Opts(n, t.TempDir(), false)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if tc.want {
-				if n.Traffic != nil {
-					t.Fatal("split network exposes the traffic recorder to the device")
+				if n.Traffic == nil {
+					t.Fatal("split network lost the supervisor traffic recorder")
 				}
 				if opts.NetPolicy != nil || opts.NetTraffic != nil {
 					t.Fatal("Opts attaches worker-owned policy/traffic to the device")
@@ -772,6 +1362,32 @@ func TestStartNetworkSplitModes(t *testing.T) {
 	}
 }
 
+func TestStartNetworkPacketCaptureDoesNotDelegateHostPath(t *testing.T) {
+	t.Setenv("GANTRY_NET_PCAP", filepath.Join(t.TempDir(), "capture.pcap"))
+
+	auto, err := (RunConfig{Net: true, ProcessIsolation: "auto"}).StartNetwork(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer auto.Close()
+	if auto.Split {
+		t.Fatal("packet capture path was delegated to a split network worker")
+	}
+	found := false
+	for _, degraded := range auto.Degraded {
+		if strings.Contains(degraded, "GANTRY_NET_PCAP") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("packet capture fallback was not reported: %v", auto.Degraded)
+	}
+
+	if _, err := (RunConfig{Net: true, ProcessIsolation: "required"}).StartNetwork(t.TempDir()); err == nil || !strings.Contains(err.Error(), "GANTRY_NET_PCAP") {
+		t.Fatalf("required packet capture error = %v", err)
+	}
+}
+
 func TestWriteIsolationStateConfinement(t *testing.T) {
 	dir := t.TempDir()
 	nw := &Network{}
@@ -781,7 +1397,9 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
 			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced},
 			{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+			{Property: workerconf.PropFDTable, State: workerconf.StateEnforced},
 			{Property: workerconf.PropProcEnum, State: workerconf.StateUnenforced, Detail: "/proc readable"},
+			{Property: workerconf.PropTaskLimit, State: workerconf.StateEnforced},
 			{Property: workerconf.PropFSWrite, State: workerconf.StateUnenforced, Detail: "probe"},
 		},
 	}
@@ -796,10 +1414,10 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 	if err := json.Unmarshal(data, &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.Confinement == nil || !st.Confinement.Applied {
+	if st.Version != 2 || st.VMMConfinement == nil || !st.VMMConfinement.Applied || st.NetworkConfinement != nil {
 		t.Fatalf("report not persisted: %s", data)
 	}
-	if st.FilesystemBoundary != "enforced" || st.NetworkBoundary != "enforced" {
+	if st.FilesystemBoundary != workerconf.StateUnenforced || st.NetworkBoundary != workerconf.StateEnforced {
 		t.Fatalf("boundaries not filled from report: %+v", st)
 	}
 	if st.ProcessBoundary != workerconf.StateUnenforced {
@@ -824,8 +1442,55 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 	if err := json.Unmarshal(data, &st2); err != nil {
 		t.Fatal(err)
 	}
-	if st2.Confinement != nil || st2.FilesystemBoundary != "unavailable" {
+	if st2.VMMConfinement != nil || st2.NetworkConfinement != nil || st2.FilesystemBoundary != "unavailable" {
 		t.Fatalf("monolithic state not honestly unavailable: %+v", st2)
+	}
+}
+
+func TestWriteIsolationStateSeparatesWorkerRoles(t *testing.T) {
+	enforced := func(networkRole bool) *workerconf.Report {
+		netDial := workerconf.StateEnforced
+		if networkRole {
+			netDial = workerconf.StateDisabled
+		}
+		return &workerconf.Report{
+			Platform: "linux", Mode: "required", Applied: true,
+			Results: []workerconf.PropertyResult{
+				{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
+				{Property: workerconf.PropFSWrite, State: workerconf.StateEnforced},
+				{Property: workerconf.PropNetDial, State: netDial},
+				{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+				{Property: workerconf.PropFDTable, State: workerconf.StateEnforced},
+				{Property: workerconf.PropSyscall, State: workerconf.StateEnforced},
+				{Property: workerconf.PropProcEnum, State: workerconf.StateEnforced},
+				{Property: workerconf.PropTaskLimit, State: workerconf.StateEnforced},
+			},
+		}
+	}
+	dir := t.TempDir()
+	networkReport := enforced(true)
+	vmmReport := enforced(false)
+	network := &Network{Split: true, Confinement: networkReport}
+	if err := writeIsolationState(dir, RunConfig{Net: true, ProcessIsolation: "required"}, network, true, vmmReport); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state isolationState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.NetworkConfinement == nil || state.VMMConfinement == nil {
+		t.Fatalf("role reports not persisted separately: %s", data)
+	}
+	if state.Topology != "split-net+split-vmm" || state.FilesystemBoundary != workerconf.StateEnforced ||
+		state.ProcessBoundary != workerconf.StateEnforced || state.NetworkBoundary != workerconf.StateEnforced {
+		t.Fatalf("role boundaries = %+v", state)
+	}
+	if len(state.Degraded) != 0 {
+		t.Fatalf("fully enforced roles reported degraded: %v", state.Degraded)
 	}
 }
 

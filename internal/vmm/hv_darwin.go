@@ -4,6 +4,7 @@ package vmm
 
 import (
 	"fmt"
+	"sync"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -20,8 +21,11 @@ var (
 	hvVmConfigCreate                func() uintptr
 	hvVmConfigSetIpaSize            func(config uintptr, ipaSize uint64) uint32
 	hvVmCreate                      func(config uintptr) uint32
+	hvVmDestroy                     func() uint32
 	hvVmMap                         func(addr unsafe.Pointer, ipa uint64, size uint64, flags uint64) uint32
+	hvVmUnmap                       func(ipa uint64, size uint64) uint32
 	hvVcpuCreate                    func(vcpu *uint64, exit **hvVcpuExit, config uintptr) uint32
+	hvVcpuDestroy                   func(vcpu uint64) uint32
 	hvVcpuSetReg                    func(vcpu uint64, reg uint32, value uint64) uint32
 	hvVcpuGetReg                    func(vcpu uint64, reg uint32, value *uint64) uint32
 	hvVcpuSetSysReg                 func(vcpu uint64, reg uint32, value uint64) uint32
@@ -34,6 +38,12 @@ var (
 	hvGicConfigSetRedistributorBase func(config uintptr, base uint64) uint32
 	hvGicCreate                     func(config uintptr) uint32
 	hvGicSetSpi                     func(intid uint32, level bool) uint32
+	osRelease                       func(object uintptr)
+)
+
+var (
+	loadHVFOnce sync.Once
+	loadHVFErr  error
 )
 
 const (
@@ -97,11 +107,24 @@ func hvReturnString(ret uint32) string {
 }
 
 func loadHVF() error {
+	loadHVFOnce.Do(func() {
+		loadHVFErr = loadHVFSymbols()
+	})
+	return loadHVFErr
+}
+
+func loadHVFSymbols() error {
 	handle, err := purego.Dlopen("/System/Library/Frameworks/Hypervisor.framework/Hypervisor",
 		purego.RTLD_NOW|purego.RTLD_GLOBAL)
 	if err != nil {
 		return fmt.Errorf("dlopen Hypervisor.framework: %w", err)
 	}
+	loaded := false
+	defer func() {
+		if !loaded {
+			_ = purego.Dlclose(handle)
+		}
+	}()
 	bind := func(fn any, name string) error {
 		sym, err := purego.Dlsym(handle, name)
 		if err != nil {
@@ -117,8 +140,11 @@ func loadHVF() error {
 		{&hvVmConfigCreate, "hv_vm_config_create"},
 		{&hvVmConfigSetIpaSize, "hv_vm_config_set_ipa_size"},
 		{&hvVmCreate, "hv_vm_create"},
+		{&hvVmDestroy, "hv_vm_destroy"},
 		{&hvVmMap, "hv_vm_map"},
+		{&hvVmUnmap, "hv_vm_unmap"},
 		{&hvVcpuCreate, "hv_vcpu_create"},
+		{&hvVcpuDestroy, "hv_vcpu_destroy"},
 		{&hvVcpuSetReg, "hv_vcpu_set_reg"},
 		{&hvVcpuGetReg, "hv_vcpu_get_reg"},
 		{&hvVcpuSetSysReg, "hv_vcpu_set_sys_reg"},
@@ -136,5 +162,11 @@ func loadHVF() error {
 			return err
 		}
 	}
+	sym, err := purego.Dlsym(purego.RTLD_DEFAULT, "os_release")
+	if err != nil {
+		return fmt.Errorf("dlsym os_release: %w", err)
+	}
+	purego.RegisterFunc(&osRelease, sym)
+	loaded = true // process-wide framework binding; intentionally kept open
 	return nil
 }

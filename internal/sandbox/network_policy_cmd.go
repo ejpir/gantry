@@ -1,12 +1,10 @@
 package sandbox
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"time"
 )
 
 // CmdNetworkPolicy implements persistent live egress-policy updates.
@@ -85,18 +83,9 @@ func CmdNetworkPolicy(argv []string) int {
 }
 
 func networkPolicyRPC(name, op string, request *brokerNetworkPolicyRequest) (NetworkPolicyEntry, error) {
-	conn, err := dialShareControl(name)
+	req := brokerRequest{Op: op, ID: newControlRequestID("netpolicy"), NetPolicy: request}
+	resp, err := callControl[brokerNetworkPolicyResponse](name, req)
 	if err != nil {
-		return NetworkPolicyEntry{}, fmt.Errorf("broker: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-	req := brokerRequest{Op: op, ID: fmt.Sprintf("netpolicy-%d", os.Getpid()), NetPolicy: request}
-	if err := json.NewEncoder(conn).Encode(&req); err != nil {
-		return NetworkPolicyEntry{}, err
-	}
-	var resp brokerNetworkPolicyResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return NetworkPolicyEntry{}, err
 	}
 	if !resp.OK || resp.Policy == nil {

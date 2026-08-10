@@ -11,3 +11,10 @@ func allocGuestRAM(size uint64) ([]byte, error) {
 		syscall.PROT_READ|syscall.PROT_WRITE,
 		syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS|0x4000 /* MAP_NORESERVE */)
 }
+
+func freeGuestRAM(ram []byte) error {
+	if len(ram) == 0 {
+		return nil
+	}
+	return syscall.Munmap(ram)
+}

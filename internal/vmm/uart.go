@@ -2,7 +2,7 @@ package vmm
 
 import (
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
+	"os"
 	"sync"
 )
 
@@ -24,8 +24,8 @@ import (
 // The storm this fixed: the driver polls RIS at 0x3C; with our RIS at the
 // wrong offset it always read 0 -> pl011_int returned IRQ_NONE -> the
 // kernel disabled the IRQ ("nobody cared").
-var noUartIRQ = gutil.EnvOr("GANTRY_NO_UART_IRQ", "MINIVM_NO_UART_IRQ") != ""
-var dbgUartIRQ = gutil.EnvOr("GANTRY_DEBUG", "MINIVM_DEBUG") != "" || gutil.EnvOr("GANTRY_DEBUG_UART", "MINIVM_DEBUG_UART") != ""
+var noUartIRQ = os.Getenv("GANTRY_NO_UART_IRQ") != ""
+var dbgUartIRQ = os.Getenv("GANTRY_DEBUG") != "" || os.Getenv("GANTRY_DEBUG_UART") != ""
 
 type pl011 struct {
 	mu       sync.Mutex

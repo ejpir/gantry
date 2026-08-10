@@ -1,7 +1,6 @@
 package workerconf
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"unsafe"
@@ -9,35 +8,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var errDebugSkipped = errors.New("WORKERCONF_NOSECCOMP=1: filter skipped (debug)")
-
-// Hand-rolled seccomp-bpf whitelist (no libseccomp cgo dependency — the
-// list is small and static). Design notes:
-//
-//   - pathname-opening and *at mutation syscalls are absent. Share roots
-//     stay in the trusted supervisor behind the request relay, so the VMM
-//     has no legitimate path operation after Apply. This also prevents an
-//     accidentally delegated directory fd from becoming a filesystem escape.
-//   - socket/connect/bind/listen/accept are absent: the worker's data
-//     plane is inherited descriptors only (net-dial probe gets EPERM).
-//   - execve/execveat are absent: fork-only children inherit the same
-//     namespaces and filter and cannot escape or do useful work.
-//   - clone/clone3 are allowed UNMASKED: the Go runtime spawns threads
-//     lazily after Apply, and clone3's flags live behind a pointer that
-//     seccomp cannot dereference. execve is the real boundary.
-//   - tgkill is allowed only when its thread-group argument is this
-//     process. The Go runtime uses tgkill(getpid(), tid, sig), while an
-//     unrestricted rule would let a namespace-less auto-mode worker signal
-//     any same-UID host process.
-//   - sched_getaffinity is allowed only for pid 0 (the calling thread), which
-//     is the form used by the Go runtime. Arbitrary PID probes would otherwise
-//     expose host-process existence in namespace-less auto mode.
-//   - fcntl is command-filtered. Descriptor duplication/status operations are
-//     needed by net.FileConn, but F_SETOWN/F_SETOWN_EX/F_SETSIG would provide
-//     an alternate cross-process signal path through O_ASYNC sockets.
-//   - ioctl is argument-filtered to the KVM command range
-//     ((cmd & 0xFFFF) in [0xAE00, 0xAEFF]); KVM ioctls use type 0xAE
-//     with nr 0x00-0xFF, direction/size bits masked off.
+// The filter is intentionally assembled without libseccomp: startup is one
+// prctl plus one seccomp syscall and the resulting policy is identical on
+// every host. Common runtime syscalls are shared; role-specific capabilities
+// are explicit below. Path mutation and exec are absent from every profile.
 const (
 	bpfLD                = 0x00
 	bpfW                 = 0x00
@@ -54,22 +28,25 @@ const (
 	retErrno             = 0x00050000
 	retAllow             = 0x7fff0000
 	sysEPERM             = 1
+	sysENOSYS            = 38
 	seccompSetModeFilter = 1
 	seccompFlagTSYNC     = 1
-	offArch              = 4  // seccomp_data.arch
-	offNr                = 0  // seccomp_data.nr
-	offArg0              = 16 // low 32 bits of seccomp_data.args[0]
-	offArg1              = 24 // low 32 bits of seccomp_data.args[1]
+	offNr                = 0
+	offArch              = 4
+	offArg0              = 16
+	offArg0Hi            = 20
+	offArg1              = 24
+	offArg2              = 32
+	offArg2Hi            = 36
+	socketTypeMask       = 0xf
 )
 
-// whitelist is the syscall set a VMM worker needs post-Apply: the Go
-// runtime (threads, GC, netpoll, timers), descriptor I/O on inherited
-// fds and the KVM ioctl range (filtered separately). Names resolve per-arch
-// via x/sys; the arch files add their arch-only runtime entries.
-var whitelist = []uint32{
+// runtimeWhitelist is the Go runtime, memory, time, signal, descriptor-I/O,
+// and netpoll substrate. PID-taking and command-taking calls are handled by
+// argument-filtered blocks, never admitted here wholesale.
+var runtimeWhitelist = []uint32{
 	unix.SYS_READ, unix.SYS_WRITE, unix.SYS_READV, unix.SYS_WRITEV,
-	unix.SYS_PREAD64, unix.SYS_PWRITE64, unix.SYS_CLOSE, unix.SYS_DUP,
-	unix.SYS_DUP3, unix.SYS_LSEEK,
+	unix.SYS_CLOSE, unix.SYS_DUP, unix.SYS_DUP3,
 	unix.SYS_MMAP, unix.SYS_MPROTECT, unix.SYS_MUNMAP, unix.SYS_MADVISE,
 	unix.SYS_MREMAP, unix.SYS_BRK,
 	unix.SYS_FUTEX, unix.SYS_SCHED_YIELD, unix.SYS_NANOSLEEP,
@@ -82,24 +59,37 @@ var whitelist = []uint32{
 	unix.SYS_GETRANDOM, unix.SYS_RSEQ,
 	unix.SYS_SET_ROBUST_LIST, unix.SYS_SET_TID_ADDRESS,
 	unix.SYS_EXIT, unix.SYS_EXIT_GROUP,
-	unix.SYS_CLONE, unix.SYS_CLONE3,
 	unix.SYS_FSTAT, unix.SYS_FSTATFS,
-	unix.SYS_FALLOCATE,
-	unix.SYS_FSYNC, unix.SYS_FDATASYNC, unix.SYS_FLOCK,
-	unix.SYS_FTRUNCATE,
-	unix.SYS_RECVMSG, unix.SYS_SENDMSG, unix.SYS_SHUTDOWN,
+	unix.SYS_SHUTDOWN,
 	unix.SYS_GETSOCKNAME, unix.SYS_GETPEERNAME,
-	// getsockopt/setsockopt are fd-scoped: net.FileConn probes SO_TYPE
-	// on every descriptor it wraps (the vsock.forward path wraps each
-	// guest-brokered socket post-Apply — the AL2023 RST regression).
-	// They cannot create connectivity (socket/connect stay denied).
 	unix.SYS_GETSOCKOPT, unix.SYS_SETSOCKOPT,
 	unix.SYS_GETUID, unix.SYS_GETEUID, unix.SYS_GETGID, unix.SYS_GETEGID,
 }
 
-// safeFcntlCommands are descriptor-local operations used by the Go runtime,
-// os.File, and net.FileConn after confinement. In particular, ownership and
-// signal-selection commands are absent.
+// whitelist is retained as the VMM profile's unconditionally allowed set.
+// Tests inspect it to ensure no path or cross-process authority slips in.
+var whitelist = append(append([]uint32{}, runtimeWhitelist...),
+	unix.SYS_PREAD64, unix.SYS_PWRITE64, unix.SYS_LSEEK,
+	unix.SYS_FSYNC, unix.SYS_FDATASYNC,
+	// The VMM receives hot-added descriptors over its dedicated SCM_RIGHTS
+	// channel. The network worker has no descriptor-transfer relationship and
+	// therefore does not receive these message-oriented capabilities.
+	unix.SYS_RECVMSG, unix.SYS_SENDMSG,
+)
+
+// networkWhitelist is the host TCP/UDP data plane. socket itself is filtered
+// separately to IPv4/IPv6 stream/datagram sockets, excluding AF_PACKET, raw,
+// netlink, and new Unix-domain endpoints. Resolver file opens are also
+// argument-filtered separately.
+var networkWhitelist = []uint32{
+	unix.SYS_CONNECT, unix.SYS_BIND, unix.SYS_LISTEN,
+	unix.SYS_ACCEPT, unix.SYS_ACCEPT4,
+	unix.SYS_SENDTO, unix.SYS_RECVFROM,
+	unix.SYS_NEWFSTATAT,
+}
+
+// safeFcntlCommands are descriptor-local operations used by the Go runtime
+// and net.FileConn. Signal ownership commands are deliberately absent.
 var safeFcntlCommands = []uint32{
 	unix.F_DUPFD,
 	unix.F_GETFD,
@@ -110,115 +100,242 @@ var safeFcntlCommands = []uint32{
 }
 
 func stmt(code uint16, k uint32) unix.SockFilter {
-	return unix.SockFilter{Code: code, Jt: 0, Jf: 0, K: k}
+	return unix.SockFilter{Code: code, K: k}
 }
 
 func jump(code uint16, k uint32, jt, jf uint8) unix.SockFilter {
 	return unix.SockFilter{Code: code, Jt: jt, Jf: jf, K: k}
 }
 
-// buildFilter assembles the BPF program. Jump targets are computed from
-// final label positions so the jeq chain length is free to grow.
-func buildFilter(selfTGID uint32) []unix.SockFilter {
-	allowNrs := append(append([]uint32{}, whitelist...), archWhitelist()...)
-	prog := make([]unix.SockFilter, 0, len(allowNrs)+20+len(safeFcntlCommands))
-	// 0: arch check — a foreign-arch process image gets killed outright.
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArch))
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, auditArch, 1, 0))
-	prog = append(prog, stmt(bpfRET|bpfK, retKill))
-	// 3: nr dispatch.
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offNr))
-	dispatch := len(prog)
-	// Reserve the jeq chain; jump offsets need ALLOW's final index.
-	affinityBlock := dispatch + len(allowNrs)
-	tgkillBlock := affinityBlock + 3 // JEQ, LD arg0, JEQ pid zero
-	fcntlBlock := tgkillBlock + 3    // JEQ, LD arg0, JEQ selfTGID
-	ioctlBlock := fcntlBlock + 2 + len(safeFcntlCommands)
-	allowIdx := ioctlBlock + 5 // LD,AND,JGE,JGT + JEQ head = 5 instrs
-	denyIdx := allowIdx + 1
-	for i, nr := range allowNrs {
-		idx := dispatch + i
-		prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, nr, uint8(allowIdx-idx-1), 0))
-	}
-	// sched_getaffinity: the Go runtime queries the calling thread (pid 0).
-	// Denying nonzero PIDs also prevents namespace-less workers from using the
-	// syscall as a host-process existence oracle.
-	a0 := affinityBlock
-	a2 := affinityBlock + 2
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, unix.SYS_SCHED_GETAFFINITY,
-		0, uint8(tgkillBlock-a0-1)))
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArg0))
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, 0,
-		uint8(allowIdx-a2-1), uint8(denyIdx-a2-1)))
-	// tgkill: Go's runtime needs to signal arbitrary threads in this process,
-	// but never another thread group. pid_t is a 32-bit kernel argument on
-	// both supported Linux architectures, so the low word is authoritative.
-	t0 := tgkillBlock
-	t2 := tgkillBlock + 2
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, unix.SYS_TGKILL, 0, uint8(fcntlBlock-t0-1)))
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArg0))
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, selfTGID,
-		uint8(allowIdx-t2-1), uint8(denyIdx-t2-1)))
-	// fcntl: allow only descriptor-local commands needed by the worker. Socket
-	// signal ownership commands are intentionally excluded.
-	f0 := fcntlBlock
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, unix.SYS_FCNTL,
-		0, uint8(ioctlBlock-f0-1)))
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArg1))
-	for i, cmd := range safeFcntlCommands {
-		idx := fcntlBlock + 2 + i
-		denyOffset := uint8(0) // a mismatch falls through to the next command
-		if i == len(safeFcntlCommands)-1 {
-			denyOffset = uint8(denyIdx - idx - 1)
-		}
-		prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, cmd,
-			uint8(allowIdx-idx-1), denyOffset))
-	}
-	// ioctl: allowed only when (cmd & 0xFFFF) is in the KVM range.
-	// Every jump offset is target-index minus current-index minus one.
-	i0 := ioctlBlock
-	i3 := ioctlBlock + 3
-	i4 := ioctlBlock + 4
-	prog = append(prog, jump(bpfJMP|bpfJEQ|bpfK, unix.SYS_IOCTL, 0, uint8(denyIdx-i0-1)))
-	// The ioctl REQUEST is the second syscall argument (fd, req, ...):
-	// seccomp_data.args[1]. The AL2023 KVM soak caught this reading
-	// args[0] (the fd, 12) and denying the whole KVM range.
-	prog = append(prog, stmt(bpfLD|bpfW|bpfABS, offArg1)) // i1
-	prog = append(prog, stmt(bpfALU|bpfAND|bpfK, 0xFFFF)) // i2
-	prog = append(prog, jump(bpfJMP|bpfJGE|bpfK, 0xAE00, 0, uint8(denyIdx-i3-1)))
-	prog = append(prog, jump(bpfJMP|bpfJGT|bpfK, 0xAEFF, uint8(denyIdx-i4-1), 0))
-	prog = append(prog, stmt(bpfRET|bpfK, retAllow))          // allowIdx
-	prog = append(prog, stmt(bpfRET|bpfK, retErrno|sysEPERM)) // denyIdx
-	return prog
+// filterBuilder resolves named forward branches after assembly. Keeping label
+// math here avoids security-sensitive hand-maintained offsets whenever a role
+// gains one syscall.
+type filterBuilder struct {
+	program []unix.SockFilter
+	labels  map[string]int
+	fixups  []filterFixup
 }
 
-// installSeccomp sets no_new_privs and loads the whitelist filter onto
-// every thread (TSYNC). A TSYNC failure leaves threads half-covered, so
-// it is reported as a full failure of the tier rather than a partial
-// success.
-func installSeccomp() error {
-	if os.Getenv("WORKERCONF_NOSECCOMP") == "1" {
-		// Debug escape hatch (worker postmortem tooling): skip the
-		// filter entirely. Never set in production; the report note
-		// makes the degradation explicit.
-		return errDebugSkipped
+type filterFixup struct {
+	index       int
+	true, false string
+}
+
+func newFilterBuilder(capacity int) *filterBuilder {
+	return &filterBuilder{
+		program: make([]unix.SockFilter, 0, capacity),
+		labels:  make(map[string]int),
 	}
+}
+
+func (b *filterBuilder) emit(code uint16, k uint32) {
+	b.program = append(b.program, stmt(code, k))
+}
+
+func (b *filterBuilder) branch(code uint16, k uint32, onTrue, onFalse string) {
+	b.fixups = append(b.fixups, filterFixup{index: len(b.program), true: onTrue, false: onFalse})
+	b.program = append(b.program, jump(code, k, 0, 0))
+}
+
+func (b *filterBuilder) jumpTo(label string) {
+	// Both outcomes target the same label, making this independent of the
+	// accumulator's current value without introducing a second assembler path.
+	b.branch(bpfJMP|bpfJEQ|bpfK, 0, label, label)
+}
+
+func (b *filterBuilder) mark(label string) {
+	if _, exists := b.labels[label]; exists {
+		panic("workerconf: duplicate seccomp label " + label)
+	}
+	b.labels[label] = len(b.program)
+}
+
+func (b *filterBuilder) resolve() []unix.SockFilter {
+	for _, fixup := range b.fixups {
+		resolve := func(label string) uint8 {
+			if label == "" { // fall through to the next instruction
+				return 0
+			}
+			target, ok := b.labels[label]
+			if !ok {
+				panic("workerconf: missing seccomp label " + label)
+			}
+			offset := target - fixup.index - 1
+			if offset < 0 || offset > 255 {
+				panic(fmt.Sprintf("workerconf: invalid seccomp jump %d -> %s (%d)", fixup.index, label, offset))
+			}
+			return uint8(offset)
+		}
+		b.program[fixup.index].Jt = resolve(fixup.true)
+		b.program[fixup.index].Jf = resolve(fixup.false)
+	}
+	return b.program
+}
+
+const (
+	labelAllow            = "allow"
+	labelDeny             = "deny"
+	labelKill             = "kill"
+	labelENOSYS           = "enosys"
+	labelAffinity         = "affinity"
+	labelTGKill           = "tgkill"
+	labelFcntl            = "fcntl"
+	labelClone            = "clone"
+	labelCloneFlags       = "clone-flags"
+	labelSocket           = "socket"
+	labelSocketType       = "socket-type"
+	labelSocketProto      = "socket-protocol"
+	labelOpen             = "open"
+	labelIOCTL            = "ioctl"
+	labelPrlimit          = "prlimit"
+	labelPrlimitResource  = "prlimit-resource"
+	labelPrlimitPointer   = "prlimit-pointer"
+	labelPrlimitPointerHi = "prlimit-pointer-hi"
+)
+
+// buildFilter preserves the original VMM-filter helper for focused tests.
+func buildFilter(selfTGID uint32) []unix.SockFilter {
+	return buildFilterFor(DefaultSpec(2, ""), selfTGID)
+}
+
+func buildFilterFor(spec Spec, selfTGID uint32) []unix.SockFilter {
+	allowNrs := append([]uint32{}, runtimeWhitelist...)
+	if spec.Profile == ProfileNetwork {
+		allowNrs = append(allowNrs, networkWhitelist...)
+	} else {
+		allowNrs = append(allowNrs, whitelist[len(runtimeWhitelist):]...)
+	}
+	allowNrs = append(allowNrs, archWhitelist()...)
+
+	b := newFilterBuilder(len(allowNrs) + 64)
+	b.emit(bpfLD|bpfW|bpfABS, offArch)
+	b.branch(bpfJMP|bpfJEQ|bpfK, auditArch, "", labelKill)
+	b.emit(bpfLD|bpfW|bpfABS, offNr)
+	for _, nr := range allowNrs {
+		b.branch(bpfJMP|bpfJEQ|bpfK, nr, labelAllow, "")
+	}
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_SCHED_GETAFFINITY, labelAffinity, "")
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_TGKILL, labelTGKill, "")
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_FCNTL, labelFcntl, "")
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_PRLIMIT64, labelPrlimit, "")
+	// clone3 stores flags behind a pointer seccomp cannot inspect. ENOSYS is
+	// intentional: glibc pthread_create then falls back to clone, whose flags
+	// are visible below. EPERM makes glibc fail instead of falling back.
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_CLONE3, labelENOSYS, "")
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_CLONE, labelClone, "")
+	if spec.Profile == ProfileNetwork {
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_SOCKET, labelSocket, "")
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_OPENAT, labelOpen, "")
+	} else {
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_IOCTL, labelIOCTL, "")
+	}
+	b.jumpTo(labelDeny)
+
+	b.mark(labelAffinity)
+	b.emit(bpfLD|bpfW|bpfABS, offArg0)
+	b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelAllow, labelDeny)
+
+	b.mark(labelTGKill)
+	b.emit(bpfLD|bpfW|bpfABS, offArg0)
+	b.branch(bpfJMP|bpfJEQ|bpfK, selfTGID, labelAllow, labelDeny)
+
+	b.mark(labelFcntl)
+	b.emit(bpfLD|bpfW|bpfABS, offArg1)
+	for _, command := range safeFcntlCommands {
+		b.branch(bpfJMP|bpfJEQ|bpfK, command, labelAllow, "")
+	}
+	b.jumpTo(labelDeny)
+
+	b.mark(labelPrlimit)
+	b.emit(bpfLD|bpfW|bpfABS, offArg0)
+	b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelPrlimitResource, labelDeny)
+	b.mark(labelPrlimitResource)
+	b.emit(bpfLD|bpfW|bpfABS, offArg1)
+	b.branch(bpfJMP|bpfJEQ|bpfK, unix.RLIMIT_NPROC, labelPrlimitPointer, labelDeny)
+	b.mark(labelPrlimitPointer)
+	b.emit(bpfLD|bpfW|bpfABS, offArg2)
+	b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelPrlimitPointerHi, labelDeny)
+	b.mark(labelPrlimitPointerHi)
+	b.emit(bpfLD|bpfW|bpfABS, offArg2Hi)
+	b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelAllow, labelDeny)
+
+	b.mark(labelClone)
+	// A nonzero high word is never a legitimate clone(2) flags value on the
+	// supported 64-bit architectures. Then require CLONE_THREAD: the kernel
+	// consequently keeps every clone in this TGID and rejects incompatible
+	// namespace/exit-signal combinations.
+	b.emit(bpfLD|bpfW|bpfABS, offArg0Hi)
+	b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelCloneFlags, labelDeny)
+	b.mark(labelCloneFlags)
+	b.emit(bpfLD|bpfW|bpfABS, offArg0)
+	b.emit(bpfALU|bpfAND|bpfK, uint32(unix.CLONE_THREAD))
+	b.branch(bpfJMP|bpfJEQ|bpfK, uint32(unix.CLONE_THREAD), labelAllow, labelDeny)
+
+	if spec.Profile == ProfileNetwork {
+		b.mark(labelSocket)
+		b.emit(bpfLD|bpfW|bpfABS, offArg0)
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.AF_INET, labelSocketType, "")
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.AF_INET6, labelSocketType, labelDeny)
+
+		b.mark(labelSocketType)
+		b.emit(bpfLD|bpfW|bpfABS, offArg1)
+		b.emit(bpfALU|bpfAND|bpfK, socketTypeMask)
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SOCK_STREAM, labelSocketProto, "")
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SOCK_DGRAM, labelSocketProto, labelDeny)
+
+		b.mark(labelSocketProto)
+		b.emit(bpfLD|bpfW|bpfABS, offArg2)
+		b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelAllow, "")
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.IPPROTO_TCP, labelAllow, "")
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.IPPROTO_UDP, labelAllow, labelDeny)
+
+		b.mark(labelOpen)
+		b.emit(bpfLD|bpfW|bpfABS, offArg2)
+		const readFlags = unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_LARGEFILE
+		b.emit(bpfALU|bpfAND|bpfK, ^uint32(readFlags))
+		b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelAllow, labelDeny)
+	} else {
+		b.mark(labelIOCTL)
+		b.emit(bpfLD|bpfW|bpfABS, offArg1)
+		b.emit(bpfALU|bpfAND|bpfK, 0xFFFF)
+		b.branch(bpfJMP|bpfJGE|bpfK, 0xAE00, "", labelDeny)
+		b.branch(bpfJMP|bpfJGT|bpfK, 0xAEFF, labelDeny, labelAllow)
+	}
+
+	b.mark(labelDeny)
+	b.emit(bpfRET|bpfK, retErrno|sysEPERM)
+	b.mark(labelENOSYS)
+	b.emit(bpfRET|bpfK, retErrno|sysENOSYS)
+	b.mark(labelAllow)
+	b.emit(bpfRET|bpfK, retAllow)
+	b.mark(labelKill)
+	b.emit(bpfRET|bpfK, retKill)
+	return b.resolve()
+}
+
+// installSeccomp preserves the VMM-profile test helper.
+func installSeccomp() error {
+	return installSeccompFor(DefaultSpec(2, ""))
+}
+
+// installSeccompFor sets no_new_privs and atomically applies the role filter
+// to every thread. TSYNC failure is a full tier failure: a partly filtered Go
+// process is not a security boundary.
+func installSeccompFor(spec Spec) error {
 	selfTGID := os.Getpid()
 	if selfTGID <= 0 {
 		return fmt.Errorf("invalid self TGID %d", selfTGID)
 	}
-	prog := buildFilter(uint32(selfTGID))
-	_, _ = fmt.Fprintf(os.Stderr, "workerconf: filter built (%d insns); PR_SET_NO_NEW_PRIVS\n", len(prog))
+	program := buildFilterFor(spec, uint32(selfTGID))
+	_, _ = fmt.Fprintf(os.Stderr, "workerconf: filter built (%d insns); PR_SET_NO_NEW_PRIVS\n", len(program))
 	if _, _, errno := unix.RawSyscall(unix.SYS_PRCTL, unix.PR_SET_NO_NEW_PRIVS, 1, 0); errno != 0 {
 		return fmt.Errorf("no_new_privs: %w", errno)
 	}
-	_, _ = fmt.Fprintln(os.Stderr, "workerconf: NNP set; seccomp(SET_MODE_FILTER|TSYNC)")
-	fprog := unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]}
+	filter := unix.SockFprog{Len: uint16(len(program)), Filter: &program[0]}
 	_, _, errno := unix.RawSyscall(unix.SYS_SECCOMP, seccompSetModeFilter, seccompFlagTSYNC,
-		uintptr(unsafe.Pointer(&fprog)))
+		uintptr(unsafe.Pointer(&filter)))
 	if errno != 0 {
 		return fmt.Errorf("seccomp load (TSYNC): %w", errno)
 	}
-	_, _ = fmt.Fprintln(os.Stderr, "workerconf: seccomp(2) returned 0")
 	return nil
 }

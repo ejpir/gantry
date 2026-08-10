@@ -98,6 +98,81 @@ func TestSendRecvFD(t *testing.T) {
 	}
 }
 
+func TestSendFDBoundedWhenPeerDoesNotRead(t *testing.T) {
+	a, b := unixPair(t)
+	defer func() { _ = a.Close() }()
+	defer func() { _ = b.Close() }()
+	if err := a.(*net.UnixConn).SetWriteBuffer(1024); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "fd-pass-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var token [FDTokenLen]byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		err = sendFDWithTimeout(a, token, f, 20*time.Millisecond)
+		if err != nil {
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("blocked send error = %v, want deadline", err)
+			}
+			return
+		}
+	}
+	t.Fatal("descriptor sends never backpressured")
+}
+
+func TestRecvFDRejectsMalformedMessagesAndClosesRights(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload []byte
+		fds     int
+	}{
+		{name: "short token", payload: []byte{1, 2, 3}, fds: 1},
+		{name: "multiple descriptors", payload: make([]byte, FDTokenLen), fds: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := unixPair(t)
+			defer func() { _ = a.Close() }()
+			defer func() { _ = b.Close() }()
+			uc := a.(*net.UnixConn)
+			readers := make([]*os.File, 0, tc.fds)
+			writers := make([]*os.File, 0, tc.fds)
+			fdNumbers := make([]int, 0, tc.fds)
+			for range tc.fds {
+				reader, writer, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				readers = append(readers, reader)
+				writers = append(writers, writer)
+				fdNumbers = append(fdNumbers, int(reader.Fd()))
+				defer func() { _ = writer.Close() }()
+			}
+			if _, _, err := uc.WriteMsgUnix(tc.payload, syscall.UnixRights(fdNumbers...), nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, reader := range readers {
+				if err := reader.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, received, err := RecvFD(b); err == nil || received != nil {
+				if received != nil {
+					_ = received.Close()
+				}
+				t.Fatalf("RecvFD = %v, %v; want malformed-message error", received, err)
+			}
+			for _, writer := range writers {
+				assertPipeReaderClosed(t, writer)
+			}
+		})
+	}
+}
+
 // TestRecvFDTimeout: with nothing sent, RecvFD fails instead of hanging.
 func TestRecvFDTimeout(t *testing.T) {
 	a, b := unixPair(t)
@@ -332,17 +407,101 @@ func TestFDMuxSurvivesIdleChannel(t *testing.T) {
 	if err := SendFD(a, token, f); err != nil {
 		t.Fatal(err)
 	}
-	ch, err := mux.Expect(token)
+	wait, err := mux.Expect(token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case res := <-ch:
-		if res.Err != nil {
-			t.Fatalf("recv after idle: %v", res.Err)
-		}
-		_ = res.F.Close()
-	case <-time.After(5 * time.Second):
-		t.Fatal("no dispatch after idle period")
+	received, err := wait.Wait(5 * time.Second)
+	if err != nil {
+		t.Fatalf("recv after idle: %v", err)
 	}
+	_ = received.Close()
+}
+
+func waitForFDMux(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal(message)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func assertPipeReaderClosed(t *testing.T, writer *os.File) {
+	t.Helper()
+	waitForFDMux(t, func() bool {
+		_, err := writer.Write([]byte{1})
+		return errors.Is(err, syscall.EPIPE)
+	}, "received descriptor was not closed")
+}
+
+func sendPipeReader(t *testing.T, conn net.Conn, token [FDTokenLen]byte) *os.File {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SendFD(conn, token, reader); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	return writer
+}
+
+func TestFDMuxCancelClosesDeliveredAndLateDescriptors(t *testing.T) {
+	a, b := unixPair(t)
+	defer func() { _ = a.Close() }()
+	mux := NewFDMux(b)
+	defer func() { _ = mux.Close() }()
+
+	var deliveredToken [FDTokenLen]byte
+	deliveredToken[0] = 1
+	wait, err := mux.Expect(deliveredToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveredWriter := sendPipeReader(t, a, deliveredToken)
+	waitForFDMux(t, func() bool { return len(wait.result) == 1 }, "descriptor was not dispatched")
+	wait.Cancel()
+	assertPipeReaderClosed(t, deliveredWriter)
+
+	var lateToken [FDTokenLen]byte
+	lateToken[0] = 2
+	late, err := mux.Expect(lateToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	late.Cancel()
+	lateWriter := sendPipeReader(t, a, lateToken)
+	assertPipeReaderClosed(t, lateWriter)
+}
+
+func TestFDMuxClosesDuplicateAndParkedDescriptors(t *testing.T) {
+	a, b := unixPair(t)
+	defer func() { _ = a.Close() }()
+	mux := NewFDMux(b)
+
+	var token [FDTokenLen]byte
+	token[0] = 3
+	firstWriter := sendPipeReader(t, a, token)
+	waitForFDMux(t, func() bool {
+		mux.mu.Lock()
+		defer mux.mu.Unlock()
+		return mux.unclaimed[token] != nil
+	}, "first descriptor was not parked")
+	duplicateWriter := sendPipeReader(t, a, token)
+	assertPipeReaderClosed(t, duplicateWriter)
+
+	if err := mux.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertPipeReaderClosed(t, firstWriter)
 }

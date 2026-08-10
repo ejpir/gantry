@@ -1,12 +1,14 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sort"
 	"strconv"
 	"sync"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/vnet"
 )
 
@@ -71,10 +73,19 @@ func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 		return PortEntry{}, err
 	}
 	if persistent {
-		ports := append(append([]string(nil), m.store.Snapshot().Ports...), normalized)
-		if err := m.persistLocked(ports); err != nil {
-			_ = m.backend.Unpublish(mapping.Proto, mapping.Local())
-			return PortEntry{}, err
+		if err := m.store.Mutate(func(cfg *RunConfig) error {
+			cfg.Ports = append(cfg.Ports, normalized)
+			return nil
+		}); err != nil {
+			if atomicfile.Committed(err) {
+				return PortEntry{Mapping: mapping, State: "bound"},
+					fmt.Errorf("published port configuration committed but durability is uncertain: %w", err)
+			}
+			rollbackErr := m.backend.Unpublish(mapping.Proto, mapping.Local())
+			if rollbackErr != nil {
+				rollbackErr = fmt.Errorf("rollback published listener: %w", rollbackErr)
+			}
+			return PortEntry{}, errors.Join(err, rollbackErr)
 		}
 	}
 	return PortEntry{Mapping: mapping, State: "bound"}, nil
@@ -112,17 +123,28 @@ func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error)
 		}
 	}
 	if persistent {
-		filtered := make([]string, 0)
-		for _, raw := range m.store.Snapshot().Ports {
-			if saved, err := ParsePortSpec(raw); err != nil || saved.Key() != mapping.Key() {
-				filtered = append(filtered, raw)
+		if err := m.store.Mutate(func(cfg *RunConfig) error {
+			filtered := make([]string, 0, len(cfg.Ports))
+			for _, raw := range cfg.Ports {
+				if saved, parseErr := ParsePortSpec(raw); parseErr != nil || saved.Key() != mapping.Key() {
+					filtered = append(filtered, raw)
+				}
 			}
-		}
-		if err := m.persistLocked(filtered); err != nil {
+			cfg.Ports = filtered
+			return nil
+		}); err != nil {
+			if atomicfile.Committed(err) {
+				return PortEntry{Mapping: mapping, State: "unpublished"},
+					fmt.Errorf("unpublished port configuration committed but durability is uncertain: %w", err)
+			}
+			var rollbackErr error
 			if bound { // restore the listener we just dropped
-				_ = m.backend.Publish(mapping.Proto, mapping.Local(), mapping.Remote())
+				rollbackErr = m.backend.Publish(mapping.Proto, mapping.Local(), mapping.Remote())
+				if rollbackErr != nil {
+					rollbackErr = fmt.Errorf("restore unpublished listener: %w", rollbackErr)
+				}
 			}
-			return PortEntry{}, err
+			return PortEntry{}, errors.Join(err, rollbackErr)
 		}
 	}
 	if !bound && !persistent {
@@ -161,13 +183,6 @@ func (m *PortManager) List() ([]PortEntry, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Mapping.Key() < out[j].Mapping.Key() })
 	return out, nil
-}
-
-func (m *PortManager) persistLocked(ports []string) error {
-	return m.store.Mutate(func(cfg *RunConfig) error {
-		cfg.Ports = ports
-		return nil
-	})
 }
 
 // forwardMapping converts the netstack's wire shape back to a PortMapping

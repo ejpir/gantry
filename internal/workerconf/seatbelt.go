@@ -9,6 +9,21 @@ import (
 	"strings"
 )
 
+// seatbeltRuntimeSysctls are the exact Darwin values queried by the current Go
+// runtime during CPU/OS initialization. Keeping the names explicit prevents
+// the broad sysctl-read operation from exposing KERN_PROC process listings.
+var seatbeltRuntimeSysctls = []string{
+	"hw.ncpu",
+	"hw.pagesize",
+	"hw.optional.armv8_1_atomics",
+	"hw.optional.armv8_crc32",
+	"hw.optional.armv8_2_sha512",
+	"hw.optional.armv8_2_sha3",
+	"hw.optional.arm.FEAT_DIT",
+	"kern.osrelease",
+	"sysctl.proc_translated",
+}
+
 // sbplEscape quotes a path for embedding in an SBPL string literal.
 func sbplEscape(p string) string {
 	p = strings.ReplaceAll(p, `\`, `\\`)
@@ -32,30 +47,32 @@ func sbplPath(p string) string {
 // buildSeatbeltProfile renders the v1 profile for the worker:
 // deny-default, the minimal runtime allowances, path access limited to
 // the declared FileAllow subpaths (read-only roots get no write rule),
-// no network, no exec. Rule order matters in SBPL — later rules win —
+// role-scoped network access, no exec. Rule order matters in SBPL — later rules win —
 // so the blanket deny comes FIRST and every subsequent rule is an
 // allow.
 func buildSeatbeltProfile(spec Spec) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n(deny default)\n")
-	// The Go runtime: thread preemption signals itself; mach-lookup and
-	// sysctl-read are needed by runtime/libSystem internals (the M2
-	// spike validates the minimal set on real hardware).
+	// The Go runtime uses self-signals for thread preemption. Hypervisor.framework
+	// enters HVF through Mach traps, not bootstrap service lookup, so neither
+	// worker role receives ambient XPC/Mach-service discovery authority.
 	b.WriteString("(allow signal (target self))\n")
-	b.WriteString("(allow mach-lookup)\n")
-	b.WriteString("(allow sysctl-read)\n")
-	// Character devices the runtime and the console/stderr fallback
-	// may touch. /dev/null + /dev/urandom only — nothing else exists
-	// for this worker.
-	b.WriteString(`(allow file-read* file-write* (literal "/dev/null") (literal "/dev/urandom"))` + "\n")
-	// Console log + stderr postmortem log: both are pre-opened fds
-	// whose writes are path-checked per op under Seatbelt. Literal
-	// paths only — their parent directory holds trusted state
-	// (sandbox.json); a subpath grant there would be a config-tamper
-	// primitive.
-	for _, p := range spec.WriteFiles {
+	b.WriteString("(allow sysctl-read\n")
+	for _, name := range seatbeltRuntimeSysctls {
+		b.WriteString("\t(sysctl-name \"" + name + "\")\n")
+	}
+	if spec.Profile == ProfileVMM {
+		// Hypervisor.framework uses this feature bit when selecting its VM
+		// creation path. It reveals no process-specific information.
+		b.WriteString("\t(sysctl-name \"kern.hv_support\")\n")
+	}
+	b.WriteString(")\n")
+	// Minimal runtime devices. Diagnostics are inherited pipes, never a path.
+	b.WriteString(`(allow file-read* file-write* (literal "/dev/null"))` + "\n")
+	b.WriteString(`(allow file-read* (literal "/dev/urandom"))` + "\n")
+	for _, p := range spec.ReadFiles {
 		if p != "" {
-			b.WriteString(`(allow file-write* (literal "` + sbplEscape(sbplPath(p)) + `"))` + "\n")
+			b.WriteString(`(allow file-read* (literal "` + sbplEscape(sbplPath(p)) + `"))` + "\n")
 		}
 	}
 	// Share export roots, split by writability: a RO export never
@@ -88,6 +105,14 @@ func buildSeatbeltProfile(spec Spec) string {
 	// named here as documentation of the contract.
 	if spec.NoNetwork {
 		b.WriteString(";; network: denied by (deny default) — data plane is pre-opened fds\n")
+	} else {
+		// The network worker is the host TCP/UDP proxy and port-listener owner.
+		// These IP-qualified rules deliberately omit AF_UNIX system-socket
+		// authority and Mach IPC. The worker's egress policy remains the
+		// finer-grained destination boundary within the required INET surface.
+		b.WriteString("(allow network-bind (local ip \"*:*\"))\n")
+		b.WriteString("(allow network-inbound)\n")
+		b.WriteString("(allow network-outbound)\n")
 	}
 	if spec.NoExec {
 		b.WriteString(";; exec/fork: denied by (deny default) — the worker never spawns\n")

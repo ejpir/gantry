@@ -1,0 +1,226 @@
+package sandbox
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/workerconf"
+
+	"github.com/containerd/ttrpc"
+)
+
+func (d *daemonRuntime) load() error {
+	// The secrets handshake arrives on stdin before anything else. Refuse a
+	// malformed or oversized launcher handshake rather than silently starting
+	// a sandbox without the secrets the caller expected to inject.
+	secrets, err := readSecretsHandshake(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("secrets handshake: %w", err)
+	}
+	d.secrets = secrets
+
+	d.dir = sandboxDir(d.name)
+	// Revalidate the local control boundary before reading configuration. On
+	// Windows this replaces inherited ACLs and fails closed if ownership or
+	// descriptor verification cannot establish a current-user-only directory.
+	if err := secureSandboxDirectory(d.dir); err != nil {
+		return fmt.Errorf("sandbox directory security: %w", err)
+	}
+	// Acquire the daemon's authoritative lifetime lock before reading mutable
+	// state. The launcher retains its stable, out-of-directory launch lock
+	// until readiness or process exit, so the two locks overlap during handoff.
+	lock, err := holdSandboxLock(d.dir)
+	if err != nil {
+		return fmt.Errorf("another daemon holds the sandbox lock: %w", err)
+	}
+	d.lock = lock
+	store, err := LoadConfigStore(d.dir)
+	if err != nil {
+		return fmt.Errorf("config store: %w", err)
+	}
+	d.store = store
+	d.cfg = d.store.Snapshot()
+	if d.cfg.ImageDigest != "" && !gutil.FileExists(d.cfg.Image) {
+		return fmt.Errorf("image %s not in cache; run `gantry image pull %s`", d.cfg.ImageDigest, d.cfg.ImageRef)
+	}
+	return nil
+}
+
+func (d *daemonRuntime) startHostServices() error {
+	consoleLog, err := newBoundedLogPipe(filepath.Join(d.dir, "console.log"))
+	if err != nil {
+		return fmt.Errorf("console log broker: %w", err)
+	}
+	d.consoleLog = consoleLog
+	d.console = consoleLog.Writer()
+	network, err := d.cfg.StartNetwork(d.dir)
+	if err != nil {
+		return err
+	}
+	d.network = network
+	d.bootLog("network up")
+	d.logNetworkState()
+
+	shareManager, warnings, err := NewShareManager(d.dir, d.store)
+	if err != nil {
+		return fmt.Errorf("shares: %w", err)
+	}
+	d.shares = shareManager
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
+	}
+	d.ports = NewPortManager(d.store, d.network.Backend)
+	return nil
+}
+
+func (d *daemonRuntime) logNetworkState() {
+	if d.network.Policy != nil {
+		fmt.Fprintln(os.Stderr, "daemon: network policy:", d.network.Policy.Describe())
+	}
+	for _, degraded := range d.network.Degraded {
+		fmt.Fprintln(os.Stderr, "daemon: process isolation degraded:", degraded)
+	}
+	if d.network.Split {
+		d.bootLog("network worker: split process (data/control channels up)")
+	}
+}
+
+func (d *daemonRuntime) prepareGuest() error {
+	opts, err := d.cfg.Opts(d.network, d.dir, true)
+	if err != nil {
+		return err
+	}
+	if d.bootTiming {
+		// The same origin travels into a split VMM worker, letting its
+		// low-overhead device milestones line up with daemon readiness.
+		opts.BootTimingStart = d.started
+	}
+	if err := d.prepareVM(opts); err != nil {
+		return err
+	}
+	d.bootLog("machine prepared (RAM+kernel)")
+
+	var confinement *workerconf.Report
+	if reporter, ok := d.runner.(interface{ ConfinementReport() workerconf.Report }); ok {
+		report := reporter.ConfinementReport()
+		confinement = &report
+	}
+	if err := writeIsolationState(d.dir, d.cfg, d.network, d.runner != nil, confinement); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
+	}
+	if err := d.shares.Publish(); err != nil {
+		return fmt.Errorf("share manifest: %w", err)
+	}
+	return nil
+}
+
+func (d *daemonRuntime) prepareVM(opts vmm.Opts) error {
+	// Split VMM (Phase 2): the guest runs in a _vmm-worker process; the
+	// supervisor keeps ctl.sock, sessions, policy, and all host sockets.
+	runner, splitErr := tryStartVMMSplit(d.cfg, opts, d.network, d.shares, d.dir, d.console)
+	switch {
+	case splitErr == nil:
+		d.runner = runner
+		if err := d.installPolicyFanout(); err != nil {
+			return err
+		}
+		d.bootLog("vmm worker spawned (split topology)")
+		return nil
+	case d.cfg.ProcessIsolation == "required":
+		return fmt.Errorf("-process-isolation=required but the split VMM failed: %w", splitErr)
+	case !errors.Is(splitErr, errVMMSplitUnavailable):
+		fmt.Fprintf(os.Stderr, "daemon: split VMM failed (%v), falling back to monolithic\n", splitErr)
+	}
+
+	if hub := d.shares.Hub(); hub != nil {
+		opts.Filesystems = []vmm.Filesystem{{
+			Tag:         shares.HubTag,
+			Handler:     hub,
+			Description: "share hub (hot-add enabled)",
+		}}
+	}
+	opts.Console = d.console
+	machine, err := vmm.Prepare(opts)
+	if err != nil {
+		return err
+	}
+	d.machine = machine
+	return nil
+}
+
+func (d *daemonRuntime) installPolicyFanout() error {
+	if d.network == nil || d.network.Split || d.network.Backend == nil {
+		return nil
+	}
+	pusher, ok := d.runner.(vmmPolicyPusher)
+	if !ok {
+		return nil
+	}
+	fanout, err := newVMMPolicyBackend(d.network.Backend, pusher, d.network.Policy)
+	if err != nil {
+		return fmt.Errorf("initialize VMM policy fan-out: %w", err)
+	}
+	d.network.Backend = fanout
+	return nil
+}
+
+type guestRPCResult struct {
+	client *ttrpc.Client
+	err    error
+}
+
+func (d *daemonRuntime) connectGuest() error {
+	// Create the RPC listener before booting: vminitd makes one dial-back
+	// attempt, and a fast CI VM can otherwise beat net.Listen below.
+	rpcSock := filepath.Join(d.dir, "1025.sock")
+	listener, err := client.ListenRPC(rpcSock)
+	if err != nil {
+		return err
+	}
+
+	guestErr := make(chan error, 1)
+	d.guestErr = guestErr
+	if d.runner != nil {
+		go func() { guestErr <- d.runner.Wait() }()
+	} else {
+		go func() { guestErr <- vmm.Run(d.machine) }()
+	}
+	d.bootLog("vCPUs running; guest booting")
+
+	// Hold the single dial-back connection for the VM's lifetime, while also
+	// watching guestErr so a failed boot cannot strand CmdStart until timeout.
+	rpcCh := make(chan guestRPCResult, 1)
+	go func() {
+		rpc, err := client.AcceptRPCListener(listener, rpcSock)
+		rpcCh <- guestRPCResult{client: rpc, err: err}
+	}()
+	select {
+	case result := <-rpcCh:
+		if result.err != nil {
+			return result.err
+		}
+		d.rpc = result.client
+		d.bootLog("guest RPC connected (READY)")
+		d.publishReady()
+		return nil
+	case err := <-guestErr:
+		_ = listener.Close()
+		return fmt.Errorf("VM exited before guest RPC: %v", err)
+	}
+}
+
+func (d *daemonRuntime) publishReady() {
+	_ = os.WriteFile(filepath.Join(d.dir, "ready"), []byte("1\n"), 0o600)
+	if err := notifyDaemonReady(d.readySocket); err != nil {
+		// The parent may have exited or fallen back to ready-file polling;
+		// readiness notification is never a reason to stop a healthy VM.
+		fmt.Fprintln(os.Stderr, "daemon: parent readiness notification:", err)
+	}
+	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
+}

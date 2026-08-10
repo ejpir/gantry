@@ -2,26 +2,11 @@
 
 package sandbox
 
-// _vmm-worker spawn (supervisor side) and entry point (worker side).
-//
-// Descriptor table handed to the child (fixed slots; everything after
-// the console is a boot asset in config-defined order):
-//
-//	0,1,2  std
-//	3      control      (workerproto RPC, supervisor -> worker)
-//	4      bridge       (workerproto RPC, worker -> supervisor)
-//	5      fd channel   (SCM_RIGHTS, nonce first)
-//	6      share data   (bounded FUSE relay, nonce first)
-//	7      net data     (QEMU-framed Ethernet)
-//	8      console log
-//	9      kernel
-//	10     rootfs (when cfg.HasRoot)
-//	...    DisksRO, Disks
+// Trusted-side process creation and host-socket brokering for _vmm-worker.
+// The inherited descriptor table is the worker's complete capability set.
 
 import (
-	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -30,25 +15,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ejpir/gantry/internal/workerconf"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
-)
-
-const (
-	vmmFDControl = 3
-	vmmFDBridge  = 4
-	vmmFDChannel = 5
-	vmmFDShare   = 6
-	vmmFDNet     = 7
-	vmmFDConsole = 8
-	vmmFDKernel  = 9
 )
 
 // spawnVMMWorker re-execs the binary as _vmm-worker with the descriptor
 // table and performs the handshake + nonce exchange. cfg counts must
 // match the assets (HasRoot ↔ Rootfs and NDisksRO/NDisks) — the worker
 // validates too, but failing here keeps the error local.
-func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmmWorker, error) {
+func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (*vmmWorker, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("worker re-exec path: %w", err)
+	}
 	ctrlSup, ctrlWrk, err := socketpairConns()
 	if err != nil {
 		return nil, err
@@ -88,34 +68,34 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		_ = shareSup.Close()
 	}()
 	workerEnds := []net.Conn{ctrlWrk, bridgeWrk, fdWrk, shareWrk}
-	defer func() {
-		for _, c := range workerEnds {
-			_ = c.Close()
-		}
-	}()
 	// The child duplicates each end into its table slot; the originals
 	// close after spawn. dupFiles are supervisor-side duplicates (always
-	// closed here); assetFiles are the SUPERVISOR'S OWN copies of the
-	// boot assets — closed only after a fully successful handshake, so a
-	// failed spawn can degrade to monolithic with the assets intact.
+	// closed here). Boot assets stay supervisor-owned until a successful
+	// acknowledgement so a failed spawn can degrade to monolithic. Writable
+	// disk descriptors remain in the supervisor after acknowledgement: they
+	// carry the process-owned exclusive locks for the worker's lifetime.
 	var dupFiles []*os.File
 	closeDups := func() {
-		for _, f := range dupFiles {
-			_ = f.Close()
-		}
+		closeFiles(dupFiles)
+		dupFiles = nil
 	}
 	defer closeDups()
-	for _, c := range workerEnds {
-		f, err := connFile(c)
-		_ = c.Close()
-		if err != nil {
-			return nil, err
-		}
-		dupFiles = append(dupFiles, f)
+	dupFiles, err = dupConnFiles(workerEnds...)
+	if err != nil {
+		return nil, fmt.Errorf("worker descriptor table: %w", err)
 	}
 	if assets.NetConn == nil || assets.Console == nil || assets.Kernel == nil {
 		closeDups()
 		return nil, fmt.Errorf("descriptor table: net conn, console and kernel are required")
+	}
+	consoleInfo, err := assets.Console.Stat()
+	if err != nil {
+		closeDups()
+		return nil, fmt.Errorf("descriptor table: inspect console sink: %w", err)
+	}
+	if consoleInfo.Mode()&os.ModeNamedPipe == 0 {
+		closeDups()
+		return nil, fmt.Errorf("descriptor table: console must be a supervisor-brokered pipe, got mode %s", consoleInfo.Mode())
 	}
 	// The net data end is dup'd into the child's slot. Keep the caller's
 	// original open until the boot ack: auto mode must be able to reuse it
@@ -127,12 +107,14 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	}
 	dupFiles = append(dupFiles, netFile)
 	assetFiles := []*os.File{assets.Console, assets.Kernel}
+	closeAfterAck := append([]*os.File(nil), assetFiles...)
 	if cfg.HasRoot {
 		if assets.Rootfs == nil {
 			closeDups()
 			return nil, fmt.Errorf("descriptor table: rootfs required")
 		}
 		assetFiles = append(assetFiles, assets.Rootfs)
+		closeAfterAck = append(closeAfterAck, assets.Rootfs)
 	}
 	if len(assets.DisksRO) != cfg.NDisksRO || len(assets.Disks) != cfg.NDisks {
 		closeDups()
@@ -140,31 +122,62 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 			len(assets.DisksRO), cfg.NDisksRO, len(assets.Disks), cfg.NDisks)
 	}
 	assetFiles = append(assetFiles, assets.DisksRO...)
+	closeAfterAck = append(closeAfterAck, assets.DisksRO...)
+	var maxWritableFileSize uint64
+	for index, disk := range assets.Disks {
+		if disk == nil {
+			return nil, fmt.Errorf("descriptor table: writable disk %d is nil", index)
+		}
+		if _, err := gutil.TryLockFD(disk); err != nil {
+			return nil, fmt.Errorf("lock writable disk %s: %w", disk.Name(), err)
+		}
+		info, err := disk.Stat()
+		if err != nil {
+			return nil, fmt.Errorf("stat writable disk %s: %w", disk.Name(), err)
+		}
+		if info.Size() <= 0 {
+			return nil, fmt.Errorf("writable disk %s has invalid size %d", disk.Name(), info.Size())
+		}
+		if size := uint64(info.Size()); size > maxWritableFileSize {
+			maxWritableFileSize = size
+		}
+	}
+	if len(assets.Disks) != 0 {
+		cfg.DisksPrelocked = true
+		cfg.MaxWritableFileSize = maxWritableFileSize
+	}
 	assetFiles = append(assetFiles, assets.Disks...)
 	if assets.KVM != nil {
 		assetFiles = append(assetFiles, assets.KVM) // LAST slot (cfg.HasKVM)
+		closeAfterAck = append(closeAfterAck, assets.KVM)
 	}
 	childFiles := append(append([]*os.File{}, dupFiles...), assetFiles...)
 
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("worker re-exec path: %w", err)
-	}
 	argv := []string{exe, "_vmm-worker"}
 	env := workerEnv()
 	if vmmWorkerSpawnHook != nil {
 		vmmWorkerSpawnHook(&argv, &env)
 	}
-	// The worker's stderr gets its own postmortem log next to the
-	// console; on open failure it inherits ours (never fatal).
-	workerStderr := os.Stderr
+	// All three standard descriptors point at a one-way pipe. The trusted
+	// supervisor owns and bounds the regular log file; a compromised worker can
+	// neither seek/truncate it nor reuse daemon stdout to grow daemon.log. The
+	// write-only end at fd 0 also prevents inheritance of the secrets handshake.
+	logPath := ""
 	if dir != "" {
-		if f, err := os.OpenFile(filepath.Join(dir, "worker-vmm.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			defer func() { _ = f.Close() }()
-			workerStderr = f
-		}
+		logPath = filepath.Join(dir, "worker-vmm.log")
 	}
-	procFiles := append([]*os.File{os.Stdin, os.Stdout, workerStderr}, childFiles...)
+	workerLog, err := newBoundedLogPipe(logPath)
+	if err != nil {
+		return nil, fmt.Errorf("open VMM worker log broker: %w", err)
+	}
+	keepWorkerLog := false
+	defer func() {
+		if !keepWorkerLog {
+			_ = workerLog.Close()
+		}
+	}()
+	diagnostic := workerLog.Writer()
+	procFiles := append([]*os.File{diagnostic, diagnostic, diagnostic}, childFiles...)
 	startProc := func(confine bool) (*os.Process, error) {
 		sys := workerSysProcAttr()
 		if confine {
@@ -186,6 +199,9 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 		fmt.Fprintf(os.Stderr, "vmm worker: confined spawn denied (%v); retrying without namespaces\n", err)
 		proc, err = startProc(false)
 	}
+	// StartProcess has duplicated the stream into the child (or failed without
+	// doing so). Drop the supervisor write end so process death produces EOF.
+	workerLog.ReleaseWriter()
 	closeDups() // the child has its own table entries now
 	if err != nil {
 		_ = ctrlSup.Close()
@@ -199,12 +215,12 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	var waitErr error
 	killProc := func() {
 		_ = proc.Kill()
-		_, waitErr = proc.Wait()
+		waitErr = waitProcess(proc, "vmm-worker")
 	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
+	nonce, err := workerproto.NewNonce()
+	if err != nil {
 		killProc()
-		return nil, err
+		return nil, fmt.Errorf("vmm worker nonce: %w", err)
 	}
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, cfg); err != nil {
 		killProc()
@@ -221,11 +237,7 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	// Boot ack: the worker answers after Prepare (machine built) — a
 	// missing /dev/kvm or a bad asset surfaces HERE, not as a dead VM
 	// minutes later.
-	var ack struct {
-		OK          bool              `json:"ok"`
-		Error       string            `json:"error"`
-		Confinement workerconf.Report `json:"confinement"`
-	}
+	var ack vmmworker.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
 		killProc()
@@ -238,31 +250,31 @@ func spawnVMMWorker(cfg vmmBootConfig, assets vmmWorkerAssets, dir string) (*vmm
 	}
 	// Handshake complete: the worker owns the boot assets now; close the
 	// supervisor's copies (the descriptor table carried them across).
-	for _, f := range assetFiles {
+	for _, f := range closeAfterAck {
 		_ = f.Close()
 	}
 	_ = assets.NetConn.Close()
 
 	w := &vmmWorker{
-		proc:       proc,
-		client:     workerproto.NewClient(ctrlSup),
-		fdChan:     fdSup,
-		bridge:     bridgeSup,
-		bridgeE:    make(chan error, 1),
-		share:      shareSup,
-		stopping:   make(chan struct{}),
-		dead:       make(chan struct{}),
-		confReport: ack.Confinement,
+		proc:        proc,
+		client:      workerproto.NewClient(ctrlSup),
+		fdChan:      fdSup,
+		bridge:      bridgeSup,
+		bridgeE:     make(chan error, 1),
+		share:       shareSup,
+		diagnostics: workerLog,
+		diskLocks:   assets.Disks,
+		lifecycle:   newWorkerLifecycle(),
+		confReport:  ack.Confinement,
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{
 			"vsock.forward": w.vsockForward(dir),
 		})
 	}()
-	go func() {
-		_, err := proc.Wait()
-		w.setDead(err)
-	}()
+	go func() { w.setDead(waitProcess(proc, "vmm-worker")) }()
+	// The drain goroutine now self-owns the broker until worker EOF.
+	keepWorkerLog = true
 	keepSup = true
 	return w, nil
 }
@@ -278,8 +290,8 @@ var vmmWorkerSpawnHook func(argv *[]string, env *[]string)
 // worker pre-registers its receive — neither side can deadlock.
 func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 	return func(req workerproto.Request) (any, error) {
-		var body vsockForwardRequest
-		if err := json.Unmarshal(req.Body, &body); err != nil {
+		var body vmmworker.ForwardRequest
+		if err := workerproto.DecodeBody(req, &body); err != nil {
 			return nil, fmt.Errorf("vsock.forward: %w", err)
 		}
 		token, err := hex.DecodeString(body.Token)
@@ -306,92 +318,6 @@ func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 		}
 		return nil, nil
 	}
-}
-
-// ------------------------------------------------------------ worker main
-
-// CmdVMMWorker is the _vmm-worker entry point: reconstruct the descriptor
-// table and run the worker. Never invoked by users; launched by
-// spawnVMMWorker.
-func CmdVMMWorker() int {
-	control, err := inheritedConn(vmmFDControl, "control")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "vmm worker control:", err)
-		return 2
-	}
-	bridge, err := inheritedConn(vmmFDBridge, "bridge")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "vmm worker bridge:", err)
-		return 2
-	}
-	fdChan, err := inheritedConn(vmmFDChannel, "fd channel")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "vmm worker fd channel:", err)
-		return 2
-	}
-	shareConn, err := inheritedConn(vmmFDShare, "share channel")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "vmm worker share channel:", err)
-		return 2
-	}
-	assetsFn := func(cfg vmmBootConfig) (vmmWorkerAssets, error) {
-		a := vmmWorkerAssets{ShareConn: shareConn}
-		slot := vmmFDNet
-		next := func(what string) (*os.File, error) {
-			f := os.NewFile(uintptr(slot), what)
-			slot++
-			if f == nil {
-				return nil, fmt.Errorf("%s: missing descriptor", what)
-			}
-			return f, nil
-		}
-		netFile, err := next("net")
-		if err != nil {
-			return a, err
-		}
-		a.NetConn, err = net.FileConn(netFile)
-		_ = netFile.Close()
-		if err != nil {
-			return a, fmt.Errorf("net: %w", err)
-		}
-		if a.Console, err = next("console"); err != nil {
-			return a, err
-		}
-		if a.Kernel, err = next("kernel"); err != nil {
-			return a, err
-		}
-		if cfg.HasRoot {
-			if a.Rootfs, err = next("rootfs"); err != nil {
-				return a, err
-			}
-		}
-		for i := 0; i < cfg.NDisksRO; i++ {
-			f, err := next(fmt.Sprintf("disk-ro-%d", i))
-			if err != nil {
-				return a, err
-			}
-			a.DisksRO = append(a.DisksRO, f)
-		}
-		for i := 0; i < cfg.NDisks; i++ {
-			f, err := next(fmt.Sprintf("disk-%d", i))
-			if err != nil {
-				return a, err
-			}
-			a.Disks = append(a.Disks, f)
-		}
-		if cfg.HasKVM {
-			if a.KVM, err = next("kvm"); err != nil {
-				return a, err
-			}
-		}
-		return a, nil
-	}
-	err = runVMMWorker(control, bridge, fdChan, assetsFn)
-	fmt.Fprintf(os.Stderr, "_vmm-worker: runVMMWorker returned: %v\n", err)
-	if err != nil {
-		return 1
-	}
-	return 0
 }
 
 // isNamespaceUnavailable reports failures that mean the requested namespace

@@ -4,8 +4,7 @@ package vmm
 
 import (
 	"fmt"
-
-	"github.com/ejpir/gantry/internal/gutil"
+	"os"
 )
 
 // x86Devices clusters the legacy PC devices: 16550 console UART, CMOS
@@ -30,7 +29,7 @@ func (m *Machine) initX86() {
 	fmt.Printf("serial: %s (console=ttyS0)\n", m.x86.uartIO)
 }
 
-var dbgIO = gutil.EnvOr("GANTRY_DEBUG", "MINIVM_DEBUG") != ""
+var dbgIO = os.Getenv("GANTRY_DEBUG") != ""
 
 // handleIO routes one x86 port-I/O access (16550 console, CMOS RTC; other
 // legacy ports read as 1s / drop writes like an empty bus).

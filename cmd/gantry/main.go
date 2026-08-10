@@ -1,16 +1,24 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
-	"github.com/ejpir/gantry/internal/sandbox"
-	"github.com/ejpir/gantry/internal/vmm"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/ejpir/gantry/internal/dashboard"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/sharefs"
+	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/vmmworker"
 
 	"golang.org/x/term"
 )
@@ -49,14 +57,136 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 }
 
 func main() {
-	run := flag.NewFlagSet("run", flag.ExitOnError)
+	os.Exit(runMain(os.Args[1:]))
+}
+
+func runMain(args []string) int {
+	if len(args) == 0 {
+		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+			return dashboard.Run(sandbox.NewDashboardService())
+		}
+		writeMainHelp(os.Stderr)
+		return 2
+	}
+
+	command, argv := args[0], args[1:]
+	if status, ok := runSimpleCommand(command, argv); ok {
+		return status
+	}
+	switch command {
+	case "-h", "--help", "help":
+		writeMainHelp(os.Stdout)
+		return 0
+	case "exec":
+		if len(argv) > 0 && !strings.HasPrefix(argv[0], "-") {
+			name, ok := validSandboxName(argv[0])
+			if !ok {
+				return 2
+			}
+			return sandbox.CmdSandboxExec(name, argv[1:])
+		}
+		return runExec(argv)
+	case "resume":
+		if len(argv) == 1 && (argv[0] == "-h" || argv[0] == "--help") {
+			fmt.Fprintln(os.Stderr, "usage: gantry resume <name>   # boot from saved sandbox.json")
+			return 0
+		}
+		if len(argv) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: gantry resume <name>")
+			return 2
+		}
+		name, ok := validSandboxName(argv[0])
+		if !ok {
+			return 2
+		}
+		return sandbox.CmdResume(name)
+	case "daemon":
+		if len(argv) < 1 || len(argv) > 2 {
+			return 2
+		}
+		name, ok := validSandboxName(argv[0])
+		if !ok {
+			return 2
+		}
+		readySocket := ""
+		if len(argv) == 2 {
+			readySocket = argv[1]
+		}
+		return sandbox.CmdDaemon(name, readySocket)
+	case "_net-worker":
+		// Hidden worker role (docs/vmm-network-isolation.md): authority is
+		// the inherited bootstrap channels, never the argv.
+		return networkworker.Cmd()
+	case "_vmm-worker":
+		// Hidden worker role (Phase 2): owns the hypervisor, guest RAM,
+		// devices, and the vsock data plane.
+		return vmmworker.Main()
+	case "ls":
+		return sandbox.CmdLs()
+	case "tui":
+		return dashboard.Run(sandbox.NewDashboardService())
+	case "stop", "delete":
+		if len(argv) != 1 {
+			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", command)
+			return 2
+		}
+		name, ok := validSandboxName(argv[0])
+		if !ok {
+			return 2
+		}
+		if command == "stop" {
+			return sandbox.CmdStop(name)
+		}
+		return sandbox.CmdDelete(name)
+	case "run":
+		return cmdRun(argv)
+	default:
+		fmt.Fprintf(os.Stderr, "gantry: unknown command %q\n\n", command)
+		writeMainHelp(os.Stderr)
+		return 2
+	}
+}
+
+func runSimpleCommand(command string, argv []string) (int, bool) {
+	switch command {
+	case "start":
+		return sandbox.CmdStart(argv), true
+	case "pi":
+		return sandbox.CmdPi(argv), true
+	case "pi-serve":
+		return sandbox.CmdPiServe(argv), true
+	case "image":
+		return sandbox.CmdImage(argv), true
+	case "share":
+		return sandbox.CmdShare(argv), true
+	case "ports":
+		return sandbox.CmdPorts(argv), true
+	case "net-policy":
+		return sandbox.CmdNetworkPolicy(argv), true
+	case "import":
+		return sandbox.CmdImport(argv), true
+	default:
+		return 0, false
+	}
+}
+
+func validSandboxName(name string) (string, bool) {
+	if err := sandbox.ValidateSandboxName(name); err != nil {
+		fmt.Fprintln(os.Stderr, "gantry:", err)
+		return "", false
+	}
+	return name, true
+}
+
+func cmdRun(argv []string) int {
+	run := flag.NewFlagSet("run", flag.ContinueOnError)
 	kernel := run.String("kernel", "", "path to arm64 Linux kernel Image (required)")
 	initrd := run.String("initrd", "", "path to initramfs cpio.gz")
 	rootfs := run.String("rootfs", "", "path to rootfs image attached as virtio-blk /dev/vda (e.g. nerdbox EROFS)")
 	var disks gutil.StrList
 	run.Var(&disks, "disk", "extra virtio-blk image (repeatable): /dev/vdb, /dev/vdc, ...")
-	var shares gutil.StrList
-	run.Var(&shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
+	var shareArgs gutil.StrList
+	run.Var(&shareArgs, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
 	netEndpoint := run.String("net", "", "Unix datagram raw-Ethernet backend (e.g. gvproxy vfkit socket)")
 	netMACArg := run.String("net-mac", "5a:94:ef:e4:0c:ee", "virtio-net MAC address")
 	netVFKIT := run.Bool("net-vfkit", true, "send the VFKT registration datagram to the network backend")
@@ -67,101 +197,24 @@ func main() {
 	memMB := run.Uint("mem", 512, "guest RAM in MiB")
 	vcpus := run.Int("cpus", 1, "guest vCPU count (SMP via PSCI CPU_ON; max 8)")
 	append_ := run.String("append", "", "kernel cmdline (default depends on -rootfs)")
-
-	if len(os.Args) < 2 {
-		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-			os.Exit(sandbox.CmdTUI())
+	if err := run.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
 		}
-		writeMainHelp(os.Stderr)
-		os.Exit(2)
+		return 2
 	}
-	// mustName validates a sandbox name at the dispatch layer so every
-	// name-taking subcommand (exec/start/resume/daemon/stop/delete) is covered.
-	mustName := func(n string) string {
-		if err := sandbox.ValidateSandboxName(n); err != nil {
-			fmt.Fprintln(os.Stderr, "gantry:", err)
-			os.Exit(2)
-		}
-		return n
-	}
-	switch os.Args[1] {
-	case "-h", "--help", "help":
-		writeMainHelp(os.Stdout)
-		return
-	case "exec":
-		if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-			os.Exit(sandbox.CmdSandboxExec(mustName(os.Args[2]), os.Args[3:]))
-		}
-		cmdExec(os.Args[2:])
-		return
-	case "start":
-		os.Exit(sandbox.CmdStart(os.Args[2:]))
-	case "resume":
-		if len(os.Args) == 3 && (os.Args[2] == "-h" || os.Args[2] == "--help") {
-			fmt.Fprintln(os.Stderr, "usage: gantry resume <name>   # boot from saved sandbox.json")
-			return
-		}
-		if len(os.Args) != 3 {
-			fmt.Fprintln(os.Stderr, "usage: gantry resume <name>")
-			os.Exit(2)
-		}
-		os.Exit(sandbox.CmdResume(mustName(os.Args[2])))
-	case "daemon":
-		if len(os.Args) < 3 || len(os.Args) > 4 {
-			os.Exit(2)
-		}
-		readySocket := ""
-		if len(os.Args) == 4 {
-			readySocket = os.Args[3]
-		}
-		os.Exit(sandbox.CmdDaemon(mustName(os.Args[2]), readySocket))
-	case "_net-worker":
-		// Hidden worker role (docs/vmm-network-isolation.md): authority is
-		// the inherited bootstrap channels, never the argv.
-		os.Exit(sandbox.CmdNetWorker())
-	case "_vmm-worker":
-		// Hidden worker role (Phase 2): owns the hypervisor, guest RAM,
-		// devices, and the vsock data plane.
-		os.Exit(sandbox.CmdVMMWorker())
-	case "ls":
-		os.Exit(sandbox.CmdLs())
-	case "tui":
-		os.Exit(sandbox.CmdTUI())
-	case "pi":
-		os.Exit(sandbox.CmdPi(os.Args[2:]))
-	case "pi-serve":
-		os.Exit(sandbox.CmdPiServe(os.Args[2:]))
-	case "image":
-		os.Exit(sandbox.CmdImage(os.Args[2:]))
-	case "share":
-		os.Exit(sandbox.CmdShare(os.Args[2:]))
-	case "ports":
-		os.Exit(sandbox.CmdPorts(os.Args[2:]))
-	case "net-policy":
-		os.Exit(sandbox.CmdNetworkPolicy(os.Args[2:]))
-	case "import":
-		os.Exit(sandbox.CmdImport(os.Args[2:]))
-	case "stop", "delete":
-		if len(os.Args) != 3 {
-			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", os.Args[1])
-			os.Exit(2)
-		}
-		name := mustName(os.Args[2])
-		if os.Args[1] == "stop" {
-			os.Exit(sandbox.CmdStop(name))
-		}
-		os.Exit(sandbox.CmdDelete(name))
-	case "run":
-		// fall through below
-	default:
-		fmt.Fprintf(os.Stderr, "gantry: unknown command %q\n\n", os.Args[1])
-		writeMainHelp(os.Stderr)
-		os.Exit(2)
-	}
-	_ = run.Parse(os.Args[2:])
 	if *kernel == "" || (*initrd == "" && *rootfs == "") {
 		run.Usage()
-		os.Exit(2)
+		return 2
+	}
+	if uint64(*memMB) > vmm.MaxMemoryBytes>>20 {
+		fmt.Fprintf(os.Stderr, "gantry run: memory must be at most %d MiB\n", vmm.MaxMemoryBytes>>20)
+		return 2
+	}
+	memBytes := uint64(*memMB) << 20
+	if err := vmm.ValidateResources(memBytes, *vcpus); err != nil {
+		fmt.Fprintln(os.Stderr, "gantry run:", err)
+		return 2
 	}
 
 	var netMAC [6]byte
@@ -169,20 +222,14 @@ func main() {
 		hw, err := net.ParseMAC(*netMACArg)
 		if err != nil || len(hw) != len(netMAC) {
 			fmt.Fprintf(os.Stderr, "gantry: invalid -net-mac %q\n", *netMACArg)
-			os.Exit(2)
+			return 2
 		}
 		copy(netMAC[:], hw)
 	}
-	var hostShares []vmm.Share
-	seenTags := map[string]bool{}
-	for _, spec := range shares {
-		share, err := vmm.ParseShareSpec(spec, seenTags)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gantry: invalid -share %q: %v\n", spec, err)
-			os.Exit(2)
-		}
-		seenTags[share.Tag] = true
-		hostShares = append(hostShares, share)
+	hostShares, err := shares.ParseSpecs(shareArgs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry: invalid -share:", err)
+		return 2
 	}
 
 	// Boot assets are opened once, up front: the VM boots from exactly
@@ -190,29 +237,42 @@ func main() {
 	kernelF, err := os.Open(*kernel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry run: kernel %s: %v\n", *kernel, err)
-		os.Exit(1)
+		return 1
 	}
+	opened := []*os.File{kernelF}
+	claimed := false
+	defer func() {
+		if claimed {
+			return
+		}
+		for _, file := range opened {
+			_ = file.Close()
+		}
+	}()
 	var initrdF, rootfsF *os.File
 	if *initrd != "" {
 		if initrdF, err = os.Open(*initrd); err != nil {
 			fmt.Fprintf(os.Stderr, "gantry run: initrd %s: %v\n", *initrd, err)
-			os.Exit(1)
+			return 1
 		}
+		opened = append(opened, initrdF)
 	}
 	if *rootfs != "" {
 		if rootfsF, err = os.Open(*rootfs); err != nil {
 			fmt.Fprintf(os.Stderr, "gantry run: rootfs %s: %v\n", *rootfs, err)
-			os.Exit(1)
+			return 1
 		}
+		opened = append(opened, rootfsF)
 	}
 	var diskFs []*os.File
 	for _, d := range disks {
 		f, err := os.OpenFile(d, os.O_RDWR, 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gantry run: disk %s: %v\n", d, err)
-			os.Exit(1)
+			return 1
 		}
 		diskFs = append(diskFs, f)
+		opened = append(opened, f)
 	}
 
 	cmdline := *append_
@@ -220,45 +280,51 @@ func main() {
 		arch, err := vmm.KernelArchFile(kernelF)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gantry run: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		cmdline = vmm.DefaultCmdline(arch, *rootfs, *initrd, *guestCID, *netEndpoint, netMAC, *netDHCP)
 	}
 
 	var listenPorts []uint32
 	if *vsockFwd != "" && *vsockListen != "" {
-		for _, s := range strings.Split(*vsockListen, ",") {
-			var p uint64
-			if _, err := fmt.Sscanf(s, "%d", &p); err == nil && p > 0 {
-				listenPorts = append(listenPorts, uint32(p))
-			}
+		listenPorts, err = parseListenPorts(*vsockListen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry run: -vsocklisten:", err)
+			return 2
 		}
 	}
+	filesystems, err := prepareRunFilesystems(hostShares)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry run: prepare shares:", err)
+		return 1
+	}
 
+	// Prepare claims every input at entry and closes it on every return path.
+	claimed = true
 	m, err := vmm.Prepare(vmm.Opts{
-		MemSize:     uint64(*memMB) << 20,
+		MemSize:     memBytes,
 		Kernel:      kernelF,
 		Initrd:      initrdF,
 		Rootfs:      rootfsF,
 		Disks:       diskFs,
-		Shares:      hostShares,
+		Filesystems: filesystems,
 		NetEndpoint: *netEndpoint,
 		NetMAC:      netMAC,
 		NetVFKIT:    *netVFKIT,
 		VsockFwd:    *vsockFwd,
 		Interactive: true,
-		VCPUs:       min(*vcpus, 8),
+		VCPUs:       *vcpus,
 		GuestCID:    *guestCID,
 		VsockListen: listenPorts,
 		Cmdline:     cmdline,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry:", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if *vsockFwd != "" {
-		if err := vmm.WriteShareManifest(filepath.Join(*vsockFwd, "shares.json"), hostShares); err != nil {
+		if err := shares.WriteManifest(filepath.Join(*vsockFwd, "shares.json"), hostShares); err != nil {
 			fmt.Fprintf(os.Stderr, "gantry: write share manifest: %v\n", err)
 		}
 	}
@@ -268,6 +334,57 @@ func main() {
 	restoreMode() // explicit: os.Exit skips deferred calls
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "\ngantry:", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+func prepareRunFilesystems(specs []shares.Spec) (filesystems []vmm.Filesystem, resultErr error) {
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		for _, filesystem := range filesystems {
+			if filesystem.Owner != nil {
+				if err := filesystem.Owner.Close(); err != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("close share %s: %w", filesystem.Tag, err))
+				}
+			}
+		}
+		filesystems = nil
+	}()
+
+	filesystems = make([]vmm.Filesystem, 0, len(specs))
+	for _, spec := range specs {
+		server, err := sharefs.NewServer(spec.Tag, spec.Path, spec.RO)
+		if err != nil {
+			resultErr = fmt.Errorf("%s: %w", spec.Tag, err)
+			return
+		}
+		mode := ""
+		if spec.RO {
+			mode = " (read-only, host-enforced)"
+		}
+		filesystems = append(filesystems, vmm.Filesystem{
+			Tag:         spec.Tag,
+			Handler:     server,
+			Owner:       server,
+			Description: fmt.Sprintf("host %q%s", server.Root(), mode),
+		})
+	}
+	return filesystems, nil
+}
+
+func parseListenPorts(value string) ([]uint32, error) {
+	parts := strings.Split(value, ",")
+	ports := make([]uint32, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		port, err := strconv.ParseUint(part, 10, 32)
+		if err != nil || port == 0 {
+			return nil, fmt.Errorf("invalid guest port %q", part)
+		}
+		ports = append(ports, uint32(port))
+	}
+	return ports, nil
 }

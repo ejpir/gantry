@@ -24,7 +24,7 @@ func TestOneShotSharePolicyParity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dev, err := NewFS("oneshot", dir)
+	dev, err := newTestFS("oneshot", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestOneShotSharePolicyParity(t *testing.T) {
 	}
 
 	// RO one-shot shares reject writes at the export layer.
-	devRO, err := NewFS("oneshot-ro", dir, true)
+	devRO, err := newTestFS("oneshot-ro", dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestPinnedRootRejectsSwappedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dev, err := NewFS("pinned", share)
+	dev, err := newTestFS("pinned", share)
 	if err != nil {
 		t.Fatal(err)
 	}

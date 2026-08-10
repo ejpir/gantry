@@ -81,7 +81,7 @@ func TestVirtioFSShareEscape(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(secretPath) })
 
-	dev, err := NewFS("escape", share)
+	dev, err := newTestFS("escape", share)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestVirtioFSSymlinkEscapeBlocked(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(secretPath) })
 
-	dev, err := NewFS("symlink-escape", share)
+	dev, err := newTestFS("symlink-escape", share)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestVirtioFSReadOnlyShare(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(share, "hello.txt"), []byte("in-share\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dev, err := NewFS("ro-share", share, true)
+	dev, err := newTestFS("ro-share", share, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestVirtioFSReadOnlyGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(share, "hello.txt"), []byte("in-share\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dev, err := NewFS("ro-gate", share, true)
+	dev, err := newTestFS("ro-gate", share, true)
 	if err != nil {
 		t.Fatal(err)
 	}

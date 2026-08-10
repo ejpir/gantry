@@ -619,6 +619,11 @@ func (c *oauthCapture) snapshot() ([]byte, bool) {
 // daemon's single guest RPC connection like any concurrent `gantry exec`.
 // User secrets are deliberately NOT injected into this internal process.
 func (br *broker) oauthExec(args []string, timeout time.Duration) ([]byte, int, error) {
+	if !br.limits.acquireSession() {
+		return nil, 0, fmt.Errorf("sandbox session limit reached")
+	}
+	defer br.limits.releaseSession()
+
 	var capture oauthCapture
 	var status int
 	if timeout <= 0 {

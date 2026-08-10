@@ -2,14 +2,12 @@ package sandbox
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 // CmdPorts implements `gantry ports ls|publish|unpublish` against a running
@@ -98,29 +96,20 @@ func portControlRPC(name, op string, portReq brokerPortRequest) (brokerPortRespo
 	if _, alive := sandboxPID(name); !alive {
 		return brokerPortResponse{}, fmt.Errorf("sandbox %q is not running (start it with: gantry start %s)", name, name)
 	}
-	conn, err := dialShareControl(name) // same ctl.sock; share dialer is generic
-	if err != nil {
-		return brokerPortResponse{}, fmt.Errorf("broker: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	req := brokerRequest{
 		Op:   op,
-		ID:   fmt.Sprintf("port-%d-%d", os.Getpid(), time.Now().UnixNano()),
+		ID:   newControlRequestID("port"),
 		Port: &portReq,
 	}
-	if err := json.NewEncoder(conn).Encode(&req); err != nil {
+	resp, err := callControl[brokerPortResponse](name, req)
+	if err != nil {
 		return brokerPortResponse{}, err
-	}
-	var resp brokerPortResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return brokerPortResponse{}, fmt.Errorf("broker response: %w", err)
 	}
 	if !resp.OK {
 		if resp.Error == "" {
 			resp.Error = "port operation rejected"
 		}
-		return resp, errors.New(resp.Error)
+		return resp, fmt.Errorf("%s", resp.Error)
 	}
 	return resp, nil
 }

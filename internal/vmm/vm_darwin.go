@@ -3,8 +3,8 @@
 package vmm
 
 import (
+	"errors"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
 	"os"
 	"os/signal"
 	"runtime"
@@ -25,17 +25,23 @@ import (
 //   - PSCI is NOT handled in-kernel: guest HVC calls exit to us and we
 //     implement the PSCI 0.2 functions ourselves (including CPU_ON for SMP)
 //
-// SMP: vCPU 0 boots on the main run-loop thread; secondary vCPUs are
-// created on demand when the guest calls PSCI CPU_ON (FDT advertises one
-// cpu node per vCPU). Each vCPU runs on its own pinned OS thread — HVF
-// vCPUs are thread-affine. Device-raised SPIs are global (hv_gic routes
-// them); we kick every vCPU so the IRQ is applied promptly.
+// SMP: vCPU 0 boots on the main run-loop thread; secondary vCPUs are created
+// at VM startup on dedicated pinned threads, then parked until the guest calls
+// PSCI CPU_ON (FDT advertises one node per vCPU). HVF vCPUs are thread-affine.
+// Device-raised SPIs are global (hv_gic routes them); we kick every vCPU so
+// the IRQ is applied promptly.
 type hvfBackend struct {
-	m     *Machine
-	debug bool
+	m         *Machine
+	debug     bool
+	lifecycle *nativeBackendLifecycle
+	ramSize   uint64
+
+	vmCreated bool
+	mapped    bool
 
 	irqMu       sync.Mutex
 	pendingIRQs []irqChange
+	shutdown    *nativeThreadTeardown
 
 	vcpuMu  sync.Mutex
 	vcpus   []*hvfVCPU
@@ -68,6 +74,7 @@ type hvfVCPU struct {
 	// parked vCPUs (hv_vcpus_exit on a never-run vCPU is pointless).
 	inLoop atomic.Bool
 
+	debugMu  sync.Mutex
 	exits    map[uint64]uint64
 	mmioHit  map[uint64]uint64
 	seenMMIO map[uint64]bool
@@ -81,9 +88,16 @@ type irqChange struct {
 // queueIRQ records an IRQ line change and kicks ALL vCPUs out so a run
 // loop applies it promptly. Safe to call from any goroutine.
 func (b *hvfBackend) queueIRQ(irq int, level bool) {
+	if b.lifecycle.isStopping() {
+		return
+	}
 	b.irqMu.Lock()
 	b.pendingIRQs = append(b.pendingIRQs, irqChange{irq, level})
 	b.irqMu.Unlock()
+	_ = b.kickVCPUs()
+}
+
+func (b *hvfBackend) kickVCPUs() error {
 	b.vcpuMu.Lock()
 	handles := make([]uint64, 0, len(b.vcpus))
 	for _, vc := range b.vcpus {
@@ -91,9 +105,83 @@ func (b *hvfBackend) queueIRQ(irq int, level bool) {
 			handles = append(handles, vc.vcpu)
 		}
 	}
+	if len(handles) == 0 {
+		b.vcpuMu.Unlock()
+		return nil
+	}
+	ret := hvVcpusExit(&handles[0], uint32(len(handles)))
 	b.vcpuMu.Unlock()
-	if len(handles) > 0 {
-		hvVcpusExit(&handles[0], uint32(len(handles))) // documented thread-safe
+	if ret != hvSuccess {
+		return fmt.Errorf("hv_vcpus_exit: %s", hvReturnString(ret))
+	}
+	return nil
+}
+
+func (b *hvfBackend) stopVCPUs() error {
+	err := b.kickVCPUs()
+	if b.shutdown != nil {
+		b.shutdown.releaseOwners()
+	}
+	return err
+}
+
+func (b *hvfBackend) releaseNative() error {
+	var errs []error
+	if b.mapped {
+		if ret := hvVmUnmap(ramBase, b.ramSize); ret != hvSuccess {
+			errs = append(errs, fmt.Errorf("hv_vm_unmap: %s", hvReturnString(ret)))
+		}
+		b.mapped = false
+	}
+	if b.vmCreated {
+		// Hypervisor.framework owns the GIC instance as part of the VM; there
+		// is no separate GIC destroy API.
+		if ret := hvVmDestroy(); ret != hvSuccess {
+			errs = append(errs, fmt.Errorf("hv_vm_destroy: %s", hvReturnString(ret)))
+		}
+		b.vmCreated = false
+	}
+	return errors.Join(errs...)
+}
+
+func (b *hvfBackend) Close() error {
+	return b.lifecycle.close(b.stopVCPUs, b.releaseNative)
+}
+
+func (b *hvfBackend) unregisterVCPU(vc *hvfVCPU) {
+	b.vcpuMu.Lock()
+	for i, candidate := range b.vcpus {
+		if candidate == vc {
+			copy(b.vcpus[i:], b.vcpus[i+1:])
+			b.vcpus[len(b.vcpus)-1] = nil
+			b.vcpus = b.vcpus[:len(b.vcpus)-1]
+			break
+		}
+	}
+	delete(b.running, vc.id)
+	delete(b.secondaries, vc.id)
+	b.vcpuMu.Unlock()
+}
+
+// destroyVCPU must run on the same locked OS thread that created vc.
+func (b *hvfBackend) destroyVCPU(vc *hvfVCPU) {
+	b.unregisterVCPU(vc)
+	if ret := hvVcpuDestroy(vc.vcpu); ret != hvSuccess {
+		b.lifecycle.recordError(fmt.Errorf("destroy HVF vCPU %d: %s", vc.id, hvReturnString(ret)))
+	}
+}
+
+func (b *hvfBackend) finishVCPU(vc *hvfVCPU) {
+	if b.shutdown != nil {
+		b.shutdown.finishOwner(func() {
+			if vc != nil {
+				b.destroyVCPU(vc)
+			}
+		})
+		return
+	}
+	if vc != nil {
+		b.destroyVCPU(vc)
 	}
 }
 
@@ -118,13 +206,16 @@ func (vc *hvfVCPU) dumpState(why string) {
 	x0, _ := vc.getReg(hvRegX0)
 	cpsr, _ := vc.getReg(hvRegCPSR)
 	lr, _ := vc.getReg(30)
+	vc.debugMu.Lock()
+	defer vc.debugMu.Unlock()
 	fmt.Printf("\n[debug] cpu%d %s\n[debug] PC=%#x X0=%#x LR=%#x CPSR=%#x\n[debug] exits=%v\n[debug] mmio=%v\n",
 		vc.id, why, pc, x0, lr, cpsr, vc.exits, vc.mmioHit)
 	// with nokaslr, kernel text: virt 0xffff800080000000 == phys 0x40000000
 	if pc >= 0xffff800080000000 {
 		phys := pc - 0xffff800080000000
 		if phys >= ramBase && phys < ramBase+uint64(len(vc.b.m.ram)) {
-			code := vc.b.m.ram[phys-ramBase : phys-ramBase+96]
+			offset := phys - ramBase
+			code := vc.b.m.ram[offset:min(offset+96, uint64(len(vc.b.m.ram)))]
 			fmt.Printf("[debug] code@pc: % x\n", code)
 		}
 	}
@@ -152,49 +243,56 @@ func (vc *hvfVCPU) dumpFullState() {
 // periodicKicker kicks all vCPUs out of hv_vcpu_run every 3s in debug mode
 // (hv_vcpus_exit -> HV_EXIT_REASON_CANCELED), giving deterministic state
 // dumps even when the guest spins without exiting.
-func (b *hvfBackend) periodicKicker() {
+func (b *hvfBackend) periodicKicker(stop <-chan struct{}) error {
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
-	for range t.C {
-		b.vcpuMu.Lock()
-		handles := make([]uint64, 0, len(b.vcpus))
-		for _, vc := range b.vcpus {
-			handles = append(handles, vc.vcpu)
-		}
-		b.vcpuMu.Unlock()
-		if len(handles) > 0 {
-			hvVcpusExit(&handles[0], uint32(len(handles)))
+	for {
+		select {
+		case <-stop:
+			return nil
+		case <-t.C:
+			if err := b.kickVCPUs(); err != nil && !b.lifecycle.isStopping() {
+				return err
+			}
 		}
 	}
 }
 
-// siginfoDumper prints vCPU 0 state on SIGINFO (Ctrl-T). Reading registers
-// from a second thread while the vCPU runs is technically racy, but fine
-// for debugging.
-func (b *hvfBackend) siginfoDumper() {
+// siginfoDumper prints the userspace exit counters on SIGINFO (Ctrl-T).
+// Hypervisor registers are intentionally not read here: Apple requires vCPU
+// operations to stay on the owning thread, including during teardown.
+func (b *hvfBackend) siginfoDumper(stop <-chan struct{}) error {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINFO)
-	for range ch {
-		b.vcpuMu.Lock()
-		var vc0 *hvfVCPU
-		if len(b.vcpus) > 0 {
-			vc0 = b.vcpus[0]
+	defer signal.Stop(ch)
+	for {
+		select {
+		case <-stop:
+			return nil
+		case <-ch:
+			b.vcpuMu.Lock()
+			var vc0 *hvfVCPU
+			for _, vc := range b.vcpus {
+				if vc.id == 0 {
+					vc0 = vc
+					break
+				}
+			}
+			b.vcpuMu.Unlock()
+			if vc0 == nil {
+				continue
+			}
+			vc0.debugMu.Lock()
+			fmt.Printf("\n[debug] cpu0 exits=%v\n", vc0.exits)
+			fmt.Printf("[debug] mmio addresses: %v\n", vc0.mmioHit)
+			vc0.debugMu.Unlock()
 		}
-		b.vcpuMu.Unlock()
-		if vc0 == nil {
-			continue
-		}
-		pc, _ := vc0.getReg(hvRegPC)
-		x0, _ := vc0.getReg(hvRegX0)
-		cpsr, _ := vc0.getReg(hvRegCPSR)
-		fmt.Printf("\n[debug] cpu0 PC=%#x X0=%#x CPSR=%#x exits=%v\n", pc, x0, cpsr, vc0.exits)
-		fmt.Printf("[debug] mmio addresses: %v\n", vc0.mmioHit)
 	}
 }
 
 type hvfPlatform struct{}
 
-func (hvfPlatform) run(m *Machine) (err error) {
+func (hvfPlatform) run(m *Machine) (resultErr error) {
 	if m.arch != "arm64" {
 		return fmt.Errorf("the macOS Hypervisor.framework backend boots arm64 guests only; use the Linux/KVM build for x86-64")
 	}
@@ -209,30 +307,84 @@ func (hvfPlatform) run(m *Machine) (err error) {
 	if err := loadHVF(); err != nil {
 		return err
 	}
-	b := &hvfBackend{m: m, running: map[int]bool{}}
+	debug := os.Getenv("GANTRY_DEBUG") != ""
+	workerCount := m.vcpus
+	if debug {
+		workerCount += 2 // SIGINFO dumper and periodic kicker
+	}
+	b := &hvfBackend{
+		m:           m,
+		debug:       debug,
+		lifecycle:   newNativeBackendLifecycle(workerCount),
+		ramSize:     uint64(len(m.ram)),
+		running:     map[int]bool{},
+		secondaries: map[int]chan psciStart{},
+	}
+	var vc0 *hvfVCPU
+	mainClaimed := false
+	defer func() {
+		// Apple's hv_vcpu_destroy must run on the vCPU's owning thread. This
+		// function remains pinned until vc0 is gone. Close runs separately so
+		// its barrier can wait for this thread to leave the run loop; it then
+		// releases every owner to destroy its vCPU before VM teardown.
+		var closeErr error
+		if b.shutdown != nil {
+			closed := make(chan error, 1)
+			go func() { closed <- b.Close() }()
+			b.finishVCPU(vc0)
+			b.lifecycle.workerDone()
+			closeErr = <-closed
+		} else {
+			b.lifecycle.stop()
+			if vc0 != nil {
+				b.destroyVCPU(vc0)
+			}
+			if mainClaimed {
+				b.lifecycle.workerDone()
+			}
+			closeErr = b.Close()
+		}
+		if closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
 
 	cfg := hvVmConfigCreate()
+	if cfg == 0 {
+		return fmt.Errorf("hv_vm_config_create returned nil")
+	}
 	if ret := hvVmCreate(cfg); ret != hvSuccess {
+		osRelease(cfg)
 		return fmt.Errorf("hv_vm_create: %s", hvReturnString(ret))
 	}
+	osRelease(cfg)
+	b.vmCreated = true
 
 	// guest RAM: same addresses as the KVM backend
 	if ret := hvVmMap(unsafe.Pointer(&m.ram[0]), ramBase, uint64(len(m.ram)),
 		hvMemoryRead|hvMemoryWrite|hvMemoryExec); ret != hvSuccess {
 		return fmt.Errorf("hv_vm_map: %s", hvReturnString(ret))
 	}
+	b.mapped = true
 
 	// vGICv3 at our standard addresses
 	gicCfg := hvGicConfigCreate()
+	if gicCfg == 0 {
+		return fmt.Errorf("hv_gic_config_create returned nil")
+	}
 	if ret := hvGicConfigSetDistributorBase(gicCfg, gicdBase); ret != hvSuccess {
+		osRelease(gicCfg)
 		return fmt.Errorf("hv_gic_config_set_distributor_base: %s", hvReturnString(ret))
 	}
 	if ret := hvGicConfigSetRedistributorBase(gicCfg, gicrBase); ret != hvSuccess {
+		osRelease(gicCfg)
 		return fmt.Errorf("hv_gic_config_set_redistributor_base: %s", hvReturnString(ret))
 	}
 	if ret := hvGicCreate(gicCfg); ret != hvSuccess {
+		osRelease(gicCfg)
 		return fmt.Errorf("hv_gic_create: %s (needs macOS 13+)", hvReturnString(ret))
 	}
+	osRelease(gicCfg)
 
 	// vCPU 0 is created on (and owned by) this main run-loop thread.
 	// Every secondary gets its own thread NOW: it creates its vCPU there
@@ -240,43 +392,78 @@ func (hvfPlatform) run(m *Machine) (err error) {
 	// vCPU on this thread blocks forever) and parks until PSCI CPU_ON.
 	// We wait for all creations to complete before vCPU 0 runs (creating
 	// a vCPU while another vCPU is running crashes HVF).
-	vc0, err := b.newVCPU(0)
+	var err error
+	vc0, err = b.newVCPU(0)
 	if err != nil {
 		return err
 	}
-	b.secondaries = map[int]chan psciStart{}
-	var wg sync.WaitGroup
-	createErrs := make([]error, m.vcpus)
+	if !b.lifecycle.claimWorker() {
+		return errMachineClosed
+	}
+	mainClaimed = true
+	b.shutdown = newNativeThreadTeardown(m.vcpus)
+	type createResult struct {
+		id  int
+		err error
+	}
+	created := make(chan createResult, max(0, m.vcpus-1))
 	for i := 1; i < m.vcpus; i++ {
 		ch := make(chan psciStart, 1)
 		b.secondaries[i] = ch
-		wg.Add(1)
 		go func(id int, start chan psciStart) {
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
-			vc, err := b.newVCPU(id)
-			createErrs[id] = err
-			wg.Done()
-			if err != nil {
-				return
-			}
-			s := <-start // parked until PSCI CPU_ON
-			_ = vc.setReg(hvRegX0, s.ctx)
-			_ = vc.setReg(hvRegPC, s.entry)
-			_ = vc.setReg(hvRegCPSR, pstateEL1hMask)
-			if err := vc.runLoop(); err != nil && !isGuestHalt(err) {
-				fmt.Fprintf(os.Stderr, "\n[cpu%d] run loop: %v\n", vc.id, err)
-			}
-			b.vcpuMu.Lock()
-			delete(b.running, id)
-			b.vcpuMu.Unlock()
+			b.lifecycle.runWorker(func(stop <-chan struct{}) {
+				vc, createErr := b.newVCPU(id)
+				created <- createResult{id: id, err: createErr}
+				if createErr != nil {
+					b.finishVCPU(nil)
+					return
+				}
+				defer b.finishVCPU(vc)
+				for {
+					var s psciStart
+					select {
+					case <-stop:
+						return
+					case s = <-start:
+					}
+					if err := vc.setReg(hvRegX0, s.ctx); err != nil {
+						b.failVCPU(id, err)
+						return
+					}
+					if err := vc.setReg(hvRegPC, s.entry); err != nil {
+						b.failVCPU(id, err)
+						return
+					}
+					if err := vc.setReg(hvRegCPSR, pstateEL1hMask); err != nil {
+						b.failVCPU(id, err)
+						return
+					}
+					runErr := vc.runLoop()
+					b.vcpuMu.Lock()
+					delete(b.running, id)
+					b.vcpuMu.Unlock()
+					if isGuestHalt(runErr) {
+						continue
+					}
+					if runErr != nil {
+						b.failVCPU(id, runErr)
+					}
+					return
+				}
+			})
 		}(i, ch)
 	}
-	wg.Wait()
-	for i := 1; i < m.vcpus; i++ {
-		if createErrs[i] != nil {
-			return fmt.Errorf("vcpu %d: %w", i, createErrs[i])
+	var createErr error
+	for range m.vcpus - 1 {
+		result := <-created
+		if result.err != nil && createErr == nil {
+			createErr = fmt.Errorf("vcpu %d: %w", result.id, result.err)
 		}
+	}
+	if createErr != nil {
+		return createErr
 	}
 	// NOTE: do NOT mask the vtimer. Masked = HVF exits on every fire instead
 	// of delivering the interrupt (for userspace-GIC users). Leaving it
@@ -284,17 +471,30 @@ func (hvfPlatform) run(m *Machine) (err error) {
 	// (Bug found on first hardware run: masking starved the guest timer and
 	// the kernel hung before console init.)
 
+	// All vCPU owner threads are now live and accounted for. Publishing the
+	// backend lets a concurrent Machine.Close stop them and wait for their
+	// thread-affine destruction.
+	if err := m.adoptBackend(b); err != nil {
+		return err
+	}
+
 	// boot protocol: x0 = FDT, PC = kernel entry, CPSR = EL1h+DAIF
-	_ = vc0.setReg(hvRegX0, fdtAddr)
-	_ = vc0.setReg(hvRegPC, m.entry)
-	_ = vc0.setReg(hvRegCPSR, pstateEL1hMask)
+	if err := vc0.setReg(hvRegX0, fdtAddr); err != nil {
+		return err
+	}
+	if err := vc0.setReg(hvRegPC, m.entry); err != nil {
+		return err
+	}
+	if err := vc0.setReg(hvRegCPSR, pstateEL1hMask); err != nil {
+		return err
+	}
 
 	// All HVF calls are serialized on each vCPU's own run-loop thread:
 	// device models (possibly called from other goroutines, e.g. the stdin
 	// pump) only enqueue IRQ changes; a run loop applies them before
 	// hv_vcpu_run. Calling HVF concurrently from multiple threads corrupts
 	// its state (this caused hv_vcpu_run to return garbage codes).
-	m.irqLine = func(irq int, level bool) { b.queueIRQ(irq, level) }
+	m.interrupts.set(func(irq int, level bool) { b.queueIRQ(irq, level) })
 
 	fmt.Printf("booting guest under Hypervisor.framework (%d vCPU max)\n", m.vcpus)
 	fmt.Println("------------------------------------------------")
@@ -302,11 +502,13 @@ func (hvfPlatform) run(m *Machine) (err error) {
 		go m.uart.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	if gutil.EnvOr("GANTRY_DEBUG", "MINIVM_DEBUG") != "" {
-		b.debug = true
-		vc0.debug = true
-		go b.siginfoDumper()
-		go b.periodicKicker()
+	if debug {
+		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
+			b.lifecycle.recordError(b.siginfoDumper(stop))
+		})
+		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
+			b.lifecycle.recordError(b.periodicKicker(stop))
+		})
 		fmt.Println("[debug] GANTRY_DEBUG=1: exits logged, Ctrl-T dumps, 3s auto-dumps")
 	}
 
@@ -317,9 +519,22 @@ func (hvfPlatform) run(m *Machine) (err error) {
 	return err
 }
 
+func (b *hvfBackend) failVCPU(id int, err error) {
+	if err == nil || isGuestHalt(err) || b.lifecycle.isStopping() {
+		return
+	}
+	workerErr := fmt.Errorf("HVF vCPU %d: %w", id, err)
+	b.lifecycle.recordError(workerErr)
+	fmt.Fprintf(os.Stderr, "\n[cpu%d] run loop: %v\n", id, err)
+	b.lifecycle.stop()
+	if kickErr := b.kickVCPUs(); kickErr != nil {
+		b.lifecycle.recordError(kickErr)
+	}
+}
+
 // newVCPU creates one vCPU (id becomes MPIDR Aff1, matching the FDT cpu
 // nodes and the GIC redistributors) and registers it.
-func (b *hvfBackend) newVCPU(id int) (*hvfVCPU, error) {
+func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 	// Serialize creation: concurrent hv_vcpu_create from several threads
 	// corrupts HVF state.
 	b.hvfMu.Lock()
@@ -336,6 +551,16 @@ func (b *hvfBackend) newVCPU(id int) (*hvfVCPU, error) {
 	if ret := hvVcpuCreate(&vc.vcpu, &exitInfo, 0); ret != hvSuccess {
 		return nil, fmt.Errorf("hv_vcpu_create: %s", hvReturnString(ret))
 	}
+	created := true
+	defer func() {
+		if resultErr == nil || !created {
+			return
+		}
+		if ret := hvVcpuDestroy(vc.vcpu); ret != hvSuccess {
+			resultErr = errors.Join(resultErr,
+				fmt.Errorf("destroy partially initialized HVF vCPU %d: %s", id, hvReturnString(ret)))
+		}
+	}()
 	vc.exit = exitInfo
 	// Aff1 = vcpu id so MPIDR matches the redistributor (libkrun does the same)
 	mpidr := uint64(0x80000000) | uint64(id)<<8
@@ -357,6 +582,7 @@ func (b *hvfBackend) newVCPU(id int) (*hvfVCPU, error) {
 	b.vcpuMu.Lock()
 	b.vcpus = append(b.vcpus, vc)
 	b.vcpuMu.Unlock()
+	created = false
 	return vc, nil
 }
 
@@ -364,6 +590,9 @@ func (b *hvfBackend) newVCPU(id int) (*hvfVCPU, error) {
 func (b *hvfBackend) startVCPU(id int, entry, ctx uint64) error {
 	b.vcpuMu.Lock()
 	defer b.vcpuMu.Unlock()
+	if b.lifecycle.isStopping() {
+		return errMachineClosed
+	}
 	ch, ok := b.secondaries[id]
 	if !ok {
 		return fmt.Errorf("target id %d out of range (max %d vcpus)", id, b.m.vcpus)
@@ -404,6 +633,9 @@ func (vc *hvfVCPU) runLoop() error {
 	defer vc.inLoop.Store(false)
 	firstRun := true
 	for {
+		if vc.b.lifecycle.isStopping() {
+			return nil
+		}
 		vc.b.applyPendingIRQs()
 		if firstRun {
 			if vc.id == 0 {
@@ -413,11 +645,16 @@ func (vc *hvfVCPU) runLoop() error {
 			firstRun = false
 		}
 		if ret := hvVcpuRun(vc.vcpu); ret != hvSuccess {
+			if vc.b.lifecycle.isStopping() {
+				return nil
+			}
 			vc.dumpFullState()
 			return fmt.Errorf("hv_vcpu_run: %s", hvReturnString(ret))
 		}
 		if vc.debug {
+			vc.debugMu.Lock()
 			vc.exits[uint64(vc.exit.reason)]++
+			vc.debugMu.Unlock()
 			syn := vc.exit.syndrome
 			ec := (syn >> 26) & 0x3f
 			if vc.exit.reason != hvExitReasonException || (ec != ecWfi && ec != ecDataAbort && ec != ecDataAbortSame) {
@@ -430,12 +667,15 @@ func (vc *hvfVCPU) runLoop() error {
 		case hvExitReasonVtimerActivated:
 			// vtimer fired while masked: inject PPI 27 ourselves and unmask
 			// so HVF can deliver it directly from now on (libkrun's flow).
-			if gutil.EnvOr("GANTRY_NO_VTIMER_INJECT", "MINIVM_NO_VTIMER_INJECT") == "" {
+			if os.Getenv("GANTRY_NO_VTIMER_INJECT") == "" {
 				hvVcpuSetPendingInterrupt(vc.vcpu, hvInterruptTypeIRQ, true)
 				hvVcpuSetVtimerMask(vc.vcpu, false)
 			}
 			continue
 		case hvExitReasonCanceled:
+			if vc.b.lifecycle.isStopping() {
+				return nil
+			}
 			// someone kicked the vcpu out (hv_vcpus_exit): debug dump, IRQ
 			// work to apply, or the periodic kicker. Never fatal.
 			if vc.debug {
@@ -490,6 +730,7 @@ func (vc *hvfVCPU) handleDataAbort(syn uint64) error {
 	phys := vc.exit.physicalAddress
 
 	if vc.debug {
+		vc.debugMu.Lock()
 		vc.mmioHit[phys>>12]++ // count per 4K page
 		if !vc.seenMMIO[phys>>12] {
 			vc.seenMMIO[phys>>12] = true
@@ -497,6 +738,7 @@ func (vc *hvfVCPU) handleDataAbort(syn uint64) error {
 			fmt.Printf("[debug] cpu%d mmio %s phys=%#x len=%d pc=%#x\n",
 				vc.id, map[bool]string{true: "W", false: "R"}[isWrite], phys, length, pc)
 		}
+		vc.debugMu.Unlock()
 	}
 
 	var data [8]byte

@@ -6,14 +6,29 @@
 // platform claims.
 package workerconf
 
+// SyscallProfile selects the ambient kernel capabilities a worker role needs.
+// The zero value is deliberately the narrower VMM profile so a partially
+// initialized Spec cannot accidentally acquire socket-creation authority.
+type SyscallProfile uint8
+
+const (
+	ProfileVMM SyscallProfile = iota
+	ProfileNetwork
+)
+
 // Spec is the worker's declared ambient-authority requirement. One
 // definition, consumed by every platform enforcer.
 type Spec struct {
+	Profile    SyscallProfile
 	NoNetwork  bool // no inbound/outbound sockets ever
 	NoExec     bool // no exec/spawn of any program
-	NoNewPaths bool // no open-by-path after Apply (empty private root on linux)
+	NoNewPaths bool // no undeclared host-path access after Apply
 	NoProcX    bool // no cross-process ptrace/signal/enumeration
 	KeepFDs    int  // descriptors 0..KeepFDs survive Apply (the fd table is dense)
+	// MaxTasks bounds Linux threads/processes in the worker's dedicated user
+	// namespace via RLIMIT_NPROC after setup capabilities are dropped. Zero
+	// disables the tier. Namespace-less auto fallback reports it unenforced.
+	MaxTasks uint64
 	// KeepFDExtra lists additional LIVE descriptors that must survive
 	// the close tier: the net.FileConn dups of the inherited channel
 	// conns land ABOVE the dense table (a dup takes the first free fd),
@@ -23,13 +38,11 @@ type Spec struct {
 	KeepFDExtra []int
 	ConfRoot    string // linux: supervisor-created mountpoint for the private root
 
-	// WriteFiles lists the pre-opened log files whose writes Seatbelt
-	// path-checks on every operation. They are LITERAL paths, never
-	// directory subtrees: the logs' parent directory also holds trusted
-	// state (sandbox.json — shares, ports, net policy), so a subpath
-	// grant there would let a compromised worker rewrite the sandbox
-	// configuration a later resume trusts.
-	WriteFiles []string
+	// ReadFiles lists immutable host configuration files required by the
+	// worker's role. The network role uses only resolver configuration. Linux
+	// copies these into its private tmpfs root before pivot_root; Seatbelt grants
+	// literal read access. No directory subtree is delegated.
+	ReadFiles []string
 
 	// FileAllow is retained for worker roles that intentionally need host
 	// path access. The VMM worker leaves it empty: shares are served by the
@@ -49,14 +62,42 @@ type FileAllowance struct {
 // anonymous memory, the hypervisor fd, and nothing else.
 func DefaultSpec(keepFDs int, confRoot string) Spec {
 	return Spec{
+		Profile:    ProfileVMM,
 		NoNetwork:  true,
 		NoExec:     true,
 		NoNewPaths: true,
 		NoProcX:    true,
 		KeepFDs:    keepFDs,
+		MaxTasks:   DefaultWorkerTaskLimit,
 		ConfRoot:   confRoot,
 	}
 }
+
+// NetworkSpec is the network worker contract. It necessarily retains IPv4 and
+// IPv6 stream/datagram socket authority so the embedded stack can proxy guest
+// traffic and host port forwards. It retains no general host filesystem,
+// executable, cross-process, raw-socket, or device-ioctl authority.
+func NetworkSpec(keepFDs int, confRoot string) Spec {
+	return Spec{
+		Profile:    ProfileNetwork,
+		NoExec:     true,
+		NoNewPaths: true,
+		NoProcX:    true,
+		KeepFDs:    keepFDs,
+		MaxTasks:   DefaultWorkerTaskLimit,
+		ConfRoot:   confRoot,
+		ReadFiles: []string{
+			"/etc/hosts",
+			"/etc/nsswitch.conf",
+			"/etc/resolv.conf",
+		},
+	}
+}
+
+// DefaultWorkerTaskLimit leaves ample room for Go runtime, cgo, vCPU, and
+// packet-processing threads while bounding a compromised worker's host task
+// consumption. Each split worker gets an independent user namespace and cap.
+const DefaultWorkerTaskLimit = 256
 
 // Property states reported by Verify. "indeterminate" is never silently
 // upgraded: a probe that cannot run says so.
@@ -77,6 +118,9 @@ const (
 	PropExec       = "exec"
 	PropProcEnum   = "proc-enum"
 	PropProcSignal = "proc-signal"
+	PropTaskLimit  = "task-limit"
+	PropSyscall    = "syscall-policy"
+	PropFDTable    = "fd-table"
 )
 
 // PropertyResult is one verified confinement property.
@@ -129,6 +173,9 @@ func DisabledReport(platform, mode string) Report {
 		{Property: PropExec, State: StateDisabled},
 		{Property: PropProcEnum, State: StateDisabled},
 		{Property: PropProcSignal, State: StateDisabled},
+		{Property: PropTaskLimit, State: StateDisabled},
+		{Property: PropSyscall, State: StateDisabled},
+		{Property: PropFDTable, State: StateDisabled},
 	}
 	return Report{Platform: platform, Mode: mode, Results: results}
 }

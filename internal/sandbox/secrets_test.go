@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -45,20 +46,63 @@ func TestSecretLiteralRefused(t *testing.T) {
 // or empty stdin degrades to no secrets (manual `gantry daemon`).
 func TestSecretsHandshake(t *testing.T) {
 	r, w, _ := os.Pipe()
-	_, _ = w.WriteString(secretsHandshakeJSON(map[string]secret.Value{
+	handshake, err := secretsHandshakeJSON(map[string]secret.Value{
 		"GITHUB_TOKEN": "ghp_canary",
 		"NPM":          "npm_canary",
-	}))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.WriteString(handshake)
 	_ = w.Close()
-	got := readSecretsHandshake(r)
+	got, err := readSecretsHandshake(r)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 2 || got["GITHUB_TOKEN"].Raw() != "ghp_canary" || got["NPM"].Raw() != "npm_canary" {
 		t.Errorf("round-trip = %v", got)
 	}
 
 	r2, w2, _ := os.Pipe()
 	_ = w2.Close() // EOF, no handshake
-	if got := readSecretsHandshake(r2); len(got) != 0 {
+	got, err = readSecretsHandshake(r2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
 		t.Errorf("EOF handshake = %v, want empty", got)
+	}
+}
+
+func TestSecretsHandshakeBounds(t *testing.T) {
+	many := make(map[string]secret.Value, secretsHandshakeMaxEntries+1)
+	for i := range secretsHandshakeMaxEntries + 1 {
+		many[fmt.Sprintf("SECRET_%d", i)] = "x"
+	}
+	if _, err := secretsHandshakeJSON(many); err == nil || !strings.Contains(err.Error(), "too many secrets") {
+		t.Fatalf("entry-limit error = %v, want count rejection", err)
+	}
+
+	oversized := map[string]secret.Value{
+		"TOKEN": secret.Value(strings.Repeat("x", secretsHandshakeMaxBytes)),
+	}
+	if _, err := secretsHandshakeJSON(oversized); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized encode error = %v, want size rejection", err)
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "oversized-handshake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(strings.Repeat("x", secretsHandshakeMaxBytes+1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSecretsHandshake(f); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized read error = %v, want size rejection", err)
 	}
 }
 

@@ -2,6 +2,7 @@ package virtio
 
 import (
 	"encoding/binary"
+	"io"
 	"net"
 	"path/filepath"
 	"testing"
@@ -13,12 +14,43 @@ import (
 	"github.com/miekg/dns"
 )
 
+func BenchmarkQEMUFrameWrite(b *testing.B) {
+	writer, reader := net.Pipe()
+	defer func() { _ = writer.Close() }()
+	defer func() { _ = reader.Close() }()
+	frame := make([]byte, 1500)
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, len(frame)+4)
+		for range b.N {
+			if _, err := io.ReadFull(reader, buf); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	conn := &qemuFrameConn{conn: writer}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(frame)))
+	b.ResetTimer()
+	for range b.N {
+		if _, err := conn.Write(frame); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	if err := <-done; err != nil {
+		b.Fatal(err)
+	}
+}
+
 func TestNetWireRecordsAllowedAndBlockedTraffic(t *testing.T) {
 	policy, err := netpol.Parse([]byte(`{"default":"deny","rules":[{"action":"allow","proto":"tcp","ports":"443"}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend := &testPacketConn{rx: make(chan []byte, 1), tx: make(chan []byte, 1)}
+	backend := &testPacketConn{rx: make(chan []byte, 1), tx: make(chan []byte, 1), closed: make(chan struct{})}
 	recorder := netpol.NewTrafficRecorder(filepath.Join(t.TempDir(), netpol.TrafficFileName))
 	nic := &Net{conn: backend, policy: policy, traffic: recorder}
 
@@ -69,34 +101,34 @@ func TestPolicyEnforcedOnWire(t *testing.T) {
 	}
 	defer func() { _ = raw.Close() }()
 
-	conn := qemuFrameConn{conn: raw, pol: pol}
+	nic := &Net{conn: &qemuFrameConn{conn: raw}, policy: pol}
 
 	// unlisted domain: query is dropped before the netstack ever sees it
-	if _, err := conn.Write(dnsQueryFrame(t, "example.com")); err != nil {
+	if _, err := nic.writeFrame(dnsQueryFrame(t, "example.com")); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = raw.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 4096)
-	if n, err := conn.Read(buf); err == nil {
+	if n, err := nic.readFrame(buf); err == nil {
 		t.Fatalf("dropped query still got %d bytes of answer", n)
 	}
 
 	// allowlisted domain: passes, resolves, and the answer is snooped.
 	// The netstack may interleave ARP probes with the answer — skip anything
 	// that isn't IPv4/UDP from port 53, answering ARP on the way.
-	if _, err := conn.Write(dnsQueryFrame(t, "debian.org")); err != nil {
+	if _, err := nic.writeFrame(dnsQueryFrame(t, "debian.org")); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var payload []byte
 	for i := 0; i < 8 && payload == nil; i++ {
-		n, err := conn.Read(buf)
+		n, err := nic.readFrame(buf)
 		if err != nil {
 			t.Skipf("no upstream DNS in this environment: %v", err)
 		}
 		frame := buf[:n]
 		if et := binary.BigEndian.Uint16(frame[12:14]); et == 0x0806 {
-			_, _ = conn.Write(arpReply(frame)) // keep the link conversation going
+			_, _ = nic.writeFrame(arpReply(frame)) // keep the link conversation going
 			continue
 		}
 		if frame[14+9] == 17 && binary.BigEndian.Uint16(frame[14+20:14+22]) == 53 {
@@ -193,32 +225,32 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = raw.Close() }()
-	conn := qemuFrameConn{conn: raw, pol: pol}
+	nic := &Net{conn: &qemuFrameConn{conn: raw}, policy: pol}
 	buf := make([]byte, 4096)
 
 	// 1) LAN destination: SYN to a private IP is dropped (silence)
-	if _, err := conn.Write(tcpSYNFrame(t, "192.168.1.1", 443)); err != nil {
+	if _, err := nic.writeFrame(tcpSYNFrame(t, "192.168.1.1", 443)); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.conn.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-	if n, err := conn.Read(buf); err == nil {
+	_ = raw.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
+	if n, err := nic.readFrame(buf); err == nil {
 		t.Fatalf("LAN SYN got %d bytes back — policy did not drop it", n)
 	}
 
 	// 2) public destination: SYN to 1.1.1.1:443 → SYN-ACK = internet egress
-	if _, err := conn.Write(tcpSYNFrame(t, "1.1.1.1", 443)); err != nil {
+	if _, err := nic.writeFrame(tcpSYNFrame(t, "1.1.1.1", 443)); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
 	gotSynAck := false
 	for i := 0; i < 8 && !gotSynAck; i++ {
-		n, err := conn.Read(buf)
+		n, err := nic.readFrame(buf)
 		if err != nil {
 			t.Skipf("no outbound internet in this environment: %v", err)
 		}
 		f := buf[:n]
 		if binary.BigEndian.Uint16(f[12:14]) == 0x0806 {
-			_, _ = conn.Write(arpReply(f))
+			_, _ = nic.writeFrame(arpReply(f))
 			continue
 		}
 		if f[14+9] == 6 && f[14+20+13]&0x12 == 0x12 { // TCP SYN|ACK
@@ -230,18 +262,18 @@ func TestDefaultPolicyBlocksLocalKeepsInternet(t *testing.T) {
 	}
 
 	// 3) gateway DNS still resolves (the apt/curl path starts here)
-	if _, err := conn.Write(dnsQueryFrame(t, "debian.org")); err != nil {
+	if _, err := nic.writeFrame(dnsQueryFrame(t, "debian.org")); err != nil {
 		t.Fatal(err)
 	}
-	_ = conn.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for i := 0; i < 8; i++ {
-		n, err := conn.Read(buf)
+		n, err := nic.readFrame(buf)
 		if err != nil {
 			t.Skipf("no upstream DNS in this environment: %v", err)
 		}
 		f := buf[:n]
 		if binary.BigEndian.Uint16(f[12:14]) == 0x0806 {
-			_, _ = conn.Write(arpReply(f))
+			_, _ = nic.writeFrame(arpReply(f))
 			continue
 		}
 		if f[14+9] == 17 && binary.BigEndian.Uint16(f[14+20:14+22]) == 53 {

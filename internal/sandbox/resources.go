@@ -1,10 +1,6 @@
 package sandbox
 
-import (
-	"encoding/json"
-	"fmt"
-	"time"
-)
+import "fmt"
 
 // setSandboxResources safely updates both stopped and running sandboxes. A
 // live daemon owns sandbox.json through ConfigStore, so running updates must
@@ -18,23 +14,12 @@ func setSandboxResources(name string, memMB uint, vcpus int) error {
 		return err
 	}
 	if _, alive := sandboxPID(name); alive {
-		conn, err := dialShareControl(name)
-		if err != nil {
-			return fmt.Errorf("connect to running sandbox: %w", err)
-		}
-		defer func() { _ = conn.Close() }()
-		// Same deadline every other ctl.sock client sets: a wedged broker
-		// must not hang the CLI forever.
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 		req := brokerRequest{
-			Op: "resources.set", ID: "resources",
+			Op: "resources.set", ID: newControlRequestID("resources"),
 			Resources: &brokerResourceRequest{MemMB: memMB, VCPUs: vcpus},
 		}
-		if err := json.NewEncoder(conn).Encode(&req); err != nil {
-			return err
-		}
-		var resp brokerResourceResponse
-		if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		resp, err := callControl[brokerResourceResponse](name, req)
+		if err != nil {
 			return err
 		}
 		if !resp.OK {

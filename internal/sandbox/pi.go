@@ -64,7 +64,7 @@ type piConfig struct {
 }
 
 func registerPiFlags(fs *flag.FlagSet, cfg *piConfig) {
-	fs.StringVar(&cfg.image, "image", gutil.EnvOr("GANTRY_PI_IMAGE"), "pi-capable image (docker save tar, OCI ref/layout, .erofs; default: GANTRY_PI_IMAGE)")
+	fs.StringVar(&cfg.image, "image", os.Getenv("GANTRY_PI_IMAGE"), "pi-capable image (docker save tar, OCI ref/layout, .erofs; default: GANTRY_PI_IMAGE)")
 	fs.StringVar(&cfg.netpol, "net-policy", "", "JSON egress policy (recommended: pin to your provider's API domain)")
 	fs.UintVar(&cfg.mem, "mem", 1024, "guest RAM in MiB")
 	fs.IntVar(&cfg.cpus, "cpus", 2, "guest vCPU count")

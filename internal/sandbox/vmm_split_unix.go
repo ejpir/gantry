@@ -15,6 +15,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/vmmworker"
 )
 
 // vmmWorkerPlatform: re-exec'd VMM workers are supported on this platform.
@@ -55,7 +56,7 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, errVMMSplitUnavailable
 	}
-	bootCfg := vmmBootConfig{
+	bootCfg := vmmworker.Config{
 		MemSize:  opts.MemSize,
 		VCPUs:    opts.VCPUs,
 		Cmdline:  opts.Cmdline,
@@ -74,22 +75,13 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 	// the hypervisor handle in the table (confinement empties /dev).
 	// The KVM open is best-effort: without it the worker's Prepare fails
 	// exactly like the monolithic path would.
-	bootCfg.Confinement = cfg.ProcessIsolation
-	if bootCfg.Confinement != "" && bootCfg.Confinement != "off" {
+	bootCfg.Confinement = effectiveProcessIsolation(cfg.ProcessIsolation)
+	if bootCfg.Confinement != "off" {
 		confRoot := filepath.Join(dir, "vmmroot")
 		if err := os.MkdirAll(confRoot, 0o700); err != nil {
 			return nil, fmt.Errorf("worker confinement root: %w", err)
 		}
 		bootCfg.ConfRoot = confRoot
-		// Pre-opened logs Seatbelt allows by literal path. The sandbox
-		// directory itself stays denied: sandbox.json (shares, ports,
-		// net policy) lives there and is trusted on resume — a
-		// directory grant would hand a compromised worker a
-		// config-tamper primitive (Codex security finding 2026-08).
-		bootCfg.WriteFiles = []string{
-			filepath.Join(dir, "console.log"),
-			filepath.Join(dir, "worker-vmm.log"),
-		}
 	}
 	var kvm *os.File
 	if f, err := openHypervisorDevice(); err == nil && f != nil {
@@ -100,16 +92,16 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 	// the worker's virtio-net device is the ONLY egress enforcement
 	// point — hand it the policy, or a nil policy there is allow-all and
 	// every configured deny (including the default local-network wall)
-	// silently vanishes. Split-net topology: opts.NetPolicy is nil and
-	// the net-worker owns enforcement.
-	if opts.NetPolicy != nil {
-		raw, err := netpol.Marshal(opts.NetPolicy)
+	// silently vanishes. In split-net topology the network worker owns
+	// enforcement; its supervisor mirror must not be applied a second time.
+	if !nw.Split && nw.Policy != nil {
+		raw, err := netpol.Marshal(nw.Policy)
 		if err != nil {
 			return nil, fmt.Errorf("marshal network policy for worker: %w", err)
 		}
 		bootCfg.Policy = raw
 	}
-	vw, err := spawnVMMWorker(bootCfg, vmmWorkerAssets{
+	vw, err := spawnVMMWorker(bootCfg, vmmworker.Assets{
 		NetConn: opts.NetConn,
 		Console: console,
 		Kernel:  opts.Kernel,
@@ -124,10 +116,10 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		}
 		return nil, err
 	}
-	if bootCfg.Policy != nil && opts.NetTraffic != nil {
+	if bootCfg.Policy != nil && nw.Traffic != nil {
 		// Attach the host recorder before starting any other lifecycle
 		// goroutine: an immediately-failing share relay can initiate Close.
-		vw.startTrafficSync(opts.NetTraffic)
+		vw.startTrafficSync(nw.Traffic)
 	}
 	if err := vw.startShareBroker(shareManager.Hub()); err != nil {
 		_ = vw.Close()
@@ -139,7 +131,7 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 // syncWorkerTraffic pulls enforcement counters from the worker into the
 // supervisor's recorder until lifecycle completion or worker death. The
 // lifecycle RPC response carries the final snapshot; a post-Done RPC cannot.
-func syncWorkerTraffic(ctx context.Context, vw *vmmWorker, rec *netpol.TrafficRecorder, interval time.Duration, done chan<- struct{}) {
+func syncWorkerTraffic(ctx context.Context, vw *vmmWorker, epoch *netpol.TrafficEpoch, interval time.Duration, done chan<- struct{}) {
 	ticker := time.NewTicker(interval)
 	defer func() {
 		ticker.Stop()
@@ -153,7 +145,7 @@ func syncWorkerTraffic(ctx context.Context, vw *vmmWorker, rec *netpol.TrafficRe
 			return
 		case <-ticker.C:
 			if snap, err := vw.trafficSnapshotContext(ctx); err == nil {
-				rec.SyncSnapshot(snap)
+				epoch.Merge(snap)
 			}
 		}
 	}

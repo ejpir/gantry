@@ -156,7 +156,12 @@ func TestBrokerConfiguresShareForRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := newTestConfigStore(t, dir, RunConfig{})
-	br := &broker{store: store, sessions: map[string]chan struct{}{}}
+	manager, _, err := NewShareManager(dir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = manager.Close() }()
+	br := &broker{store: store, shares: manager, sessions: map[string]chan struct{}{}}
 	req := brokerRequest{
 		Op: "share.configure", ID: "mount",
 		Share: &brokerShareRequest{Spec: "code=" + host + "@/workspace", Persistent: true},

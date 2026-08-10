@@ -2,17 +2,17 @@ package sandbox
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
-	"github.com/ejpir/gantry/internal/virtio"
-	"github.com/ejpir/gantry/internal/vmm"
 )
 
 const maxManagedShares = 256
@@ -28,51 +28,53 @@ const maxManagedShares = 256
 // touched. Every step before the hub mutation is reversible, so a failure
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
-// shareServing is the share-plane backend behind ShareManager. The real
-// FUSE-serving hub always remains in this trusted process; split VMMs see
-// only its bounded request relay and never receive a share root.
-type shareServing interface {
-	PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (prepared any, canonical string, err error)
-	Publish(prepared any) (*virtio.ShareExport, error)
-	Swap(prepared any) (old, exp *virtio.ShareExport, err error)
-	Remove(tag string, force bool) (*virtio.ShareExport, error)
-	ClosePrepared(prepared any)
-	Close() error
-}
-
-// localShareServing adapts the in-process hub.
-type localShareServing struct{ hub *virtio.ShareHub }
-
-func (s localShareServing) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (any, string, error) {
-	return s.hub.PrepareMapped(tag, path, ro, uid, gid)
-}
-func (s localShareServing) Publish(p any) (*virtio.ShareExport, error) {
-	return s.hub.Publish(p.(*virtio.PreparedShare))
-}
-func (s localShareServing) Swap(p any) (old, exp *virtio.ShareExport, err error) {
-	return s.hub.Swap(p.(*virtio.PreparedShare))
-}
-func (s localShareServing) Remove(tag string, force bool) (*virtio.ShareExport, error) {
-	return s.hub.Remove(tag, force)
-}
-func (s localShareServing) ClosePrepared(p any) { p.(*virtio.PreparedShare).ClosePrepared() }
-func (s localShareServing) Close() error        { return s.hub.Close() }
-
 type ShareManager struct {
 	dir        string
-	hub        *virtio.ShareHub
-	serving    shareServing
+	hub        *sharefs.Hub
 	store      *ConfigStore
 	mu         sync.Mutex
 	exports    map[string]*managedShare
 	retired    []*managedShare
 	generation uint64
+	failed     error
+	closed     bool
 }
 
 type managedShare struct {
-	share     vmm.Share
-	export    *virtio.ShareExport
+	share     shares.Spec
+	identity  sharefs.Identity
+	export    *sharefs.Export
 	ephemeral bool
+}
+
+// shareAddCandidate owns a pinned root until commit publishes it. Publish and
+// Swap consume prepared on success; Close is therefore safe on every return
+// path and makes descriptor ownership explicit.
+type shareAddCandidate struct {
+	share     shares.Spec
+	identity  sharefs.Identity
+	prepared  *sharefs.Prepared
+	existing  *managedShare
+	identical bool
+}
+
+func (c *shareAddCandidate) Close() {
+	if c != nil {
+		c.prepared.Close()
+	}
+}
+
+// shareAddTransaction is the three-stage live-add transaction: persist the
+// desired configuration, stage the manifest, then publish the pinned root.
+// Only the final hub operation is irreversible.
+type shareAddTransaction struct {
+	manager    *ShareManager
+	candidate  *shareAddCandidate
+	addition   *managedShare
+	persistent bool
+	oldConfig  []string
+	persistErr error
+	retiredLen int
 }
 
 // NewShareManager prepares every configured export before vmm.Prepare. A nil
@@ -85,7 +87,7 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 	if len(cfg.Shares) > maxManagedShares {
 		return nil, nil, fmt.Errorf("too many shares: %d (max %d)", len(cfg.Shares), maxManagedShares)
 	}
-	hub, err := virtio.NewShareHub()
+	hub, err := sharefs.NewHub()
 	if err != nil {
 		if len(cfg.Shares) == 0 {
 			// Platforms without a host FUSE backend can still run shareless
@@ -95,16 +97,13 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 		return nil, nil, err
 	}
 	m.hub = hub
-	m.serving = localShareServing{hub: hub}
 	var warnings []string
-	seenTags := map[string]bool{}
-	for _, raw := range cfg.Shares {
-		share, err := vmm.ParseShareSpec(raw, seenTags)
-		if err != nil {
-			_ = m.Close()
-			return nil, nil, fmt.Errorf("bad configured share %q: %w", raw, err)
-		}
-		seenTags[share.Tag] = true
+	configured, err := shares.ParseSpecs(cfg.Shares)
+	if err != nil {
+		_ = m.Close()
+		return nil, nil, fmt.Errorf("bad configured share: %w", err)
+	}
+	for _, share := range configured {
 		if share.Tag == "hostshare" && share.CtrPath == "" {
 			share.CtrPath = defaultHubCtrPath(share.Tag)
 			warnings = append(warnings, `share "hostshare" now appears at /host/hostshare (the hub root owns /host; use an explicit @/host alias for the legacy path)`)
@@ -113,65 +112,88 @@ func NewShareManager(dir string, store *ConfigStore) (*ShareManager, []string, e
 			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s path must be absolute (got %q)", share.Tag, share.Path)
 		}
-		if err := m.validateNewShare(share); err != nil {
+		if err := validateShareTarget(share); err != nil {
 			_ = m.Close()
 			return nil, nil, err
 		}
-		prepared, canonical, err := m.serving.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
+		prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
 		if err != nil {
 			_ = m.Close()
 			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
 		}
-		export, err := m.serving.Publish(prepared)
-		if err != nil {
-			m.serving.ClosePrepared(prepared)
-			_ = m.Close()
-			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
-		}
+		identity := prepared.Identity()
 		share.Path = canonical
-		m.exports[share.Tag] = &managedShare{share: share, export: export}
+		if err := m.validatePreparedShare(share, identity, nil); err != nil {
+			prepared.Close()
+			_ = m.Close()
+			return nil, nil, err
+		}
+		export, err := m.hub.Publish(prepared)
+		if err != nil {
+			prepared.Close()
+			_ = m.Close()
+			return nil, nil, fmt.Errorf("share %s: %w", share.Tag, err)
+		}
+		m.exports[share.Tag] = &managedShare{share: share, identity: identity, export: export}
 	}
 	return m, warnings, nil
 }
 
 // Hub returns the trusted serving hub. Monolithic VMMs attach it directly;
 // split VMMs attach a request-only proxy while this hub stays here.
-func (m *ShareManager) Hub() *virtio.ShareHub { return m.hub }
+func (m *ShareManager) Hub() *sharefs.Hub { return m.hub }
 
 // Close releases all host-side export roots.
 func (m *ShareManager) Close() error {
-	if m == nil || m.serving == nil {
+	if m == nil {
 		return nil
 	}
-	return m.serving.Close()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.closed = true
+	if m.hub == nil {
+		return nil
+	}
+	return m.hub.Close()
+}
+
+func (m *ShareManager) readyLocked() error {
+	if m.failed != nil {
+		return fmt.Errorf("share manager failed closed: %w", m.failed)
+	}
+	if m.closed {
+		return fmt.Errorf("share manager is closed")
+	}
+	return nil
+}
+
+// failLocked makes an ambiguous control-plane transaction fail closed. Once
+// config or manifest rollback fails, serving the old namespace would claim a
+// consistency guarantee the daemon can no longer prove.
+func (m *ShareManager) failLocked(err error) error {
+	closeErr := error(nil)
+	if m.hub != nil {
+		closeErr = m.hub.Close()
+	}
+	m.closed = true
+	m.failed = errors.Join(m.failed, err, closeErr)
+	return fmt.Errorf("share manager failed closed: %w", m.failed)
+}
+
+// ConfigureRestart serializes a restart-only OCI alias update with live share
+// transactions. The ConfigStore protects individual writes; this manager lock
+// additionally prevents Add/Remove rollback from restoring a snapshot taken
+// before a concurrent configure committed.
+func (m *ShareManager) ConfigureRestart(spec string, replace bool) (shares.Spec, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.readyLocked(); err != nil {
+		return shares.Spec{}, err
+	}
+	return m.store.SetShareForRestart(spec, replace)
 }
 
 func defaultHubCtrPath(tag string) string { return shares.HubHostPath + "/" + tag }
-
-func canonicalManagedPath(path string) (string, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", err
-	}
-	st, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !st.IsDir() {
-		return "", fmt.Errorf("not a directory: %s", resolved)
-	}
-	return resolved, nil
-}
-
-func pathsOverlap(a, b string) bool {
-	a = filepath.Clean(a)
-	b = filepath.Clean(b)
-	return a == b || strings.HasPrefix(a, b+string(filepath.Separator)) || strings.HasPrefix(b, a+string(filepath.Separator))
-}
 
 // containerPathsOverlap is pathsOverlap for guest container paths: always
 // slash-separated regardless of the host OS, so it must not go through
@@ -188,17 +210,7 @@ func containerPathsOverlap(a, b string) bool {
 	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }
 
-func (m *ShareManager) validateNewShare(share vmm.Share) error {
-	if len(m.exports) >= maxManagedShares {
-		return fmt.Errorf("too many shares (max %d)", maxManagedShares)
-	}
-	if _, exists := m.exports[share.Tag]; exists {
-		return fmt.Errorf("share tag %q already exists", share.Tag)
-	}
-	canonical, err := canonicalManagedPath(share.Path)
-	if err != nil {
-		return fmt.Errorf("share %s: %w", share.Tag, err)
-	}
+func validateShareTarget(share shares.Spec) error {
 	ctr := share.CtrPath
 	if ctr == "" {
 		ctr = defaultHubCtrPath(share.Tag)
@@ -206,16 +218,27 @@ func (m *ShareManager) validateNewShare(share vmm.Share) error {
 	if containerPathsOverlap(ctr, shares.HubInternalPath) {
 		return fmt.Errorf("share %s may not cover, sit under, or contain the internal hub path %s", share.Tag, shares.HubInternalPath)
 	}
+	return nil
+}
+
+// validatePreparedShare compares only identities derived from pinned roots.
+// except is the export being atomically replaced, if any.
+func (m *ShareManager) validatePreparedShare(share shares.Spec, identity sharefs.Identity, except *managedShare) error {
+	ctr := configuredShareTarget(share)
 	for _, existing := range m.exports {
-		otherCanonical, err := canonicalManagedPath(existing.share.Path)
-		if err == nil && pathsOverlap(canonical, otherCanonical) {
-			return fmt.Errorf("share %s overlaps share %s (%s)", share.Tag, existing.share.Tag, otherCanonical)
+		if existing == except {
+			continue
 		}
-		otherCtr := existing.share.CtrPath
-		if otherCtr == "" {
-			otherCtr = defaultHubCtrPath(existing.share.Tag)
+		if existing.share.Tag == share.Tag {
+			return fmt.Errorf("share tag %q already exists", share.Tag)
 		}
-		if ctr == otherCtr {
+		if identity.Aliases(existing.identity) {
+			return fmt.Errorf("share %s aliases share %s (%s)", share.Tag, existing.share.Tag, existing.share.Path)
+		}
+		if identity.Overlaps(existing.identity) {
+			return fmt.Errorf("share %s overlaps share %s (%s)", share.Tag, existing.share.Tag, existing.share.Path)
+		}
+		if ctr == configuredShareTarget(existing.share) {
 			return fmt.Errorf("share tags %q and %q both target %s", existing.share.Tag, share.Tag, ctr)
 		}
 	}
@@ -226,128 +249,201 @@ func (m *ShareManager) validateNewShare(share vmm.Share) error {
 // deliberately limited to the stable /host/<tag> path; arbitrary container
 // aliases still require container creation.
 func (m *ShareManager) Add(spec string, persistent, replace bool) (shares.Entry, error) {
-	m.muLock()
-	defer m.muUnlock()
-	if m.serving == nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.requireLiveAddLocked(); err != nil {
+		return shares.Entry{}, err
+	}
+	candidate, err := m.prepareAddLocked(spec, replace)
+	if err != nil {
+		return shares.Entry{}, err
+	}
+	if candidate.identical {
+		candidate.Close()
+		return m.completeIdenticalAddLocked(candidate.existing, persistent)
+	}
+	tx := shareAddTransaction{
+		manager:    m,
+		candidate:  candidate,
+		addition:   &managedShare{share: candidate.share, identity: candidate.identity, ephemeral: !persistent},
+		persistent: persistent,
+	}
+	return tx.commit()
+}
+
+func (m *ShareManager) requireLiveAddLocked() error {
+	if err := m.readyLocked(); err != nil {
+		return err
+	}
+	if m.hub == nil {
 		// No serving backend: a platform without a virtio-fs hub.
-		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
+		return fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
 	if !m.store.Snapshot().RW {
 		// A read-only container root cannot create the /host bind target,
 		// so the hub was never mounted into the container (client.go).
-		return shares.Entry{}, fmt.Errorf("live shares require a writable container root (sandbox started with -rw=false)")
+		return fmt.Errorf("live shares require a writable container root (sandbox started with -rw=false)")
 	}
-	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
-	if err != nil {
-		return shares.Entry{}, err
-	}
-	if share.CtrPath != "" {
-		return shares.Entry{}, fmt.Errorf("live shares always appear at /host/<tag>; @CTRPATH requires sandbox restart")
-	}
-	if !filepath.IsAbs(share.Path) {
-		return shares.Entry{}, fmt.Errorf("share path must be absolute (got %q)", share.Path)
-	}
-	share.CtrPath = defaultHubCtrPath(share.Tag)
-	if share.Tag == "hostshare" {
-		// hostshare has no special /host shortcut in hub mode.
-		share.CtrPath = defaultHubCtrPath(share.Tag)
-	}
-	var existing *managedShare
-	if existing = m.exports[share.Tag]; existing != nil {
-		canonical, _ := canonicalManagedPath(share.Path)
-		if existing.share.Path == canonical && existing.share.RO == share.RO && shareOwnerEqual(existing.share, share) {
-			// Identical share: re-adding an ephemeral share with --persist
-			// promotes it to persistent instead of being a no-op.
-			if persistent && existing.ephemeral {
-				if err := m.mutateSharesLocked(share.Tag, shareConfigSpec(existing.share)); err != nil {
-					return shares.Entry{}, err
-				}
-				existing.ephemeral = false
-				m.generation++
-				return m.entry(existing), m.publishLocked()
-			}
-			return m.entry(existing), nil
-		}
-		if !replace {
-			return shares.Entry{}, fmt.Errorf("share tag %q already exists with different settings (use --replace)", share.Tag)
-		}
-		// Validate and prepare the candidate before disturbing the old export,
-		// so a bad replacement cannot remove a working share.
-		delete(m.exports, share.Tag)
-		err := m.validateNewShare(share)
-		m.exports[share.Tag] = existing
-		if err != nil {
-			return shares.Entry{}, err
-		}
-	} else if err := m.validateNewShare(share); err != nil {
-		return shares.Entry{}, err
-	}
-	if m.serving == nil {
-		return shares.Entry{}, fmt.Errorf("share backend unavailable")
-	}
-	prepared, canonical, err := m.serving.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
-	if err != nil {
-		return shares.Entry{}, err
-	}
-	share.Path = canonical
-	ms := &managedShare{share: share, ephemeral: !persistent}
-
-	// Persist first: one mutation computing the final Shares slice (an
-	// atomic replace for an existing tag — never separate remove+add
-	// writes). Then stage memory + manifest, and touch the live namespace
-	// last; failures before the hub mutation roll everything back.
-	var oldConfig []string
-	if persistent {
-		// Replacing an existing persistent share is still a single
-		// slice swap: shareSpecsReplacingTag drops the tag's old
-		// specs and appends the new one in one write.
-		if err := m.mutateSharesSnapshotLocked(share.Tag, shareConfigSpec(share), &oldConfig); err != nil {
-			m.serving.ClosePrepared(prepared)
-			return shares.Entry{}, err
-		}
-	}
-	retiredIdx := len(m.retired)
-	m.exports[share.Tag] = ms
-	if existing != nil {
-		m.retired = append(m.retired, existing)
-	}
-	m.generation++
-	rollback := func(err error) (shares.Entry, error) {
-		delete(m.exports, share.Tag)
-		m.retired = m.retired[:retiredIdx]
-		if existing != nil {
-			m.exports[share.Tag] = existing
-		}
-		m.generation++
-		if persistent {
-			m.restoreSharesLocked(oldConfig)
-		}
-		_ = m.publishLocked()
-		m.serving.ClosePrepared(prepared)
-		return shares.Entry{}, err
-	}
-	if err := m.publishLocked(); err != nil {
-		return rollback(err)
-	}
-	var export *virtio.ShareExport
-	if existing != nil {
-		_, export, err = m.serving.Swap(prepared)
-	} else {
-		export, err = m.serving.Publish(prepared)
-	}
-	if err != nil {
-		return rollback(err)
-	}
-	ms.export = export
-	// Best-effort refresh: the pre-swap publish validated writability and
-	// the rollback path republishes on failure; this one just tightens the
-	// retired/active states now that the live namespace has moved. A stale
-	// manifest self-heals on the next mutation or boot Publish.
-	_ = m.publishLocked()
-	return m.entry(ms), nil
+	return nil
 }
 
-func shareOwnerEqual(a, b vmm.Share) bool {
+func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCandidate, error) {
+	share, err := shares.ParseSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	if share.CtrPath != "" {
+		return nil, fmt.Errorf("live shares always appear at /host/<tag>; @CTRPATH requires sandbox restart")
+	}
+	if !filepath.IsAbs(share.Path) {
+		return nil, fmt.Errorf("share path must be absolute (got %q)", share.Path)
+	}
+	share.CtrPath = defaultHubCtrPath(share.Tag)
+	if err := validateShareTarget(share); err != nil {
+		return nil, err
+	}
+	existing := m.exports[share.Tag]
+	if existing == nil && len(m.exports) >= maxManagedShares {
+		return nil, fmt.Errorf("too many shares (max %d)", maxManagedShares)
+	}
+	prepared, canonical, err := m.hub.PrepareMapped(share.Tag, share.Path, share.RO, share.UID, share.GID)
+	if err != nil {
+		return nil, err
+	}
+	identity := prepared.Identity()
+	share.Path = canonical
+	identical := existing != nil &&
+		identity.Aliases(existing.identity) &&
+		existing.share.RO == share.RO &&
+		shareOwnerEqual(existing.share, share)
+	candidate := &shareAddCandidate{
+		share:     share,
+		identity:  identity,
+		prepared:  prepared,
+		existing:  existing,
+		identical: identical,
+	}
+	if identical {
+		return candidate, nil
+	}
+	if existing != nil && !replace {
+		candidate.Close()
+		return nil, fmt.Errorf("share tag %q already exists with different settings (use --replace)", share.Tag)
+	}
+	if err := m.validatePreparedShare(share, identity, existing); err != nil {
+		candidate.Close()
+		return nil, err
+	}
+	return candidate, nil
+}
+
+func (m *ShareManager) completeIdenticalAddLocked(existing *managedShare, persistent bool) (shares.Entry, error) {
+	// Re-adding an ephemeral share with --persist promotes it instead of
+	// taking the otherwise idempotent no-op path.
+	if !persistent || !existing.ephemeral {
+		return m.entry(existing), nil
+	}
+	var oldConfig []string
+	persistErr := m.mutateSharesSnapshotLocked(existing.share.Tag, shareConfigSpec(existing.share), &oldConfig)
+	if persistErr != nil && !atomicfile.Committed(persistErr) {
+		return shares.Entry{}, persistErr
+	}
+	existing.ephemeral = false
+	m.generation++
+	if err := m.publishLocked(); err != nil {
+		existing.ephemeral = true
+		m.generation++
+		recoveryErr := m.recoverControlPlaneLocked(true, oldConfig)
+		return shares.Entry{}, errors.Join(err, recoveryErr)
+	}
+	entry := m.entry(existing)
+	if persistErr != nil {
+		return entry, fmt.Errorf("share promotion committed but configuration durability is uncertain: %w", persistErr)
+	}
+	return entry, nil
+}
+
+func (tx *shareAddTransaction) commit() (shares.Entry, error) {
+	defer tx.candidate.Close()
+	if err := tx.persist(); err != nil {
+		return shares.Entry{}, err
+	}
+	tx.stage()
+	if err := tx.manager.publishLocked(); err != nil {
+		return tx.rollback(err)
+	}
+	if err := tx.publish(); err != nil {
+		return tx.rollback(err)
+	}
+	entry := tx.manager.entry(tx.addition)
+	if err := tx.manager.publishLocked(); err != nil {
+		return entry, tx.manager.failLocked(fmt.Errorf("publish committed share manifest: %w", err))
+	}
+	if tx.persistErr != nil {
+		return entry, fmt.Errorf("share added but configuration durability is uncertain: %w", tx.persistErr)
+	}
+	return entry, nil
+}
+
+func (tx *shareAddTransaction) persist() error {
+	if !tx.persistent {
+		return nil
+	}
+	// A replacement is one slice swap, never a remove then add sequence
+	// that a crash could split.
+	tx.persistErr = tx.manager.mutateSharesSnapshotLocked(
+		tx.addition.share.Tag,
+		shareConfigSpec(tx.addition.share),
+		&tx.oldConfig,
+	)
+	if tx.persistErr != nil && !atomicfile.Committed(tx.persistErr) {
+		return tx.persistErr
+	}
+	return nil
+}
+
+func (tx *shareAddTransaction) stage() {
+	m := tx.manager
+	tx.retiredLen = len(m.retired)
+	m.exports[tx.addition.share.Tag] = tx.addition
+	if tx.candidate.existing != nil {
+		m.retired = append(m.retired, tx.candidate.existing)
+	}
+	m.generation++
+}
+
+func (tx *shareAddTransaction) publish() error {
+	m := tx.manager
+	var (
+		export *sharefs.Export
+		err    error
+	)
+	if tx.candidate.existing == nil {
+		export, err = m.hub.Publish(tx.candidate.prepared)
+	} else {
+		_, export, err = m.hub.Swap(tx.candidate.prepared)
+	}
+	if err == nil {
+		tx.addition.export = export
+	}
+	return err
+}
+
+func (tx *shareAddTransaction) rollback(cause error) (shares.Entry, error) {
+	m := tx.manager
+	tag := tx.addition.share.Tag
+	delete(m.exports, tag)
+	m.retired = m.retired[:tx.retiredLen]
+	if tx.candidate.existing != nil {
+		m.exports[tag] = tx.candidate.existing
+	}
+	m.generation++
+	tx.candidate.Close()
+	recoveryErr := m.recoverControlPlaneLocked(tx.persistent, tx.oldConfig)
+	return shares.Entry{}, errors.Join(cause, recoveryErr)
+}
+
+func shareOwnerEqual(a, b shares.Spec) bool {
 	if (a.UID == nil) != (b.UID == nil) || (a.GID == nil) != (b.GID == nil) {
 		return false
 	}
@@ -357,13 +453,16 @@ func shareOwnerEqual(a, b vmm.Share) bool {
 // Remove hides a share immediately. Graceful removal drains existing handles;
 // force revokes subsequent host-backed operations with ESTALE.
 func (m *ShareManager) Remove(tag string, persistent, force bool) (shares.Entry, error) {
-	m.muLock()
-	defer m.muUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.removeLocked(tag, persistent, force)
 }
 
 func (m *ShareManager) removeLocked(tag string, persistent, force bool) (shares.Entry, error) {
-	if m.serving == nil {
+	if err := m.readyLocked(); err != nil {
+		return shares.Entry{}, err
+	}
+	if m.hub == nil {
 		return shares.Entry{}, fmt.Errorf("live shares require the virtio-fs hub (unsupported on this platform)")
 	}
 	ms := m.exports[tag]
@@ -378,9 +477,11 @@ func (m *ShareManager) removeLocked(tag string, persistent, force bool) (shares.
 		return shares.Entry{}, fmt.Errorf("share %q has an explicit container alias at %s; use --force or restart the sandbox", tag, ctr)
 	}
 	var oldConfig []string
+	var persistErr error
 	if persistent && !ms.ephemeral {
-		if err := m.mutateSharesSnapshotLocked(tag, "", &oldConfig); err != nil {
-			return shares.Entry{}, err
+		persistErr = m.mutateSharesSnapshotLocked(tag, "", &oldConfig)
+		if persistErr != nil && !atomicfile.Committed(persistErr) {
+			return shares.Entry{}, persistErr
 		}
 	}
 	// Unstage + manifest before revoking the live export, so a failure
@@ -393,36 +494,39 @@ func (m *ShareManager) removeLocked(tag string, persistent, force bool) (shares.
 		m.retired = m.retired[:retiredIdx]
 		m.exports[tag] = ms
 		m.generation++
-		if persistent && !ms.ephemeral {
-			m.restoreSharesLocked(oldConfig)
-		}
-		_ = m.publishLocked()
-		return shares.Entry{}, err
+		recoveryErr := m.recoverControlPlaneLocked(persistent && !ms.ephemeral, oldConfig)
+		return shares.Entry{}, errors.Join(err, recoveryErr)
 	}
 	if err := m.publishLocked(); err != nil {
 		return rollback(err)
 	}
-	export, err := m.serving.Remove(tag, force)
+	export, err := m.hub.Remove(tag, force)
 	if err != nil {
 		return rollback(err)
 	}
 	ms.export = export
-	_ = m.publishLocked() // refresh export states post-revoke; see Add
-	return m.entry(ms), nil
+	entry := m.entry(ms)
+	if err := m.publishLocked(); err != nil {
+		return entry, m.failLocked(fmt.Errorf("publish committed share manifest: %w", err))
+	}
+	if persistErr != nil {
+		return entry, fmt.Errorf("share removed but configuration durability is uncertain: %w", persistErr)
+	}
+	return entry, nil
 }
 
 // Generation is the live namespace version written to shares.json.
 func (m *ShareManager) Generation() uint64 {
-	m.muLock()
-	defer m.muUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.generation
 }
 
 // Entries returns the live namespace plus exports still draining after a
 // removal. Stopped sandboxes use loadTUIMounts' sandbox.json fallback instead.
 func (m *ShareManager) Entries() []shares.Entry {
-	m.muLock()
-	defer m.muUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.entriesLocked()
 }
 
@@ -433,7 +537,7 @@ func (m *ShareManager) entriesLocked() []shares.Entry {
 	}
 	kept := m.retired[:0]
 	for _, ms := range m.retired {
-		if ms.export != nil && ms.export.State() == virtio.ShareExportGone {
+		if ms.export != nil && ms.export.State() == sharefs.ExportGone {
 			continue
 		}
 		out = append(out, m.entry(ms))
@@ -452,7 +556,7 @@ func (m *ShareManager) entry(ms *managedShare) shares.Entry {
 	state := "active"
 	if ms.export != nil {
 		state = ms.export.State().String()
-	} else if m.hub == nil && m.serving == nil {
+	} else if m.hub == nil {
 		state = "saved"
 	}
 	return shares.Entry{
@@ -471,8 +575,11 @@ func (m *ShareManager) entry(ms *managedShare) shares.Entry {
 // and dashboard. It is atomic and host-local; guest requests never see host
 // paths over ttrpc.
 func (m *ShareManager) Publish() error {
-	m.muLock()
-	defer m.muUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.readyLocked(); err != nil {
+		return err
+	}
 	return m.publishLocked()
 }
 
@@ -491,21 +598,20 @@ func (m *ShareManager) publishLocked() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(filepath.Join(m.dir, "shares.json"), append(b, '\n'), 0o600)
+	// The manifest is derived from sandbox.json and the live hub, and is
+	// regenerated at boot. Atomic visibility matters; forcing it to stable
+	// storage would only add file and directory fsyncs to startup.
+	return atomicfile.WriteFile(filepath.Join(m.dir, "shares.json"), append(b, '\n'), 0o600)
 }
 
-func shareConfigSpec(share vmm.Share) string {
-	spec := share.Tag + "=" + share.Path
-	if share.CtrPath != "" && share.CtrPath != defaultHubCtrPath(share.Tag) {
-		spec += "@" + share.CtrPath
+func shareConfigSpec(share shares.Spec) string {
+	// The persistent hub's implicit target is /host/<tag>. Keep omitting that
+	// derived value from sandbox.json while delegating canonical formatting to
+	// the share model.
+	if share.CtrPath == defaultHubCtrPath(share.Tag) {
+		share.CtrPath = ""
 	}
-	if share.RO {
-		spec += ",ro"
-	}
-	if share.UID != nil {
-		spec += fmt.Sprintf(",uid=%d,gid=%d", *share.UID, *share.GID)
-	}
-	return spec
+	return share.String()
 }
 
 // shareSpecsReplacingTag returns specs with every entry for tag dropped and
@@ -514,7 +620,7 @@ func shareConfigSpec(share vmm.Share) string {
 func shareSpecsReplacingTag(specs []string, tag, newSpec string) []string {
 	out := make([]string, 0, len(specs)+1)
 	for _, raw := range specs {
-		share, err := vmm.ParseShareSpec(raw, map[string]bool{})
+		share, err := shares.ParseSpec(raw)
 		if err != nil || share.Tag != tag {
 			out = append(out, raw)
 		}
@@ -540,55 +646,28 @@ func (m *ShareManager) mutateSharesSnapshotLocked(tag, newSpec string, old *[]st
 	})
 }
 
-// mutateSharesLocked is the no-rollback-needed variant (promotion path).
-func (m *ShareManager) mutateSharesLocked(tag, newSpec string) error {
+func (m *ShareManager) restoreSharesLocked(old []string) error {
 	return m.store.Mutate(func(cfg *RunConfig) error {
-		cfg.Shares = shareSpecsReplacingTag(cfg.Shares, tag, newSpec)
-		return nil
-	})
-}
-
-func (m *ShareManager) restoreSharesLocked(old []string) {
-	_ = m.store.Mutate(func(cfg *RunConfig) error {
 		cfg.Shares = append([]string(nil), old...)
 		return nil
 	})
 }
 
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
-	if err != nil {
-		return err
+// recoverControlPlaneLocked restores the pre-transaction persistent and
+// manifest state. Any recovery failure closes the hub: continuing to serve
+// after that point would make disk, dashboard, and live namespace disagree.
+func (m *ShareManager) recoverControlPlaneLocked(restoreConfig bool, oldConfig []string) error {
+	var recoveryErr error
+	if restoreConfig {
+		if err := m.restoreSharesLocked(oldConfig); err != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("restore sandbox share configuration: %w", err))
+		}
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
+	if err := m.publishLocked(); err != nil {
+		recoveryErr = errors.Join(recoveryErr, fmt.Errorf("restore share manifest: %w", err))
 	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	if d, err := os.Open(dir); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
+	if recoveryErr != nil {
+		return m.failLocked(recoveryErr)
 	}
 	return nil
 }
-
-// A tiny wrapper keeps the critical section obvious at call sites (the
-// manager intentionally serializes whole control-plane transactions).
-func (m *ShareManager) muLock()   { m.mu.Lock() }
-func (m *ShareManager) muUnlock() { m.mu.Unlock() }

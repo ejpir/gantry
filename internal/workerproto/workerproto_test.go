@@ -3,6 +3,7 @@ package workerproto
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,19 @@ import (
 	"testing"
 	"time"
 )
+
+type errorReader struct{ err error }
+
+func (r errorReader) Read([]byte) (int, error) { return 0, r.err }
+
+func testNonce(t *testing.T) []byte {
+	t.Helper()
+	nonce, err := NewNonce()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return nonce
+}
 
 func TestMessageRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
@@ -94,8 +108,23 @@ func TestFrameBounds(t *testing.T) {
 	}
 }
 
+func BenchmarkFrameWriter(b *testing.B) {
+	frame := make([]byte, 1500)
+	var writer FrameWriter
+	var output bytes.Buffer
+	output.Grow(4 + len(frame))
+	b.ReportAllocs()
+	b.SetBytes(int64(len(frame)))
+	for b.Loop() {
+		output.Reset()
+		if err := writer.WriteFrame(&output, frame); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestNonceCrossCheck(t *testing.T) {
-	nonce := NewNonce()
+	nonce := testNonce(t)
 	var buf bytes.Buffer
 	if err := WriteNonce(&buf, nonce); err != nil {
 		t.Fatal(err)
@@ -103,12 +132,22 @@ func TestNonceCrossCheck(t *testing.T) {
 	if err := ReadNonce(&buf, nonce); err != nil {
 		t.Fatal(err)
 	}
-	other := NewNonce()
+	other := testNonce(t)
 	if err := ReadNonce(bytes.NewReader(buf.Bytes()), other); err == nil {
 		t.Fatal("nonce mismatch not detected")
 	}
 	if err := ReadNonce(bytes.NewReader(buf.Bytes()[:10]), nonce); err == nil {
 		t.Fatal("short nonce accepted")
+	}
+}
+
+func TestNewNonceReturnsEntropyError(t *testing.T) {
+	want := errors.New("entropy unavailable")
+	old := rand.Reader
+	rand.Reader = errorReader{err: want}
+	t.Cleanup(func() { rand.Reader = old })
+	if _, err := NewNonce(); !errors.Is(err, want) {
+		t.Fatalf("NewNonce error = %v, want %v", err, want)
 	}
 }
 
@@ -138,7 +177,7 @@ func TestHandshakeValidation(t *testing.T) {
 	}
 
 	c, done := good()
-	if err := SendHandshake(c, RoleNet, NewNonce(), cfg{X: 42}); err != nil {
+	if err := SendHandshake(c, RoleNet, testNonce(t), cfg{X: 42}); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {

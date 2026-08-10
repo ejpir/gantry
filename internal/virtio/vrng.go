@@ -12,7 +12,8 @@ import "crypto/rand"
 const virtioRngDeviceID = 4
 
 type RNG struct {
-	core *Core
+	core   *Core
+	buffer []byte
 }
 
 func NewRNG() *RNG { return &RNG{} }
@@ -36,7 +37,12 @@ func (v *RNG) handleQueue(qn int) {
 		_, writable := splitChain(chain)
 		var total uint32
 		for _, d := range writable {
-			buf := make([]byte, d.len)
+			if cap(v.buffer) < int(d.len) {
+				v.buffer = make([]byte, int(d.len))
+			} else {
+				v.buffer = v.buffer[:int(d.len)]
+			}
+			buf := v.buffer
 			if _, err := rand.Read(buf); err != nil {
 				break
 			}

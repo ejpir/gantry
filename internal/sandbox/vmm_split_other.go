@@ -25,9 +25,3 @@ func crossProcNetConn() (sup, dev net.Conn, err error) {
 func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *ShareManager, dir string, console *os.File) (vmmRunner, error) {
 	return nil, errVMMSplitUnavailable
 }
-
-// CmdVMMWorker on unsupported platforms: refuse the role.
-func CmdVMMWorker() int {
-	fmt.Fprintln(os.Stderr, "vmm worker unsupported on this platform")
-	return 2
-}

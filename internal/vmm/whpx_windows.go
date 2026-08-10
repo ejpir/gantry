@@ -10,13 +10,13 @@ package vmm
 // WHPX, while the IO-APIC (ioapic.go), i8254 PIT (pit.go), i8259 PIC
 // (pic.go), 16550 UART (uart16550.go) and CMOS RTC (cmos.go) are userspace.
 // MMIO exits carry instruction bytes (no operand value), so writes are
-// decoded with x86emul.go. SMP: non-zero VPs wait for the guest's
-// INIT/SIPI, delivered by WHPX's in-kernel LAPIC.
+// decoded with x86emul.go. WHPX's in-kernel LAPIC delivers virtual interrupts.
+// Resource validation admits one BSP until INIT/SIPI AP startup is supported.
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -31,7 +31,10 @@ var (
 	procSetupPartition   = winhv.NewProc("WHvSetupPartition")
 	procDeletePartition  = winhv.NewProc("WHvDeletePartition")
 	procMapGpaRange      = winhv.NewProc("WHvMapGpaRange")
+	procUnmapGpaRange    = winhv.NewProc("WHvUnmapGpaRange")
 	procCreateVP         = winhv.NewProc("WHvCreateVirtualProcessor")
+	procDeleteVP         = winhv.NewProc("WHvDeleteVirtualProcessor")
+	procCancelRunVP      = winhv.NewProc("WHvCancelRunVirtualProcessor")
 	procRunVP            = winhv.NewProc("WHvRunVirtualProcessor")
 	procGetVPRegs        = winhv.NewProc("WHvGetVirtualProcessorRegisters")
 	procSetVPRegs        = winhv.NewProc("WHvSetVirtualProcessorRegisters")
@@ -87,9 +90,87 @@ func whvCall(name string, proc *windows.LazyProc, args ...uintptr) error {
 }
 
 type whpxBackend struct {
-	h  windows.Handle
-	m  *Machine
-	mu sync.Mutex // serializes register file get/set per exit (cheap)
+	h         windows.Handle
+	m         *Machine
+	lifecycle *nativeBackendLifecycle
+	mu        sync.Mutex // serializes register file get/set per exit (cheap)
+	nativeMu  sync.RWMutex
+	runMu     sync.Mutex
+	runningVP []bool
+
+	partitionCreated bool
+	mapped           bool
+	createdVPs       []bool
+}
+
+func (b *whpxBackend) cancelVCPUs() error {
+	b.runMu.Lock()
+	running := make([]int, 0, len(b.runningVP))
+	for vp, active := range b.runningVP {
+		if active {
+			running = append(running, vp)
+		}
+	}
+	b.runMu.Unlock()
+	var errs []error
+	for _, vp := range running {
+		if err := whvCall("WHvCancelRunVirtualProcessor", procCancelRunVP,
+			uintptr(b.h), uintptr(vp), 0); err != nil {
+			errs = append(errs, fmt.Errorf("cancel WHPX vCPU %d: %w", vp, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (b *whpxBackend) beginRun(vp uint32) bool {
+	b.runMu.Lock()
+	defer b.runMu.Unlock()
+	if b.lifecycle.isStopping() {
+		return false
+	}
+	b.runningVP[vp] = true
+	return true
+}
+
+func (b *whpxBackend) endRun(vp uint32) {
+	b.runMu.Lock()
+	b.runningVP[vp] = false
+	b.runMu.Unlock()
+}
+
+func (b *whpxBackend) releaseNative() error {
+	b.nativeMu.Lock()
+	defer b.nativeMu.Unlock()
+	var errs []error
+	for vp := len(b.createdVPs) - 1; vp >= 0; vp-- {
+		if !b.createdVPs[vp] {
+			continue
+		}
+		if err := whvCall("WHvDeleteVirtualProcessor", procDeleteVP,
+			uintptr(b.h), uintptr(vp)); err != nil {
+			errs = append(errs, fmt.Errorf("delete WHPX vCPU %d: %w", vp, err))
+		}
+		b.createdVPs[vp] = false
+	}
+	if b.mapped {
+		if err := whvCall("WHvUnmapGpaRange", procUnmapGpaRange,
+			uintptr(b.h), 0, uintptr(len(b.m.ram))); err != nil {
+			errs = append(errs, fmt.Errorf("unmap WHPX guest RAM: %w", err))
+		}
+		b.mapped = false
+	}
+	if b.partitionCreated {
+		if err := whvCall("WHvDeletePartition", procDeletePartition, uintptr(b.h)); err != nil {
+			errs = append(errs, fmt.Errorf("delete WHPX partition: %w", err))
+		}
+		b.partitionCreated = false
+		b.h = 0
+	}
+	return errors.Join(errs...)
+}
+
+func (b *whpxBackend) Close() error {
+	return b.lifecycle.close(b.cancelVCPUs, b.releaseNative)
 }
 
 // whvRegValue is one WHV_REGISTER_VALUE (16 bytes).
@@ -160,6 +241,14 @@ func (b *whpxBackend) writeGPR(vp uint32, idx int, v uint64) error {
 
 // deliverInterrupt is the IO-APIC's delivery path into WHPX.
 func (b *whpxBackend) deliverInterrupt(dest, vector uint32, level bool) {
+	if b.lifecycle.isStopping() {
+		return
+	}
+	b.nativeMu.RLock()
+	defer b.nativeMu.RUnlock()
+	if b.lifecycle.isStopping() {
+		return
+	}
 	var ctrl [16]byte
 	// Type=Fixed(0) @bits0-7, DestinationMode=Physical(0) @bits8-11,
 	// TriggerMode=Edge(0)|Level(1) @bits12-15
@@ -179,7 +268,7 @@ func (b *whpxBackend) deliverInterrupt(dest, vector uint32, level bool) {
 // runGuest boots the prepared machine under WHPX (entry point for main).
 type whpxPlatform struct{}
 
-func (whpxPlatform) run(m *Machine) error {
+func (whpxPlatform) run(m *Machine) (resultErr error) {
 	if m.arch != "amd64" {
 		return fmt.Errorf("the WHPX backend boots x86-64 guests only (got %s)", m.arch)
 	}
@@ -191,8 +280,23 @@ func (whpxPlatform) run(m *Machine) error {
 		uintptr(unsafe.Pointer(&h))); err != nil {
 		return fmt.Errorf("%w (needs Windows 10 1809+ with the Hypervisor Platform enabled)", err)
 	}
-	b := &whpxBackend{h: h, m: m}
-	defer func() { _, _, _ = procDeletePartition.Call(uintptr(h)) }()
+	b := &whpxBackend{
+		h:                h,
+		m:                m,
+		lifecycle:        newNativeBackendLifecycle(m.vcpus),
+		partitionCreated: true,
+		createdVPs:       make([]bool, m.vcpus),
+		runningVP:        make([]bool, m.vcpus),
+	}
+	mainClaimed := false
+	defer func() {
+		if mainClaimed {
+			b.lifecycle.workerDone()
+		}
+		if closeErr := b.Close(); closeErr != nil {
+			resultErr = errors.Join(resultErr, closeErr)
+		}
+	}()
 
 	prop := u64Value(uint64(m.vcpus))
 	if err := whvCall("WHvSetPartitionProperty(ProcessorCount)", procSetPartitionProp,
@@ -218,36 +322,27 @@ func (whpxPlatform) run(m *Machine) error {
 		uintptr(len(m.ram)), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
 		return fmt.Errorf("WHvMapGpaRange: %w", err)
 	}
+	b.mapped = true
 
 	// userspace irqchip: IO-APIC delivering via WHvRequestInterrupt
 	m.x86.ioapic = newIOApic(b.deliverInterrupt)
-	m.irqLine = func(irq int, level bool) { m.x86.ioapic.raise(irq, level) }
+	m.interrupts.set(func(irq int, level bool) { m.x86.ioapic.raise(irq, level) })
 
 	for i := 0; i < m.vcpus; i++ {
 		if err := whvCall("WHvCreateVirtualProcessor", procCreateVP,
 			uintptr(h), uintptr(i), 0); err != nil {
 			return fmt.Errorf("WHvCreateVirtualProcessor(%d): %w", i, err)
 		}
+		b.createdVPs[i] = true
+	}
+	if !b.lifecycle.claimWorker() {
+		return errMachineClosed
+	}
+	mainClaimed = true
+	if err := m.adoptBackend(b); err != nil {
+		return err
 	}
 
-	// APs: unlike KVM, WHPX places every VP in the architectural reset
-	// state — it does not hold APs for the guest's INIT/SIPI. An AP thread
-	// started before the BSP has populated the trampoline would execute
-	// the reset vector in zeroed RAM and triple-fault. Until this is
-	// validated on real Windows, warn and let the caller use -cpus 1.
-	if m.vcpus > 1 {
-		fmt.Fprintf(os.Stderr, "whpx: %d vCPUs requested; WHPX AP bring-up is unvalidated "+
-			"and APs may triple-fault — prefer -cpus 1 on Windows\n", m.vcpus)
-	}
-	for i := 1; i < m.vcpus; i++ {
-		go func(vp uint32) {
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
-			if err := b.runVPLoop(vp); err != nil {
-				fmt.Fprintf(os.Stderr, "\n[cpu%d] run loop: %v\n", vp, err)
-			}
-		}(uint32(i))
-	}
 	return b.bootLoop()
 }
 
@@ -294,9 +389,17 @@ const (
 func (b *whpxBackend) runVPLoop(vp uint32) error {
 	buf := make([]byte, whvExitContextSize)
 	for {
-		if err := whvCall("WHvRunVirtualProcessor", procRunVP,
+		if !b.beginRun(vp) {
+			return nil
+		}
+		err := whvCall("WHvRunVirtualProcessor", procRunVP,
 			uintptr(b.h), uintptr(vp),
-			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf))); err != nil {
+			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		b.endRun(vp)
+		if err != nil {
+			if b.lifecycle.isStopping() {
+				return nil
+			}
 			return fmt.Errorf("WHvRunVirtualProcessor: %w", err)
 		}
 		switch binary.LittleEndian.Uint32(buf[0:]) {
@@ -308,9 +411,12 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			if err := b.handleIOExit(vp, buf); err != nil {
 				return err
 			}
-		case whvExitHalt, whvExitCanceled:
+		case whvExitHalt:
 			// halt: re-enter and block until the next interrupt;
-			// canceled: someone kicked us, just re-enter.
+		case whvExitCanceled:
+			if b.lifecycle.isStopping() {
+				return nil
+			}
 		case whvExitUnrecoverable:
 			b.m.stdoutFlush()
 			rip := binary.LittleEndian.Uint64(buf[32:])

@@ -112,6 +112,18 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsInvalidResources(t *testing.T) {
+	for _, args := range [][]string{
+		{"-mem", "0"},
+		{"-cpus", "0"},
+		{"-cpus", "9"},
+	} {
+		if _, _, err := resolveSandbox(t, args...); err == nil {
+			t.Errorf("Resolve accepted invalid resources %v", args)
+		}
+	}
+}
+
 func TestResolveOAuthBridgeDefaultsOnAndPersistsOptOut(t *testing.T) {
 	cfg, _, err := resolveNamedSandbox(t, "agent")
 	if err != nil {
@@ -141,11 +153,12 @@ func TestResolveOAuthBridgeDefaultsOnAndPersistsOptOut(t *testing.T) {
 	if roundTrip.OAuthBridge == nil || roundTrip.OAuthBridgeEnabled() {
 		t.Fatalf("persisted opt-out did not survive JSON round trip: %s", raw)
 	}
-	if _, _, err := resolveSandbox(t, "-oauth-bridge"); err == nil || !strings.Contains(err.Error(), "named sandbox") {
-		t.Fatalf("one-shot -oauth-bridge error = %v", err)
+	oneShot, _, err := resolveSandbox(t, "-oauth-bridge=false")
+	if err != nil {
+		t.Fatalf("one-shot -oauth-bridge=false: %v", err)
 	}
-	if _, _, err := resolveSandbox(t); err != nil {
-		t.Fatalf("one-shot default unexpectedly failed: %v", err)
+	if oneShot.OAuthBridge == nil || oneShot.OAuthBridgeEnabled() {
+		t.Fatal("one-shot OAuth bridge opt-out was not preserved")
 	}
 }
 
@@ -357,7 +370,7 @@ func TestValidateSandboxName(t *testing.T) {
 
 func TestPiSandboxName(t *testing.T) {
 	for _, tc := range []struct{ cwd, want string }{
-		{"/Users/x/repos/minivm", "pi-minivm"},
+		{"/Users/x/repos/gantry", "pi-gantry"},
 		{"/Users/x/repos/my project (v2)", "pi-my-project--v2-"},
 		{"/", "pi--"},
 	} {
@@ -536,7 +549,7 @@ func TestOptsOpensBootAssets(t *testing.T) {
 		MemMB:   256,
 		VCPUs:   2,
 	}
-	o, err := cfg.Opts(nil, nil, "", false)
+	o, err := cfg.Opts(nil, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +584,7 @@ func TestOptsOpensBootAssets(t *testing.T) {
 	// A missing asset fails the whole Opts and leaks nothing the caller
 	// could misuse (the error path closes what it opened).
 	cfg.Image = filepath.Join(dir, "gone.erofs")
-	if _, err := cfg.Opts(nil, nil, "", false); err == nil {
+	if _, err := cfg.Opts(nil, "", false); err == nil {
 		t.Fatal("Opts with a missing layer succeeded")
 	}
 }

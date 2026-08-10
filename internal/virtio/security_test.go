@@ -10,10 +10,76 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ejpir/gantry/internal/fusewire"
+
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+type rejectingFuseHandler struct{ calls int }
+
+func (h *rejectingFuseHandler) HandleRequest(_, _ [][]byte) (int, fuse.Status) {
+	h.calls++
+	return 0, fuse.OK
+}
+
+func TestVirtioFSRejectsMalformedRequestShape(t *testing.T) {
+	tests := []struct {
+		name        string
+		descriptors []desc
+	}{
+		{
+			name: "all writable",
+			descriptors: []desc{
+				{addr: ramBase + testDataAddr, len: 16, flags: vringDescFWrite},
+			},
+		},
+		{
+			name: "truncated header",
+			descriptors: []desc{
+				{addr: ramBase + testDataAddr, len: fusewire.InHeaderSize - 1, flags: vringDescFNext, next: 1},
+				{addr: ramBase + testDataAddr + 64, len: 16, flags: vringDescFWrite},
+			},
+		},
+		{
+			name: "header starts in third input vector",
+			descriptors: []desc{
+				{addr: ramBase + testDataAddr, len: 1, flags: vringDescFNext, next: 1},
+				{addr: ramBase + testDataAddr + 64, len: 1, flags: vringDescFNext, next: 2},
+				{addr: ramBase + testDataAddr + 128, len: fusewire.InHeaderSize, flags: vringDescFNext, next: 3},
+				{addr: ramBase + testDataAddr + 192, len: 16, flags: vringDescFWrite},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := new(rejectingFuseHandler)
+			device, err := NewFS("malformed", handler, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mem := NewRAM(make([]byte, 2<<20), ramBase)
+			core := NewCoreAt(device, mem, MMIOBaseArm64, MMIOIRQArm64, func(int, bool) {}, "fs")
+			setupQueue(mem, core, virtioFSRequestQ, 8)
+			for i, descriptor := range tt.descriptors {
+				putDesc(mem, virtioFSRequestQ, uint16(i), descriptor.addr, descriptor.len, descriptor.flags, descriptor.next)
+			}
+			availPush(mem, virtioFSRequestQ, 0)
+			core.MMIOWrite(0x050, virtioFSRequestQ)
+
+			if handler.calls != 0 {
+				t.Fatalf("malformed request reached handler %d times", handler.calls)
+			}
+			used, ok := usedPop(mem, virtioFSRequestQ)
+			if !ok || used.id != 0 || used.len != 0 {
+				t.Fatalf("used element = %+v, %v; want id 0 length 0", used, ok)
+			}
+		})
+	}
+}
+
 // newTestBlkCore wires a virtio-blk device into 1 MiB of fake guest RAM.
-func newTestBlkCore(t *testing.T) (*Core, mem) {
+func newTestBlkCore(t *testing.T) (*Core, *RAM) {
 	t.Helper()
 	img := filepath.Join(t.TempDir(), "disk.img")
 	if err := os.WriteFile(img, make([]byte, 1<<20), 0o644); err != nil {
@@ -79,7 +145,7 @@ func TestDeviceChainLimitsImplemented(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fsDev, err := NewFS("limit", t.TempDir())
+	fsDev, err := newTestFS("limit", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

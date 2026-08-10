@@ -71,14 +71,14 @@ func TestApplyConfined(t *testing.T) {
 	// pass, never demand what the environment cannot give.
 	mountOK := !strings.Contains(strings.Join(rep.Notes, " "), "mount tier unavailable")
 	if !mountOK {
-		for _, name := range []string{PropFSRead, PropFSWrite, PropNetDial, PropExec, PropProcEnum} {
+		for _, name := range []string{PropFSRead, PropFSWrite, PropNetDial, PropExec, PropFDTable, PropSyscall, PropProcEnum, PropTaskLimit} {
 			if got := rep.Property(name).State; got != StateEnforced {
 				t.Errorf("%s = %q (%s), want enforced even in the degraded tier", name, got, rep.Property(name).Detail)
 			}
 		}
 		t.Skipf("mount tier unavailable in this environment (restricted userns); seccomp tier verified, notes: %v", rep.Notes)
 	}
-	for _, name := range []string{PropFSRead, PropFSWrite, PropNetDial, PropExec, PropProcEnum} {
+	for _, name := range []string{PropFSRead, PropFSWrite, PropNetDial, PropExec, PropFDTable, PropSyscall, PropProcEnum, PropTaskLimit} {
 		if got := rep.Property(name).State; got != StateEnforced {
 			t.Errorf("%s = %q (%s), want enforced\nnotes: %v", name, got, rep.Property(name).Detail, rep.Notes)
 		}
@@ -103,6 +103,13 @@ func namespaceTestUnavailable(err error, output string) bool {
 		}
 	}
 	return false
+}
+
+func TestCopyPrivateConfigRejectsDevices(t *testing.T) {
+	err := copyPrivateConfig(t.TempDir(), "/dev/null")
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("copyPrivateConfig(/dev/null) = %v, want regular-file rejection", err)
+	}
 }
 
 // confinedHelper runs inside the re-executed process: confine, churn

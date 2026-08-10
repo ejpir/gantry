@@ -46,7 +46,7 @@ func TestReportJSONRoundTrip(t *testing.T) {
 
 func TestDisabledReport(t *testing.T) {
 	rep := DisabledReport("darwin", "off")
-	if len(rep.Failed(PropFSRead, PropNetDial, PropExec, PropFSWrite, PropProcEnum, PropProcSignal)) != 6 {
+	if len(rep.Failed(PropFSRead, PropNetDial, PropExec, PropFSWrite, PropFDTable, PropProcEnum, PropProcSignal)) != 7 {
 		t.Fatalf("disabled report must fail every required property: %+v", rep)
 	}
 	if got := rep.Property(PropProcSignal).State; got != StateDisabled {
@@ -135,7 +135,7 @@ func TestEvaluateProcSignalProbe(t *testing.T) {
 
 func TestDefaultSpec(t *testing.T) {
 	s := DefaultSpec(8, "/x")
-	if !s.NoNetwork || !s.NoExec || !s.NoNewPaths || !s.NoProcX || s.KeepFDs != 8 || s.ConfRoot != "/x" {
+	if s.Profile != ProfileVMM || !s.NoNetwork || !s.NoExec || !s.NoNewPaths || !s.NoProcX || s.KeepFDs != 8 || s.ConfRoot != "/x" {
 		t.Fatalf("DefaultSpec: %+v", s)
 	}
 	if os.Getenv("WORKERCONF_HELPER") == "1" {
@@ -143,12 +143,21 @@ func TestDefaultSpec(t *testing.T) {
 	}
 }
 
+func TestNetworkSpecIsRoleSpecific(t *testing.T) {
+	s := NetworkSpec(4, "/netroot")
+	if s.Profile != ProfileNetwork || s.NoNetwork || !s.NoExec || !s.NoNewPaths || !s.NoProcX {
+		t.Fatalf("NetworkSpec: %+v", s)
+	}
+	if s.KeepFDs != 4 || s.ConfRoot != "/netroot" || len(s.ReadFiles) == 0 {
+		t.Fatalf("NetworkSpec resources: %+v", s)
+	}
+	if len(s.FileAllow) != 0 {
+		t.Fatalf("network worker acquired host write/subtree authority: %+v", s)
+	}
+}
+
 func TestBuildSeatbeltProfile(t *testing.T) {
 	spec := DefaultSpec(12, "")
-	spec.WriteFiles = []string{
-		"/Users/test/.gantry/sandboxes/dev/console.log",
-		"/Users/test/.gantry/sandboxes/dev/worker-vmm.log",
-	}
 	spec.FileAllow = []FileAllowance{
 		{Path: "/Users/test/project", Write: true},
 		{Path: "/Users/test/shared refs", Write: false},
@@ -159,11 +168,8 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 		"(version 1)",
 		"(deny default)",
 		"(allow signal (target self))",
-		"(allow mach-lookup)",
-		"(allow sysctl-read)",
+		"(allow sysctl-read\n",
 		`(literal "/dev/null")`,
-		`(allow file-write* (literal "/Users/test/.gantry/sandboxes/dev/console.log"))`,
-		`(allow file-write* (literal "/Users/test/.gantry/sandboxes/dev/worker-vmm.log"))`,
 		`(subpath "/Users/test/project")`,
 		`(subpath "/Users/test/shared refs")`,
 	} {
@@ -180,18 +186,21 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 	if len(signalRules) != 1 || signalRules[0] != "(allow signal (target self))" {
 		t.Fatalf("profile must allow only self-signaling, got %v:\n%s", signalRules, p)
 	}
-	// The logs' parent directory — trusted state (sandbox.json) — must
-	// carry NO grant of any kind.
-	if strings.Contains(p, `(subpath "/Users/test/.gantry/sandboxes/dev")`) || strings.Contains(p, "sandbox.json") {
-		t.Fatalf("profile grants access to trusted sandbox state:\n%s", p)
+	if strings.Contains(p, "mach-lookup") {
+		t.Fatalf("profile grants ambient Mach service discovery:\n%s", p)
+	}
+	// Trusted sandbox state and broker-owned logs carry no path grant.
+	for _, forbidden := range []string{"sandbox.json", "console.log", "worker-vmm.log", "worker-net.log"} {
+		if strings.Contains(p, forbidden) {
+			t.Fatalf("profile grants access to trusted path %q:\n%s", forbidden, p)
+		}
 	}
 	// Escaping: quotes and backslashes must not break the SBPL literal.
 	if !strings.Contains(p, `/Users/test/we\"ird\\path`) {
 		t.Fatalf("profile escaping wrong:\n%s", p)
 	}
 	// RO root must never appear under a write rule: the only
-	// file-write* rules are the /dev literals, the two log literals,
-	// and the RW export block.
+	// file-write* rules are the /dev literals and the RW export block.
 	writeLines := 0
 	for _, line := range strings.Split(p, "\n") {
 		if strings.HasPrefix(line, "(allow file-read* file-write*") {
@@ -215,6 +224,47 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 	}
 	if len(denyLines) != 1 || denyLines[0] != "(deny default)" {
 		t.Fatalf("a deny rule follows an allow (SBPL later-wins): %v\n%s", denyLines, p)
+	}
+}
+
+func TestBuildNetworkSeatbeltProfile(t *testing.T) {
+	spec := NetworkSpec(4, "")
+	profile := buildSeatbeltProfile(spec)
+	for _, rule := range []string{
+		`(allow network-bind (local ip "*:*")`,
+		"(allow network-inbound)",
+		"(allow network-outbound)",
+	} {
+		if !strings.Contains(profile, rule) {
+			t.Fatalf("network profile lacks %q:\n%s", rule, profile)
+		}
+	}
+	for _, forbidden := range []string{"(allow network*)", "(allow mach-lookup)", "system-socket", "file-write*\n", "process-fork", "process-exec"} {
+		if strings.Contains(profile, forbidden) {
+			t.Fatalf("network profile contains forbidden authority %q:\n%s", forbidden, profile)
+		}
+	}
+	for _, name := range seatbeltRuntimeSysctls {
+		if !strings.Contains(profile, `(sysctl-name "`+name+`")`) {
+			t.Fatalf("network profile lacks runtime sysctl %q:\n%s", name, profile)
+		}
+	}
+	if strings.Contains(profile, "(allow sysctl-read)") || strings.Contains(profile, "kern.proc") {
+		t.Fatalf("network profile grants broad/process sysctl reads:\n%s", profile)
+	}
+	for _, path := range spec.ReadFiles {
+		resolved := sbplEscape(sbplPath(path))
+		if !strings.Contains(profile, `(allow file-read* (literal "`+resolved+`"))`) {
+			t.Fatalf("network profile lacks literal resolver read %q:\n%s", resolved, profile)
+		}
+		if strings.Contains(profile, `(subpath "`+resolved+`")`) {
+			t.Fatalf("network profile widened resolver file to subtree %q:\n%s", resolved, profile)
+		}
+	}
+	for _, forbidden := range []string{"worker-net.log", "console.log", "worker-vmm.log"} {
+		if strings.Contains(profile, forbidden) {
+			t.Fatalf("network profile grants broker-owned log path %q:\n%s", forbidden, profile)
+		}
 	}
 }
 

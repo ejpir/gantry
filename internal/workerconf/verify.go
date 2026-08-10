@@ -30,13 +30,43 @@ func Verify(spec Spec, report *Report) {
 		staged("fs-write", probeFSWrite),
 		staged("net-dial", func() PropertyResult { return probeNetDial(spec.NoNetwork) }),
 		staged("exec", func() PropertyResult { return probeExec(spec.NoExec) }),
-		staged("proc-enum", probeProcEnum),
+	}
+	if runtime.GOOS == "linux" {
+		fdTable := report.Property(PropFDTable)
+		if fdTable.State == StateUnavailable {
+			fdTable = PropertyResult{
+				Property: PropFDTable,
+				State:    StateIndeterminate,
+				Detail:   "descriptor close outcome unavailable",
+			}
+		}
+		results = append(results, fdTable)
+		syscallPolicy := report.Property(PropSyscall)
+		if syscallPolicy.State == StateUnavailable {
+			syscallPolicy = PropertyResult{
+				Property: PropSyscall,
+				State:    StateIndeterminate,
+				Detail:   "seccomp installation outcome unavailable",
+			}
+		}
+		results = append(results, syscallPolicy)
+		results = append(results, staged("proc-enum", probeProcEnum))
+		taskLimit := report.Property(PropTaskLimit)
+		if taskLimit.State == StateUnavailable {
+			taskLimit = staged("task-limit", func() PropertyResult { return probeTaskLimit(spec.MaxTasks) })
+		} else {
+			_, _ = fmt.Fprintf(os.Stderr, "workerconf: probe task-limit -> %s (%s)\n", taskLimit.State, taskLimit.Detail)
+		}
+		results = append(results, taskLimit)
 	}
 	// proc-signal is a Darwin Seatbelt property. Omitting it elsewhere keeps
 	// Linux reports from treating a deliberately unavailable platform probe as
 	// a degraded applied property; Property still reports it unavailable.
 	if runtime.GOOS == "darwin" {
-		results = append(results, staged("proc-signal", func() PropertyResult { return probeProcSignal(spec.NoProcX) }))
+		results = append(results,
+			staged("proc-enum", probeProcEnum),
+			staged("proc-signal", func() PropertyResult { return probeProcSignal(spec.NoProcX) }),
+		)
 	}
 	report.Results = results
 }
@@ -109,20 +139,6 @@ func probeExec(noExec bool) PropertyResult {
 		return PropertyResult{Property: PropExec, State: StateUnenforced, Detail: "spawned " + os.Args[0]}
 	}
 	return PropertyResult{Property: PropExec, State: StateEnforced, Detail: errString(err)}
-}
-
-// probeProcEnum checks process enumeration. Linux-only in practice: the
-// confined mount namespace has no /proc at all.
-func probeProcEnum() PropertyResult {
-	if runtime.GOOS != "linux" {
-		return PropertyResult{Property: PropProcEnum, State: StateUnavailable, Detail: "no /proc convention on " + runtime.GOOS}
-	}
-	f, err := os.Open("/proc")
-	if err != nil {
-		return PropertyResult{Property: PropProcEnum, State: StateEnforced, Detail: errString(err)}
-	}
-	_ = f.Close()
-	return PropertyResult{Property: PropProcEnum, State: StateUnenforced, Detail: "/proc readable"}
 }
 
 // evaluateProcSignalProbe classifies the Darwin signal(0) probe. signal(0)

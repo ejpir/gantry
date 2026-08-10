@@ -30,9 +30,9 @@ func init() {
 }
 
 // Apply confines the worker via Seatbelt. HVF's hv_* calls are mach
-// traps, which Seatbelt does not filter — verified on real hardware by
-// cmd/seatbeltspike (docs/worker-confinement.md M2) — so confinement
-// installs BEFORE vmm.Prepare exercises the hypervisor.
+// traps, which Seatbelt does not filter. Native confinement tests verify
+// the profile on real hardware, so confinement installs before VMM setup
+// exercises the hypervisor.
 func Apply(spec Spec) (*Report, error) {
 	if sandboxInitWithParameters == nil {
 		rep := DisabledReport("darwin", "")

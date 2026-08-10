@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,14 +17,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/netpol"
-	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/sharebroker"
+	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/vmm"
+	"github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-// fakeVMM is a vmmRunnerImpl double: Run blocks until Close, Inject
+// fakeVMM is a vmmworker.Runner double: Run blocks until Close, Inject
 // records the conn, and the captured Opts expose the worker's vsock
 // dial func for bridge tests.
 type fakeVMM struct {
@@ -33,6 +37,7 @@ type fakeVMM struct {
 	injected []net.Conn
 	opts     vmm.Opts
 	runErr   error
+	closeErr error
 	// Optional test gate: hold vm.close inside runner.Close so tests can
 	// distinguish lifecycle cancellation from a normal vm.wait response.
 	closeEntered chan<- struct{}
@@ -58,7 +63,7 @@ func (f *fakeVMM) Close() error {
 		<-release
 	}
 	f.stopOnce.Do(func() { close(f.stop) })
-	return nil
+	return f.closeErr
 }
 
 func (f *fakeVMM) setCloseGate(entered chan<- struct{}, release <-chan struct{}) {
@@ -83,22 +88,20 @@ func (f *fakeVMM) lastInjected() net.Conn {
 	return f.injected[len(f.injected)-1]
 }
 
-// installFakeBoot routes the worker's machine boot to a fake runner and
-// returns it (after start) via the returned holder.
-func installFakeBoot(t *testing.T) **fakeVMM {
-	t.Helper()
+// newFakeRuntime routes machine boot to a fake runner and returns it after
+// Serve starts through holder.
+func newFakeRuntime() (vmmworker.Runtime, **fakeVMM) {
 	holder := new(*fakeVMM)
-	old := vmmWorkerBoot
-	vmmWorkerBoot = func(opts vmm.Opts) (vmmRunnerImpl, error) {
+	runtime := vmmworker.NewRuntime()
+	runtime.Boot = func(opts vmm.Opts) (vmmworker.Runner, error) {
 		f := &fakeVMM{stop: make(chan struct{}), opts: opts}
 		*holder = f
 		return f, nil
 	}
-	t.Cleanup(func() { vmmWorkerBoot = old })
-	return holder
+	return runtime, holder
 }
 
-// vmmWorkerHarness drives runVMMWorker in-process: control/bridge and the
+// vmmWorkerHarness drives vmmworker.Runtime in-process: control/bridge and the
 // request-only share relay on net.Pipe, the fd channel on a real socketpair
 // (SCM_RIGHTS). It performs the supervisor-side handshake/nonces/ack and
 // serves the bridge with a sandbox-dir forward handler.
@@ -109,9 +112,14 @@ type vmmWorkerHarness struct {
 	dir       string
 }
 
-func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerTestAssets) *vmmWorkerHarness {
+func startVMMWorkerHarness(t *testing.T, cfg vmmworker.Config, assets vmmWorkerTestAssets) *vmmWorkerHarness {
 	t.Helper()
-	holder := installFakeBoot(t)
+	runtime, holder := newFakeRuntime()
+	return startVMMWorkerHarnessWithRuntime(t, cfg, assets, runtime, holder)
+}
+
+func startVMMWorkerHarnessWithRuntime(t *testing.T, cfg vmmworker.Config, assets vmmWorkerTestAssets, runtime vmmworker.Runtime, holder **fakeVMM) *vmmWorkerHarness {
+	t.Helper()
 
 	ctrlSup, ctrlWrk := net.Pipe()
 	bridgeSup, bridgeWrk := net.Pipe()
@@ -121,8 +129,8 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerTest
 	}
 	dir := t.TempDir()
 	workerErr := make(chan error, 1)
-	assetsFn := func(vmmBootConfig) (vmmWorkerAssets, error) { return assets.worker, nil }
-	go func() { workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, assetsFn) }()
+	assetsFn := func(vmmworker.Config) (vmmworker.Assets, error) { return assets.worker, nil }
+	go func() { workerErr <- runtime.Serve(ctrlWrk, bridgeWrk, fdWrk, assetsFn) }()
 
 	nonce := make([]byte, 32)
 	if _, err := io.ReadFull(randReader{}, nonce); err != nil {
@@ -157,8 +165,7 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerTest
 		bridge:     bridgeSup,
 		bridgeE:    make(chan error, 1),
 		share:      assets.shareSup,
-		stopping:   make(chan struct{}),
-		dead:       make(chan struct{}),
+		lifecycle:  newWorkerLifecycle(),
 		confReport: ack.Confinement,
 	}
 	go func() {
@@ -189,7 +196,7 @@ func startVMMWorkerHarness(t *testing.T, cfg vmmBootConfig, assets vmmWorkerTest
 
 func TestVMMWorkerBootTimingOrigin(t *testing.T) {
 	origin := time.Unix(1234, 5678)
-	h := startVMMWorkerHarness(t, vmmBootConfig{
+	h := startVMMWorkerHarness(t, vmmworker.Config{
 		MemSize:                 1 << 20,
 		BootTimingStartUnixNano: origin.UnixNano(),
 	}, testAssets(t))
@@ -211,29 +218,30 @@ func TestVMMWorkerNetPolicyEnforcement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := startVMMWorkerHarness(t, vmmBootConfig{
+	h := startVMMWorkerHarness(t, vmmworker.Config{
 		MemSize: 1 << 20, Policy: raw,
 	}, testAssets(t))
 
 	fake := *h.fake
-	if fake.opts.NetPolicy == nil {
+	policy, ok := fake.opts.NetPolicy.(*netpol.Policy)
+	if !ok {
 		t.Fatal("worker booted without the local-netstack policy: device would be allow-all")
 	}
 	if fake.opts.NetTraffic == nil {
 		t.Fatal("worker booted without the traffic recorder")
 	}
 	// Boot policy: internet reachable, LAN walled off (DefaultPolicy).
-	if !fake.opts.NetPolicy.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+	if !policy.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
 		t.Fatal("boot policy denies plain internet egress; want DefaultPolicy semantics")
 	}
-	if fake.opts.NetPolicy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
+	if policy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
 		t.Fatal("boot policy allows the LAN; want the default local-network wall")
 	}
 	// A live swap via net.policy must reach the device's policy object.
 	if err := h.w.SetPolicy(&netpol.Policy{DefaultAllow: true, AllowLocal: true}); err != nil {
 		t.Fatalf("SetPolicy: %v", err)
 	}
-	if !fake.opts.NetPolicy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
+	if !policy.Allows([4]byte{192, 168, 1, 20}, 6, 443) {
 		t.Fatal("net.policy swap did not reach the device's policy")
 	}
 	// Counters accumulate in the worker (no host paths under
@@ -244,7 +252,7 @@ func TestVMMWorkerNetPolicyEnforcement(t *testing.T) {
 		t.Fatalf("TrafficSnapshot: %v", err)
 	}
 	sup := netpol.NewTrafficRecorder("")
-	sup.SyncSnapshot(snap)
+	sup.BeginEpoch().Merge(snap)
 	if got := sup.Snapshot(); got.Version == 0 {
 		t.Fatal("supervisor recorder did not merge the worker snapshot")
 	}
@@ -258,7 +266,7 @@ func TestVMMWorkerWaitFurnishesTrafficBeforeFirstPeriodicSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := startVMMWorkerHarness(t, vmmBootConfig{
+	h := startVMMWorkerHarness(t, vmmworker.Config{
 		MemSize: 1 << 20,
 		Policy:  raw,
 	}, testAssets(t))
@@ -292,7 +300,7 @@ func TestVMMWorkerCloseFurnishesFinalTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := startVMMWorkerHarness(t, vmmBootConfig{
+	h := startVMMWorkerHarness(t, vmmworker.Config{
 		MemSize: 1 << 20,
 		Policy:  raw,
 	}, testAssets(t))
@@ -311,9 +319,20 @@ func TestVMMWorkerCloseFurnishesFinalTraffic(t *testing.T) {
 	}
 }
 
+func TestVMMWorkerCloseReportsDeviceFailure(t *testing.T) {
+	h := startVMMWorkerHarness(t, vmmworker.Config{MemSize: 1 << 20}, testAssets(t))
+	(*h.fake).closeErr = errors.New("disk flush failed")
+
+	err := h.w.Close()
+	if err == nil || !strings.Contains(err.Error(), "disk flush failed") {
+		t.Fatalf("Close() error = %v, want disk flush failure", err)
+	}
+}
+
 // TestVMMWorkerRejectsBadPolicy: an unparseable boot policy must fail
 // the worker boot, never degrade into an allow-all device.
 func TestVMMWorkerRejectsBadPolicy(t *testing.T) {
+	runtime, _ := newFakeRuntime()
 	ctrlSup, ctrlWrk := net.Pipe()
 	defer func() { _ = ctrlSup.Close() }()
 	bridgeSup, bridgeWrk := net.Pipe()
@@ -326,13 +345,13 @@ func TestVMMWorkerRejectsBadPolicy(t *testing.T) {
 	assets := testAssets(t)
 	workerErr := make(chan error, 1)
 	go func() {
-		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+		workerErr <- runtime.Serve(ctrlWrk, bridgeWrk, fdWrk, func(vmmworker.Config) (vmmworker.Assets, error) {
 			return assets.worker, nil
 		})
 	}()
 	nonce := make([]byte, 32)
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce,
-		vmmBootConfig{MemSize: 1 << 20, Policy: []byte("{not a policy")}); err != nil {
+		vmmworker.Config{MemSize: 1 << 20, Policy: []byte("{not a policy")}); err != nil {
 		t.Fatal(err)
 	}
 	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
@@ -362,7 +381,7 @@ func (randReader) Read(p []byte) (int, error) {
 }
 
 type vmmWorkerTestAssets struct {
-	worker   vmmWorkerAssets
+	worker   vmmworker.Assets
 	shareSup net.Conn
 }
 
@@ -398,7 +417,7 @@ func testAssets(t *testing.T) vmmWorkerTestAssets {
 		_ = kf.Close()
 	})
 	return vmmWorkerTestAssets{
-		worker:   vmmWorkerAssets{ShareConn: shareWrk, NetConn: dev, Console: console, Kernel: kf},
+		worker:   vmmworker.Assets{ShareConn: shareWrk, NetConn: dev, Console: console, Kernel: kf},
 		shareSup: shareSup,
 	}
 }
@@ -406,7 +425,7 @@ func testAssets(t *testing.T) vmmWorkerTestAssets {
 // TestVMMWorkerLifecycle: handshake + boot ack + parked vm.wait, then
 // vm.close flushes (fake Close) and unwinds the worker with exit 0.
 func TestVMMWorkerLifecycle(t *testing.T) {
-	h := startVMMWorkerHarness(t, vmmBootConfig{MemSize: 1 << 20}, testAssets(t))
+	h := startVMMWorkerHarness(t, vmmworker.Config{MemSize: 1 << 20}, testAssets(t))
 	// Ordinary control operations stay bounded, but vm.wait represents the
 	// VM lifetime and must not inherit that RPC deadline.
 	h.w.client.Timeout = 5 * time.Millisecond
@@ -437,7 +456,7 @@ func TestVMMWorkerLifecycle(t *testing.T) {
 }
 
 func TestVMMWorkerWaitCanceledByClose(t *testing.T) {
-	h := startVMMWorkerHarness(t, vmmBootConfig{MemSize: 1 << 20}, testAssets(t))
+	h := startVMMWorkerHarness(t, vmmworker.Config{MemSize: 1 << 20}, testAssets(t))
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -489,9 +508,8 @@ func TestVMMWorkerWaitCanceledByProcessDeath(t *testing.T) {
 		close(received)
 	}()
 	w := &vmmWorker{
-		client:   workerproto.NewClient(ctrlSup),
-		stopping: make(chan struct{}),
-		dead:     make(chan struct{}),
+		client:    workerproto.NewClient(ctrlSup),
+		lifecycle: newWorkerLifecycle(),
 	}
 	waitOut := make(chan error, 1)
 	go func() { waitOut <- w.Wait() }()
@@ -513,8 +531,8 @@ func TestVMMWorkerWaitCanceledByProcessDeath(t *testing.T) {
 }
 
 func TestVMMWorkerShareBrokerExitStopsWorker(t *testing.T) {
-	h := startVMMWorkerHarness(t, vmmBootConfig{MemSize: 1 << 20}, testAssets(t))
-	hub, err := virtio.NewShareHub()
+	h := startVMMWorkerHarness(t, vmmworker.Config{MemSize: 1 << 20}, testAssets(t))
+	hub, err := sharefs.NewHub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +544,14 @@ func TestVMMWorkerShareBrokerExitStopsWorker(t *testing.T) {
 	// Closing the worker frontend while the worker is otherwise healthy is
 	// an unexpected relay exit. The supervisor must tear the worker down;
 	// reconnecting could replay a stateful host mutation.
-	if err := (*h.fake).opts.ShareProxy.Close(); err != nil {
+	if len((*h.fake).opts.Filesystems) != 1 {
+		t.Fatalf("worker filesystems = %d, want 1", len((*h.fake).opts.Filesystems))
+	}
+	client, ok := (*h.fake).opts.Filesystems[0].Handler.(*sharebroker.Client)
+	if !ok {
+		t.Fatalf("worker share handler = %T, want broker client", (*h.fake).opts.Filesystems[0].Handler)
+	}
+	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -545,8 +570,8 @@ func TestVMMWorkerShareBrokerExitStopsWorker(t *testing.T) {
 }
 
 func TestVMMWorkerNormalCloseDoesNotReportBrokerFailure(t *testing.T) {
-	h := startVMMWorkerHarness(t, vmmBootConfig{MemSize: 1 << 20}, testAssets(t))
-	hub, err := virtio.NewShareHub()
+	h := startVMMWorkerHarness(t, vmmworker.Config{MemSize: 1 << 20}, testAssets(t))
+	hub, err := sharefs.NewHub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,9 +592,8 @@ func TestVMMWorkerNormalCloseDoesNotReportBrokerFailure(t *testing.T) {
 
 // TestVMMWorkerBootFailure: a failed Prepare surfaces as ack{ok:false}.
 func TestVMMWorkerBootFailure(t *testing.T) {
-	old := vmmWorkerBoot
-	vmmWorkerBoot = func(vmm.Opts) (vmmRunnerImpl, error) { return nil, fmt.Errorf("no /dev/kvm") }
-	t.Cleanup(func() { vmmWorkerBoot = old })
+	runtime := vmmworker.NewRuntime()
+	runtime.Boot = func(vmm.Opts) (vmmworker.Runner, error) { return nil, fmt.Errorf("no /dev/kvm") }
 
 	ctrlSup, ctrlWrk := net.Pipe()
 	defer func() { _ = ctrlSup.Close() }()
@@ -583,12 +607,12 @@ func TestVMMWorkerBootFailure(t *testing.T) {
 	assets := testAssets(t)
 	workerErr := make(chan error, 1)
 	go func() {
-		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+		workerErr <- runtime.Serve(ctrlWrk, bridgeWrk, fdWrk, func(vmmworker.Config) (vmmworker.Assets, error) {
 			return assets.worker, nil
 		})
 	}()
 	nonce := make([]byte, 32)
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, vmmBootConfig{}); err != nil {
+	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, vmmworker.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
@@ -615,7 +639,7 @@ func TestVMMWorkerBootFailure(t *testing.T) {
 // TestVMMWorkerVsockConnect: a host->guest stream crosses as a
 // descriptor and lands in the device's injected conn.
 func TestVMMWorkerVsockConnect(t *testing.T) {
-	h := startVMMWorkerHarness(t, vmmBootConfig{}, testAssets(t))
+	h := startVMMWorkerHarness(t, vmmworker.Config{}, testAssets(t))
 
 	conn, err := h.w.DialStream(1026)
 	if err != nil {
@@ -648,7 +672,7 @@ func TestVMMWorkerVsockConnect(t *testing.T) {
 // supervisor: the worker's dial func crosses the bridge and returns a
 // live conn to the sandbox-dir listener.
 func TestVMMWorkerVsockForward(t *testing.T) {
-	h := startVMMWorkerHarness(t, vmmBootConfig{}, testAssets(t))
+	h := startVMMWorkerHarness(t, vmmworker.Config{}, testAssets(t))
 
 	// The broker's API listener (supervisor-owned host socket).
 	ln, err := net.Listen("unix", filepath.Join(h.dir, "1025.sock"))
@@ -697,7 +721,7 @@ func TestVMMWorkerVsockForward(t *testing.T) {
 // TestVMMWorkerNonceMismatchRefused: a cross-wired fd channel dies at
 // the nonce check, before any RPC or frame.
 func TestVMMWorkerNonceMismatchRefused(t *testing.T) {
-	installFakeBoot(t)
+	runtime, _ := newFakeRuntime()
 	ctrlSup, ctrlWrk := net.Pipe()
 	defer func() { _ = ctrlSup.Close() }()
 	bridgeSup, bridgeWrk := net.Pipe()
@@ -710,12 +734,12 @@ func TestVMMWorkerNonceMismatchRefused(t *testing.T) {
 	assets := testAssets(t)
 	workerErr := make(chan error, 1)
 	go func() {
-		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+		workerErr <- runtime.Serve(ctrlWrk, bridgeWrk, fdWrk, func(vmmworker.Config) (vmmworker.Assets, error) {
 			return assets.worker, nil
 		})
 	}()
 	nonce := make([]byte, 32)
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, vmmBootConfig{}); err != nil {
+	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, vmmworker.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	wrong := make([]byte, 32)
@@ -734,7 +758,7 @@ func TestVMMWorkerNonceMismatchRefused(t *testing.T) {
 }
 
 func TestVMMWorkerShareNonceMismatchRefused(t *testing.T) {
-	installFakeBoot(t)
+	runtime, _ := newFakeRuntime()
 	ctrlSup, ctrlWrk := net.Pipe()
 	defer func() { _ = ctrlSup.Close() }()
 	bridgeSup, bridgeWrk := net.Pipe()
@@ -747,12 +771,12 @@ func TestVMMWorkerShareNonceMismatchRefused(t *testing.T) {
 	assets := testAssets(t)
 	workerErr := make(chan error, 1)
 	go func() {
-		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+		workerErr <- runtime.Serve(ctrlWrk, bridgeWrk, fdWrk, func(vmmworker.Config) (vmmworker.Assets, error) {
 			return assets.worker, nil
 		})
 	}()
 	nonce := make([]byte, 32)
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, vmmBootConfig{}); err != nil {
+	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, vmmworker.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
@@ -774,15 +798,29 @@ func TestVMMWorkerShareNonceMismatchRefused(t *testing.T) {
 }
 
 // TestVMMWorkerHelperProcess is the re-exec'd child (see
-// TestVMMWorkerReExec): fake boot + real CmdVMMWorker entry point.
+// TestVMMWorkerReExec): fake boot + real vmmworker entry point.
 func TestVMMWorkerHelperProcess(t *testing.T) {
 	if os.Getenv("GANTRY_TEST_VMM_WORKER") != "1" {
 		return
 	}
-	vmmWorkerBoot = func(opts vmm.Opts) (vmmRunnerImpl, error) {
+	assertWorkerStdinUnreadable()
+	runtime := vmmworker.NewRuntime()
+	runtime.Boot = func(opts vmm.Opts) (vmmworker.Runner, error) {
+		if os.Getenv("GANTRY_TEST_DISK_LIMIT") == "1" {
+			if len(opts.Disks) != 1 || !opts.DisksPrelocked {
+				return nil, fmt.Errorf("writable disk was not supervisor-prelocked")
+			}
+			info, err := opts.Disks[0].Stat()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := syscall.Pwrite(int(opts.Disks[0].Fd()), []byte{1}, info.Size()); !errors.Is(err, syscall.EFBIG) {
+				return nil, fmt.Errorf("write beyond fixed disk size returned %v, want EFBIG", err)
+			}
+		}
 		return &fakeVMM{stop: make(chan struct{}), opts: opts}, nil
 	}
-	os.Exit(CmdVMMWorker())
+	os.Exit(runtime.Main())
 }
 
 func TestVMMWorkerEarlyExitHelper(t *testing.T) {
@@ -813,11 +851,12 @@ func TestVMMWorkerSpawnFailurePreservesNetConn(t *testing.T) {
 	}
 	defer func() { _ = netSup.Close() }()
 	defer func() { _ = netDev.Close() }()
-	console, err := os.CreateTemp(t.TempDir(), "console-*")
+	consoleLog, err := newBoundedLogPipe(filepath.Join(t.TempDir(), "console.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = console.Close() }()
+	defer func() { _ = consoleLog.Close() }()
+	console := consoleLog.Writer()
 	kernelPath := filepath.Join(t.TempDir(), "Image")
 	hdr := make([]byte, 64)
 	copy(hdr[0x38:], "ARM\x64")
@@ -830,7 +869,7 @@ func TestVMMWorkerSpawnFailurePreservesNetConn(t *testing.T) {
 	}
 	defer func() { _ = kernel.Close() }()
 
-	if _, err := spawnVMMWorker(vmmBootConfig{MemSize: 1 << 20}, vmmWorkerAssets{
+	if _, err := spawnVMMWorker(vmmworker.Config{MemSize: 1 << 20}, vmmworker.Assets{
 		NetConn: netDev, Console: console, Kernel: kernel,
 	}, t.TempDir()); err == nil {
 		t.Fatal("early worker exit unexpectedly booted")
@@ -863,6 +902,130 @@ func TestVMMWorkerSpawnFailurePreservesNetConn(t *testing.T) {
 	}
 }
 
+func TestVMMWorkerRejectsRegularConsoleCapability(t *testing.T) {
+	netSup, netDev, err := socketpairConns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = netSup.Close() }()
+	defer func() { _ = netDev.Close() }()
+	console, err := os.CreateTemp(t.TempDir(), "console-regular-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = console.Close() }()
+	kernel, err := os.CreateTemp(t.TempDir(), "kernel-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = kernel.Close() }()
+
+	_, err = spawnVMMWorker(vmmworker.Config{MemSize: 1 << 20}, vmmworker.Assets{
+		NetConn: netDev, Console: console, Kernel: kernel,
+	}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "supervisor-brokered pipe") {
+		t.Fatalf("regular console spawn error = %v", err)
+	}
+}
+
+func TestDiskLockProbeHelper(t *testing.T) {
+	path := os.Getenv("GANTRY_TEST_DISK_LOCK_PATH")
+	if path == "" {
+		return
+	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		os.Exit(41)
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := gutil.TryLockFD(file); err != nil {
+		os.Exit(42)
+	}
+	os.Exit(0)
+}
+
+func TestVMMWorkerKeepsWritableDiskLockInSupervisor(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := vmmWorkerSpawnHook
+	vmmWorkerSpawnHook = func(argv *[]string, env *[]string) {
+		*argv = []string{exe, "-test.run", "^TestVMMWorkerHelperProcess$"}
+		*env = append(*env,
+			"GANTRY_TEST_VMM_WORKER=1",
+			"GANTRY_TEST_WORKER_STDIN_UNREADABLE=1",
+			"GANTRY_TEST_DISK_LIMIT=1",
+		)
+	}
+	t.Cleanup(func() { vmmWorkerSpawnHook = old })
+
+	netSup, netDev, err := socketpairConns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = netSup.Close() }()
+	consoleLog, err := newBoundedLogPipe(filepath.Join(t.TempDir(), "console.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = consoleLog.Close() }()
+	kernelPath := filepath.Join(t.TempDir(), "Image")
+	header := make([]byte, 64)
+	copy(header[0x38:], "ARM\x64")
+	if err := os.WriteFile(kernelPath, header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kernel, err := os.Open(kernelPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskPath := filepath.Join(t.TempDir(), "rwlayer.ext4")
+	if err := os.WriteFile(diskPath, make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	disk, err := os.OpenFile(diskPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vw, err := spawnVMMWorker(vmmworker.Config{MemSize: 1 << 20, NDisks: 1}, vmmworker.Assets{
+		NetConn: netDev,
+		Console: consoleLog.Writer(),
+		Kernel:  kernel,
+		Disks:   []*os.File{disk},
+	}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = vw.Close() })
+	if notes := strings.Join(vw.ConfinementReport().Notes, " "); !strings.Contains(notes, "disk locks remain supervisor-owned") {
+		t.Fatalf("worker report omits disk authority boundary: %q", notes)
+	}
+	probe := func(want int) {
+		t.Helper()
+		cmd := exec.Command(exe, "-test.run", "^TestDiskLockProbeHelper$")
+		cmd.Env = append(os.Environ(), "GANTRY_TEST_DISK_LOCK_PATH="+diskPath)
+		err := cmd.Run()
+		got := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatal(err)
+			}
+			got = exitErr.ExitCode()
+		}
+		if got != want {
+			t.Fatalf("disk lock probe exit = %d, want %d (err %v)", got, want, err)
+		}
+	}
+	probe(42)
+	if err := vw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	probe(0)
+}
+
 func TestNamespaceUnavailableClassification(t *testing.T) {
 	for _, errno := range []error{syscall.EPERM, syscall.EACCES, syscall.ENOSPC, syscall.EUSERS} {
 		if !isNamespaceUnavailable(&os.PathError{Op: "fork/exec", Path: "worker", Err: errno}) {
@@ -887,7 +1050,7 @@ func TestVMMWorkerReExec(t *testing.T) {
 	old := vmmWorkerSpawnHook
 	vmmWorkerSpawnHook = func(argv *[]string, env *[]string) {
 		*argv = []string{exe, "-test.run", "^TestVMMWorkerHelperProcess$"}
-		*env = append(*env, "GANTRY_TEST_VMM_WORKER=1")
+		*env = append(*env, "GANTRY_TEST_VMM_WORKER=1", "GANTRY_TEST_WORKER_STDIN_UNREADABLE=1")
 	}
 	t.Cleanup(func() { vmmWorkerSpawnHook = old })
 
@@ -896,10 +1059,12 @@ func TestVMMWorkerReExec(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = netSup.Close() }()
-	console, err := os.CreateTemp(t.TempDir(), "console-*")
+	consoleLog, err := newBoundedLogPipe(filepath.Join(t.TempDir(), "console.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = consoleLog.Close() }()
+	console := consoleLog.Writer()
 	kernel := filepath.Join(t.TempDir(), "Image")
 	hdr := make([]byte, 64)
 	copy(hdr[0x38:], "ARM\x64")
@@ -911,7 +1076,7 @@ func TestVMMWorkerReExec(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vw, err := spawnVMMWorker(vmmBootConfig{MemSize: 1 << 20}, vmmWorkerAssets{
+	vw, err := spawnVMMWorker(vmmworker.Config{MemSize: 1 << 20}, vmmworker.Assets{
 		NetConn: netDev, Console: console, Kernel: kf,
 	}, t.TempDir())
 	if err != nil {
@@ -952,43 +1117,31 @@ func TestVMMWorkerReExec(t *testing.T) {
 	}
 }
 
-func TestVMMKeepFDs(t *testing.T) {
-	base := vmmKeepFDs(vmmBootConfig{})
-	if base != 9 { // fds 0..8 fixed + kernel at 9
-		t.Fatalf("base keepFDs: %d", base)
-	}
-	full := vmmKeepFDs(vmmBootConfig{HasRoot: true, NDisksRO: 2, NDisks: 1, HasKVM: true})
-	if full != base+1+2+1+1 {
-		t.Fatalf("full keepFDs: %d", full)
-	}
-}
-
 // TestVMMWorkerConfinementReport: the worker applies confinement after
 // the descriptor table is consumed, and the verified report rides the
 // boot ack to the supervisor.
 func TestVMMWorkerConfinementReport(t *testing.T) {
-	oldA, oldV := workerconfApplyFn, workerconfVerifyFn
-	t.Cleanup(func() { workerconfApplyFn, workerconfVerifyFn = oldA, oldV })
+	runtime, holder := newFakeRuntime()
 	var sawSpec workerconf.Spec
-	workerconfApplyFn = func(spec workerconf.Spec) (*workerconf.Report, error) {
+	runtime.ApplyConfinement = func(spec workerconf.Spec) (*workerconf.Report, error) {
 		sawSpec = spec
 		rep := &workerconf.Report{Platform: "linux", Applied: true, Notes: []string{"fake tier"}}
 		return rep, nil
 	}
-	workerconfVerifyFn = func(spec workerconf.Spec, rep *workerconf.Report) {
+	runtime.VerifyConfinement = func(spec workerconf.Spec, rep *workerconf.Report) {
 		rep.Results = []workerconf.PropertyResult{
 			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced, Detail: "fake"},
 			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced, Detail: "fake"},
 			{Property: workerconf.PropExec, State: workerconf.StateEnforced, Detail: "fake"},
 		}
 	}
-	cfg := vmmBootConfig{MemSize: 1 << 20, Confinement: "auto", ConfRoot: t.TempDir()}
-	h := startVMMWorkerHarness(t, cfg, testAssets(t))
+	cfg := vmmworker.Config{MemSize: 1 << 20, Confinement: "auto", ConfRoot: t.TempDir()}
+	h := startVMMWorkerHarnessWithRuntime(t, cfg, testAssets(t), runtime, holder)
 	if sawSpec.ConfRoot == "" {
 		t.Fatal("worker did not receive the confinement spec")
 	}
-	if sawSpec.KeepFDs != vmmKeepFDs(cfg) {
-		t.Fatalf("spec KeepFDs %d, want %d", sawSpec.KeepFDs, vmmKeepFDs(cfg))
+	if sawSpec.KeepFDs != 9 { // fds 0..8 fixed + kernel at fd 9
+		t.Fatalf("spec KeepFDs %d, want 9", sawSpec.KeepFDs)
 	}
 	rep := h.w.ConfinementReport()
 	if !rep.Applied || rep.Mode != "auto" {
@@ -1003,12 +1156,11 @@ func TestVMMWorkerConfinementReport(t *testing.T) {
 // (with a structured error ack) when cross-process isolation is not
 // enforced, even if every filesystem/network/exec property is.
 func TestVMMWorkerConfinementRequiredRefused(t *testing.T) {
-	oldA, oldV := workerconfApplyFn, workerconfVerifyFn
-	t.Cleanup(func() { workerconfApplyFn, workerconfVerifyFn = oldA, oldV })
-	workerconfApplyFn = func(workerconf.Spec) (*workerconf.Report, error) {
+	runtime, _ := newFakeRuntime()
+	runtime.ApplyConfinement = func(workerconf.Spec) (*workerconf.Report, error) {
 		return &workerconf.Report{Platform: "linux", Applied: true}, nil
 	}
-	workerconfVerifyFn = func(_ workerconf.Spec, rep *workerconf.Report) {
+	runtime.VerifyConfinement = func(_ workerconf.Spec, rep *workerconf.Report) {
 		rep.Results = []workerconf.PropertyResult{
 			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
 			{Property: workerconf.PropFSWrite, State: workerconf.StateEnforced},
@@ -1029,13 +1181,13 @@ func TestVMMWorkerConfinementRequiredRefused(t *testing.T) {
 	assets := testAssets(t)
 	workerErr := make(chan error, 1)
 	go func() {
-		workerErr <- runVMMWorker(ctrlWrk, bridgeWrk, fdWrk, func(vmmBootConfig) (vmmWorkerAssets, error) {
+		workerErr <- runtime.Serve(ctrlWrk, bridgeWrk, fdWrk, func(vmmworker.Config) (vmmworker.Assets, error) {
 			return assets.worker, nil
 		})
 	}()
 	nonce := make([]byte, 32)
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce,
-		vmmBootConfig{MemSize: 1 << 20, Confinement: "required", ConfRoot: t.TempDir()}); err != nil {
+		vmmworker.Config{MemSize: 1 << 20, Confinement: "required", ConfRoot: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
@@ -1069,25 +1221,6 @@ func TestVMMWorkerConfinementRequiredRefused(t *testing.T) {
 	}
 }
 
-func TestRequiredWorkerConfinementPropertiesArePlatformVerified(t *testing.T) {
-	has := func(items []string, want string) bool {
-		for _, item := range items {
-			if item == want {
-				return true
-			}
-		}
-		return false
-	}
-	linux := requiredWorkerConfinementProperties("linux")
-	if !has(linux, workerconf.PropProcEnum) || has(linux, workerconf.PropProcSignal) {
-		t.Fatalf("Linux required properties = %v", linux)
-	}
-	darwin := requiredWorkerConfinementProperties("darwin")
-	if !has(darwin, workerconf.PropProcSignal) || has(darwin, workerconf.PropProcEnum) {
-		t.Fatalf("Darwin required properties = %v", darwin)
-	}
-}
-
 // TestVMMWorkerDarwinConfinementBrokersLiveShares pins the Darwin wiring
 // contract with a fake confinement report: the worker profile receives no
 // host-share paths while the supervisor retains the live hub and proxy relay.
@@ -1095,21 +1228,23 @@ func TestRequiredWorkerConfinementPropertiesArePlatformVerified(t *testing.T) {
 func TestVMMWorkerDarwinConfinementBrokersLiveShares(t *testing.T) {
 	manager, _ := newTestShareManager(t) // zero boot shares, RW
 
-	oldA, oldV := workerconfApplyFn, workerconfVerifyFn
-	t.Cleanup(func() { workerconfApplyFn, workerconfVerifyFn = oldA, oldV })
+	runtime, holder := newFakeRuntime()
 	var sawSpec workerconf.Spec
-	workerconfApplyFn = func(spec workerconf.Spec) (*workerconf.Report, error) {
+	runtime.ApplyConfinement = func(spec workerconf.Spec) (*workerconf.Report, error) {
 		sawSpec = spec
 		return &workerconf.Report{Platform: "darwin", Applied: true}, nil
 	}
-	workerconfVerifyFn = func(workerconf.Spec, *workerconf.Report) {}
-	h := startVMMWorkerHarness(t, vmmBootConfig{MemSize: 1 << 20, Confinement: "auto"}, testAssets(t))
+	runtime.VerifyConfinement = func(workerconf.Spec, *workerconf.Report) {}
+	h := startVMMWorkerHarnessWithRuntime(t, vmmworker.Config{MemSize: 1 << 20, Confinement: "auto"}, testAssets(t), runtime, holder)
 
 	if len(sawSpec.FileAllow) != 0 {
 		t.Fatalf("worker Seatbelt spec exposes host share paths: %+v", sawSpec.FileAllow)
 	}
-	if (*h.fake).opts.ShareProxy == nil || (*h.fake).opts.ShareHub != nil {
-		t.Fatalf("worker share topology: proxy=%v hub=%v", (*h.fake).opts.ShareProxy, (*h.fake).opts.ShareHub)
+	if len((*h.fake).opts.Filesystems) != 1 {
+		t.Fatalf("worker filesystems = %d, want 1", len((*h.fake).opts.Filesystems))
+	}
+	if _, ok := (*h.fake).opts.Filesystems[0].Handler.(*sharebroker.Client); !ok {
+		t.Fatalf("worker share handler = %T, want path-neutral broker client", (*h.fake).opts.Filesystems[0].Handler)
 	}
 	if err := h.w.startShareBroker(manager.Hub()); err != nil {
 		t.Fatalf("start share broker: %v", err)

@@ -177,7 +177,7 @@ jobs:
           - { name: linux-amd64, goos: linux, goarch: amd64 }
           - { name: linux-arm64, goos: linux, goarch: arm64 }
           - { name: darwin-arm64, goos: darwin, goarch: arm64 }
-          - { name: windows-arm64, goos: windows, goarch: arm64 }
+          - { name: windows-amd64, goos: windows, goarch: amd64 }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -207,7 +207,7 @@ jobs:
       matrix:
         include:
           - { name: linux, os: ubuntu-latest, quality: true, race: true }
-          - { name: windows-arm64, os: windows-11-arm, quality: false, race: false }
+          - { name: windows-amd64, os: windows-latest, quality: false, race: false }
           - { name: macos, os: macos-latest, quality: false, race: false }
     runs-on: ${{ matrix.os }}
     steps:
@@ -331,7 +331,6 @@ jobs:
           - { goos: linux, goarch: arm64, ext: "" }
           - { goos: darwin, goarch: arm64, ext: "" }
           - { goos: windows, goarch: amd64, ext: ".exe" }
-          - { goos: windows, goarch: arm64, ext: ".exe" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -366,7 +365,7 @@ jobs:
           if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
             version="$REF_NAME"
           fi
-          go build -trimpath -ldflags "-X github.com/ejpir/gantry/internal/vmm.Version=${version}" \
+          go build -trimpath -ldflags "-X github.com/ejpir/gantry/internal/guestasset.Version=${version}" \
             -o "$RUNNER_TEMP/dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/gantry
           go build -trimpath -o "$RUNNER_TEMP/dist/hostctl-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/hostctl
       - uses: actions/upload-artifact@v4

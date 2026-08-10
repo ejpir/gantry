@@ -2,17 +2,13 @@ package sandbox
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/ejpir/gantry/internal/shares"
-	"github.com/ejpir/gantry/internal/vmm"
 )
 
 // CmdShare implements `gantry share add|remove|ls` against a running
@@ -131,29 +127,20 @@ func shareControlRPC(name, op string, shareReq brokerShareRequest) (brokerShareR
 	if _, alive := sandboxPID(name); !alive {
 		return brokerShareResponse{}, fmt.Errorf("sandbox %q is not running (start it with: gantry start %s)", name, name)
 	}
-	conn, err := dialShareControl(name)
-	if err != nil {
-		return brokerShareResponse{}, fmt.Errorf("broker: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	req := brokerRequest{
 		Op:    op,
-		ID:    fmt.Sprintf("share-%d-%d", os.Getpid(), time.Now().UnixNano()),
+		ID:    newControlRequestID("share"),
 		Share: &shareReq,
 	}
-	if err := json.NewEncoder(conn).Encode(&req); err != nil {
+	resp, err := callControl[brokerShareResponse](name, req)
+	if err != nil {
 		return brokerShareResponse{}, err
-	}
-	var resp brokerShareResponse
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
-		return brokerShareResponse{}, fmt.Errorf("broker response: %w", err)
 	}
 	if !resp.OK {
 		if resp.Error == "" {
 			resp.Error = "share operation rejected"
 		}
-		return resp, errors.New(resp.Error)
+		return resp, fmt.Errorf("%s", resp.Error)
 	}
 	return resp, nil
 }
@@ -207,7 +194,7 @@ func removeSandboxShare(name, tag string, force bool) error {
 }
 
 func normalizeShareSpecForClient(spec string) (string, error) {
-	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
+	share, err := shares.ParseSpec(spec)
 	if err != nil {
 		return "", err
 	}
@@ -215,31 +202,8 @@ func normalizeShareSpecForClient(spec string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	normalized := share.Tag + "=" + abs
-	if share.CtrPath != "" {
-		normalized += "@" + share.CtrPath
-	}
-	if share.RO {
-		normalized += ",ro"
-	}
-	if share.UID != nil {
-		normalized += fmt.Sprintf(",uid=%d,gid=%d", *share.UID, *share.GID)
-	}
-	return normalized, nil
-}
-
-func dialShareControl(name string) (net.Conn, error) {
-	path := filepath.Join(sandboxDir(name), "ctl.sock")
-	var err error
-	for range 20 {
-		var conn net.Conn
-		conn, err = net.DialTimeout("unix", path, time.Second)
-		if err == nil {
-			return conn, nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return nil, err
+	share.Path = abs
+	return share.String(), nil
 }
 
 func printShareMutation(verb string, entry *shares.Entry) {
@@ -275,14 +239,12 @@ func printShares(name string) int {
 			fmt.Fprintln(os.Stderr, "gantry share ls: corrupt sandbox.json:", err)
 			return 1
 		}
-		seen := map[string]bool{}
-		for _, spec := range cfg.Shares {
-			share, err := vmm.ParseShareSpec(spec, seen)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "gantry share ls: bad saved share:", err)
-				return 1
-			}
-			seen[share.Tag] = true
+		configured, err := shares.ParseSpecs(cfg.Shares)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry share ls: bad saved share:", err)
+			return 1
+		}
+		for _, share := range configured {
 			ctr := share.CtrPath
 			if ctr == "" {
 				ctr = shares.HubHostPath + "/" + share.Tag

@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,37 @@ func TestSandboxNameTraversal(t *testing.T) {
 		if !validSandboxName(good) {
 			t.Fatalf("validSandboxName(%q) = false", good)
 		}
+	}
+}
+
+func TestBrokerShutdownRequestAcknowledgesAndNotifies(t *testing.T) {
+	shutdown := make(chan struct{}, 1)
+	br := &broker{
+		sessions:   map[string]chan struct{}{},
+		sessionCtl: map[string]net.Conn{},
+		shutdown:   shutdown,
+	}
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	go br.handle(server)
+	if err := json.NewEncoder(client).Encode(brokerRequest{Op: "daemon.shutdown", ID: "stop-1"}); err != nil {
+		t.Fatal(err)
+	}
+	line, err := readBoundedLine(bufio.NewReader(client), controlMaxResponseBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response daemonShutdownResponse
+	if err := json.Unmarshal(line, &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.OK || response.Error != "" {
+		t.Fatalf("shutdown response = %+v", response)
+	}
+	select {
+	case <-shutdown:
+	default:
+		t.Fatal("shutdown notification was not published")
 	}
 }
 
@@ -105,11 +138,11 @@ func TestSessionCtlRegistrationAndEvent(t *testing.T) {
 	defer func() { _ = clientEnd.Close() }()
 	handlerDone := make(chan struct{})
 	go func() {
-		br.sessionctl(serverEnd, brokerRequest{Op: "sessionctl", ID: "s1", V: sessionProtocolVersion})
+		br.sessionctl(serverEnd, serverEnd, brokerRequest{Op: "sessionctl", ID: "s1", V: sessionProtocolVersion})
 		close(handlerDone)
 	}()
 	r := bufio.NewReader(clientEnd)
-	line, err := r.ReadBytes('\n')
+	line, err := readBoundedLine(r, controlMaxEventBytes)
 	if err != nil {
 		t.Fatalf("handshake read: %v", err)
 	}
@@ -133,13 +166,15 @@ func TestSessionCtlRegistrationAndEvent(t *testing.T) {
 	writeDone := make(chan struct{})
 	go func() {
 		defer close(writeDone)
-		br.mu.Lock()
-		taken := br.sessionCtl["s1"]
-		delete(br.sessionCtl, "s1")
-		br.mu.Unlock()
-		if taken == nil {
+		taken, err := br.beginSession("s1", make(chan struct{}))
+		if err != nil {
 			return
 		}
+		defer func() {
+			br.mu.Lock()
+			delete(br.sessions, "s1")
+			br.mu.Unlock()
+		}()
 		if err := json.NewEncoder(taken).Encode(&sessionExitEvent{V: sessionProtocolVersion, Exit: 7}); err != nil {
 			return
 		}
@@ -165,6 +200,9 @@ func TestSessionCtlRegistrationAndEvent(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("sessionCtl leak: %d entries left", left)
 	}
+	if got := len(br.limits.parked); got != 0 {
+		t.Fatalf("transferred control retained %d parked slot", got)
+	}
 }
 
 // Version enforcement: a sessionctl request without the current protocol
@@ -176,8 +214,8 @@ func TestSessionCtlRejectsWrongVersion(t *testing.T) {
 	}
 	clientEnd, serverEnd := net.Pipe()
 	defer func() { _ = clientEnd.Close() }()
-	go br.sessionctl(serverEnd, brokerRequest{Op: "sessionctl", ID: "s1", V: 0})
-	line, err := bufio.NewReader(clientEnd).ReadBytes('\n')
+	go br.sessionctl(serverEnd, serverEnd, brokerRequest{Op: "sessionctl", ID: "s1", V: 0})
+	line, err := readBoundedLine(bufio.NewReader(clientEnd), controlMaxEventBytes)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -191,6 +229,41 @@ func TestSessionCtlRejectsWrongVersion(t *testing.T) {
 	}
 }
 
+func TestSessionCtlConsumesBytesBufferedWithHandshake(t *testing.T) {
+	br := &broker{sessions: map[string]chan struct{}{}, sessionCtl: map[string]net.Conn{}}
+	clientEnd, serverEnd := net.Pipe()
+	defer func() { _ = clientEnd.Close() }()
+	handlerDone := make(chan struct{})
+	go func() {
+		br.handle(serverEnd)
+		close(handlerDone)
+	}()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(clientEnd, `{"op":"sessionctl","id":"buffered","v":1}`+"\nX")
+		writeDone <- err
+	}()
+
+	line, err := readBoundedLine(bufio.NewReader(clientEnd), controlMaxEventBytes)
+	if err != nil || !strings.Contains(string(line), `"ok":true`) {
+		t.Fatalf("sessionctl handshake = %q, %v", line, err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("buffered control byte did not wake parked handler")
+	}
+	br.mu.Lock()
+	remaining := len(br.sessionCtl)
+	br.mu.Unlock()
+	if remaining != 0 || len(br.limits.parked) != 0 {
+		t.Fatalf("buffered disconnect leaked controls=%d slots=%d", remaining, len(br.limits.parked))
+	}
+}
+
 // A session request without a parked control channel is refused BEFORE any
 // guest work starts: silently falling back to in-band status is exactly the
 // failure mode this protocol removes.
@@ -201,17 +274,224 @@ func TestSessionRequiresControlChannel(t *testing.T) {
 	}
 	clientEnd, serverEnd := net.Pipe()
 	defer func() { _ = clientEnd.Close() }()
-	go br.session(serverEnd, brokerRequest{Op: "session", ID: "s1"})
-	line, err := bufio.NewReader(clientEnd).ReadBytes('\n')
+	done := make(chan struct{})
+	go func() {
+		br.session(serverEnd, strings.NewReader(""), brokerRequest{Op: "session", ID: "s1"})
+		_ = serverEnd.Close()
+		close(done)
+	}()
+	line, err := readBoundedLine(bufio.NewReader(clientEnd), controlMaxEventBytes)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
 	if !strings.Contains(string(line), "no session control channel") {
 		t.Fatalf("response = %s, want control-channel refusal", strings.TrimSpace(string(line)))
 	}
+	<-done
 	br.mu.Lock()
 	defer br.mu.Unlock()
 	if len(br.sessions) != 0 {
 		t.Fatal("refused session registered a kill channel")
+	}
+	if got := len(br.limits.sessions); got != 0 {
+		t.Fatalf("refused session retained %d streaming slot", got)
+	}
+}
+
+func TestBoundedControlLine(t *testing.T) {
+	exact := strings.Repeat("x", controlMaxRequestBytes-1) + "\n"
+	line, err := readBoundedLine(bufio.NewReader(strings.NewReader(exact)), controlMaxRequestBytes)
+	if err != nil || string(line) != exact {
+		t.Fatalf("exact-limit line: len=%d err=%v", len(line), err)
+	}
+
+	tooLarge := strings.Repeat("x", controlMaxRequestBytes) + "\n"
+	if _, err := readBoundedLine(bufio.NewReader(strings.NewReader(tooLarge)), controlMaxRequestBytes); !errors.Is(err, errControlFrameTooLarge) {
+		t.Fatalf("oversized line error = %v, want %v", err, errControlFrameTooLarge)
+	}
+	if line, err := readBoundedLine(bufio.NewReader(strings.NewReader("truncated")), controlMaxRequestBytes); !errors.Is(err, io.EOF) || string(line) != "truncated" {
+		t.Fatalf("truncated line = %q, err=%v", line, err)
+	}
+}
+
+func TestBrokerRejectsOversizedRequest(t *testing.T) {
+	br := &broker{sessions: map[string]chan struct{}{}, sessionCtl: map[string]net.Conn{}}
+	clientEnd, serverEnd := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		br.handle(serverEnd)
+		close(done)
+	}()
+	defer func() { _ = clientEnd.Close() }()
+
+	payload := strings.Repeat("x", controlMaxRequestBytes) + "\n"
+	if _, err := clientEnd.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	line, err := readBoundedLine(bufio.NewReader(clientEnd), controlMaxEventBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), "request too large") {
+		t.Fatalf("response = %s", strings.TrimSpace(string(line)))
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("oversized request handler did not exit")
+	}
+}
+
+func TestBrokerConnectionLimitReleasesSlot(t *testing.T) {
+	br := &broker{sessions: map[string]chan struct{}{}, sessionCtl: map[string]net.Conn{}}
+	br.limits.connections = make(chan struct{}, 1)
+
+	sock := filepath.Join(t.TempDir(), "ctl.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skipf("unix sockets unavailable: %v", err)
+	}
+	serveDone := make(chan struct{})
+	go func() {
+		br.serve(ln)
+		close(serveDone)
+	}()
+	defer func() {
+		_ = ln.Close()
+		<-serveDone
+	}()
+
+	first, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	waitForTest(t, func() bool { return len(br.limits.connections) == 1 }, "first connection admission")
+
+	second, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	line, err := readBoundedLine(bufio.NewReader(second), controlMaxEventBytes)
+	_ = second.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), "too many control connections") {
+		t.Fatalf("overload response = %s", strings.TrimSpace(string(line)))
+	}
+
+	_ = first.Close()
+	waitForTest(t, func() bool { return len(br.limits.connections) == 0 }, "connection slot release")
+}
+
+func TestSessionControlLimitReleasesSlot(t *testing.T) {
+	br := &broker{sessions: map[string]chan struct{}{}, sessionCtl: map[string]net.Conn{}}
+	br.limits.parked = make(chan struct{}, 1)
+
+	first, firstDone := startSessionControlForTest(t, br, "first")
+	readControlOKForTest(t, first)
+	waitForTest(t, func() bool { return len(br.limits.parked) == 1 }, "parked control admission")
+
+	second, secondDone := startSessionControlForTest(t, br, "second")
+	line, err := readBoundedLine(bufio.NewReader(second), controlMaxEventBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), "too many parked") {
+		t.Fatalf("parked overload response = %s", strings.TrimSpace(string(line)))
+	}
+	_ = second.Close()
+	<-secondDone
+	if got := len(br.limits.parked); got != 1 {
+		t.Fatalf("rejected control changed occupied slots to %d", got)
+	}
+
+	_ = first.Close()
+	<-firstDone
+	waitForTest(t, func() bool {
+		br.mu.Lock()
+		defer br.mu.Unlock()
+		return len(br.sessionCtl) == 0 && len(br.limits.parked) == 0
+	}, "parked control cleanup")
+
+	third, thirdDone := startSessionControlForTest(t, br, "third")
+	readControlOKForTest(t, third)
+	_ = third.Close()
+	<-thirdDone
+	waitForTest(t, func() bool { return len(br.limits.parked) == 0 }, "reused parked slot release")
+}
+
+func TestStreamingSessionLimitRejectsPromptly(t *testing.T) {
+	br := &broker{sessions: map[string]chan struct{}{}, sessionCtl: map[string]net.Conn{}}
+	br.limits.sessions = make(chan struct{}, 1)
+	if !br.limits.acquireSession() {
+		t.Fatal("failed to occupy test session slot")
+	}
+	defer br.limits.releaseSession()
+
+	clientEnd, serverEnd := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		br.session(serverEnd, strings.NewReader(""), brokerRequest{Op: "session", ID: "busy"})
+		_ = serverEnd.Close()
+		close(done)
+	}()
+	defer func() { _ = clientEnd.Close() }()
+	line, err := readBoundedLine(bufio.NewReader(clientEnd), controlMaxEventBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), "too many active sessions") {
+		t.Fatalf("session overload response = %s", strings.TrimSpace(string(line)))
+	}
+	<-done
+	if got := len(br.limits.sessions); got != 1 {
+		t.Fatalf("rejected session changed occupied slots to %d", got)
+	}
+	if _, _, err := br.oauthExec([]string{"true"}, time.Second); err == nil || !strings.Contains(err.Error(), "session limit") {
+		t.Fatalf("OAuth overload error = %v, want shared session-limit rejection", err)
+	}
+}
+
+func startSessionControlForTest(t *testing.T, br *broker, id string) (net.Conn, <-chan struct{}) {
+	t.Helper()
+	clientEnd, serverEnd := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		br.sessionctl(serverEnd, serverEnd, brokerRequest{Op: "sessionctl", ID: id, V: sessionProtocolVersion})
+		_ = serverEnd.Close()
+		close(done)
+	}()
+	return clientEnd, done
+}
+
+func readControlOKForTest(t *testing.T, c net.Conn) {
+	t.Helper()
+	line, err := readBoundedLine(bufio.NewReader(c), controlMaxEventBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(line), `"ok":true`) {
+		t.Fatalf("control response = %s", strings.TrimSpace(string(line)))
+	}
+}
+
+func waitForTest(t *testing.T, ready func() bool, what string) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ready() {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %s", what)
+		case <-ticker.C:
+		}
 	}
 }

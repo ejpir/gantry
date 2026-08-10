@@ -42,7 +42,7 @@ func (r *irqRec) line(irq int, level bool) { r.mu.Lock(); r.raised[irq] = level;
 func (r *irqRec) isRaised(irq int) bool { r.mu.Lock(); defer r.mu.Unlock(); return r.raised[irq] }
 
 // setupQueue wires one virtqueue into fake RAM the way a driver would.
-func setupQueue(mem mem, core *Core, qn, num uint32) {
+func setupQueue(mem *RAM, core *Core, qn, num uint32) {
 	core.MMIOWrite(0x030, uint32(qn)) // QueueSel
 	core.MMIOWrite(0x038, num)        // QueueNum
 	core.MMIOWrite(0x080, ramBase+testDescAddr+uint32(qn)*testStride)
@@ -54,7 +54,7 @@ func setupQueue(mem mem, core *Core, qn, num uint32) {
 	_ = mem.writeAt(ramBase+testUsedAddr+uint64(qn)*testStride, make([]byte, 8))
 }
 
-func putDesc(mem mem, qn uint32, idx uint16, addr uint64, length uint32, flags uint16, next uint16) {
+func putDesc(mem *RAM, qn uint32, idx uint16, addr uint64, length uint32, flags uint16, next uint16) {
 	var d [16]byte
 	binary.LittleEndian.PutUint64(d[0:], addr)
 	binary.LittleEndian.PutUint32(d[8:], length)
@@ -63,7 +63,7 @@ func putDesc(mem mem, qn uint32, idx uint16, addr uint64, length uint32, flags u
 	_ = mem.writeAt(ramBase+testDescAddr+uint64(qn)*testStride+uint64(idx)*16, d[:])
 }
 
-func availPush(mem mem, qn uint32, head uint16) {
+func availPush(mem *RAM, qn uint32, head uint16) {
 	base := ramBase + testAvailAddr + uint64(qn)*testStride
 	var idx [2]byte
 	_ = mem.readAt(base+2, idx[:])
@@ -81,21 +81,21 @@ type usedElem struct {
 	len uint32
 }
 
-func usedIndex(mem mem, qn uint32) uint16 {
+func usedIndex(mem *RAM, qn uint32) uint16 {
 	base := ramBase + testUsedAddr + uint64(qn)*testStride
 	var idx [2]byte
 	_ = mem.readAt(base+2, idx[:])
 	return binary.LittleEndian.Uint16(idx[:])
 }
 
-func usedAt(mem mem, qn uint32, n uint16) usedElem {
+func usedAt(mem *RAM, qn uint32, n uint16) usedElem {
 	base := ramBase + testUsedAddr + uint64(qn)*testStride
 	var e [8]byte
 	_ = mem.readAt(base+4+uint64(n%8)*8, e[:])
 	return usedElem{binary.LittleEndian.Uint32(e[0:]), binary.LittleEndian.Uint32(e[4:])}
 }
 
-func usedPop(mem mem, qn uint32) (usedElem, bool) {
+func usedPop(mem *RAM, qn uint32) (usedElem, bool) {
 	n := usedIndex(mem, qn)
 	if n == 0 {
 		return usedElem{}, false
@@ -201,7 +201,7 @@ func TestVirtioFSLoopbackProtocol(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dev, err := NewFS("testshare", root)
+	dev, err := newTestFS("testshare", root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,7 +523,7 @@ func TestVirtioNetUnixgramVFKIT(t *testing.T) {
 }
 
 func TestVirtioNetTxRx(t *testing.T) {
-	backend := &testPacketConn{rx: make(chan []byte, 1), tx: make(chan []byte, 1)}
+	backend := &testPacketConn{rx: make(chan []byte, 1), tx: make(chan []byte, 1), closed: make(chan struct{})}
 	mac := [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 	nic := &Net{mac: mac, conn: backend}
 	ram := make([]byte, 2<<20)
@@ -531,6 +531,7 @@ func TestVirtioNetTxRx(t *testing.T) {
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := NewCoreAt(nic, mem, MMIOBaseArm64+0*MMIOStrideArm64, MMIOIRQArm64+0, irqs.line, "net")
 	nic.core = core
+	t.Cleanup(func() { _ = nic.Close() })
 
 	if got := core.MMIORead(0x008, 4); got != virtioNetDeviceID {
 		t.Fatalf("device id = %d", got)
@@ -642,6 +643,7 @@ func TestVirtioVsockHandshakeAndRW(t *testing.T) {
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := NewCoreAt(vs, mem, MMIOBaseArm64+1*MMIOStrideArm64, MMIOIRQArm64+1, irqs.line, "vsock")
 	vs.core = core
+	t.Cleanup(func() { _ = vs.Close() })
 	vs.verboseLog = true
 
 	setupQueue(mem, core, vsockQueueRx, 8)
@@ -756,6 +758,7 @@ func TestVirtioVsockHostListen(t *testing.T) {
 	irqs := &irqRec{raised: map[int]bool{}}
 	core := NewCoreAt(vs, mem, MMIOBaseArm64+1*MMIOStrideArm64, MMIOIRQArm64+1, irqs.line, "vsock")
 	vs.core = core
+	t.Cleanup(func() { _ = vs.Close() })
 
 	setupQueue(mem, core, vsockQueueRx, 8)
 	setupQueue(mem, core, vsockQueueTx, 8)

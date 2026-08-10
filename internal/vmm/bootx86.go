@@ -21,6 +21,7 @@ package vmm
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 )
 
 const (
@@ -220,31 +221,40 @@ func putE820(b []byte, addr, size uint64, typ uint32) {
 // loadKernelX86 loads a vmlinux ELF64 (what the reference stack ships as
 // nerdbox-kernel-x86_64) into guest RAM at each PT_LOAD's physical address
 // and returns the ELF entry point.
-func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {
-	if len(img) < 64 || string(img[1:4]) != "ELF" {
+func loadKernelX86(image io.ReaderAt, imageSize uint64, ram []byte) (entry uint64, err error) {
+	if imageSize < 64 {
 		return 0, fmt.Errorf("not an ELF64 kernel")
 	}
-	if img[4] != 2 || img[5] != 1 { // ELFCLASS64, little-endian
+	var header [64]byte
+	if err := readAtExact(image, header[:], 0); err != nil {
+		return 0, fmt.Errorf("read ELF header: %w", err)
+	}
+	if header[0] != 0x7f || string(header[1:4]) != "ELF" {
+		return 0, fmt.Errorf("not an ELF64 kernel")
+	}
+	if header[4] != 2 || header[5] != 1 { // ELFCLASS64, little-endian
 		return 0, fmt.Errorf("kernel is not a 64-bit little-endian ELF")
 	}
-	if mach := binary.LittleEndian.Uint16(img[18:]); mach != 62 { // EM_X86_64
+	if mach := binary.LittleEndian.Uint16(header[18:]); mach != 62 { // EM_X86_64
 		return 0, fmt.Errorf("kernel ELF machine %d, want 62 (x86-64)", mach)
 	}
-	entry = binary.LittleEndian.Uint64(img[24:])
-	phoff := binary.LittleEndian.Uint64(img[32:])
-	phnum := int(binary.LittleEndian.Uint16(img[56:]))
-	phentsize := int(binary.LittleEndian.Uint16(img[54:]))
+	entry = binary.LittleEndian.Uint64(header[24:])
+	phoff := binary.LittleEndian.Uint64(header[32:])
+	phnum := uint64(binary.LittleEndian.Uint16(header[56:]))
+	phentsize := uint64(binary.LittleEndian.Uint16(header[54:]))
 	if phnum == 0 || phentsize < 56 {
 		return 0, fmt.Errorf("kernel ELF has no usable program headers")
 	}
-	// Validate the header table before indexing (truncated/crafted files
-	// must produce errors, not panics); all arithmetic is overflow-safe.
-	if phoff >= uint64(len(img)) || uint64(phnum) > (uint64(len(img))-phoff)/uint64(phentsize) {
-		return 0, fmt.Errorf("kernel ELF program headers outside file (phoff %#x, phnum %d, size %d)", phoff, phnum, len(img))
+	if phoff > imageSize || phnum > (imageSize-phoff)/phentsize {
+		return 0, fmt.Errorf("kernel ELF program headers outside file (phoff %#x, phnum %d, size %d)", phoff, phnum, imageSize)
 	}
 	loaded := 0
-	for i := 0; i < phnum; i++ {
-		ph := img[phoff+uint64(i*phentsize):]
+	var ph [56]byte
+	for i := uint64(0); i < phnum; i++ {
+		offset := phoff + i*phentsize
+		if err := readAtExact(image, ph[:], offset); err != nil {
+			return 0, fmt.Errorf("read kernel program header %d: %w", i, err)
+		}
 		if binary.LittleEndian.Uint32(ph[0:]) != 1 { // PT_LOAD
 			continue
 		}
@@ -252,8 +262,8 @@ func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {
 		paddr := binary.LittleEndian.Uint64(ph[24:])
 		filesz := binary.LittleEndian.Uint64(ph[32:])
 		memsz := binary.LittleEndian.Uint64(ph[40:])
-		if off > uint64(len(img)) || filesz > uint64(len(img))-off {
-			return 0, fmt.Errorf("kernel segment file range %#x+%#x outside file (%d bytes)", off, filesz, len(img))
+		if off > imageSize || filesz > imageSize-off {
+			return 0, fmt.Errorf("kernel segment file range %#x+%#x outside file (%d bytes)", off, filesz, imageSize)
 		}
 		if memsz < filesz {
 			return 0, fmt.Errorf("kernel segment memsz %#x < filesz %#x", memsz, filesz)
@@ -261,7 +271,9 @@ func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {
 		if memsz > uint64(len(ram)) || paddr > uint64(len(ram))-memsz {
 			return 0, fmt.Errorf("kernel segment @ %#x (%d bytes) exceeds guest RAM", paddr, memsz)
 		}
-		copy(ram[paddr:], img[off:off+filesz]) // memsz>filesz tail stays zero (BSS)
+		if err := readAtExact(image, ram[paddr:paddr+filesz], off); err != nil {
+			return 0, fmt.Errorf("read kernel segment %d: %w", i, err)
+		}
 		loaded++
 	}
 	if loaded == 0 {
@@ -269,4 +281,21 @@ func loadKernelX86(img []byte, ram []byte) (entry uint64, err error) {
 	}
 	fmt.Printf("kernel: %d ELF segments loaded, entry %#x\n", loaded, entry)
 	return entry, nil
+}
+
+// readAtExact avoids a SectionReader allocation on the kernel startup path.
+// ReaderAt permits an implementation to return an error together with a full
+// buffer, so the byte count is authoritative here.
+func readAtExact(r io.ReaderAt, dst []byte, offset uint64) error {
+	if len(dst) == 0 {
+		return nil
+	}
+	n, err := r.ReadAt(dst, int64(offset))
+	if n == len(dst) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return io.ErrUnexpectedEOF
 }

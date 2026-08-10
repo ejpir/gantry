@@ -5,19 +5,18 @@ package vmm
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
 	"os"
 	"runtime"
 	"syscall"
 	"unsafe"
+
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // kvmBackend is the Linux/KVM implementation of the hypervisor backend.
 type kvmBackend struct {
-	kvm   *kvmFile
-	vmFD  uintptr
-	vcpus []*kvmVCPU
-	m     *Machine
+	*kvmMachineResources
+	m *Machine
 }
 
 // runGuest boots the prepared machine under KVM (entry point for main).
@@ -29,16 +28,29 @@ func (kvmARM64Platform) run(m *Machine) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	k, err := openKVM(m.kvmFD)
+	kvmFD, err := m.takeKVM()
 	if err != nil {
 		return err
 	}
+	k, err := openKVM(kvmFD)
+	if err != nil {
+		return err
+	}
+	resources := &kvmMachineResources{kvm: k}
+	b := &kvmBackend{kvmMachineResources: resources, m: m}
+	owned := true
+	defer func() {
+		if owned {
+			_ = b.Close()
+		}
+	}()
+
 	vmFD, err := k.createVM()
 	if err != nil {
-		k.Close()
 		return fmt.Errorf("KVM_CREATE_VM: %w", err)
 	}
-	b := &kvmBackend{kvm: k, vmFD: vmFD, m: m}
+	b.vmFD = vmFD
+	b.vmOpen = true
 
 	// register guest RAM
 	reg := kvmUserspaceMemoryRegion{
@@ -67,6 +79,7 @@ func (kvmARM64Platform) run(m *Machine) error {
 			return fmt.Errorf("KVM_CREATE_VCPU(%d): %w", i, errno)
 		}
 		vc := &kvmVCPU{id: i, fd: r}
+		b.vcpus = append(b.vcpus, vc)
 		vi := kvmVcpuInit{target: kvmArmTargetGenericV8}
 		vi.features[0] = (1 << kvmArmVcpuPowerOff) | (1 << kvmArmVcpuPSCI02)
 		if err := ioctl(vc.fd, kvmArmVcpuInit, unsafe.Pointer(&vi)); err != nil {
@@ -78,16 +91,22 @@ func (kvmARM64Platform) run(m *Machine) error {
 			return fmt.Errorf("mmap kvm_run(%d): %w", i, err)
 		}
 		vc.run = kvmRunStruct{data: runBuf}
-		b.vcpus = append(b.vcpus, vc)
 	}
 
-	m.irqLine = b.irqLine
+	b.prepareVCPURuns()
+	defer b.abandonVCPURuns()
+	if err := m.adoptBackend(b); err != nil {
+		return err
+	}
+	owned = false
+
+	m.interrupts.set(b.irqLine)
 	// secondary vCPUs: plain run loops on their own threads
 	for _, vc := range b.vcpus[1:] {
 		go func(vc *kvmVCPU) {
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
-			if err := b.runVCPULoop(vc); err != nil {
+			if err := b.runVCPU(vc, b.runVCPULoop); err != nil {
 				fmt.Fprintf(os.Stderr, "\n[cpu%d] run loop: %v\n", vc.id, err)
 			}
 		}(vc)
@@ -101,6 +120,8 @@ func (b *kvmBackend) createGIC() error {
 		return fmt.Errorf("KVM_CREATE_DEVICE(GICv3): %w", err)
 	}
 	gic := uintptr(cd.fd)
+	b.gicFD = gic
+	b.gicOpen = true
 	set := func(group, attr uint32, val uint64) error {
 		da := kvmDeviceAttr{group: group, attr: uint64(attr), addr: uint64(uintptr(unsafe.Pointer(&val)))}
 		return ioctl(gic, kvmSetDeviceAttr, unsafe.Pointer(&da))
@@ -161,13 +182,19 @@ func (b *kvmBackend) bootLoop() error {
 		go m.uart.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	return b.runVCPULoop(vc)
+	return b.runVCPU(vc, b.runVCPULoop)
 }
 
 func (b *kvmBackend) runVCPULoop(vc *kvmVCPU) error {
 	m := b.m
 	for {
+		if b.stopping.Load() {
+			return nil
+		}
 		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, vc.fd, kvmRun, 0)
+		if b.stopping.Load() {
+			return nil
+		}
 		if errno == syscall.EINTR {
 			continue
 		}

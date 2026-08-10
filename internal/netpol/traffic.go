@@ -282,67 +282,6 @@ func (epoch *TrafficEpoch) Merge(other TrafficSnapshot) {
 	}
 }
 
-// SyncSnapshot merges one cumulative snapshot without worker-epoch context.
-// New remote-worker integrations should retain a TrafficEpoch and call Merge;
-// this compatibility path keeps older in-process callers correct until their
-// ownership is migrated with the worker topology.
-func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
-	if r == nil || other.Version != trafficSnapshotVersion {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	before := snapshotCounters(r.snapshot)
-	r.snapshot.TXBytes = max(r.snapshot.TXBytes, other.TXBytes)
-	r.snapshot.RXBytes = max(r.snapshot.RXBytes, other.RXBytes)
-	r.snapshot.TXPackets = max(r.snapshot.TXPackets, other.TXPackets)
-	r.snapshot.RXPackets = max(r.snapshot.RXPackets, other.RXPackets)
-	r.snapshot.DroppedBytes = max(r.snapshot.DroppedBytes, other.DroppedBytes)
-	r.snapshot.DroppedPackets = max(r.snapshot.DroppedPackets, other.DroppedPackets)
-	if snapshotCounters(r.snapshot) != before {
-		r.dirty = true
-	}
-
-	entries := other.Entries
-	if len(entries) > maxTrafficEntries {
-		entries = entries[:maxTrafficEntries]
-	}
-	for _, entry := range entries {
-		if !validMergedTrafficEntry(entry) {
-			continue
-		}
-		key := trafficEntryKey(entry.Address, entry.Host, entry.Protocol, entry.Port, entry.Allowed)
-		current, ok := r.entries[key]
-		if !ok {
-			if len(r.entries) >= maxTrafficEntries {
-				continue
-			}
-			copy := entry
-			r.entries[key] = &copy
-			r.dirty = true
-			continue
-		}
-		previous := *current
-		current.TXBytes = max(current.TXBytes, entry.TXBytes)
-		current.RXBytes = max(current.RXBytes, entry.RXBytes)
-		current.TXPackets = max(current.TXPackets, entry.TXPackets)
-		current.RXPackets = max(current.RXPackets, entry.RXPackets)
-		if entry.FirstSeen.Before(current.FirstSeen) {
-			current.FirstSeen = entry.FirstSeen
-		}
-		if entry.LastSeen.After(current.LastSeen) {
-			current.LastSeen = entry.LastSeen
-		}
-		if entry.Host != "" && (current.Host == "" || current.Host == current.Address) && entry.Host != entry.Address {
-			current.Host = entry.Host
-		}
-		if *current != previous {
-			r.dirty = true
-		}
-	}
-}
-
 func snapshotCounters(snapshot TrafficSnapshot) trafficCounters {
 	return trafficCounters{
 		txBytes: snapshot.TXBytes, rxBytes: snapshot.RXBytes,

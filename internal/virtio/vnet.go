@@ -3,8 +3,6 @@ package virtio
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
-	"github.com/ejpir/gantry/internal/netpol"
 	"io"
 	"net"
 	"os"
@@ -22,7 +20,6 @@ const (
 	virtioNetRxQ      = 0
 	virtioNetTxQ      = 1
 	virtioNetMaxFrame = 65562
-	virtioNetMaxQueue = 256
 )
 
 type packetConn interface {
@@ -31,16 +28,31 @@ type packetConn interface {
 	Close() error
 }
 
+// PacketPolicy is the device's narrow egress-policy boundary.
+type PacketPolicy interface {
+	MatchTX(frame []byte) bool
+	ObserveRX(frame []byte)
+}
+
+// TrafficObserver receives packet accounting at the device boundary.
+type TrafficObserver interface {
+	ObserveTX(frame []byte, allowed bool)
+	ObserveRX(frame []byte)
+}
+
 type Net struct {
 	core    *Core
 	mac     [6]byte
 	conn    packetConn
-	policy  *netpol.Policy
-	traffic *netpol.TrafficRecorder
+	policy  PacketPolicy
+	traffic TrafficObserver
 
 	localPath string
-	pending   [][]byte
+	pending   pendingRing[[]byte]
 	started   sync.Once
+	closeOnce sync.Once
+	readDone  chan struct{}
+	closeErr  error
 	verbose   bool
 }
 
@@ -99,7 +111,7 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 		mac:       mac,
 		conn:      conn,
 		localPath: localPath,
-		verbose:   gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != "",
+		verbose:   os.Getenv("GANTRY_DEBUG_NET") != "",
 	}, nil
 }
 
@@ -110,68 +122,77 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 // expects on the other end. Policy and traffic observation live on Net so
 // both this backend and external unixgram backends get identical accounting.
 type qemuFrameConn struct {
-	conn net.Conn
-	// pol is retained for direct wire-level tests. Production attaches policy
-	// to Net so unixgram and QEMU backends share one enforcement point.
-	pol *netpol.Policy
+	conn     net.Conn
+	writeBuf []byte // reused by the single virtio TX queue
 }
 
-func (q qemuFrameConn) Read(p []byte) (int, error) {
+func (q *qemuFrameConn) Read(p []byte) (int, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(q.conn, hdr[:]); err != nil {
 		return 0, err
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
+	if n > virtioNetMaxFrame {
+		return 0, fmt.Errorf("qemu frame %d bytes exceeds maximum %d", n, virtioNetMaxFrame)
+	}
 	if n > uint32(len(p)) {
 		return 0, fmt.Errorf("qemu frame %d bytes > buffer %d", n, len(p))
 	}
-	m, err := io.ReadFull(q.conn, p[:n])
-	if err == nil && q.pol != nil {
-		q.pol.ObserveRX(p[:m])
-	}
-	return m, err
+	return io.ReadFull(q.conn, p[:n])
 }
 
-func (q qemuFrameConn) Write(p []byte) (int, error) {
-	if q.pol != nil && !q.pol.MatchTX(p) {
-		return len(p), nil
+func (q *qemuFrameConn) Write(p []byte) (int, error) {
+	if len(p) > virtioNetMaxFrame {
+		return 0, fmt.Errorf("qemu frame %d bytes exceeds maximum %d", len(p), virtioNetMaxFrame)
 	}
-	var hdr [4]byte
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(p)))
-	buf := append(hdr[:], p...)
-	if _, err := q.conn.Write(buf); err != nil {
+	size := len(p) + 4
+	if cap(q.writeBuf) < size {
+		q.writeBuf = make([]byte, size)
+	} else {
+		q.writeBuf = q.writeBuf[:size]
+	}
+	binary.BigEndian.PutUint32(q.writeBuf[:4], uint32(len(p)))
+	copy(q.writeBuf[4:], p)
+	if err := writePacket(q.conn, q.writeBuf); err != nil {
 		return 0, err
 	}
 	return len(p), nil
 }
 
-func (q qemuFrameConn) Close() error { return q.conn.Close() }
+func (q *qemuFrameConn) Close() error { return q.conn.Close() }
+
+func writePacket(w io.Writer, packet []byte) error {
+	for len(packet) != 0 {
+		n, err := w.Write(packet)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		packet = packet[n:]
+	}
+	return nil
+}
 
 // NewNetConn attaches the device to a QEMU-framed stream endpoint —
 // typically Stack.Dial() from the embedded netstack (no external gvproxy
 // needed). The connection is unbuffered, so a busy guest TX serializes
 // frame-by-frame against the netstack's read loop; fine at sandbox scale.
 func NewNetConn(conn net.Conn, mac [6]byte) *Net {
-	return NewNetConnPolicy(conn, mac, nil)
-}
-
-// NewNetConnPolicy is NewNetConn with an egress network policy enforced on
-// the link (see internal/netpol).
-func NewNetConnPolicy(conn net.Conn, mac [6]byte, pol *netpol.Policy) *Net {
-	verbose := gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != ""
+	verbose := os.Getenv("GANTRY_DEBUG_NET") != ""
 	return &Net{
 		mac:     mac,
-		conn:    qemuFrameConn{conn: conn},
-		policy:  pol,
+		conn:    &qemuFrameConn{conn: conn},
 		verbose: verbose,
 	}
 }
 
-// SetTrafficRecorder attaches persistent dashboard accounting before the
-// device starts processing queues.
-func (v *Net) SetTrafficRecorder(recorder *netpol.TrafficRecorder) {
-	v.traffic = recorder
-}
+// SetPolicy installs policy before the device starts processing queues.
+func (v *Net) SetPolicy(policy PacketPolicy) { v.policy = policy }
+
+// SetTrafficObserver installs accounting before queue processing starts.
+func (v *Net) SetTrafficObserver(observer TrafficObserver) { v.traffic = observer }
 
 func (v *Net) deviceID() uint32 { return virtioNetDeviceID }
 func (v *Net) features() uint64 { return 1 << virtioNetFMac }
@@ -191,11 +212,17 @@ func (v *Net) configWrite(off uint64, p []byte) {}
 func (v *Net) reset() {
 	// Driver initialization starts with a reset. Keep the external packet
 	// endpoint connected and discard only frames queued for the old rings.
-	v.pending = nil
+	v.pending.Reset()
 }
 
 func (v *Net) start() {
-	v.started.Do(func() { go v.readLoop() })
+	v.started.Do(func() {
+		v.readDone = make(chan struct{})
+		go func() {
+			defer close(v.readDone)
+			v.readLoop()
+		}()
+	})
 }
 
 func (v *Net) logf(format string, args ...any) {
@@ -221,7 +248,7 @@ func (v *Net) writeFrame(frame []byte) (int, error) {
 		v.traffic.ObserveTX(frame, allowed)
 	}
 	if !allowed {
-		v.logf("policy drop: %s", netpol.Summarize(frame))
+		v.logf("policy drop: frame %d bytes", len(frame))
 		return len(frame), nil // silently dropped, like any ethernet drop
 	}
 	n, err := v.conn.Write(frame)
@@ -279,10 +306,8 @@ func (v *Net) readLoop() {
 	for {
 		n, err := v.readFrame(buf)
 		if n > 0 {
-			frame := append([]byte(nil), buf[:n]...)
 			v.core.mu.Lock()
-			if len(v.pending) < virtioNetMaxQueue {
-				v.pending = append(v.pending, frame)
+			if v.enqueueRXFrame(buf[:n]) {
 				v.logf("rx frame %d bytes", n)
 				v.tryRx()
 			} else {
@@ -300,6 +325,20 @@ func (v *Net) readLoop() {
 	}
 }
 
+// enqueueRXFrame copies frame into the bounded guest-facing queue. The caller
+// holds core.mu, so checking capacity before allocating is atomic with the
+// enqueue: a guest withholding RX descriptors makes every drop allocation
+// free.
+func (v *Net) enqueueRXFrame(frame []byte) bool {
+	if v.pending.Full() {
+		return false
+	}
+	packet := make([]byte, virtioNetHdrLen+len(frame))
+	copy(packet[virtioNetHdrLen:], frame)
+	_, ok := v.pending.Push(packet)
+	return ok
+}
+
 // tryRx prepends a zeroed virtio_net_hdr_v1 and scatters each frame into one
 // guest-provided receive descriptor chain. Called with core.mu held.
 func (v *Net) tryRx() {
@@ -307,31 +346,31 @@ func (v *Net) tryRx() {
 	if !q.ready {
 		return
 	}
-	for len(v.pending) > 0 {
+	for v.pending.Len() != 0 {
 		head, chain, ok := v.core.availChain(virtioNetRxQ)
 		if !ok {
 			return
 		}
 		_, in := splitChain(chain)
-		packet := make([]byte, virtioNetHdrLen+len(v.pending[0]))
-		copy(packet[virtioNetHdrLen:], v.pending[0])
-		v.pending = v.pending[1:]
+		packet, _, _ := v.pending.Front()
 
 		capacity := uint32(0)
 		for _, d := range in {
 			capacity += d.len
 		}
-		if capacity < uint32(len(packet)) {
-			v.logf("rx descriptor too small: %d < %d", capacity, len(packet))
+		if capacity < uint32(len(*packet)) {
+			v.logf("rx descriptor too small: %d < %d", capacity, len(*packet))
 			v.core.pushUsed(q, head, 0)
+			v.pending.Pop()
 			continue
 		}
-		n, err := v.core.writeChains(in, packet)
+		n, err := v.core.writeChains(in, *packet)
 		if err != nil {
 			v.logf("write rx descriptors: %v", err)
 			n = 0
 		}
 		v.core.pushUsed(q, head, n)
+		v.pending.Pop()
 	}
 }
 
@@ -346,14 +385,20 @@ func (v *Net) maxChainBytes(qn int) uint64 { return netMaxChainBytes }
 // Close shuts the packet endpoint and removes the unixgram client
 // socket (VM teardown; see Machine.Close).
 func (v *Net) Close() error {
-	var err error
-	if v.conn != nil {
-		err = v.conn.Close()
-	}
-	if v.localPath != "" {
-		_ = os.Remove(v.localPath)
-	}
-	return err
+	v.closeOnce.Do(func() {
+		if v.conn != nil {
+			v.closeErr = v.conn.Close()
+		}
+		if v.readDone != nil {
+			<-v.readDone
+		}
+		if v.localPath != "" {
+			if err := os.Remove(v.localPath); v.closeErr == nil && err != nil && !os.IsNotExist(err) {
+				v.closeErr = err
+			}
+		}
+	})
+	return v.closeErr
 }
 
 func (v *Net) setCore(c *Core) { v.core = c }

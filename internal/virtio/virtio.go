@@ -34,18 +34,16 @@ const (
 	vringDescFIndirect = 4
 
 	virtqSize = 128
+
+	// A direct chain can contain at most 65 descriptors. This is deliberately
+	// lower than virtqSize: every guest-facing device has a much smaller
+	// protocol byte limit, and bounding both dimensions keeps malformed rings
+	// cheap to reject.
+	virtqMaxChainDescriptors = 65
 )
 
-// mem is the device's view of guest physical memory.
-type mem interface {
-	readAt(addr uint64, p []byte) error
-	writeAt(addr uint64, p []byte) error
-	size() uint64
-	contains(addr, n uint64) bool
-}
-
-// RAM implements mem over the VM's RAM slice. base is the guest
-// physical address of ram[0] (0x40000000 on arm64, 0 on x86-64).
+// RAM is a device's view of guest physical memory. base is the guest physical
+// address of ram[0] (0x40000000 on arm64, 0 on x86-64).
 type RAM struct {
 	mu   sync.RWMutex
 	ram  []byte
@@ -141,7 +139,7 @@ type Device interface {
 type Core struct {
 	mu      sync.Mutex
 	dev     Device
-	mem     mem
+	mem     *RAM
 	irq     int
 	irqLine func(irq int, level bool)
 	name    string
@@ -155,6 +153,16 @@ type Core struct {
 	status     uint32
 	isr        uint32
 	gen        uint32
+
+	// Queue dispatch is serialized by mu, so one fixed descriptor scratch
+	// array serves every queue without allocating on each notification. The
+	// slice returned by availChain is valid until the next call on this Core.
+	chain [virtqMaxChainDescriptors]desc
+
+	// Device-readable chains are consumed synchronously under mu. Reusing one
+	// contiguous buffer removes a host allocation from every network, block,
+	// vsock, and RTC request while keeping each device's protocol byte cap.
+	readStorage []byte
 }
 
 // NewCoreAt attaches dev at an explicit MMIO base and IRQ (the
@@ -196,10 +204,11 @@ func (c *Core) MMIORead(off uint64, length uint32) uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if off >= 0x100 { // device config space, arbitrary widths
-		buf := make([]byte, length)
-		c.dev.configRead(off-0x100, buf)
+		var buf [4]byte
+		n := min(length, uint32(len(buf)))
+		c.dev.configRead(off-0x100, buf[:n])
 		var v uint32
-		for i := uint32(0); i < length && i < 4; i++ {
+		for i := uint32(0); i < n; i++ {
 			v |= uint32(buf[i]) << (8 * i)
 		}
 		return v
@@ -396,7 +405,7 @@ func (c *Core) availChain(qn int) (uint16, []desc, bool) {
 	head := binary.LittleEndian.Uint16(headBuf[:])
 	q.lastAvail++
 
-	var chain []desc
+	chain := c.chain[:0]
 	var total uint64
 	limit := c.chainLimit(qn)
 	d, err := c.descAt(q, head)
@@ -404,6 +413,9 @@ func (c *Core) availChain(qn int) (uint16, []desc, bool) {
 		return 0, nil, false
 	}
 	for {
+		if len(chain) == cap(chain) {
+			return 0, nil, false
+		}
 		chain = append(chain, d)
 		total += uint64(d.len)
 		// per-chain byte cap: ~65 max-length descriptors must not sum to
@@ -416,7 +428,7 @@ func (c *Core) availChain(qn int) (uint16, []desc, bool) {
 			break
 		}
 		d, err = c.descAt(q, d.next)
-		if err != nil || len(chain) > 64 {
+		if err != nil {
 			return 0, nil, false
 		}
 	}
@@ -439,10 +451,10 @@ func (c *Core) pushUsed(q *virtq, head uint16, written uint32) {
 		return
 	}
 	usedIdx := binary.LittleEndian.Uint16(usedIdxBuf[:])
-	elem := make([]byte, 8)
+	var elem [8]byte
 	binary.LittleEndian.PutUint32(elem[0:], uint32(head))
 	binary.LittleEndian.PutUint32(elem[4:], written)
-	if err := c.mem.writeAt(q.usedAddr+4+uint64(usedIdx%uint16(q.num))*8, elem); err != nil {
+	if err := c.mem.writeAt(q.usedAddr+4+uint64(usedIdx%uint16(q.num))*8, elem[:]); err != nil {
 		return
 	}
 	usedIdx++
@@ -486,15 +498,29 @@ func splitChain(chain []desc) (out, in []desc) {
 	return chain, nil
 }
 
-// readChains copies all "out" descriptors into one buffer.
+// readChains copies all "out" descriptors into one contiguous buffer. The
+// returned slice is valid until the next readChains call on this Core.
 func (c *Core) readChains(ds []desc) ([]byte, error) {
-	var out []byte
+	var total uint64
 	for _, d := range ds {
-		buf := make([]byte, d.len)
-		if err := c.mem.readAt(d.addr, buf); err != nil {
+		total += uint64(d.len)
+		if total > uint64(^uint(0)>>1) {
+			return nil, fmt.Errorf("descriptor chain length %d overflows int", total)
+		}
+	}
+	if cap(c.readStorage) < int(total) {
+		c.readStorage = make([]byte, int(total))
+	} else {
+		c.readStorage = c.readStorage[:int(total)]
+	}
+	out := c.readStorage
+	offset := 0
+	for _, d := range ds {
+		next := offset + int(d.len)
+		if err := c.mem.readAt(d.addr, out[offset:next]); err != nil {
 			return nil, err
 		}
-		out = append(out, buf...)
+		offset = next
 	}
 	return out, nil
 }

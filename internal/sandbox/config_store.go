@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
 )
@@ -17,12 +19,15 @@ import (
 // clobber each other's fields: every mutation applies to the latest
 // in-memory copy and the whole file is rewritten under one mutex.
 //
-// Mutate rolls the in-memory state back when the write fails, so a failed
-// mutation leaves no half-applied configuration behind.
+// Mutate rolls the in-memory state back when a write fails before replacement.
+// A post-replacement durability error keeps the committed state in memory;
+// callers can use atomicfile.Committed to avoid rolling back live state that
+// now agrees with the on-disk file.
 type ConfigStore struct {
-	path string
-	mu   sync.Mutex
-	cfg  RunConfig
+	path  string
+	mu    sync.Mutex
+	cfg   RunConfig
+	write func(string, []byte, os.FileMode) error
 }
 
 // readSandboxConfig is the canonical sandbox.json reader.
@@ -34,6 +39,9 @@ func readSandboxConfig(dir string) (RunConfig, error) {
 	var cfg RunConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return RunConfig{}, fmt.Errorf("corrupt sandbox.json: %w", err)
+	}
+	if err := validateSandboxResources(cfg.MemMB, cfg.VCPUs); err != nil {
+		return RunConfig{}, fmt.Errorf("invalid sandbox resources: %w", err)
 	}
 	return cfg, nil
 }
@@ -49,12 +57,12 @@ func LoadConfigStore(dir string) (*ConfigStore, error) {
 	return &ConfigStore{path: filepath.Join(dir, "sandbox.json"), cfg: cfg}, nil
 }
 
-// Snapshot returns the latest persisted configuration. Slice fields share
-// storage with the store; callers must not mutate them.
+// Snapshot returns an independent copy of the latest persisted configuration.
+// Callers may retain or modify the result without racing later mutations.
 func (s *ConfigStore) Snapshot() RunConfig {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cfg
+	return cloneRunConfig(s.cfg)
 }
 
 // Mutate applies fn to the live configuration and atomically persists the
@@ -65,38 +73,58 @@ func (s *ConfigStore) Snapshot() RunConfig {
 func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	backup := s.cfg
-	backup.Shares = append([]string(nil), s.cfg.Shares...)
-	backup.Ports = append([]string(nil), s.cfg.Ports...)
+	backup := cloneRunConfig(s.cfg)
 	if err := fn(&s.cfg); err != nil {
 		s.cfg = backup
 		return err
 	}
 	if err := s.writeLocked(); err != nil {
-		s.cfg = backup
+		if !atomicfile.Committed(err) {
+			s.cfg = backup
+		}
 		return err
 	}
 	return nil
 }
 
-const maxSandboxVCPUs = 8
+func cloneRunConfig(cfg RunConfig) RunConfig {
+	cfg.Shares = append([]string(nil), cfg.Shares...)
+	cfg.Ports = append([]string(nil), cfg.Ports...)
+	cfg.SecretNames = append([]string(nil), cfg.SecretNames...)
+	if cfg.ImageCfg != nil {
+		imageCfg := *cfg.ImageCfg
+		imageCfg.Env = append([]string(nil), imageCfg.Env...)
+		imageCfg.Entrypoint = append([]string(nil), imageCfg.Entrypoint...)
+		imageCfg.Cmd = append([]string(nil), imageCfg.Cmd...)
+		cfg.ImageCfg = &imageCfg
+	}
+	if cfg.LayerSet != nil {
+		layerSet := *cfg.LayerSet
+		layerSet.Layers = append([]string(nil), layerSet.Layers...)
+		cfg.LayerSet = &layerSet
+	}
+	if cfg.OAuthBridge != nil {
+		enabled := *cfg.OAuthBridge
+		cfg.OAuthBridge = &enabled
+	}
+	return cfg
+}
 
-// maxSandboxMemMB bounds the persisted allocation at 1 TiB: a stray extra
-// zero on the CLI should not write a value the VMM can never satisfy at
-// the next boot.
-const maxSandboxMemMB = 1 << 20
+const maxSandboxVCPUs = vmm.MaxVCPUs
+
+const (
+	minSandboxMemMB = (vmm.MinMemoryBytes + (1 << 20) - 1) >> 20
+	maxSandboxMemMB = vmm.MaxMemoryBytes >> 20
+)
 
 func validateSandboxResources(memMB uint, vcpus int) error {
-	if memMB == 0 {
-		return fmt.Errorf("memory must be at least 1 MiB")
+	if uint64(memMB) < minSandboxMemMB {
+		return fmt.Errorf("memory must be at least %d MiB", minSandboxMemMB)
 	}
-	if memMB > maxSandboxMemMB {
+	if uint64(memMB) > maxSandboxMemMB {
 		return fmt.Errorf("memory must be at most %d MiB", maxSandboxMemMB)
 	}
-	if vcpus < 1 || vcpus > maxSandboxVCPUs {
-		return fmt.Errorf("CPUs must be between 1 and %d", maxSandboxVCPUs)
-	}
-	return nil
+	return vmm.ValidateResources(uint64(memMB)<<20, vcpus)
 }
 
 // SetResources persists the allocation used the next time the VM boots. A
@@ -126,61 +154,65 @@ func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {
 // when the sandbox container starts. Validation happens while this store owns
 // the configuration lock so a concurrent live share/port mutation cannot race
 // the replacement.
-func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (vmm.Share, error) {
-	share, err := vmm.ParseShareSpec(spec, map[string]bool{})
+func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (shares.Spec, error) {
+	share, err := shares.ParseSpec(spec)
 	if err != nil {
-		return vmm.Share{}, err
+		return shares.Spec{}, err
 	}
 	if !filepath.IsAbs(share.Path) {
-		return vmm.Share{}, fmt.Errorf("share path must be absolute (got %q)", share.Path)
+		return shares.Spec{}, fmt.Errorf("share path must be absolute (got %q)", share.Path)
 	}
-	share.Path, err = canonicalManagedPath(share.Path)
+	identity, err := sharefs.Identify(share.Path)
 	if err != nil {
-		return vmm.Share{}, err
+		return shares.Spec{}, err
 	}
+	share.Path = identity.Path()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	backup := s.cfg
-	backup.Shares = append([]string(nil), s.cfg.Shares...)
-	backup.Ports = append([]string(nil), s.cfg.Ports...)
+	backup := cloneRunConfig(s.cfg)
 
-	seen, found := map[string]bool{}, false
-	for _, raw := range s.cfg.Shares {
-		existing, parseErr := vmm.ParseShareSpec(raw, seen)
-		if parseErr != nil {
-			return vmm.Share{}, fmt.Errorf("bad configured share %q: %w", raw, parseErr)
-		}
-		seen[existing.Tag] = true
+	existingShares, err := shares.ParseSpecs(s.cfg.Shares)
+	if err != nil {
+		return shares.Spec{}, fmt.Errorf("bad configured share: %w", err)
+	}
+	found := false
+	for _, existing := range existingShares {
 		if existing.Tag == share.Tag {
 			found = true
 			continue
 		}
-		otherPath, pathErr := canonicalManagedPath(existing.Path)
+		otherIdentity, pathErr := sharefs.Identify(existing.Path)
 		if pathErr != nil {
-			return vmm.Share{}, fmt.Errorf("share %s: %w", existing.Tag, pathErr)
+			return shares.Spec{}, fmt.Errorf("share %s: %w", existing.Tag, pathErr)
 		}
-		if pathsOverlap(share.Path, otherPath) {
-			return vmm.Share{}, fmt.Errorf("share %s overlaps share %s (%s)", share.Tag, existing.Tag, otherPath)
+		if identity.Aliases(otherIdentity) {
+			return shares.Spec{}, fmt.Errorf("share %s aliases share %s (%s)", share.Tag, existing.Tag, otherIdentity.Path())
+		}
+		if identity.Overlaps(otherIdentity) {
+			return shares.Spec{}, fmt.Errorf("share %s overlaps share %s (%s)", share.Tag, existing.Tag, otherIdentity.Path())
 		}
 		if configuredShareTarget(share) == configuredShareTarget(existing) {
-			return vmm.Share{}, fmt.Errorf("share tags %q and %q both target %s", existing.Tag, share.Tag, configuredShareTarget(share))
+			return shares.Spec{}, fmt.Errorf("share tags %q and %q both target %s", existing.Tag, share.Tag, configuredShareTarget(share))
 		}
 	}
 	if found && !replace {
-		return vmm.Share{}, fmt.Errorf("share tag %q already exists (use replace)", share.Tag)
+		return shares.Spec{}, fmt.Errorf("share tag %q already exists (use replace)", share.Tag)
 	}
 	if !found && len(s.cfg.Shares) >= maxManagedShares {
-		return vmm.Share{}, fmt.Errorf("too many shares (max %d)", maxManagedShares)
+		return shares.Spec{}, fmt.Errorf("too many shares (max %d)", maxManagedShares)
 	}
 	if containerPathsOverlap(configuredShareTarget(share), shares.HubInternalPath) {
-		return vmm.Share{}, fmt.Errorf("share %s may not cover, sit under, or contain the internal hub path %s", share.Tag, shares.HubInternalPath)
+		return shares.Spec{}, fmt.Errorf("share %s may not cover, sit under, or contain the internal hub path %s", share.Tag, shares.HubInternalPath)
 	}
 
 	s.cfg.Shares = shareSpecsReplacingTag(s.cfg.Shares, share.Tag, shareConfigSpec(share))
 	if err := s.writeLocked(); err != nil {
-		s.cfg = backup
-		return vmm.Share{}, err
+		if !atomicfile.Committed(err) {
+			s.cfg = backup
+			return shares.Spec{}, err
+		}
+		return share, err
 	}
 	return share, nil
 }
@@ -189,20 +221,18 @@ func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (vmm.Share, 
 // hub. Stopped sandboxes use this path; a running sandbox delegates removal to
 // its broker instead so the live namespace and desired configuration move as
 // one transaction.
-func (s *ConfigStore) RemoveShareForRestart(tag string) (vmm.Share, error) {
+func (s *ConfigStore) RemoveShareForRestart(tag string) (shares.Spec, error) {
 	if err := shares.ValidateShareTag(tag); err != nil {
-		return vmm.Share{}, err
+		return shares.Spec{}, err
 	}
-	var removed vmm.Share
+	var removed shares.Spec
 	err := s.Mutate(func(cfg *RunConfig) error {
-		seen := map[string]bool{}
+		configured, err := shares.ParseSpecs(cfg.Shares)
+		if err != nil {
+			return fmt.Errorf("bad configured share: %w", err)
+		}
 		found := false
-		for _, raw := range cfg.Shares {
-			share, parseErr := vmm.ParseShareSpec(raw, seen)
-			if parseErr != nil {
-				return fmt.Errorf("bad configured share %q: %w", raw, parseErr)
-			}
-			seen[share.Tag] = true
+		for _, share := range configured {
 			if share.Tag == tag {
 				removed = share
 				found = true
@@ -217,7 +247,7 @@ func (s *ConfigStore) RemoveShareForRestart(tag string) (vmm.Share, error) {
 	return removed, err
 }
 
-func configuredShareTarget(share vmm.Share) string {
+func configuredShareTarget(share shares.Spec) string {
 	if share.CtrPath != "" {
 		return share.CtrPath
 	}
@@ -229,5 +259,9 @@ func (s *ConfigStore) writeLocked() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.path, append(b, '\n'), 0o600)
+	write := s.write
+	if write == nil {
+		write = atomicfile.WriteFileDurable
+	}
+	return write(s.path, append(b, '\n'), 0o600)
 }

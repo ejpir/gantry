@@ -4,14 +4,20 @@ package sandbox
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/sharebroker"
+	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
-	"github.com/ejpir/gantry/internal/virtio"
 )
 
 func newTestShareManager(t *testing.T, specs ...string) (*ShareManager, string) {
@@ -123,6 +129,116 @@ func TestShareManagerRejectsOverlapAndDuplicateContainerTarget(t *testing.T) {
 	}
 	if entry, err := manager.Add("root="+root, true, false); err != nil || entry.Tag != "root" {
 		t.Fatalf("idempotent duplicate: entry=%+v err=%v", entry, err)
+	}
+}
+
+func TestShareManagerRejectsPinnedRootAliasWithoutLeakingPreparedRoots(t *testing.T) {
+	root := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	manager, _ := newTestShareManager(t)
+	if _, err := manager.Add("root="+root, false, false); err != nil {
+		t.Fatal(err)
+	}
+
+	fdCount := func() int { return 0 }
+	if runtime.GOOS == "linux" {
+		fdCount = func() int {
+			entries, err := os.ReadDir("/proc/self/fd")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return len(entries)
+		}
+	}
+	before := fdCount()
+	for i := 0; i < 16; i++ {
+		_, err := manager.Add(fmt.Sprintf("alias%d=%s", i, alias), false, false)
+		if err == nil || !strings.Contains(err.Error(), "aliases share root") {
+			t.Fatalf("alias add %d error = %v", i, err)
+		}
+	}
+	if after := fdCount(); runtime.GOOS == "linux" && after != before {
+		t.Fatalf("rejected prepared roots leaked descriptors: before=%d after=%d", before, after)
+	}
+}
+
+func TestShareManagerConfigureRestartSerializesWithLiveTransactions(t *testing.T) {
+	manager, _ := newTestShareManager(t)
+	host := t.TempDir()
+	started := make(chan struct{})
+	done := make(chan error, 1)
+
+	manager.mu.Lock()
+	go func() {
+		close(started)
+		_, err := manager.ConfigureRestart("workspace="+host+"@/workspace", false)
+		done <- err
+	}()
+	<-started
+	select {
+	case err := <-done:
+		manager.mu.Unlock()
+		t.Fatalf("configure bypassed share transaction lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	manager.mu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("configure remained blocked after live transaction completed")
+	}
+}
+
+func TestShareManagerFailsClosedWhenRollbackManifestCannotBeRestored(t *testing.T) {
+	manager, dir := newTestShareManager(t)
+	manager.dir = filepath.Join(dir, "missing")
+	_, err := manager.Add("code="+t.TempDir(), true, false)
+	if err == nil || !strings.Contains(err.Error(), "restore share manifest") {
+		t.Fatalf("rollback error = %v", err)
+	}
+	if manager.failed == nil || !manager.closed {
+		t.Fatalf("manager did not fail closed: failed=%v closed=%t", manager.failed, manager.closed)
+	}
+	if _, err := manager.Add("other="+t.TempDir(), false, false); err == nil || !strings.Contains(err.Error(), "failed closed") {
+		t.Fatalf("mutation after ambiguous rollback error = %v", err)
+	}
+	if got := manager.store.Snapshot().Shares; len(got) != 0 {
+		t.Fatalf("successful config rollback left shares %v", got)
+	}
+	if manager.Hub().Export("code") != nil {
+		t.Fatal("failed candidate became live")
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		// writeFileAtomic wraps the missing-directory PathError; retaining it
+		// in the join is what lets callers diagnose the rollback failure.
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) {
+			t.Fatalf("rollback did not retain filesystem cause: %v", err)
+		}
+	}
+}
+
+func TestShareManagerFailsClosedWhenConfigRollbackCannotBeRestored(t *testing.T) {
+	manager, dir := newTestShareManager(t)
+	manager.store.path = filepath.Join(dir, "missing", "sandbox.json")
+	manager.mu.Lock()
+	err := manager.recoverControlPlaneLocked(true, nil)
+	manager.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "restore sandbox share configuration") {
+		t.Fatalf("config rollback error = %v", err)
+	}
+	if manager.failed == nil || !manager.closed {
+		t.Fatalf("manager did not fail closed: failed=%v closed=%t", manager.failed, manager.closed)
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("rollback did not retain config write cause: %v", err)
 	}
 }
 
@@ -274,8 +390,8 @@ func TestShareManagerBrokeredReplaceKeepsOneActiveExport(t *testing.T) {
 
 	server, client := net.Pipe()
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- hub.ServeBroker(server) }()
-	proxy, err := virtio.NewShareHubProxy(client)
+	go func() { serveErr <- sharebroker.Serve(server, hub) }()
+	proxy, err := sharebroker.NewClient(client)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,9 +400,8 @@ func TestShareManagerBrokeredReplaceKeepsOneActiveExport(t *testing.T) {
 	// This is the invariant the removed workerShareServing path violated:
 	// split mode serves the same hub; it does not exchange the manager's
 	// backend for a remote mirror.
-	local, ok := manager.serving.(localShareServing)
-	if !ok || local.hub != hub || manager.Hub() != hub {
-		t.Fatalf("broker detached supervisor hub: serving=%T hub=%p want=%p", manager.serving, manager.Hub(), hub)
+	if manager.Hub() != hub {
+		t.Fatalf("broker detached supervisor hub: got %p want %p", manager.Hub(), hub)
 	}
 
 	newDir := t.TempDir()
@@ -297,11 +412,11 @@ func TestShareManagerBrokeredReplaceKeepsOneActiveExport(t *testing.T) {
 	if entry.State != "active" || !entry.RO {
 		t.Fatalf("replacement entry: %+v", entry)
 	}
-	if oldExport.State() == virtio.ShareExportActive {
+	if oldExport.State() == sharefs.ExportActive {
 		t.Fatalf("replaced export remained active: %+v", oldExport)
 	}
 	exports := hub.Exports()
-	if len(exports) != 1 || exports[0].Tag != "code" || exports[0] == oldExport || exports[0].State() != virtio.ShareExportActive {
+	if len(exports) != 1 || exports[0].Tag != "code" || exports[0] == oldExport || exports[0].State() != sharefs.ExportActive {
 		t.Fatalf("live hub exports after replacement: %+v", exports)
 	}
 	active := 0
@@ -349,5 +464,79 @@ func TestShareManagerPromoteEphemeralToPersistent(t *testing.T) {
 	canonical, _ := filepath.EvalSymlinks(shareDir)
 	if len(cfg.Shares) != 1 || cfg.Shares[0] != "code="+canonical {
 		t.Errorf("persisted shares = %v, want exactly [code=%s]", cfg.Shares, canonical)
+	}
+}
+
+func TestShareManagerAddKeepsPostCommitState(t *testing.T) {
+	manager, _ := newTestShareManager(t)
+	wantErr := errors.New("directory sync failed")
+	manager.store.write = func(path string, data []byte, mode os.FileMode) error {
+		if err := os.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return &atomicfile.CommitError{Err: wantErr}
+	}
+
+	entry, err := manager.Add("code="+t.TempDir(), true, false)
+	if !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
+		t.Fatalf("Add error = %v, want committed %v", err, wantErr)
+	}
+	if entry.Tag != "code" || entry.State != "active" {
+		t.Fatalf("committed entry = %+v", entry)
+	}
+	if manager.Hub().Export("code") == nil {
+		t.Fatal("committed share was not published")
+	}
+	if got := manager.store.Snapshot().Shares; len(got) != 1 || !strings.HasPrefix(got[0], "code=") {
+		t.Fatalf("committed configuration = %v", got)
+	}
+}
+
+func TestShareManagerAddStopsBeforeStagingOnPersistenceFailure(t *testing.T) {
+	manager, _ := newTestShareManager(t)
+	wantErr := errors.New("configuration write failed")
+	manager.store.write = func(string, []byte, os.FileMode) error { return wantErr }
+
+	entry, err := manager.Add("code="+t.TempDir(), true, false)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Add error = %v, want %v", err, wantErr)
+	}
+	if entry != (shares.Entry{}) {
+		t.Fatalf("failed add returned entry %+v", entry)
+	}
+	if manager.Generation() != 0 || manager.Hub().Export("code") != nil {
+		t.Fatal("failed persistence staged or published the share")
+	}
+	if got := manager.store.Snapshot().Shares; len(got) != 0 {
+		t.Fatalf("failed persistence changed configuration: %v", got)
+	}
+}
+
+func TestShareManagerPromotionKeepsPostCommitState(t *testing.T) {
+	manager, _ := newTestShareManager(t)
+	spec := "code=" + t.TempDir()
+	if _, err := manager.Add(spec, false, false); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("directory sync failed")
+	manager.store.write = func(path string, data []byte, mode os.FileMode) error {
+		if err := os.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return &atomicfile.CommitError{Err: wantErr}
+	}
+
+	entry, err := manager.Add(spec, true, false)
+	if !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
+		t.Fatalf("promotion error = %v, want committed %v", err, wantErr)
+	}
+	if entry.Tag != "code" || entry.State != "active" {
+		t.Fatalf("promoted entry = %+v", entry)
+	}
+	if manager.exports["code"].ephemeral {
+		t.Fatal("committed promotion remained ephemeral")
+	}
+	if got := manager.store.Snapshot().Shares; len(got) != 1 || !strings.HasPrefix(got[0], "code=") {
+		t.Fatalf("committed promotion configuration = %v", got)
 	}
 }

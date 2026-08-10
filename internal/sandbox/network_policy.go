@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/netpol"
 )
 
@@ -88,6 +89,11 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 		return NetworkPolicyEntry{}, err
 	}
 	if err := m.store.SetNetworkPolicy(path, allowLocal); err != nil {
+		if atomicfile.Committed(err) {
+			m.current = policy
+			return makeNetworkPolicyEntry(path, allowLocal, policy, "active"),
+				fmt.Errorf("network policy applied but configuration durability is uncertain: %w", err)
+		}
 		if rollbackErr := m.backend.SetPolicy(m.current); rollbackErr != nil {
 			return NetworkPolicyEntry{}, errors.Join(err,
 				fmt.Errorf("restore previous live network policy: %w", rollbackErr))

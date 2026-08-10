@@ -1,9 +1,22 @@
 package vmm
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
 	"testing"
 )
+
+type countingReaderAt struct {
+	reader io.ReaderAt
+	bytes  int
+}
+
+func (r *countingReaderAt) ReadAt(dst []byte, offset int64) (int, error) {
+	n, err := r.reader.ReadAt(dst, offset)
+	r.bytes += n
+	return n, err
+}
 
 func TestSetupX86BootZeroPage(t *testing.T) {
 	ram := make([]byte, 16<<20)
@@ -174,7 +187,8 @@ func TestLoadKernelX86(t *testing.T) {
 	for i := 0; i < 0x100; i++ {
 		img[0x2000+i] = 0xab
 	}
-	entry, err := loadKernelX86(img, ram)
+	reader := &countingReaderAt{reader: bytes.NewReader(img)}
+	entry, err := loadKernelX86(reader, uint64(len(img)), ram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +200,10 @@ func TestLoadKernelX86(t *testing.T) {
 	}
 	if ram[0x1000100] != 0 {
 		t.Error("bss tail not zero")
+	}
+	const wantRead = 64 + 56 + 0x100
+	if reader.bytes != wantRead {
+		t.Fatalf("loader read %d bytes, want %d; it must not buffer the whole kernel", reader.bytes, wantRead)
 	}
 }
 
