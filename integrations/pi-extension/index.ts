@@ -17,7 +17,7 @@
  *
  * Usage:
  *   cd /path/to/project
- *   pi -e /path/to/minivm/integrations/pi-extension
+ *   pi -e /path/to/gantry/integrations/pi-extension
  *
  * Per-project config (.pi/gantry.json):
  *   {

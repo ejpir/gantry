@@ -61,7 +61,7 @@ case "$1" in
     if [ ! -S /tmp/gantry-vsock/1025.sock ]; then
       echo "start this first in another terminal:"
       hint="$HOSTCTL shell"
-      [ -n "${GANTRY_SHARE:-${MINIVM_SHARE:-}}${GANTRY_SHARES:-${MINIVM_SHARES:-}}" ] && hint="$hint --share"
+      [ -n "${GANTRY_SHARE:-}${GANTRY_SHARES:-}" ] && hint="$hint --share"
       [ -n "${RWLAYER:-}" ] && hint="$hint --rw"
       [ "$IMAGE" != "$ARTIFACTS/shell-rootfs.erofs" ] && hint="$hint -- /bin/bash"
       echo "  $hint"
@@ -111,16 +111,16 @@ case "$1" in
       echo "== writable layer: $RWLAYER -> /dev/vdc (use: hostctl shell --rw)"
       set -- "$@" -disk "$RWLAYER"
     fi
-    if [ -n "${GANTRY_SHARE:-${MINIVM_SHARE:-}}" ]; then
-      echo "== virtio-fs host share: ${GANTRY_SHARE:-$MINIVM_SHARE} -> container /host"
-      set -- "$@" -share "hostshare=${GANTRY_SHARE:-$MINIVM_SHARE}"
+    if [ -n "${GANTRY_SHARE:-}" ]; then
+      echo "== virtio-fs host share: $GANTRY_SHARE -> container /host"
+      set -- "$@" -share "hostshare=$GANTRY_SHARE"
     fi
     # Extra shares (space-separated TAG=PATH[,ro]; no spaces in paths):
     #   GANTRY_SHARES="code=/Users/you/repos,ro docs=/Users/you/Documents"
     # land at /host/<tag> inside the container.
-    if [ -n "${GANTRY_SHARES:-${MINIVM_SHARES:-}}" ]; then
-      echo "== virtio-fs extra shares: ${GANTRY_SHARES:-$MINIVM_SHARES} -> container /host/<tag>"
-      for spec in ${GANTRY_SHARES:-$MINIVM_SHARES}; do set -- "$@" -share "$spec"; done
+    if [ -n "${GANTRY_SHARES:-}" ]; then
+      echo "== virtio-fs extra shares: $GANTRY_SHARES -> container /host/<tag>"
+      for spec in $GANTRY_SHARES; do set -- "$@" -share "$spec"; done
     fi
     "$@"
     ;;

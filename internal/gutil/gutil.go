@@ -7,23 +7,11 @@ import (
 	"strings"
 )
 
-// EnvOr returns the first non-empty environment variable value. Used to
-// accept the old MINIVM_* names after the rename to gantry.
-func EnvOr(names ...string) string {
-	for _, n := range names {
-		if v := os.Getenv(n); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// InsertExtraCmdline inserts GANTRY_EXTRA_CMDLINE (MINIVM_ fallback) into a
-// kernel cmdline BEFORE any " -- " init-args separator, so the extra args
-// reach the kernel rather than vminitd. Used for debug knobs like
-// hung_task_panic=1.
+// InsertExtraCmdline inserts GANTRY_EXTRA_CMDLINE into a kernel cmdline before
+// any " -- " init-args separator, so the extra args reach the kernel rather
+// than vminitd. It is used for debug knobs such as hung_task_panic=1.
 func InsertExtraCmdline(cmdline string) string {
-	extra := EnvOr("GANTRY_EXTRA_CMDLINE", "MINIVM_EXTRA_CMDLINE")
+	extra := os.Getenv("GANTRY_EXTRA_CMDLINE")
 	if extra == "" {
 		return cmdline
 	}

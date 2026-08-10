@@ -30,13 +30,7 @@ IMAGE=${IMAGE:-$ROOT/artifacts/debian-bookworm.erofs}
 NAME=${NAME:-boot-probe-$$}
 OUT=${OUT:-$ROOT/artifacts/boot-probes/$(date +%Y%m%d-%H%M%S)}
 
-if [ -n "${GANTRY_HOME:-}" ]; then
-	state_root=$GANTRY_HOME
-elif [ -n "${MINIVM_HOME:-}" ]; then
-	state_root=$MINIVM_HOME
-else
-	state_root=$HOME/.gantry/sandboxes
-fi
+state_root=${GANTRY_HOME:-$HOME/.gantry/sandboxes}
 sandbox_dir=$state_root/$NAME
 summary=$OUT/summary.tsv
 

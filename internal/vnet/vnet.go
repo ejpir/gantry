@@ -17,12 +17,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/containers/gvisor-tap-vsock/pkg/virtualnetwork"
-
-	"github.com/ejpir/gantry/internal/gutil"
 )
 
 const (
@@ -53,7 +52,7 @@ type Stack struct {
 // already in use) fails stack creation, so callers surface it as a boot
 // error.
 func Start(guestMAC [6]byte, forwards map[string]string) (*Stack, error) {
-	debug := gutil.EnvOr("GANTRY_DEBUG_NET", "MINIVM_DEBUG_NET") != ""
+	debug := os.Getenv("GANTRY_DEBUG_NET") != ""
 	cfg := &types.Configuration{
 		Debug:             debug,
 		MTU:               DefaultMTU,
@@ -87,7 +86,7 @@ func Start(guestMAC [6]byte, forwards map[string]string) (*Stack, error) {
 		Forwards: forwards,
 		Protocol: types.QemuProtocol,
 	}
-	if pcap := gutil.EnvOr("GANTRY_NET_PCAP", "MINIVM_NET_PCAP"); pcap != "" {
+	if pcap := os.Getenv("GANTRY_NET_PCAP"); pcap != "" {
 		cfg.CaptureFile = pcap
 	}
 

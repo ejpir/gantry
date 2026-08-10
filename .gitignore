@@ -1,14 +1,12 @@
 # build artifacts (regenerate: ./scripts/build.sh)
 /artifacts/
 /gantry
-/seatbeltspike
 /hostctl
 /cmd/hostctl/hostctl
-/minivm
 /gantry-*
 /hostctl-*
-/minivm-*
 *.exe
+.DS_Store
 
 # guest assets (regenerate: ./scripts/build.sh, or copy from a nerdbox release)
 /initramfs*.cpio.gz
@@ -19,7 +17,7 @@
 
 # container images + rw layers (regenerate: ./scripts/mkimage.sh, ./scripts/mkrwlayer.sh)
 /*.erofs
-/rwlayer*.ext4
+/*.ext4
 
 # gvproxy binaries (fetch from containers/gvisor-tap-vsock or build static)
 /gvproxy-*
