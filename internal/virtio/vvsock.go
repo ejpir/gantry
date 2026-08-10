@@ -2,11 +2,12 @@ package virtio
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -38,6 +39,8 @@ const (
 	vsockQueueEv  = 2
 )
 
+var errVsockPendingFull = errors.New("vsock: guest receive queue is full")
+
 type vsockHdr struct {
 	srcCID, dstCID   uint64
 	srcPort, dstPort uint32
@@ -62,8 +65,7 @@ func parseVsockHdr(b []byte) vsockHdr {
 	}
 }
 
-func (h vsockHdr) marshal() []byte {
-	b := make([]byte, vsockHdrLen)
+func (h vsockHdr) marshalTo(b []byte) {
 	binary.LittleEndian.PutUint64(b[0:], h.srcCID)
 	binary.LittleEndian.PutUint64(b[8:], h.dstCID)
 	binary.LittleEndian.PutUint32(b[16:], h.srcPort)
@@ -74,7 +76,6 @@ func (h vsockHdr) marshal() []byte {
 	binary.LittleEndian.PutUint32(b[32:], h.flags)
 	binary.LittleEndian.PutUint32(b[36:], h.bufAlloc)
 	binary.LittleEndian.PutUint32(b[40:], h.fwdCnt)
-	return b
 }
 
 type vsockPkt struct {
@@ -101,25 +102,32 @@ type vsockConn struct {
 func connKey(srcPort, dstPort uint32) uint64 { return uint64(srcPort)<<32 | uint64(dstPort) }
 
 type Vsock struct {
-	guestCID     uint64
-	forwardDir   string
-	dial         func(port uint32) (net.Conn, error)
-	conns        map[uint64]*vsockConn
-	pending      []vsockPkt     // outbound FIFO (control + data)
-	listeners    []net.Listener // AddListen sockets (closed at VM teardown)
-	core         *Core
-	verboseLog   bool
-	nextHostPort uint32
+	guestCID      uint64
+	forwardDir    string
+	dial          func(port uint32) (net.Conn, error)
+	conns         map[uint64]*vsockConn
+	pending       pendingRing[vsockPkt] // bounded outbound FIFO (control + data)
+	pendingCredit map[uint64]int        // connection key -> coalescible CREDIT_UPDATE slot
+	listeners     []net.Listener        // AddListen sockets (closed at VM teardown)
+	core          *Core
+	verboseLog    bool
+	nextHostPort  uint32
+	frameStorage  []byte
+	closing       bool
+	workers       sync.WaitGroup
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func NewVsock(guestCID uint64, forwardDir string) *Vsock {
 	_ = os.MkdirAll(forwardDir, 0o755)
 	return &Vsock{
-		guestCID:     guestCID,
-		forwardDir:   forwardDir,
-		conns:        map[uint64]*vsockConn{},
-		nextHostPort: 0x100000,
-		verboseLog:   gutil.EnvOr("GANTRY_DEBUG_VSOCK", "MINIVM_DEBUG_VSOCK") != "",
+		guestCID:      guestCID,
+		forwardDir:    forwardDir,
+		conns:         map[uint64]*vsockConn{},
+		pendingCredit: map[uint64]int{},
+		nextHostPort:  0x100000,
+		verboseLog:    os.Getenv("GANTRY_DEBUG_VSOCK") != "",
 		dial: func(port uint32) (net.Conn, error) {
 			path := filepath.Join(forwardDir, fmt.Sprintf("%d.sock", port))
 			return net.DialTimeout("unix", path, 3*time.Second)
@@ -138,9 +146,22 @@ func (v *Vsock) AddListen(guestPort uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if v.core == nil {
+		_ = ln.Close()
+		return "", fmt.Errorf("vsock: device is not attached")
+	}
+	v.core.mu.Lock()
+	if v.closing {
+		v.core.mu.Unlock()
+		_ = ln.Close()
+		return "", net.ErrClosed
+	}
 	v.listeners = append(v.listeners, ln)
+	v.workers.Add(1)
+	v.core.mu.Unlock()
 	fmt.Printf("[vsock] host->guest listen port %d at %s\n", guestPort, path)
 	go func() {
+		defer v.workers.Done()
 		for {
 			nc, err := ln.Accept()
 			if err != nil {
@@ -168,18 +189,24 @@ func (v *Vsock) SetDial(dial func(port uint32) (net.Conn, error)) { v.dial = dia
 func (v *Vsock) InjectConn(guestPort uint32, nc net.Conn) error {
 	v.core.mu.Lock()
 	defer v.core.mu.Unlock()
+	if v.closing {
+		return net.ErrClosed
+	}
 	srcPort := v.nextHostPort
-	v.nextHostPort++
 	key := connKey(guestPort, srcPort)
 	c := &vsockConn{key: key, nc: nc, peerBufAlloc: vsockBufAlloc, outSig: make(chan struct{}, 1), done: make(chan struct{})}
-	v.conns[key] = c
-	go v.pumpOut(c)
-	v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
+	request := vsockPkt{hdr: vsockHdr{
 		srcCID: vsockHostCID, dstCID: v.guestCID,
 		srcPort: srcPort, dstPort: guestPort,
 		typ: vsockTypeStream, op: vsockOpRequest,
 		bufAlloc: vsockBufAlloc,
-	}})
+	}}
+	if !v.queuePending(request) {
+		return errVsockPendingFull
+	}
+	v.nextHostPort++
+	v.conns[key] = c
+	v.startWorkerLocked(func() { v.pumpOut(c) })
 	v.tryFlush()
 	v.logf("host-originated conn to guest port %d (srcPort %d)", guestPort, srcPort)
 	return nil
@@ -195,7 +222,8 @@ func (v *Vsock) reset() {
 		close(c.done) // wake pumpOut so it doesn't leak on the socket
 		delete(v.conns, k)
 	}
-	v.pending = nil
+	v.pending.Reset()
+	clear(v.pendingCredit)
 }
 
 func (v *Vsock) configRead(off uint64, p []byte) {
@@ -271,9 +299,17 @@ func (v *Vsock) handleTx() {
 			}
 			c = &vsockConn{key: key, nc: nc, peerBufAlloc: hdr.bufAlloc, peerFwdCnt: hdr.fwdCnt, established: true, outSig: make(chan struct{}, 1), done: make(chan struct{})}
 			v.conns[key] = c
-			v.enqueueCtrl(hdr, vsockOpResponse, 0)
-			go v.pumpHost(c, hdr.srcPort, hdr.dstPort)
-			go v.pumpOut(c)
+			if !v.enqueueCtrl(hdr, vsockOpResponse, 0) {
+				c.closed = true
+				_ = c.nc.Close()
+				close(c.done)
+				delete(v.conns, key)
+				v.logf("guest receive queue full: dropping connection to host port %d", hdr.dstPort)
+				break
+			}
+			srcPort, dstPort := hdr.srcPort, hdr.dstPort
+			v.startWorkerLocked(func() { v.pumpHost(c, srcPort, dstPort) })
+			v.startWorkerLocked(func() { v.pumpOut(c) })
 			v.logf("connected -> forwarded to host port %d", hdr.dstPort)
 
 		case vsockOpRW:
@@ -317,7 +353,8 @@ func (v *Vsock) handleTx() {
 			if c != nil && !c.established {
 				c.established = true
 				c.peerBufAlloc, c.peerFwdCnt = hdr.bufAlloc, hdr.fwdCnt
-				go v.pumpHost(c, hdr.srcPort, hdr.dstPort)
+				srcPort, dstPort := hdr.srcPort, hdr.dstPort
+				v.startWorkerLocked(func() { v.pumpHost(c, srcPort, dstPort) })
 				v.logf("guest accepted host-originated conn (ports %d<->%d)", hdr.srcPort, hdr.dstPort)
 			}
 
@@ -325,6 +362,16 @@ func (v *Vsock) handleTx() {
 			if c != nil {
 				c.peerBufAlloc, c.peerFwdCnt = hdr.bufAlloc, hdr.fwdCnt
 				v.enqueueCtrl(hdr, vsockOpCreditUpdate, 0)
+			}
+
+		case vsockOpCreditUpdate:
+			if c != nil {
+				// Every credit-bearing packet carries cumulative peer state.
+				// CREDIT_UPDATE has no response of its own; retry delivery now
+				// because the front packet may have been waiting for exactly
+				// this window advancement.
+				c.peerBufAlloc, c.peerFwdCnt = hdr.bufAlloc, hdr.fwdCnt
+				v.tryFlush()
 			}
 
 		case vsockOpShutdown, vsockOpRST:
@@ -377,9 +424,15 @@ func (v *Vsock) pumpOut(c *vsockConn) {
 }
 
 // enqueueCtrl queues a control packet (RESPONSE/RST/CREDIT_UPDATE) back to
-// the guest, addressing it to the peer of the packet that triggered it.
-func (v *Vsock) enqueueCtrl(trigger vsockHdr, op uint16, flags uint32) {
-	v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
+// the guest, addressing it to the peer of the packet that triggered it. All
+// producers pass through queuePending, so a missing guest RX buffer can never
+// turn control traffic into an unbounded append.
+func (v *Vsock) enqueueCtrl(trigger vsockHdr, op uint16, flags uint32) bool {
+	return v.enqueueCtrlWithFwd(trigger, op, flags, v.rxCntFor(trigger))
+}
+
+func (v *Vsock) enqueueCtrlWithFwd(trigger vsockHdr, op uint16, flags, fwdCnt uint32) bool {
+	queued := v.queuePending(vsockPkt{hdr: vsockHdr{
 		srcCID:   vsockHostCID,
 		dstCID:   v.guestCID,
 		srcPort:  trigger.dstPort,
@@ -388,9 +441,68 @@ func (v *Vsock) enqueueCtrl(trigger vsockHdr, op uint16, flags uint32) {
 		op:       op,
 		flags:    flags,
 		bufAlloc: vsockBufAlloc,
-		fwdCnt:   v.rxCntFor(trigger),
+		fwdCnt:   fwdCnt,
 	}})
-	v.tryFlush()
+	if queued {
+		v.tryFlush()
+	}
+	return queued
+}
+
+func pendingConnKey(pkt *vsockPkt) uint64 {
+	return connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)
+}
+
+// queuePending is the single admission policy for host-to-guest traffic.
+// Data stops before the physical ring fills, reserving slots for connection
+// control. CREDIT_UPDATE is cumulative, so retaining only the newest update
+// per connection avoids wasting that reserve when a guest temporarily stops
+// posting receive buffers.
+func (v *Vsock) queuePending(pkt vsockPkt) bool {
+	if pkt.hdr.op == vsockOpCreditUpdate {
+		key := pendingConnKey(&pkt)
+		if slot, ok := v.pendingCredit[key]; ok {
+			existing := &v.pending.slots[slot]
+			if existing.hdr.op == vsockOpCreditUpdate && pendingConnKey(existing) == key {
+				*existing = pkt
+				return true
+			}
+			delete(v.pendingCredit, key)
+		}
+	}
+
+	limit := vsockMaxPending
+	if pkt.hdr.op == vsockOpRW {
+		limit -= vsockControlReserve
+	}
+	if v.pending.Len() >= limit {
+		return false
+	}
+	slot, ok := v.pending.Push(pkt)
+	if !ok {
+		return false
+	}
+	if pkt.hdr.op == vsockOpCreditUpdate {
+		if v.pendingCredit == nil {
+			v.pendingCredit = make(map[uint64]int)
+		}
+		v.pendingCredit[pendingConnKey(&pkt)] = slot
+	}
+	return true
+}
+
+func (v *Vsock) popPending() {
+	pkt, slot, ok := v.pending.Front()
+	if !ok {
+		return
+	}
+	if pkt.hdr.op == vsockOpCreditUpdate {
+		key := pendingConnKey(pkt)
+		if v.pendingCredit[key] == slot {
+			delete(v.pendingCredit, key)
+		}
+	}
+	v.pending.Pop()
 }
 
 func (v *Vsock) rxCntFor(trigger vsockHdr) uint32 {
@@ -400,17 +512,31 @@ func (v *Vsock) rxCntFor(trigger vsockHdr) uint32 {
 	return 0
 }
 
+// peerCredit returns the bytes the peer currently advertises as available.
+// The counters are uint32 and deliberately subtract modulo 2^32, matching the
+// virtio-vsock wire protocol when long-lived streams wrap. A peer forwarding
+// more bytes than we have sent yields an implausibly large in-flight value and
+// therefore fails closed at zero credit instead of manufacturing capacity.
+func (c *vsockConn) peerCredit() uint32 {
+	inFlight := c.txCnt - c.peerFwdCnt
+	if inFlight >= c.peerBufAlloc {
+		return 0
+	}
+	return c.peerBufAlloc - inFlight
+}
+
 func (v *Vsock) closeConn(c *vsockConn, trigger vsockHdr, sendRST bool) {
 	if c.closed {
 		return
 	}
 	c.closed = true
+	fwdCnt := c.rxCnt
 	_ = c.nc.Close()
 	close(c.done) // release pumpOut; sending on outSig after this is a no-op
 	delete(v.conns, c.key)
 	if sendRST {
 		v.logf("closeConn: sending RST (op trigger=%d ports %d->%d)", trigger.op, trigger.srcPort, trigger.dstPort)
-		v.enqueueCtrl(trigger, vsockOpRST, 0)
+		v.enqueueCtrlWithFwd(trigger, vsockOpRST, 0, fwdCnt)
 	}
 }
 
@@ -420,7 +546,10 @@ func (v *Vsock) closeConn(c *vsockConn, trigger vsockHdr, sendRST bool) {
 // tryFlush can stall indefinitely when the guest stops posting rx
 // buffers or granting credit; without a cap a stuck or hostile guest
 // grows host memory without limit just by holding a stream open.
-const vsockMaxPending = virtioNetMaxQueue
+const (
+	vsockMaxPending     = pendingRingCapacity
+	vsockControlReserve = 16
+)
 
 // vsockOutQMaxPackets caps the per-connection guest->host queue in
 // PACKETS (the byte side is bounded by vsockBufAlloc credit): without
@@ -435,18 +564,19 @@ func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 		n, err := c.nc.Read(buf)
 		if n > 0 {
 			v.logf("host->guest %d bytes", n)
-			payload := append([]byte(nil), buf[:n]...)
 			v.core.mu.Lock()
-			if len(v.pending) >= vsockMaxPending {
+			if v.pending.Len() >= vsockMaxPending-vsockControlReserve {
 				// queue full: drop the connection with RST rather than
-				// buffer without bound for a non-draining guest.
-				v.logf("pumpHost: %d pending -> RST", len(v.pending))
+				// buffer without bound for a non-draining guest. Check the
+				// bound before copying so this drop path does not allocate.
+				v.logf("pumpHost: %d pending -> RST", v.pending.Len())
 				v.closeConn(c, vsockHdr{op: vsockOpRW, srcPort: srcPort, dstPort: dstPort}, true)
 				v.tryFlush()
 				v.core.mu.Unlock()
 				return
 			}
-			v.pending = append(v.pending, vsockPkt{
+			payload := append([]byte(nil), buf[:n]...)
+			if !v.queuePending(vsockPkt{
 				hdr: vsockHdr{
 					srcCID: vsockHostCID, dstCID: v.guestCID,
 					srcPort: dstPort, dstPort: srcPort,
@@ -454,7 +584,13 @@ func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 					bufAlloc: vsockBufAlloc, fwdCnt: c.rxCnt,
 				},
 				payload: payload,
-			})
+			}) {
+				// Admission cannot fail after the locked capacity check, but
+				// keep teardown fail-closed if that invariant ever changes.
+				v.closeConn(c, vsockHdr{op: vsockOpRW, srcPort: srcPort, dstPort: dstPort}, true)
+				v.core.mu.Unlock()
+				return
+			}
 			v.tryFlush()
 			v.core.mu.Unlock()
 		}
@@ -462,16 +598,7 @@ func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 			v.core.mu.Lock()
 			if !c.closed {
 				v.logf("pumpHost: host socket read: %v -> RST", err)
-				c.closed = true
-				close(c.done)
-				delete(v.conns, c.key)
-				v.pending = append(v.pending, vsockPkt{hdr: vsockHdr{
-					srcCID: vsockHostCID, dstCID: v.guestCID,
-					srcPort: dstPort, dstPort: srcPort,
-					typ: vsockTypeStream, op: vsockOpRST,
-					bufAlloc: vsockBufAlloc, fwdCnt: c.rxCnt,
-				}})
-				v.tryFlush()
+				v.closeConn(c, vsockHdr{srcPort: srcPort, dstPort: dstPort}, true)
 			}
 			v.core.mu.Unlock()
 			return
@@ -486,14 +613,14 @@ func (v *Vsock) tryFlush() {
 		return
 	}
 	q := &v.core.queues[vsockQueueRx]
-	for len(v.pending) > 0 {
-		pkt := v.pending[0]
+	for v.pending.Len() != 0 {
+		pkt, _, _ := v.pending.Front()
 		// credit check for data packets
 		if pkt.hdr.op == vsockOpRW && len(pkt.payload) > 0 {
 			c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]
 			if c != nil {
-				credit := int64(c.peerBufAlloc) - int64(c.peerFwdCnt) - int64(c.txCnt)
-				if credit < int64(len(pkt.payload)) {
+				credit := c.peerCredit()
+				if uint32(len(pkt.payload)) > credit {
 					v.logf("tryFlush: stalled on credit (%d < %d)", credit, len(pkt.payload))
 					return // wait for the guest to consume
 				}
@@ -501,17 +628,22 @@ func (v *Vsock) tryFlush() {
 		}
 		head, chain, ok := v.core.availChain(vsockQueueRx)
 		if !ok {
-			v.logf("tryFlush: %d pending, no rx buffers", len(v.pending))
+			v.logf("tryFlush: %d pending, no rx buffers", v.pending.Len())
 			return // no rx buffers posted yet
 		}
 		v.logf("tryFlush: delivering op=%d len=%d", pkt.hdr.op, len(pkt.payload))
 		_, in := splitChain(chain)
-		if len(in) == 0 {
-			// a chain with no guest-writable descriptor can never carry a
-			// frame; return the descriptor and drop the packet rather than
-			// spinning on it forever.
+		frameLen := vsockHdrLen + len(pkt.payload)
+		var capacity uint64
+		for _, descriptor := range in {
+			capacity += uint64(descriptor.len)
+		}
+		if capacity < uint64(frameLen) {
+			// Never expose a truncated stream frame whose header advertises
+			// bytes that were not written. Consume the unusable descriptor but
+			// retain the packet for the next correctly sized receive buffer.
+			v.logf("tryFlush: rx descriptor too small (%d < %d)", capacity, frameLen)
 			v.core.pushUsed(q, head, 0)
-			v.pending = v.pending[1:]
 			continue
 		}
 		hdr := pkt.hdr
@@ -521,21 +653,27 @@ func (v *Vsock) tryFlush() {
 		// and the payload from desc[1] is only valid when desc[0] is
 		// exactly 44 bytes — guests post large descs, which corrupted
 		// frames (guest ttrpc server then RST the connection).
-		frame := append(hdr.marshal(), pkt.payload...)
+		if cap(v.frameStorage) < frameLen {
+			v.frameStorage = make([]byte, frameLen)
+		} else {
+			v.frameStorage = v.frameStorage[:frameLen]
+		}
+		frame := v.frameStorage
+		hdr.marshalTo(frame[:vsockHdrLen])
+		copy(frame[vsockHdrLen:], pkt.payload)
 		total, err := v.core.writeChains(in, frame)
-		if err != nil || total < vsockHdrLen {
+		if err != nil || total != uint32(frameLen) {
 			v.logf("tryFlush: write failed (%v, %d)", err, total)
-			// return the rx descriptor to the guest (otherwise it leaks)
-			// and drop the packet; the peer's next send resets the conn.
-			v.core.pushUsed(q, head, total)
-			v.pending = v.pending[1:]
+			// A partial response is not a valid vsock frame. Report no bytes
+			// and preserve the packet so a later buffer can carry it whole.
+			v.core.pushUsed(q, head, 0)
 			continue
 		}
 		if c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]; c != nil && total > vsockHdrLen {
 			c.txCnt += total - vsockHdrLen
 		}
 		v.core.pushUsed(q, head, total)
-		v.pending = v.pending[1:]
+		v.popPending()
 	}
 }
 
@@ -547,26 +685,55 @@ const vsockMaxChainBytes = vsockBufAlloc + vsockHdrLen + 1024
 
 func (v *Vsock) maxChainBytes(qn int) uint64 { return vsockMaxChainBytes }
 
+// startWorkerLocked starts a connection worker while core.mu proves Close has
+// not begun. This ordering prevents WaitGroup.Add from racing teardown's Wait.
+func (v *Vsock) startWorkerLocked(run func()) {
+	if v.closing {
+		return
+	}
+	v.workers.Add(1)
+	go func() {
+		defer v.workers.Done()
+		run()
+	}()
+}
+
 // Close tears down the host-originated listeners and every forwarded
 // connection (VM teardown; see Machine.Close). Connection teardown
 // mirrors reset(): closed-flag first so pumpOut/closeConn can't
 // double-close c.done.
 func (v *Vsock) Close() error {
-	for _, l := range v.listeners {
-		_ = l.Close()
-	}
-	if v.core == nil {
-		return nil
-	}
-	v.core.mu.Lock()
-	for k, c := range v.conns {
-		c.closed = true
-		_ = c.nc.Close()
-		close(c.done)
-		delete(v.conns, k)
-	}
-	v.core.mu.Unlock()
-	return nil
+	v.closeOnce.Do(func() {
+		if v.core == nil {
+			return
+		}
+		v.core.mu.Lock()
+		v.closing = true
+		listeners := append([]net.Listener(nil), v.listeners...)
+		v.listeners = nil
+		v.core.mu.Unlock()
+
+		var closeErrs []error
+		for _, listener := range listeners {
+			if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				closeErrs = append(closeErrs, err)
+			}
+		}
+
+		v.core.mu.Lock()
+		for key, conn := range v.conns {
+			conn.closed = true
+			if err := conn.nc.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				closeErrs = append(closeErrs, err)
+			}
+			close(conn.done)
+			delete(v.conns, key)
+		}
+		v.core.mu.Unlock()
+		v.workers.Wait()
+		v.closeErr = errors.Join(closeErrs...)
+	})
+	return v.closeErr
 }
 
 func (v *Vsock) setCore(c *Core) { v.core = c }
