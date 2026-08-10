@@ -3,6 +3,7 @@
 package gutil
 
 import (
+	"io"
 	"os"
 	"syscall"
 )
@@ -19,12 +20,22 @@ func TryLockFile(path string) (*os.File, error) {
 	return flock(path, syscall.LOCK_EX|syscall.LOCK_NB)
 }
 
-// TryLockFD takes an exclusive non-blocking flock on an already-open
-// file. The lock rides the open file description, so it survives fd
-// inheritance across fork/exec (the VMM-worker handoff) and is released
-// when the last duplicate closes.
+// TryLockFD takes both exclusive non-blocking lock forms. flock catches a
+// second open description in this process; the POSIX record lock is owned by
+// the process, so a split VMM child cannot release the trusted supervisor's
+// lock even though it inherits a descriptor for the same file.
 func TryLockFD(f *os.File) (*os.File, error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return nil, err
+	}
+	lock := syscall.Flock_t{
+		Type:   syscall.F_WRLCK,
+		Whence: int16(io.SeekStart),
+		Start:  0,
+		Len:    0,
+	}
+	if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lock); err != nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		return nil, err
 	}
 	return f, nil

@@ -3,8 +3,9 @@ package virtio
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
 	"os"
+
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // virtio-blk (device ID 2), file-backed. The boot -rootfs is exposed
@@ -33,6 +34,7 @@ type Blk struct {
 	size     uint64
 	writable bool
 	debugLog bool
+	data     []byte
 }
 
 func (b *Blk) logf(format string, a ...any) {
@@ -41,8 +43,8 @@ func (b *Blk) logf(format string, a ...any) {
 	}
 }
 
-// NewBlk opens a disk image. Writable images are flock'd for the caller's
-// lifetime: two live VMs sharing one ext4 means two guest kernels with
+// NewBlk opens a disk image. Writable images are exclusively locked for the
+// caller's lifetime: two live VMs sharing one ext4 means two guest kernels with
 // independent page caches and allocators writing the same block bitmaps —
 // the silent corruption behind "stale file handle" overlay failures.
 // The lock turns that into an immediate, honest error.
@@ -64,13 +66,24 @@ func NewBlk(path string, writable bool) (*Blk, error) {
 }
 
 // NewBlkFile attaches an already-open disk image. The descriptor (not the
-// path) is authoritative: a VMM worker receives it by inheritance and can
-// never be tricked into opening a swapped path. Writable images are
-// flock'd on the descriptor itself — the lock rides the open file
-// description across fork/exec, so the handoff stays single-writer.
+// path) is authoritative. Monolithic VMMs acquire the writable lock here;
+// split VMMs use NewBlkFilePrelocked because their trusted supervisor must
+// remain the lock owner.
 func NewBlkFile(f *os.File, writable bool) (*Blk, error) {
-	b := &Blk{debugLog: gutil.EnvOr("GANTRY_DEBUG_BLK", "MINIVM_DEBUG_BLK") != ""}
-	if writable {
+	return newBlkFile(f, writable, false)
+}
+
+// NewBlkFilePrelocked attaches a writable disk whose exclusive lock is held
+// by the trusted supervisor process. The split VMM child must not acquire the
+// lock itself: process-owned locks are deliberately not transferable or
+// releasable by the untrusted child.
+func NewBlkFilePrelocked(f *os.File, writable bool) (*Blk, error) {
+	return newBlkFile(f, writable, true)
+}
+
+func newBlkFile(f *os.File, writable, prelocked bool) (*Blk, error) {
+	b := &Blk{debugLog: os.Getenv("GANTRY_DEBUG_BLK") != ""}
+	if writable && !prelocked {
 		lock, err := gutil.TryLockFD(f)
 		if err != nil {
 			return nil, fmt.Errorf("%s is already attached to another gantry VM (a writable disk cannot be shared)", f.Name())
@@ -124,7 +137,7 @@ func (b *Blk) reset()         {}
 // virtio_blk_config: capacity @0 (u64), size_max @8, seg_max @12,
 // geometry @16, blk_size @20.
 func (b *Blk) configRead(off uint64, p []byte) {
-	cfg := make([]byte, 64)
+	var cfg [64]byte
 	binary.LittleEndian.PutUint64(cfg[0:], b.size/512) // capacity in sectors
 	binary.LittleEndian.PutUint32(cfg[8:], 0x20000)    // size_max 128KiB
 	binary.LittleEndian.PutUint32(cfg[12:], 32)        // seg_max
@@ -168,7 +181,7 @@ func (b *Blk) handleQueue(qn int) {
 			for _, d := range in[:len(in)-1] { // last "in" desc is the status byte
 				dataLen += d.len
 			}
-			buf := make([]byte, dataLen)
+			buf := b.resizeData(int(dataLen))
 			// guard sector before the *512 to rule out uint64 overflow
 			if sector > uint64(b.size)>>9 {
 				status = BlkSIOErr
@@ -215,9 +228,9 @@ func (b *Blk) handleQueue(qn int) {
 			}
 			// read-only backend: nothing to flush
 		case BlkTGetID:
-			id := make([]byte, 20)
-			copy(id, "gantry-blk")
-			if n, err := b.core.writeChains(in[:len(in)-1], id); err == nil {
+			var id [20]byte
+			copy(id[:], "gantry-blk")
+			if n, err := b.core.writeChains(in[:len(in)-1], id[:]); err == nil {
 				written = n
 			}
 		default:
@@ -227,12 +240,22 @@ func (b *Blk) handleQueue(qn int) {
 		b.logf("req type=%d sector=%d -> status=%d written=%d", reqType, sector, status, written)
 		// status byte lives in the last descriptor of the chain
 		st := in[len(in)-1]
-		if err := b.core.mem.writeAt(st.addr, []byte{status}); err != nil {
+		statusBuffer := [1]byte{status}
+		if err := b.core.mem.writeAt(st.addr, statusBuffer[:]); err != nil {
 			b.logf("status write: %v", err)
 		}
 		written++
 		b.core.pushUsed(q, head, written)
 	}
+}
+
+func (b *Blk) resizeData(size int) []byte {
+	if cap(b.data) < size {
+		b.data = make([]byte, size)
+	} else {
+		b.data = b.data[:size]
+	}
+	return b.data
 }
 
 // blkMaxChainBytes caps one request chain at seg_max (32) × size_max
