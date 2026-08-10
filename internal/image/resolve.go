@@ -57,9 +57,7 @@ func cachedRef(ref, arch string, st *Store, res *auth.Resolver, say func(string,
 		return &Resolved{Digest: digest, Path: st.ErofsPath(digest), Config: m.Config, Ref: ref, Cached: true}
 	}
 	// refDigest is what lookups compare against: the index digest for a
-	// multi-arch pull, the manifest digest for a single-arch one (legacy
-	// metas predate RefDigest — fall back to Digest, correct for the
-	// single-arch case they all are)
+	// multi-arch pull and the manifest digest for a single-arch pull.
 	refDigest := func(m *Meta) string {
 		if m.RefDigest != "" {
 			return m.RefDigest
@@ -219,9 +217,6 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 	})
 	if err != nil {
 		return nil, err
-	}
-	if p.refDigest != "" && m.RefDigest == "" {
-		st.SetRefDigest(p.digest, p.refDigest) // heal pre-RefDigest metas
 	}
 	return &Resolved{
 		Digest: p.digest,

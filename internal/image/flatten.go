@@ -190,6 +190,127 @@ func goFileMode(perm int64) fs.FileMode {
 	return m
 }
 
+type layerEmitter struct {
+	writer         *erofs.Writer
+	layers         []*os.File
+	index          *mergeIndex
+	hardlinkMisses int
+}
+
+func (e *layerEmitter) emit(name string, entry *loc) error {
+	header := &entry.hdr
+	outputPath := "/" + name
+	switch header.Typeflag {
+	case tar.TypeDir:
+		if err := e.writer.Mkdir(outputPath, 0o755); err != nil {
+			return err
+		}
+		if err := e.writer.Chmod(outputPath, goFileMode(header.Mode)); err != nil {
+			return err
+		}
+	case tar.TypeReg:
+		if err := e.emitRegular(outputPath, name, entry, header.Mode); err != nil {
+			return err
+		}
+	case tar.TypeSymlink:
+		if err := e.writer.Symlink(header.Linkname, outputPath); err != nil {
+			return err
+		}
+	case tar.TypeLink:
+		emitted, err := e.emitHardlink(outputPath, name, header)
+		if err != nil {
+			return err
+		}
+		if !emitted {
+			return nil
+		}
+	case tar.TypeChar, tar.TypeBlock, tar.TypeFifo, 's':
+		mode, ok := unixMknodMode(header.Typeflag, uint32(header.Mode))
+		if !ok {
+			return nil
+		}
+		if err := e.writer.Mknod(outputPath, mode, linuxRdev(header.Devmajor, header.Devminor)); err != nil {
+			return err
+		}
+	default:
+		return nil
+	}
+	return e.setMetadata(outputPath, header)
+}
+
+func (e *layerEmitter) emitRegular(outputPath, name string, entry *loc, mode int64) error {
+	file, err := e.writer.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(file, io.NewSectionReader(e.layers[entry.layer], entry.off, entry.size)); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if err := file.Chmod(goFileMode(mode)); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func (e *layerEmitter) emitHardlink(outputPath, name string, header *tar.Header) (bool, error) {
+	targetName, err := cleanTarName(header.Linkname)
+	if err != nil {
+		return false, err
+	}
+	target, ok := e.index.entries[targetName]
+	if !ok || target.hdr.Typeflag != tar.TypeReg {
+		e.hardlinkMisses++
+		return false, nil
+	}
+	return true, e.emitRegular(outputPath, name, target, header.Mode)
+}
+
+func (e *layerEmitter) setMetadata(outputPath string, header *tar.Header) error {
+	if err := e.writer.Chown(outputPath, header.Uid, header.Gid); err != nil {
+		return err
+	}
+	modified := header.ModTime
+	if modified.IsZero() {
+		modified = time.Unix(0, 0)
+	}
+	if err := e.writer.Chtimes(outputPath, modified, modified); err != nil {
+		return err
+	}
+	for key, value := range header.PAXRecords {
+		attribute, ok := strings.CutPrefix(key, "SCHILY.xattr.")
+		if ok {
+			if err := e.writer.Setxattr(outputPath, attribute, value); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type orderedPath struct {
+	name  string
+	depth int
+}
+
+func (idx *mergeIndex) livePathsByDepth() []orderedPath {
+	paths := make([]orderedPath, 0, len(idx.entries))
+	seen := make(map[string]struct{}, len(idx.entries))
+	for _, name := range idx.order {
+		if _, live := idx.entries[name]; !live {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		paths = append(paths, orderedPath{name: name, depth: strings.Count(name, "/")})
+	}
+	sort.SliceStable(paths, func(i, j int) bool { return paths[i].depth < paths[j].depth })
+	return paths
+}
+
 // flattenLayers merges layers into w. Returns the index (the caller
 // reads /etc/passwd + /etc/group from it for image-user resolution).
 func flattenLayers(w *erofs.Writer, layers []*os.File, logf func(string, ...any)) (*mergeIndex, error) {
@@ -208,136 +329,22 @@ func flattenLayers(w *erofs.Writer, layers []*os.File, logf func(string, ...any)
 		return nil, err
 	}
 
-	emitted := map[string]bool{}
-	var hardlinkMisses int
-	emit := func(name string, l *loc) error {
-		if emitted[name] {
-			return nil
-		}
-		emitted[name] = true
-		hdr := &l.hdr
-		p := "/" + name
-		setMeta := func() error {
-			if err := w.Chown(p, hdr.Uid, hdr.Gid); err != nil {
-				return err
-			}
-			mt := hdr.ModTime
-			if mt.IsZero() {
-				mt = time.Unix(0, 0)
-			}
-			if err := w.Chtimes(p, mt, mt); err != nil {
-				return err
-			}
-			for k, v := range hdr.PAXRecords {
-				if attr, ok := strings.CutPrefix(k, "SCHILY.xattr."); ok {
-					if err := w.Setxattr(p, attr, v); err != nil {
-						return err
-					}
-				}
-			}
-			return nil
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := w.Mkdir(p, 0o755); err != nil {
-				return err
-			}
-			if err := w.Chmod(p, goFileMode(hdr.Mode)); err != nil {
-				return err
-			}
-			return setMeta()
-		case tar.TypeReg:
-			f, err := w.Create(p)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, io.NewSectionReader(layers[l.layer], l.off, l.size)); err != nil {
-				_ = f.Close()
-				return fmt.Errorf("%s: %w", name, err)
-			}
-			if err := f.Chmod(goFileMode(hdr.Mode)); err != nil {
-				_ = f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			return setMeta()
-		case tar.TypeSymlink:
-			if err := w.Symlink(hdr.Linkname, p); err != nil {
-				return err
-			}
-			return setMeta()
-		case tar.TypeLink:
-			// hardlink: materialize as a copy of the target's data —
-			// fs.FS has no hardlink concept and neither does the writer.
-			tname, err := cleanTarName(hdr.Linkname)
-			if err != nil {
-				return err
-			}
-			tgt, ok := idx.entries[tname]
-			if !ok || tgt.hdr.Typeflag != tar.TypeReg {
-				hardlinkMisses++
-				return nil
-			}
-			f, err := w.Create(p)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, io.NewSectionReader(layers[tgt.layer], tgt.off, tgt.size)); err != nil {
-				_ = f.Close()
-				return err
-			}
-			if err := f.Chmod(goFileMode(hdr.Mode)); err != nil {
-				_ = f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			return setMeta()
-		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo, 's':
-			mode, ok := unixMknodMode(hdr.Typeflag, uint32(hdr.Mode))
-			if !ok {
-				return nil
-			}
-			if err := w.Mknod(p, mode, linuxRdev(hdr.Devmajor, hdr.Devminor)); err != nil {
-				return err
-			}
-			return setMeta()
-		default:
-			// TypeGNUSparse, TypeXGlobalHeader etc.: nothing to emit
-			return nil
-		}
-	}
-
 	// Emit in depth order (parents before children, first-seen order
 	// within a depth): the writer's ensureParent auto-creates missing
 	// parents (root-owned 0755, at most once), and checkPath ERRORS on
 	// duplicate paths — so every explicit directory must be created
 	// before any entry beneath it, or a later explicit Mkdir on an
 	// auto-created parent would fail with "duplicate path".
-	// parents strictly before children, first-seen order within a depth:
-	// stable sort over the insertion order with a precomputed key (the
-	// old exchange sort was O(n^2) and unstable — seconds of pure CPU on
-	// a 25k-entry image)
-	order := append([]string{}, idx.order...)
-	depths := make(map[string]int, len(order))
-	for _, p := range order {
-		depths[p] = strings.Count(p, "/")
-	}
-	sort.SliceStable(order, func(i, j int) bool { return depths[order[i]] < depths[order[j]] })
-	for _, name := range order {
-		l, ok := idx.entries[name]
-		if !ok {
-			continue // shadowed by a later whiteout
-		}
-		if err := emit(name, l); err != nil {
+	// paths are deduplicated before sorting, avoiding both the old O(n^2)
+	// exchange sort and a second full path-keyed map.
+	emitter := layerEmitter{writer: w, layers: layers, index: idx}
+	for _, path := range idx.livePathsByDepth() {
+		if err := emitter.emit(path.name, idx.entries[path.name]); err != nil {
 			return nil, err
 		}
 	}
-	if hardlinkMisses > 0 && logf != nil {
-		logf("flatten: %d hardlink(s) with unresolvable targets skipped", hardlinkMisses)
+	if emitter.hardlinkMisses > 0 && logf != nil {
+		logf("flatten: %d hardlink(s) with unresolvable targets skipped", emitter.hardlinkMisses)
 	}
 	return idx, nil
 }

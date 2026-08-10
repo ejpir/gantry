@@ -1,6 +1,7 @@
 package image
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,10 +11,51 @@ import (
 	"testing"
 )
 
+func TestRemovePersistsIndexBeforeDeletingContent(t *testing.T) {
+	s := NewStore(t.TempDir())
+	if err := os.MkdirAll(s.root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("d", 64)
+	ref := "registry.example/app:latest"
+	for _, path := range []string{s.ErofsPath(digest), s.metaPath(digest), s.lockPath(digest)} {
+		if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.writeIndex(map[string]string{refKey(ref, "arm64"): digest}); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("index write failed")
+	s.writeIndexHook = func(map[string]string) error { return wantErr }
+	if err := s.Remove(ref); !errors.Is(err, wantErr) {
+		t.Fatalf("Remove error = %v, want %v", err, wantErr)
+	}
+	for _, path := range []string{s.ErofsPath(digest), s.metaPath(digest), s.lockPath(digest)} {
+		if !fileExists(path) {
+			t.Fatalf("%s was deleted before the index committed", path)
+		}
+	}
+	if got, ok := s.LookupRef(ref, "arm64"); !ok || got != digest {
+		t.Fatalf("index after failed removal = %q, %t", got, ok)
+	}
+
+	s.writeIndexHook = nil
+	if err := s.Remove(ref); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LookupRef(ref, "arm64"); ok {
+		t.Fatal("successful removal retained the index entry")
+	}
+	for _, path := range []string{s.ErofsPath(digest), s.metaPath(digest), s.lockPath(digest)} {
+		if fileExists(path) {
+			t.Fatalf("successful removal retained %s", path)
+		}
+	}
+}
+
 // Concurrent builds of DIFFERENT digests must not lose each other's
-// index entries or delete each other's temp files (review finding 4:
-// the store used one shared index.json.tmp and deleted every *.erofs.tmp
-// before taking any lock).
+// index entries or delete each other's temp files.
 func TestStoreConcurrentEnsure(t *testing.T) {
 	s := NewStore(t.TempDir())
 	const n = 8
@@ -60,13 +102,13 @@ func TestCleanDigestLitterScoped(t *testing.T) {
 	s := NewStore(t.TempDir())
 	a := digestFile("sha256:"+strings.Repeat("a", 64)) + ".erofs"
 	b := digestFile("sha256:"+strings.Repeat("b", 64)) + ".erofs"
-	for _, n := range []string{a + ".12345.tmp", a + ".tmp", b + ".99999.tmp"} {
+	for _, n := range []string{a + ".12345.tmp", b + ".99999.tmp"} {
 		if err := os.WriteFile(filepath.Join(s.root, n), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	s.cleanDigestLitter("sha256:" + strings.Repeat("a", 64))
-	for _, n := range []string{a + ".12345.tmp", a + ".tmp"} {
+	for _, n := range []string{a + ".12345.tmp"} {
 		if fileExists(filepath.Join(s.root, n)) {
 			t.Errorf("stale temp %s survived digest-scoped cleanup", n)
 		}
@@ -106,17 +148,6 @@ func TestStorePermissions(t *testing.T) {
 		if m := mode(p); m != 0o600 {
 			t.Errorf("%s mode %o, want 600", filepath.Base(p), m)
 		}
-	}
-
-	// migration: pre-hardening 0644/0755 caches are tightened on use
-	if err := os.Chmod(s.ErofsPath(digest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ensure(digest, nil); err != nil { // cached path: no build
-		t.Fatal(err)
-	}
-	if m := mode(s.ErofsPath(digest)); m != 0o600 {
-		t.Errorf("legacy 0644 image not tightened, mode %o", m)
 	}
 }
 

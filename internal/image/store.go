@@ -2,12 +2,14 @@ package image
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/gutil"
 )
 
@@ -37,7 +39,8 @@ func refKey(ref, arch string) string { return ref + "/" + arch }
 
 // Store is the image cache root.
 type Store struct {
-	root string
+	root           string
+	writeIndexHook func(map[string]string) error
 }
 
 // DefaultStore is ~/.gantry/images (GANTRY_IMAGES overrides, mainly for
@@ -87,16 +90,10 @@ func (s *Store) ReadMeta(digest string) (*Meta, error) {
 	return &m, nil
 }
 
-// LookupRef resolves ref+arch to a cached digest via index.json. The
-// arch-keyed slot wins; a legacy bare-ref slot is returned too (the
-// caller still verifies Meta.Arch).
+// LookupRef resolves ref+arch to a cached digest via index.json.
 func (s *Store) LookupRef(ref, arch string) (string, bool) {
-	idx := s.readIndex()
-	if d, ok := idx[refKey(ref, arch)]; ok {
-		return d, true
-	}
-	d, ok := idx[ref]
-	return d, ok
+	digest, ok := s.readIndex()[refKey(ref, arch)]
+	return digest, ok
 }
 
 func (s *Store) readIndex() map[string]string {
@@ -114,28 +111,17 @@ func (s *Store) readIndex() map[string]string {
 }
 
 func (s *Store) writeIndex(refs map[string]string) error {
+	if s.writeIndexHook != nil {
+		return s.writeIndexHook(refs)
+	}
 	b, err := json.MarshalIndent(struct {
 		Refs map[string]string `json:"refs"`
 	}{refs}, "", "  ")
 	if err != nil {
 		return err
 	}
-	// Unique temp + rename: a shared index.json.tmp let two concurrent
-	// transactions clobber each other's rewrite (review finding 4).
-	// 0600: ref metadata can name private registries (review finding 6).
-	tmp, err := os.CreateTemp(s.root, "index.json.*.tmp")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), filepath.Join(s.root, "index.json"))
+	// Ref metadata can name private registries, so it remains mode 0600.
+	return atomicfile.WriteFileDurable(filepath.Join(s.root, "index.json"), b, 0o600)
 }
 
 // indexTransaction serializes index.json read-modify-write cycles across
@@ -154,13 +140,9 @@ func (s *Store) indexTransaction(fn func() error) error {
 	return fn()
 }
 
-// cleanDigestLitter removes leftover temp outputs for ONE digest —
-// Build's unique <digest>.erofs.<random>.tmp files plus the legacy
-// fixed <digest>.erofs.tmp. It runs only under that digest's build
-// lock, so no live build can own the files it deletes. (The old
-// cleanCrashLitter deleted every temp in the store BEFORE taking any
-// lock — including another process's in-progress build for a different
-// digest. Review finding 4.)
+// cleanDigestLitter removes leftover temp outputs for one digest. It runs only
+// under that digest's build lock, so no live build can own the files it
+// deletes.
 func (s *Store) cleanDigestLitter(digest string) {
 	base := digestFile(digest) + ".erofs"
 	ents, err := os.ReadDir(s.root)
@@ -169,25 +151,8 @@ func (s *Store) cleanDigestLitter(digest string) {
 	}
 	for _, e := range ents {
 		n := e.Name()
-		if n == base+".tmp" || (strings.HasPrefix(n, base+".") && strings.HasSuffix(n, ".tmp")) {
+		if strings.HasPrefix(n, base+".") && strings.HasSuffix(n, ".tmp") {
 			_ = os.Remove(filepath.Join(s.root, n))
-		}
-	}
-}
-
-// tightenPerms migrates pre-hardening caches: image content and metadata
-// (private registry layers, OCI env) are 0600/0700 now, but stores built
-// by older gantry versions carry 0644/0755 (review finding 6).
-// Best-effort; called from ensure.
-func (s *Store) tightenPerms() {
-	_ = os.Chmod(s.root, 0o700)
-	ents, err := os.ReadDir(s.root)
-	if err != nil {
-		return
-	}
-	for _, e := range ents {
-		if n := e.Name(); strings.HasSuffix(n, ".erofs") || strings.HasSuffix(n, ".json") {
-			_ = os.Chmod(filepath.Join(s.root, n), 0o600)
 		}
 	}
 }
@@ -200,11 +165,15 @@ func (s *Store) ensure(digest string, build func(outPath string) (*Meta, error))
 	if err := os.MkdirAll(s.root, 0o700); err != nil {
 		return nil, err
 	}
-	s.tightenPerms()
+	if err := os.Chmod(s.root, 0o700); err != nil {
+		return nil, fmt.Errorf("secure image store: %w", err)
+	}
 	if m, err := s.ReadMeta(digest); err == nil {
 		if gutil.FileExists(s.ErofsPath(digest)) {
-			_ = s.indexRef(m, digest) // migrate legacy arch-less entries
-			return m, nil             // cached
+			if err := s.indexRef(m, digest); err != nil {
+				return nil, err
+			}
+			return m, nil
 		}
 	}
 	lock, err := gutil.LockFile(s.lockPath(digest))
@@ -214,6 +183,9 @@ func (s *Store) ensure(digest string, build func(outPath string) (*Meta, error))
 	defer func() { _ = lock.Close() }()
 	// re-check under the lock
 	if m, err := s.ReadMeta(digest); err == nil && gutil.FileExists(s.ErofsPath(digest)) {
+		if err := s.indexRef(m, digest); err != nil {
+			return nil, err
+		}
 		return m, nil
 	}
 	// Only this digest's own temp files, and only under its lock.
@@ -222,8 +194,11 @@ func (s *Store) ensure(digest string, build func(outPath string) (*Meta, error))
 	if err != nil {
 		return nil, err
 	}
-	b, _ := json.MarshalIndent(m, "", "  ")
-	if err := os.WriteFile(s.metaPath(digest), b, 0o600); err != nil {
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := atomicfile.WriteFileDurable(s.metaPath(digest), b, 0o600); err != nil {
 		return nil, err
 	}
 	if err := s.indexRef(m, digest); err != nil {
@@ -232,45 +207,18 @@ func (s *Store) ensure(digest string, build func(outPath string) (*Meta, error))
 	return m, nil
 }
 
-// indexRef records ref+arch -> digest, dropping the legacy arch-less
-// slot for the same ref. Runs inside the global index transaction lock
-// so concurrent builds of different digests can't lose each other's
-// entries.
+// indexRef records ref+arch -> digest. It runs inside the global index
+// transaction lock so concurrent builds of different digests cannot lose
+// each other's entries.
 func (s *Store) indexRef(m *Meta, digest string) error {
 	return s.indexTransaction(func() error {
 		refs := s.readIndex()
 		if refs[refKey(m.Ref, m.Arch)] == digest {
 			return nil
 		}
-		delete(refs, m.Ref)
 		refs[refKey(m.Ref, m.Arch)] = digest
 		return s.writeIndex(refs)
 	})
-}
-
-// SetRefDigest backfills Meta.RefDigest for an image pulled before the
-// field existed: without it a multi-arch tag's HEAD compare can never
-// match and every pull re-fetches manifests.
-func (s *Store) SetRefDigest(digest, refDigest string) {
-	m, err := s.ReadMeta(digest)
-	if err != nil || m.RefDigest != "" {
-		return
-	}
-	m.RefDigest = refDigest
-	if b, err := json.MarshalIndent(m, "", "  "); err == nil {
-		// tmp + rename: a torn write here would corrupt the metadata a
-		// concurrent reader is parsing.
-		tmp, err := os.CreateTemp(s.root, digestFile(digest)+".*.tmp")
-		if err != nil {
-			return
-		}
-		defer func() { _ = os.Remove(tmp.Name()) }()
-		if _, err := tmp.Write(b); err == nil {
-			if err := tmp.Close(); err == nil {
-				_ = os.Rename(tmp.Name(), s.metaPath(digest))
-			}
-		}
-	}
 }
 
 // List returns every cached image's metadata.
@@ -311,17 +259,27 @@ func (s *Store) Remove(refOrDigest string) error {
 		if len(digests) == 0 {
 			return fmt.Errorf("no cached image for %q", refOrDigest)
 		}
-		for d := range digests {
-			_ = os.Remove(s.ErofsPath(d))
-			_ = os.Remove(s.metaPath(d))
-			_ = os.Remove(s.lockPath(d))
-		}
 		for k, d := range refs {
 			if digests[d] {
 				delete(refs, k)
 			}
 		}
-		return s.writeIndex(refs)
+		// The index is authoritative: remove its references before deleting
+		// content. If persistence fails, every old reference still has all of
+		// its files; a successful index update followed by a cleanup failure
+		// leaves only harmless unreferenced data.
+		if err := s.writeIndex(refs); err != nil {
+			return err
+		}
+		var cleanupErr error
+		for d := range digests {
+			for _, path := range []string{s.ErofsPath(d), s.metaPath(d), s.lockPath(d)} {
+				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove %s: %w", path, err))
+				}
+			}
+		}
+		return cleanupErr
 	})
 }
 

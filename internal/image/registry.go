@@ -66,7 +66,7 @@ const manifestAccept = "application/vnd.oci.image.manifest.v1+json, " +
 func newRegistryClient(reg string, cred *auth.Credential, logf func(string, ...any)) *registryClient {
 	c := &registryClient{
 		reg: reg, cred: cred, logf: logf,
-		debug:  gutil.EnvOr("GANTRY_DEBUG_REGISTRY") != "",
+		debug:  os.Getenv("GANTRY_DEBUG_REGISTRY") != "",
 		tokens: map[string]*bearerToken{},
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()

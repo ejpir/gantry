@@ -2,12 +2,15 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/ejpir/gantry/internal/atomicfile"
 )
 
 // withHome points the resolver at a synthetic HOME.
@@ -175,5 +178,70 @@ func TestStorePlaintextFallbackWarns(t *testing.T) {
 	}
 	if c := Resolve().For("ghcr.io"); c != nil {
 		t.Error("erase left a credential")
+	}
+}
+
+func TestStoreReloadsCredentialsUnderLock(t *testing.T) {
+	withHome(t)
+	first, second := Resolve(), Resolve()
+	if _, err := first.Store("one.example", "one", Secret("first")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Store("two.example", "two", Secret("second")); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Resolve()
+	for registry, username := range map[string]string{
+		"one.example": "one",
+		"two.example": "two",
+	} {
+		credential := got.For(registry)
+		if credential == nil || credential.Username != username {
+			t.Fatalf("%s credential = %+v, want user %q", registry, credential, username)
+		}
+	}
+
+	// Erasing through a stale resolver must preserve the other process's
+	// later addition rather than rewriting its old in-memory snapshot.
+	if err := first.Erase("one.example"); err != nil {
+		t.Fatal(err)
+	}
+	got = Resolve()
+	if got.For("one.example") != nil {
+		t.Fatal("erased credential remains")
+	}
+	if credential := got.For("two.example"); credential == nil || credential.Username != "two" {
+		t.Fatalf("concurrent credential was lost: %+v", credential)
+	}
+}
+
+func TestResolverRefreshesCacheAfterCommittedDurabilityError(t *testing.T) {
+	withHome(t)
+	r := Resolve()
+	wantErr := errors.New("directory sync failed")
+	r.writeFile = func(path string, data []byte, mode os.FileMode) error {
+		if err := os.WriteFile(path, data, mode); err != nil {
+			return err
+		}
+		return &atomicfile.CommitError{Err: wantErr}
+	}
+
+	warning, err := r.Store("registry.example", "user", Secret("secret"))
+	if !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
+		t.Fatalf("Store error = %v, want committed durability error", err)
+	}
+	if warning == "" {
+		t.Fatal("committed plaintext store lost its security warning")
+	}
+	if credential := r.For("registry.example"); credential == nil || credential.Username != "user" {
+		t.Fatalf("resolver cache did not adopt committed credential: %+v", credential)
+	}
+
+	if err := r.Erase("registry.example"); !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
+		t.Fatalf("Erase error = %v, want committed durability error", err)
+	}
+	if credential := r.For("registry.example"); credential != nil {
+		t.Fatalf("resolver cache retained committed erase: %+v", credential)
 	}
 }

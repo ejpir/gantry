@@ -65,8 +65,7 @@ func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...
 	if err := os.Rename(tmp, outPath); err != nil {
 		return 0, err
 	}
-	// CreateTemp's 0600 survives the rename; assert it for images built
-	// by an older gantry and re-verified here.
+	// CreateTemp's 0600 survives the rename; assert the final mode explicitly.
 	_ = os.Chmod(outPath, 0o600)
 	return len(idx.entries), nil
 }

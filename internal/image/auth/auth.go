@@ -11,11 +11,15 @@ package auth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // Secret is a credential whose value cannot leak into logs: String and
@@ -58,6 +62,15 @@ type Resolver struct {
 	podmanCfgs  []*dockerConfig
 	envCreds    map[string]*Credential
 	parseErrors []error // found-but-unparseable config files
+	writeFile   func(string, []byte, os.FileMode) error
+}
+
+func (r *Resolver) writeGantryConfig(data []byte) error {
+	write := r.writeFile
+	if write == nil {
+		write = atomicfile.WriteFileDurable
+	}
+	return write(r.gantryPath, data, 0o600)
 }
 
 var (
@@ -116,7 +129,10 @@ func (r *Resolver) ParseErrors() []error { return r.parseErrors }
 func readConfig(path string) (*dockerConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	var c dockerConfig
 	if err := json.Unmarshal(b, &c); err != nil {
@@ -228,13 +244,27 @@ func (r *Resolver) fromHelper(helper, serverURL string) *Credential {
 // base64 in gantry's own credentials.json (mode 0600). Returns a warning
 // for the plaintext path — base64 is encoding, not encryption, and the
 // user should hear it.
-func (r *Resolver) Store(registry, username string, secret Secret) (warning string, err error) {
+func (r *Resolver) Store(registry, username string, secret Secret) (warning string, resultErr error) {
 	key := normalize(registry)
 	if helper := r.configuredHelper(key); helper != "" {
 		err := storeViaHelper(helper, key, username, secret)
 		return "", err
 	}
-	cfg := r.gantryCfg
+	if err := os.MkdirAll(filepath.Dir(r.gantryPath), 0o700); err != nil {
+		return "", err
+	}
+	lock, err := gutil.LockFile(r.gantryPath + ".lock")
+	if err != nil {
+		return "", fmt.Errorf("lock credentials: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+
+	// Reload under the inter-process lock. A Resolver may live long enough
+	// for another CLI process to update the file after Resolve returned.
+	cfg, err := readConfig(r.gantryPath)
+	if err != nil {
+		return "", err
+	}
 	if cfg == nil {
 		cfg = &dockerConfig{Auths: map[string]struct {
 			Auth          string `json:"auth"`
@@ -249,34 +279,58 @@ func (r *Resolver) Store(registry, username string, secret Secret) (warning stri
 	}
 	entry := cfg.Auths[key]
 	entry.Auth = base64.StdEncoding.EncodeToString([]byte(username + ":" + secret.Raw()))
+	entry.IdentityToken = ""
 	cfg.Auths[key] = entry
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(r.gantryPath), 0o700); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(r.gantryPath, b, 0o600); err != nil {
-		return "", err
+	warning = "no docker-credential-* helper configured: stored base64-encoded in ~/.gantry/credentials.json (0600) — base64 is encoding, not encryption"
+	if err := r.writeGantryConfig(b); err != nil {
+		if atomicfile.Committed(err) {
+			r.gantryCfg = cfg
+		}
+		return warning, err
 	}
 	r.gantryCfg = cfg
-	return "no docker-credential-* helper configured: stored base64-encoded in ~/.gantry/credentials.json (0600) — base64 is encoding, not encryption", nil
+	return warning, nil
 }
 
 // Erase removes a credential (helper erase, then our file).
-func (r *Resolver) Erase(registry string) error {
+func (r *Resolver) Erase(registry string) (resultErr error) {
 	key := normalize(registry)
 	if helper := r.configuredHelper(key); helper != "" {
 		_ = eraseViaHelper(helper, key) // best-effort; the helper may not know it
 	}
-	if r.gantryCfg != nil {
-		delete(r.gantryCfg.Auths, key)
-		b, err := json.MarshalIndent(r.gantryCfg, "", "  ")
-		if err == nil {
-			_ = os.WriteFile(r.gantryPath, b, 0o600)
-		}
+	if err := os.MkdirAll(filepath.Dir(r.gantryPath), 0o700); err != nil {
+		return err
 	}
+	lock, err := gutil.LockFile(r.gantryPath + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock credentials: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
+
+	cfg, err := readConfig(r.gantryPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		r.gantryCfg = nil
+		return nil
+	}
+	delete(cfg.Auths, key)
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := r.writeGantryConfig(b); err != nil {
+		if atomicfile.Committed(err) {
+			r.gantryCfg = cfg
+		}
+		return err
+	}
+	r.gantryCfg = cfg
 	return nil
 }
 
