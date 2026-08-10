@@ -59,7 +59,25 @@ func (p *pit8254) ioRead(port uint16) byte {
 	idx := int(port - 0x40)
 	if idx < 0 || idx > 2 {
 		if port == 0x61 {
-			return p.nmi61
+			// Bit 5 (OUT2) is live state, not a shadow: early TSC
+			// calibration runs channel 2 in one-shot mode and polls
+			// this bit until the count expires. KVM's in-kernel PIT
+			// covers this on Linux; on WHPX we must model it.
+			v := p.nmi61 &^ 0x20
+			c := &p.ch[2]
+			if c.running && c.reload != 0 {
+				ticks := uint64(time.Since(c.start).Nanoseconds()) * pitClockHz / 1e9
+				expired := false
+				if c.mode == 0 || c.mode == 4 { // one-shot: OUT high at terminal count
+					expired = ticks >= uint64(c.reload)
+				} else { // periodic: high for the second half of each cycle
+					expired = ticks%uint64(c.reload) >= uint64(c.reload)/2
+				}
+				if expired {
+					v |= 0x20
+				}
+			}
+			return v
 		}
 		return 0xff
 	}
@@ -94,6 +112,7 @@ func (p *pit8254) ioWrite(port uint16, val byte) {
 		c.running = false
 		if p.cancel != nil && idx == 0 {
 			p.cancel()
+			p.cancel = nil
 		}
 		return
 	}
