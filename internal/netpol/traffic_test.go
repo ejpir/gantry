@@ -108,7 +108,7 @@ func TestTrafficRecorderResumesSnapshot(t *testing.T) {
 	}
 }
 
-func TestSyncSnapshot(t *testing.T) {
+func TestTrafficEpochMergesCumulativeSnapshots(t *testing.T) {
 	now := time.Now()
 	worker := TrafficSnapshot{
 		Version: trafficSnapshotVersion, Updated: now,
@@ -121,7 +121,8 @@ func TestSyncSnapshot(t *testing.T) {
 		},
 	}
 	sup := NewTrafficRecorder("")
-	sup.SyncSnapshot(worker)
+	epoch := sup.BeginEpoch()
+	epoch.Merge(worker)
 	got := sup.Snapshot()
 	if got.TXBytes != 1000 || got.DroppedPackets != 2 {
 		t.Fatalf("top-level counters: %+v", got)
@@ -133,7 +134,7 @@ func TestSyncSnapshot(t *testing.T) {
 	stale := worker
 	stale.TXBytes = 10
 	stale.Entries[0].TXBytes = 1
-	sup.SyncSnapshot(stale)
+	epoch.Merge(stale)
 	got = sup.Snapshot()
 	if got.TXBytes != 1000 {
 		t.Fatalf("stale pull shrank TXBytes: %+v", got)
@@ -149,13 +150,50 @@ func TestSyncSnapshot(t *testing.T) {
 	// A later pull advances counters.
 	later := worker
 	later.TXBytes = 2000
-	sup.SyncSnapshot(later)
+	epoch.Merge(later)
 	if got := sup.Snapshot(); got.TXBytes != 2000 {
 		t.Fatalf("later pull did not advance: %+v", got)
 	}
 }
 
-func TestSyncSnapshotCapsRotatingWorkerEntries(t *testing.T) {
+func TestTrafficEpochAccumulatesRestartsAndFinalSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), TrafficFileName)
+	first := NewTrafficRecorder(path)
+	firstEpoch := first.BeginEpoch()
+	firstEpoch.Merge(TrafficSnapshot{
+		Version: trafficSnapshotVersion,
+		TXBytes: 100, TXPackets: 10,
+	})
+	first.Close()
+
+	// A new supervisor recorder resumes the persisted lifetime aggregate,
+	// while a new worker gets a fresh epoch whose counters start at zero.
+	second := NewTrafficRecorder(path)
+	secondEpoch := second.BeginEpoch()
+	secondEpoch.Merge(TrafficSnapshot{
+		Version: trafficSnapshotVersion,
+		TXBytes: 40, TXPackets: 4,
+	})
+	// The final lifecycle response is cumulative for this boot. Only its
+	// delta from the periodic pull is added, and replaying it is a no-op.
+	final := TrafficSnapshot{
+		Version: trafficSnapshotVersion,
+		TXBytes: 90, TXPackets: 9,
+	}
+	secondEpoch.Merge(final)
+	secondEpoch.Merge(final)
+	second.Close()
+
+	got, err := ReadTrafficSnapshot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TXBytes != 190 || got.TXPackets != 19 {
+		t.Fatalf("persisted lifetime totals = %+v, want 190 bytes in 19 packets", got)
+	}
+}
+
+func TestTrafficEpochCapsRotatingWorkerEntries(t *testing.T) {
 	now := time.Now()
 	entry := func(prefix string, i int) TrafficEntry {
 		return TrafficEntry{
@@ -166,11 +204,12 @@ func TestSyncSnapshotCapsRotatingWorkerEntries(t *testing.T) {
 	}
 	recorder := NewTrafficRecorder("")
 	defer recorder.Close()
+	epoch := recorder.BeginEpoch()
 	first := TrafficSnapshot{Version: trafficSnapshotVersion, Entries: make([]TrafficEntry, maxTrafficEntries+64)}
 	for i := range first.Entries {
 		first.Entries[i] = entry("first", i)
 	}
-	recorder.SyncSnapshot(first)
+	epoch.Merge(first)
 	if got := len(recorder.Snapshot().Entries); got != maxTrafficEntries {
 		t.Fatalf("first merge retained %d entries, want %d", got, maxTrafficEntries)
 	}
@@ -183,15 +222,18 @@ func TestSyncSnapshotCapsRotatingWorkerEntries(t *testing.T) {
 	for i := 0; i < maxTrafficEntries; i++ {
 		second.Entries = append(second.Entries, entry("second", i))
 	}
-	recorder.SyncSnapshot(second)
+	epoch.Merge(second)
 	rotated := TrafficSnapshot{Version: trafficSnapshotVersion, Entries: make([]TrafficEntry, maxTrafficEntries)}
 	for i := range rotated.Entries {
 		rotated.Entries[i] = entry("rotated", i)
 	}
-	recorder.SyncSnapshot(rotated)
+	epoch.Merge(rotated)
 	got := recorder.Snapshot()
 	if len(got.Entries) != maxTrafficEntries {
 		t.Fatalf("rotating merges retained %d entries, want %d", len(got.Entries), maxTrafficEntries)
+	}
+	if len(epoch.entries) != maxTrafficEntries {
+		t.Fatalf("epoch retained %d watermarks, want bounded %d", len(epoch.entries), maxTrafficEntries)
 	}
 	var found bool
 	for _, e := range got.Entries {
@@ -207,18 +249,19 @@ func TestSyncSnapshotCapsRotatingWorkerEntries(t *testing.T) {
 	}
 }
 
-func TestSyncSnapshotValidatesWorkerTelemetry(t *testing.T) {
+func TestTrafficEpochValidatesWorkerTelemetry(t *testing.T) {
 	recorder := NewTrafficRecorder("")
 	defer recorder.Close()
+	epoch := recorder.BeginEpoch()
 	valid := TrafficEntry{Host: "example.com", Address: "192.0.2.1", Protocol: "tcp", Port: 443}
-	recorder.SyncSnapshot(TrafficSnapshot{
+	epoch.Merge(TrafficSnapshot{
 		Version: trafficSnapshotVersion + 1, TXPackets: 99, Entries: []TrafficEntry{valid},
 	})
 	if got := recorder.Snapshot(); got.TXPackets != 0 || len(got.Entries) != 0 {
 		t.Fatalf("wrong-version worker snapshot was merged: %+v", got)
 	}
 
-	recorder.SyncSnapshot(TrafficSnapshot{
+	epoch.Merge(TrafficSnapshot{
 		Version: trafficSnapshotVersion, TXPackets: 7,
 		Entries: []TrafficEntry{
 			{Host: strings.Repeat("h", maxTrafficHostBytes+1), Address: "192.0.2.2", Protocol: "tcp"},

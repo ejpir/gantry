@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/miekg/dns"
 )
 
@@ -82,6 +82,33 @@ type TrafficRecorder struct {
 	closeOnce sync.Once
 }
 
+// TrafficEpoch merges cumulative snapshots from one remote recorder into a
+// lifetime TrafficRecorder. A worker reports counters from zero on every
+// boot, while the supervisor recorder survives those boots on disk. Keeping
+// the watermark in this trusted, per-worker object makes repeated periodic
+// and final snapshots idempotent without trusting an epoch identifier supplied
+// by the worker.
+//
+// Begin a new epoch for every new worker process and reuse it for every
+// snapshot from that process.
+type TrafficEpoch struct {
+	recorder *TrafficRecorder
+	previous trafficCounters
+	entries  map[string]trafficEntryCounters
+	mu       sync.Mutex
+}
+
+type trafficCounters struct {
+	txBytes, rxBytes             uint64
+	txPackets, rxPackets         uint64
+	droppedBytes, droppedPackets uint64
+}
+
+type trafficEntryCounters struct {
+	txBytes, rxBytes     uint64
+	txPackets, rxPackets uint64
+}
+
 // NewTrafficRecorder starts a recorder at path. A valid previous snapshot is
 // resumed so stop/start cycles retain the sandbox's traffic history.
 func NewTrafficRecorder(path string) *TrafficRecorder {
@@ -92,6 +119,12 @@ func NewTrafficRecorder(path string) *TrafficRecorder {
 		dnsNames: make(map[[4]byte]trafficDNSName),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+	}
+	if path == "" {
+		// Confined workers use an in-memory recorder and expose snapshots over
+		// RPC. Avoid a writer goroutine and ticker when there is no sink.
+		close(r.done)
+		return r
 	}
 	r.load()
 	// Publish an empty marker immediately. The TUI uses its presence to
@@ -168,30 +201,42 @@ func (r *TrafficRecorder) Close() {
 	<-r.done
 }
 
-// SyncSnapshot merges another recorder's snapshot into this one. Worker
-// confinement means enforcement counters accumulate in the confined
-// process (which owns no host paths); the supervisor pulls snapshots
-// over RPC and merges them here. Counters are monotonic from boot, so
-// the merge takes the max per counter (retries and restarts never
-// double-count), the earliest FirstSeen and the latest LastSeen.
-func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
-	if r == nil || other.Version != trafficSnapshotVersion {
+// BeginEpoch starts accumulation for one remote recorder lifetime. The epoch
+// holds only bounded counter watermarks; the destination recorder owns the
+// aggregate entries and persistence.
+func (r *TrafficRecorder) BeginEpoch() *TrafficEpoch {
+	if r == nil {
+		return nil
+	}
+	return &TrafficEpoch{
+		recorder: r,
+		entries:  make(map[string]trafficEntryCounters),
+	}
+}
+
+// Merge advances this epoch to other. Remote snapshots are cumulative within
+// an epoch, so only monotonic deltas are added to the recorder's lifetime
+// totals. Replays and stale snapshots add nothing; a new worker gets a new
+// epoch and therefore contributes its counters from zero.
+func (epoch *TrafficEpoch) Merge(other TrafficSnapshot) {
+	if epoch == nil || epoch.recorder == nil || other.Version != trafficSnapshotVersion {
 		return
 	}
+	epoch.mu.Lock()
+	defer epoch.mu.Unlock()
+
+	r := epoch.recorder
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	maxU64 := func(a, b uint64) uint64 {
-		if b > a {
-			return b
-		}
-		return a
+
+	next := snapshotCounters(other)
+	delta := next.delta(epoch.previous)
+	epoch.previous = epoch.previous.max(next)
+	if !delta.zero() {
+		addSnapshotCounters(&r.snapshot, delta)
+		r.dirty = true
 	}
-	r.snapshot.TXBytes = maxU64(r.snapshot.TXBytes, other.TXBytes)
-	r.snapshot.RXBytes = maxU64(r.snapshot.RXBytes, other.RXBytes)
-	r.snapshot.TXPackets = maxU64(r.snapshot.TXPackets, other.TXPackets)
-	r.snapshot.RXPackets = maxU64(r.snapshot.RXPackets, other.RXPackets)
-	r.snapshot.DroppedBytes = maxU64(r.snapshot.DroppedBytes, other.DroppedBytes)
-	r.snapshot.DroppedPackets = maxU64(r.snapshot.DroppedPackets, other.DroppedPackets)
+
 	entries := other.Entries
 	if len(entries) > maxTrafficEntries {
 		entries = entries[:maxTrafficEntries]
@@ -202,30 +247,196 @@ func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
 		}
 		key := trafficEntryKey(e.Address, e.Host, e.Protocol, e.Port, e.Allowed)
 		cur, ok := r.entries[key]
+		if !ok && len(r.entries) >= maxTrafficEntries {
+			continue
+		}
+		next := entryCounters(e)
+		previous := epoch.entries[key]
+		delta := next.delta(previous)
+		epoch.entries[key] = previous.max(next)
+
 		if !ok {
-			if len(r.entries) >= maxTrafficEntries {
-				continue
-			}
 			dup := e
+			setEntryCounters(&dup, delta)
 			r.entries[key] = &dup
 			r.dirty = true
 			continue
 		}
-		cur.TXBytes = maxU64(cur.TXBytes, e.TXBytes)
-		cur.RXBytes = maxU64(cur.RXBytes, e.RXBytes)
-		cur.TXPackets = maxU64(cur.TXPackets, e.TXPackets)
-		cur.RXPackets = maxU64(cur.RXPackets, e.RXPackets)
+		changed := !delta.zero()
+		addEntryCounters(cur, delta)
 		if e.FirstSeen.Before(cur.FirstSeen) {
 			cur.FirstSeen = e.FirstSeen
+			changed = true
 		}
 		if e.LastSeen.After(cur.LastSeen) {
 			cur.LastSeen = e.LastSeen
+			changed = true
 		}
-		if cur.Host == "" {
+		if e.Host != "" && (cur.Host == "" || cur.Host == cur.Address) && e.Host != e.Address {
 			cur.Host = e.Host
+			changed = true
 		}
+		if changed {
+			r.dirty = true
+		}
+	}
+}
+
+// SyncSnapshot merges one cumulative snapshot without worker-epoch context.
+// New remote-worker integrations should retain a TrafficEpoch and call Merge;
+// this compatibility path keeps older in-process callers correct until their
+// ownership is migrated with the worker topology.
+func (r *TrafficRecorder) SyncSnapshot(other TrafficSnapshot) {
+	if r == nil || other.Version != trafficSnapshotVersion {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	before := snapshotCounters(r.snapshot)
+	r.snapshot.TXBytes = max(r.snapshot.TXBytes, other.TXBytes)
+	r.snapshot.RXBytes = max(r.snapshot.RXBytes, other.RXBytes)
+	r.snapshot.TXPackets = max(r.snapshot.TXPackets, other.TXPackets)
+	r.snapshot.RXPackets = max(r.snapshot.RXPackets, other.RXPackets)
+	r.snapshot.DroppedBytes = max(r.snapshot.DroppedBytes, other.DroppedBytes)
+	r.snapshot.DroppedPackets = max(r.snapshot.DroppedPackets, other.DroppedPackets)
+	if snapshotCounters(r.snapshot) != before {
 		r.dirty = true
 	}
+
+	entries := other.Entries
+	if len(entries) > maxTrafficEntries {
+		entries = entries[:maxTrafficEntries]
+	}
+	for _, entry := range entries {
+		if !validMergedTrafficEntry(entry) {
+			continue
+		}
+		key := trafficEntryKey(entry.Address, entry.Host, entry.Protocol, entry.Port, entry.Allowed)
+		current, ok := r.entries[key]
+		if !ok {
+			if len(r.entries) >= maxTrafficEntries {
+				continue
+			}
+			copy := entry
+			r.entries[key] = &copy
+			r.dirty = true
+			continue
+		}
+		previous := *current
+		current.TXBytes = max(current.TXBytes, entry.TXBytes)
+		current.RXBytes = max(current.RXBytes, entry.RXBytes)
+		current.TXPackets = max(current.TXPackets, entry.TXPackets)
+		current.RXPackets = max(current.RXPackets, entry.RXPackets)
+		if entry.FirstSeen.Before(current.FirstSeen) {
+			current.FirstSeen = entry.FirstSeen
+		}
+		if entry.LastSeen.After(current.LastSeen) {
+			current.LastSeen = entry.LastSeen
+		}
+		if entry.Host != "" && (current.Host == "" || current.Host == current.Address) && entry.Host != entry.Address {
+			current.Host = entry.Host
+		}
+		if *current != previous {
+			r.dirty = true
+		}
+	}
+}
+
+func snapshotCounters(snapshot TrafficSnapshot) trafficCounters {
+	return trafficCounters{
+		txBytes: snapshot.TXBytes, rxBytes: snapshot.RXBytes,
+		txPackets: snapshot.TXPackets, rxPackets: snapshot.RXPackets,
+		droppedBytes: snapshot.DroppedBytes, droppedPackets: snapshot.DroppedPackets,
+	}
+}
+
+func entryCounters(entry TrafficEntry) trafficEntryCounters {
+	return trafficEntryCounters{
+		txBytes: entry.TXBytes, rxBytes: entry.RXBytes,
+		txPackets: entry.TXPackets, rxPackets: entry.RXPackets,
+	}
+}
+
+func (c trafficCounters) delta(previous trafficCounters) trafficCounters {
+	return trafficCounters{
+		txBytes:        monotonicDelta(c.txBytes, previous.txBytes),
+		rxBytes:        monotonicDelta(c.rxBytes, previous.rxBytes),
+		txPackets:      monotonicDelta(c.txPackets, previous.txPackets),
+		rxPackets:      monotonicDelta(c.rxPackets, previous.rxPackets),
+		droppedBytes:   monotonicDelta(c.droppedBytes, previous.droppedBytes),
+		droppedPackets: monotonicDelta(c.droppedPackets, previous.droppedPackets),
+	}
+}
+
+func (c trafficCounters) max(other trafficCounters) trafficCounters {
+	return trafficCounters{
+		txBytes: max(c.txBytes, other.txBytes), rxBytes: max(c.rxBytes, other.rxBytes),
+		txPackets: max(c.txPackets, other.txPackets), rxPackets: max(c.rxPackets, other.rxPackets),
+		droppedBytes:   max(c.droppedBytes, other.droppedBytes),
+		droppedPackets: max(c.droppedPackets, other.droppedPackets),
+	}
+}
+
+func (c trafficCounters) zero() bool {
+	return c == (trafficCounters{})
+}
+
+func (c trafficEntryCounters) delta(previous trafficEntryCounters) trafficEntryCounters {
+	return trafficEntryCounters{
+		txBytes:   monotonicDelta(c.txBytes, previous.txBytes),
+		rxBytes:   monotonicDelta(c.rxBytes, previous.rxBytes),
+		txPackets: monotonicDelta(c.txPackets, previous.txPackets),
+		rxPackets: monotonicDelta(c.rxPackets, previous.rxPackets),
+	}
+}
+
+func (c trafficEntryCounters) max(other trafficEntryCounters) trafficEntryCounters {
+	return trafficEntryCounters{
+		txBytes: max(c.txBytes, other.txBytes), rxBytes: max(c.rxBytes, other.rxBytes),
+		txPackets: max(c.txPackets, other.txPackets), rxPackets: max(c.rxPackets, other.rxPackets),
+	}
+}
+
+func (c trafficEntryCounters) zero() bool {
+	return c == (trafficEntryCounters{})
+}
+
+func monotonicDelta(current, previous uint64) uint64 {
+	if current > previous {
+		return current - previous
+	}
+	return 0
+}
+
+func addSnapshotCounters(snapshot *TrafficSnapshot, delta trafficCounters) {
+	snapshot.TXBytes = saturatingAdd(snapshot.TXBytes, delta.txBytes)
+	snapshot.RXBytes = saturatingAdd(snapshot.RXBytes, delta.rxBytes)
+	snapshot.TXPackets = saturatingAdd(snapshot.TXPackets, delta.txPackets)
+	snapshot.RXPackets = saturatingAdd(snapshot.RXPackets, delta.rxPackets)
+	snapshot.DroppedBytes = saturatingAdd(snapshot.DroppedBytes, delta.droppedBytes)
+	snapshot.DroppedPackets = saturatingAdd(snapshot.DroppedPackets, delta.droppedPackets)
+}
+
+func addEntryCounters(entry *TrafficEntry, delta trafficEntryCounters) {
+	entry.TXBytes = saturatingAdd(entry.TXBytes, delta.txBytes)
+	entry.RXBytes = saturatingAdd(entry.RXBytes, delta.rxBytes)
+	entry.TXPackets = saturatingAdd(entry.TXPackets, delta.txPackets)
+	entry.RXPackets = saturatingAdd(entry.RXPackets, delta.rxPackets)
+}
+
+func setEntryCounters(entry *TrafficEntry, counters trafficEntryCounters) {
+	entry.TXBytes = counters.txBytes
+	entry.RXBytes = counters.rxBytes
+	entry.TXPackets = counters.txPackets
+	entry.RXPackets = counters.rxPackets
+}
+
+func saturatingAdd(a, b uint64) uint64 {
+	if ^uint64(0)-a < b {
+		return ^uint64(0)
+	}
+	return a + b
 }
 
 // validMergedTrafficEntry validates the retained, peer-controlled strings in
@@ -537,7 +748,7 @@ func (r *TrafficRecorder) flush() {
 
 	if r.path == "" {
 		// In-memory recorder (confined worker): publishing is the
-		// supervisor's job via SyncSnapshot; path ops do not exist here.
+		// supervisor's job via TrafficEpoch; path ops do not exist here.
 		return
 	}
 	data, err := json.Marshal(snapshot)
@@ -556,26 +767,5 @@ func writeTrafficSnapshot(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(dir, ".network-traffic-*")
-	if err != nil {
-		return err
-	}
-	tmp := file.Name()
-	defer func() { _ = os.Remove(tmp) }()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if runtime.GOOS == "windows" {
-		// Windows rename does not replace an existing destination.
-		_ = os.Remove(path)
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.WriteFile(path, data, 0o600)
 }
