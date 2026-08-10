@@ -146,6 +146,12 @@ func (r *runResolver) resolveImage() error {
 	r.cfg.Image = *r.flags.Image
 	if r.cfg.Image == "" {
 		r.cfg.Image = guestasset.DefaultImage()
+		if !gutil.FileExists(r.cfg.Image) {
+			// The unstaged default must not fall into registry
+			// resolution: ParseRef would normalize a bare name like
+			// shell-rootfs.erofs into a docker.io library/ pull.
+			return fmt.Errorf("no default image found: %s does not exist\npass -image <ref-or-file> explicitly (see 'gantry image ls' and 'gantry image pull'), or stage a default rootfs at %s", r.cfg.Image, r.cfg.Image)
+		}
 	}
 	if *r.flags.LayerSet != "" {
 		layers, err := client.LoadLayerSet(*r.flags.LayerSet)

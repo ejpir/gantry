@@ -111,7 +111,7 @@ func looksLikeMissingPath(ref string) bool {
 	if strings.HasPrefix(ref, ".") || strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "~") {
 		return true
 	}
-	for _, suf := range []string{".tar", ".tgz", ".tar.gz", ".oci"} {
+	for _, suf := range []string{".tar", ".tgz", ".tar.gz", ".oci", ".erofs"} {
 		if strings.HasSuffix(ref, suf) {
 			return true
 		}

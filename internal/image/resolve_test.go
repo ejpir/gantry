@@ -193,7 +193,7 @@ func readAllFile(fsys fs.FS, name string) ([]byte, error) {
 // never a registry pull from a mangled hostname ("./pi-agent.tar" used
 // to become a pull from a registry literally named ".").
 func TestResolveMissingPathIsClearError(t *testing.T) {
-	for _, ref := range []string{"./pi-agent.tar", "/tmp/nope.tar", "~/x.oci", "images/foo.tar"} {
+	for _, ref := range []string{"./pi-agent.tar", "/tmp/nope.tar", "~/x.oci", "images/foo.tar", "shell-rootfs.erofs", "artifacts/debian-bookworm-amd64.erofs"} {
 		_, err := Resolve(ref, "arm64", NewStore(t.TempDir()), nil)
 		if err == nil || !strings.Contains(err.Error(), "image file not found") {
 			t.Errorf("Resolve(%q): err = %v, want image-file-not-found", ref, err)
