@@ -105,7 +105,7 @@ func testBridge(t *testing.T, replay func(port int, uri string) (oauthReplayResu
 		listeners:        map[int]*oauthListener{},
 		failed:           map[int]bool{},
 		replaySlots:      make(chan struct{}, oauthMaxConcurrentReplays),
-		replayTimeout:    time.Second,
+		replayTimeout:    oauthReplayTimeout,
 		listenerLifetime: time.Minute,
 	}
 	t.Cleanup(func() {
