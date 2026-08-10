@@ -37,10 +37,26 @@ func (n *LoopbackNode) Statx(ctx context.Context, f FileHandle,
 		}
 	}
 
-	p := n.path()
-
 	st := unix.Statx_t{}
-	err := unix.Statx(unix.AT_FDCWD, p, int(flags), int(mask), &st)
+	var err error
+	if n.pinned() {
+		dir, base := relSplitParent(n.relPath())
+		dirfd, openErr := openRelDir(n.RootData.RootFD, dir)
+		if openErr != nil {
+			return ToErrno(openErr)
+		}
+		defer unix.Close(dirfd)
+		if base == "" {
+			base = "."
+		}
+		// A FUSE node represents the directory entry itself. Never let a
+		// caller clear AT_SYMLINK_NOFOLLOW and redirect STATX beyond the
+		// pinned export through a swapped final symlink.
+		err = unix.Statx(dirfd, base, int(flags)|unix.AT_SYMLINK_NOFOLLOW, int(mask), &st)
+	} else {
+		p := n.path()
+		err = unix.Statx(unix.AT_FDCWD, p, int(flags), int(mask), &st)
+	}
 	if err != nil {
 		return ToErrno(err)
 	}

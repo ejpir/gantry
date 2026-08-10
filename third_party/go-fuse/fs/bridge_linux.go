@@ -31,10 +31,23 @@ func (b *rawBridge) setStatxTimeout(out *fuse.StatxOut) {
 }
 
 func (b *rawBridge) Statx(cancel <-chan struct{}, in *fuse.StatxIn, out *fuse.StatxOut) fuse.Status {
-	n, fe := b.inode(in.NodeId, in.Fh)
+	var n *Inode
 	var fh FileHandle
-	if fe != nil {
-		fh = fe.file
+	if in.GetattrFlags&fuse.FUSE_GETATTR_FH != 0 {
+		var entry *fileEntry
+		var status fuse.Status
+		n, entry, status = b.acquireFile(in.NodeId, in.Fh)
+		if status != fuse.OK {
+			return status
+		}
+		defer entry.wg.Done()
+		fh = entry.file
+	} else {
+		var status fuse.Status
+		n, status = b.inode(in.NodeId)
+		if status != fuse.OK {
+			return status
+		}
 	}
 
 	ctx := &fuse.Context{Caller: in.Caller, Cancel: cancel}

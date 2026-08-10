@@ -150,6 +150,63 @@ func lstatRel(rootFD int, rel string) (syscall.Stat_t, syscall.Errno) {
 	return statToSyscall(&st), 0
 }
 
+// openRelXattr pins a regular file or directory beneath rootFD for an
+// extended-attribute operation. Linux and Darwin do not provide the complete
+// l*xattrat family, so pathname xattr calls cannot be made safely relative to
+// a directory descriptor. Opening the target with O_NOFOLLOW and using the
+// descriptor variants gives the operation the same pinned-root confinement as
+// the rest of the loopback backend.
+//
+// Symlink and special-file xattrs deliberately fail closed. Opening a device,
+// FIFO, or socket merely to address its attributes could have host-side side
+// effects; following a final symlink could escape the export.
+func openRelXattr(rootFD int, rel string) (int, error) {
+	dir, base := relSplitParent(rel)
+	dirfd, err := openRelDir(rootFD, dir)
+	if err != nil {
+		return -1, err
+	}
+	if base == "" {
+		return dirfd, nil
+	}
+	defer unix.Close(dirfd)
+
+	var before unix.Stat_t
+	if err := unix.Fstatat(dirfd, base, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return -1, err
+	}
+	switch before.Mode & unix.S_IFMT {
+	case unix.S_IFREG, unix.S_IFDIR:
+	default:
+		return -1, unix.EPERM
+	}
+
+	fd, err := unix.Openat(dirfd, base,
+		unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	if before.Dev != after.Dev || before.Ino != after.Ino || before.Mode&unix.S_IFMT != after.Mode&unix.S_IFMT {
+		unix.Close(fd)
+		return -1, unix.ESTALE
+	}
+	return fd, nil
+}
+
+func (n *LoopbackNode) withPinnedXattr(fn func(fd int) error) syscall.Errno {
+	fd, err := openRelXattr(n.RootData.RootFD, n.relPath())
+	if err != nil {
+		return ToErrno(err)
+	}
+	defer unix.Close(fd)
+	return ToErrno(fn(fd))
+}
+
 // pinned reports whether this export operates relative to a pinned root
 // descriptor.
 func (n *LoopbackNode) pinned() bool { return n.RootData.RootFD >= 0 }
@@ -371,7 +428,12 @@ func (n *LoopbackNode) setattrAt(ctx context.Context, f FileHandle, in *fuse.Set
 			if base == "" {
 				err = unix.Fchmod(dirfd, m)
 			} else {
-				err = unix.Fchmodat(dirfd, base, m, 0)
+				// The guest may create absolute or escaping symlink targets.
+				// Following the final component here would apply host-credential
+				// chmod outside the pinned export. fchmodat2 on Linux and
+				// fchmodat on Darwin operate atomically with NOFOLLOW; older
+				// kernels that cannot honor the flag fail closed.
+				err = unix.Fchmodat(dirfd, base, m, unix.AT_SYMLINK_NOFOLLOW)
 			}
 			if err != nil {
 				return ToErrno(err)

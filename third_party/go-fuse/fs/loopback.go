@@ -777,17 +777,37 @@ func (n *LoopbackNode) Setattr(ctx context.Context, f FileHandle, in *fuse.SetAt
 var _ = (NodeGetxattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	if n.pinned() {
+		var size int
+		errno := n.withPinnedXattr(func(fd int) error {
+			var err error
+			size, err = unix.Fgetxattr(fd, attr, dest)
+			return err
+		})
+		if errno != 0 {
+			return 0, errno
+		}
+		return uint32(size), 0
+	}
 	p, errno := n.securePath("")
 	if errno != 0 {
 		return 0, errno
 	}
 	sz, err := unix.Lgetxattr(p, attr, dest)
-	return uint32(sz), ToErrno(err)
+	if err != nil {
+		return 0, ToErrno(err)
+	}
+	return uint32(sz), 0
 }
 
 var _ = (NodeSetxattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	if n.pinned() {
+		return n.withPinnedXattr(func(fd int) error {
+			return unix.Fsetxattr(fd, attr, data, xattrFlagsToHost(flags))
+		})
+	}
 	p, errno := n.securePath("")
 	if errno != 0 {
 		return errno
@@ -799,6 +819,11 @@ func (n *LoopbackNode) Setxattr(ctx context.Context, attr string, data []byte, f
 var _ = (NodeRemovexattrer)((*LoopbackNode)(nil))
 
 func (n *LoopbackNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	if n.pinned() {
+		return n.withPinnedXattr(func(fd int) error {
+			return unix.Fremovexattr(fd, attr)
+		})
+	}
 	p, errno := n.securePath("")
 	if errno != 0 {
 		return errno
