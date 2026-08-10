@@ -8,7 +8,7 @@ package sandbox
 // bitmaps → silent corruption surfacing as overlay ESTALE), and it let
 // an upper populated by one image ride over another image's lower
 // (overlayfs origin verification → ESTALE again). Both are now
-// structural: writable disks are flock'd (vblk), the default is
+// structural: writable disks are exclusively locked (vblk), the default is
 // per-sandbox, and the pairing is recorded and enforced.
 
 import (
@@ -16,12 +16,14 @@ import (
 	"compress/gzip"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/gutil"
 )
 
@@ -167,17 +169,22 @@ func allZero(b []byte) bool {
 func checkRWLayerPairing(layer, imageID string) error {
 	pp := rwlayerPairingPath(layer)
 	b, err := os.ReadFile(pp)
+	if errors.Is(err, os.ErrNotExist) {
+		// A legacy or hand-made layer has no record yet. Install one before
+		// attachment so a crash cannot leave an ambiguous partial sidecar.
+		return writeRWLayerPairing(layer, imageID)
+	}
 	if err != nil {
-		// no sidecar: legacy or hand-made layer — record and move on
-		writeRWLayerPairing(layer, imageID)
-		return nil
+		return fmt.Errorf("read rwlayer pairing %s: %w", pp, err)
 	}
 	var rec struct {
 		Image string `json:"image"`
 	}
-	if json.Unmarshal(b, &rec) != nil || rec.Image == "" {
-		writeRWLayerPairing(layer, imageID)
-		return nil
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return fmt.Errorf("rwlayer pairing %s is malformed: %w", pp, err)
+	}
+	if rec.Image == "" {
+		return fmt.Errorf("rwlayer pairing %s has no image identity", pp)
 	}
 	if rec.Image != imageID {
 		return fmt.Errorf(`rwlayer %s was built against image
@@ -191,12 +198,19 @@ or point -rwlayer at a different file`,
 	return nil
 }
 
-// writeRWLayerPairing records the pairing sidecar (best-effort).
-func writeRWLayerPairing(layer, imageID string) {
-	b, _ := json.Marshal(struct {
+// writeRWLayerPairing durably installs the pairing sidecar. It is written only
+// when a layer is created or adopted, not on the normal startup path.
+func writeRWLayerPairing(layer, imageID string) error {
+	b, err := json.Marshal(struct {
 		Image string `json:"image"`
 	}{imageID})
-	_ = os.WriteFile(rwlayerPairingPath(layer), b, 0o600)
+	if err != nil {
+		return fmt.Errorf("encode rwlayer pairing: %w", err)
+	}
+	if err := atomicfile.WriteFileDurable(rwlayerPairingPath(layer), append(b, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write rwlayer pairing: %w", err)
+	}
+	return nil
 }
 
 // rwlayerHealthWarning reads the ext4 superblock and reports recorded

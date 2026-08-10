@@ -68,6 +68,29 @@ func TestRWLayerPairing(t *testing.T) {
 	}
 }
 
+func TestRWLayerPairingRejectsMalformedRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	layer := filepath.Join(dir, "test.ext4")
+	if err := os.WriteFile(layer, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pairing := rwlayerPairingPath(layer)
+	if err := os.WriteFile(pairing, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkRWLayerPairing(layer, "sha256:new"); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("malformed pairing error = %v", err)
+	}
+	data, err := os.ReadFile(pairing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{" {
+		t.Fatalf("malformed pairing was silently replaced: %q", data)
+	}
+}
+
 func TestDefaultRWLayerCreatesPerSandbox(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("GANTRY_HOME", filepath.Join(home, "sandboxes"))
