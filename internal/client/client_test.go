@@ -3,60 +3,82 @@ package client
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/ejpir/gantry/internal/image"
-	"github.com/ejpir/gantry/internal/shares"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/shares"
+
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
+func decodeRuntimeConfig(t *testing.T, encoded string) runtimeConfig {
+	t.Helper()
+	var config runtimeConfig
+	if err := json.Unmarshal([]byte(encoded), &config); err != nil {
+		t.Fatalf("invalid runtime config: %v\n%s", err, encoded)
+	}
+	return config
+}
+
+func findMount(mounts []specs.Mount, destination string) *specs.Mount {
+	for i := range mounts {
+		if mounts[i].Destination == destination {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
+func hasOption(mount *specs.Mount, option string) bool {
+	if mount == nil {
+		return false
+	}
+	for _, candidate := range mount.Options {
+		if candidate == option {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConfigJSONShare(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		shares  []ShareEntry
-		want    []string
-		notWant []string
-	}{
-		{name: "none", notWant: []string{`"destination": "/host"`}},
-		{
-			name: "single rw hostshare",
-			shares: []ShareEntry{
-				{Tag: "hostshare", VMPath: "/run/mnt/hostshare", CtrPath: "/host"},
-			},
-			want:    []string{`"destination": "/host"`, `"source": "/run/mnt/hostshare"`},
-			notWant: []string{`"type": "tmpfs", "source": "tmpfs", "options": ["nosuid","nodev","rw"]`},
-		},
-		{
-			name: "multi with ro",
-			shares: []ShareEntry{
-				{Tag: "hostshare", VMPath: "/run/mnt/hostshare", CtrPath: "/host/hostshare"},
-				{Tag: "code", RO: true, VMPath: "/run/mnt/code", CtrPath: "/host/code"},
-			},
-			want: []string{
-				`"destination": "/host", "type": "tmpfs"`,
-				`"destination": "/host/hostshare"`,
-				`"destination": "/host/code", "type": "bind", "source": "/run/mnt/code", "options": ["rbind","rprivate","ro"]`,
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := ConfigJSON(tc.shares, false, []string{"/bin/sh"}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !json.Valid([]byte(cfg)) {
-				t.Fatalf("invalid JSON:\n%s", cfg)
-			}
-			for _, w := range tc.want {
-				if !strings.Contains(cfg, w) {
-					t.Errorf("missing %q", w)
-				}
-			}
-			for _, nw := range tc.notWant {
-				if strings.Contains(cfg, nw) {
-					t.Errorf("unexpected %q", nw)
-				}
-			}
-		})
+	encoded, err := ConfigJSON(nil, false, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mount := findMount(decodeRuntimeConfig(t, encoded).Mounts, "/host"); mount != nil {
+		t.Fatalf("shareless config has /host mount: %+v", mount)
+	}
+
+	encoded, err = ConfigJSON([]ShareEntry{{Tag: "hostshare", VMPath: "/run/mnt/hostshare", CtrPath: "/host"}}, false, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mount := findMount(decodeRuntimeConfig(t, encoded).Mounts, "/host")
+	if mount == nil || mount.Type != "bind" || mount.Source != "/run/mnt/hostshare" {
+		t.Fatalf("single host share mount = %+v", mount)
+	}
+
+	entries := []ShareEntry{
+		{Tag: "hostshare", VMPath: "/run/mnt/hostshare", CtrPath: "/host/hostshare"},
+		{Tag: "code", RO: true, VMPath: "/run/mnt/code", CtrPath: "/host/code"},
+	}
+	encoded, err = ConfigJSON(entries, false, []string{"/bin/sh"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts := decodeRuntimeConfig(t, encoded).Mounts
+	if mount := findMount(mounts, "/host"); mount == nil || mount.Type != "tmpfs" {
+		t.Fatalf("multi-share /host mount = %+v", mount)
+	}
+	if mount := findMount(mounts, "/host/hostshare"); mount == nil || mount.Source != "/run/mnt/hostshare" {
+		t.Fatalf("hostshare mount = %+v", mount)
+	}
+	if mount := findMount(mounts, "/host/code"); mount == nil || mount.Source != "/run/mnt/code" || !hasOption(mount, "ro") {
+		t.Fatalf("read-only code mount = %+v", mount)
 	}
 }
 
@@ -70,22 +92,20 @@ func TestConfigJSONShareHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid([]byte(cfg)) {
-		t.Fatalf("invalid JSON:\n%s", cfg)
-	}
-	for _, want := range []string{
-		`"destination": "/run/gantry/shares", "type": "bind", "source": "/run/mnt/gantry-shares"`,
-		`"destination": "/host", "type": "bind", "source": "/run/mnt/gantry-shares"`,
-		`"destination": "/workspace", "type": "bind", "source": "/run/mnt/gantry-shares/work"`,
+	mounts := decodeRuntimeConfig(t, cfg).Mounts
+	for destination, source := range map[string]string{
+		"/run/gantry/shares": "/run/mnt/gantry-shares",
+		"/host":              "/run/mnt/gantry-shares",
+		"/workspace":         "/run/mnt/gantry-shares/work",
 	} {
-		if !strings.Contains(cfg, want) {
-			t.Errorf("missing %q", want)
+		if mount := findMount(mounts, destination); mount == nil || mount.Source != source {
+			t.Errorf("mount %s = %+v, want source %s", destination, mount, source)
 		}
 	}
-	if strings.Contains(cfg, `"destination": "/host/code", "type": "bind"`) {
+	if findMount(mounts, "/host/code") != nil {
 		t.Error("default /host/<tag> received a redundant bind")
 	}
-	if strings.Contains(cfg, `"destination": "/host", "type": "tmpfs"`) {
+	if mount := findMount(mounts, "/host"); mount != nil && mount.Type == "tmpfs" {
 		t.Error("hub mode must not replace /host with a tmpfs")
 	}
 
@@ -96,11 +116,12 @@ func TestConfigJSONShareHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cfg, `"destination": "/host", "type": "bind", "source": "/run/mnt/gantry-shares/code", "options": ["rbind","rprivate","ro"]`) {
-		t.Errorf("missing explicit /host alias:\n%s", cfg)
+	mounts = decodeRuntimeConfig(t, cfg).Mounts
+	if mount := findMount(mounts, "/host"); mount == nil || mount.Source != "/run/mnt/gantry-shares/code" || !hasOption(mount, "ro") {
+		t.Errorf("explicit /host alias = %+v", mount)
 	}
-	if !strings.Contains(cfg, `"destination": "/run/gantry/shares"`) {
-		t.Errorf("missing internal hub fallback:\n%s", cfg)
+	if findMount(mounts, "/run/gantry/shares") == nil {
+		t.Error("missing internal hub fallback")
 	}
 }
 
@@ -115,12 +136,10 @@ func TestConfigJSONShareHubReadOnlyRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid([]byte(cfg)) {
-		t.Fatalf("invalid JSON:\n%s", cfg)
-	}
-	for _, absent := range []string{"/run/gantry/shares", `"destination": "/host"`} {
-		if strings.Contains(cfg, absent) {
-			t.Errorf("read-only root must not carry hub bind %q", absent)
+	mounts := decodeRuntimeConfig(t, cfg).Mounts
+	for _, destination := range []string{"/run/gantry/shares", "/host"} {
+		if mount := findMount(mounts, destination); mount != nil {
+			t.Errorf("read-only root carries hub mount %+v", mount)
 		}
 	}
 }
@@ -158,17 +177,15 @@ func TestConfigJSONRWAndArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !json.Valid([]byte(cfg)) {
-		t.Fatalf("invalid JSON:\n%s", cfg)
+	config := decodeRuntimeConfig(t, cfg)
+	if strings.Join(config.Process.Args, " ") != "/bin/bash -l" {
+		t.Errorf("args = %v", config.Process.Args)
 	}
-	for _, want := range []string{
-		`"args": ["/bin/bash","-l"]`,
-		`"root": {"path": "rootfs", "readonly": false}`,
-		`"HOME=/root"`,
-	} {
-		if !strings.Contains(cfg, want) {
-			t.Errorf("missing %q", want)
-		}
+	if config.Root.Path != "rootfs" || config.Root.Readonly {
+		t.Errorf("root = %+v", config.Root)
+	}
+	if !strings.Contains(strings.Join(config.Process.Env, " "), "HOME=/root") {
+		t.Errorf("env = %v", config.Process.Env)
 	}
 
 	// RW rootfs: erofs lower + ext4 upper + overlay.
@@ -201,6 +218,28 @@ func TestConfigJSONRWAndArgs(t *testing.T) {
 func TestLoadSharesMissing(t *testing.T) {
 	if got := LoadShares("/nonexistent-dir"); len(got) != 0 {
 		t.Fatalf("LoadShares = %v, want none", got)
+	}
+}
+
+func TestLoadShareManifestSupportsLiveTransportShapes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shares.json")
+	perDevice := `{"shares":[{"tag":"code","vmPath":"/run/mnt/code","ctrPath":"/host/code"}]}`
+	if err := os.WriteFile(path, []byte(perDevice), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := LoadShareManifest(dir)
+	if manifest.Version != 0 || manifest.Transport != nil || len(manifest.Shares) != 1 {
+		t.Fatalf("per-device manifest = %+v", manifest)
+	}
+
+	hub := `{"version":2,"generation":7,"transport":{"tag":"gantry-shares","vmPath":"/run/mnt/gantry-shares"},"shares":[]}`
+	if err := os.WriteFile(path, []byte(hub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest = LoadShareManifest(dir)
+	if manifest.Version != shares.ManifestVersion || manifest.Generation != 7 || manifest.Transport == nil || manifest.Transport.Tag != shares.HubTag {
+		t.Fatalf("hub manifest = %+v", manifest)
 	}
 }
 
@@ -337,5 +376,19 @@ func TestShellSessionOptions(t *testing.T) {
 	}
 	if sess.ID != "oneshot" || sess.StreamSock != "/tmp/stream.sock" || !sess.RW {
 		t.Errorf("ID/StreamSock/RW not propagated: %+v", sess)
+	}
+}
+
+func BenchmarkConfigJSONWithTransport(b *testing.B) {
+	transport := &shares.Transport{Tag: shares.HubTag, VMPath: shares.HubVMPath}
+	entries := []ShareEntry{
+		{Tag: "code", RO: true, VMPath: shares.HubVMPath + "/code", CtrPath: "/host/code"},
+		{Tag: "work", VMPath: shares.HubVMPath + "/work", CtrPath: "/workspace"},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := ConfigJSONWithTransport(entries, transport, true, []string{"/bin/sh"}, nil); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
