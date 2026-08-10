@@ -97,6 +97,7 @@ type whpxBackend struct {
 	nativeMu  sync.RWMutex
 	runMu     sync.Mutex
 	runningVP []bool
+	exitCount uint64
 
 	partitionCreated bool
 	mapped           bool
@@ -402,6 +403,22 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			}
 			return fmt.Errorf("WHvRunVirtualProcessor: %w", err)
 		}
+		if dbgIO {
+			b.exitCount++
+			if b.exitCount <= 500 || b.exitCount%100000 == 0 {
+				reason := binary.LittleEndian.Uint32(buf[0:])
+				if reason == whvExitIoPort {
+					fmt.Printf("[whpx] exit io rip=%#x port=%#x info=%#x len=%d/%d (n=%d)\n",
+						binary.LittleEndian.Uint64(buf[32:]),
+						binary.LittleEndian.Uint16(buf[72:]),
+						binary.LittleEndian.Uint32(buf[68:]),
+						buf[10]&0x0f, buf[48], b.exitCount)
+				} else {
+					fmt.Printf("[whpx] exit %#x rip=%#x (n=%d)\n", reason,
+						binary.LittleEndian.Uint64(buf[32:]), b.exitCount)
+				}
+			}
+		}
 		switch binary.LittleEndian.Uint32(buf[0:]) {
 		case whvExitMemoryAccess:
 			if err := b.handleMMIOExit(vp, buf); err != nil {
@@ -437,9 +454,15 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 // service the device access, fill/read registers, advance RIP.
 func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	m := b.m
-	instrLen := int(buf[48])
+	instrLen := int(buf[10] & 0x0f)
+	if instrLen == 0 {
+		instrLen = int(buf[48])
+	}
 	if instrLen < 1 || instrLen > 15 {
-		return fmt.Errorf("bad instruction length %d", instrLen)
+		// WHPX does not populate either instruction-length field for
+		// MemoryAccess exits on current releases: hand the decoder the
+		// full instruction window and trust op.length for the advance.
+		instrLen = 15
 	}
 	instr := buf[52 : 52+instrLen]
 	gpa := binary.LittleEndian.Uint64(buf[72:])
@@ -505,13 +528,21 @@ func (b *whpxBackend) handleIOExit(vp uint32, buf []byte) error {
 	}
 
 	// WHPX does not complete the intercepted IN/OUT: RIP must be advanced
-	// past the instruction manually (InstructionByteCount @ union offset 0
-	// of the exit context, i.e. buf[48]). Without this the guest
-	// re-executes the same port access forever — the CMOS/PIT reads in
-	// early boot hang silently before the console comes up.
+	// past the instruction manually. The length comes from
+	// VpContext.InstructionLength (buf[10], low nibble): the IoPort
+	// context's InstructionByteCount (buf[48]) is 0 on current WHPX
+	// releases, which looped the guest on one port access forever (field
+	// finding from the first real hardware run).
 	advance := func() error {
+		instrLen := int(buf[10] & 0x0f)
+		if instrLen == 0 {
+			instrLen = int(buf[48])
+		}
+		if instrLen == 0 {
+			return fmt.Errorf("io exit @ %#x: zero instruction length", binary.LittleEndian.Uint64(buf[32:]))
+		}
 		rip := binary.LittleEndian.Uint64(buf[32:])
-		return b.writeGPR(vp, whvRegRip, rip+uint64(buf[48]))
+		return b.writeGPR(vp, whvRegRip, rip+uint64(instrLen))
 	}
 
 	if isWrite {
