@@ -1,7 +1,6 @@
-// Package shares defines the virtio-fs share manifest the VMM writes and
-// session clients read (<vsockfwd>/shares.json). It exists so internal/vmm
-// (writer) and internal/client (reader) share one definition of the JSON
-// schema instead of maintaining twin structs.
+// Package shares defines host-directory export specifications and the
+// virtio-fs manifest shared by the CLI, sandbox control plane, VMM assembly,
+// and guest session client.
 package shares
 
 import "fmt"
@@ -36,7 +35,8 @@ type Entry struct {
 }
 
 // Manifest is <vsockfwd>/shares.json. Version/Generation/Transport are
-// omitted by the legacy per-device writer so old clients keep parsing it.
+// omitted by the per-device writer so clients predating the hub protocol keep
+// parsing it.
 type Manifest struct {
 	Version    int        `json:"version,omitempty"`
 	Generation uint64     `json:"generation,omitempty"`
@@ -47,8 +47,8 @@ type Manifest struct {
 // MaxTagLen is the virtio-fs mount-tag field bound (FSTagLen).
 const MaxTagLen = 36
 
-// ValidateShareTag is the single share-tag validator used by the CLI parser
-// (internal/vmm) and the hub control plane (internal/virtio). Tags become
+// ValidateShareTag is the single share-tag validator used by the spec parser
+// and the host share service. Tags become
 // synthetic FUSE directory entries, so "." and ".." are rejected outright:
 // they are reserved directory names and would produce unreachable or
 // path-collapsing share definitions.
@@ -56,7 +56,7 @@ func ValidateShareTag(tag string) error {
 	if tag == "" {
 		return fmt.Errorf("share tag is empty")
 	}
-	if len([]byte(tag)) > MaxTagLen {
+	if len(tag) > MaxTagLen {
 		return fmt.Errorf("share tag %q exceeds %d bytes", tag, MaxTagLen)
 	}
 	if tag == "." || tag == ".." {
