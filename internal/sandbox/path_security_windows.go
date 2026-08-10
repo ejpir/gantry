@@ -192,10 +192,21 @@ func verifyWindowsOwner(path string, want *windows.SID) error {
 	if err != nil {
 		return fmt.Errorf("read owner SID: %w", err)
 	}
-	if owner == nil || !owner.Equals(want) {
+	if owner == nil {
 		return fmt.Errorf("path is not owned by the current user")
 	}
-	return nil
+	if owner.Equals(want) {
+		return nil
+	}
+	// Elevated Windows tokens create objects owned by the Administrators
+	// group (or LocalSystem for services) rather than the process user;
+	// the DACL rules above already trust exactly those accounts.
+	for _, sid := range trustedWindowsServiceSIDs {
+		if trusted, err := windows.StringToSid(sid); err == nil && owner.Equals(trusted) {
+			return nil
+		}
+	}
+	return fmt.Errorf("path is not owned by the current user or a trusted service account")
 }
 
 func verifyPrivateWindowsPath(path string, userSID *windows.SID, inheritChildren bool) error {
@@ -221,8 +232,20 @@ func verifyPrivateWindowsPath(path string, userSID *windows.SID, inheritChildren
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(userSID) {
-		return fmt.Errorf("owner is not the current user")
+	if owner == nil {
+		return fmt.Errorf("missing owner")
+	}
+	ownerTrusted := owner.Equals(userSID)
+	if !ownerTrusted {
+		for _, sid := range trustedWindowsServiceSIDs {
+			if trusted, err := windows.StringToSid(sid); err == nil && owner.Equals(trusted) {
+				ownerTrusted = true
+				break
+			}
+		}
+	}
+	if !ownerTrusted {
+		return fmt.Errorf("owner is not the current user or a trusted service account")
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
