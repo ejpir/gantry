@@ -11,15 +11,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/ejpir/gantry/internal/gutil"
-	"github.com/ejpir/gantry/internal/image"
-	"github.com/ejpir/gantry/internal/vmm"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/image"
 )
 
 // CmdImport implements `gantry import`.
@@ -119,189 +121,261 @@ func writeImportCommands(output io.Writer) {
 	_ = w.Flush()
 }
 
+type dockerImportPlan struct {
+	sourceName    string
+	targetName    string
+	runtimePath   string
+	socketPath    string
+	sourceRWLayer string
+	rwLayer       string
+	runtime       *dockerRuntime
+	config        RunConfig
+}
+
 func importDockerSandbox(root, name, as, logPath, workspaceOwner string, dryRun bool) int {
-	rtPath := filepath.Join(root, "runtimes", name+".json")
-	b, err := os.ReadFile(rtPath)
+	plan, err := inspectDockerImport(root, name, as, logPath, workspaceOwner)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
-	rt, err := parseDockerRuntime(b)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %s: %v\n", rtPath, err)
-		return 1
-	}
-	gname := as
-	if gname == "" {
-		gname = rt.Spec.RuntimeName
-	}
-	if !validSandboxName(gname) {
-		fmt.Fprintf(os.Stderr, "gantry import: invalid sandbox name %q\n", gname)
-		return 1
+		return reportImportError(err)
 	}
 
-	// Live container lookup → container ID for the log attribution, plus
-	// the container's process config.
-	sock := filepath.Join(root, "docker.sock")
-	ctr, err := dockerFindContainer(sock, name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
-	if !dockerSourceQuiescent(ctr.State) {
-		fmt.Fprintf(os.Stderr, "gantry import: source sandbox %q is %s; stop it before importing its writable layer\n", name, ctr.State)
-		return 1
-	}
-	imgCfg, err := dockerImageConfig(sock, ctr.ID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: inspect: %v\n", err)
-		return 1
-	}
-	ownerSuffix, err := importedWorkspaceOwner(workspaceOwner, imgCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: --workspace-owner: %v\n", err)
-		return 1
-	}
-
-	// The rootfs mount chain from the daemon log: native layer set +
-	// the sandbox's own writable layer.
-	if logPath == "" {
-		logPath = filepath.Join(root, "daemon.log")
-	}
-	logText, err := os.ReadFile(logPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
-	ls, sourceRWLayer, err := parseTaskRootfs(string(logText), ctr.ID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
-	if err := ls.Validate(); err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
 	// Probe and clone under an exclusive flock on the SOURCE rwlayer. The
 	// lock serializes us against other gantry attaches (our vblk layer
 	// takes the same lock); it cannot stop a non-cooperative writer, so
 	// the container state is re-checked right before the clone to narrow
 	// the window where the reference stack restarts mid-import.
-	sourceLock, err := gutil.TryLockFile(sourceRWLayer)
+	sourceLock, err := lockImportedRWLayer(plan.sourceRWLayer)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: source writable layer is locked by another gantry process: %v\n", err)
-		return 1
+		return reportImportError(err)
 	}
 	defer func() { _ = sourceLock.Close() }()
-	if info, err := gutil.ProbeExt4(sourceRWLayer); err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: writable layer: %v\n", err)
-		return 1
-	} else if info.State&gutil.Ext4StateError != 0 {
-		fmt.Fprintf(os.Stderr, "gantry import: source writable layer is damaged: %s (repair it offline before importing)\n", info.Diagnosis())
-		return 1
-	}
-	// Immutable EROFS layers are safe to share, but an ext4 writable layer
-	// is not. Point Gantry at its own clone so the source stack can restart
-	// safely and two runtimes can never attach the same mutable filesystem.
-	rwlayer := defaultRWLayerPath(gname)
 
-	// Published ports.
-	var ports []string
-	if pb, err := os.ReadFile(filepath.Join(root, "runtimes", "ports", sha256Hex(name)+".json")); err == nil {
-		specs, perr := parseDockerPorts(pb)
-		if perr != nil {
-			fmt.Fprintf(os.Stderr, "gantry import: ports: %v\n", perr)
-			return 1
-		}
-		for _, spec := range specs {
-			n, nerr := NormalizePortSpec(spec)
-			if nerr != nil {
-				fmt.Fprintf(os.Stderr, "gantry import: port %q: %v\n", spec, nerr)
-				return 1
-			}
-			ports = append(ports, n)
-		}
-	}
-
-	// Guest assets (auto-download on first use). Absolute paths: the
-	// daemon runs with cwd=/, so anything relative would break there.
 	say := func(format string, a ...any) { fmt.Printf("gantry import: "+format+"\n", a...) }
-	kernel, err := vmm.EnsureKernel(vmm.DefaultKernelImage(), say)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
-	rootfs, err := vmm.EnsureRootfs(vmm.DefaultRootfs(), say)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	}
-	kernel, rootfs = absPath(kernel), absPath(rootfs)
-
-	// Egress policy mirroring the source service domains. Written OUTSIDE
-	// the sandbox dir on purpose: launchSandbox removes and recreates that
-	// directory on start.
-	netpolPath := ""
-	if pol, _ := importedNetpol(rt); pol != nil {
-		polDir := filepath.Join(filepath.Dir(sandboxRoot()), "netpol")
-		if err := os.MkdirAll(polDir, 0o700); err != nil {
-			fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-			return 1
-		}
-		netpolPath = filepath.Join(polDir, "imported-"+gname+".json")
-		if err := os.WriteFile(netpolPath, pol, 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-			return 1
-		}
-	}
-
-	var shares []string
-	if rt.Spec.WorkspaceDir != "" {
-		shares = append(shares, "workspace="+rt.Spec.WorkspaceDir+"@"+rt.Spec.WorkspaceDir+ownerSuffix)
-	}
-
-	cfg := RunConfig{
-		Kernel:   kernel,
-		Rootfs:   rootfs,
-		ImageRef: rt.Spec.Template,
-		ImageCfg: imgCfg,
-		LayerSet: ls,
-		RWLayer:  rwlayer,
-		RW:       true,
-		Shares:   shares,
-		Ports:    ports,
-		Net:      true,
-		NetPol:   netpolPath,
-		MemMB:    512,
-		VCPUs:    1,
+	if err := plan.prepare(root, say); err != nil {
+		return reportImportError(err)
 	}
 
 	if dryRun {
-		out, _ := json.MarshalIndent(cfg, "", "  ")
-		fmt.Printf("would start gantry sandbox %q from %s:\n%s\n", gname, rtPath, out)
+		plan.printDryRun()
 		return 0
 	}
 
-	// Last-moment state re-check: a source that restarted since the first
-	// lookup would be writing to the layer we are about to clone.
-	if ctr, err := dockerFindContainer(sock, name); err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
-		return 1
-	} else if !dockerSourceQuiescent(ctr.State) {
-		fmt.Fprintf(os.Stderr, "gantry import: source sandbox %q became %s during import; stop it and retry\n", name, ctr.State)
-		return 1
+	if err := plan.cloneWritableLayer(); err != nil {
+		return reportImportError(err)
 	}
-	if err := cloneImportedRWLayer(sourceRWLayer, rwlayer); err != nil {
-		fmt.Fprintf(os.Stderr, "gantry import: clone writable layer: %v\n", err)
-		return 1
-	}
-	writeRWLayerPairing(rwlayer, cfg.imageIdentity())
+	plan.printAdoption()
+	return launchSandbox(plan.targetName, plan.config, nil, true)
+}
 
-	fmt.Printf("gantry import: adopting %q: %d shared erofs layers + private rwlayer %s\n", name, len(ls.Layers), filepath.Base(rwlayer))
-	if len(ports) > 0 {
-		fmt.Printf("gantry import: publishing %s\n", strings.Join(ports, ", "))
+func reportImportError(err error) int {
+	fmt.Fprintf(os.Stderr, "gantry import: %v\n", err)
+	return 1
+}
+
+func inspectDockerImport(root, name, as, logPath, workspaceOwner string) (*dockerImportPlan, error) {
+	runtimePath := filepath.Join(root, "runtimes", name+".json")
+	b, err := os.ReadFile(runtimePath)
+	if err != nil {
+		return nil, err
 	}
-	return launchSandbox(gname, cfg, nil, true)
+	runtimeConfig, err := parseDockerRuntime(b)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", runtimePath, err)
+	}
+	targetName := as
+	if targetName == "" {
+		targetName = runtimeConfig.Spec.RuntimeName
+	}
+	if !validSandboxName(targetName) {
+		return nil, fmt.Errorf("invalid sandbox name %q", targetName)
+	}
+
+	// The live lookup supplies both the log-attribution ID and the process
+	// configuration to reproduce in Gantry.
+	socketPath := filepath.Join(root, "docker.sock")
+	container, err := dockerFindContainer(socketPath, name)
+	if err != nil {
+		return nil, err
+	}
+	if !dockerSourceQuiescent(container.State) {
+		return nil, fmt.Errorf("source sandbox %q is %s; stop it before importing its writable layer", name, container.State)
+	}
+	imageConfig, err := dockerImageConfig(socketPath, container.ID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect: %w", err)
+	}
+	ownerSuffix, err := importedWorkspaceOwner(workspaceOwner, imageConfig)
+	if err != nil {
+		return nil, fmt.Errorf("--workspace-owner: %w", err)
+	}
+
+	if logPath == "" {
+		logPath = filepath.Join(root, "daemon.log")
+	}
+	logText, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil, err
+	}
+	layers, sourceRWLayer, err := parseTaskRootfs(string(logText), container.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := layers.Validate(); err != nil {
+		return nil, err
+	}
+
+	var shareSpecs []string
+	if runtimeConfig.Spec.WorkspaceDir != "" {
+		workspace := runtimeConfig.Spec.WorkspaceDir
+		shareSpecs = append(shareSpecs, "workspace="+workspace+"@"+workspace+ownerSuffix)
+	}
+	rwLayer := defaultRWLayerPath(targetName)
+	return &dockerImportPlan{
+		sourceName:    name,
+		targetName:    targetName,
+		runtimePath:   runtimePath,
+		socketPath:    socketPath,
+		sourceRWLayer: sourceRWLayer,
+		rwLayer:       rwLayer,
+		runtime:       runtimeConfig,
+		config: RunConfig{
+			ImageRef: runtimeConfig.Spec.Template,
+			ImageCfg: imageConfig,
+			LayerSet: layers,
+			RWLayer:  rwLayer,
+			RW:       true,
+			Shares:   shareSpecs,
+			Net:      true,
+			MemMB:    512,
+			VCPUs:    1,
+		},
+	}, nil
+}
+
+func lockImportedRWLayer(path string) (*os.File, error) {
+	lock, err := gutil.TryLockFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("source writable layer is locked by another gantry process: %w", err)
+	}
+	info, err := gutil.ProbeExt4(path)
+	if err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("writable layer: %w", err)
+	}
+	if info.State&gutil.Ext4StateError != 0 {
+		_ = lock.Close()
+		return nil, fmt.Errorf("source writable layer is damaged: %s (repair it offline before importing)", info.Diagnosis())
+	}
+	return lock, nil
+}
+
+func (p *dockerImportPlan) prepare(root string, say func(string, ...any)) error {
+	ports, err := loadImportedPorts(root, p.sourceName)
+	if err != nil {
+		return err
+	}
+	kernel, rootfs, err := ensureImportedGuestAssets(say)
+	if err != nil {
+		return err
+	}
+	netpolPath, err := writeImportedNetpol(p.runtime, p.targetName)
+	if err != nil {
+		return err
+	}
+	p.config.Kernel = kernel
+	p.config.Rootfs = rootfs
+	p.config.Ports = ports
+	p.config.NetPol = netpolPath
+	return nil
+}
+
+func loadImportedPorts(root, name string) ([]string, error) {
+	path := filepath.Join(root, "runtimes", "ports", sha256Hex(name)+".json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// The source stack does not create this optional file when the
+		// sandbox has no published ports.
+		return nil, nil
+	}
+	specs, err := parseDockerPorts(b)
+	if err != nil {
+		return nil, fmt.Errorf("ports: %w", err)
+	}
+	ports := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		normalized, err := NormalizePortSpec(spec)
+		if err != nil {
+			return nil, fmt.Errorf("port %q: %w", spec, err)
+		}
+		ports = append(ports, normalized)
+	}
+	return ports, nil
+}
+
+func ensureImportedGuestAssets(say func(string, ...any)) (string, string, error) {
+	// Absolute paths are required because the daemon runs with cwd=/.
+	kernel, err := guestasset.EnsureKernel(guestasset.DefaultKernel(), say)
+	if err != nil {
+		return "", "", err
+	}
+	rootfs, err := guestasset.EnsureRootfs(guestasset.DefaultRootfs(), say)
+	if err != nil {
+		return "", "", err
+	}
+	return absPath(kernel), absPath(rootfs), nil
+}
+
+func writeImportedNetpol(runtimeConfig *dockerRuntime, targetName string) (string, error) {
+	policy, _ := importedNetpol(runtimeConfig)
+	if policy == nil {
+		return "", nil
+	}
+	// Keep imported policy outside the sandbox directory: launchSandbox
+	// removes and recreates that directory on start.
+	dir := filepath.Join(filepath.Dir(sandboxRoot()), "netpol")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "imported-"+targetName+".json")
+	if err := atomicfile.WriteFileDurable(path, policy, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func (p *dockerImportPlan) cloneWritableLayer() error {
+	// Last-moment state re-check: a source that restarted since inspection
+	// would be writing to the layer we are about to clone.
+	container, err := dockerFindContainer(p.socketPath, p.sourceName)
+	if err != nil {
+		return err
+	}
+	if !dockerSourceQuiescent(container.State) {
+		return fmt.Errorf("source sandbox %q became %s during import; stop it and retry", p.sourceName, container.State)
+	}
+	if err := cloneImportedRWLayer(p.sourceRWLayer, p.rwLayer); err != nil {
+		return fmt.Errorf("clone writable layer: %w", err)
+	}
+	if err := writeRWLayerPairing(p.rwLayer, p.config.imageIdentity()); err != nil {
+		return fmt.Errorf("record writable-layer pairing: %w", err)
+	}
+	return nil
+}
+
+func (p *dockerImportPlan) printDryRun() {
+	out, _ := json.MarshalIndent(p.config, "", "  ")
+	fmt.Printf("would start gantry sandbox %q from %s:\n%s\n", p.targetName, p.runtimePath, out)
+}
+
+func (p *dockerImportPlan) printAdoption() {
+	fmt.Printf(
+		"gantry import: adopting %q: %d shared erofs layers + private rwlayer %s\n",
+		p.sourceName,
+		len(p.config.LayerSet.Layers),
+		filepath.Base(p.rwLayer),
+	)
+	if len(p.config.Ports) > 0 {
+		fmt.Printf("gantry import: publishing %s\n", strings.Join(p.config.Ports, ", "))
+	}
 }
 
 // importedWorkspaceOwner resolves the import-only ownership policy. "auto"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -105,6 +106,36 @@ func TestParseDockerPorts(t *testing.T) {
 	}
 	if len(specs) != 1 || specs[0] != "53:5353/udp" {
 		t.Fatalf("specs = %v", specs)
+	}
+}
+
+func TestLoadImportedPorts(t *testing.T) {
+	root := t.TempDir()
+	if ports, err := loadImportedPorts(root, "dev"); err != nil || ports != nil {
+		t.Fatalf("missing optional ports file = %v, %v", ports, err)
+	}
+
+	dir := filepath.Join(root, "runtimes", "ports")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, sha256Hex("dev")+".json")
+	if err := os.WriteFile(path, []byte(`[{"host_ip":"127.0.0.1","host_port":8000,"sandbox_port":18000,"protocol":"tcp"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ports, err := loadImportedPorts(root, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ports) != 1 || ports[0] != "127.0.0.1:8000:18000" {
+		t.Fatalf("loaded ports = %v", ports)
+	}
+
+	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadImportedPorts(root, "dev"); err == nil || !strings.Contains(err.Error(), "ports:") {
+		t.Fatalf("malformed ports error = %v", err)
 	}
 }
 
