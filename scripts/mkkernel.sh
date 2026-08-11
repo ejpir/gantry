@@ -11,6 +11,16 @@
 #   ./scripts/mkkernel.sh x86_64       # cross/native for another arch
 #   PAGES=4k ./scripts/mkkernel.sh     # arm64 4K-page variant (runsc)
 #                                      # → artifacts/gantry-kernel-arm64-4k
+#   ERRATA=strip ./scripts/mkkernel.sh arm64   # boot-cost experiment, NOT a
+#                                      # release artifact — see ERRATA below
+#                                      # → artifacts/gantry-kernel-arm64-noerrata
+#   PROBE=idreg ./scripts/mkkernel.sh arm64    # instrumented boot diagnosis,
+#                                      # NOT a release artifact — see PROBE
+#                                      # → artifacts/gantry-kernel-arm64-probe
+#   FIX=rngcap ./scripts/mkkernel.sh arm64     # the RNDR capability-cache
+#                                      # fix: boot to init 277 -> 107 ms on
+#                                      # Apple silicon — see FIX below
+#                                      # → artifacts/gantry-kernel-arm64-rngcap
 #
 # The CLI downloads these exact names from the GitHub release page when
 # they are not staged locally, so build once, attach to a release, and
@@ -39,6 +49,74 @@ amd64|x86_64)  ARCH=x86_64 ;;
 *) echo "usage: mkkernel.sh [arm64|x86_64]"; exit 1 ;;
 esac
 PAGES=${PAGES:-16k}   # arm64 only; x86_64 is always 4K
+
+# ERRATA=strip drops the CPU errata workarounds for third-party arm64 silicon
+# (arm64 only). It exists to measure one boot cost: every capability the guest
+# kernel evaluates against an ID register does an MRS that Hypervisor.framework
+# traps and emulates, and on an M-series host that phase costs ~176 ms before
+# the console even comes up (see docs/boot-timing.md).
+#
+# MEASURED: no improvement (203.8 ms vs 180-183 ms stock, M-series host). The
+# errata that were removed match on MIDR_EL1, which HVF serves from VPIDR_EL2
+# WITHOUT trapping; the expensive reads are ID_AA64* from feature checks, and
+# those remain. Kept only so the experiment can be repeated across kernel
+# bumps — it is not a boot-time optimisation.
+#
+# NOT for release artifacts, which is why the output gets its own name. The
+# guest sees the HOST's MIDR, so these workarounds are live whenever the host
+# is the affected core — and gantry-kernel-arm64 also boots under KVM on
+# Graviton (Neoverse-N1/V1/V2), Ampere, and Raspberry Pi hosts, where several
+# of these apply for real. Only under Hypervisor.framework is the host
+# guaranteed to be Apple silicon, which no CONFIG_ARM64_ERRATUM_* covers.
+ERRATA=${ERRATA:-full}
+case "$ERRATA" in
+full)  ERRATA_SUFFIX= ;;
+strip) ERRATA_SUFFIX=-noerrata ;;
+*) echo "ERRATA must be full or strip" >&2; exit 1 ;;
+esac
+if [ "$ERRATA" = strip ] && [ "$ARCH" != arm64 ]; then
+	echo "ERRATA=strip is arm64-only" >&2
+	exit 1
+fi
+
+# PROBE=idreg instruments the kernel source itself (arm64 only) to count the
+# ID-register reads that Hypervisor.framework traps, dump the stack of
+# whoever is looping on them, and report the counts at each step of
+# mm_core_init. Host-side sampling localised the cost to that function but
+# cannot see the call count or the caller — see scripts/kernel-boot-probe.py
+# and docs/boot-timing.md. A debugging kernel, never a release artifact.
+# PROBE_DUMP_AT sets which read triggers the one-shot dump_stack (default
+# 1000): raise it if the trace lands before the interesting loop.
+PROBE=${PROBE:-none}
+case "$PROBE" in
+none)  PROBE_SUFFIX=;      PROBE_ARGS=--skip-probe ;;
+idreg) PROBE_SUFFIX=-probe; PROBE_ARGS= ;;
+*) echo "PROBE must be none or idreg" >&2; exit 1 ;;
+esac
+
+# FIX=rngcap applies what the probes found (arm64 only): arm64 answers "does
+# this cpu have RNDR?" through this_cpu_has_cap(), which is uncached BY
+# DESIGN — it re-reads ID_AA64ISAR0_EL1, and under Hypervisor.framework that
+# read traps to EL2 (~0.96 us). SLAB freelist randomisation asks once per slab
+# object; every get_random_* during boot asks too. Caching the answer cut boot
+# to init from 277 ms to 107 ms on an M-series host, with 141430 reads
+# becoming 7. Unlike CONFIG_SLAB_FREELIST_RANDOM=n it keeps the hardening
+# kernel-hardening.sh asks for.
+#
+# It is a deliberate divergence from upstream, so it stays opt-in and named:
+# on a system whose cpus genuinely differ in RNDR support, the cached answer
+# is the first answering cpu's. Independent of PROBE — combine them to watch
+# the read count collapse, use FIX alone for a kernel without probe printks.
+FIX=${FIX:-none}
+case "$FIX" in
+none)   FIX_SUFFIX= ;;
+rngcap) FIX_SUFFIX=-rngcap; PROBE_ARGS="$PROBE_ARGS --fix-rngcap" ;;
+*) echo "FIX must be none or rngcap" >&2; exit 1 ;;
+esac
+if [ "$PROBE$FIX" != nonenone ] && [ "$ARCH" != arm64 ]; then
+	echo "PROBE/FIX are arm64-only" >&2
+	exit 1
+fi
 
 # Build tree. Never default to a predictable /tmp path: the script cd's
 # into WORK and executes its scripts/config and Makefiles, so a shared or
@@ -94,9 +172,9 @@ case "$ARCH" in
 arm64)
 	KARCH=arm64
 	if [ "$PAGES" = 4k ]; then
-		OUT=${OUT:-$ARTIFACTS/gantry-kernel-arm64-4k}
+		OUT=${OUT:-$ARTIFACTS/gantry-kernel-arm64-4k$ERRATA_SUFFIX$FIX_SUFFIX$PROBE_SUFFIX}
 	else
-		OUT=${OUT:-$ARTIFACTS/gantry-kernel-arm64}
+		OUT=${OUT:-$ARTIFACTS/gantry-kernel-arm64$ERRATA_SUFFIX$FIX_SUFFIX$PROBE_SUFFIX}
 	fi
 	TARGET=Image
 	RESULT=arch/arm64/boot/Image
@@ -158,6 +236,27 @@ if [ ! -f "$WORK/Makefile" ]; then
 fi
 
 cd "$WORK"
+# The owned guest and Gantry's virtio-fs device negotiate one bounded reverse
+# notification queue. Upstream virtio-fs has no unsolicited device-to-driver
+# path, so apply the audited, version-pinned extension after tarball
+# verification. Reused WORK trees are accepted only when the exact patch is
+# already present.
+NOTIFY_PATCH="$ROOT/patches/linux-$VERSION-virtiofs-notifications.patch"
+if ! grep -q '^#define VIRTIO_FS_F_NOTIFICATION 23$' include/uapi/linux/virtio_fs.h; then
+	patch -p1 < "$NOTIFY_PATCH"
+fi
+if ! grep -q 'fuse_dev_notify(struct fuse_dev' fs/fuse/dev.c ||
+	! grep -q 'virtio_fs_fill_notification_queue' fs/fuse/virtio_fs.c; then
+	echo "kernel tree contains an incomplete $NOTIFY_PATCH" >&2
+	exit 1
+fi
+# After extraction (so the sha256 covers exactly the audited bytes) and
+# before configuring, since the probe compiles into the kernel.
+if [ "$PROBE$FIX" != nonenone ]; then
+	# shellcheck disable=SC2086 # PROBE_ARGS is a deliberate word split
+	python3 "$ROOT/scripts/kernel-boot-probe.py" "$WORK" \
+		--dump-at "${PROBE_DUMP_AT:-1000}" $PROBE_ARGS
+fi
 [ -f .config ] || {
 	# Baseline: the committed gantry config. BASE_CONFIG may also point at
 	# a stock nerdbox kernel binary to re-extract its embedded config
@@ -194,6 +293,20 @@ fi
 for sym in $(printf '%s\n' "$DISABLES" | sed 's/#.*//'); do
 	scripts/config --disable "$sym"
 done
+# ERRATA=strip: turn off every errata workaround the baseline enabled, rather
+# than a hand-kept list — the set changes with each kernel bump, and a stale
+# list would quietly stop stripping what it claims to. The workarounds are
+# keyed to specific ARM Ltd, Ampere, Cavium, Rockchip (etc.) cores by MIDR;
+# an Apple-silicon host matches none of them. olddefconfig leaves explicitly
+# unset symbols alone, so these stay off.
+if [ "$ERRATA" = strip ]; then
+	stripped=0
+	for sym in $(sed -n 's/^CONFIG_\([A-Z0-9_]*ERRATUM[A-Z0-9_]*\)=y$/\1/p' .config); do
+		scripts/config --disable "$sym"
+		stripped=$((stripped + 1))
+	done
+	echo "== ERRATA=strip: disabled $stripped CPU errata workarounds (not for release artifacts)"
+fi
 case "$ARCH/$PAGES" in
 arm64/4k)  scripts/config --disable ARM64_16K_PAGES --disable ARM64_64K_PAGES --enable ARM64_4K_PAGES ;;
 arm64/16k) scripts/config --enable ARM64_16K_PAGES ;;

@@ -1,0 +1,210 @@
+--- a/include/uapi/linux/virtio_fs.h
++++ b/include/uapi/linux/virtio_fs.h
+@@ -18,0 +19,3 @@
++/* Gantry extension: one device-to-driver FUSE notification virtqueue. */
++#define VIRTIO_FS_F_NOTIFICATION 23
++
+--- a/fs/fuse/fuse_i.h
++++ b/fs/fuse/fuse_i.h
+@@ -1347,0 +1348 @@
++ssize_t fuse_dev_notify(struct fuse_dev *fud, void *buf, size_t len);
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -2283,0 +2284,20 @@
++/*
++ * Process an unsolicited notification supplied by an in-kernel transport.
++ * The ordinary /dev/fuse path accepts only userspace iterators; virtio-fs's
++ * Gantry notification queue owns a bounded kernel buffer instead.
++ */
++ssize_t fuse_dev_notify(struct fuse_dev *fud, void *buf, size_t len)
++{
++	struct fuse_copy_state cs;
++	struct kvec iov = { .iov_base = buf, .iov_len = len };
++	struct iov_iter iter;
++
++	if (!fud || !buf || len < sizeof(struct fuse_out_header))
++		return -EINVAL;
++
++	iov_iter_kvec(&iter, ITER_SOURCE, &iov, 1, len);
++	fuse_copy_init(&cs, false, &iter);
++	return fuse_dev_do_write(fud, &cs, len);
++}
++EXPORT_SYMBOL_GPL(fuse_dev_notify);
++
+--- a/fs/fuse/virtio_fs.c
++++ b/fs/fuse/virtio_fs.c
+@@ -42 +42,2 @@
+-	VQ_REQUEST
++	VQ_REQUEST,
++	VQ_NOTIFICATION
+@@ -45,0 +47,2 @@
++#define VIRTIO_FS_NOTIFICATION_BUFS	64
++#define VIRTIO_FS_NOTIFICATION_SIZE	(8 * 1024)
+@@ -55,0 +59,2 @@
++	struct mutex notification_lock; /* protects notification_ready and fud */
++	bool notification_ready;
+@@ -59,0 +65 @@
++	unsigned int notification_buffers;
+@@ -71,0 +78,2 @@
++	unsigned int notification_queue;
++	bool has_notifications;
+@@ -98,0 +107,4 @@
++struct virtio_fs_notification {
++	u8 buf[VIRTIO_FS_NOTIFICATION_SIZE];
++};
++
+@@ -486 +498,3 @@
+-		if (!fsvq->fud)
++		mutex_lock(&fsvq->notification_lock);
++		if (!fsvq->fud) {
++			mutex_unlock(&fsvq->notification_lock);
+@@ -488 +502,2 @@
+-
++		}
++		fsvq->notification_ready = false;
+@@ -490,0 +506 @@
++		mutex_unlock(&fsvq->notification_lock);
+@@ -555,0 +572,98 @@
++static int virtio_fs_queue_notification(struct virtio_fs_vq *fsvq,
++					struct virtio_fs_notification *notification)
++{
++	struct scatterlist sg;
++	bool kick;
++	int ret;
++
++	spin_lock(&fsvq->lock);
++	if (!fsvq->connected) {
++		spin_unlock(&fsvq->lock);
++		return -ENODEV;
++	}
++	sg_init_one(&sg, notification->buf, sizeof(notification->buf));
++	ret = virtqueue_add_inbuf(fsvq->vq, &sg, 1, notification, GFP_ATOMIC);
++	if (ret) {
++		spin_unlock(&fsvq->lock);
++		return ret;
++	}
++	kick = virtqueue_kick_prepare(fsvq->vq);
++	spin_unlock(&fsvq->lock);
++	if (kick)
++		virtqueue_notify(fsvq->vq);
++	return 0;
++}
++
++static void virtio_fs_notification_done_work(struct work_struct *work)
++{
++	struct virtio_fs_vq *fsvq = container_of(work, struct virtio_fs_vq,
++						 done_work);
++	struct virtio_fs_notification *notification;
++	unsigned int len;
++
++	for (;;) {
++		spin_lock(&fsvq->lock);
++		virtqueue_disable_cb(fsvq->vq);
++		notification = virtqueue_get_buf(fsvq->vq, &len);
++		if (!notification) {
++			if (!virtqueue_enable_cb(fsvq->vq)) {
++				spin_unlock(&fsvq->lock);
++				continue;
++			}
++			spin_unlock(&fsvq->lock);
++			break;
++		}
++		spin_unlock(&fsvq->lock);
++
++		mutex_lock(&fsvq->notification_lock);
++		if (len <= sizeof(notification->buf) && fsvq->notification_ready)
++			fuse_dev_notify(fsvq->fud, notification->buf, len);
++		mutex_unlock(&fsvq->notification_lock);
++		memset(notification->buf, 0, sizeof(notification->buf));
++		if (virtio_fs_queue_notification(fsvq, notification)) {
++			spin_lock(&fsvq->lock);
++			fsvq->notification_buffers--;
++			spin_unlock(&fsvq->lock);
++			kfree(notification);
++		}
++	}
++}
++
++static void virtio_fs_notification_dispatch_work(struct work_struct *work)
++{
++	(void)work;
++}
++
++static int virtio_fs_fill_notification_queue(struct virtio_fs_vq *fsvq)
++{
++	int ret = 0;
++
++	for (;;) {
++		struct virtio_fs_notification *notification;
++
++		spin_lock(&fsvq->lock);
++		if (fsvq->notification_buffers >= VIRTIO_FS_NOTIFICATION_BUFS) {
++			spin_unlock(&fsvq->lock);
++			break;
++		}
++		fsvq->notification_buffers++;
++		spin_unlock(&fsvq->lock);
++
++		notification = kzalloc_obj(*notification);
++		if (!notification) {
++			ret = -ENOMEM;
++			goto undo_count;
++		}
++		ret = virtio_fs_queue_notification(fsvq, notification);
++		if (ret) {
++			kfree(notification);
++undo_count:
++			spin_lock(&fsvq->lock);
++			fsvq->notification_buffers--;
++			spin_unlock(&fsvq->lock);
++			break;
++		}
++	}
++	return ret;
++}
++
+@@ -911,0 +1026 @@
++	mutex_init(&fsvq->notification_lock);
+@@ -919,0 +1035,3 @@
++	} else if (vq_type == VQ_NOTIFICATION) {
++		INIT_WORK(&fsvq->done_work, virtio_fs_notification_done_work);
++		INIT_WORK(&fsvq->dispatch_work, virtio_fs_notification_dispatch_work);
+@@ -949 +1067,3 @@
+-	fs->nvqs = VQ_REQUEST + fs->num_request_queues;
++	fs->has_notifications = virtio_has_feature(vdev, VIRTIO_FS_F_NOTIFICATION);
++	fs->notification_queue = VQ_REQUEST + fs->num_request_queues;
++	fs->nvqs = fs->notification_queue + fs->has_notifications;
+@@ -969 +1089 @@
+-	for (i = VQ_REQUEST; i < fs->nvqs; i++) {
++	for (i = VQ_REQUEST; i < fs->notification_queue; i++) {
+@@ -976,0 +1097,6 @@
++	if (fs->has_notifications) {
++		i = fs->notification_queue;
++		virtio_fs_init_vq(&fs->vqs[i], "notifications", VQ_NOTIFICATION);
++		vqs_info[i].callback = virtio_fs_vq_done;
++		vqs_info[i].name = fs->vqs[i].name;
++	}
+@@ -998,0 +1125,10 @@
++	struct virtio_fs *fs = vdev->priv;
++
++	if (fs && fs->has_notifications && fs->vqs) {
++		struct virtio_fs_vq *fsvq = &fs->vqs[fs->notification_queue];
++		struct virtio_fs_notification *notification;
++
++		while ((notification = virtqueue_detach_unused_buf(fsvq->vq)))
++			kfree(notification);
++		fsvq->notification_buffers = 0;
++	}
+@@ -1219 +1355,3 @@
+-static const unsigned int feature_table[] = {};
++static const unsigned int feature_table[] = {
++	VIRTIO_FS_F_NOTIFICATION,
++};
+@@ -1590,0 +1729,3 @@
++		mutex_lock(&fsvq->notification_lock);
++		fsvq->notification_ready = true;
++		mutex_unlock(&fsvq->notification_lock);
+@@ -1594,0 +1736,3 @@
++	if (fs->has_notifications &&
++	    virtio_fs_fill_notification_queue(&fs->vqs[fs->notification_queue]))
++		pr_warn("virtio-fs: could not fill notification queue\n");
