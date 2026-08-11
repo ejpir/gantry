@@ -253,17 +253,29 @@ func TestBuildNetworkSeatbeltProfile(t *testing.T) {
 		t.Fatalf("network profile grants broad/process sysctl reads:\n%s", profile)
 	}
 	for _, path := range spec.ReadFiles {
+		escapedRaw := sbplEscape(path)
 		resolved := sbplEscape(sbplPath(path))
-		if !strings.Contains(profile, `(allow file-read* (literal "`+resolved+`"))`) {
-			t.Fatalf("network profile lacks literal resolver read %q:\n%s", resolved, profile)
+		if !strings.Contains(profile, `(allow file-read* (literal "`+escapedRaw+`"))`) {
+			t.Fatalf("network profile lacks literal resolver read %q:\n%s", escapedRaw, profile)
 		}
-		if strings.Contains(profile, `(subpath "`+resolved+`")`) {
-			t.Fatalf("network profile widened resolver file to subtree %q:\n%s", resolved, profile)
+		if resolved != escapedRaw && !strings.Contains(profile, `(allow file-read* (literal "`+resolved+`"))`) {
+			t.Fatalf("network profile lacks canonicalized resolver read %q:\n%s", resolved, profile)
+		}
+		for _, dir := range []string{filepath.Dir(path), filepath.Dir(sbplPath(path))} {
+			escapedDir := sbplEscape(dir)
+			if strings.Contains(profile, `(subpath "`+escapedDir+`")`) {
+				t.Fatalf("literal resolver grant %q broadened to parent %q:\n%s", path, dir, profile)
+			}
 		}
 	}
 	for _, forbidden := range []string{"worker-net.log", "console.log", "worker-vmm.log"} {
 		if strings.Contains(profile, forbidden) {
 			t.Fatalf("network profile grants broker-owned log path %q:\n%s", forbidden, profile)
+		}
+	}
+	for _, forbidden := range []string{probeReadPath, sbplPath(probeReadPath)} {
+		if strings.Contains(profile, `(literal "`+sbplEscape(forbidden)+`")`) {
+			t.Fatalf("network profile grants verifier read target %q:\n%s", forbidden, profile)
 		}
 	}
 }

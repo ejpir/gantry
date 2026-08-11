@@ -71,8 +71,22 @@ func buildSeatbeltProfile(spec Spec) string {
 	b.WriteString(`(allow file-read* file-write* (literal "/dev/null"))` + "\n")
 	b.WriteString(`(allow file-read* (literal "/dev/urandom"))` + "\n")
 	for _, p := range spec.ReadFiles {
-		if p != "" {
-			b.WriteString(`(allow file-read* (literal "` + sbplEscape(sbplPath(p)) + `"))` + "\n")
+		if p == "" {
+			continue
+		}
+		seen := map[string]struct{}{}
+		for _, path := range []string{p, sbplPath(p)} {
+			if path == "" {
+				continue
+			}
+			if _, exists := seen[path]; exists {
+				continue
+			}
+			seen[path] = struct{}{}
+			// Keep configuration grants literal. Granting the parent as a
+			// subpath turns /etc/hosts into authority over /etc/passwd and made
+			// required confinement correctly fail its fs-read probe on macOS.
+			b.WriteString(`(allow file-read* (literal "` + sbplEscape(path) + `"))` + "\n")
 		}
 	}
 	// Share export roots, split by writability: a RO export never
