@@ -70,7 +70,7 @@ func (f *winShareFile) Getattr(ctx context.Context, out *fuse.AttrOut) syscall.E
 	info, errno := f.backend.infoForHandle(windows.Handle(f.wf.file.Fd()))
 	if errno == 0 {
 		out.Attr = info.attr
-		out.SetTimeout(0)
+		cacheAttr(f.export, out)
 	}
 	return errno
 }
@@ -84,7 +84,7 @@ func (f *winShareFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fus
 	attr, errno := f.backend.setattr("", f.wf, in)
 	if errno == 0 {
 		out.Attr = attr
-		out.SetTimeout(0)
+		cacheAttr(f.export, out)
 	}
 	return errno
 }

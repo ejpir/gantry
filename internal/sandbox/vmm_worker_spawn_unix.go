@@ -71,9 +71,9 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	// The child duplicates each end into its table slot; the originals
 	// close after spawn. dupFiles are supervisor-side duplicates (always
 	// closed here). Boot assets stay supervisor-owned until a successful
-	// acknowledgement so a failed spawn can degrade to monolithic. Writable
-	// disk descriptors remain in the supervisor after acknowledgement: they
-	// carry the process-owned exclusive locks for the worker's lifetime.
+	// acknowledgement so a failed spawn can degrade to monolithic — the
+	// writable-disk locks included, since the monolithic fallback has to be
+	// able to take them itself.
 	var dupFiles []*os.File
 	closeDups := func() {
 		closeFiles(dupFiles)
@@ -123,14 +123,26 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	}
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	closeAfterAck = append(closeAfterAck, assets.DisksRO...)
+	// Each writable disk is locked on a private description the child never
+	// receives: flock ownership follows the open file description, so the
+	// worker's inherited descriptor cannot unlock what the supervisor holds.
+	var diskLocks []*os.File
+	keepDiskLocks := false
+	defer func() {
+		if !keepDiskLocks {
+			closeFiles(diskLocks)
+		}
+	}()
 	var maxWritableFileSize uint64
 	for index, disk := range assets.Disks {
 		if disk == nil {
 			return nil, fmt.Errorf("descriptor table: writable disk %d is nil", index)
 		}
-		if _, err := gutil.TryLockFD(disk); err != nil {
+		lock, err := gutil.TryLockPrivate(disk)
+		if err != nil {
 			return nil, fmt.Errorf("lock writable disk %s: %w", disk.Name(), err)
 		}
+		diskLocks = append(diskLocks, lock)
 		info, err := disk.Stat()
 		if err != nil {
 			return nil, fmt.Errorf("stat writable disk %s: %w", disk.Name(), err)
@@ -147,6 +159,31 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 		cfg.MaxWritableFileSize = maxWritableFileSize
 	}
 	assetFiles = append(assetFiles, assets.Disks...)
+	closeAfterAck = append(closeAfterAck, assets.Disks...)
+	var vhostPipes []*os.File
+	defer closeFiles(vhostPipes)
+	if cfg.VhostShares {
+		if !cfg.HasSharedRAM || assets.SharedRAM == nil {
+			return nil, fmt.Errorf("descriptor table: vhost shares require shared RAM")
+		}
+		assetFiles = append(assetFiles, assets.SharedRAM)
+		closeAfterAck = append(closeAfterAck, assets.SharedRAM)
+		for queue := 0; queue < vmmworker.VhostQueueCount; queue++ {
+			kickRead, kickWrite, err := os.Pipe()
+			if err != nil {
+				return nil, fmt.Errorf("vhost queue %d kick pipe: %w", queue, err)
+			}
+			vhostPipes = append(vhostPipes, kickRead, kickWrite)
+			callRead, callWrite, err := os.Pipe()
+			if err != nil {
+				return nil, fmt.Errorf("vhost queue %d call pipe: %w", queue, err)
+			}
+			vhostPipes = append(vhostPipes, callRead, callWrite)
+			assetFiles = append(assetFiles, kickRead, kickWrite, callRead, callWrite)
+		}
+	} else if cfg.HasSharedRAM || assets.SharedRAM != nil {
+		return nil, fmt.Errorf("descriptor table: shared RAM without vhost shares")
+	}
 	if assets.KVM != nil {
 		assetFiles = append(assetFiles, assets.KVM) // LAST slot (cfg.HasKVM)
 		closeAfterAck = append(closeAfterAck, assets.KVM)
@@ -263,7 +300,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 		bridgeE:     make(chan error, 1),
 		share:       shareSup,
 		diagnostics: workerLog,
-		diskLocks:   assets.Disks,
+		diskLocks:   diskLocks,
 		lifecycle:   newWorkerLifecycle(),
 		confReport:  ack.Confinement,
 	}
@@ -276,6 +313,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	// The drain goroutine now self-owns the broker until worker EOF.
 	keepWorkerLog = true
 	keepSup = true
+	keepDiskLocks = true // released by revokeWorkerCapabilities
 	return w, nil
 }
 

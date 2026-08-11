@@ -76,6 +76,13 @@ func availPush(mem *RAM, qn uint32, head uint16) {
 	_ = mem.writeAt(base+2, idx[:])
 }
 
+func setAvailUsedEvent(mem *RAM, qn, queueSize uint32, event uint16) {
+	base := ramBase + testAvailAddr + uint64(qn)*testStride
+	var value [2]byte
+	binary.LittleEndian.PutUint16(value[:], event)
+	_ = mem.writeAt(base+4+uint64(queueSize)*2, value[:])
+}
+
 type usedElem struct {
 	id  uint32
 	len uint32

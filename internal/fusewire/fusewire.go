@@ -15,7 +15,24 @@ const (
 	// validating guest-controlled IOV shapes.
 	InHeaderSize  = 40
 	outHeaderSize = 16
+
+	// MaxNotificationBytes bounds the Gantry virtio-fs notification extension.
+	// INVAL_ENTRY is below 512 bytes and batched PRUNE notifications fit in 8
+	// KiB. Both the guest driver and every host transport enforce this limit.
+	MaxNotificationBytes = 8 << 10
 )
+
+// NotificationSink accepts one complete FUSE notification frame. The frame is
+// call-scoped; sinks that retain it must copy it. Status is a Linux FUSE errno.
+type NotificationSink func(message []byte) fuse.Status
+
+// NotificationSource is implemented by a FUSE protocol endpoint capable of
+// emitting reverse invalidations. A transport attaches the sink only after the
+// guest has negotiated and populated Gantry's notification virtqueue. A nil
+// sink detaches it and forces cache policy back to its short-TTL fallback.
+type NotificationSource interface {
+	SetNotificationSink(NotificationSink)
+}
 
 // Handler consumes one raw FUSE request and fills the supplied response
 // vectors. Implementations return the response length and a transport status.
@@ -34,6 +51,46 @@ func ValidRequest(in [][]byte) bool {
 		available += len(part)
 	}
 	return available >= InHeaderSize
+}
+
+// ValidNotification validates an unsolicited FUSE response before a transport
+// copies it into guest memory. Only the invalidation forms Gantry emits are
+// accepted; STORE/RETRIEVE would turn this cache-coherence channel into a
+// general host-to-guest memory writer.
+func ValidNotification(message []byte) bool {
+	if len(message) < outHeaderSize || len(message) > MaxNotificationBytes ||
+		int(binary.LittleEndian.Uint32(message[0:4])) != len(message) ||
+		binary.LittleEndian.Uint64(message[8:16]) != 0 {
+		return false
+	}
+	code := int32(binary.LittleEndian.Uint32(message[4:8]))
+	switch code {
+	case -2: // FUSE_NOTIFY_INVAL_INODE
+		return len(message) == outHeaderSize+24
+	case -3: // FUSE_NOTIFY_INVAL_ENTRY
+		if len(message) < outHeaderSize+16+1 {
+			return false
+		}
+		nameLen := int(binary.LittleEndian.Uint32(message[outHeaderSize+8 : outHeaderSize+12]))
+		return nameLen > 0 && len(message) == outHeaderSize+16+nameLen+1 && message[len(message)-1] == 0
+	case -6: // FUSE_NOTIFY_DELETE
+		if len(message) < outHeaderSize+24+1 {
+			return false
+		}
+		nameLen := int(binary.LittleEndian.Uint32(message[outHeaderSize+16 : outHeaderSize+20]))
+		return nameLen > 0 && len(message) == outHeaderSize+24+nameLen+1 && message[len(message)-1] == 0
+	case -8: // FUSE_NOTIFY_INC_EPOCH
+		return len(message) == outHeaderSize
+	case -9: // FUSE_NOTIFY_PRUNE
+		if len(message) < outHeaderSize+16 {
+			return false
+		}
+		count := uint64(binary.LittleEndian.Uint32(message[outHeaderSize : outHeaderSize+4]))
+		return count <= (MaxNotificationBytes-outHeaderSize-16)/8 &&
+			uint64(len(message)) == uint64(outHeaderSize+16)+count*8
+	default:
+		return false
+	}
 }
 
 // CopyPrefix copies the leading bytes of an IOV into dst without allocating.

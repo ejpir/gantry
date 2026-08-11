@@ -75,8 +75,8 @@ func NewBlkFile(f *os.File, writable bool) (*Blk, error) {
 
 // NewBlkFilePrelocked attaches a writable disk whose exclusive lock is held
 // by the trusted supervisor process. The split VMM child must not acquire the
-// lock itself: process-owned locks are deliberately not transferable or
-// releasable by the untrusted child.
+// lock itself: the supervisor holds it on a private open file description
+// (gutil.TryLockPrivate) that the child never inherits and cannot release.
 func NewBlkFilePrelocked(f *os.File, writable bool) (*Blk, error) {
 	return newBlkFile(f, writable, true)
 }

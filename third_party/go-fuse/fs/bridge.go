@@ -1210,48 +1210,49 @@ func (b *rawBridge) Fallocate(cancel <-chan struct{}, input *fuse.FallocateIn) f
 	return fuse.ENOTSUP
 }
 
+func (b *rawBridge) newDirHandle(ctx context.Context, n *Inode, flags uint32) (FileHandle, uint32, syscall.Errno) {
+	if odh, ok := n.ops.(NodeOpendirHandler); ok {
+		return odh.OpendirHandle(ctx, flags)
+	}
+	if nod, ok := n.ops.(NodeOpendirer); ok {
+		if errno := nod.Opendir(ctx); errno != 0 {
+			return nil, 0, errno
+		}
+	}
+	var ctor func(context.Context) (DirStream, syscall.Errno)
+	if nrd, ok := n.ops.(NodeReaddirer); ok {
+		ctor = func(ctx context.Context) (DirStream, syscall.Errno) {
+			return nrd.Readdir(ctx)
+		}
+	} else {
+		ctor = func(context.Context) (DirStream, syscall.Errno) {
+			return n.childrenAsDirstream(), 0
+		}
+	}
+	return &dirStreamAsFile{creator: ctor}, 0, 0
+}
+
+func releaseDirHandle(ctx context.Context, fh FileHandle) {
+	if releasedir, ok := fh.(FileReleasedirer); ok {
+		releasedir.Releasedir(ctx, 0)
+	} else if stream, ok := fh.(DirStream); ok {
+		stream.Close()
+	}
+}
+
 func (b *rawBridge) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.OpenOut) fuse.Status {
+	if b.options.ZeroMessageOpenDir {
+		return fuse.ENOSYS
+	}
 	n, status := b.inode(input.NodeId)
 	if status != fuse.OK {
 		return status
 	}
-
-	var fh FileHandle
-	var fuseFlags uint32
-	var errno syscall.Errno
-
 	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
-
-	nod, _ := n.ops.(NodeOpendirer)
-	nrd, _ := n.ops.(NodeReaddirer)
-
-	if odh, ok := n.ops.(NodeOpendirHandler); ok {
-		fh, fuseFlags, errno = odh.OpendirHandle(ctx, input.Flags)
-
-		if errno != 0 {
-			return errnoToStatus(errno)
-		}
-	} else {
-		if nod != nil {
-			errno = nod.Opendir(ctx)
-			if errno != 0 {
-				return errnoToStatus(errno)
-			}
-		}
-
-		var ctor func(context.Context) (DirStream, syscall.Errno)
-		if nrd != nil {
-			ctor = func(ctx context.Context) (DirStream, syscall.Errno) {
-				return nrd.Readdir(ctx)
-			}
-		} else {
-			ctor = func(ctx context.Context) (DirStream, syscall.Errno) {
-				return n.childrenAsDirstream(), 0
-			}
-		}
-		fh = &dirStreamAsFile{creator: ctor}
+	fh, fuseFlags, errno := b.newDirHandle(ctx, n, input.Flags)
+	if errno != 0 {
+		return errnoToStatus(errno)
 	}
-
 	if fuseFlags&(fuse.FOPEN_CACHE_DIR|fuse.FOPEN_KEEP_CACHE) != 0 {
 		fuseFlags |= fuse.FOPEN_CACHE_DIR | fuse.FOPEN_KEEP_CACHE
 	}
@@ -1283,11 +1284,29 @@ func (b *rawBridge) ReadDir(cancel <-chan struct{}, input *fuse.ReadIn, out *fus
 }
 
 func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadIn, out *fuse.DirEntryList, lookup bool) fuse.Status {
-	n, f, status := b.acquireFile(input.NodeId, input.Fh)
-	if status != fuse.OK {
-		return status
+	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
+	var n *Inode
+	var f *fileEntry
+	if b.options.ZeroMessageOpenDir && input.Fh == 0 {
+		var status fuse.Status
+		n, status = b.inode(input.NodeId)
+		if status != fuse.OK {
+			return status
+		}
+		fh, _, errno := b.newDirHandle(ctx, n, 0)
+		if errno != 0 {
+			return errnoToStatus(errno)
+		}
+		f = &fileEntry{file: fh, inode: n}
+		defer releaseDirHandle(ctx, fh)
+	} else {
+		var status fuse.Status
+		n, f, status = b.acquireFile(input.NodeId, input.Fh)
+		if status != fuse.OK {
+			return status
+		}
+		defer f.wg.Done()
 	}
-	defer f.wg.Done()
 
 	direnter, ok := f.file.(FileReaddirenter)
 	if !ok {
@@ -1297,8 +1316,6 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
-	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
 	interruptedRead := false
 	if input.Offset != f.dirOffset {
 		// If the last readdir(plus) was interrupted, the
@@ -1402,6 +1419,11 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 		if de.Name == "." || de.Name == ".." {
 			continue
 		}
+		if b.options.ReadDirPlusLookup != nil && !b.options.ReadDirPlusLookup(*de) {
+			// A zero EntryOut.NodeId is explicitly valid for READDIRPLUS: the
+			// kernel emits the dirent but does not instantiate or account an inode.
+			continue
+		}
 
 		var child *Inode
 		if fileLookupper, ok := f.file.(FileLookuper); ok {
@@ -1434,12 +1456,29 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 }
 
 func (b *rawBridge) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.Status {
-	n, f, status := b.acquireFile(input.NodeId, input.Fh)
-	if status != fuse.OK {
-		return status
-	}
-	defer f.wg.Done()
 	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
+	var n *Inode
+	var f *fileEntry
+	if b.options.ZeroMessageOpenDir && input.Fh == 0 {
+		var status fuse.Status
+		n, status = b.inode(input.NodeId)
+		if status != fuse.OK {
+			return status
+		}
+		fh, _, errno := b.newDirHandle(ctx, n, 0)
+		if errno != 0 {
+			return errnoToStatus(errno)
+		}
+		f = &fileEntry{file: fh, inode: n}
+		defer releaseDirHandle(ctx, fh)
+	} else {
+		var status fuse.Status
+		n, f, status = b.acquireFile(input.NodeId, input.Fh)
+		if status != fuse.OK {
+			return status
+		}
+		defer f.wg.Done()
+	}
 	if fsd, ok := f.file.(FileFsyncdirer); ok {
 		return errnoToStatus(fsd.Fsyncdir(ctx, input.FsyncFlags))
 	} else if fs, ok := n.ops.(NodeFsyncer); ok {
@@ -1463,6 +1502,12 @@ func (b *rawBridge) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fu
 }
 
 func (b *rawBridge) Init(s *fuse.Server) {
+	b.server = s
+}
+
+// InitProtocol connects reverse cache notifications when RawFileSystem is
+// served without a local /dev/fuse file descriptor (virtio-fs).
+func (b *rawBridge) InitProtocol(s *fuse.ProtocolServer) {
 	b.server = s
 }
 

@@ -293,7 +293,7 @@ func TestClientRejectsWrongResponseID(t *testing.T) {
 			_, err = frame.readInput(server, inLens)
 		}
 		if err == nil {
-			err = writeShareBrokerResponse(server, 2, fuse.OK, nil, &frame.header)
+			err = writeShareBrokerResponse(server, 2, fuse.OK, nil, &frame.header, &frame.responseVectors, &frame.responseBuffers)
 		}
 		serverErr <- err
 	}()

@@ -76,6 +76,10 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 	// The KVM open is best-effort: without it the worker's Prepare fails
 	// exactly like the monolithic path would.
 	bootCfg.Confinement = effectiveProcessIsolation(cfg.ProcessIsolation)
+	// Opt-in while the vhost data plane is field-validated. The fallback is
+	// the established framed share broker; no persisted sandbox format changes.
+	bootCfg.VhostShares = os.Getenv("GANTRY_VHOST_SHARES") == "1"
+	bootCfg.HasSharedRAM = bootCfg.VhostShares
 	if bootCfg.Confinement != "off" {
 		confRoot := filepath.Join(dir, "vmmroot")
 		if err := os.MkdirAll(confRoot, 0o700); err != nil {
@@ -101,16 +105,33 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		}
 		bootCfg.Policy = raw
 	}
+	var (
+		sharedRAM *os.File
+		err       error
+	)
+	if bootCfg.VhostShares {
+		sharedRAM, err = newSharedRAM(dir, opts.MemSize)
+		if err != nil {
+			if kvm != nil {
+				_ = kvm.Close()
+			}
+			return nil, err
+		}
+	}
 	vw, err := spawnVMMWorker(bootCfg, vmmworker.Assets{
-		NetConn: opts.NetConn,
-		Console: console,
-		Kernel:  opts.Kernel,
-		Rootfs:  opts.Rootfs,
-		DisksRO: opts.DisksRO,
-		Disks:   opts.Disks,
-		KVM:     kvm,
+		NetConn:   opts.NetConn,
+		Console:   console,
+		Kernel:    opts.Kernel,
+		Rootfs:    opts.Rootfs,
+		DisksRO:   opts.DisksRO,
+		Disks:     opts.Disks,
+		SharedRAM: sharedRAM,
+		KVM:       kvm,
 	}, dir)
 	if err != nil {
+		if sharedRAM != nil {
+			_ = sharedRAM.Close()
+		}
 		if kvm != nil {
 			_ = kvm.Close()
 		}
@@ -121,9 +142,14 @@ func tryStartVMMSplit(cfg RunConfig, opts vmm.Opts, nw *Network, shareManager *S
 		// goroutine: an immediately-failing share relay can initiate Close.
 		vw.startTrafficSync(nw.Traffic)
 	}
-	if err := vw.startShareBroker(shareManager.Hub()); err != nil {
+	if bootCfg.VhostShares {
+		err = vw.startShareVhost(shareManager.Hub())
+	} else {
+		err = vw.startShareBroker(shareManager.Hub())
+	}
+	if err != nil {
 		_ = vw.Close()
-		return nil, fmt.Errorf("share broker: %w", err)
+		return nil, fmt.Errorf("share backend: %w", err)
 	}
 	return vw, nil
 }

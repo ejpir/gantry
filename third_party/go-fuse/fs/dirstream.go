@@ -121,6 +121,7 @@ type loopbackDirStream struct {
 	// mutable
 	todo      []byte
 	todoErrno syscall.Errno
+	eof       bool
 	fd        int
 }
 
@@ -131,6 +132,15 @@ func NewLoopbackDirStreamFd(fd int) (DirStream, syscall.Errno) {
 		fd: fd,
 	}
 	return ds, OK
+}
+
+// GantryDirFD exposes the already pinned directory only to the hardened
+// READDIRPLUS lookup wrapper. The bridge's file-entry reference prevents
+// Releasedir from closing it while a request is using the handle.
+func (ds *loopbackDirStream) GantryDirFD() (int, bool) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	return ds.fd, ds.fd >= 0
 }
 
 func (ds *loopbackDirStream) Close() {
@@ -160,6 +170,7 @@ func (ds *loopbackDirStream) Seekdir(ctx context.Context, off uint64) syscall.Er
 
 	ds.todo = nil
 	ds.todoErrno = 0
+	ds.eof = false
 	ds.load()
 	return 0
 }
@@ -226,7 +237,7 @@ func (ds *loopbackDirStream) Ioctl(ctx context.Context, cmd uint32, arg uint64, 
 }
 
 func (ds *loopbackDirStream) load() {
-	if len(ds.todo) > 0 || ds.todoErrno != 0 {
+	if len(ds.todo) > 0 || ds.todoErrno != 0 || ds.eof {
 		return
 	}
 	if ds.buf == nil {
@@ -238,4 +249,5 @@ func (ds *loopbackDirStream) load() {
 	}
 	ds.todo = ds.buf[:n]
 	ds.todoErrno = ToErrno(err)
+	ds.eof = n == 0 && ds.todoErrno == 0
 }

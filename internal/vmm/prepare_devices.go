@@ -3,10 +3,27 @@ package vmm
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/virtio"
 )
+
+// checkNilInterface reports an interface value that is non-nil but holds a
+// nil pointer — "no policy" expressed as a live implementation that dies (or
+// lies) on first use. Callers must leave the field nil to mean absent.
+func checkNilInterface(field string, value any) error {
+	if value == nil {
+		return nil
+	}
+	switch v := reflect.ValueOf(value); v.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		if v.IsNil() {
+			return fmt.Errorf("opts.%s holds a nil %s: leave the field nil when there is none", field, v.Type())
+		}
+	}
+	return nil
+}
 
 type diskInput struct {
 	file     *os.File
@@ -74,6 +91,17 @@ func (m *Machine) attachNetwork(o Opts, inputs *prepareInputs) error {
 			return fmt.Errorf("virtio-net: %w", err)
 		}
 		how = "unixgram " + o.NetEndpoint
+	}
+	// A typed-nil in either interface is a composition bug with two bad
+	// endings: the device's nil guard passes and the first frame panics the
+	// VMM, or a nil-tolerant implementation makes every configured deny
+	// silently vanish. Neither is survivable for an egress boundary — refuse
+	// the boot instead, while the caller can still see why.
+	if err := checkNilInterface("NetPolicy", o.NetPolicy); err != nil {
+		return err
+	}
+	if err := checkNilInterface("NetTraffic", o.NetTraffic); err != nil {
+		return err
 	}
 	nic.SetPolicy(o.NetPolicy)
 	nic.SetTrafficObserver(o.NetTraffic)

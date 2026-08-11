@@ -17,8 +17,9 @@ import (
 type Virtq struct {
 	Vring Ring
 
-	regions    *deviceRegions
-	dispatchMu *sync.RWMutex
+	regions      *deviceRegions
+	dispatchMu   *sync.RWMutex
+	completionMu *sync.RWMutex
 
 	// mu protects all mutable vring state: avail-side (LastAvailIdx,
 	// ShadowAvailIdx, inuse), used-side (UsedIdx, SignaledUsed,
@@ -41,6 +42,7 @@ type Virtq struct {
 
 	SignaledUsedValid bool
 	Notification      bool
+	EventIdx          bool
 	Debug             *bool
 
 	inuse uint
@@ -54,20 +56,20 @@ type Virtq struct {
 
 	Addr VhostVringAddr
 
-	control *readerControl
+	control       *readerControl
+	requests      sync.WaitGroup
+	notifications *notificationQueue
 }
 
-func (vq *Virtq) MapRing(du, av, uu unsafe.Pointer) {
-	vq.Vring.Desc = unsafe.Slice((*VringDesc)(du), vq.Vring.Num)
+func (vq *Virtq) MapRing(desc, avail, used []byte) {
+	vq.Vring.Desc = unsafe.Slice((*VringDesc)(unsafe.Pointer(&desc[0])), vq.Vring.Num)
 
-	vq.Vring.Used = (*VringUsed)(uu)
+	vq.Vring.Used = (*VringUsed)(unsafe.Pointer(&used[0]))
 	vq.Vring.UsedRing = unsafe.Slice(&vq.Vring.Used.Ring0, vq.Vring.Num)
-	//if (vu_has_feature(dev, VIRTIO_RING_F_EVENT_IDX)) {
 	vq.Vring.UsedAvailEvent = (*uint16)(unsafe.Pointer(&unsafe.Slice(&vq.Vring.Used.Ring0, vq.Vring.Num+1)[vq.Vring.Num]))
 
-	vq.Vring.Avail = (*VringAvail)(av)
+	vq.Vring.Avail = (*VringAvail)(unsafe.Pointer(&avail[0]))
 	vq.Vring.AvailRing = unsafe.Slice(&vq.Vring.Avail.Ring0, vq.Vring.Num)
-	//if (vu_has_feature(dev, VIRTIO_RING_F_EVENT_IDX)) {
 	vq.Vring.AvailUsedEvent = &unsafe.Slice(&vq.Vring.Avail.Ring0, vq.Vring.Num+1)[vq.Vring.Num]
 }
 
@@ -75,6 +77,10 @@ func (vq *Virtq) SetEnable(handle func(*VirtqElem) int) {
 	var enable uint
 	if handle != nil {
 		enable = 1
+	}
+	if enable != 0 && vq.control != nil {
+		vq.Enable = enable // idempotent SET_VRING_ENABLE
+		return
 	}
 
 	vq.Enable = enable
@@ -87,6 +93,7 @@ func (vq *Virtq) SetEnable(handle func(*VirtqElem) int) {
 	} else if vq.control != nil {
 		close(vq.control.cancel)
 		<-vq.control.done
+		vq.requests.Wait()
 		vq.control = nil
 	}
 }
@@ -249,9 +256,12 @@ func (vq *Virtq) vringNotify() bool {
 
 	barrier.Full()
 
-	// if F_NOTIFY_ON_EMPTY ...
-
-	// if ! F_EVENT_IDX ...
+	// Without EVENT_IDX, use a conservative always-notify policy. Ignoring
+	// VRING_AVAIL_F_NO_INTERRUPT may add an IRQ while the guest polls, but it
+	// cannot lose a completion and is appropriate for the correctness path.
+	if !vq.EventIdx {
+		return true
+	}
 
 	v := vq.SignaledUsedValid
 	old := vq.SignaledUsed
@@ -279,56 +289,82 @@ func (vq *Virtq) queueNotify() {
 	}
 }
 
-// queueMapDesc resolves descriptor chain starting at head into a VirtqElem.
+const (
+	maxVhostChainDescriptors = 65
+	maxVhostChainBytes       = 256 << 10
+)
+
+// queueMapDesc resolves a hostile descriptor chain into bounded IOVs. The
+// limits match Gantry's in-process virtio frontend; cycles, nested indirect
+// tables, read-after-write layouts, and ranges outside registered RAM fail
+// before the FUSE parser sees them.
 func (vq *Virtq) queueMapDesc(head uint16) (*VirtqElem, error) {
-	result := VirtqElem{
-		index: uint(head),
+	if int(head) >= len(vq.Vring.Desc) {
+		return nil, fmt.Errorf("descriptor head %d outside table", head)
 	}
-
+	result := VirtqElem{index: uint(head)}
 	descArray := vq.Vring.Desc
-	desc := descArray[head]
-	if desc.Flags&VRING_DESC_F_INDIRECT != 0 {
-		eltSize := unsafe.Sizeof(VringDesc{})
-		if (desc.Len % uint32(eltSize)) != 0 {
-			return nil, fmt.Errorf("modulo size")
+	first := descArray[head]
+	if first.Flags&VRING_DESC_F_INDIRECT != 0 {
+		const eltSize = uint32(unsafe.Sizeof(VringDesc{}))
+		if first.Flags&VRING_DESC_F_NEXT != 0 || first.Len == 0 || first.Len%eltSize != 0 {
+			return nil, fmt.Errorf("invalid indirect descriptor")
 		}
-
-		indirectAsBytes := vq.regions.FromGuestAddr(desc.Addr, uint64(desc.Len))
-		if indirectAsBytes == nil {
-			return nil, fmt.Errorf("OOB read %x", desc.Addr)
+		count := first.Len / eltSize
+		if count > maxVhostChainDescriptors {
+			return nil, fmt.Errorf("indirect table has %d descriptors", count)
 		}
-		if len(indirectAsBytes) != int(desc.Len) {
-			return nil, fmt.Errorf("partial read indirect desc")
+		indirect := vq.regions.FromGuestAddr(first.Addr, uint64(first.Len))
+		if len(indirect) != int(first.Len) {
+			return nil, fmt.Errorf("indirect table outside registered memory")
 		}
-		n := desc.Len / uint32(eltSize)
-		descArray = unsafe.Slice((*VringDesc)(unsafe.Pointer(&indirectAsBytes[0])), n)
-		desc = descArray[0]
+		descArray = unsafe.Slice((*VringDesc)(unsafe.Pointer(&indirect[0])), count)
+		head = 0
 	}
 
-	for {
+	var visited [maxQueueSize]bool
+	var total uint64
+	seenWrite := false
+	for count := 0; ; count++ {
+		if count >= maxVhostChainDescriptors {
+			return nil, fmt.Errorf("descriptor chain exceeds %d entries", maxVhostChainDescriptors)
+		}
+		if int(head) >= len(descArray) {
+			return nil, fmt.Errorf("descriptor index %d outside table", head)
+		}
+		if visited[head] {
+			return nil, fmt.Errorf("descriptor chain cycle at %d", head)
+		}
+		visited[head] = true
+		desc := descArray[head]
+		if desc.Flags&^(VRING_DESC_F_NEXT|VRING_DESC_F_WRITE) != 0 {
+			return nil, fmt.Errorf("unsupported descriptor flags %#x", desc.Flags)
+		}
+		total += uint64(desc.Len)
+		if total > maxVhostChainBytes {
+			return nil, fmt.Errorf("descriptor chain exceeds %d bytes", maxVhostChainBytes)
+		}
 		iov, err := vq.readVringEntry(desc.Addr, desc.Len)
 		if err != nil {
 			return nil, err
 		}
 		if desc.Flags&VRING_DESC_F_WRITE != 0 {
-			// virtqueue_map_desc
+			seenWrite = true
 			result.Write = append(result.Write, iov...)
 		} else {
+			if seenWrite {
+				return nil, fmt.Errorf("readable descriptor follows writable descriptor")
+			}
 			result.Read = append(result.Read, iov...)
 		}
-		//
-
+		if len(result.Read)+len(result.Write) > maxVhostChainDescriptors {
+			return nil, fmt.Errorf("descriptor chain maps to too many regions")
+		}
 		if desc.Flags&VRING_DESC_F_NEXT == 0 {
 			break
 		}
-
 		head = barrier.LoadUint16(&desc.Next)
-		if head >= uint16(len(descArray)) {
-			return nil, fmt.Errorf("OOB read, head %d beyond %d", head, len(descArray))
-		}
-		desc = descArray[head]
 	}
-
 	return &result, nil
 }
 
@@ -336,6 +372,9 @@ func (vq *Virtq) queueMapDesc(head uint16) (*VirtqElem, error) {
 // following region boundaries.
 func (vq *Virtq) readVringEntry(physAddr uint64, sz uint32) ([][]byte, error) {
 	var result [][]byte
+	if physAddr+uint64(sz) < physAddr {
+		return nil, fmt.Errorf("descriptor range overflows address space")
+	}
 
 	for sz > 0 {
 		d := vq.regions.FromGuestAddr(physAddr, uint64(sz))
@@ -356,24 +395,26 @@ type readerControl struct {
 }
 
 func (vq *Virtq) SetVringAddr(addr *VhostVringAddr) error {
+	if vq.Vring.Num < 1 || vq.Vring.Num > maxQueueSize {
+		return fmt.Errorf("invalid vring size %d", vq.Vring.Num)
+	}
+	if addr.DescUserAddr%16 != 0 || addr.AvailUserAddr%2 != 0 || addr.UsedUserAddr%4 != 0 {
+		return fmt.Errorf("misaligned vring address")
+	}
 	vq.Addr = *addr
 	vq.Vring.Flags = uint32(addr.Flags)
-
 	vq.Vring.LogGuestAddr = addr.LogGuestAddr
 
-	du := vq.regions.FromDriverAddr(addr.DescUserAddr)
-	av := vq.regions.FromDriverAddr(addr.AvailUserAddr)
-	uu := vq.regions.FromDriverAddr(addr.UsedUserAddr)
-	if du == nil {
-		return fmt.Errorf("could not map DescUserAddr %x", addr.DescUserAddr)
+	descSize := uint64(vq.Vring.Num * int(unsafe.Sizeof(VringDesc{})))
+	availSize := uint64(4 + 2*vq.Vring.Num + 2) // header + ring + used_event
+	usedSize := uint64(4 + 8*vq.Vring.Num + 2)  // header + ring + avail_event
+	desc := vq.regions.FromDriverRange(addr.DescUserAddr, descSize)
+	avail := vq.regions.FromDriverRange(addr.AvailUserAddr, availSize)
+	used := vq.regions.FromDriverRange(addr.UsedUserAddr, usedSize)
+	if desc == nil || avail == nil || used == nil {
+		return fmt.Errorf("vring range lies outside registered memory")
 	}
-	if av == nil {
-		return fmt.Errorf("could not map AvailUserAddr %x", addr.AvailUserAddr)
-	}
-	if uu == nil {
-		return fmt.Errorf("could not map UsedUserAddr %x", addr.UsedUserAddr)
-	}
-	vq.MapRing(du, av, uu)
+	vq.MapRing(desc, avail, used)
 
 	vq.UsedIdx = vq.Vring.Used.Idx
 	if vq.LastAvailIdx != vq.UsedIdx {
@@ -389,6 +430,7 @@ func newVirtq(dev *Device) *Virtq {
 		Notification: true,
 		regions:      &dev.regions,
 		dispatchMu:   &dev.dispatchMu,
+		completionMu: &dev.completionMu,
 		Debug:        &dev.Debug,
 		KickFD:       -1,
 		ErrFD:        -1,
@@ -400,6 +442,7 @@ func (vq *Virtq) Close() error {
 	if vq.control != nil {
 		close(vq.control.cancel)
 		<-vq.control.done
+		vq.requests.Wait()
 		vq.control = nil
 	}
 

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 )
 
@@ -53,6 +54,15 @@ func (d *deviceRegions) FromDriverAddr(driverAddr uint64) unsafe.Pointer {
 	return nil
 }
 
+func (d *deviceRegions) FromDriverRange(driverAddr, size uint64) []byte {
+	for _, r := range d.load() {
+		if data := r.driverRange(driverAddr, size); data != nil {
+			return data
+		}
+	}
+	return nil
+}
+
 func (d *deviceRegions) FromGuestAddr(guestAddr uint64, sz uint64) []byte {
 	regs := d.load()
 	idx := findRegionByGuestAddr(regs, guestAddr)
@@ -64,11 +74,12 @@ func (d *deviceRegions) FromGuestAddr(guestAddr uint64, sz uint64) []byte {
 		return nil
 	}
 
-	seg := r.Data[guestAddr-r.GuestPhysAddr:]
-	if len(seg) > int(sz) {
-		seg = seg[:sz]
+	offset := guestAddr - r.GuestPhysAddr
+	available := uint64(len(r.Data)) - offset
+	if sz > available {
+		sz = available
 	}
-	return seg
+	return r.Data[offset : offset+sz]
 }
 
 // findRegionByGuestAddr returns the index of the region that may contain
@@ -81,6 +92,11 @@ func findRegionByGuestAddr(regs []deviceRegion, guestAddr uint64) int {
 }
 
 func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
+	defer syscall.Close(fd)
+	if reg == nil || reg.MemorySize == 0 || reg.GuestPhysAddr+reg.MemorySize < reg.GuestPhysAddr ||
+		reg.DriverAddr+reg.MemorySize < reg.DriverAddr {
+		return fmt.Errorf("invalid memory region")
+	}
 	if hps := getFDHugepagesize(fd); hps != 0 {
 		return fmt.Errorf("huge pages")
 	}
@@ -89,6 +105,12 @@ func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
 	if err := dr.configure(fd, reg); err != nil {
 		return err
 	}
+	keep := false
+	defer func() {
+		if !keep {
+			_ = dr.Close()
+		}
+	}()
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -97,6 +119,13 @@ func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
 	if len(old) == int(d.GetMaxMemslots()) {
 		return fmt.Errorf("out of memory slots")
 	}
+	newEnd := reg.GuestPhysAddr + reg.MemorySize
+	for index := range old {
+		oldEnd := old[index].GuestPhysAddr + old[index].MemorySize
+		if reg.GuestPhysAddr < oldEnd && old[index].GuestPhysAddr < newEnd {
+			return fmt.Errorf("overlapping guest memory region")
+		}
+	}
 
 	idx := findRegionByGuestAddr(old, reg.GuestPhysAddr)
 	newRegs := make([]deviceRegion, len(old)+1)
@@ -104,6 +133,7 @@ func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
 	newRegs[idx] = dr
 	copy(newRegs[idx+1:], old[idx:])
 	d.regions.Store(&newRegs)
+	keep = true
 	return nil
 }
 

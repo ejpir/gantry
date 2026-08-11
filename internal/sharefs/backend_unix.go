@@ -64,9 +64,14 @@ func newExportNodeFD(exp *Export, identity Identity, rootFD *os.File, salt uint6
 		return nil, Identity{}, nil, fmt.Errorf("unexpected loopback root %T", rootNode)
 	}
 	loopback.RootData.InoSalt = salt
+	exp.watchRootFD = int(rootFD.Fd())
 	rootData := loopback.RootData
 	node := &shareNode{LoopbackNode: fs.LoopbackNode{RootData: rootData}, export: exp}
 	rootData.RootNode = node
-	release := func() { _ = rootFD.Close() }
+	registerShareDirCache(exp)
+	release := func() {
+		closeShareDirCache(exp)
+		_ = rootFD.Close()
+	}
 	return node, identity, release, nil
 }

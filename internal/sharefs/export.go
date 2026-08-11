@@ -42,6 +42,13 @@ type Export struct {
 	GID  *uint32
 
 	identity Identity
+	hub      *Hub
+
+	// Platform watcher capabilities are populated while the export root is
+	// pinned. Only the matching platform backend interprets its field.
+	watchRootFD     int     //nolint:unused // consumed by watcher_linux.go
+	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
+	coherence       *exportCoherence
 
 	state atomic.Int32
 	// node is the platform backend's root node, presented at /<tag>.
@@ -97,12 +104,20 @@ func (e *Export) mutable() syscall.Errno {
 	return 0
 }
 
+func (e *Export) longCacheHealthy() bool {
+	return e != nil && e.hub != nil && e.hub.notificationsReady.Load() &&
+		e.coherence != nil && e.coherence.Healthy()
+}
+
 func (e *Export) finish() {
 	if e == nil {
 		return
 	}
 	e.finishOne.Do(func() {
 		e.advanceState(ExportGone)
+		if e.coherence != nil {
+			e.coherence.close()
+		}
 		if e.release != nil {
 			e.release()
 		}

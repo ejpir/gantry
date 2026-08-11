@@ -2,14 +2,23 @@
 
 package vmm
 
-import "syscall"
+import (
+	"os"
+	"syscall"
+)
 
 // allocGuestRAM reserves the guest's memory; the backend maps it into the VM
-// with hv_vm_map afterwards.
-func allocGuestRAM(size uint64) ([]byte, error) {
-	return syscall.Mmap(-1, 0, int(size),
-		syscall.PROT_READ|syscall.PROT_WRITE,
-		syscall.MAP_PRIVATE|syscall.MAP_ANON)
+// with hv_vm_map afterwards. Split VMMs use a shared backing descriptor so a
+// vhost-style filesystem backend can map the same guest pages directly.
+func allocGuestRAM(size uint64, backing *os.File) ([]byte, error) {
+	fd := -1
+	flags := syscall.MAP_PRIVATE | syscall.MAP_ANON
+	if backing != nil {
+		fd = int(backing.Fd())
+		flags = syscall.MAP_SHARED
+	}
+	return syscall.Mmap(fd, 0, int(size),
+		syscall.PROT_READ|syscall.PROT_WRITE, flags)
 }
 
 func freeGuestRAM(ram []byte) error {

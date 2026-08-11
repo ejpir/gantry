@@ -13,6 +13,8 @@ import (
 	"github.com/ejpir/gantry/internal/workerconf"
 )
 
+const VhostQueueCount = 3 // virtio-fs hiprio + request + Gantry notification queue
+
 // Config is the authenticated bootstrap payload sent in the worker handshake.
 // Descriptor counts define the inherited asset-table layout.
 type Config struct {
@@ -41,20 +43,38 @@ type Config struct {
 	Confinement string `json:"confinement,omitempty"`
 	ConfRoot    string `json:"confRoot,omitempty"`
 	HasKVM      bool   `json:"hasKVM,omitempty"`
+
+	// VhostShares switches the filesystem data plane from framed FUSE RPCs
+	// to shared guest RAM plus virtqueue doorbells. HasSharedRAM requires the
+	// corresponding inherited backing descriptor.
+	VhostShares  bool `json:"vhostShares,omitempty"`
+	HasSharedRAM bool `json:"hasSharedRAM,omitempty"`
 }
 
 // Assets contains the pre-opened capabilities consumed by the child. ShareConn
 // carries bounded FUSE messages and intentionally conveys no host filesystem
 // descriptor or path.
 type Assets struct {
-	ShareConn net.Conn
-	NetConn   net.Conn
-	Console   *os.File
-	Kernel    *os.File
-	Rootfs    *os.File
-	DisksRO   []*os.File
-	Disks     []*os.File
-	KVM       *os.File
+	ShareConn  net.Conn
+	NetConn    net.Conn
+	Console    *os.File
+	Kernel     *os.File
+	Rootfs     *os.File
+	DisksRO    []*os.File
+	Disks      []*os.File
+	SharedRAM  *os.File
+	VhostQueue []VhostQueueFiles
+	KVM        *os.File
+}
+
+// VhostQueueFiles are the two unidirectional doorbells for one virtqueue.
+// The frontend keeps KickWrite and CallRead; it transfers KickRead and
+// CallWrite to the backend over the setup-only vhost control connection.
+type VhostQueueFiles struct {
+	KickRead  *os.File
+	KickWrite *os.File
+	CallRead  *os.File
+	CallWrite *os.File
 }
 
 // AssetLoader reconstructs the inherited descriptor table after Config has

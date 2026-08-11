@@ -33,6 +33,10 @@ func (n *shareNode) mutable() syscall.Errno {
 	return n.export.mutable()
 }
 
+func (n *shareNode) isExportRoot() bool {
+	return n.RootData != nil && n.RootData.RootNode == n
+}
+
 func (n *shareNode) wrapFile(f fs.FileHandle, errno syscall.Errno) (fs.FileHandle, uint32, syscall.Errno) {
 	if errno != 0 || f == nil {
 		return nil, 0, errno
@@ -55,6 +59,9 @@ func (n *shareNode) WrapChild(ctx context.Context, ops fs.InodeEmbedder) fs.Inod
 }
 
 func (n *shareNode) OnForget() {
+	if n.export != nil && n.export.coherence != nil {
+		n.export.coherence.forget(n.EmbeddedInode())
+	}
 	// Only the export root owns the pinned root directory. Descendants can
 	// forget independently throughout normal operation.
 	if n.export != nil && n.RootData.RootNode == n {
@@ -69,6 +76,10 @@ func (n *shareNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	inode, errno := n.LoopbackNode.Lookup(ctx, name, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
+		if n.export.coherence != nil {
+			n.export.coherence.remember(n.EmbeddedInode(), name, inode)
+		}
+		cacheEntry(n.export, out)
 	}
 	return inode, errno
 }
@@ -91,6 +102,10 @@ func (n *shareNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	inode, errno := n.LoopbackNode.Mkdir(ctx, name, mode, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
+		if n.export.coherence != nil {
+			n.export.coherence.remember(n.EmbeddedInode(), name, inode)
+		}
+		cacheEntry(n.export, out)
 	}
 	return inode, errno
 }
@@ -99,29 +114,43 @@ func (n *shareNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	return n.LoopbackNode.Rmdir(ctx, name)
+	errno := n.LoopbackNode.Rmdir(ctx, name)
+	if errno == 0 && n.export.coherence != nil {
+		n.export.coherence.forgetPath(n.EmbeddedInode(), name)
+	}
+	return errno
 }
 
 func (n *shareNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	return n.LoopbackNode.Unlink(ctx, name)
+	errno := n.LoopbackNode.Unlink(ctx, name)
+	if errno == 0 && n.export.coherence != nil {
+		n.export.coherence.forgetPath(n.EmbeddedInode(), name)
+	}
+	return errno
 }
 
 func (n *shareNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	if other, ok := newParent.(*shareNode); ok {
-		if errno := other.mutable(); errno != 0 {
-			return errno
-		}
-		if other.export != n.export {
-			return syscall.EXDEV
-		}
+	other, ok := newParent.(*shareNode)
+	if !ok {
+		return syscall.EXDEV
 	}
-	return n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
+	if errno := other.mutable(); errno != 0 {
+		return errno
+	}
+	if other.export != n.export {
+		return syscall.EXDEV
+	}
+	errno := n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
+	if errno == 0 && n.export.coherence != nil {
+		n.export.coherence.renamePath(n.EmbeddedInode(), name, other.EmbeddedInode(), newName)
+	}
+	return errno
 }
 
 func (n *shareNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
@@ -131,6 +160,10 @@ func (n *shareNode) Create(ctx context.Context, name string, flags uint32, mode 
 	inode, fh, fuseFlags, errno = n.LoopbackNode.Create(ctx, name, flags, mode, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
+		if n.export.coherence != nil {
+			n.export.coherence.remember(n.EmbeddedInode(), name, inode)
+		}
+		cacheEntry(n.export, out)
 	}
 	fh, _, errno = n.wrapFile(fh, errno)
 	return inode, fh, fuseFlags, errno
@@ -143,6 +176,10 @@ func (n *shareNode) Symlink(ctx context.Context, target, name string, out *fuse.
 	inode, errno := n.LoopbackNode.Symlink(ctx, target, name, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
+		if n.export.coherence != nil {
+			n.export.coherence.remember(n.EmbeddedInode(), name, inode)
+		}
+		cacheEntry(n.export, out)
 	}
 	return inode, errno
 }
@@ -157,6 +194,10 @@ func (n *shareNode) Link(ctx context.Context, target fs.InodeEmbedder, name stri
 	inode, errno := n.LoopbackNode.Link(ctx, target, name, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
+		if n.export.coherence != nil {
+			n.export.coherence.remember(n.EmbeddedInode(), name, inode)
+		}
+		cacheEntry(n.export, out)
 	}
 	return inode, errno
 }
@@ -200,11 +241,18 @@ func (n *shareNode) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHan
 	if errno := n.available(); errno != 0 {
 		return nil, 0, errno
 	}
+	if fd, ok := shareDirectoryCache(n.export).open(n.StableAttr().Ino); ok {
+		ds, errno := fs.NewLoopbackDirStreamFd(fd)
+		if errno == 0 {
+			return &shareDirHandle{FileHandle: ds, export: n.export, node: n}, 0, 0
+		}
+		_ = syscall.Close(fd)
+	}
 	fh, fuseFlags, errno := n.LoopbackNode.OpendirHandle(ctx, flags)
 	if errno != 0 || fh == nil {
 		return nil, 0, errno
 	}
-	return &shareDirHandle{FileHandle: fh, export: n.export}, fuseFlags, 0
+	return &shareDirHandle{FileHandle: fh, export: n.export, node: n}, fuseFlags, 0
 }
 
 func (n *shareNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -225,6 +273,9 @@ func (n *shareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	errno := n.LoopbackNode.Getattr(ctx, f, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
+		if !n.isExportRoot() {
+			cacheAttr(n.export, out)
+		}
 	}
 	return errno
 }
@@ -240,6 +291,9 @@ func (n *shareNode) Statx(ctx context.Context, f fs.FileHandle, flags uint32, ma
 	errno := statxer.Statx(ctx, f, flags, mask, out)
 	if errno == 0 {
 		mapGuestStatxOwner(n.export, &out.Statx)
+		if !n.isExportRoot() {
+			cacheStatx(n.export, out)
+		}
 	}
 	return errno
 }

@@ -183,6 +183,11 @@ func workerEnv() []string {
 	if os.Getenv("GANTRY_DEBUG_RTC") != "" {
 		out = append(out, "GANTRY_DEBUG_RTC=1")
 	}
+	// GANTRY_PREFAULT_RAM likewise: the guest RAM commit happens inside the
+	// VMM worker, so the boot-latency experiment is unreachable without it.
+	if os.Getenv("GANTRY_PREFAULT_RAM") != "" {
+		out = append(out, "GANTRY_PREFAULT_RAM=1")
+	}
 	return out
 }
 

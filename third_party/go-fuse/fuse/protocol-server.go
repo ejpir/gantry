@@ -5,6 +5,7 @@
 package fuse
 
 import (
+	"encoding/binary"
 	"sync"
 	"syscall"
 )
@@ -15,11 +16,18 @@ type protocolServer struct {
 
 	writev func([][]byte) (int, syscall.Errno)
 
+	// gantryNotificationSink carries unsolicited FUSE invalidations over
+	// Gantry's negotiated virtio-fs notification queue. Ordinary /dev/fuse
+	// mounts continue to use writev above.
+	gantryNotificationMu   sync.RWMutex
+	gantryNotificationSink func([]byte) Status
+
 	interruptMu    sync.Mutex
 	reqInflight    []*request
 	connectionDead bool
 
-	kernelSettings InitIn
+	kernelSettingsMu sync.RWMutex
+	kernelSettings   InitIn
 
 	opts *MountOptions
 
@@ -160,13 +168,17 @@ func NewProtocolServer(fs RawFileSystem, opts *MountOptions) *ProtocolServer {
 	optsCopy.setDefaults(fs)
 	optsCopy.DisableSplice = true
 
-	return &ProtocolServer{
+	server := &ProtocolServer{
 		protocolServer: protocolServer{
 			fileSystem:  fs,
 			retrieveTab: make(map[uint64]*retrieveCacheRequest),
 			opts:        &optsCopy,
 		},
 	}
+	if initializer, ok := fs.(interface{ InitProtocol(*ProtocolServer) }); ok {
+		initializer.InitProtocol(server)
+	}
+	return server
 }
 
 // GantryResourceUsage forwards optional live inode/file-handle accounting
@@ -179,6 +191,88 @@ func (ps *ProtocolServer) GantryResourceUsage() (nodes, handles int) {
 		return reporter.GantryResourceUsage()
 	}
 	return 0, 0
+}
+
+// GantrySetNotificationSink installs the transport for unsolicited reverse
+// invalidations. The callback receives a call-scoped contiguous frame.
+func (ps *ProtocolServer) GantrySetNotificationSink(sink func([]byte) Status) {
+	ps.gantryNotificationMu.Lock()
+	ps.gantryNotificationSink = sink
+	ps.gantryNotificationMu.Unlock()
+}
+
+func (ps *protocolServer) gantryNotify(iov [][]byte) Status {
+	ps.gantryNotificationMu.RLock()
+	defer ps.gantryNotificationMu.RUnlock()
+	if ps.gantryNotificationSink == nil {
+		return ENOSYS
+	}
+	total := iovLen(iov)
+	message := make([]byte, total)
+	offset := 0
+	for _, part := range iov {
+		offset += copy(message[offset:], part)
+	}
+	return ps.gantryNotificationSink(message)
+}
+
+func (ps *ProtocolServer) sendGantryNotification(code int32, data, payload []byte) Status {
+	total := 16 + len(data) + len(payload)
+	header := make([]byte, 16)
+	binary.LittleEndian.PutUint32(header[0:4], uint32(total))
+	binary.LittleEndian.PutUint32(header[4:8], uint32(code))
+	return ps.protocolServer.gantryNotify([][]byte{header, data, payload})
+}
+
+func (ps *ProtocolServer) InodeNotify(node uint64, off int64, length int64) Status {
+	data := make([]byte, 24)
+	binary.LittleEndian.PutUint64(data[0:8], node)
+	binary.LittleEndian.PutUint64(data[8:16], uint64(off))
+	binary.LittleEndian.PutUint64(data[16:24], uint64(length))
+	return ps.sendGantryNotification(NOTIFY_INVAL_INODE, data, nil)
+}
+
+func (ps *ProtocolServer) EntryNotify(parent uint64, name string) Status {
+	if name == "" {
+		return EINVAL
+	}
+	data := make([]byte, 16)
+	binary.LittleEndian.PutUint64(data[0:8], parent)
+	binary.LittleEndian.PutUint32(data[8:12], uint32(len(name)))
+	payload := append([]byte(name), 0)
+	return ps.sendGantryNotification(NOTIFY_INVAL_ENTRY, data, payload)
+}
+
+func (ps *ProtocolServer) DeleteNotify(parent uint64, child uint64, name string) Status {
+	if name == "" {
+		return EINVAL
+	}
+	data := make([]byte, 24)
+	binary.LittleEndian.PutUint64(data[0:8], parent)
+	binary.LittleEndian.PutUint64(data[8:16], child)
+	binary.LittleEndian.PutUint32(data[16:20], uint32(len(name)))
+	payload := append([]byte(name), 0)
+	return ps.sendGantryNotification(NOTIFY_DELETE, data, payload)
+}
+
+func (ps *ProtocolServer) InodeNotifyStoreCache(uint64, int64, []byte) Status {
+	return ENOSYS
+}
+
+func (ps *ProtocolServer) InodeRetrieveCache(uint64, int64, []byte) (int, Status) {
+	return 0, ENOSYS
+}
+
+// GantryNotifyEpoch invalidates all dentries from the previous FUSE
+// connection epoch. It is used as the bounded fail-safe for watcher loss.
+func (ps *ProtocolServer) GantryNotifyEpoch() Status {
+	ps.kernelSettingsMu.RLock()
+	settings := ps.kernelSettings
+	ps.kernelSettingsMu.RUnlock()
+	if settings.Major < 7 || (settings.Major == 7 && settings.Minor < 44) {
+		return ENOSYS
+	}
+	return ps.sendGantryNotification(NOTIFY_INC_EPOCH, nil, nil)
 }
 
 func iovLen(iov [][]byte) int {

@@ -73,6 +73,9 @@ func keepFDs(config Config) int {
 		count++
 	}
 	count += config.NDisksRO + config.NDisks
+	if config.HasSharedRAM {
+		count += 1 + 4*VhostQueueCount
+	}
 	if config.HasKVM {
 		count++
 	}

@@ -23,11 +23,13 @@ const (
 // FS is a host-path-neutral virtio-fs frontend. It does not own handler; the
 // component that created the handler controls its lifetime explicitly.
 type FS struct {
-	core    *Core
-	tag     string
-	handler fusewire.Handler
-	owner   io.Closer
-	verbose bool
+	core          *Core
+	tag           string
+	handler       fusewire.Handler
+	owner         io.Closer
+	notifySource  fusewire.NotificationSource
+	notifications *fsNotificationQueue
+	verbose       bool
 
 	// Core serializes queue dispatch, so request vectors and their backing
 	// storage can be reused without pooling or cross-goroutine ownership.
@@ -48,22 +50,39 @@ func NewFS(tag string, handler fusewire.Handler, owner io.Closer) (*FS, error) {
 	if handler == nil {
 		return nil, fmt.Errorf("virtio-fs: nil request handler")
 	}
+	notifySource, _ := handler.(fusewire.NotificationSource)
 	return &FS{
-		tag:     tag,
-		handler: handler,
-		owner:   owner,
-		verbose: os.Getenv("GANTRY_DEBUG_FS") != "",
+		tag:          tag,
+		handler:      handler,
+		owner:        owner,
+		notifySource: notifySource,
+		verbose:      os.Getenv("GANTRY_DEBUG_FS") != "",
 	}, nil
 }
 
 func (v *FS) Tag() string      { return v.tag }
 func (v *FS) deviceID() uint32 { return virtioFSDeviceID }
-func (v *FS) features() uint64 { return 0 }
-func (v *FS) numQueues() int   { return 2 }
-func (v *FS) reset()           {}
-func (v *FS) setCore(c *Core)  { v.core = c }
+func (v *FS) features() uint64 {
+	if v.notifySource != nil {
+		return virtioFSFGantryNotification
+	}
+	return 0
+}
+func (v *FS) numQueues() int { return virtioFSQueueCount }
+func (v *FS) reset() {
+	if v.notifications != nil {
+		v.notifications.reset()
+	}
+}
+func (v *FS) setCore(c *Core) {
+	v.core = c
+	v.notifications = newFSNotificationQueue(c, v.notifySource)
+}
 
 func (v *FS) Close() error {
+	if v.notifications != nil {
+		v.notifications.close()
+	}
 	if v.owner == nil {
 		return nil
 	}
@@ -88,6 +107,12 @@ func (v *FS) logf(format string, args ...any) {
 }
 
 func (v *FS) handleQueue(qn int) {
+	if qn == virtioFSNotificationQ {
+		if v.core.driverFeat&virtioFSFGantryNotification != 0 {
+			v.notifications.acceptAvailable()
+		}
+		return
+	}
 	if qn != virtioFSHiprioQ && qn != virtioFSRequestQ {
 		return
 	}
@@ -201,6 +226,11 @@ func (v *FS) writeIOV(ds []desc, bufs [][]byte, limit int) (uint32, error) {
 	return written, nil
 }
 
-func (v *FS) maxChainBytes(qn int) uint64 { return fsMaxChainBytes }
+func (v *FS) maxChainBytes(qn int) uint64 {
+	if qn == virtioFSNotificationQ {
+		return fusewire.MaxNotificationBytes
+	}
+	return fsMaxChainBytes
+}
 
 var _ Device = (*FS)(nil)

@@ -10,6 +10,7 @@ import (
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sharebroker"
 	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/virtio"
 	"github.com/ejpir/gantry/internal/vmm"
 	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
@@ -114,11 +115,34 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 	bridgeClient := workerproto.NewClient(bridge)
 	defer func() { _ = bridgeClient.Close() }()
 
-	shareClient, err := sharebroker.NewClient(assets.ShareConn)
-	if err != nil {
-		return fmt.Errorf("share proxy: %w", err)
+	filesystem := vmm.Filesystem{Tag: shares.HubTag}
+	if config.VhostShares {
+		confinement.Notes = append(confinement.Notes, "virtio-fs data plane uses shared guest RAM and doorbell pipes; VMM retains no host share roots")
+		queues := make([]virtio.VhostQueueFiles, len(assets.VhostQueue))
+		for index, queue := range assets.VhostQueue {
+			queues[index] = virtio.VhostQueueFiles{
+				KickRead: queue.KickRead, KickWrite: queue.KickWrite,
+				CallRead: queue.CallRead, CallWrite: queue.CallWrite,
+			}
+		}
+		endpoint, endpointErr := virtio.NewVhostEndpoint(assets.ShareConn, queues)
+		if endpointErr != nil {
+			return endpointErr
+		}
+		defer func() { _ = endpoint.Close() }()
+		assets.ShareConn = nil
+		assets.VhostQueue = nil
+		filesystem.Vhost = endpoint
+		filesystem.Description = "vhost shared-memory share backend"
+	} else {
+		shareClient, clientErr := sharebroker.NewClient(assets.ShareConn)
+		if clientErr != nil {
+			return fmt.Errorf("share proxy: %w", clientErr)
+		}
+		defer func() { _ = shareClient.Close() }()
+		filesystem.Handler = shareClient
+		filesystem.Description = "supervisor share broker (hot-add enabled)"
 	}
-	defer func() { _ = shareClient.Close() }()
 
 	policy, traffic, err := workerNetworkState(config.Policy)
 	if err != nil {
@@ -132,22 +156,25 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 	if config.BootTimingStartUnixNano != 0 {
 		bootStart = time.Unix(0, config.BootTimingStartUnixNano)
 	}
+	netPolicy, netTraffic := netDeviceHooks(policy, traffic)
+	sharedRAM := assets.SharedRAM
+	if config.VhostShares {
+		// Prepare consumes every descriptor-bearing option on entry.
+		assets.SharedRAM = nil
+	}
 	runner, err := rt.Boot(vmm.Opts{
-		MemSize:        config.MemSize,
-		Kernel:         assets.Kernel,
-		Rootfs:         assets.Rootfs,
-		DisksRO:        assets.DisksRO,
-		Disks:          assets.Disks,
-		DisksPrelocked: config.DisksPrelocked,
-		Filesystems: []vmm.Filesystem{{
-			Tag:         shares.HubTag,
-			Handler:     shareClient,
-			Description: "supervisor share broker (hot-add enabled)",
-		}},
+		MemSize:         config.MemSize,
+		Kernel:          assets.Kernel,
+		Rootfs:          assets.Rootfs,
+		DisksRO:         assets.DisksRO,
+		Disks:           assets.Disks,
+		DisksPrelocked:  config.DisksPrelocked,
+		SharedRAM:       sharedRAM,
+		Filesystems:     []vmm.Filesystem{filesystem},
 		NetConn:         assets.NetConn,
 		NetMAC:          config.NetMAC,
-		NetPolicy:       policy,
-		NetTraffic:      traffic,
+		NetPolicy:       netPolicy,
+		NetTraffic:      netTraffic,
 		KVM:             assets.KVM,
 		GuestCID:        config.GuestCID,
 		VCPUs:           config.VCPUs,
@@ -186,6 +213,27 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 			return nil, workerproto.ErrShutdown
 		},
 	})
+}
+
+// netDeviceHooks converts the worker's concrete network state into the
+// device-level interfaces vmm.Opts carries. The conversion is explicit
+// because a direct assignment of a nil *netpol.Policy yields a NON-nil
+// interface holding a nil pointer: virtio-net's `policy != nil` guard then
+// passes and the first inbound frame dereferences it. That is the normal
+// state in split-net topology, where the network worker owns enforcement
+// and no policy is sent to the VMM worker at all.
+func netDeviceHooks(policy *netpol.Policy, traffic *netpol.TrafficRecorder) (virtio.PacketPolicy, virtio.TrafficObserver) {
+	var (
+		devicePolicy  virtio.PacketPolicy
+		deviceTraffic virtio.TrafficObserver
+	)
+	if policy != nil {
+		devicePolicy = policy
+	}
+	if traffic != nil {
+		deviceTraffic = traffic
+	}
+	return devicePolicy, deviceTraffic
 }
 
 func workerNetworkState(rawPolicy []byte) (*netpol.Policy, *netpol.TrafficRecorder, error) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1267,12 +1268,22 @@ func TestWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 	t.Setenv("TMPDIR", "/host/tmp")
 	t.Setenv("GANTRY_SECRET_TEST", "must-not-cross")
 	t.Setenv("GANTRY_DEBUG_RTC", "1")
+	t.Setenv("GANTRY_PREFAULT_RAM", "1")
 
-	if got := workerEnv(); len(got) != 1 || got[0] != "GANTRY_DEBUG_RTC=1" {
-		t.Fatalf("worker environment = %v, want only non-secret debug switch", got)
+	want := []string{"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1"}
+	if got := workerEnv(); !slices.Equal(got, want) {
+		t.Fatalf("worker environment = %v, want only the non-secret debug switches %v", got, want)
 	}
-	if got := networkWorkerEnv(); len(got) != 2 || got[0] != "GANTRY_DEBUG_RTC=1" || got[1] != "GODEBUG=netdns=go" {
-		t.Fatalf("network worker environment = %v, want debug + pure-Go resolver", got)
+	if got := networkWorkerEnv(); !slices.Equal(got, append(slices.Clone(want), "GODEBUG=netdns=go")) {
+		t.Fatalf("network worker environment = %v, want debug switches + pure-Go resolver", got)
+	}
+}
+
+func TestWorkerEnvironmentCarriesNothingByDefault(t *testing.T) {
+	t.Setenv("GANTRY_DEBUG_RTC", "")
+	t.Setenv("GANTRY_PREFAULT_RAM", "")
+	if got := workerEnv(); len(got) != 0 {
+		t.Fatalf("worker environment = %v, want empty", got)
 	}
 }
 

@@ -778,6 +778,18 @@ type Options struct {
 	// more information.
 	NegativeTimeout *time.Duration
 
+	// ReadDirPlusLookup, when non-nil, selects directory entries that should
+	// receive the LOOKUP half of READDIRPLUS. Rejected entries are still
+	// returned as valid dirent-plus records with a zero node ID, which asks the
+	// Linux client to use an ordinary LOOKUP only if it later needs the inode.
+	// Nil preserves the traditional behavior of looking up every entry.
+	ReadDirPlusLookup func(entry fuse.DirEntry) bool
+
+	// ZeroMessageOpenDir makes OpenDir return ENOSYS and serves directory
+	// operations through short-lived handles opened from the inode instead.
+	// It must only be enabled with FUSE_CAP_NO_OPENDIR_SUPPORT.
+	ZeroMessageOpenDir bool
+
 	// FirstAutomaticIno is start of the automatic inode numbers that are handed
 	// out sequentially.
 	//

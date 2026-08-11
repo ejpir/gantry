@@ -33,16 +33,18 @@ import (
 // Hub is a synthetic FUSE root containing dynamically managed exports. It
 // owns host filesystem capabilities but no virtio device or IPC transport.
 type Hub struct {
-	root    *shareHubRoot
-	handler fusewire.Handler
-	guard   *requestGuard
-	request sync.RWMutex // drains guest operations before root capabilities close
+	root     *shareHubRoot
+	protocol *fuse.ProtocolServer
+	handler  fusewire.Handler
+	guard    *requestGuard
+	debugFS  bool
+	request  sync.RWMutex // drains guest operations before root capabilities close
 
-	// rootVer is the namespace mutation stamp, reported as the hub
-	// root's mtime. The guest kernel invalidates its cached READDIR of
-	// the mount root only when the directory mtime changes — a static
-	// mtime made hot-added tags invisible until remount (FUSE
-	// NotifyEntry is a no-op over virtio-fs: no notify virtqueue).
+	notificationsReady atomic.Bool
+
+	// rootVer is the namespace mutation stamp, reported as the hub root's
+	// mtime. The synthetic root remains uncached even when reverse
+	// invalidations are available, so hot-add never depends on watcher health.
 	rootVer atomic.Int64
 
 	mu       sync.RWMutex
@@ -60,6 +62,7 @@ func NewHub() (*Hub, error) {
 		exports: map[string]*Export{},
 		all:     map[*Export]struct{}{},
 		guard:   newRequestGuard(),
+		debugFS: debug,
 	}
 	h.root = &shareHubRoot{hub: h}
 	zero := time.Duration(0)
@@ -69,21 +72,26 @@ func NewHub() (*Hub, error) {
 			FsName:               shares.HubTag,
 			Name:                 "virtiofs",
 			MaxWrite:             128 << 10,
+			ExtraCapabilities:    fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT,
 			IgnoreSecurityLabels: true,
 			PanicHandler:         h.guard.containPanic,
 		},
-		EntryTimeout:    &zero,
-		AttrTimeout:     &zero,
-		NegativeTimeout: &zero,
+		EntryTimeout:       &zero,
+		AttrTimeout:        &zero,
+		NegativeTimeout:    &zero,
+		ReadDirPlusLookup:  prefetchReadDirPlusEntry,
+		ZeroMessageOpenDir: true,
 	})
-	h.handler = fuse.NewProtocolServer(raw, &fuse.MountOptions{
+	h.protocol = fuse.NewProtocolServer(raw, &fuse.MountOptions{
 		Debug:                debug,
 		FsName:               shares.HubTag,
 		Name:                 "virtiofs",
 		MaxWrite:             128 << 10,
+		ExtraCapabilities:    fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT,
 		IgnoreSecurityLabels: true,
 		PanicHandler:         h.guard.containPanic,
 	})
+	h.handler = h.protocol
 	h.guard.setReporter(h.handler)
 	return h, nil
 }
@@ -107,7 +115,7 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 		// the option there would make it a no-op the user asked for.
 		return nil, "", fmt.Errorf("share uid=/gid= ownership mapping is not supported on this platform")
 	}
-	exp := &Export{Tag: tag, RO: ro, UID: uid, GID: gid}
+	exp := &Export{Tag: tag, RO: ro, UID: uid, GID: gid, hub: h, watchRootFD: -1}
 	exp.state.Store(int32(ExportActive))
 	node, identity, release, err := newExportNode(exp, path, h.nextSalt.Add(1)<<32)
 	if err != nil {
@@ -117,6 +125,7 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 	exp.Path = identity.Path()
 	exp.node = node
 	exp.release = release
+	exp.coherence = newExportCoherence(exp)
 	return &Prepared{export: exp}, exp.Path, nil
 }
 
@@ -141,6 +150,9 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 		return nil, fmt.Errorf("share tag %q already exists", exp.Tag)
 	}
 	exp.inode = child
+	if exp.coherence != nil {
+		exp.coherence.attachRoot(child)
+	}
 	exp.onFinish = h.unregister
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
@@ -178,7 +190,13 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 		return nil, nil, fmt.Errorf("share tag %q swap failed", exp.Tag)
 	}
 	old.advanceState(ExportRevoked)
+	if old.coherence != nil {
+		old.coherence.revoke()
+	}
 	exp.inode = child
+	if exp.coherence != nil {
+		exp.coherence.attachRoot(child)
+	}
 	exp.onFinish = h.unregister
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
@@ -236,6 +254,9 @@ func (h *Hub) Remove(tag string, force bool) (*Export, error) {
 	}
 	if force {
 		exp.advanceState(ExportRevoked)
+		if exp.coherence != nil {
+			exp.coherence.revoke()
+		}
 	} else if exp.State() == ExportActive {
 		exp.advanceState(ExportDraining)
 	}
@@ -266,6 +287,10 @@ func (h *Hub) Close() error {
 		return nil
 	}
 	h.closed = true
+	h.notificationsReady.Store(false)
+	if h.protocol != nil {
+		h.protocol.GantrySetNotificationSink(nil)
+	}
 	exports := make([]*Export, 0, len(h.all))
 	for exp := range h.all {
 		exports = append(exports, exp)
@@ -276,6 +301,25 @@ func (h *Hub) Close() error {
 		exp.finish()
 	}
 	return nil
+}
+
+// SetNotificationSink is called by a transport only after the guest has
+// negotiated and populated Gantry's notification virtqueue. Descendant cache
+// policy becomes long-lived at that point, provided each export's host watcher
+// is also healthy.
+func (h *Hub) SetNotificationSink(sink fusewire.NotificationSink) {
+	if h == nil || h.protocol == nil {
+		return
+	}
+	if sink == nil {
+		h.notificationsReady.Store(false)
+		h.protocol.GantrySetNotificationSink(nil)
+		return
+	}
+	h.protocol.GantrySetNotificationSink(func(message []byte) fuse.Status {
+		return sink(message)
+	})
+	h.notificationsReady.Store(true)
 }
 
 // HandleRequest serves one raw FUSE request. Hub remains transport-neutral;
@@ -289,4 +333,7 @@ func (h *Hub) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	return h.guard.handle(h.handler, in, out)
 }
 
-var _ fusewire.Handler = (*Hub)(nil)
+var (
+	_ fusewire.Handler            = (*Hub)(nil)
+	_ fusewire.NotificationSource = (*Hub)(nil)
+)

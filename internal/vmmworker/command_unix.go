@@ -116,6 +116,21 @@ func loadAssets(config Config, share net.Conn) (Assets, error) {
 		}
 		assets.Disks = append(assets.Disks, file)
 	}
+	if config.HasSharedRAM {
+		assets.SharedRAM = next("shared-ram")
+		if assets.SharedRAM == nil {
+			return assets, fmt.Errorf("shared RAM: missing descriptor")
+		}
+		assets.VhostQueue = make([]VhostQueueFiles, VhostQueueCount)
+		for index := range assets.VhostQueue {
+			assets.VhostQueue[index] = VhostQueueFiles{
+				KickRead:  next(fmt.Sprintf("vhost-kick-read-%d", index)),
+				KickWrite: next(fmt.Sprintf("vhost-kick-write-%d", index)),
+				CallRead:  next(fmt.Sprintf("vhost-call-read-%d", index)),
+				CallWrite: next(fmt.Sprintf("vhost-call-write-%d", index)),
+			}
+		}
+	}
 	if config.HasKVM {
 		assets.KVM = next("kvm")
 		if assets.KVM == nil {

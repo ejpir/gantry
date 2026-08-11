@@ -14,6 +14,8 @@ const (
 // rejected explicitly instead of becoming a silent no-op.
 const shareOwnerMappingSupported = false
 
+func invalidateShareDirCache(*Export) {}
+
 // newExportNode pins sharePath beneath a root HANDLE and builds the export's
 // policy-wrapped FUSE root.
 func newExportNode(exp *Export, sharePath string, salt uint64) (fs.InodeEmbedder, Identity, func(), error) {
@@ -22,6 +24,7 @@ func newExportNode(exp *Export, sharePath string, salt uint64) (fs.InodeEmbedder
 		return nil, Identity{}, nil, err
 	}
 	node := &winShareNode{export: exp, backend: backend}
+	exp.watchRootHandle = uintptr(backend.root)
 	release := func() { _ = backend.Close() }
 	return node, backend.identity, release, nil
 }

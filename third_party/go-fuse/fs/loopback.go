@@ -236,11 +236,28 @@ func (n *LoopbackNode) Lookup(ctx context.Context, name string, out *fuse.EntryO
 			return nil, ToErrno(err)
 		}
 	}
+	return n.newLookupChild(ctx, name, &st, out), 0
+}
 
-	out.Attr.FromStat(&st)
-	node := n.RootData.newNode(n.EmbeddedInode(), name, &st)
-	ch := n.NewInode(ctx, node, n.RootData.idFromStat(&st))
-	return ch, 0
+// LookupAt performs the LOOKUP half of READDIRPLUS relative to an already
+// pinned directory descriptor. It preserves final-component no-follow
+// semantics while avoiding another root-to-parent path walk for every entry.
+func (n *LoopbackNode) LookupAt(ctx context.Context, dirFD int, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
+	if dirFD < 0 || name == "" || name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
+		return nil, syscall.EINVAL
+	}
+	var raw unix.Stat_t
+	if err := unix.Fstatat(dirFD, name, &raw, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, ToErrno(err)
+	}
+	st := statToSyscall(&raw)
+	return n.newLookupChild(ctx, name, &st, out), 0
+}
+
+func (n *LoopbackNode) newLookupChild(ctx context.Context, name string, st *syscall.Stat_t, out *fuse.EntryOut) *Inode {
+	out.Attr.FromStat(st)
+	node := n.RootData.newNode(n.EmbeddedInode(), name, st)
+	return n.NewInode(ctx, node, n.RootData.idFromStat(st))
 }
 
 // preserveOwner sets uid and gid of `path` according to the caller information

@@ -73,8 +73,9 @@ const (
 	_OP_NOTIFY_RETRIEVE_CACHE = uint32(103)
 	_OP_NOTIFY_DELETE         = uint32(104) // protocol version 18
 	_OP_NOTIFY_PRUNE          = uint32(105) // protocol version 45
+	_OP_NOTIFY_INC_EPOCH      = uint32(106) // protocol version 44
 
-	_OPCODE_COUNT = uint32(106)
+	_OPCODE_COUNT = uint32(107)
 
 	// Constants from Linux kernel fs/fuse/fuse_i.h
 	// Default MaxPages value in all kernel versions
@@ -109,7 +110,9 @@ func doInit(server *protocolServer, req *request) {
 	}
 
 	kernelFlags := input.Flags64()
+	server.kernelSettingsMu.Lock()
 	server.kernelSettings = *input
+	server.kernelSettingsMu.Unlock()
 	kernelFlags &= (CAP_ASYNC_READ | CAP_BIG_WRITES | CAP_FILE_OPS |
 		CAP_READDIRPLUS | CAP_NO_OPEN_SUPPORT | CAP_PARALLEL_DIROPS | CAP_MAX_PAGES | CAP_RENAME_SWAP | CAP_PASSTHROUGH | CAP_ALLOW_IDMAP |
 		server.opts.ExtraCapabilities)
@@ -611,6 +614,7 @@ func init() {
 		_OP_NOTIFY_STORE_CACHE:    "NOTIFY_STORE",
 		_OP_NOTIFY_RETRIEVE_CACHE: "NOTIFY_RETRIEVE",
 		_OP_NOTIFY_DELETE:         "NOTIFY_DELETE",
+		_OP_NOTIFY_INC_EPOCH:      "NOTIFY_INC_EPOCH",
 		_OP_FALLOCATE:             "FALLOCATE",
 		_OP_READDIRPLUS:           "READDIRPLUS",
 		_OP_RENAME2:               "RENAME2",

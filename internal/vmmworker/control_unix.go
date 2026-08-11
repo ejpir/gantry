@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -27,6 +28,9 @@ type workerState struct {
 
 func (state *workerState) run() {
 	state.vmErr = state.runner.Run()
+	if state.vmErr != nil {
+		fmt.Fprintln(os.Stderr, "_vmm-worker: VM run:", state.vmErr)
+	}
 	close(state.vmDone)
 }
 

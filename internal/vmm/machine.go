@@ -389,9 +389,13 @@ type Opts struct {
 	// so the supervisor passes the hypervisor handle in the descriptor
 	// table. Nil means "open /dev/kvm by path" (monolithic). The backend
 	// keeps it open for the VM's lifetime. Ignored on darwin/windows.
-	KVM     *os.File
-	DisksRO []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
-	Disks   []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
+	KVM *os.File
+	// SharedRAM is an optional pre-sized backing descriptor for guest RAM.
+	// Split VMM/vhost mode maps it MAP_SHARED and transfers the same object to
+	// the filesystem backend; monolithic VMs leave it nil.
+	SharedRAM *os.File
+	DisksRO   []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
+	Disks     []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
 	// DisksPrelocked means a trusted supervisor process owns the exclusive
 	// locks for Disks. Split workers use this so compromised children cannot
 	// unlock an rwlayer through their inherited disk descriptors.
@@ -489,11 +493,12 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	}
 	// guest RAM is allocated by the backend (it must be mapped into the
 	// hypervisor); here we only fill it.
-	ram, err := allocGuestRAM(o.MemSize)
+	ram, err := allocGuestRAM(o.MemSize, o.SharedRAM)
 	if err != nil {
 		return nil, err
 	}
 	m.ram = ram
+	prefaultGuestRAM(m.bootTiming, ram)
 
 	entry, arch, err := loadKernel(o.Kernel, ram)
 	if closeErr := inputs.closeFile(o.Kernel); err != nil || closeErr != nil {
@@ -526,7 +531,7 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	if err := m.attachDisks(o, inputs); err != nil {
 		return nil, err
 	}
-	if err := m.attachFilesystems(o.Filesystems, inputs); err != nil {
+	if err := m.attachFilesystems(o, inputs); err != nil {
 		return nil, err
 	}
 	if err := m.attachNetwork(o, inputs); err != nil {

@@ -152,6 +152,7 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 	claim(o.Initrd, "initrd", false)
 	claim(o.Rootfs, "rootfs", false)
 	claim(o.KVM, "KVM", false)
+	claim(o.SharedRAM, "shared guest RAM", false)
 	for i, f := range o.DisksRO {
 		claim(f, fmt.Sprintf("read-only disk %d", i), true)
 	}
@@ -160,22 +161,29 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 	}
 	seenOwners := make(map[io.Closer]int, len(o.Filesystems))
 	for i, filesystem := range o.Filesystems {
-		if filesystem.Owner == nil {
+		owner := filesystem.Owner
+		if filesystem.Vhost != nil {
+			if owner != nil || filesystem.Handler != nil {
+				errs = append(errs, fmt.Errorf("vmm: filesystem %d mixes vhost with handler/owner", i))
+			}
+			owner = filesystem.Vhost
+		}
+		if owner == nil {
 			continue
 		}
-		ownerValue := reflect.ValueOf(filesystem.Owner)
+		ownerValue := reflect.ValueOf(owner)
 		if ownerValue.Kind() == reflect.Pointer && ownerValue.IsNil() {
 			errs = append(errs, fmt.Errorf("vmm: filesystem %d has a nil owner", i))
 			continue
 		}
 		if ownerValue.Type().Comparable() {
-			if previous, exists := seenOwners[filesystem.Owner]; exists {
+			if previous, exists := seenOwners[owner]; exists {
 				errs = append(errs, fmt.Errorf("vmm: filesystems %d and %d reuse the same owner", previous, i))
 				continue
 			}
-			seenOwners[filesystem.Owner] = i
+			seenOwners[owner] = i
 		}
-		in.filesystemOwners[i] = ownedFilesystem{tag: filesystem.Tag, closer: filesystem.Owner}
+		in.filesystemOwners[i] = ownedFilesystem{tag: filesystem.Tag, closer: owner}
 	}
 	return in, errors.Join(errs...)
 }

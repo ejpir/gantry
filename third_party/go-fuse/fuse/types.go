@@ -528,6 +528,7 @@ const (
 	NOTIFY_RETRIEVE_CACHE = -5 // retrieve data from kernel cache of an inode
 	NOTIFY_DELETE         = -6 // notify kernel that a directory entry has been deleted
 	NOTIFY_RESEND         = -7
+	NOTIFY_INC_EPOCH      = -8 // invalidate dentries from the previous connection epoch
 	NOTIFY_PRUNE          = -9
 )
 

@@ -564,11 +564,15 @@ func notifyWrite(writev func([][]byte) (int, syscall.Errno), opts *MountOptions,
 }
 
 func (ms *protocolServer) notifyWrite(req *request) Status {
-	if ms.writev == nil {
-		return ENOSYS
+	if ms.writev != nil {
+		errno := notifyWrite(ms.writev, ms.opts, req)
+		return Status(errno)
 	}
-	errno := notifyWrite(ms.writev, ms.opts, req)
-	return Status(errno)
+	req.serializeHeader(req.outPayloadSize())
+	if ms.opts.Debug {
+		ms.opts.Logger.Println(req.OutputDebug())
+	}
+	return ms.gantryNotify([][]byte{req.outHeaderBuf, req.outDataBuf, req.outPayload})
 }
 
 func newNotifyRequest(opcode uint32) *request {
@@ -583,6 +587,7 @@ func newNotifyRequest(opcode uint32) *request {
 			_OP_NOTIFY_RETRIEVE_CACHE: NOTIFY_RETRIEVE_CACHE,
 			_OP_NOTIFY_DELETE:         NOTIFY_DELETE,
 			_OP_NOTIFY_PRUNE:          NOTIFY_PRUNE,
+			_OP_NOTIFY_INC_EPOCH:      NOTIFY_INC_EPOCH,
 		}[opcode],
 	}
 	r.inHeader().Opcode = opcode
@@ -599,6 +604,14 @@ func (ms *protocolServer) InodeNotify(node uint64, off int64, length int64) Stat
 	entry.Off = off
 	entry.Length = length
 
+	return ms.notifyWrite(req)
+}
+
+func (ms *protocolServer) notifyEpoch() Status {
+	if !ms.kernelSettings.SupportsNotify(NOTIFY_INC_EPOCH) {
+		return ENOSYS
+	}
+	req := newNotifyRequest(_OP_NOTIFY_INC_EPOCH)
 	return ms.notifyWrite(req)
 }
 
@@ -825,6 +838,8 @@ func (in *InitIn) SupportsNotify(notifyType int) bool {
 		return in.SupportsVersion(7, 18)
 	case NOTIFY_PRUNE:
 		return in.SupportsVersion(7, 45)
+	case NOTIFY_INC_EPOCH:
+		return in.SupportsVersion(7, 44)
 	}
 	return false
 }

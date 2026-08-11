@@ -34,10 +34,12 @@ const (
 	fuseGetattr     = 3
 	fuseGetxattr    = 22
 	fuseOpendir     = 27
+	fuseReaddirplus = 44
 	fuseListxattr   = 23
 	fuseSetxattr    = 21
 	fuseRemovexattr = 24
 	fuseStatx       = 52
+	linuxENOSYS     = 38
 )
 
 type resourceLimitHandler struct {
@@ -174,6 +176,88 @@ func handlerReq(t *testing.T, handler fusewire.Handler, in [][]byte, outSizes ..
 	return n, errno, out
 }
 
+func TestShareHubNegotiatesAdaptiveReadDirPlus(t *testing.T) {
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	payload := make([]byte, 64)
+	binary.LittleEndian.PutUint32(payload[0:4], 7)
+	binary.LittleEndian.PutUint32(payload[4:8], 38)
+	binary.LittleEndian.PutUint32(payload[12:16], uint32(fuse.CAP_READDIRPLUS|fuse.CAP_READDIRPLUS_AUTO|fuse.CAP_NO_OPENDIR_SUPPORT))
+	_, errno, out := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseInit, 1, 0, len(payload)), payload}, 16, 64)
+	if errno != 0 {
+		t.Fatalf("FUSE_INIT errno %d", errno)
+	}
+	flags := uint64(binary.LittleEndian.Uint32(out[1][12:16]))
+	want := uint64(fuse.CAP_READDIRPLUS | fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT)
+	if flags&want != want {
+		t.Fatalf("FUSE_INIT flags %#x, want adaptive READDIRPLUS %#x", flags, want)
+	}
+}
+
+func TestShareHubReadDirPlusOnlyPrefetchesDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "directory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "regular"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	fuseInitHub(t, hub)
+	publishHubShare(t, hub, "tree", root, true)
+	treeNode, errno := hubLookup(t, hub, 2, 1, "tree")
+	if errno != 0 {
+		t.Fatalf("tree lookup errno %d", errno)
+	}
+	opendirIn := make([]byte, 8)
+	_, errno, _ = hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpendir, 3, treeNode, len(opendirIn)), opendirIn}, 16, 16)
+	if errno != -linuxENOSYS {
+		t.Fatalf("opendir errno %d, want Linux ENOSYS for zero-message mode", errno)
+	}
+	readIn := make([]byte, 40)
+	binary.LittleEndian.PutUint32(readIn[16:20], 4096)
+	n, errno, readOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseReaddirplus, 4, treeNode, len(readIn)), readIn}, 16, 4096)
+	if errno != 0 {
+		t.Fatalf("readdirplus errno %d", errno)
+	}
+	if n < 16 || n-16 > len(readOut[1]) {
+		t.Fatalf("readdirplus response length %d", n)
+	}
+	const entryOutSize = 128
+	entries := make(map[string]uint64)
+	payload := readOut[1][:n-16]
+	for len(payload) != 0 {
+		if len(payload) < entryOutSize+24 {
+			t.Fatalf("short dirent-plus record: %d bytes", len(payload))
+		}
+		dirent := payload[entryOutSize:]
+		nameLength := int(binary.LittleEndian.Uint32(dirent[16:20]))
+		recordLength := (entryOutSize + 24 + nameLength + 7) &^ 7
+		if nameLength < 0 || recordLength > len(payload) {
+			t.Fatalf("invalid dirent-plus name/record length %d/%d", nameLength, len(payload))
+		}
+		name := string(dirent[24 : 24+nameLength])
+		entries[name] = binary.LittleEndian.Uint64(payload[0:8])
+		payload = payload[recordLength:]
+	}
+	if entries["directory"] == 0 {
+		t.Fatal("directory READDIRPLUS entry has no prefetched node")
+	}
+	if entries["regular"] != 0 {
+		t.Fatalf("regular READDIRPLUS entry eagerly instantiated node %d", entries["regular"])
+	}
+}
+
 func TestShareHubBrokeredReadOnlyPath(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("brokered\n"), 0o600); err != nil {
@@ -285,6 +369,44 @@ func TestShareHubPublishConsumesPreparedExport(t *testing.T) {
 	}
 	if _, err := hub.Publish(prepared); err == nil {
 		t.Fatal("published preparation was reusable")
+	}
+}
+
+func TestShareHubCachesOnlyExportDescendants(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	publishHubShare(t, hub, "workspace", dir, false)
+
+	var exportOut fuse.EntryOut
+	exportRoot, errno := hub.root.Lookup(context.Background(), "workspace", &exportOut)
+	if errno != 0 {
+		t.Fatalf("export lookup: %v", errno)
+	}
+	if exportOut.EntryTimeout() != 0 || exportOut.AttrTimeout() != 0 {
+		t.Fatalf("dynamic export entry cached: entry=%s attr=%s", exportOut.EntryTimeout(), exportOut.AttrTimeout())
+	}
+
+	var childOut fuse.EntryOut
+	if _, errno := exportRoot.Operations().(fs.NodeLookuper).Lookup(context.Background(), "sub", &childOut); errno != 0 {
+		t.Fatalf("descendant lookup: %v", errno)
+	}
+	if childOut.EntryTimeout() != descendantMetadataTTL || childOut.AttrTimeout() != descendantMetadataTTL {
+		t.Fatalf("descendant timeout = entry %s attr %s, want %s", childOut.EntryTimeout(), childOut.AttrTimeout(), descendantMetadataTTL)
+	}
+
+	var missing fuse.EntryOut
+	if _, errno := exportRoot.Operations().(fs.NodeLookuper).Lookup(context.Background(), "missing", &missing); errno != syscall.ENOENT {
+		t.Fatalf("missing lookup errno = %v, want ENOENT", errno)
+	}
+	if missing.EntryTimeout() != 0 {
+		t.Fatalf("negative entry cached for %s", missing.EntryTimeout())
 	}
 }
 
@@ -407,8 +529,8 @@ func TestShareHubDynamicNamespace(t *testing.T) {
 	opendirIn := make([]byte, 8)
 	_, errno, _ = hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseOpendir, 31, tagNode, len(opendirIn)), opendirIn}, 16, 16)
-	if errno != 0 {
-		t.Fatalf("export root opendir errno %d", errno)
+	if errno != -linuxENOSYS {
+		t.Fatalf("export root opendir errno %d, want Linux ENOSYS", errno)
 	}
 	fileNode, errno := hubLookup(t, hub, 4, tagNode, "hello.txt")
 	if errno != 0 {
@@ -895,8 +1017,8 @@ func TestShareHubOwnerMappingRejectedWhereUnsupported(t *testing.T) {
 func TestShareHubRootMtimeTracksNamespace(t *testing.T) {
 	// The guest kernel invalidates its cached READDIR of the mount
 	// root only on mtime change; a static mtime made hot-added tags
-	// invisible until remount (FUSE NotifyEntry is a no-op over
-	// virtio-fs: no notify virtqueue).
+	// invisible until remount on legacy guests. The root remains uncached even
+	// when Gantry's reverse-notification queue is negotiated.
 	hub, err := NewHub()
 	if err != nil {
 		t.Fatal(err)

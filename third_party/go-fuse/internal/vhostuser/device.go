@@ -6,7 +6,6 @@ package vhostuser
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"syscall"
 )
@@ -26,14 +25,19 @@ type Device struct {
 	// dispatchMu guards all control-plane mutations (SET_VRING_*, ADD_MEM_REG,
 	// etc.) against concurrent vring dequeue.  Control messages take the write
 	// lock; queue threads take the read lock while draining the avail ring.
-	// FUSE request processing runs without any lock (matching virtiofsd's
-	// vu_dispatch_rwlock design).
-	dispatchMu sync.RWMutex
+	// FUSE request processing runs without dispatchMu (matching virtiofsd's
+	// vu_dispatch_rwlock design). completionMu orders reverse invalidations
+	// after every host operation whose result they may invalidate.
+	dispatchMu   sync.RWMutex
+	completionMu sync.RWMutex
 }
 
 func (d *Device) Close() error {
 	var retErr error
 	for i := range d.vqs {
+		if d.vqs[i].notifications != nil {
+			d.vqs[i].notifications.close()
+		}
 		if err := d.vqs[i].Close(); err != nil && retErr == nil {
 			retErr = err
 		}
@@ -44,71 +48,120 @@ func (d *Device) Close() error {
 	}
 
 	if d.logTable != nil {
-		if err := syscall.Munmap(d.logTable); err != nil && retErr == nil {
+		if err := unmapRegion(d.logTable); err != nil && retErr == nil {
 			retErr = err
 		}
 	}
 	return retErr
 }
 
-// NewDevice creates a new virtio device. The handler should return
-// the number of response bytes written.
+// NewDevice creates the traditional two-queue virtio-fs device.
 func NewDevice(handle func(*VirtqElem) int) *Device {
-	d := &Device{
-		// TODO: queue count should be configurable; 2 is hardcoded (hiprio +
-		// one request queue). GetQueueNum() reports this count to the driver,
-		// so they must stay in sync.
-		vqs: make([]*Virtq, 2),
+	return NewDeviceWithQueues(2, handle)
+}
+
+// NewDeviceWithQueues creates a virtio device with an explicit, bounded queue
+// count. Gantry uses a third queue for reverse FUSE invalidations.
+func NewDeviceWithQueues(queueCount int, handle func(*VirtqElem) int) *Device {
+	if queueCount < 1 || queueCount > 64 {
+		panic("vhostuser: invalid queue count")
 	}
+	d := &Device{vqs: make([]*Virtq, queueCount), handle: handle}
 	for i := range d.vqs {
 		d.vqs[i] = newVirtq(d)
 	}
-
-	d.handle = handle
 	return d
+}
+
+// SetNotificationQueue parks writable guest buffers on queueIndex and invokes
+// ready when the first buffer arrives. Passing nil to ready on shutdown lets
+// the owner detach its notification source before shared memory is unmapped.
+func (d *Device) SetNotificationQueue(queueIndex int, ready func(func([]byte) syscall.Errno)) error {
+	if queueIndex < 0 || queueIndex >= len(d.vqs) {
+		return fmt.Errorf("notification queue %d out of range", queueIndex)
+	}
+	if d.vqs[queueIndex].notifications != nil {
+		return fmt.Errorf("notification queue %d already configured", queueIndex)
+	}
+	d.vqs[queueIndex].notifications = newNotificationQueue(d.vqs[queueIndex], ready)
+	return nil
 }
 
 // https://qemu-project.gitlab.io/qemu/interop/vhost-user.html#communication
 // is incorrect regarding types.
 func (d *Device) SetLogBase(fd int, log *VhostUserLog) error {
-	data, err := syscall.Mmap(fd, int64(log.MmapOffset), int(log.MmapSize),
-		syscall.PROT_READ|syscall.PROT_WRITE,
-		syscall.MAP_SHARED) // |syscall.MAP_NORESERVE)?
+	data, err := mapSharedRegion(fd, int64(log.MmapOffset), int(log.MmapSize))
 	syscall.Close(fd)
 	if err != nil {
 		return err
 	}
 	if d.logTable != nil {
-		syscall.Munmap(d.logTable)
+		_ = unmapRegion(d.logTable)
 	}
 
 	d.logTable = data
 	return nil
 }
 
-func (d *Device) SetVringAddr(addr *VhostVringAddr) error {
-	return d.vqs[addr.Index].SetVringAddr(addr)
-}
+const maxQueueSize = 128
 
-func (d *Device) SetVringNum(state *VhostVringState) {
-	d.vqs[state.Index].Vring.Num = int(state.Num)
-}
-
-func (d *Device) SetVringBase(state *VhostVringState) {
-	p := d.vqs[state.Index]
-	p.ShadowAvailIdx = uint16(state.Num)
-	p.LastAvailIdx = uint16(state.Num)
-}
-
-func (d *Device) SetVringEnable(state *VhostVringState) {
-	vq := d.vqs[state.Index]
-
-	enable := uint(state.Num) != 0
-	if enable {
-		vq.SetEnable(d.handle)
-	} else {
-		vq.SetEnable(nil)
+func (d *Device) queue(index uint64) (*Virtq, error) {
+	if index >= uint64(len(d.vqs)) {
+		return nil, fmt.Errorf("virtqueue index %d out of range", index)
 	}
+	return d.vqs[index], nil
+}
+
+func (d *Device) SetVringAddr(addr *VhostVringAddr) error {
+	if addr == nil {
+		return fmt.Errorf("nil vring address")
+	}
+	queue, err := d.queue(uint64(addr.Index))
+	if err != nil {
+		return err
+	}
+	return queue.SetVringAddr(addr)
+}
+
+func (d *Device) SetVringNum(state *VhostVringState) error {
+	if state == nil || state.Num == 0 || state.Num > maxQueueSize {
+		return fmt.Errorf("invalid vring size")
+	}
+	queue, err := d.queue(uint64(state.Index))
+	if err != nil {
+		return err
+	}
+	queue.Vring.Num = int(state.Num)
+	return nil
+}
+
+func (d *Device) SetVringBase(state *VhostVringState) error {
+	if state == nil || state.Num > uint32(^uint16(0)) {
+		return fmt.Errorf("invalid vring base")
+	}
+	queue, err := d.queue(uint64(state.Index))
+	if err != nil {
+		return err
+	}
+	queue.ShadowAvailIdx = uint16(state.Num)
+	queue.LastAvailIdx = uint16(state.Num)
+	return nil
+}
+
+func (d *Device) SetVringEnable(state *VhostVringState) error {
+	if state == nil || state.Num > 1 {
+		return fmt.Errorf("invalid vring enable")
+	}
+	queue, err := d.queue(uint64(state.Index))
+	if err != nil {
+		return err
+	}
+	if state.Num != 0 {
+		queue.SetEnable(d.handle)
+	} else {
+		queue.SetEnable(nil)
+	}
+	return nil
 }
 
 type VirtqElem struct {
@@ -149,9 +202,12 @@ func (d *Device) logWrite(address, sz uint64) {
 // twice; we reject it explicitly rather than rely on that assumption.
 func (d *Device) SetVringKick(fd int, index uint64) error {
 	if index&(1<<8) != 0 {
-		log.Panic("not supported")
+		return fmt.Errorf("invalid vring kick index %#x", index)
 	}
-	vq := d.vqs[index]
+	vq, err := d.queue(index)
+	if err != nil {
+		return err
+	}
 	if vq.control != nil {
 		return fmt.Errorf("SET_VRING_KICK after vring %d enabled", index)
 	}
@@ -168,30 +224,35 @@ func (d *Device) SetVringKick(fd int, index uint64) error {
 }
 
 // SetVringErr sets the error eventfd.
-func (d *Device) SetVringErr(fd int, index uint64) {
+func (d *Device) SetVringErr(fd int, index uint64) error {
 	if index&(1<<8) != 0 {
-		log.Panic("not supported")
+		return fmt.Errorf("invalid vring error index %#x", index)
 	}
-
-	if old := d.vqs[index].ErrFD; old >= 0 {
-		syscall.Close(old)
+	queue, err := d.queue(index)
+	if err != nil {
+		return err
 	}
-
-	d.vqs[index].ErrFD = fd
-
-	// no need to change blocking status: we only write to this fd.
+	if old := queue.ErrFD; old >= 0 {
+		_ = syscall.Close(old)
+	}
+	queue.ErrFD = fd
+	return nil
 }
 
 // SetVringCall sets the call eventfd.
-func (d *Device) SetVringCall(fd int, index uint64) {
+func (d *Device) SetVringCall(fd int, index uint64) error {
 	if index&(1<<8) != 0 {
-		log.Panic("not supported")
+		return fmt.Errorf("invalid vring call index %#x", index)
 	}
-	if old := d.vqs[index].CallFD; old >= 0 {
-		syscall.Close(old)
+	queue, err := d.queue(index)
+	if err != nil {
+		return err
 	}
-	d.vqs[index].CallFD = fd
-	// no need to change blocking status: we only write to this fd.
+	if old := queue.CallFD; old >= 0 {
+		_ = syscall.Close(old)
+	}
+	queue.CallFD = fd
+	return nil
 }
 
 func (d *Device) SetOwner() {
@@ -208,7 +269,8 @@ func (d *Device) GetQueueNum() uint64 {
 
 func (h *Device) GetFeatures() []int {
 	return []int{
-		//"\0\0\0p\1\0\0\0"
+		// Device-specific bit 23 is VIRTIO_FS_F_GANTRY_NOTIFICATION.
+		23,
 		RING_F_INDIRECT_DESC,
 		RING_F_EVENT_IDX,
 		F_PROTOCOL_FEATURES,
@@ -216,8 +278,17 @@ func (h *Device) GetFeatures() []int {
 	}
 }
 
-func (h *Device) SetFeatures(fs []int) {
-
+func (h *Device) SetFeatures(features []int) {
+	eventIdx := false
+	for _, feature := range features {
+		if feature == RING_F_EVENT_IDX {
+			eventIdx = true
+			break
+		}
+	}
+	for _, queue := range h.vqs {
+		queue.EventIdx = eventIdx
+	}
 }
 
 func (h *Device) SetProtocolFeatures([]int) {

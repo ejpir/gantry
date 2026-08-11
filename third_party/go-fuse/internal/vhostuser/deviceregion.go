@@ -6,10 +6,7 @@ package vhostuser
 
 import (
 	"fmt"
-	"syscall"
 	"unsafe"
-
-	"golang.org/x/sys/unix"
 )
 
 type deviceRegion struct {
@@ -20,7 +17,7 @@ type deviceRegion struct {
 
 func (r *deviceRegion) Close() error {
 	if r.Data != nil {
-		return syscall.Munmap(r.Data)
+		return unmapRegion(r.Data)
 	}
 
 	return nil
@@ -38,13 +35,11 @@ func (r *deviceRegion) configure(fd int, reg *VhostUserMemoryRegion) error {
 	// alignment working.  We reject huge-page fds (see AddMemReg) and
 	// instead pass MmapOffset straight to mmap(2), so Data[0] is already
 	// the region's first byte and no offset arithmetic is needed later.
-	data, err := syscall.Mmap(fd, int64(reg.MmapOffset), int(reg.MemorySize),
-		syscall.PROT_READ|syscall.PROT_WRITE,
-		syscall.MAP_SHARED|syscall.MAP_NORESERVE)
+	data, err := mapSharedRegion(fd, int64(reg.MmapOffset), int(reg.MemorySize))
 	if err != nil {
 		return err
 	}
-	syscall.Madvise(data, unix.MADV_DONTDUMP)
+	dontDump(data)
 	*r = deviceRegion{
 		VhostUserMemoryRegion: *reg,
 		Data:                  data,
@@ -57,16 +52,27 @@ func (r *deviceRegion) String() string {
 }
 
 func (r *deviceRegion) containsGuestAddr(guestAddr uint64) bool {
-	return guestAddr >= r.GuestPhysAddr && guestAddr < r.GuestPhysAddr+r.MemorySize
+	return guestAddr >= r.GuestPhysAddr && guestAddr-r.GuestPhysAddr < r.MemorySize
 }
 
 // FromDriverAddr translates a driver (host-virtual) address to a host
 // pointer.  Data starts at the region's first byte (see configure), so we
 // do not add MmapOffset here even though QEMU's libvhost-user does.
-func (r *deviceRegion) FromDriverAddr(driverAddr uint64) unsafe.Pointer {
-	if driverAddr < r.DriverAddr || driverAddr >= r.DriverAddr+r.MemorySize {
+func (r *deviceRegion) driverRange(driverAddr, size uint64) []byte {
+	if driverAddr < r.DriverAddr {
 		return nil
 	}
+	offset := driverAddr - r.DriverAddr
+	if offset > uint64(len(r.Data)) || size > uint64(len(r.Data))-offset {
+		return nil
+	}
+	return r.Data[offset : offset+size]
+}
 
-	return unsafe.Pointer(&r.Data[driverAddr-r.DriverAddr])
+func (r *deviceRegion) FromDriverAddr(driverAddr uint64) unsafe.Pointer {
+	data := r.driverRange(driverAddr, 1)
+	if len(data) == 0 {
+		return nil
+	}
+	return unsafe.Pointer(&data[0])
 }

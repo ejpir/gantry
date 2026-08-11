@@ -32,6 +32,10 @@ func (n *winShareNode) mutable() syscall.Errno {
 	return n.export.mutable()
 }
 
+func (n *winShareNode) isExportRoot() bool {
+	return n.export != nil && n.export.node == n
+}
+
 func (n *winShareNode) relPath() string {
 	if n.export == nil {
 		return ""
@@ -48,6 +52,9 @@ func (n *winShareNode) child() *winShareNode {
 }
 
 func (n *winShareNode) OnForget() {
+	if n.export != nil && n.export.coherence != nil {
+		n.export.coherence.forget(n.EmbeddedInode())
+	}
 	if n.export != nil && n.export.node == n {
 		n.export.finish()
 	}
@@ -65,10 +72,13 @@ func (n *winShareNode) Lookup(ctx context.Context, name string, out *fuse.EntryO
 		return nil, errno
 	}
 	out.Attr = info.attr
-	out.SetEntryTimeout(0)
-	out.SetAttrTimeout(0)
 	mode := info.attr.Mode & 0o170000
-	return n.NewInode(ctx, n.child(), fs.StableAttr{Ino: info.attr.Ino, Mode: mode}), 0
+	inode := n.NewInode(ctx, n.child(), fs.StableAttr{Ino: info.attr.Ino, Mode: mode})
+	if n.export.coherence != nil {
+		n.export.coherence.remember(n.EmbeddedInode(), name, inode)
+	}
+	cacheEntry(n.export, out)
+	return inode, 0
 }
 
 var _ fs.NodeGetattrer = (*winShareNode)(nil)
@@ -85,7 +95,9 @@ func (n *winShareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 		info, errno := n.backend.infoForHandle(windows.Handle(file.wf.file.Fd()))
 		if errno == 0 {
 			out.Attr = info.attr
-			out.SetTimeout(0)
+			if !n.isExportRoot() {
+				cacheAttr(n.export, out)
+			}
 		}
 		return errno
 	}
@@ -96,7 +108,9 @@ func (n *winShareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 	}
 	_ = windows.CloseHandle(h)
 	out.Attr = info.attr
-	out.SetTimeout(0)
+	if !n.isExportRoot() {
+		cacheAttr(n.export, out)
+	}
 	return 0
 }
 
@@ -152,10 +166,12 @@ func (n *winShareNode) Create(ctx context.Context, name string, flags uint32, mo
 		return nil, nil, 0, errno
 	}
 	out.Attr = info.attr
-	out.SetEntryTimeout(0)
-	out.SetAttrTimeout(0)
 	childOps := n.child()
 	child := n.NewInode(ctx, childOps, fs.StableAttr{Ino: info.attr.Ino, Mode: fuse.S_IFREG})
+	if n.export.coherence != nil {
+		n.export.coherence.remember(n.EmbeddedInode(), name, child)
+	}
+	cacheEntry(n.export, out)
 	return child, &winShareFile{wf: wf, backend: n.backend, export: n.export, node: childOps}, fuse.FOPEN_DIRECT_IO, 0
 }
 
@@ -170,9 +186,12 @@ func (n *winShareNode) Mkdir(ctx context.Context, name string, mode uint32, out 
 		return nil, errno
 	}
 	out.Attr = info.attr
-	out.SetEntryTimeout(0)
-	out.SetAttrTimeout(0)
-	return n.NewInode(ctx, n.child(), fs.StableAttr{Ino: info.attr.Ino, Mode: fuse.S_IFDIR}), 0
+	child := n.NewInode(ctx, n.child(), fs.StableAttr{Ino: info.attr.Ino, Mode: fuse.S_IFDIR})
+	if n.export.coherence != nil {
+		n.export.coherence.remember(n.EmbeddedInode(), name, child)
+	}
+	cacheEntry(n.export, out)
+	return child, 0
 }
 
 var _ fs.NodeUnlinker = (*winShareNode)(nil)
@@ -181,7 +200,11 @@ func (n *winShareNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	return n.backend.delete(n.relPath(), name, false)
+	errno := n.backend.delete(n.relPath(), name, false)
+	if errno == 0 && n.export.coherence != nil {
+		n.export.coherence.forgetPath(n.EmbeddedInode(), name)
+	}
+	return errno
 }
 
 var _ fs.NodeRmdirer = (*winShareNode)(nil)
@@ -190,7 +213,11 @@ func (n *winShareNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	return n.backend.delete(n.relPath(), name, true)
+	errno := n.backend.delete(n.relPath(), name, true)
+	if errno == 0 && n.export.coherence != nil {
+		n.export.coherence.forgetPath(n.EmbeddedInode(), name)
+	}
+	return errno
 }
 
 var _ fs.NodeRenamer = (*winShareNode)(nil)
@@ -206,7 +233,11 @@ func (n *winShareNode) Rename(ctx context.Context, name string, newParent fs.Ino
 	if errno := other.mutable(); errno != 0 {
 		return errno
 	}
-	return n.backend.rename(n.relPath(), name, other.relPath(), newName, flags)
+	errno := n.backend.rename(n.relPath(), name, other.relPath(), newName, flags)
+	if errno == 0 && n.export.coherence != nil {
+		n.export.coherence.renamePath(n.EmbeddedInode(), name, other.EmbeddedInode(), newName)
+	}
+	return errno
 }
 
 func (n *winShareNode) Mknod(ctx context.Context, name string, mode, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {

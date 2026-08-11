@@ -55,6 +55,56 @@ func TestOpenRelDirRootHasIndependentOffsets(t *testing.T) {
 // blocking in open(O_RDONLY) until a writer appears (guest-reachable DoS
 // via a crafted parent inode; the Fstat S_IFDIR check used to run only
 // AFTER the blocking open).
+func TestLoopbackDirStreamCachesEOFFUntilSeek(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/first", []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	fd, err := openRelDir(int(root.Fd()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds, errno := NewLoopbackDirStreamFd(fd)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	defer ds.Close()
+	for ds.HasNext() {
+		if _, errno := ds.Next(); errno != 0 {
+			t.Fatal(errno)
+		}
+	}
+	if err := os.WriteFile(dir+"/second", []byte("2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ds.HasNext() {
+		t.Fatal("directory stream retried getdents after EOF")
+	}
+	seeker, ok := ds.(FileSeekdirer)
+	if !ok {
+		t.Fatal("directory stream does not implement seekdir")
+	}
+	if errno := seeker.Seekdir(nil, 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	foundSecond := false
+	for ds.HasNext() {
+		entry, errno := ds.Next()
+		if errno != 0 {
+			t.Fatal(errno)
+		}
+		foundSecond = foundSecond || entry.Name == "second"
+	}
+	if !foundSecond {
+		t.Fatal("seekdir did not clear cached EOF")
+	}
+}
+
 func TestOpenRelDirRejectsFIFOComponent(t *testing.T) {
 	dir := t.TempDir()
 	if err := syscall.Mkfifo(dir+"/pipe", 0o600); err != nil {

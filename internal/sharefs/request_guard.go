@@ -3,6 +3,8 @@
 package sharefs
 
 import (
+	"fmt"
+	"os"
 	"sync/atomic"
 
 	"github.com/ejpir/gantry/internal/fusewire"
@@ -33,9 +35,15 @@ func (g *requestGuard) setReporter(handler fusewire.Handler) {
 	g.reporter, _ = handler.(resourceReporter)
 }
 
-func (g *requestGuard) containPanic(any) fuse.Status {
-	g.failed.Store(true)
+func (g *requestGuard) containPanic(value any) fuse.Status {
+	g.fail(fmt.Errorf("contained filesystem panic (%T): %v", value, value))
 	return fuse.EIO
+}
+
+func (g *requestGuard) fail(err error) {
+	if g != nil && g.failed.CompareAndSwap(false, true) {
+		fmt.Fprintf(os.Stderr, "sharefs: %v\n", err)
+	}
 }
 
 func (g *requestGuard) handle(handler fusewire.Handler, in, out [][]byte) (int, fuse.Status) {
@@ -51,7 +59,10 @@ func (g *requestGuard) handle(handler fusewire.Handler, in, out [][]byte) (int, 
 	}
 	nodes, handles := g.reporter.GantryResourceUsage()
 	if nodes > maxLiveNodes || handles > shareHandleLimit() {
-		g.failed.Store(true)
+		if g.failed.CompareAndSwap(false, true) {
+			fmt.Fprintf(os.Stderr, "sharefs: resource limit exceeded: nodes=%d/%d handles=%d/%d\n",
+				nodes, maxLiveNodes, handles, shareHandleLimit())
+		}
 		return 0, fuse.EIO
 	}
 	return n, status

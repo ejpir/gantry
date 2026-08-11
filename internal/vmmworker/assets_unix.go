@@ -29,6 +29,9 @@ func (config Config) validate() error {
 	if config.NDisks == 0 && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
 		return fmt.Errorf("writable-disk lock metadata without writable disks")
 	}
+	if config.VhostShares != config.HasSharedRAM {
+		return fmt.Errorf("vhost shares and shared guest RAM must be enabled together")
+	}
 	return nil
 }
 
@@ -43,7 +46,14 @@ func (assets Assets) close() {
 			_ = file.Close()
 		}
 	}
-	for _, file := range []*os.File{assets.Console, assets.Kernel, assets.Rootfs, assets.KVM} {
+	for _, queue := range assets.VhostQueue {
+		for _, file := range []*os.File{queue.KickRead, queue.KickWrite, queue.CallRead, queue.CallWrite} {
+			if file != nil {
+				_ = file.Close()
+			}
+		}
+	}
+	for _, file := range []*os.File{assets.Console, assets.Kernel, assets.Rootfs, assets.SharedRAM, assets.KVM} {
 		if file != nil {
 			_ = file.Close()
 		}

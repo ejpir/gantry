@@ -65,6 +65,7 @@ func (f *shareFile) Getattr(ctx context.Context, out *fuse.AttrOut) syscall.Errn
 	errno := g.Getattr(ctx, out)
 	if errno == 0 {
 		mapGuestOwner(f.export, &out.Attr)
+		cacheAttr(f.export, out)
 	}
 	return errno
 }
@@ -89,6 +90,7 @@ func (f *shareFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.A
 	}
 	if errno == 0 {
 		mapGuestOwner(f.export, &out.Attr)
+		cacheAttr(f.export, out)
 	}
 	return errno
 }
@@ -187,6 +189,7 @@ func (f *shareFile) Statx(ctx context.Context, flags uint32, mask uint32, out *f
 	errno := s.Statx(ctx, flags, mask, out)
 	if errno == 0 {
 		mapGuestStatxOwner(f.export, &out.Statx)
+		cacheStatx(f.export, out)
 	}
 	return errno
 }
@@ -214,6 +217,7 @@ func (d *shareDirStream) Next() (fuse.DirEntry, syscall.Errno) {
 type shareDirHandle struct {
 	fs.FileHandle
 	export *Export
+	node   *shareNode
 }
 
 func (d *shareDirHandle) available() bool {
@@ -229,6 +233,34 @@ func (d *shareDirHandle) Readdirent(ctx context.Context) (*fuse.DirEntry, syscal
 		return nil, syscall.ENOTSUP
 	}
 	return r.Readdirent(ctx)
+}
+
+func (d *shareDirHandle) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if !d.available() || d.node == nil {
+		return nil, syscall.ESTALE
+	}
+	provider, ok := d.FileHandle.(interface {
+		GantryDirFD() (int, bool)
+	})
+	if !ok {
+		return d.node.Lookup(ctx, name, out)
+	}
+	dirFD, ok := provider.GantryDirFD()
+	if !ok {
+		return nil, syscall.EBADF
+	}
+	inode, errno := d.node.LookupAt(ctx, dirFD, name, out)
+	if errno == 0 {
+		mapGuestOwner(d.export, &out.Attr)
+		if d.export.coherence != nil {
+			d.export.coherence.remember(d.node.EmbeddedInode(), name, inode)
+		}
+		cacheEntry(d.export, out)
+		if out.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+			shareDirectoryCache(d.export).prefetch(inode.StableAttr().Ino, dirFD, name, out.Ino)
+		}
+	}
+	return inode, errno
 }
 
 func (d *shareDirHandle) Seekdir(ctx context.Context, off uint64) syscall.Errno {

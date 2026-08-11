@@ -82,3 +82,37 @@ func TestRunnerCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("runner closes = %d, want 1", got)
 	}
 }
+
+// Split-net topology sends no policy to the VMM worker: the network worker
+// enforces. The absence has to reach virtio-net as a genuinely nil
+// interface — a typed-nil *netpol.Policy passes the device's `!= nil` guard
+// and panics on the first frame the guest receives (a DHCP offer was enough
+// to kill the worker mid-boot).
+func TestNetDeviceHooksAbsentPolicyIsNilInterface(t *testing.T) {
+	policy, traffic, err := workerNetworkState(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	devicePolicy, deviceTraffic := netDeviceHooks(policy, traffic)
+	if devicePolicy != nil {
+		t.Errorf("device policy = %#v, want a nil interface", devicePolicy)
+	}
+	if deviceTraffic != nil {
+		t.Errorf("device traffic observer = %#v, want a nil interface", deviceTraffic)
+	}
+}
+
+func TestNetDeviceHooksCarryPresentPolicy(t *testing.T) {
+	policy, traffic, err := workerNetworkState([]byte(`{"defaultAllow":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy == nil {
+		t.Fatal("parsed policy is nil")
+	}
+	defer traffic.Close()
+	devicePolicy, deviceTraffic := netDeviceHooks(policy, traffic)
+	if devicePolicy == nil || deviceTraffic == nil {
+		t.Fatalf("device hooks = (%v, %v), want both installed", devicePolicy, deviceTraffic)
+	}
+}

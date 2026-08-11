@@ -109,9 +109,16 @@ func (c RunConfig) Opts(n *Network, vsockFwd string, envExtra bool) (vmm.Opts, e
 	var conn net.Conn
 	if n != nil {
 		sock, conn = n.Sock, n.Conn
+		// Interface fields: a typed-nil *netpol.Policy would read as a
+		// non-nil PacketPolicy at the device boundary, so only assign what
+		// actually exists.
 		if !n.Split {
-			o.NetPolicy = n.Policy
-			o.NetTraffic = n.Traffic
+			if n.Policy != nil {
+				o.NetPolicy = n.Policy
+			}
+			if n.Traffic != nil {
+				o.NetTraffic = n.Traffic
+			}
 		}
 	}
 	cmdline := vmm.DefaultCmdline(arch, c.Rootfs, "", 3, NetMarker(sock, conn), guestNetMAC, true)

@@ -22,6 +22,8 @@ func (code Status) String() string {
 			"NOTIFY_STORE_CACHE",
 			"NOTIFY_RETRIEVE_CACHE",
 			"NOTIFY_DELETE",
+			"NOTIFY_RESEND",
+			"NOTIFY_INC_EPOCH",
 			"NOTIFY_PRUNE",
 		}[-code]
 	}
