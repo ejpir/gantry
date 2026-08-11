@@ -63,10 +63,6 @@ func (kvmARM64Platform) run(m *Machine) error {
 		return fmt.Errorf("KVM_SET_USER_MEMORY_REGION: %w", err)
 	}
 
-	if err := b.createGIC(); err != nil {
-		return err
-	}
-
 	sz, _, errno := syscall.Syscall(syscall.SYS_IOCTL, k.fd, kvmGetVcpuMmapSize, 0)
 	if errno != 0 {
 		return fmt.Errorf("KVM_GET_VCPU_MMAP_SIZE: %w", errno)
@@ -78,17 +74,24 @@ func (kvmARM64Platform) run(m *Machine) error {
 		if errno != 0 {
 			return fmt.Errorf("KVM_CREATE_VCPU(%d): %w", i, errno)
 		}
-		vc := &kvmVCPU{id: i, fd: r}
-		b.vcpus = append(b.vcpus, vc)
+		b.vcpus = append(b.vcpus, &kvmVCPU{id: i, fd: r})
+	}
+	// KVM mandates the vGIC be created after every VCPU exists but before
+	// any is initialized: KVM_CREATE_VCPU fails once the GIC is live, and
+	// KVM_ARM_VCPU_INIT requires the GIC to be there.
+	if err := b.createGIC(); err != nil {
+		return err
+	}
+	for _, vc := range b.vcpus {
 		vi := kvmVcpuInit{target: kvmArmTargetGenericV8}
 		vi.features[0] = (1 << kvmArmVcpuPowerOff) | (1 << kvmArmVcpuPSCI02)
 		if err := ioctl(vc.fd, kvmArmVcpuInit, unsafe.Pointer(&vi)); err != nil {
-			return fmt.Errorf("KVM_ARM_VCPU_INIT(%d): %w", i, err)
+			return fmt.Errorf("KVM_ARM_VCPU_INIT(%d): %w", vc.id, err)
 		}
 		runBuf, err := syscall.Mmap(int(vc.fd), 0, int(sz),
 			syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 		if err != nil {
-			return fmt.Errorf("mmap kvm_run(%d): %w", i, err)
+			return fmt.Errorf("mmap kvm_run(%d): %w", vc.id, err)
 		}
 		vc.run = kvmRunStruct{data: runBuf}
 	}
@@ -161,18 +164,18 @@ func (b *kvmBackend) bootLoop() error {
 	// arm64 Linux boot protocol: x0 = FDT phys, x1..x3 = 0, PC = kernel
 	// entry, PSTATE = EL1h with DAIF masked, MMU off.
 	if err := vc.setReg(0, fdtAddr); err != nil {
-		return err
+		return fmt.Errorf("set x0 (fdt): %w", err)
 	}
 	for i := uint64(1); i <= 3; i++ {
 		if err := vc.setReg(i, 0); err != nil {
-			return err
+			return fmt.Errorf("set x%d: %w", i, err)
 		}
 	}
 	if err := vc.setReg(32, m.entry); err != nil { // pc
-		return err
+		return fmt.Errorf("set pc: %w", err)
 	}
 	if err := vc.setReg(33, pstateEL1hMask); err != nil { // pstate
-		return err
+		return fmt.Errorf("set pstate: %w", err)
 	}
 
 	fmt.Printf("booting guest (%d vCPU max; type 'exit' in guest shell or Ctrl-A X to quit)\n", m.vcpus)

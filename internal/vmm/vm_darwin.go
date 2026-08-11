@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/ejpir/gantry/internal/gutil"
 )
 
 // hvfBackend is the macOS Hypervisor.framework implementation.
@@ -73,6 +75,27 @@ type hvfVCPU struct {
 	// inLoop is true while the vCPU is inside its run loop; IRQ kicks skip
 	// parked vCPUs (hv_vcpus_exit on a never-run vCPU is pointless).
 	inLoop atomic.Bool
+	// wake releases a vCPU parked on WFI. hv_vcpus_exit only breaks
+	// hv_vcpu_run, so an idling vCPU — which is NOT inside the hypervisor —
+	// needs its own wakeup path or it sits out the whole idle bound while
+	// the interrupt it is waiting for is already queued. Buffered by one: a
+	// token left by an IRQ raised while the guest was running costs one
+	// spurious wakeup, which is the safe direction to err in.
+	wake chan struct{}
+	// run accounting (diagnostic, reported on the boot timeline): what the
+	// vCPU actually did, since neither the guest's clock nor the host's
+	// wall time alone can distinguish guest execution from trap storms
+	// from host-side idling.
+	statExits   atomic.Uint64
+	statWFI     atomic.Uint64
+	statMMIO    atomic.Uint64
+	statSysreg  atomic.Uint64
+	statOther   atomic.Uint64
+	idleWaits   atomic.Uint64
+	idleBlocked atomic.Int64
+	idleCapped  atomic.Uint64
+	// profiled counts boot PC samples taken. Owned by the run-loop thread.
+	profiled int
 
 	debugMu  sync.Mutex
 	exits    map[uint64]uint64
@@ -101,6 +124,9 @@ func (b *hvfBackend) kickVCPUs() error {
 	b.vcpuMu.Lock()
 	handles := make([]uint64, 0, len(b.vcpus))
 	for _, vc := range b.vcpus {
+		// Both halves of "kick": hv_vcpus_exit for whoever is inside the
+		// hypervisor, wake for whoever is parked on WFI outside it.
+		vc.signalWake()
 		if vc.inLoop.Load() {
 			handles = append(handles, vc.vcpu)
 		}
@@ -205,14 +231,14 @@ func (vc *hvfVCPU) dumpState(why string) {
 	pc, _ := vc.getReg(hvRegPC)
 	x0, _ := vc.getReg(hvRegX0)
 	cpsr, _ := vc.getReg(hvRegCPSR)
-	lr, _ := vc.getReg(30)
+	lr, _ := vc.getReg(hvRegLR)
 	vc.debugMu.Lock()
 	defer vc.debugMu.Unlock()
 	fmt.Printf("\n[debug] cpu%d %s\n[debug] PC=%#x X0=%#x LR=%#x CPSR=%#x\n[debug] exits=%v\n[debug] mmio=%v\n",
 		vc.id, why, pc, x0, lr, cpsr, vc.exits, vc.mmioHit)
-	// with nokaslr, kernel text: virt 0xffff800080000000 == phys 0x40000000
-	if pc >= 0xffff800080000000 {
-		phys := pc - 0xffff800080000000
+	// with nokaslr, kernel text: virt kernelTextVA == phys 0x40000000
+	if pc >= kernelTextVA {
+		phys := pc - kernelTextVA
 		if phys >= ramBase && phys < ramBase+uint64(len(vc.b.m.ram)) {
 			offset := phys - ramBase
 			code := vc.b.m.ram[offset:min(offset+96, uint64(len(vc.b.m.ram)))]
@@ -238,6 +264,99 @@ func (vc *hvfVCPU) dumpFullState() {
 	pc, _ := vc.getReg(hvRegPC)
 	cpsr, _ := vc.getReg(hvRegCPSR)
 	fmt.Printf("[dump] pc=%#x cpsr=%#x\n", pc, cpsr)
+}
+
+// Boot profiling: while the boot timeline is live, interrupt the guest every
+// bootProfileInterval and record its PC. The interval is short enough to
+// place a ~100 ms stretch and long enough that the sampling itself (one
+// hv_vcpus_exit and a register read) stays in the noise.
+const (
+	bootProfileInterval   = 5 * time.Millisecond
+	maxBootProfileSamples = 64
+	// kernelTextVA is where the arm64 kernel image is mapped with nokaslr;
+	// PC minus this is an offset resolvable against the kernel's symbols.
+	kernelTextVA = 0xffff800080000000
+)
+
+// bootProfiler drives the sampling. It retires at the last boot milestone:
+// the question it answers is only about boot, and an idle guest should not
+// be woken for diagnostics.
+func (b *hvfBackend) bootProfiler(stop <-chan struct{}) error {
+	if b.m.bootTiming == nil {
+		return nil
+	}
+	ticker := time.NewTicker(bootProfileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return nil
+		case <-ticker.C:
+			if b.m.bootTiming.bootComplete() {
+				return nil
+			}
+			if err := b.kickVCPUs(); err != nil && !b.lifecycle.isStopping() {
+				return err
+			}
+		}
+	}
+}
+
+// sampleGuestPC runs on the owning thread after a cancellation (Apple requires
+// vCPU register access there), so the PC is the guest's own.
+func (vc *hvfVCPU) sampleGuestPC() {
+	timeline := vc.b.m.bootTiming
+	if timeline == nil || vc.profiled >= maxBootProfileSamples || timeline.bootComplete() {
+		return
+	}
+	pc, err := vc.getReg(hvRegPC)
+	if err != nil {
+		return
+	}
+	vc.profiled++
+	// LR names the caller, which is the part a PC alone cannot give: a hot
+	// leaf says what the guest is doing, not which loop is doing it. x0/x1
+	// carry that call's arguments.
+	lr, _ := vc.getReg(hvRegLR)
+	x0, _ := vc.getReg(hvRegX0)
+	x1, _ := vc.getReg(hvRegX0 + 1)
+	detail := fmt.Sprintf(" lr %s x0 %#x x1 %#x", kernelSymbolish(lr), x0, x1)
+	timeline.sample(vc.id, pc, kernelTextVA, detail+vc.b.m.codeAtPC(pc))
+}
+
+// kernelSymbolish renders an address as a kernel-text offset when it is one,
+// so a caller can be resolved against the image without a symbol table.
+func kernelSymbolish(addr uint64) string {
+	if addr < kernelTextVA {
+		return fmt.Sprintf("%#x", addr)
+	}
+	return fmt.Sprintf("text+%#x", addr-kernelTextVA)
+}
+
+// codeAtPC renders the instruction words the guest is executing, so a sample
+// is readable without the guest kernel's symbol table: a loop of cache or TLB
+// maintenance ops looks nothing like a loop of ordinary loads and stores.
+//
+// With nokaslr the kernel image is mapped at kernelTextVA and loaded at the
+// entry address, so a text offset resolves against the LOAD address — not the
+// start of RAM, which is where the FDT lives. A PC outside the image (guest
+// userspace, the linear map, an early physical-address stretch) resolves to
+// nothing and simply prints without code.
+func (m *Machine) codeAtPC(pc uint64) string {
+	const words = 8
+	if pc < kernelTextVA || m.entry < ramBase {
+		return ""
+	}
+	phys := m.entry + (pc - kernelTextVA)
+	if phys < ramBase || phys+words*4 > ramBase+uint64(len(m.ram)) {
+		return ""
+	}
+	code := m.ram[phys-ramBase:]
+	out := fmt.Sprintf(" pa %#x code:", phys)
+	for i := range words {
+		out += fmt.Sprintf(" %08x", gutil.LE32(code[i*4:]))
+	}
+	return out
 }
 
 // periodicKicker kicks all vCPUs out of hv_vcpu_run every 3s in debug mode
@@ -312,6 +431,9 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	if debug {
 		workerCount += 2 // SIGINFO dumper and periodic kicker
 	}
+	if m.bootTiming != nil {
+		workerCount++ // boot PC sampler
+	}
 	b := &hvfBackend{
 		m:           m,
 		debug:       debug,
@@ -320,6 +442,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		running:     map[int]bool{},
 		secondaries: map[int]chan psciStart{},
 	}
+	m.bootTiming.setRunStats(b.runStats)
 	var vc0 *hvfVCPU
 	mainClaimed := false
 	defer func() {
@@ -502,6 +625,11 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		go m.uart.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
+	if m.bootTiming != nil {
+		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
+			b.lifecycle.recordError(b.bootProfiler(stop))
+		})
+	}
 	if debug {
 		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
 			b.lifecycle.recordError(b.siginfoDumper(stop))
@@ -543,6 +671,7 @@ func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 		id:       id,
 		b:        b,
 		debug:    b.debug,
+		wake:     make(chan struct{}, 1),
 		exits:    map[uint64]uint64{},
 		mmioHit:  map[uint64]uint64{},
 		seenMMIO: map[uint64]bool{},
@@ -628,10 +757,22 @@ func (vc *hvfVCPU) advancePC() {
 	}
 }
 
+// Per-exit trace budget. The opening exits are always shown (they are the
+// firmware handshake), and after that only stretches worth explaining — with
+// earlycon the guest emits hundreds of short UART exits, and a
+// first-N-only trace would spend its whole budget on them before reaching
+// the long runs that motivated the trace.
+const (
+	maxTracedExits    = 48
+	alwaysTracedExits = 12
+	longExitThreshold = 2 * time.Millisecond
+)
+
 func (vc *hvfVCPU) runLoop() error {
 	vc.inLoop.Store(true)
 	defer vc.inLoop.Store(false)
 	firstRun := true
+	traced, printed := 0, 0
 	for {
 		if vc.b.lifecycle.isStopping() {
 			return nil
@@ -644,12 +785,27 @@ func (vc *hvfVCPU) runLoop() error {
 			}
 			firstRun = false
 		}
+		timing := printed < maxTracedExits && !vc.b.m.bootTiming.bootComplete()
+		var entered time.Time
+		if timing {
+			entered = time.Now()
+		}
 		if ret := hvVcpuRun(vc.vcpu); ret != hvSuccess {
 			if vc.b.lifecycle.isStopping() {
 				return nil
 			}
 			vc.dumpFullState()
 			return fmt.Errorf("hv_vcpu_run: %s", hvReturnString(ret))
+		}
+		vc.statExits.Add(1)
+		if timing {
+			traced++
+			if ran := time.Since(entered); traced <= alwaysTracedExits || ran >= longExitThreshold {
+				printed++
+				ec := (vc.exit.syndrome >> 26) & 0x3f
+				vc.b.m.bootTiming.traceExit(traced, ran,
+					vc.exit.reason, ec, vc.traceDetail(ec))
+			}
 		}
 		if vc.debug {
 			vc.debugMu.Lock()
@@ -665,6 +821,7 @@ func (vc *hvfVCPU) runLoop() error {
 		}
 		switch vc.exit.reason {
 		case hvExitReasonVtimerActivated:
+			vc.statOther.Add(1)
 			// vtimer fired while masked: inject PPI 27 ourselves and unmask
 			// so HVF can deliver it directly from now on (libkrun's flow).
 			if os.Getenv("GANTRY_NO_VTIMER_INJECT") == "" {
@@ -673,9 +830,11 @@ func (vc *hvfVCPU) runLoop() error {
 			}
 			continue
 		case hvExitReasonCanceled:
+			vc.statOther.Add(1)
 			if vc.b.lifecycle.isStopping() {
 				return nil
 			}
+			vc.sampleGuestPC()
 			// someone kicked the vcpu out (hv_vcpus_exit): debug dump, IRQ
 			// work to apply, or the periodic kicker. Never fatal.
 			if vc.debug {
@@ -692,21 +851,90 @@ func (vc *hvfVCPU) runLoop() error {
 	}
 }
 
+// traceDetail names what an early exit was for, so the boot trace says which
+// guest phase brackets a long run rather than just its exception class. HVC
+// carries the SMCCC/PSCI function id in x0; a data abort carries the address
+// the guest touched. Only traced exits pay the register read.
+func (vc *hvfVCPU) traceDetail(ec uint64) string {
+	switch ec {
+	case ecHvc:
+		fn, err := vc.getReg(hvRegX0)
+		if err != nil {
+			return ""
+		}
+		return fmt.Sprintf(", smccc fn %#x", fn)
+	case ecDataAbort, ecDataAbortSame:
+		return fmt.Sprintf(", pa %#x", vc.exit.physicalAddress)
+	default:
+		return ""
+	}
+}
+
+// idleBound is how long a WFI parks with nothing to wake it. It is a
+// backstop, not the wakeup mechanism: device interrupts release the vCPU
+// immediately through wake, so the bound only paces guests waiting on the
+// vtimer, which HVF cannot deliver while we are outside hv_vcpu_run.
+const idleBound = time.Millisecond
+
+// idle parks the vCPU until something wants it back. Blocking here (rather
+// than spinning in hv_vcpu_run) keeps an idle guest off a host core.
+func (vc *hvfVCPU) idle() {
+	timer := time.NewTimer(idleBound)
+	defer timer.Stop()
+	start := time.Now()
+	select {
+	case <-vc.wake:
+	case <-timer.C:
+		vc.idleCapped.Add(1)
+	}
+	vc.idleWaits.Add(1)
+	vc.idleBlocked.Add(int64(time.Since(start)))
+}
+
+// signalWake releases a vCPU parked in idle. Never blocks: a full buffer
+// already means "go look again".
+func (vc *hvfVCPU) signalWake() {
+	select {
+	case vc.wake <- struct{}{}:
+	default:
+	}
+}
+
+// runStats totals what the vCPUs did, for the boot timeline. Cheap enough to
+// stay unconditional: a handful of atomic loads per milestone line.
+func (b *hvfBackend) runStats() runStats {
+	b.vcpuMu.Lock()
+	defer b.vcpuMu.Unlock()
+	var s runStats
+	for _, vc := range b.vcpus {
+		s.Exits += vc.statExits.Load()
+		s.WFI += vc.statWFI.Load()
+		s.MMIO += vc.statMMIO.Load()
+		s.Sysreg += vc.statSysreg.Load()
+		s.Other += vc.statOther.Load()
+		s.IdleWaits += vc.idleWaits.Load()
+		s.IdleCapped += vc.idleCapped.Load()
+		s.IdleBlocked += time.Duration(vc.idleBlocked.Load())
+	}
+	return s
+}
+
 func (vc *hvfVCPU) handleException() error {
 	syn := vc.exit.syndrome
 	ec := (syn >> 26) & 0x3f
 	switch ec {
 	case 0x18: // MSR/MRS/system-instruction trap
+		vc.statSysreg.Add(1)
 		return vc.handleSysreg(syn)
 	case ecWfi:
-		// Guest idled. The reference VMM sleeps the host thread here until the timer
-		// or an IRQ ("vCPU WFI: sleeping until timer"); a short sleep keeps
-		// us from burning a host core on idle guests.
-		time.Sleep(time.Millisecond)
+		vc.statWFI.Add(1)
+		vc.idle()
 		return nil
 	case ecHvc:
+		vc.statOther.Add(1)
 		return vc.handlePSCI()
 	case ecDataAbort, ecDataAbortSame:
+		vc.statMMIO.Add(1)
 		return vc.handleDataAbort(syn)
 	case ecBrk:
 		return fmt.Errorf("guest hit BRK (debug breakpoint)")

@@ -54,6 +54,7 @@ const (
 	hvMemoryExec  = 4
 
 	hvRegX0   = 0 // X0..X30 = 0..30
+	hvRegLR   = 30
 	hvRegPC   = 31
 	hvRegCPSR = 34
 

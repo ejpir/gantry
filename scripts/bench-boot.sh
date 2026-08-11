@@ -12,6 +12,7 @@
 # daemon.log. It includes daemon phases plus first HVF/MMIO/block/vsock
 # milestones; in-guest time is in console.log (kernel printk stamps).
 #
+# GANTRY_BOOT_TIMING=1 GANTRY_EXTRA_CMDLINE="earlycon=pl011,mmio32,0x9000000" GANTRY_DEBUG_BOOT=1 ./artifacts/gantry-darwin-arm64 start dev -image nn-docker.artifactory.insim.biz/ubuntu:latest -kernel artifacts/gantry-kernel-arm64-rngcap
 # usage: ./scripts/bench-boot.sh [runs] [image]
 # env:   GANTRY=./artifacts/gantry-darwin-arm64  (binary to test)
 set -u
