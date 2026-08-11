@@ -74,7 +74,8 @@ echo "== instance ($INSTANCE_TYPE) =="
 IID=$(aws ec2 describe-instances --filters Name=tag:Name,Values="$NAME" Name=instance-state-name,Values=pending,running,stopping,stopped \
       --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null)
 if [ -z "$IID" ] || [ "$IID" = "None" ]; then
-	AMI=$(aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+	AMI_PARAM="${AMI_PARAM:-/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}"
+	AMI=$(aws ssm get-parameter --name "$AMI_PARAM" \
 	      --query 'Parameter.Value' --output text)
 	IID=$(aws ec2 run-instances --image-id "$AMI" --instance-type "$INSTANCE_TYPE" --subnet-id "$SUBNET_ID" \
 	      --iam-instance-profile Name="$ROLE" --security-group-ids "$TEST_SG" \
