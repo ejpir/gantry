@@ -250,6 +250,20 @@ if ! grep -q 'fuse_dev_notify(struct fuse_dev' fs/fuse/dev.c ||
 	echo "kernel tree contains an incomplete $NOTIFY_PATCH" >&2
 	exit 1
 fi
+# Early userspace performs synchronous RCU operations while mounting its
+# filesystems and enabling cgroup controllers. With multiple online CPUs those
+# dominate readiness. The owned kernel can boot on CPU 0 and asynchronously
+# online the remaining CPUs after PID 1 submits its first vsock packet. Stock
+# kernels safely ignore the namespaced opt-in command-line parameter.
+SMP_PATCH="$ROOT/patches/linux-$VERSION-deferred-smp.patch"
+if ! grep -q 'early_param("gantry.defer_smp"' net/vmw_vsock/virtio_transport.c; then
+	patch -p1 < "$SMP_PATCH"
+fi
+if ! grep -q 'gantry_trigger_deferred_smp' net/vmw_vsock/virtio_transport.c ||
+	! grep -q 'gantry: deferred SMP online complete' net/vmw_vsock/virtio_transport.c; then
+	echo "kernel tree contains an incomplete $SMP_PATCH" >&2
+	exit 1
+fi
 # After extraction (so the sha256 covers exactly the audited bytes) and
 # before configuring, since the probe compiles into the kernel.
 if [ "$PROBE$FIX" != nonenone ]; then
@@ -280,9 +294,13 @@ sys.stdout.buffer.write(gzip.decompress(data[g:j]))
 PYEOF
 	fi
 }
-# baseline sanity: the guest can't boot without these
-if ! grep -q "^CONFIG_EROFS_FS=y" .config || ! grep -q "^CONFIG_VIRTIO_MMIO=y" .config; then
-	echo "config baseline failed (.config lacks EROFS_FS/VIRTIO_MMIO)" >&2
+# Baseline sanity: the guest cannot boot without the filesystem/device pair,
+# and deferred SMP requires built-in vsock plus CPU hotplug (a module would
+# load too late to parse the early parameter or trigger readiness bringup).
+if ! grep -q "^CONFIG_EROFS_FS=y" .config || ! grep -q "^CONFIG_VIRTIO_MMIO=y" .config ||
+	! grep -q "^CONFIG_SMP=y" .config || ! grep -q "^CONFIG_HOTPLUG_CPU=y" .config ||
+	! grep -q "^CONFIG_VIRTIO_VSOCKETS=y" .config; then
+	echo "config baseline failed (.config lacks EROFS/VIRTIO_MMIO or built-in SMP hotplug/vsock)" >&2
 	echo "remove $WORK/.config and re-run" >&2
 	exit 1
 fi

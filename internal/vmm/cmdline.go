@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
 
 // bootLogLevel caps kernel printk at KERN_WARNING on the console:
@@ -53,6 +54,33 @@ func guestHardeningParams() string {
 		" sysctl.kernel.unprivileged_bpf_disabled=1" +
 		" sysctl.kernel.yama.ptrace_scope=1" +
 		" sysctl.net.core.bpf_jit_harden=2"
+}
+
+// WithDeferredSMP asks Gantry's owned kernel to boot on CPU 0 and online the
+// remaining CPUs after vminitd submits its first vsock packet. This keeps SMP
+// RCU grace periods out of early filesystem/cgroup initialization while still
+// making every configured CPU available as the control plane becomes ready.
+// Stock and older kernels safely ignore the namespaced parameter. Set
+// GANTRY_DEFER_SMP=0 (also accepts false, no, and off) to retain eager bringup.
+func WithDeferredSMP(cmdline string, vcpus int) string {
+	if vcpus <= 1 || deferredSMPDisabled() {
+		return cmdline
+	}
+	separator := strings.Index(cmdline, " -- ")
+	if separator < 0 || !strings.Contains(cmdline[:separator], "init=/sbin/vminitd") ||
+		strings.Contains(cmdline[:separator], " gantry.defer_smp=") {
+		return cmdline
+	}
+	return cmdline[:separator] + " gantry.defer_smp=1" + cmdline[separator:]
+}
+
+func deferredSMPDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_DEFER_SMP"))) {
+	case "0", "false", "no", "off":
+		return true
+	default:
+		return false
+	}
 }
 
 // defaultCmdline mirrors nerdbox's libkrun instance.go (PL011 on arm64,

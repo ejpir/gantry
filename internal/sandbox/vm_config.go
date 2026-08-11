@@ -122,6 +122,7 @@ func (c RunConfig) Opts(n *Network, vsockFwd string, envExtra bool) (vmm.Opts, e
 		}
 	}
 	cmdline := vmm.DefaultCmdline(arch, c.Rootfs, "", 3, NetMarker(sock, conn), guestNetMAC, true)
+	cmdline = vmm.WithDeferredSMP(cmdline, c.VCPUs)
 	if envExtra {
 		cmdline = gutil.InsertExtraCmdline(cmdline)
 	}

@@ -1,0 +1,82 @@
+--- a/net/vmw_vsock/virtio_transport.c
++++ b/net/vmw_vsock/virtio_transport.c
+@@ -15,0 +16,4 @@
++#include <linux/cpu.h>
++#include <linux/init.h>
++#include <linux/smp.h>
++#include <linux/workqueue.h>
+@@ -29,0 +34,71 @@
++/*
++ * Gantry's control plane becomes usable when PID 1 sends its first virtio-vsock
++ * packet.  Bringing every secondary CPU online before that point makes early
++ * userspace wait tens of milliseconds for SMP RCU grace periods.  This
++ * opt-in parameter boots on CPU 0, submits the readiness packet, then onlines
++ * the remaining CPUs asynchronously.  A fallback prevents a guest whose PID
++ * 1 never uses vsock from remaining uniprocessor indefinitely.
++ *
++ * Unknown gantry.* parameters are harmless on stock kernels, so the host can
++ * request this mode without first identifying the owned kernel build.
++ */
++#if defined(CONFIG_HOTPLUG_CPU) && defined(CONFIG_SMP) && !defined(MODULE)
++static bool gantry_defer_smp;
++static atomic_t gantry_deferred_smp_triggered = ATOMIC_INIT(0);
++
++static int __init gantry_defer_smp_setup(char *value)
++{
++	bool enabled;
++
++	if (kstrtobool(value, &enabled))
++		return -EINVAL;
++	if (!enabled)
++		return 0;
++
++	gantry_defer_smp = true;
++	if (setup_max_cpus)
++		setup_max_cpus = 1;
++	return 0;
++}
++early_param("gantry.defer_smp", gantry_defer_smp_setup);
++
++static void gantry_online_deferred_cpus(struct work_struct *work)
++{
++	unsigned int cpu;
++	int ret;
++
++	atomic_set(&gantry_deferred_smp_triggered, 1);
++	for_each_present_cpu(cpu) {
++		if (cpu_online(cpu))
++			continue;
++		ret = add_cpu(cpu);
++		if (ret)
++			pr_warn("gantry: failed to online deferred CPU %u: %d\n",
++				cpu, ret);
++	}
++	pr_info("gantry: deferred SMP online complete (%u CPUs)\n",
++		num_online_cpus());
++}
++static DECLARE_DELAYED_WORK(gantry_deferred_smp_work,
++			    gantry_online_deferred_cpus);
++
++static void gantry_trigger_deferred_smp(void)
++{
++	if (!gantry_defer_smp ||
++	    atomic_xchg(&gantry_deferred_smp_triggered, 1))
++		return;
++	mod_delayed_work(system_unbound_wq, &gantry_deferred_smp_work, 0);
++}
++
++static int __init gantry_deferred_smp_fallback(void)
++{
++	if (gantry_defer_smp)
++		queue_delayed_work(system_unbound_wq, &gantry_deferred_smp_work,
++				   5 * HZ);
++	return 0;
++}
++late_initcall(gantry_deferred_smp_fallback);
++#else
++static inline void gantry_trigger_deferred_smp(void) { }
++#endif
++
+@@ -275,0 +351,2 @@
++	if (len >= 0)
++		gantry_trigger_deferred_smp();

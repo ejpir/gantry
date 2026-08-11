@@ -5,6 +5,31 @@ import (
 	"testing"
 )
 
+func TestWithDeferredSMP(t *testing.T) {
+	base := DefaultCmdline("arm64", "/x/rootfs.erofs", "", 3, "", [6]byte{}, false)
+
+	if got := WithDeferredSMP(base, 1); got != base {
+		t.Fatalf("single-vCPU cmdline changed:\n%s", got)
+	}
+	got := WithDeferredSMP(base, 8)
+	parameter := strings.Index(got, " gantry.defer_smp=1")
+	separator := strings.Index(got, " -- ")
+	if parameter < 0 || separator < 0 || parameter > separator {
+		t.Fatalf("deferred-SMP parameter is not a kernel argument:\n%s", got)
+	}
+
+	t.Setenv("GANTRY_DEFER_SMP", "off")
+	if got := WithDeferredSMP(base, 8); got != base {
+		t.Fatalf("GANTRY_DEFER_SMP=off did not retain eager bringup:\n%s", got)
+	}
+
+	t.Setenv("GANTRY_DEFER_SMP", "")
+	debug := DefaultCmdline("arm64", "/x/rootfs.erofs", "/x/initrd", 3, "", [6]byte{}, false)
+	if got := WithDeferredSMP(debug, 8); got != debug {
+		t.Fatalf("initramfs debug cmdline unexpectedly deferred SMP:\n%s", got)
+	}
+}
+
 func TestDefaultCmdlineHardening(t *testing.T) {
 	cmd := DefaultCmdline("arm64", "/x/rootfs.erofs", "", 3, "", [6]byte{}, false)
 	for _, want := range []string{

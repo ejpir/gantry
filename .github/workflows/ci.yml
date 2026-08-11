@@ -137,7 +137,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
+          key: kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'patches/linux-*.patch', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
           restore-keys: |
             kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-
             kernel-ccache-${{ matrix.arch }}-
