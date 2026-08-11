@@ -9,10 +9,10 @@ import (
 	"time"
 )
 
-// bootMilestone identifies one first-occurrence guest event. The timeline is
-// diagnostic-only (GANTRY_BOOT_TIMING=1), so the normal boot path carries no
-// timestamp or formatting work. Enabled boots pay one atomic load at each
-// relevant MMIO access and emit at most one line per milestone.
+// bootMilestone identifies one first-occurrence guest event. The low-overhead
+// timeline is enabled by GANTRY_BOOT_TIMING=1; disruptive exit tracing, PC
+// sampling, console stamps, and vCPU accounting additionally require
+// GANTRY_BOOT_PROFILE=1. Normal boots carry no timestamp or formatting work.
 type bootMilestone uint32
 
 const (
@@ -38,6 +38,7 @@ type bootTimeline struct {
 	seen      atomic.Uint32
 	writeMu   sync.Mutex
 	stats     atomic.Pointer[runStatsFunc]
+	profile   bool
 }
 
 // runStats is what a backend can say about the vCPUs themselves between two
@@ -63,10 +64,16 @@ type runStatsFunc func() runStats
 // setRunStats installs the backend's counters. Safe before or after the
 // vCPUs start; milestones simply omit the column until it is set.
 func (t *bootTimeline) setRunStats(report runStatsFunc) {
-	if t == nil || report == nil {
+	if !t.profiling() || report == nil {
 		return
 	}
 	t.stats.Store(&report)
+}
+
+// profiling reports whether the intentionally perturbing diagnostics are
+// enabled in addition to the low-overhead milestone timeline.
+func (t *bootTimeline) profiling() bool {
+	return t != nil && t.profile
 }
 
 // statsSuffix renders the vCPU column, empty when no backend reports one.
@@ -91,7 +98,12 @@ func newBootTimeline(origin time.Time, out io.Writer) *bootTimeline {
 	if out == nil {
 		out = os.Stdout
 	}
-	return &bootTimeline{origin: origin, out: out, now: time.Now}
+	return &bootTimeline{
+		origin:  origin,
+		out:     out,
+		now:     time.Now,
+		profile: os.Getenv("GANTRY_BOOT_PROFILE") == "1",
+	}
 }
 
 // start records the instant the boot vCPU is about to enter the hypervisor.
@@ -132,10 +144,11 @@ func (t *bootTimeline) mark(bit bootMilestone, phase string) {
 // otherwise unattributable: the guest's clock does not run before it programs
 // a timer, so a long first entry (hypervisor-side setup, stage-2 population)
 // and genuinely slow guest code look identical from the outside. Only the
-// first few exits are traced — enough to place that gap, cheap enough to
-// leave in the diagnostic path.
+// first few exits are traced — enough to place that gap. Timing every exit
+// remains profile-only because even bounded output requires timing the hot
+// exit path until the trace budget is filled.
 func (t *bootTimeline) traceExit(index int, ran time.Duration, reason uint32, ec uint64, detail string) {
-	if t == nil {
+	if !t.profiling() {
 		return
 	}
 	t.writeMu.Lock()
@@ -149,7 +162,7 @@ func (t *bootTimeline) traceExit(index int, ran time.Duration, reason uint32, ec
 // doing, and the guest's own clock does not run yet, so the only way to
 // attribute them is to stop the guest and read its PC.
 func (t *bootTimeline) sample(cpu int, pc, textBase uint64, detail string) {
-	if t == nil {
+	if !t.profiling() {
 		return
 	}
 	where := ""
@@ -163,11 +176,11 @@ func (t *bootTimeline) sample(cpu int, pc, textBase uint64, detail string) {
 
 // stampLine prefixes a console line with the host time since the vCPU
 // entered the hypervisor — the same clock the exit trace and the milestones
-// use, so a guest message can be placed against them. Off unless the
-// timeline is enabled, and it retires with the rest of the boot
-// diagnostics so a long-running guest's console stays untouched.
+// use, so a guest message can be placed against them. It is profile-only and
+// retires at boot completion so a long-running guest's console stays
+// untouched.
 func (t *bootTimeline) stampLine(dst []byte) []byte {
-	if t == nil || !t.started.Load() || t.bootComplete() {
+	if !t.profiling() || !t.started.Load() || t.bootComplete() {
 		return dst
 	}
 	return fmt.Appendf(dst, "[host +%9.3f ms] ", durationMillis(t.now().Sub(t.vcpuStart)))

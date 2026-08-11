@@ -1269,8 +1269,9 @@ func TestWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 	t.Setenv("GANTRY_SECRET_TEST", "must-not-cross")
 	t.Setenv("GANTRY_DEBUG_RTC", "1")
 	t.Setenv("GANTRY_PREFAULT_RAM", "1")
+	t.Setenv("GANTRY_BOOT_PROFILE", "1")
 
-	want := []string{"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1"}
+	want := []string{"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1", "GANTRY_BOOT_PROFILE=1"}
 	if got := workerEnv(); !slices.Equal(got, want) {
 		t.Fatalf("worker environment = %v, want only the non-secret debug switches %v", got, want)
 	}
@@ -1282,6 +1283,7 @@ func TestWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 func TestWorkerEnvironmentCarriesNothingByDefault(t *testing.T) {
 	t.Setenv("GANTRY_DEBUG_RTC", "")
 	t.Setenv("GANTRY_PREFAULT_RAM", "")
+	t.Setenv("GANTRY_BOOT_PROFILE", "")
 	if got := workerEnv(); len(got) != 0 {
 		t.Fatalf("worker environment = %v, want empty", got)
 	}

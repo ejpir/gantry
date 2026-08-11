@@ -12,7 +12,7 @@ import (
 // hypervisor — so the wake path is the only thing standing between a virtio
 // completion and a full idleBound of dead wall time.
 func TestIdleWakesOnInterrupt(t *testing.T) {
-	vc := &hvfVCPU{wake: make(chan struct{}, 1)}
+	vc := &hvfVCPU{wake: make(chan struct{}, 1), bootAccounting: true}
 	go func() {
 		time.Sleep(time.Millisecond / 10)
 		vc.signalWake()
@@ -36,7 +36,7 @@ func TestIdleWakesOnInterrupt(t *testing.T) {
 
 // Nothing to wake it: the bound paces the guest instead of spinning a core.
 func TestIdleFallsBackToBound(t *testing.T) {
-	vc := &hvfVCPU{wake: make(chan struct{}, 1)}
+	vc := &hvfVCPU{wake: make(chan struct{}, 1), bootAccounting: true}
 	start := time.Now()
 	vc.idle()
 	if blocked := time.Since(start); blocked < idleBound {

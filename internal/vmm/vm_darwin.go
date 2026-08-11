@@ -82,18 +82,20 @@ type hvfVCPU struct {
 	// token left by an IRQ raised while the guest was running costs one
 	// spurious wakeup, which is the safe direction to err in.
 	wake chan struct{}
-	// run accounting (diagnostic, reported on the boot timeline): what the
-	// vCPU actually did, since neither the guest's clock nor the host's
-	// wall time alone can distinguish guest execution from trap storms
-	// from host-side idling.
-	statExits   atomic.Uint64
-	statWFI     atomic.Uint64
-	statMMIO    atomic.Uint64
-	statSysreg  atomic.Uint64
-	statOther   atomic.Uint64
-	idleWaits   atomic.Uint64
-	idleBlocked atomic.Int64
-	idleCapped  atomic.Uint64
+	// run accounting (profile-only, reported on the boot timeline): what the
+	// vCPU actually did, since neither the guest's clock nor the host's wall
+	// time alone can distinguish guest execution from trap storms from
+	// host-side idling. The immutable flag keeps atomics off the basic timing
+	// and normal run paths.
+	bootAccounting bool
+	statExits      atomic.Uint64
+	statWFI        atomic.Uint64
+	statMMIO       atomic.Uint64
+	statSysreg     atomic.Uint64
+	statOther      atomic.Uint64
+	idleWaits      atomic.Uint64
+	idleBlocked    atomic.Int64
+	idleCapped     atomic.Uint64
 	// profiled counts boot PC samples taken. Owned by the run-loop thread.
 	profiled int
 
@@ -266,10 +268,10 @@ func (vc *hvfVCPU) dumpFullState() {
 	fmt.Printf("[dump] pc=%#x cpsr=%#x\n", pc, cpsr)
 }
 
-// Boot profiling: while the boot timeline is live, interrupt the guest every
-// bootProfileInterval and record its PC. The interval is short enough to
-// place a ~100 ms stretch and long enough that the sampling itself (one
-// hv_vcpus_exit and a register read) stays in the noise.
+// Boot profiling: when GANTRY_BOOT_PROFILE=1 accompanies the timeline,
+// interrupt the guest every bootProfileInterval and record its PC. Sampling
+// is intentionally separate from GANTRY_BOOT_TIMING because forcing exits is
+// observably perturbing, especially as the vCPU count grows.
 const (
 	bootProfileInterval   = 5 * time.Millisecond
 	maxBootProfileSamples = 64
@@ -282,7 +284,7 @@ const (
 // the question it answers is only about boot, and an idle guest should not
 // be woken for diagnostics.
 func (b *hvfBackend) bootProfiler(stop <-chan struct{}) error {
-	if b.m.bootTiming == nil {
+	if !b.m.bootTiming.profiling() {
 		return nil
 	}
 	ticker := time.NewTicker(bootProfileInterval)
@@ -306,7 +308,7 @@ func (b *hvfBackend) bootProfiler(stop <-chan struct{}) error {
 // vCPU register access there), so the PC is the guest's own.
 func (vc *hvfVCPU) sampleGuestPC() {
 	timeline := vc.b.m.bootTiming
-	if timeline == nil || vc.profiled >= maxBootProfileSamples || timeline.bootComplete() {
+	if !timeline.profiling() || vc.profiled >= maxBootProfileSamples || timeline.bootComplete() {
 		return
 	}
 	pc, err := vc.getReg(hvRegPC)
@@ -431,8 +433,8 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	if debug {
 		workerCount += 2 // SIGINFO dumper and periodic kicker
 	}
-	if m.bootTiming != nil {
-		workerCount++ // boot PC sampler
+	if m.bootTiming.profiling() {
+		workerCount++ // perturbing boot PC sampler
 	}
 	b := &hvfBackend{
 		m:           m,
@@ -625,7 +627,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		go m.uart.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	if m.bootTiming != nil {
+	if m.bootTiming.profiling() {
 		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
 			b.lifecycle.recordError(b.bootProfiler(stop))
 		})
@@ -668,13 +670,14 @@ func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 	b.hvfMu.Lock()
 	defer b.hvfMu.Unlock()
 	vc := &hvfVCPU{
-		id:       id,
-		b:        b,
-		debug:    b.debug,
-		wake:     make(chan struct{}, 1),
-		exits:    map[uint64]uint64{},
-		mmioHit:  map[uint64]uint64{},
-		seenMMIO: map[uint64]bool{},
+		id:             id,
+		b:              b,
+		debug:          b.debug,
+		bootAccounting: b.m.bootTiming.profiling(),
+		wake:           make(chan struct{}, 1),
+		exits:          map[uint64]uint64{},
+		mmioHit:        map[uint64]uint64{},
+		seenMMIO:       map[uint64]bool{},
 	}
 	var exitInfo *hvVcpuExit
 	if ret := hvVcpuCreate(&vc.vcpu, &exitInfo, 0); ret != hvSuccess {
@@ -785,7 +788,7 @@ func (vc *hvfVCPU) runLoop() error {
 			}
 			firstRun = false
 		}
-		timing := printed < maxTracedExits && !vc.b.m.bootTiming.bootComplete()
+		timing := vc.b.m.bootTiming.profiling() && printed < maxTracedExits && !vc.b.m.bootTiming.bootComplete()
 		var entered time.Time
 		if timing {
 			entered = time.Now()
@@ -797,7 +800,9 @@ func (vc *hvfVCPU) runLoop() error {
 			vc.dumpFullState()
 			return fmt.Errorf("hv_vcpu_run: %s", hvReturnString(ret))
 		}
-		vc.statExits.Add(1)
+		if vc.bootAccounting {
+			vc.statExits.Add(1)
+		}
 		if timing {
 			traced++
 			if ran := time.Since(entered); traced <= alwaysTracedExits || ran >= longExitThreshold {
@@ -821,7 +826,9 @@ func (vc *hvfVCPU) runLoop() error {
 		}
 		switch vc.exit.reason {
 		case hvExitReasonVtimerActivated:
-			vc.statOther.Add(1)
+			if vc.bootAccounting {
+				vc.statOther.Add(1)
+			}
 			// vtimer fired while masked: inject PPI 27 ourselves and unmask
 			// so HVF can deliver it directly from now on (libkrun's flow).
 			if os.Getenv("GANTRY_NO_VTIMER_INJECT") == "" {
@@ -830,7 +837,9 @@ func (vc *hvfVCPU) runLoop() error {
 			}
 			continue
 		case hvExitReasonCanceled:
-			vc.statOther.Add(1)
+			if vc.bootAccounting {
+				vc.statOther.Add(1)
+			}
 			if vc.b.lifecycle.isStopping() {
 				return nil
 			}
@@ -881,14 +890,21 @@ const idleBound = time.Millisecond
 func (vc *hvfVCPU) idle() {
 	timer := time.NewTimer(idleBound)
 	defer timer.Stop()
-	start := time.Now()
+	var start time.Time
+	if vc.bootAccounting {
+		start = time.Now()
+	}
 	select {
 	case <-vc.wake:
 	case <-timer.C:
-		vc.idleCapped.Add(1)
+		if vc.bootAccounting {
+			vc.idleCapped.Add(1)
+		}
 	}
-	vc.idleWaits.Add(1)
-	vc.idleBlocked.Add(int64(time.Since(start)))
+	if vc.bootAccounting {
+		vc.idleWaits.Add(1)
+		vc.idleBlocked.Add(int64(time.Since(start)))
+	}
 }
 
 // signalWake releases a vCPU parked in idle. Never blocks: a full buffer
@@ -924,17 +940,25 @@ func (vc *hvfVCPU) handleException() error {
 	ec := (syn >> 26) & 0x3f
 	switch ec {
 	case 0x18: // MSR/MRS/system-instruction trap
-		vc.statSysreg.Add(1)
+		if vc.bootAccounting {
+			vc.statSysreg.Add(1)
+		}
 		return vc.handleSysreg(syn)
 	case ecWfi:
-		vc.statWFI.Add(1)
+		if vc.bootAccounting {
+			vc.statWFI.Add(1)
+		}
 		vc.idle()
 		return nil
 	case ecHvc:
-		vc.statOther.Add(1)
+		if vc.bootAccounting {
+			vc.statOther.Add(1)
+		}
 		return vc.handlePSCI()
 	case ecDataAbort, ecDataAbortSame:
-		vc.statMMIO.Add(1)
+		if vc.bootAccounting {
+			vc.statMMIO.Add(1)
+		}
 		return vc.handleDataAbort(syn)
 	case ecBrk:
 		return fmt.Errorf("guest hit BRK (debug breakpoint)")

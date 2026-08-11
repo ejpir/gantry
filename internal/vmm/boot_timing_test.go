@@ -114,6 +114,7 @@ func TestBootTimelineReportsVCPUStats(t *testing.T) {
 	now := origin
 	var out bytes.Buffer
 	timeline := newBootTimeline(origin, &out)
+	timeline.profile = true
 	timeline.now = func() time.Time { return now }
 	timeline.setRunStats(func() runStats {
 		return runStats{
@@ -152,6 +153,7 @@ func TestBootTimelineTracesEarlyExits(t *testing.T) {
 	origin := time.Unix(500, 0)
 	var out bytes.Buffer
 	timeline := newBootTimeline(origin, &out)
+	timeline.profile = true
 	timeline.traceExit(1, 140*time.Millisecond, 1, 0x16, ", smccc fn 0x84000000")
 
 	got := out.String()
@@ -172,9 +174,31 @@ func TestBootTimelineDisabledTracesNothing(t *testing.T) {
 	}
 }
 
+func TestBootTimelineBasicModeSkipsProfileWork(t *testing.T) {
+	origin := time.Unix(550, 0)
+	var out bytes.Buffer
+	timeline := newBootTimeline(origin, &out)
+	timeline.profile = false
+	timeline.start("vCPU entered HVF")
+	timeline.setRunStats(func() runStats { return runStats{Exits: 1} })
+	timeline.traceExit(1, time.Second, 1, 0x24, ", pa 0x9000000")
+	timeline.sample(0, 0xffff800080123456, 0xffff800080000000, "")
+	if got := timeline.stampLine(nil); got != nil {
+		t.Fatalf("basic timeline stamped console: %q", got)
+	}
+	got := out.String()
+	if strings.Contains(got, "boot-profile:") || strings.Contains(got, "exit  #") || strings.Contains(got, "exits ") {
+		t.Fatalf("basic timeline emitted profile output:\n%s", got)
+	}
+	if !strings.Contains(got, "vCPU entered HVF") {
+		t.Fatalf("basic timeline omitted milestone:\n%s", got)
+	}
+}
+
 func TestBootTimelineSampleResolvesKernelOffset(t *testing.T) {
 	var out bytes.Buffer
 	timeline := newBootTimeline(time.Unix(600, 0), &out)
+	timeline.profile = true
 	timeline.sample(0, 0xffff800080123456, 0xffff800080000000, " pa 0x40123456 code: d50b7b20")
 	timeline.sample(1, 0x40200000, 0xffff800080000000, "") // below the text base
 
@@ -217,6 +241,7 @@ func TestBootTimelineStampsConsoleLines(t *testing.T) {
 	origin := time.Unix(800, 0)
 	now := origin
 	timeline := newBootTimeline(origin, &bytes.Buffer{})
+	timeline.profile = true
 	timeline.now = func() time.Time { return now }
 
 	if got := timeline.stampLine(nil); got != nil {

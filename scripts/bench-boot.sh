@@ -9,10 +9,11 @@
 #                  container + graceful shutdown, the one-shot flow)
 #
 # Phase attribution: run one boot with GANTRY_BOOT_TIMING=1 and read
-# daemon.log. It includes daemon phases plus first HVF/MMIO/block/vsock
-# milestones; in-guest time is in console.log (kernel printk stamps).
+# daemon.log. Add GANTRY_BOOT_PROFILE=1 only for detailed PC/exit attribution;
+# it perturbs timing and must not be mixed with benchmark samples. Earlycon is
+# similarly attribution-only because every PL011 byte causes trapped MMIO.
 #
-# GANTRY_BOOT_TIMING=1 GANTRY_EXTRA_CMDLINE="earlycon=pl011,mmio32,0x9000000" GANTRY_DEBUG_BOOT=1 ./artifacts/gantry-darwin-arm64 start dev -image nn-docker.artifactory.insim.biz/ubuntu:latest -kernel artifacts/gantry-kernel-arm64-rngcap
+# GANTRY_BOOT_TIMING=1 GANTRY_BOOT_PROFILE=1 GANTRY_EXTRA_CMDLINE="earlycon=pl011,mmio32,0x9000000" ./artifacts/gantry-darwin-arm64 start dev -image nn-docker.artifactory.insim.biz/ubuntu:latest -kernel artifacts/gantry-kernel-arm64-rngcap
 # usage: ./scripts/bench-boot.sh [runs] [image]
 # env:   GANTRY=./artifacts/gantry-darwin-arm64  (binary to test)
 set -u

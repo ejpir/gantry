@@ -174,10 +174,11 @@ func closeFiles(files []*os.File) {
 // only: os.Executable() is the test binary under `go test`).
 var netWorkerSpawnHook func(argv *[]string, env *[]string)
 
-// workerEnv is the explicit child environment allowlist: no secret
-// material, no GANTRY_* knobs (those travel in the bootstrap config).
+// workerEnv is the explicit child environment allowlist: no secret material.
+// Most GANTRY_* knobs travel in bootstrap config; these diagnostic-only
+// switches must be present before the worker constructs the VMM.
 func workerEnv() []string {
-	out := make([]string, 0, 1)
+	out := make([]string, 0, 3)
 	// GANTRY_DEBUG_RTC is a debug pass-through (worker-side postmortem
 	// logging); it carries no secret material.
 	if os.Getenv("GANTRY_DEBUG_RTC") != "" {
@@ -187,6 +188,11 @@ func workerEnv() []string {
 	// VMM worker, so the boot-latency experiment is unreachable without it.
 	if os.Getenv("GANTRY_PREFAULT_RAM") != "" {
 		out = append(out, "GANTRY_PREFAULT_RAM=1")
+	}
+	// GANTRY_BOOT_PROFILE enables intentionally perturbing vCPU sampling and
+	// exit tracing. The low-overhead timeline itself travels in bootstrap.
+	if os.Getenv("GANTRY_BOOT_PROFILE") == "1" {
+		out = append(out, "GANTRY_BOOT_PROFILE=1")
 	}
 	return out
 }

@@ -36,11 +36,10 @@ func (m *Machine) stdoutWrite(b byte) {
 	m.consoleMu.Lock()
 	defer m.consoleMu.Unlock()
 	if len(m.stdoutBuf) == 0 {
-		// Host stamp at the start of each line while the boot timeline is
-		// live. The guest's own printk timestamps are all zero until it
-		// registers a timer, so without this there is no way to line a
-		// console message up against the exit trace — which is exactly
-		// where the interesting part of an arm64 boot happens.
+		// In boot-profile mode, add a host stamp at the start of each line.
+		// The guest's own printk timestamps are all zero until it registers a
+		// timer, so without this there is no way to line a console message up
+		// against the exit trace. Basic timing returns the buffer unchanged.
 		m.stdoutBuf = m.bootTiming.stampLine(m.stdoutBuf)
 	}
 	m.stdoutBuf = append(m.stdoutBuf, b)
