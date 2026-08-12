@@ -97,25 +97,20 @@ func setupX86Boot(ram []byte, cmdline string, memSize uint64, ncpus int) error {
 
 // writeMPS installs an Intel MultiProcessor Specification v1.4 floating
 // pointer + config table. Without ACPI this is how the kernel enumerates
-// CPUs (SMP) and finds the IO-APIC. Layout follows kvmtool's mptable.c:
-// NO ISA->IO-APIC interrupt entries.
+// CPUs (SMP), the IO-APIC, and the ISA interrupt routes Gantry exposes.
 func writeMPS(ram []byte, ncpus int) {
 	if ncpus < 1 {
 		ncpus = 1
 	}
 	ioapicID := byte(ncpus + 1) // kvmtool: ioapic id right after LAPIC ids
 
-	// entry sizes: processor=20, bus=8, ioapic=8, int/lint=8.
-	// Layout follows kvmtool's mptable.c: NO ISA->IO-APIC interrupt
-	// entries. Legacy IRQs (<16) stay in virtual-wire PIC mode — KVM's
-	// in-kernel irqchip asserts IRQs <16 to both the i8259 and the
-	// IO-APIC, so drivers using legacy IRQs (virtio-mmio slots, UART)
-	// get interrupts through the PIC without IO-APIC routing. An INT
-	// entry for IRQ0 instead sends the kernel down the IO-APIC-timer
-	// path where the timer IRQ is never allocated -> NULL deref in
-	// check_timer(). Only LINT0 (ExtINT) and LINT1 (NMI) are declared.
-	nEntries := ncpus + 2 + 1 + 2
-	baseLen := 44 + ncpus*20 + 2*8 + 8 + 2*8
+	// entry sizes: processor=20, bus=8, ioapic=8, int/lint=8. Publish
+	// every connected ISA route rather than making Linux synthesize a
+	// default table and report a firmware bug. IRQ0 uses the conventional
+	// IO-APIC pin 2; IRQ2 is the legacy PIC cascade and is not routable.
+	const isaRoutes = 15
+	nEntries := ncpus + 2 + 1 + isaRoutes + 2
+	baseLen := 44 + ncpus*20 + 2*8 + 8 + isaRoutes*8 + 2*8
 
 	// --- floating pointer structure (16 bytes) ---
 	fp := ram[x86MPSFloatingPtr:]
@@ -182,6 +177,26 @@ func writeMPS(ram []byte, ncpus int) {
 	e[3] = 1    // enabled
 	binary.LittleEndian.PutUint32(e[4:], 0xfec00000)
 	p += 8
+
+	// --- ISA IRQ sources -> IO-APIC ---
+	for irq := 0; irq < 16; irq++ {
+		if irq == 2 {
+			continue
+		}
+		e = ct[p:]
+		e[0] = 3 // entry type: interrupt source
+		e[1] = 0 // interrupt type: INT
+		binary.LittleEndian.PutUint16(e[2:], 0)
+		e[4] = 1 // source bus id 1 (ISA)
+		e[5] = byte(irq)
+		e[6] = ioapicID
+		if irq == 0 {
+			e[7] = 2
+		} else {
+			e[7] = byte(irq)
+		}
+		p += 8
+	}
 
 	// --- LINT0: ISA IRQ0 -> BSP LAPIC LINT0 as ExtINT (virtual wire) ---
 	e = ct[p:]

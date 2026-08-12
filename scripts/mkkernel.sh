@@ -200,15 +200,26 @@ USB                                     # no USB bus
 SCSI                                    # disks are virtio-blk
 KVM KVM_VFIO                            # no nested virtualization in the guest
 INPUT                                   # no keyboard/mouse; serial console only
-DAX FUSE_DAX                            # virtio-fs runs without the DAX window
+DAX FS_DAX FUSE_DAX                     # virtio-fs runs without the DAX window
 DEBUG_MEMORY_INIT                       # kernel-hacking debug option
 XEN HYPERV VHOST                        # other hypervisors' guest agents
 "
-# x86 keeps ACPI (bootx86.go writes RSDP tables) — drop it only on arm64,
-# where boot is FDT-only. PCI stays on x86 too: conservative, unmeasured.
 if [ "$ARCH" = arm64 ]; then
 	DISABLES="$DISABLES
 ACPI                                    # boot is FDT-only (3.6 ms probe)
+"
+else
+	# Gantry's x86 VMM deliberately boots through a complete MPS table and
+	# virtio-mmio, not firmware/PCI. These options initialized nonexistent PC
+	# hardware and added about 7 ms to vCPU->READY after the larger KVM CPUID
+	# fix. Keep container, network, filesystem, and memory-hardening features.
+	DISABLES="$DISABLES
+ACPI NUMA X86_MCE                       # no ACPI tables, NUMA nodes, or physical MCE
+CPU_FREQ CPU_IDLE MEMORY_HOTPLUG        # fixed virtual CPUs and RAM
+THERMAL VFIO XFS_FS                     # no sensors, device assignment, or XFS root
+BLK_DEV_RAM BLK_DEV_LOOP                # all guest disks are virtio-blk
+VIRTIO_PMEM VIRTIO_BALLOON VIRTIO_IOMMU # devices Gantry does not expose
+LIBNVDIMM DAX                           # no persistent-memory/DAX data plane
 "
 fi
 
@@ -311,6 +322,11 @@ fi
 for sym in $(printf '%s\n' "$DISABLES" | sed 's/#.*//'); do
 	scripts/config --disable "$sym"
 done
+if [ "$ARCH" = x86_64 ]; then
+	# INPUT and VT default to y unless EXPERT exposes their prompts. Gantry's
+	# x86 console is the 8250 serial driver, so neither subsystem is needed.
+	scripts/config --enable EXPERT --disable INPUT --disable VT --disable VGA_CONSOLE
+fi
 # ERRATA=strip: turn off every errata workaround the baseline enabled, rather
 # than a hand-kept list — the set changes with each kernel bump, and a stale
 # list would quietly stop stripping what it claims to. The workarounds are

@@ -32,6 +32,15 @@ const (
 	kvmCreatePit2        = 0x4040AE77 // _IOW (0xAE, 0x77, struct kvm_pit_config)
 	kvmGetSupportedCpuid = 0xC008AE05 // _IOWR(0xAE, 0x05, struct kvm_cpuid2)
 	kvmSetCpuid2         = 0x4008AE90 // _IOW (0xAE, 0x90, struct kvm_cpuid2)
+	kvmCheckExtension    = 0xAE03     // _IO (0xAE, 0x03)
+
+	kvmCapTSCDeadlineTimer = 72
+
+	kvmCPUIDSignature = 0x40000000
+	kvmCPUIDFeatures  = 0x40000001
+
+	kvmCPUIDFeatureHypervisor  = 1 << 31
+	kvmCPUIDFeatureTSCDeadline = 1 << 24
 )
 
 // ---- UAPI structs (x86-64) --------------------------------------------------
@@ -92,6 +101,54 @@ type kvmCPUID2 struct {
 	nent    uint32
 	pad     uint32
 	entries [256]kvmCPUIDEntry2
+}
+
+// prepareKVMCPUID turns KVM_GET_SUPPORTED_CPUID's system-wide template into
+// one vCPU's CPUID contract. KVM supplies its paravirtual signature/features
+// as leaves 0x40000000..1, but Linux will ignore those leaves unless the
+// architectural hypervisor-present bit is also advertised in leaf 1. The
+// in-kernel irqchip additionally supports TSC deadline timers even on older
+// hosts that omit that dynamically enabled bit from GET_SUPPORTED_CPUID.
+func prepareKVMCPUID(cpuid *kvmCPUID2, vcpuID int, tscDeadline bool) error {
+	var leaf1 *kvmCPUIDEntry2
+	var signature, features bool
+	for i := uint32(0); i < cpuid.nent; i++ {
+		entry := &cpuid.entries[i]
+		switch entry.function {
+		case 1:
+			leaf1 = entry
+		case kvmCPUIDSignature:
+			signature = true
+		case kvmCPUIDFeatures:
+			features = true
+		}
+	}
+	if leaf1 == nil || !signature || !features {
+		return fmt.Errorf("KVM_GET_SUPPORTED_CPUID omitted required KVM leaves")
+	}
+	leaf1.ecx |= kvmCPUIDFeatureHypervisor
+	if tscDeadline {
+		leaf1.ecx |= kvmCPUIDFeatureTSCDeadline
+	}
+	leaf1.ebx = leaf1.ebx&0x00ffffff | uint32(vcpuID&0xff)<<24
+	for i := uint32(0); i < cpuid.nent; i++ {
+		entry := &cpuid.entries[i]
+		if entry.function == 0xb || entry.function == 0x1f {
+			entry.edx = uint32(vcpuID)
+		}
+		if entry.function == 0x8000001e {
+			entry.eax = uint32(vcpuID)
+		}
+	}
+	return nil
+}
+
+func (k *kvmFile) checkExtension(capability uintptr) (bool, error) {
+	r, _, errno := syscall.Syscall(syscall.SYS_IOCTL, k.fd, kvmCheckExtension, capability)
+	if errno != 0 {
+		return false, errno
+	}
+	return r != 0, nil
 }
 
 type kvmPitConfig struct {
@@ -159,17 +216,21 @@ func (kvmX86Platform) run(m *Machine) error {
 	}
 
 	// Host CPUID (incl. KVM paravirt leaves: kvm-clock, ...) for all vCPUs.
-	cpuid := &kvmCPUID2{nent: 256}
-	if err := ioctl(k.fd, kvmGetSupportedCpuid, unsafe.Pointer(cpuid)); err != nil {
+	cpuidTemplate := &kvmCPUID2{nent: 256}
+	if err := ioctl(k.fd, kvmGetSupportedCpuid, unsafe.Pointer(cpuidTemplate)); err != nil {
 		return fmt.Errorf("KVM_GET_SUPPORTED_CPUID: %w", err)
 	}
-	if int(cpuid.nent) > len(cpuid.entries) {
-		return fmt.Errorf("KVM_GET_SUPPORTED_CPUID: nent=%d exceeds buffer", cpuid.nent)
+	if int(cpuidTemplate.nent) > len(cpuidTemplate.entries) {
+		return fmt.Errorf("KVM_GET_SUPPORTED_CPUID: nent=%d exceeds buffer", cpuidTemplate.nent)
 	}
 
 	sz, _, errno := syscall.Syscall(syscall.SYS_IOCTL, k.fd, kvmGetVcpuMmapSize, 0)
 	if errno != 0 {
 		return fmt.Errorf("KVM_GET_VCPU_MMAP_SIZE: %w", errno)
+	}
+	tscDeadline, err := k.checkExtension(kvmCapTSCDeadlineTimer)
+	if err != nil {
+		return fmt.Errorf("KVM_CHECK_EXTENSION(TSC_DEADLINE_TIMER): %w", err)
 	}
 	for i := 0; i < m.vcpus; i++ {
 		r, _, errno := syscall.Syscall(syscall.SYS_IOCTL, vmFD, kvmCreateVcpu, uintptr(i))
@@ -178,7 +239,13 @@ func (kvmX86Platform) run(m *Machine) error {
 		}
 		vc := &kvmVCPU{id: i, fd: r}
 		b.vcpus = append(b.vcpus, vc)
-		if err := ioctl(vc.fd, kvmSetCpuid2, unsafe.Pointer(cpuid)); err != nil {
+		// Topology/APIC fields are vCPU-specific. Copy the immutable KVM
+		// template rather than carrying one vCPU's edits into the next.
+		cpuid := *cpuidTemplate
+		if err := prepareKVMCPUID(&cpuid, i, tscDeadline); err != nil {
+			return err
+		}
+		if err := ioctl(vc.fd, kvmSetCpuid2, unsafe.Pointer(&cpuid)); err != nil {
 			return fmt.Errorf("KVM_SET_CPUID2(%d): %w", i, err)
 		}
 		runBuf, err := syscall.Mmap(int(vc.fd), 0, int(sz),
@@ -263,6 +330,7 @@ func (b *kvmX86Backend) bootLoop() error {
 		go m.x86.uartIO.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
+	m.bootTiming.start("vCPU entered KVM")
 	return b.runVCPU(vc, b.runVCPULoop)
 }
 

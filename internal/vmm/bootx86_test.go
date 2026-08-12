@@ -123,7 +123,7 @@ func TestSetupX86BootMPS(t *testing.T) {
 	if sum != 0 {
 		t.Error("config table checksum != 0")
 	}
-	if n := binary.LittleEndian.Uint16(ct[34:]); int(n) != 4+2+1+2 {
+	if n := binary.LittleEndian.Uint16(ct[34:]); int(n) != 4+2+1+15+2 {
 		t.Errorf("entry count = %d", n)
 	}
 	if lapic := binary.LittleEndian.Uint32(ct[36:]); lapic != 0xfee00000 {
@@ -143,8 +143,8 @@ func TestSetupX86BootMPS(t *testing.T) {
 			t.Errorf("cpu%d BSP flag wrong", i)
 		}
 	}
-	// kvmtool layout: PCI bus 0, ISA bus 1, ioapic id 5, then 2 LINT
-	// entries (ExtINT on LINT0, NMI on LINT1) and NO ISA INT entries.
+	// PCI bus 0, ISA bus 1, ioapic id 5, all connected ISA routes,
+	// then ExtINT on LINT0 and NMI on LINT1.
 	p := 44 + 4*20
 	if ct[p] != 1 || ct[p+1] != 0 || string(ct[p+2:p+8]) != "PCI   " {
 		t.Errorf("PCI bus entry: %+v", ct[p:p+8])
@@ -158,6 +158,20 @@ func TestSetupX86BootMPS(t *testing.T) {
 		t.Errorf("ioapic entry: %+v", ct[p:p+8])
 	}
 	p += 8
+	for irq := 0; irq < 16; irq++ {
+		if irq == 2 {
+			continue
+		}
+		wantPin := irq
+		if irq == 0 {
+			wantPin = 2
+		}
+		if ct[p] != 3 || ct[p+1] != 0 || ct[p+4] != 1 ||
+			ct[p+5] != byte(irq) || ct[p+6] != 5 || ct[p+7] != byte(wantPin) {
+			t.Errorf("ISA IRQ%d entry: %+v", irq, ct[p:p+8])
+		}
+		p += 8
+	}
 	if ct[p] != 4 || ct[p+1] != 3 || ct[p+6] != 0 || ct[p+7] != 0 {
 		t.Errorf("LINT0 entry: %+v", ct[p:p+8])
 	}
