@@ -1,0 +1,6 @@
+#!/bin/bash
+set +e
+cd /opt/gantry||exit 1
+case $(uname -m) in aarch64) G=./gantry-linux-arm64-final;K=./gantry-kernel-arm64-deferred-smp;R=./nerdbox-rootfs-arm64.erofs;I=./ubuntu-arm64.erofs;; x86_64) G=./gantry-linux-amd64-final;K=./gantry-kernel-x86_64;R=./nerdbox-rootfs-x86_64.erofs;I=./debian-bookworm-amd64.erofs;;esac
+A=$(uname -m);echo -e 'arch\tcpus\trun\trc\tcli_ms\tprep_ms\tvcpu_ms\tready_ms\tvcpu_to_ready_ms'
+for C in 1 2 4 8;do for X in 1 2 3;do N=timing-c$C-r$X;S=/tmp/.gantry/sandboxes/$N;$G stop $N >/dev/null 2>&1||true;rm -rf $S;T0=$(date +%s%N);GANTRY_BOOT_TIMING=1 timeout 30 $G start $N -kernel $K -rootfs $R -image $I -cpus $C -mem 512 -rw=false -net=false -process-isolation=off >/tmp/$N.out 2>&1;RC=$?;T1=$(date +%s%N);CLI=$(awk -v n=$((T1-T0)) 'BEGIN{printf "%.3f",n/1e6}');P=$(grep -m1 'machine prepared' $S/daemon.log|awk '{print $(NF-1)}');V=$(grep -m1 'vCPU entered KVM' $S/daemon.log|awk '{print $(NF-4)}');D=$(grep -m1 'guest RPC connected' $S/daemon.log|awk '{print $(NF-1)}');VR=$(awk -v d="$D" -v v="$V" 'BEGIN{if(d!=""&&v!="")printf "%.3f",d-v;else printf "NA"}');echo -e "$A\t$C\t$X\t$RC\t$CLI\t${P:-NA}\t${V:-NA}\t${D:-NA}\t$VR";$G stop $N >/dev/null 2>&1||true;done;done

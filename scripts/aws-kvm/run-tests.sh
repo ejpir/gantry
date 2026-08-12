@@ -21,7 +21,7 @@ echo "== running battery on ${GANTRY_TEST_IID:?export GANTRY_TEST_IID} =="
 # Bootstrap /opt/gantry on the instance: presign every asset and emit a
 # retry-loop download block (fresh instances have nothing; existing
 # files are kept, the binary is always refreshed).
-ASSETS="gantry-linux-amd64 nerdbox-kernel-x86_64 nerdbox-rootfs-x86_64.erofs nerdbox-rootfs-gvisor-x86_64.erofs debian-bookworm-amd64.erofs rwlayer-amd64.ext4"
+ASSETS="gantry-linux-amd64 nerdbox-kernel-x86_64 gantry-kernel-x86_64 nerdbox-rootfs-x86_64.erofs nerdbox-rootfs-gvisor-x86_64.erofs debian-bookworm-amd64.erofs rwlayer-amd64.ext4"
 DL="mkdir -p /opt/gantry && cd /opt/gantry"
 for a in $ASSETS; do
 	U=$(aws s3 presign "s3://$BUCKET/$a" --expires-in 7200)

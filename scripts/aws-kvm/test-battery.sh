@@ -8,6 +8,7 @@ set +e
 cd /opt/gantry || exit 1
 
 G=./gantry-linux-amd64
+KERNEL=${GANTRY_TEST_KERNEL:-nerdbox-kernel-x86_64}
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -22,7 +23,7 @@ rm -rf /tmp/.gantry/sandboxes/t* /root/.gantry/sandboxes/t* /tmp/.gantry/images 
 # rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
 
 echo "===== crun (t1) ====="
-$G start t1 -kernel nerdbox-kernel-x86_64 -rootfs nerdbox-rootfs-x86_64.erofs \
+$G start t1 -kernel "$KERNEL" -rootfs nerdbox-rootfs-x86_64.erofs \
   -image debian-bookworm-amd64.erofs >/dev/null 2>&1
 sleep 1
 R=$(xe t1 'uname -m; echo M1');            chk "crun: boot+exec"        "x86_64"  "$R"
@@ -40,7 +41,7 @@ wait
 chk "crun: concurrent (s1)" "CC1-ALIVE" "$(cat /tmp/cc1.log)"
 
 echo "===== runsc (t2) ====="
-$G start t2 -runtime runsc -kernel nerdbox-kernel-x86_64 \
+$G start t2 -runtime runsc -kernel "$KERNEL" \
   -image debian-bookworm-amd64.erofs >/dev/null 2>&1
 sleep 1
 R=$(xe t2 'uname -r; cat /proc/1/comm');    chk "runsc: sentry boot"    "4.19.0-gvisor" "$R"
@@ -59,7 +60,7 @@ chk "runsc: concurrent (s1)" "S1-ALIVE" "$(cat /tmp/s1.log)"
 
 echo "===== shares (runsc, t3) ====="
 rm -rf /tmp/sharetest && mkdir -p /tmp/sharetest && echo hostfile > /tmp/sharetest/existing.txt
-$G start t3 -runtime runsc -kernel nerdbox-kernel-x86_64 \
+$G start t3 -runtime runsc -kernel "$KERNEL" \
   -image debian-bookworm-amd64.erofs \
   -share code=/tmp/sharetest >/dev/null 2>&1
 sleep 1
