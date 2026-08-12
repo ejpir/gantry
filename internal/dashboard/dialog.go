@@ -993,6 +993,13 @@ func (m *sandboxTUIModel) updateConfirmationDialogMouse(mouse tea.Mouse, bounds 
 }
 
 func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
+	// Resolve the footer from the rendered dialog before consulting the
+	// approximate field-row ranges. In compact terminals the Create button can
+	// share a row covered by the memory slider's generous mouse target.
+	if m.dialogButtonHit(mouse, bounds, "Create") {
+		m.createFocus = 6
+		return m.submitCreate()
+	}
 	relY := mouse.Y - bounds.y
 	rows := m.formControlRows(createDialogRows, 0)
 	switch {
@@ -1012,9 +1019,6 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 	case rows[5].contains(relY):
 		m.setSliderFromMouse(&m.createMemory, bounds, mouse.X, "MiB")
 		return m, m.focusCreate(5)
-	case m.dialogButtonHit(mouse, bounds, "Create"):
-		m.createFocus = 6
-		return m.submitCreate()
 	}
 	return m, nil
 }

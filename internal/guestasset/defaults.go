@@ -6,11 +6,20 @@ package guestasset
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/gutil"
 )
+
+var (
+	userCacheDir  = os.UserCacheDir
+	userHomeDir   = os.UserHomeDir
+	systemTempDir = os.TempDir
+)
+
+var releaseVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$`)
 
 // Path returns the conventional location of a generated guest artifact.
 // GANTRY_ARTIFACTS selects an explicit artifact directory. In a source
@@ -27,18 +36,43 @@ func Path(name string) string {
 	return name
 }
 
-// DefaultKernel selects Gantry's hardened kernel when it is staged, then the
-// stock nerdbox kernel. When neither exists, it returns the hardened kernel's
-// destination so EnsureKernel can stage it on demand.
+// releaseAssetPath returns a cache destination isolated by the release tag.
+// Replacing a release binary must never reuse a same-named kernel from an
+// older release. os.UserCacheDir maps to LocalAppData on Windows, so staging
+// release assets neither depends on the current directory nor needs elevation.
+//
+// GANTRY_ARTIFACTS remains an explicit staging override for development,
+// packaging, and air-gapped installations. Development binaries retain the
+// source-tree/cwd lookup performed by Path because "dev" does not identify an
+// immutable release.
+func releaseAssetPath(name string) string {
+	if dir := os.Getenv("GANTRY_ARTIFACTS"); dir != "" {
+		return filepath.Join(dir, name)
+	}
+	if !releaseVersionRE.MatchString(Version) {
+		return Path(name)
+	}
+	if cache, err := userCacheDir(); err == nil && cache != "" {
+		return filepath.Join(cache, "gantry", "assets", Version, name)
+	}
+	// UserCacheDir should be available on every supported host. Keep a
+	// user-writable fallback for unusual stripped-down environments instead of
+	// falling back to the process cwd (which may be Program Files on Windows).
+	if home, err := userHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".gantry", "assets", Version, name)
+	}
+	// The OS temp directory is the final user-writable fallback. Never return
+	// to the process cwd for a tagged binary: it may live in Program Files or
+	// another administrator-owned directory on Windows.
+	return filepath.Join(systemTempDir(), "gantry", "assets", Version, name)
+}
+
+// DefaultKernel always selects Gantry's owned kernel. A stock nerdbox kernel
+// remains available only through an explicit -kernel path (and KernelChoices
+// for interactive selection); it is never a silent unattended fallback.
 func DefaultKernel() string {
-	gantry, nerdbox := kernelNames(runtime.GOARCH)
-	if path := Path(gantry); gutil.FileExists(path) {
-		return path
-	}
-	if path := Path(nerdbox); gutil.FileExists(path) {
-		return path
-	}
-	return Path(gantry)
+	gantry, _ := kernelNames(runtime.GOARCH)
+	return releaseAssetPath(gantry)
 }
 
 // KernelChoices returns staged kernels for the host architecture in artifact
@@ -85,14 +119,22 @@ func kernelNames(goarch string) (gantry, nerdbox string) {
 // DefaultRootfs returns the release rootfs for the host architecture.
 func DefaultRootfs() string {
 	if runtime.GOARCH == "amd64" {
-		return Path("nerdbox-rootfs-x86_64.erofs")
+		return releaseAssetPath("nerdbox-rootfs-x86_64.erofs")
 	}
-	return Path("nerdbox-rootfs-arm64.erofs")
+	return releaseAssetPath("nerdbox-rootfs-arm64.erofs")
 }
 
-// DefaultImage selects the full Debian image when staged, otherwise the small
-// debug image. Both are generated artifacts rather than source files.
+// DefaultImage returns the release's small Alpine OCI image for tagged
+// binaries. Development builds retain the source-tree convention: prefer a
+// staged Debian image and then the locally generated shell image.
 func DefaultImage() string {
+	if releaseVersionRE.MatchString(Version) {
+		name := "gantry-default-image-arm64.erofs"
+		if runtime.GOARCH == "amd64" {
+			name = "gantry-default-image-x86_64.erofs"
+		}
+		return releaseAssetPath(name)
+	}
 	if path := Path("debian-bookworm.erofs"); gutil.FileExists(path) {
 		return path
 	}

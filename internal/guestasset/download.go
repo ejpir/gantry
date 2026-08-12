@@ -36,11 +36,17 @@ func EnsureRootfs(path string, progress func(string, ...any)) (string, error) {
 	return ensure(path, rootfsAsset, progress)
 }
 
+// EnsureImage is EnsureKernel for Gantry's default release OCI image.
+func EnsureImage(path string, progress func(string, ...any)) (string, error) {
+	return ensure(path, imageAsset, progress)
+}
+
 type assetKind string
 
 const (
 	kernelAsset assetKind = "kernel"
 	rootfsAsset assetKind = "rootfs"
+	imageAsset  assetKind = "image"
 )
 
 func ensure(path string, kind assetKind, progress func(string, ...any)) (string, error) {
@@ -67,6 +73,9 @@ func downloadable(name string, kind assetKind) bool {
 			name == "nerdbox-rootfs-x86_64.erofs" ||
 			name == "nerdbox-rootfs-gvisor-arm64.erofs" ||
 			name == "nerdbox-rootfs-gvisor-x86_64.erofs"
+	case imageAsset:
+		return name == "gantry-default-image-arm64.erofs" ||
+			name == "gantry-default-image-x86_64.erofs"
 	default:
 		return false
 	}
@@ -76,7 +85,7 @@ func releaseBase() string {
 	if base := os.Getenv("GANTRY_RELEASE_BASE"); base != "" {
 		return strings.TrimRight(base, "/")
 	}
-	if strings.HasPrefix(Version, "v") {
+	if releaseVersionRE.MatchString(Version) {
 		return "https://github.com/ejpir/gantry/releases/download/" + Version
 	}
 	return "https://github.com/ejpir/gantry/releases/latest/download"
@@ -105,12 +114,26 @@ func download(dest string, progress func(string, ...any)) error {
 	if resp.ContentLength > maxAssetSize {
 		return fmt.Errorf("download %s: asset exceeds %d bytes", url, maxAssetSize)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return err
+	assetDir := filepath.Dir(dest)
+	if err := os.MkdirAll(assetDir, 0o700); err != nil {
+		return fmt.Errorf("create user asset directory %s: %w", assetDir, err)
 	}
 
 	if err := atomicfile.WriteDurable(dest, 0o644, func(writer io.Writer) error {
-		return copyVerified(writer, resp.Body, wantSum, maxAssetSize)
+		body := io.Reader(resp.Body)
+		var tracked *assetProgressReader
+		if progress != nil {
+			tracked = &assetProgressReader{
+				reader: resp.Body, name: filepath.Base(dest), total: resp.ContentLength,
+				progress: progress,
+			}
+			body = tracked
+		}
+		err := copyVerified(writer, body, wantSum, maxAssetSize)
+		if err == nil && tracked != nil {
+			tracked.finish()
+		}
+		return err
 	}); err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
@@ -118,6 +141,63 @@ func download(dest string, progress func(string, ...any)) error {
 		progress("staged %s", dest)
 	}
 	return nil
+}
+
+type assetProgressReader struct {
+	reader     io.Reader
+	name       string
+	total      int64
+	read       int64
+	lastReport time.Time
+	progress   func(string, ...any)
+	complete   bool
+}
+
+func (r *assetProgressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	now := time.Now()
+	complete := r.total > 0 && r.read >= r.total
+	if n > 0 && (r.lastReport.IsZero() || complete || now.Sub(r.lastReport) >= 100*time.Millisecond) {
+		r.lastReport = now
+		r.progress("%s", formatAssetProgress(r.name, r.read, r.total))
+		r.complete = complete
+	}
+	return n, err
+}
+
+func (r *assetProgressReader) finish() {
+	if r.complete {
+		return
+	}
+	total := r.total
+	if total <= 0 {
+		total = r.read
+	}
+	r.progress("%s", formatAssetProgress(r.name, r.read, total))
+	r.complete = true
+}
+
+func formatAssetProgress(name string, received, total int64) string {
+	if total <= 0 {
+		return fmt.Sprintf("downloading %s [····················] %s", name, formatByteCount(received))
+	}
+	percent := int(received * 100 / total)
+	if percent > 100 {
+		percent = 100
+	}
+	filled := percent * 20 / 100
+	bar := strings.Repeat("=", filled) + strings.Repeat("·", 20-filled)
+	return fmt.Sprintf("downloading %s [%s] %3d%% (%s/%s)",
+		name, bar, percent, formatByteCount(received), formatByteCount(total))
+}
+
+func formatByteCount(bytes int64) string {
+	const mebibyte = int64(1 << 20)
+	if bytes < mebibyte {
+		return fmt.Sprintf("%.1f KiB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.1f MiB", float64(bytes)/float64(mebibyte))
 }
 
 func copyVerified(dst io.Writer, src io.Reader, wantSum string, limit int64) error {

@@ -30,9 +30,16 @@ Or install from source with Go 1.26+:
 go install github.com/ejpir/gantry/cmd/gantry@latest
 ```
 
-Guest assets: nothing to do — the hardened kernel (`gantry-kernel-<arch>`)
-and guest rootfs (`nerdbox-rootfs-<arch>.erofs`) download automatically from
-the latest release on first start. Manual fallback: copy the rootfs from a
+Guest assets: nothing to do — the hardened kernel (`gantry-kernel-<arch>`),
+guest rootfs (`nerdbox-rootfs-<arch>.erofs`), and a small default Alpine OCI
+image download automatically from the matching release on first start. Leave
+the dashboard's OCI image field blank to use that default. Tagged binaries
+cache them by release under the OS user cache
+(`%LocalAppData%\gantry\assets` on Windows), so an upgrade cannot silently
+reuse an older kernel and never needs Administrator access to the executable's
+directory. `GANTRY_ARTIFACTS` remains an explicit staging override. A stock
+nerdbox kernel is used only when selected with `-kernel`; automatic boots
+always use Gantry's owned kernel. Manual fallback: copy the rootfs from a
 [nerdbox release](https://github.com/containerd/nerdbox/releases) into
 `artifacts/`, or build from source below.
 

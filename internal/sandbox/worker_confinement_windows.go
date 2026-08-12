@@ -114,9 +114,7 @@ func startWindowsWorkerProcess(exe string, argv, env []string, files []*os.File,
 	start := func(token windows.Token) (*os.Process, error) {
 		return os.StartProcess(exe, argv, &os.ProcAttr{
 			Env: env, Files: files,
-			Sys: &syscall.SysProcAttr{
-				Token: syscall.Token(token), AdditionalInheritedHandles: handles,
-			},
+			Sys: windowsWorkerSysProcAttr(token, handles),
 		})
 	}
 	if confinement == "" || confinement == "off" {

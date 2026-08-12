@@ -170,10 +170,16 @@ func (r *runResolver) resolveImage() error {
 	if r.cfg.Image == "" {
 		r.cfg.Image = guestasset.DefaultImage()
 		if !gutil.FileExists(r.cfg.Image) {
-			// The unstaged default must not fall into registry
-			// resolution: ParseRef would normalize a bare name like
-			// shell-rootfs.erofs into a docker.io library/ pull.
-			return fmt.Errorf("no default image found: %s does not exist\npass -image <ref-or-file> explicitly (see 'gantry image ls' and 'gantry image pull'), or stage a default rootfs at %s", r.cfg.Image, r.cfg.Image)
+			imagePath, err := guestasset.EnsureImage(r.cfg.Image, r.report)
+			if err != nil {
+				// An unstaged development default must not fall into registry
+				// resolution: ParseRef would normalize a bare name like
+				// shell-rootfs.erofs into a docker.io library/ pull. Tagged
+				// releases reach this path only when their verified default
+				// image download failed.
+				return fmt.Errorf("no default image available: %w\npass -image <ref-or-file> explicitly (see 'gantry image ls' and 'gantry image pull')", err)
+			}
+			r.cfg.Image = imagePath
 		}
 	}
 	if *r.flags.LayerSet != "" {

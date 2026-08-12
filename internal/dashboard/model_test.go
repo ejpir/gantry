@@ -483,6 +483,32 @@ func TestSandboxTUIKeepsCreateSelectionAcrossStaleRefresh(t *testing.T) {
 	}
 }
 
+func TestSandboxTUIStreamsDownloadProgress(t *testing.T) {
+	events := make(chan tuiProcessStreamEvent, 1)
+	output := &tuiProcessOutput{events: events}
+	line := "gantry start: downloading gantry-kernel-x86_64 [==========··········]  50% (8.0 MiB/16.0 MiB)"
+	if _, err := output.Write([]byte(line + "\nordinary diagnostic\n")); err != nil {
+		t.Fatal(err)
+	}
+	event := <-events
+	if event.progress != strings.TrimPrefix(line, "gantry start: ") {
+		t.Fatalf("streamed progress = %q", event.progress)
+	}
+	if got := output.String(); !strings.Contains(got, "ordinary diagnostic") {
+		t.Fatalf("captured output lost diagnostics: %q", got)
+	}
+
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.busyAction = "create"
+	m.busyName = "dev"
+	m.busyProgress = event.progress
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "50%") || !strings.Contains(plain, "gantry-kernel-x86_64") {
+		t.Fatalf("dashboard does not render download progress:\n%s", plain)
+	}
+}
+
 func TestSandboxTUIGridNavigationKeepsSelectionVisible(t *testing.T) {
 	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
 	m.loading = false
@@ -679,6 +705,33 @@ func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
 	m = *model.(*sandboxTUIModel)
 	if m.dialog != tuiNoDialog || m.busyAction != "edit" || m.busyName != "dev" {
 		t.Fatalf("Save click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+	}
+}
+
+func TestSandboxTUICreateButtonHitbox(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.openCreateDialog()
+	m.createName.SetValue("click-create")
+
+	plain := ansi.Strip(m.View().Content)
+	buttonX, buttonY := -1, -1
+	lines := strings.Split(plain, "\n")
+	for y := len(lines) - 1; y >= 0; y-- {
+		if byteOffset := strings.LastIndex(lines[y], "Create"); byteOffset >= 0 {
+			buttonX = lipgloss.Width(lines[y][:byteOffset]) + 1
+			buttonY = y
+			break
+		}
+	}
+	if buttonX < 0 || buttonY < 0 {
+		t.Fatalf("Create button not rendered:\n%s", plain)
+	}
+	model, _ := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiNoDialog || m.busyAction != "create" || m.busyName != "click-create" {
+		t.Fatalf("Create click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
 	}
 }
 

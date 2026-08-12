@@ -99,7 +99,7 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 		Rootfs: fs.String("rootfs", guestasset.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)"),
 		Image: fs.String("image", "", `container image: a reference to pull ("debian:bookworm-slim",
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
-or a plain .erofs file (default: artifacts/debian-bookworm.erofs if present)`),
+or a plain .erofs file (default: release Alpine image; staged Debian/shell image in development)`),
 		RWLayer:          fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
 		LayerSet:         fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
 		RW:               fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),

@@ -39,6 +39,7 @@ func TestEnsureRejectsUnknownReleaseAssets(t *testing.T) {
 		{"gantry-kernel-riscv64", EnsureKernel},
 		{"my-rootfs.erofs", EnsureRootfs},
 		{"nerdbox-rootfs-riscv64.erofs", EnsureRootfs},
+		{"gantry-default-image-riscv64.erofs", EnsureImage},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -56,6 +57,9 @@ func TestEnsureRejectsAssetOfWrongKind(t *testing.T) {
 	}
 	if _, err := EnsureRootfs(filepath.Join(dir, "gantry-kernel-arm64"), nil); err == nil {
 		t.Fatal("kernel accepted as a downloadable rootfs")
+	}
+	if _, err := EnsureImage(filepath.Join(dir, "nerdbox-rootfs-arm64.erofs"), nil); err == nil {
+		t.Fatal("rootfs accepted as a downloadable default image")
 	}
 }
 
@@ -89,8 +93,8 @@ func TestEnsureKernelDownloadReportsProgress(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "gantry-kernel-arm64")
 	var messages []string
-	got, err := EnsureKernel(dest, func(format string, _ ...any) {
-		messages = append(messages, format)
+	got, err := EnsureKernel(dest, func(format string, values ...any) {
+		messages = append(messages, fmt.Sprintf(format, values...))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -101,11 +105,45 @@ func TestEnsureKernelDownloadReportsProgress(t *testing.T) {
 	if body, err := os.ReadFile(dest); err != nil || string(body) != payload {
 		t.Fatalf("downloaded %d bytes, want %d (err=%v)", len(body), len(payload), err)
 	}
-	if len(messages) != 2 {
-		t.Errorf("progress messages = %d, want 2", len(messages))
+	if len(messages) < 3 {
+		t.Errorf("progress messages = %d, want at least start, byte progress, and staged", len(messages))
+	}
+	if joined := strings.Join(messages, "\n"); !strings.Contains(joined, "[====================] 100%") {
+		t.Errorf("progress does not include completed bar:\n%s", joined)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
 		t.Fatalf("artifacts entries=%d err=%v, want 1", len(entries), err)
+	}
+}
+
+func TestTaggedReleaseDownloadsIntoVersionedUserCache(t *testing.T) {
+	oldVersion, oldCache, oldHome, oldTemp := Version, userCacheDir, userHomeDir, systemTempDir
+	t.Cleanup(func() {
+		Version, userCacheDir, userHomeDir, systemTempDir = oldVersion, oldCache, oldHome, oldTemp
+	})
+	payload := strings.Repeat("K", 1<<20)
+	server := newAssetServer(t, "gantry-kernel-arm64", payload)
+	t.Setenv("GANTRY_RELEASE_BASE", server.URL)
+	t.Setenv("GANTRY_ARTIFACTS", "")
+	Version = "v9.8.7"
+	cache := t.TempDir()
+	userCacheDir = func() (string, error) { return cache, nil }
+	userHomeDir = func() (string, error) { return "", os.ErrNotExist }
+
+	dest := releaseAssetPath("gantry-kernel-arm64")
+	want := filepath.Join(cache, "gantry", "assets", Version, "gantry-kernel-arm64")
+	if dest != want {
+		t.Fatalf("release asset destination = %q, want %q", dest, want)
+	}
+	got, err := EnsureKernel(dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("EnsureKernel = %q, want %q", got, want)
+	}
+	if body, err := os.ReadFile(want); err != nil || string(body) != payload {
+		t.Fatalf("cached release asset has %d bytes, want %d (err=%v)", len(body), len(payload), err)
 	}
 }
 
@@ -197,6 +235,20 @@ func TestEnsureRootfsDownloadsGVisorVariant(t *testing.T) {
 
 	dest := filepath.Join(t.TempDir(), "nerdbox-rootfs-gvisor-arm64.erofs")
 	if _, err := EnsureRootfs(dest, nil); err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(dest); err != nil || string(body) != payload {
+		t.Fatalf("downloaded %d bytes, want %d (err=%v)", len(body), len(payload), err)
+	}
+}
+
+func TestEnsureDefaultImageDownload(t *testing.T) {
+	payload := strings.Repeat("I", 1<<20)
+	server := newAssetServer(t, "gantry-default-image-arm64.erofs", payload)
+	t.Setenv("GANTRY_RELEASE_BASE", server.URL)
+
+	dest := filepath.Join(t.TempDir(), "gantry-default-image-arm64.erofs")
+	if _, err := EnsureImage(dest, nil); err != nil {
 		t.Fatal(err)
 	}
 	if body, err := os.ReadFile(dest); err != nil || string(body) != payload {

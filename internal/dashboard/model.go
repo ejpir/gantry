@@ -1,10 +1,12 @@
 package dashboard
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
@@ -109,6 +111,16 @@ type tuiProcessDoneMsg struct {
 	err    error
 }
 
+type tuiProcessStreamEvent struct {
+	progress string
+	done     *tuiProcessDoneMsg
+}
+
+type tuiProcessStreamMsg struct {
+	event  tuiProcessStreamEvent
+	stream <-chan tuiProcessStreamEvent
+}
+
 type tuiToastExpiredMsg struct{ gen uint64 }
 
 type sandboxTUIModel struct {
@@ -143,6 +155,7 @@ type sandboxTUIModel struct {
 	lastUpdate     time.Time
 	busyAction     string
 	busyName       string
+	busyProgress   string
 	selectNext     string
 
 	spinner   spinner.Model
@@ -306,6 +319,12 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case tuiProcessDoneMsg:
 		return m.handleProcessDone(msg)
+	case tuiProcessStreamMsg:
+		if msg.event.done != nil {
+			return m.handleProcessDone(*msg.event.done)
+		}
+		m.busyProgress = safeUILine(msg.event.progress)
+		return m, waitTUIProcessStream(msg.stream)
 	case tuiToastExpiredMsg:
 		if m.toast != nil && m.toast.gen == msg.gen {
 			m.toast = nil
@@ -378,6 +397,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, tea.Cmd) {
 	m.busyAction = ""
 	m.busyName = ""
+	m.busyProgress = ""
 	m.refreshing = true
 
 	kind, title, body := tuiToastSuccess, actionPastTense(msg.action), msg.name
@@ -620,6 +640,7 @@ func (m *sandboxTUIModel) beginAction(action, name string, argv []string, intera
 	m.dialog = tuiNoDialog
 	m.busyAction = action
 	m.busyName = name
+	m.busyProgress = ""
 	if action == "create" || action == "start" {
 		m.selectNext = name
 	}
@@ -645,15 +666,91 @@ func runTUIProcessCmd(service dashboardapi.Service, action, name string, argv []
 			return msg
 		})
 	}
+	events := make(chan tuiProcessStreamEvent, 16)
 	return func() tea.Msg {
-		output, err := cmd.CombinedOutput()
-		return tuiProcessDoneMsg{
-			action: action,
-			name:   name,
-			output: strings.TrimSpace(string(output)),
-			err:    err,
+		output := &tuiProcessOutput{events: events}
+		cmd.Stdout = output
+		cmd.Stderr = output
+		go func() {
+			err := cmd.Run()
+			events <- tuiProcessStreamEvent{done: &tuiProcessDoneMsg{
+				action: action,
+				name:   name,
+				output: strings.TrimSpace(output.String()),
+				err:    err,
+			}}
+			close(events)
+		}()
+		return receiveTUIProcessStream(events)
+	}
+}
+
+func waitTUIProcessStream(stream <-chan tuiProcessStreamEvent) tea.Cmd {
+	return func() tea.Msg { return receiveTUIProcessStream(stream) }
+}
+
+func receiveTUIProcessStream(stream <-chan tuiProcessStreamEvent) tea.Msg {
+	event, ok := <-stream
+	if !ok {
+		done := tuiProcessDoneMsg{err: fmt.Errorf("process output stream closed unexpectedly")}
+		event.done = &done
+	}
+	return tuiProcessStreamMsg{event: event, stream: stream}
+}
+
+// tuiProcessOutput retains the command's complete diagnostic output while
+// forwarding only bounded download-progress lines to Bubble Tea. stdout and
+// stderr may be copied concurrently by os/exec, hence the shared lock.
+type tuiProcessOutput struct {
+	mu      sync.Mutex
+	output  bytes.Buffer
+	pending string
+	events  chan<- tuiProcessStreamEvent
+}
+
+func (w *tuiProcessOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	_, _ = w.output.Write(p)
+	w.pending += string(p)
+	var progress []string
+	for {
+		newline := strings.IndexByte(w.pending, '\n')
+		if newline < 0 {
+			break
+		}
+		line := strings.TrimSuffix(w.pending[:newline], "\r")
+		w.pending = w.pending[newline+1:]
+		if line, ok := downloadProgressLine(line); ok {
+			progress = append(progress, line)
 		}
 	}
+	w.mu.Unlock()
+
+	for _, line := range progress {
+		select {
+		case w.events <- tuiProcessStreamEvent{progress: line}:
+		default: // The next update supersedes a stale intermediate percentage.
+		}
+	}
+	return len(p), nil
+}
+
+func (w *tuiProcessOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.output.String()
+}
+
+func downloadProgressLine(line string) (string, bool) {
+	start := strings.Index(line, "downloading ")
+	if start < 0 {
+		return "", false
+	}
+	line = line[start:]
+	if !strings.Contains(line, "[") || !strings.Contains(line, "]") {
+		return "", false
+	}
+	return line, true
 }
 
 func saveSandboxResourcesCmd(service dashboardapi.Service, name string, memMB uint, vcpus int, running bool) tea.Cmd {

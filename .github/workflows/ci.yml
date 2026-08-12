@@ -394,6 +394,10 @@ jobs:
             "${{ runner.temp }}/release/nerdbox-rootfs-gvisor-arm64.erofs"
           cp "${{ runner.temp }}/guest/guest-assets-amd64/nerdbox-rootfs-gvisor.erofs" \
             "${{ runner.temp }}/release/nerdbox-rootfs-gvisor-x86_64.erofs"
+          cp "${{ runner.temp }}/guest/guest-assets-arm64/alpine.erofs" \
+            "${{ runner.temp }}/release/gantry-default-image-arm64.erofs"
+          cp "${{ runner.temp }}/guest/guest-assets-amd64/alpine.erofs" \
+            "${{ runner.temp }}/release/gantry-default-image-x86_64.erofs"
       - name: checksum sidecars
         run: |
           cd "${{ runner.temp }}/release"

@@ -117,6 +117,19 @@ func clearInheritedHandles(handles []syscall.Handle) {
 	}
 }
 
+// windowsWorkerSysProcAttr keeps re-executed worker processes in the
+// supervisor's background process tree without allocating a console window.
+// All worker input and diagnostics use the explicit inherited handles below,
+// so the workers do not need a console even when gantry itself is a console
+// executable launched from the TUI.
+func windowsWorkerSysProcAttr(token windows.Token, handles []syscall.Handle) *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		Token:                      syscall.Token(token),
+		AdditionalInheritedHandles: handles,
+		CreationFlags:              windows.CREATE_NO_WINDOW,
+	}
+}
+
 func workerHandleEnv(base []string, files []*os.File, firstSlot int) []string {
 	env := append([]string(nil), base...)
 	for index, file := range files {

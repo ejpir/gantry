@@ -614,11 +614,15 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 	}
 
 	var left string
+	budget := maxInt(1, innerWidth-lipgloss.Width(right)-1)
 	if m.busyAction != "" {
-		left = m.spinner.View() + " " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToLower(busyLabel(m.busyAction))+" "+m.busyName+"…")
+		if m.busyProgress != "" {
+			left = truncateANSI(lipgloss.NewStyle().Foreground(theme.text).Render(m.busyProgress), budget)
+		} else {
+			left = m.spinner.View() + " " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToLower(busyLabel(m.busyAction))+" "+m.busyName+"…")
+		}
 	} else {
 		separator := lipgloss.NewStyle().Foreground(theme.border).Render("  •  ")
-		budget := maxInt(1, innerWidth-lipgloss.Width(right)-1)
 		var parts []string
 		for _, hint := range m.contextHints() {
 			key := lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(hint[0])

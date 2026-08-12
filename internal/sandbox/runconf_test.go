@@ -13,11 +13,14 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/ejpir/gantry/internal/guestasset"
 )
 
 // resolveAssets are the files Resolve requires; covers the default names
 // of both supported host architectures (CI runs on x86_64).
 var resolveAssets = []string{
+	"gantry-kernel-arm64", "gantry-kernel-x86_64",
 	"nerdbox-kernel-arm64", "nerdbox-rootfs-arm64.erofs",
 	"nerdbox-kernel-x86_64", "nerdbox-rootfs-x86_64.erofs",
 	"debian-bookworm.erofs",
@@ -249,20 +252,20 @@ func resolveSandboxNoRootfs(t *testing.T, srv string, args ...string) (RunConfig
 	return cfg, err
 }
 
-// guestServer serves both kernel and rootfs release assets.
+// guestServer serves kernel, VM rootfs, and default OCI release assets.
 func guestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := path.Base(r.URL.Path)
 		if strings.HasSuffix(base, ".sha256") {
 			asset := strings.TrimSuffix(base, ".sha256")
-			if strings.HasPrefix(asset, "gantry-kernel-") || strings.HasPrefix(asset, "nerdbox-rootfs-") {
+			if strings.HasPrefix(asset, "gantry-kernel-") || strings.HasPrefix(asset, "nerdbox-rootfs-") || strings.HasPrefix(asset, "gantry-default-image-") {
 				sum := sha256.Sum256([]byte("downloaded-" + asset))
 				_, _ = fmt.Fprintf(w, "%x  %s\n", sum, asset)
 				return
 			}
 		}
-		if strings.HasPrefix(base, "gantry-kernel-") || strings.HasPrefix(base, "nerdbox-rootfs-") {
+		if strings.HasPrefix(base, "gantry-kernel-") || strings.HasPrefix(base, "nerdbox-rootfs-") || strings.HasPrefix(base, "gantry-default-image-") {
 			_, _ = w.Write([]byte("downloaded-" + base))
 			return
 		}
@@ -270,6 +273,42 @@ func guestServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func TestResolveBlankImageDownloadsReleaseDefault(t *testing.T) {
+	oldVersion := guestasset.Version
+	t.Cleanup(func() { guestasset.Version = oldVersion })
+	guestasset.Version = "v9.8.7"
+	t.Setenv("GANTRY_RELEASE_BASE", guestServer(t).URL)
+	assets := t.TempDir()
+	t.Setenv("GANTRY_ARTIFACTS", assets)
+
+	arch := "arm64"
+	if runtime.GOARCH == "amd64" {
+		arch = "x86_64"
+	}
+	for _, name := range []string{"gantry-kernel-" + arch, "nerdbox-rootfs-" + arch + ".erofs"} {
+		if err := os.WriteFile(filepath.Join(assets, name), []byte("staged"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	rf := RegisterRunFlags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := rf.Resolve(fs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "gantry-default-image-" + arch + ".erofs"
+	if filepath.Base(cfg.Image) != want {
+		t.Fatalf("blank -image resolved to %q, want %q", cfg.Image, want)
+	}
+	if body, err := os.ReadFile(cfg.Image); err != nil || string(body) != "downloaded-"+want {
+		t.Fatalf("default image content = %q, want downloaded payload (err=%v)", body, err)
+	}
 }
 
 func TestResolveDownloadsRootfs(t *testing.T) {
@@ -352,6 +391,28 @@ func TestResolveExplicitKernelMissing(t *testing.T) {
 	_, err := resolveSandboxNoKernel(t, kernelServer(t).URL, "-kernel", "/no/such/kernel")
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("explicit missing kernel: want not-found error, got %v", err)
+	}
+}
+
+func TestResolvePreservesExplicitCustomKernel(t *testing.T) {
+	dir := t.TempDir()
+	custom := filepath.Join(dir, "custom-kernel")
+	if err := os.WriteFile(custom, []byte("caller-owned kernel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := resolveSandbox(t, "-kernel", custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Kernel != want {
+		t.Fatalf("explicit kernel = %q, want unchanged path %q", cfg.Kernel, want)
+	}
+	if body, err := os.ReadFile(cfg.Kernel); err != nil || string(body) != "caller-owned kernel" {
+		t.Fatalf("explicit kernel changed: body=%q err=%v", body, err)
 	}
 }
 

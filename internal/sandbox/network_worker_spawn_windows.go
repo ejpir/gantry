@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"syscall"
 )
 
 func spawnNetWorkerProcess(stderrPath, confinement string) (control, data net.Conn, proc *os.Process, diagnostics *boundedLogPipe, err error) {
@@ -51,9 +50,7 @@ func spawnNetWorkerProcess(stderrPath, confinement string) (control, data net.Co
 	proc, err = os.StartProcess(exe, argv, &os.ProcAttr{
 		Env:   env,
 		Files: []*os.File{diagnostic, diagnostic, diagnostic},
-		Sys: &syscall.SysProcAttr{
-			AdditionalInheritedHandles: childHandles,
-		},
+		Sys:   windowsWorkerSysProcAttr(0, childHandles),
 	})
 	workerLog.ReleaseWriter()
 	closeFiles(childFiles)
