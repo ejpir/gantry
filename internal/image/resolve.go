@@ -31,6 +31,44 @@ type Resolved struct {
 	Cached bool // false when built during this call
 }
 
+// localCachedRef resolves a reference entirely from the verified local cache.
+// It performs no credential lookup and no network request. Tagged references
+// use the last digest explicitly recorded for that ref and architecture;
+// digest-pinned references may also directly name a cached manifest.
+func localCachedRef(ref, arch string, st *Store) *Resolved {
+	parsed, err := ParseRef(ref)
+	if err != nil {
+		return nil
+	}
+	hit := func(digest string) *Resolved {
+		m, err := st.ReadMeta(digest)
+		if err != nil || m.Arch != arch || !gutil.FileExists(st.ErofsPath(digest)) {
+			return nil
+		}
+		return &Resolved{Digest: digest, Path: st.ErofsPath(digest), Config: m.Config, Ref: ref, Cached: true}
+	}
+	if parsed.Digest != "" {
+		// A pinned digest may name either the platform manifest or its index.
+		if digest, ok := st.LookupRef(ref, arch); ok {
+			if m, err := st.ReadMeta(digest); err == nil {
+				refDigest := m.RefDigest
+				if refDigest == "" {
+					refDigest = m.Digest
+				}
+				if digest == parsed.Digest || refDigest == parsed.Digest {
+					return hit(digest)
+				}
+			}
+		}
+		return hit(parsed.Digest)
+	}
+	digest, ok := st.LookupRef(ref, arch)
+	if !ok {
+		return nil
+	}
+	return hit(digest)
+}
+
 // cachedRef resolves a reference from the cache without a pull when
 // possible: a digest-pinned ref is a pure cache lookup; a tagged ref
 // costs one HEAD (the doc's "re-pull of an unchanged tag is a no-op").
@@ -138,12 +176,32 @@ func LooksLikeRef(v string) bool {
 // rootfs. arch is the GUEST kernel arch (from vmm.KernelArch), not the
 // host's. logf may be nil.
 func Resolve(ref, arch string, st *Store, logf func(string, ...any)) (*Resolved, error) {
-	return ResolveAuth(ref, arch, st, nil, logf)
+	return resolveAuth(ref, arch, st, nil, logf, false, false)
+}
+
+// ResolvePreferCached is Resolve for latency-sensitive execution. Existing
+// tagged references use their verified local cache entry without invoking a
+// credential helper or registry. Cache misses still pull normally. Call
+// Resolve (as `gantry image pull` does) when remote tag freshness is required.
+func ResolvePreferCached(ref, arch string, st *Store, logf func(string, ...any)) (*Resolved, error) {
+	return resolveAuth(ref, arch, st, nil, logf, true, false)
+}
+
+// ResolveCachedOnly never consults registry credentials or the network.
+// Existing local sources may still be imported, while an uncached reference
+// fails with an explicit `gantry image pull` instruction. Long-lived manager
+// processes use this policy so they never become credential holders.
+func ResolveCachedOnly(ref, arch string, st *Store, logf func(string, ...any)) (*Resolved, error) {
+	return resolveAuth(ref, arch, st, nil, logf, true, true)
 }
 
 // ResolveAuth is Resolve with an explicit credential resolver (nil
 // resolves from the environment, which is what the CLI wants).
 func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(string, ...any)) (*Resolved, error) {
+	return resolveAuth(ref, arch, st, res, logf, false, false)
+}
+
+func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(string, ...any), preferCached, cachedOnly bool) (*Resolved, error) {
 	if st == nil {
 		st = DefaultStore()
 	}
@@ -173,7 +231,17 @@ func ResolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		// into a pull from a registry literally named ".".
 		return nil, fmt.Errorf("image file not found: %s\n(pass an OCI reference like debian:bookworm-slim, or build the file first — e.g. ./scripts/mkpiimage.sh)", ref)
 	} else {
-		// 4. image reference → registry pull (cached by manifest digest)
+		// 4. image reference → local cache or registry pull. Ordinary VM
+		// starts prefer the verified local cache: on macOS, credential-helper
+		// and freshness HEAD latency otherwise dominates the entire VM boot.
+		if preferCached {
+			if cached := localCachedRef(ref, arch, st); cached != nil {
+				return cached, nil
+			}
+		}
+		if cachedOnly {
+			return nil, fmt.Errorf("image %s is not in the local linux/%s cache; run `gantry image pull %s` before asking the manager to create a sandbox", ref, arch, ref)
+		}
 		if res == nil {
 			res = auth.Resolve()
 		}

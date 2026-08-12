@@ -9,12 +9,27 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ejpir/gantry/internal/atomicfile"
 )
 
 type fakeSandboxDaemon struct {
 	pid    int
 	wait   chan error
 	killed atomic.Bool
+}
+
+func installDurabilityGate(t *testing.T) (entered <-chan struct{}, release chan<- error) {
+	t.Helper()
+	old := makeConfigDurable
+	started := make(chan struct{}, 1)
+	result := make(chan error, 1)
+	makeConfigDurable = func(string) error {
+		started <- struct{}{}
+		return <-result
+	}
+	t.Cleanup(func() { makeConfigDurable = old })
+	return started, result
 }
 
 func (p *fakeSandboxDaemon) PID() int { return p.pid }
@@ -94,6 +109,99 @@ func TestConcurrentLaunchesCannotClobberOrDoubleSpawn(t *testing.T) {
 		t.Fatal("first launch did not observe readiness")
 	}
 	process.wait <- nil
+}
+
+func TestLaunchOverlapsConfigDurabilityWithDaemonStartup(t *testing.T) {
+	if !atomicfile.CanMakeDurableAfterCommit() {
+		t.Skip("platform requires write-through replacement")
+	}
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	entered, release := installDurabilityGate(t)
+	name := "durability-overlap"
+	process := &fakeSandboxDaemon{pid: os.Getpid(), wait: make(chan error, 1)}
+	spawned := make(chan struct{}, 1)
+	spawn := func(*exec.Cmd) (sandboxDaemonProcess, error) {
+		spawned <- struct{}{}
+		return process, nil
+	}
+	result := make(chan int, 1)
+	go func() {
+		result <- launchSandboxModeWithSpawner(name, RunConfig{}, nil, true, false, spawn)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("durability barrier did not start")
+	}
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon startup waited for durability")
+	}
+	lifetime, err := holdSandboxLock(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lifetime.Close() }()
+	if err := os.WriteFile(filepath.Join(sandboxDir(name), "ready"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case status := <-result:
+		t.Fatalf("launch completed before durability release with status %d", status)
+	case <-time.After(150 * time.Millisecond):
+	}
+	release <- nil
+	select {
+	case status := <-result:
+		if status != 0 {
+			t.Fatalf("launch status = %d, want 0", status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("launch did not complete after durability succeeded")
+	}
+	process.wait <- nil
+}
+
+func TestLaunchDurabilityFailureKillsUncommittedDaemon(t *testing.T) {
+	if !atomicfile.CanMakeDurableAfterCommit() {
+		t.Skip("platform requires write-through replacement")
+	}
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	entered, release := installDurabilityGate(t)
+	name := "durability-failure"
+	process := &fakeSandboxDaemon{pid: os.Getpid(), wait: make(chan error, 1)}
+	spawned := make(chan struct{}, 1)
+	spawn := func(*exec.Cmd) (sandboxDaemonProcess, error) {
+		spawned <- struct{}{}
+		return process, nil
+	}
+	result := make(chan int, 1)
+	go func() {
+		result <- launchSandboxModeWithSpawner(name, RunConfig{}, nil, true, false, spawn)
+	}()
+	<-entered
+	<-spawned
+	lifetime, err := holdSandboxLock(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lifetime.Close() }()
+	if err := os.WriteFile(filepath.Join(sandboxDir(name), "ready"), []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release <- errors.New("sync failed")
+	select {
+	case status := <-result:
+		if status == 0 {
+			t.Fatal("launch succeeded despite durability failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("launch did not fail after durability failure")
+	}
+	if !process.killed.Load() {
+		t.Fatal("daemon was not killed after durability failure")
+	}
 }
 
 func TestReadinessWithoutLifetimeLockAbortsLaunch(t *testing.T) {

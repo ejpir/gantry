@@ -2,7 +2,17 @@
 
 package atomicfile
 
-import "golang.org/x/sys/windows"
+import (
+	"os"
+
+	"golang.org/x/sys/windows"
+)
+
+// FlushFileBuffers (used by os.File.Sync) requires a handle opened for
+// writing on Windows. os.Open's read-only handle fails with ACCESS_DENIED.
+func openCommittedForSync(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR, 0)
+}
 
 func replace(from, to string, durable bool) error {
 	fromPath, err := windows.UTF16PtrFromString(from)

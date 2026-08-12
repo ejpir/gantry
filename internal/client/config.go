@@ -87,7 +87,14 @@ func configJSON(entries []ShareEntry, rw bool, args []string, img *image.Config,
 }
 
 func configJSONWithTransport(entries []ShareEntry, transport *shares.Transport, rw bool, args []string, img *image.Config, terminal bool) (string, error) {
+	return configJSONWithTransportCwd(entries, transport, rw, args, img, terminal, "")
+}
+
+func configJSONWithTransportCwd(entries []ShareEntry, transport *shares.Transport, rw bool, args []string, img *image.Config, terminal bool, cwd string) (string, error) {
 	uid, gid := img.IDs()
+	if cwd == "" {
+		cwd = img.WorkdirOr()
+	}
 	mounts := baseContainerMounts
 	if transport != nil {
 		// crun cannot create bind targets in a read-only EROFS root. The hub
@@ -106,7 +113,7 @@ func configJSONWithTransport(entries []ShareEntry, transport *shares.Transport, 
 			User:     specs.User{UID: uid, GID: gid},
 			Args:     args,
 			Env:      img.EnvWith("TERM=xterm"),
-			Cwd:      img.WorkdirOr(),
+			Cwd:      cwd,
 			Capabilities: &specs.LinuxCapabilities{
 				Bounding:  containerCapabilities,
 				Effective: containerCapabilities,

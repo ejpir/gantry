@@ -103,10 +103,6 @@ func absPath(p string) string {
 	return p
 }
 
-func dumpTail(path string) {
-	dumpTailTo(os.Stderr, path)
-}
-
 func dumpTailTo(w io.Writer, path string) {
 	b, err := readFileTail(path, 4096)
 	if err != nil || len(b) == 0 {

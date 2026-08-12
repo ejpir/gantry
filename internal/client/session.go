@@ -50,10 +50,20 @@ type SessionOptions struct {
 	ExitStatus *int
 	// ExecIntoExisting gives sandbox sessions docker-exec semantics.
 	ExecIntoExisting bool
-	// ImgCfg provides the image environment, user, command, and working dir.
+	// ImgCfg provides the image environment, user, command, and default working dir.
 	ImgCfg *image.Config
+	// Cwd overrides the image working directory for this process. It is a guest
+	// path and is used by programmatic exec clients; empty preserves ImgCfg.
+	Cwd string
 	// Secrets enter only the in-memory process spec, never config.json.
 	Secrets []string
+}
+
+func (options SessionOptions) workingDir() string {
+	if options.Cwd != "" {
+		return options.Cwd
+	}
+	return options.ImgCfg.WorkdirOr()
 }
 
 func resolveArgs(args []string, config *image.Config) []string {
@@ -238,7 +248,7 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 		return sessionExec(taskClient, options, options.ID, stdin, stdout)
 	}
 
-	config, err := ConfigJSONWithTransport(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg)
+	config, err := configJSONWithTransportCwd(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, true, options.Cwd)
 	if err != nil {
 		return err
 	}

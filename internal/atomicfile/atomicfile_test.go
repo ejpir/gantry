@@ -57,6 +57,32 @@ func TestWriteFileDurable(t *testing.T) {
 	}
 }
 
+func TestMakeDurablePersistsPublishedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MakeDurable(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMakeDurableFailureReportsCommittedReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("directory sync failed")
+	original := syncParentDir
+	syncParentDir = func(string) error { return wantErr }
+	t.Cleanup(func() { syncParentDir = original })
+
+	err := MakeDurable(path)
+	if !Committed(err) || !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want committed error wrapping %v", err, wantErr)
+	}
+}
+
 func TestDurabilityFailureReportsCommittedReplacement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {

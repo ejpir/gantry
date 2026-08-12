@@ -36,21 +36,39 @@ func collectExplicitRunFlags(fs *flag.FlagSet) (set explicitRunFlags) {
 }
 
 type runResolver struct {
-	flags    *RunFlags
-	explicit explicitRunFlags
-	cfg      RunConfig
-	warnings []string
-	progress func(string, ...any)
+	flags      *RunFlags
+	explicit   explicitRunFlags
+	cfg        RunConfig
+	warnings   []string
+	progress   func(string, ...any)
+	cachedOnly bool
 }
 
 // Resolve turns parsed flags into an absolute, fully-defaulted RunConfig.
 // Warnings are non-fatal degradations surfaced by the caller. Progress may be
 // nil; when present, slow registry and asset operations report synchronously.
 func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (RunConfig, []string, error) {
+	return f.resolve(fs, progress, nil)
+}
+
+// resolve is Resolve with optional low-overhead launcher milestones. Keeping
+// the hook here attributes work before the daemon exists (asset checks, image
+// freshness, and writable-layer setup) without changing normal CLI output.
+func (f *RunFlags) resolve(fs *flag.FlagSet, progress func(string, ...any), milestone func(string)) (RunConfig, []string, error) {
+	return f.resolveWithPolicy(fs, progress, milestone, false)
+}
+
+func (f *RunFlags) resolveWithPolicy(fs *flag.FlagSet, progress func(string, ...any), milestone func(string), cachedOnly bool) (RunConfig, []string, error) {
 	r := runResolver{
-		flags:    f,
-		explicit: collectExplicitRunFlags(fs),
-		progress: progress,
+		flags:      f,
+		explicit:   collectExplicitRunFlags(fs),
+		progress:   progress,
+		cachedOnly: cachedOnly,
+	}
+	mark := func(phase string) {
+		if milestone != nil {
+			milestone(phase)
+		}
 	}
 	if err := r.initialize(); err != nil {
 		return r.cfg, r.warnings, err
@@ -58,15 +76,19 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (Run
 	if err := r.resolveRuntime(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	mark("launcher runtime resolved")
 	if err := r.resolveBootAssets(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	mark("launcher boot assets resolved")
 	if err := r.resolveImage(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	mark("launcher image resolved")
 	if err := r.resolveWritableLayer(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	mark("launcher writable layer resolved")
 	if err := r.resolveNetworking(); err != nil {
 		return r.cfg, r.warnings, err
 	}
@@ -76,6 +98,7 @@ func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (Run
 	if err := r.normalizeAndValidatePaths(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	mark("launcher configuration resolved")
 	return r.cfg, r.warnings, nil
 }
 
@@ -171,7 +194,12 @@ func (r *runResolver) resolveImage() error {
 	if err != nil {
 		return err
 	}
-	resolved, err := image.Resolve(r.cfg.Image, arch, nil, r.report)
+	var resolved *image.Resolved
+	if r.cachedOnly {
+		resolved, err = image.ResolveCachedOnly(r.cfg.Image, arch, nil, r.report)
+	} else {
+		resolved, err = image.ResolvePreferCached(r.cfg.Image, arch, nil, r.report)
+	}
 	if err != nil {
 		return err
 	}
@@ -194,10 +222,18 @@ func kernelArch(path string) (string, error) {
 }
 
 func (r *runResolver) resolveWritableLayer() error {
+	if r.cfg.LayerSet != nil && r.explicit.rw && !*r.flags.RW {
+		return fmt.Errorf("a layerset is a writable overlay pair (remove -rw=false)")
+	}
+
 	r.cfg.RWLayer = *r.flags.RWLayer
 	explicitLayer := r.cfg.RWLayer != ""
 	switch {
 	case r.cfg.RWLayer != "":
+	case r.explicit.rw && !*r.flags.RW:
+		// An explicitly read-only VM cannot attach a writable layer. In
+		// particular, do not inflate the implicit 512 MiB per-sandbox ext4:
+		// on macOS this wasted hundreds of milliseconds on every fresh start.
 	case r.flags.Name != "":
 		path, warnings, err := defaultRWLayer(r.flags.Name, r.cfg.imageIdentity())
 		if err != nil {
@@ -211,9 +247,6 @@ func (r *runResolver) resolveWritableLayer() error {
 	}
 
 	if r.cfg.LayerSet != nil {
-		if r.explicit.rw && !*r.flags.RW {
-			return fmt.Errorf("a layerset is a writable overlay pair (remove -rw=false)")
-		}
 		if r.cfg.RWLayer == "" {
 			return fmt.Errorf("a layerset requires a writable layer (-rwlayer, or the per-sandbox default)")
 		}

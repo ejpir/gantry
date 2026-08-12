@@ -47,7 +47,7 @@ func sessionExec(taskClient task.TTRPCTaskService, options SessionOptions, id st
 		User:     specs.User{UID: uid, GID: gid},
 		Args:     options.Args,
 		Env:      append(options.ImgCfg.EnvWith("TERM=xterm"), options.Secrets...),
-		Cwd:      options.ImgCfg.WorkdirOr(),
+		Cwd:      options.workingDir(),
 	}
 	encoded, err := typeurl.MarshalAny(process)
 	if err != nil {

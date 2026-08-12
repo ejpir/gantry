@@ -247,6 +247,24 @@ func TestLoadShareManifestSupportsLiveTransportShapes(t *testing.T) {
 // user/env/cwd exactly per the precedence table (regression: the
 // placeholder rewrite could have produced malformed config.json, which
 // crun reports as the unhelpful "bad message").
+func TestConfigJSONCwdOverride(t *testing.T) {
+	var parsed struct {
+		Process struct {
+			Cwd string `json:"cwd"`
+		} `json:"process"`
+	}
+	config, err := configJSONWithTransportCwd(nil, nil, false, []string{"pwd"}, &image.Config{WorkingDir: "/image"}, true, "/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(config), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Process.Cwd != "/workspace" {
+		t.Fatalf("cwd = %q, want /workspace", parsed.Process.Cwd)
+	}
+}
+
 func TestConfigJSONValidAndImageDriven(t *testing.T) {
 	// nil image config: historical defaults
 	cfg, err := ConfigJSON(nil, true, []string{"/bin/sh"}, nil)

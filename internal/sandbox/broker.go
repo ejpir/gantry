@@ -51,6 +51,7 @@ type brokerRequest struct {
 	ID        string                      `json:"id"`
 	V         int                         `json:"v,omitempty"` // sessionctl: sessionProtocolVersion
 	Args      []string                    `json:"args,omitempty"`
+	Cwd       string                      `json:"cwd,omitempty"`
 	Cols      uint32                      `json:"cols,omitempty"`
 	Rows      uint32                      `json:"rows,omitempty"`
 	Terminal  bool                        `json:"terminal,omitempty"`

@@ -1,0 +1,296 @@
+openapi: 3.1.0
+info:
+  title: Gantry Local Manager API
+  version: 1.0.0
+  description: >-
+    Same-user local sandbox lifecycle API. The production endpoint is an
+    HTTP/1.1 Unix-domain socket; it is not a network authentication boundary.
+servers:
+  - url: http://gantry.local
+paths:
+  /v1/health:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Manager health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/openapi.yaml:
+    get:
+      operationId: openAPI
+      responses:
+        "200":
+          description: This OpenAPI contract
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /v1/sandboxes:
+    get:
+      operationId: listSandboxes
+      responses:
+        "200":
+          description: Current local sandboxes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sandboxes]
+                properties:
+                  sandboxes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Sandbox"
+    post:
+      operationId: createSandbox
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSandboxRequest"
+      responses:
+        "201":
+          description: Sandbox is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "200":
+          description: Replayed completed idempotent operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "202":
+          description: Matching idempotent operation is still running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /v1/sandboxes/{name}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: getSandbox
+      responses:
+        "200":
+          description: Sandbox state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sandbox"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSandbox
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Sandbox deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /v1/sandboxes/{name}/start:
+    post:
+      operationId: startSandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxName"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Saved sandbox is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /v1/sandboxes/{name}/stop:
+    post:
+      operationId: stopSandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxName"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Sandbox stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+  /v1/sandboxes/{name}/exec:
+    post:
+      operationId: execSandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "200":
+          description: Process completed (including a non-zero process exit)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecResult"
+        "408":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+  /v1/operations/{id}:
+    get:
+      operationId: getOperation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 128
+      responses:
+        "200":
+          description: Operation state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/events:
+    get:
+      operationId: events
+      responses:
+        "200":
+          description: Bounded live lifecycle stream; historical events are not replayed
+          content:
+            text/event-stream:
+              schema:
+                type: string
+components:
+  parameters:
+    SandboxName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9._-]{1,64}$"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+  responses:
+    Error:
+      description: Request failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Health:
+      type: object
+      required: [ok, version]
+      properties:
+        ok: { type: boolean }
+        version: { type: string }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        operationId: { type: string }
+    Sandbox:
+      type: object
+      required: [name, state]
+      properties:
+        name: { type: string }
+        state: { type: string, enum: [running, stopped] }
+        pid: { type: integer }
+        image: { type: string }
+        imageRef: { type: string }
+        imageDigest: { type: string }
+        cpus: { type: integer }
+        memoryMiB: { type: integer }
+        writable: { type: boolean }
+    CreateSandboxRequest:
+      type: object
+      required: [name, image]
+      properties:
+        name: { type: string }
+        image: { type: string }
+        kernel: { type: string }
+        rootfs: { type: string }
+        runtime: { type: string, enum: [crun, runsc] }
+        rw: { type: boolean, default: false }
+        rwlayer: { type: string }
+        shares:
+          type: array
+          items: { type: string }
+        publish:
+          type: array
+          items: { type: string }
+        net: { type: boolean, default: true }
+        networkPolicy: { type: string }
+        allowLocalNetwork: { type: boolean, default: false }
+        oauthBridge: { type: boolean, default: true }
+        processIsolation: { type: string, enum: [auto, required, off], default: auto }
+        memoryMiB: { type: integer, default: 512 }
+        cpus: { type: integer, default: 1 }
+        secretNames:
+          description: Names resolved from the manager's startup environment; values are never accepted over HTTP or persisted.
+          type: array
+          items: { type: string }
+    ExecRequest:
+      type: object
+      required: [argv]
+      properties:
+        argv:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items: { type: string, maxLength: 32768 }
+        cwd: { type: string, maxLength: 4096 }
+        stdin: { type: string, maxLength: 1048576 }
+        timeoutSeconds: { type: integer, minimum: 1, maximum: 3600, default: 30 }
+        maxOutputBytes: { type: integer, minimum: 1, maximum: 16777216, default: 1048576 }
+    ExecResult:
+      type: object
+      required: [exitCode, output, truncated]
+      properties:
+        exitCode: { type: integer }
+        output: { type: string }
+        truncated: { type: boolean }
+    Operation:
+      type: object
+      required: [id, kind, state, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        sandbox: { type: string }
+        state: { type: string, enum: [running, succeeded, failed] }
+        error: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    Event:
+      type: object
+      required: [id, type, time]
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        operationId: { type: string }
+        sandbox: { type: string }
+        state: { type: string }
+        time: { type: string, format: date-time }

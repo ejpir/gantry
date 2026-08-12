@@ -20,6 +20,7 @@ func TestWriteMainHelpListsCommands(t *testing.T) {
 		"gantry start <name>",
 		"gantry exec <name>",
 		"gantry tui",
+		"gantry serve",
 		"gantry image <verb>",
 		"gantry share <verb>",
 		"gantry ports <verb>",

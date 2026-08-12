@@ -7,6 +7,8 @@ import (
 	"os"
 )
 
+func openCommittedForSync(path string) (*os.File, error) { return os.Open(path) }
+
 func replace(from, to string, _ bool) error {
 	return os.Rename(from, to)
 }

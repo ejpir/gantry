@@ -57,6 +57,9 @@ attestation — verify with
 # interactive dashboard (auto-starts in a terminal): cards, create/start/
 # stop/exec, and Traffic / Rules / Mounts / Ports views — tab or 1–5 to switch
 ./gantry-linux-arm64 tui
+
+# persistent local HTTP/JSON manager over ~/.gantry/manager.sock
+./gantry-linux-arm64 serve
 ```
 
 ## Features
@@ -92,6 +95,9 @@ attestation — verify with
 - **Dashboard and import** — create/start/stop/exec plus Traffic, Rules,
   Mounts, and Ports views; `gantry import` adopts compatible sandbox state
   without re-pulling or flattening immutable image layers.
+- **Local manager API** — `gantry serve` provides lifecycle, bounded captured
+  exec, operations, and SSE events as HTTP/JSON over a same-user Unix socket;
+  see the checked-in [OpenAPI contract](api/managerapi/openapi.yaml).
 
 ## Build from source
 

@@ -36,6 +36,7 @@ usage:
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
   gantry tui                        # interactive local sandbox dashboard
+  gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
   gantry share <verb>               # live host shares: add|remove|ls
@@ -100,6 +101,8 @@ func runMain(args []string) int {
 			return 2
 		}
 		return sandbox.CmdResume(name)
+	case "serve":
+		return sandbox.CmdServe(argv)
 	case "daemon":
 		if len(argv) < 1 || len(argv) > 2 {
 			return 2

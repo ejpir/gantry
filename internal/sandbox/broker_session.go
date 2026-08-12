@@ -164,6 +164,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
 		RW:             br.cfg.RW,
 		LayerSet:       br.cfg.LayerSet,
 		Args:           req.Args,
+		Cwd:            req.Cwd,
 		Secrets:        secret.Env(br.secrets),
 		// one VM = one container workload with a well-known id, so a
 		// concurrent session can find it and Exec into it instead of

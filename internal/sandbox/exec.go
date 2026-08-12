@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +16,176 @@ import (
 
 	"golang.org/x/term"
 )
+
+type capturedExecRequest struct {
+	Context        context.Context
+	Args           []string
+	Cwd            string
+	Stdin          io.Reader
+	Timeout        time.Duration
+	MaxOutputBytes int64
+}
+
+type capturedExecResult struct {
+	ExitCode  int
+	Output    []byte
+	Truncated bool
+}
+
+var errCapturedExecTimeout = errors.New("exec timed out")
+var errCapturedExecOutputLimit = errors.New("exec output limit exceeded")
+
+// execSandboxCaptured runs a non-terminal process through the existing
+// authenticated sandbox broker and captures a bounded combined output stream.
+// It keeps the broker's out-of-band exit event, so guest bytes can never forge
+// an exit status. The caller controls timeout and output limits.
+func execSandboxCaptured(name string, request capturedExecRequest) (capturedExecResult, error) {
+	if len(request.Args) == 0 {
+		return capturedExecResult{}, fmt.Errorf("argv must not be empty")
+	}
+	if request.Timeout <= 0 {
+		request.Timeout = 30 * time.Second
+	}
+	if request.MaxOutputBytes <= 0 {
+		request.MaxOutputBytes = 1 << 20
+	}
+	if _, alive := sandboxPID(name); !alive {
+		return capturedExecResult{}, fmt.Errorf("sandbox %q is not running", name)
+	}
+	baseContext := request.Context
+	if baseContext == nil {
+		baseContext = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(baseContext, request.Timeout)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	id := newControlRequestID("manager-exec")
+	dialer := net.Dialer{Timeout: controlHandshakeTimeout}
+
+	ctl, err := dialer.DialContext(ctx, "unix", filepath.Join(sandboxDir(name), "ctl.sock"))
+	if err != nil {
+		return capturedExecResult{}, fmt.Errorf("connect session control: %w", err)
+	}
+	defer func() { _ = ctl.Close() }()
+	_ = ctl.SetDeadline(deadline)
+	stopControlCancel := context.AfterFunc(ctx, func() { _ = ctl.SetDeadline(time.Now()) })
+	defer stopControlCancel()
+	if err := json.NewEncoder(ctl).Encode(&brokerRequest{Op: "sessionctl", ID: id, V: sessionProtocolVersion}); err != nil {
+		return capturedExecResult{}, fmt.Errorf("send session control: %w", err)
+	}
+	ctlR := bufio.NewReader(ctl)
+	line, err := readBoundedLine(ctlR, controlMaxEventBytes)
+	if err != nil {
+		return capturedExecResult{}, fmt.Errorf("session control handshake: %w", err)
+	}
+	var response struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(line, &response); err != nil || !response.OK {
+		return capturedExecResult{}, fmt.Errorf("session control rejected: %s", strings.TrimSpace(string(line)))
+	}
+
+	data, err := dialer.DialContext(ctx, "unix", filepath.Join(sandboxDir(name), "ctl.sock"))
+	if err != nil {
+		return capturedExecResult{}, fmt.Errorf("connect session data: %w", err)
+	}
+	defer func() { _ = data.Close() }()
+	_ = data.SetDeadline(deadline)
+	stopDataCancel := context.AfterFunc(ctx, func() {
+		_ = data.SetDeadline(time.Now())
+		_ = killSandboxSession(name, id)
+	})
+	defer stopDataCancel()
+	if err := json.NewEncoder(data).Encode(&brokerRequest{Op: "session", ID: id, Args: request.Args, Cwd: request.Cwd}); err != nil {
+		return capturedExecResult{}, fmt.Errorf("send session request: %w", err)
+	}
+	dataR := bufio.NewReader(data)
+	line, err = readBoundedLine(dataR, controlMaxEventBytes)
+	if err != nil {
+		return capturedExecResult{}, fmt.Errorf("session handshake: %w", err)
+	}
+	response = struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}{}
+	if err := json.Unmarshal(line, &response); err != nil || !response.OK {
+		return capturedExecResult{}, fmt.Errorf("session rejected: %s", strings.TrimSpace(string(line)))
+	}
+
+	stdin := request.Stdin
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
+	copyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(data, stdin)
+		if unix, ok := data.(*net.UnixConn); ok {
+			_ = unix.CloseWrite()
+		}
+		close(copyDone)
+	}()
+
+	limited := io.LimitReader(dataR, request.MaxOutputBytes+1)
+	output, readErr := io.ReadAll(limited)
+	truncated := int64(len(output)) > request.MaxOutputBytes
+	if truncated {
+		output = output[:request.MaxOutputBytes]
+		_ = killSandboxSession(name, id)
+	}
+	<-copyDone
+	if readErr != nil {
+		if ctx.Err() != nil || errors.Is(readErr, os.ErrDeadlineExceeded) {
+			_ = killSandboxSession(name, id)
+			return capturedExecResult{Output: output, Truncated: truncated}, fmt.Errorf("%w: %v", errCapturedExecTimeout, ctx.Err())
+		}
+		return capturedExecResult{Output: output, Truncated: truncated}, fmt.Errorf("read session output: %w", readErr)
+	}
+	if truncated {
+		return capturedExecResult{Output: output, Truncated: true}, errCapturedExecOutputLimit
+	}
+	event, err := readSessionExitEvent(ctlR)
+	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, os.ErrDeadlineExceeded) {
+			_ = killSandboxSession(name, id)
+			return capturedExecResult{Output: output}, fmt.Errorf("%w: %v", errCapturedExecTimeout, ctx.Err())
+		}
+		return capturedExecResult{Output: output}, fmt.Errorf("read session exit: %w", err)
+	}
+	result := capturedExecResult{ExitCode: sessionExitCode(event), Output: output}
+	if event.Error != "" {
+		return result, errors.New(event.Error)
+	}
+	return result, nil
+}
+
+func killSandboxSession(name, id string) error {
+	const killTimeout = time.Second
+	connection, err := net.DialTimeout("unix", filepath.Join(sandboxDir(name), "ctl.sock"), killTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = connection.Close() }()
+	_ = connection.SetDeadline(time.Now().Add(killTimeout))
+	if err := json.NewEncoder(connection).Encode(&brokerRequest{Op: "kill", ID: id}); err != nil {
+		return err
+	}
+	line, err := readBoundedLine(bufio.NewReader(connection), controlMaxResponseBytes)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(line, &response); err != nil {
+		return err
+	}
+	if !response.OK && response.Error != "no such session" {
+		return errors.New(response.Error)
+	}
+	return nil
+}
 
 func CmdSandboxExec(name string, argv []string) int {
 	dir := sandboxDir(name)

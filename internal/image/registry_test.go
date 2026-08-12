@@ -232,6 +232,8 @@ type fakeIndexRegistry struct {
 	repo           string
 	indexDigest    string
 	manifestDigest string
+	manifestGets   int
+	manifestHeads  int
 	blobGets       int
 	headerDigest   string // when set, overrides Docker-Content-Digest on GET
 	oversizeBlobs  bool   // serve blobs larger than their descriptor
@@ -276,6 +278,11 @@ func newFakeIndexRegistry(t *testing.T, arch string) *fakeIndexRegistry {
 		p := strings.TrimPrefix(req.URL.Path, "/v2/"+r.repo+"/")
 		switch {
 		case strings.HasPrefix(p, "manifests/"):
+			if req.Method == http.MethodHead {
+				r.manifestHeads++
+			} else {
+				r.manifestGets++
+			}
 			if r.denyStatus != 0 {
 				http.Error(w, "proxy block page", r.denyStatus)
 				return
@@ -323,6 +330,56 @@ func (r *fakeIndexRegistry) ref() string {
 // review4 #3+#4: a multi-arch pull must hit the cache on the next
 // resolve (HEAD compares the INDEX digest against Meta.RefDigest), and
 // the cache must be keyed per arch.
+func TestResolvePreferCachedSkipsRegistryFreshness(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	st := NewStore(t.TempDir())
+
+	first, err := Resolve(reg.ref(), "arm64", st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gets, heads, blobs := reg.manifestGets, reg.manifestHeads, reg.blobGets
+	reg.denyStatus = http.StatusForbidden
+
+	cached, err := ResolvePreferCached(reg.ref(), "arm64", st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached.Cached || cached.Digest != first.Digest {
+		t.Fatalf("preferred cache result = %+v, want digest %s", cached, first.Digest)
+	}
+	if reg.manifestGets != gets || reg.manifestHeads != heads || reg.blobGets != blobs {
+		t.Fatalf("preferred cache made registry requests: manifests GET %d->%d HEAD %d->%d blobs %d->%d",
+			gets, reg.manifestGets, heads, reg.manifestHeads, blobs, reg.blobGets)
+	}
+}
+
+func TestResolveCachedOnlyMissDoesNotContactRegistry(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	_, err := ResolveCachedOnly(reg.ref(), "arm64", NewStore(t.TempDir()), nil)
+	if err == nil || !strings.Contains(err.Error(), "gantry image pull") {
+		t.Fatalf("cached-only miss error = %v, want pull instruction", err)
+	}
+	if reg.manifestGets != 0 || reg.manifestHeads != 0 || reg.blobGets != 0 {
+		t.Fatalf("cached-only miss contacted registry: GETs=%d HEADs=%d blobs=%d",
+			reg.manifestGets, reg.manifestHeads, reg.blobGets)
+	}
+}
+
+func TestResolvePreferCachedMissPulls(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	resolved, err := ResolvePreferCached(reg.ref(), "arm64", NewStore(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Cached {
+		t.Fatal("cache miss incorrectly reported a cached result")
+	}
+	if reg.manifestGets == 0 || reg.blobGets == 0 {
+		t.Fatalf("cache miss did not pull: manifest GETs=%d blobs=%d", reg.manifestGets, reg.blobGets)
+	}
+}
+
 func TestCacheHitMultiArch(t *testing.T) {
 	reg := newFakeIndexRegistry(t, "arm64")
 	st := NewStore(t.TempDir())

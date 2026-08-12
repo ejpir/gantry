@@ -67,6 +67,31 @@ func WriteDurable(path string, mode os.FileMode, write func(io.Writer) error) er
 	return writeTo(path, mode, true, write)
 }
 
+// MakeDurable persists an atomic replacement that is already visible at path.
+// It is useful when a caller can overlap the storage barrier with independent
+// work, but must not report success until this function returns. Every failure
+// is a CommitError because readers may already observe the replacement.
+func MakeDurable(path string) error {
+	file, err := openCommittedForSync(path)
+	if err != nil {
+		return &CommitError{Err: fmt.Errorf("open committed file %s: %w", path, err)}
+	}
+	if err := file.Sync(); err != nil {
+		return &CommitError{Err: errors.Join(
+			fmt.Errorf("sync committed file %s: %w", path, err),
+			file.Close(),
+		)}
+	}
+	if err := file.Close(); err != nil {
+		return &CommitError{Err: fmt.Errorf("close committed file %s: %w", path, err)}
+	}
+	dir := filepath.Dir(path)
+	if err := syncParentDir(dir); err != nil {
+		return &CommitError{Err: fmt.Errorf("sync parent directory %s: %w", dir, err)}
+	}
+	return nil
+}
+
 func writeTo(path string, mode os.FileMode, durable bool, write func(io.Writer) error) (retErr error) {
 	if write == nil {
 		return fmt.Errorf("atomicfile: nil writer")

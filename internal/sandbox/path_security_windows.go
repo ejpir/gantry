@@ -23,6 +23,13 @@ var trustedWindowsServiceSIDs = [...]string{
 // createSandboxDirectory protects the root before creating its child. That
 // closes the useful race in which an account allowed by an inherited DACL
 // could replace the sandbox directory between creation and hardening.
+func createManagerDirectory(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return createPrivateWindowsDirectory(path, true)
+}
+
 func createSandboxDirectory(path string) error {
 	root := filepath.Dir(filepath.Clean(path))
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
