@@ -271,6 +271,18 @@ func TestBuildNetworkSeatbeltProfile(t *testing.T) {
 			}
 		}
 	}
+	var metadataRule strings.Builder
+	metadataRule.WriteString("(allow file-read-metadata\n")
+	for _, path := range seatbeltNetworkConfigMetadata {
+		metadataRule.WriteString(`	(literal "` + sbplEscape(path) + `")` + "\n")
+		if strings.Contains(profile, `(subpath "`+sbplEscape(path)+`")`) {
+			t.Fatalf("resolver metadata grant %q broadened to a subpath:\n%s", path, profile)
+		}
+	}
+	metadataRule.WriteString(")\n")
+	if !strings.Contains(profile, metadataRule.String()) {
+		t.Fatalf("network profile lacks exact resolver metadata rule:\n%s", profile)
+	}
 	for _, forbidden := range []string{"worker-net.log", "console.log", "worker-vmm.log"} {
 		if strings.Contains(profile, forbidden) {
 			t.Fatalf("network profile grants broker-owned log path %q:\n%s", forbidden, profile)

@@ -24,6 +24,18 @@ var seatbeltRuntimeSysctls = []string{
 	"sysctl.proc_translated",
 }
 
+// seatbeltNetworkConfigMetadata names only the symlink nodes and directory
+// aliases traversed by macOS when opening /etc/resolv.conf. The resolver file
+// commonly resolves through /etc -> /private/etc and then into /var/run.
+// Data access remains limited to the ReadFiles literals and their canonical
+// targets below; these rules do not permit directory enumeration.
+var seatbeltNetworkConfigMetadata = []string{
+	"/etc",
+	"/var",
+	"/etc/resolv.conf",
+	"/private/etc/resolv.conf",
+}
+
 // sbplEscape quotes a path for embedding in an SBPL string literal.
 func sbplEscape(p string) string {
 	p = strings.ReplaceAll(p, `\`, `\\`)
@@ -88,6 +100,13 @@ func buildSeatbeltProfile(spec Spec) string {
 			// required confinement correctly fail its fs-read probe on macOS.
 			b.WriteString(`(allow file-read* (literal "` + sbplEscape(path) + `"))` + "\n")
 		}
+	}
+	if spec.Profile == ProfileNetwork {
+		b.WriteString("(allow file-read-metadata\n")
+		for _, path := range seatbeltNetworkConfigMetadata {
+			b.WriteString(`	(literal "` + sbplEscape(path) + `")` + "\n")
+		}
+		b.WriteString(")\n")
 	}
 	// Share export roots, split by writability: a RO export never
 	// appears in a write rule (defense in depth behind the hub's own

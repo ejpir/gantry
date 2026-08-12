@@ -146,6 +146,36 @@ func (s *brokerSpyRWC) Write(p []byte) (int, error) {
 }
 func (s *brokerSpyRWC) Close() error { s.closed = true; return nil }
 
+type brokerOwnedSpyRWC struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newBrokerOwnedSpyRWC() *brokerOwnedSpyRWC {
+	return &brokerOwnedSpyRWC{closed: make(chan struct{})}
+}
+
+func (s *brokerOwnedSpyRWC) Read([]byte) (int, error) {
+	<-s.closed
+	return 0, io.EOF
+}
+
+func (s *brokerOwnedSpyRWC) Write(p []byte) (int, error) { return len(p), nil }
+
+func (s *brokerOwnedSpyRWC) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+
+func (s *brokerOwnedSpyRWC) isClosed() bool {
+	select {
+	case <-s.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 func TestClientRejectsOversizedRequestBeforeWrite(t *testing.T) {
 	stream := &brokerSpyRWC{}
 	proxy, err := NewClient(stream)
@@ -186,18 +216,19 @@ func TestClientRejectsMalformedFUSEShapeBeforeWrite(t *testing.T) {
 }
 
 func TestClientOwnsTransport(t *testing.T) {
-	stream := &brokerSpyRWC{}
+	stream := newBrokerOwnedSpyRWC()
 	proxy, err := NewClient(stream)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stream.closed {
+	t.Cleanup(func() { _ = proxy.Close() })
+	if stream.isClosed() {
 		t.Fatal("constructing the client closed the broker transport")
 	}
 	if err := proxy.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !stream.closed {
+	if !stream.isClosed() {
 		t.Fatal("owning proxy Close did not close the broker transport")
 	}
 }
