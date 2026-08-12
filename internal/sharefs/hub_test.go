@@ -403,7 +403,7 @@ func TestShareHubCachesOnlyExportDescendants(t *testing.T) {
 	}
 
 	var missing fuse.EntryOut
-	if _, errno := exportRoot.Operations().(fs.NodeLookuper).Lookup(context.Background(), "missing", &missing); errno != syscall.ENOENT {
+	if _, errno := exportRoot.Operations().(fs.NodeLookuper).Lookup(context.Background(), "missing", &missing); fuse.ToStatus(errno) != fuse.ENOENT {
 		t.Fatalf("missing lookup errno = %v, want ENOENT", errno)
 	}
 	if missing.EntryTimeout() != 0 {

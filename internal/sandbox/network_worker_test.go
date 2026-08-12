@@ -1319,6 +1319,9 @@ func TestStartNetworkSplitModes(t *testing.T) {
 			cfg := RunConfig{Net: true, ProcessIsolation: tc.mode}
 			n, err := cfg.StartNetwork(t.TempDir())
 			if err != nil {
+				if tc.mode == "required" && strings.Contains(err.Error(), "mount tier unavailable") {
+					t.Skipf("required mount tier unavailable in this test environment: %v", err)
+				}
 				t.Fatal(err)
 			}
 			defer n.Close()

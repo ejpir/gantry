@@ -61,7 +61,7 @@ func ApplyConfinement(config Config, control, data net.Conn) (*workerconf.Report
 	if len(failed) == 0 {
 		return &report, nil
 	}
-	return &report, fmt.Errorf("network worker: required confinement not enforced: %v", failed)
+	return &report, fmt.Errorf("network worker: required confinement not enforced: %v (notes: %v)", failed, report.Notes)
 }
 
 // RequiredConfinementProperties excludes net-dial: creating host TCP/UDP

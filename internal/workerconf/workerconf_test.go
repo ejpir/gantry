@@ -232,14 +232,17 @@ func TestBuildNetworkSeatbeltProfile(t *testing.T) {
 	profile := buildSeatbeltProfile(spec)
 	for _, rule := range []string{
 		`(allow network-bind (local ip "*:*")`,
-		"(allow network-inbound)",
-		"(allow network-outbound)",
+		`(allow network-inbound (local ip "*:*")`,
+		`(allow network-outbound (remote ip "*:*")`,
 	} {
 		if !strings.Contains(profile, rule) {
 			t.Fatalf("network profile lacks %q:\n%s", rule, profile)
 		}
 	}
-	for _, forbidden := range []string{"(allow network*)", "(allow mach-lookup)", "system-socket", "file-write*\n", "process-fork", "process-exec"} {
+	for _, forbidden := range []string{
+		"(allow network*)", "(allow network-inbound)", "(allow network-outbound)",
+		"(allow mach-lookup)", "system-socket", "file-write*\n", "process-fork", "process-exec",
+	} {
 		if strings.Contains(profile, forbidden) {
 			t.Fatalf("network profile contains forbidden authority %q:\n%s", forbidden, profile)
 		}

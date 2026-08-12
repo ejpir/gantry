@@ -125,8 +125,8 @@ func buildSeatbeltProfile(spec Spec) string {
 		// authority and Mach IPC. The worker's egress policy remains the
 		// finer-grained destination boundary within the required INET surface.
 		b.WriteString("(allow network-bind (local ip \"*:*\"))\n")
-		b.WriteString("(allow network-inbound)\n")
-		b.WriteString("(allow network-outbound)\n")
+		b.WriteString("(allow network-inbound (local ip \"*:*\"))\n")
+		b.WriteString("(allow network-outbound (remote ip \"*:*\"))\n")
 	}
 	if spec.NoExec {
 		b.WriteString(";; exec/fork: denied by (deny default) — the worker never spawns\n")

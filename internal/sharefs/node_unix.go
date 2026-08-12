@@ -302,6 +302,13 @@ func (n *shareNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
+	// LoopbackNode's handle-less chmod/truncate path uses pathname syscalls.
+	// On Darwin chmod follows the final symlink, which would let a writable
+	// export mutate a target outside its pinned root. Symlink type is immutable
+	// for the inode lifetime, so reject every attribute mutation up front.
+	if n.StableAttr().Mode&syscall.S_IFMT == syscall.S_IFLNK {
+		return syscall.ELOOP
+	}
 	errno := n.LoopbackNode.Setattr(ctx, f, in, out)
 	// Ownership squash, as in NewFS: gVisor's gofer chowns every file it
 	// creates, and non-root hosts cannot chown. Ownership is cosmetic on a

@@ -139,6 +139,10 @@ type closeFunc func() error
 func (fn closeFunc) Close() error { return fn() }
 
 func TestValidateResources(t *testing.T) {
+	maximumVCPUs := MaxVCPUs
+	if runtime.GOOS == "windows" {
+		maximumVCPUs = 1 // WHPX SMP is rejected by the platform validator.
+	}
 	for _, tc := range []struct {
 		name   string
 		memory uint64
@@ -146,7 +150,7 @@ func TestValidateResources(t *testing.T) {
 		ok     bool
 	}{
 		{name: "minimum", memory: MinMemoryBytes, vcpus: 1, ok: true},
-		{name: "maximum", memory: MaxMemoryBytes, vcpus: MaxVCPUs, ok: true},
+		{name: "maximum", memory: MaxMemoryBytes, vcpus: maximumVCPUs, ok: true},
 		{name: "below minimum", memory: MinMemoryBytes - 1, vcpus: 1},
 		{name: "above maximum", memory: MaxMemoryBytes + 1, vcpus: 1},
 		{name: "zero CPUs", memory: MinMemoryBytes, vcpus: 0},
