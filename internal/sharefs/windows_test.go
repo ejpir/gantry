@@ -11,6 +11,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 	"unicode/utf16"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -257,7 +258,18 @@ func TestWinExportFSCreateWhileWatcherIsActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = watcher.Close() }()
+	defer func() {
+		closed := make(chan error, 1)
+		go func() { closed <- watcher.Close() }()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Errorf("close active watcher: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("closing active watcher did not cancel ReadDirectoryChangesW")
+		}
+	}()
 
 	created, _, errno := backend.create("", "new.txt", 0x8241, 0o644)
 	if errno != 0 {

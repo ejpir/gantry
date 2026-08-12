@@ -128,6 +128,10 @@ func cleanWinSharePath(p string) (string, error) {
 }
 
 func openWinRoot(p string) (windows.Handle, error) {
+	return openWinRootWithOptions(p, winBaseOpenOpts|windows.FILE_DIRECTORY_FILE)
+}
+
+func openWinRootWithOptions(p string, options uint32) (windows.Handle, error) {
 	name := p
 	name = strings.TrimPrefix(name, `\\?\`)
 	name = strings.TrimPrefix(name, `\??\`)
@@ -146,7 +150,7 @@ func openWinRoot(p string) (windows.Handle, error) {
 		windows.FILE_GENERIC_READ,
 		&oa, &iosb, nil, windows.FILE_ATTRIBUTE_NORMAL, winShareMode,
 		windows.FILE_OPEN,
-		winBaseOpenOpts|windows.FILE_DIRECTORY_FILE,
+		options,
 		0, 0)
 	if err != nil {
 		return 0, err

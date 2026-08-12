@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -13,10 +14,13 @@ import (
 )
 
 type windowsShareWatcher struct {
-	handle windows.Handle
-	emit   func(shareWatchEvent)
-	closed atomic.Bool
-	done   chan struct{}
+	handle     windows.Handle
+	event      windows.Handle
+	overlapped windows.Overlapped
+	emit       func(shareWatchEvent)
+	closed     atomic.Bool
+	ioMu       sync.Mutex
+	done       chan struct{}
 }
 
 func newPlatformShareWatcher(export *Export, emit func(shareWatchEvent)) (shareWatcher, error) {
@@ -34,25 +38,38 @@ func newPlatformShareWatcher(export *Export, emit func(shareWatchEvent)) (shareW
 	if err != nil {
 		return nil, err
 	}
-	handle, err := openWinRoot(rootPath)
+	// Omit FILE_SYNCHRONOUS_IO_NONALERT so ReadDirectoryChangesW can use an
+	// OVERLAPPED request. Close must be able to cancel a quiet directory watch;
+	// CancelIoEx does not unblock a synchronous ReadDirectoryChangesW call.
+	handle, err := openWinRootWithOptions(rootPath,
+		windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_DIRECTORY_FILE)
 	if err != nil {
 		return nil, err
 	}
+	event, err := windows.CreateEvent(nil, 0, 0, nil)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("create share watcher event: %w", err)
+	}
 	original, err := winInfoFromHandle(root, 0)
 	if err != nil {
+		_ = windows.CloseHandle(event)
 		_ = windows.CloseHandle(handle)
 		return nil, err
 	}
 	watched, err := winInfoFromHandle(handle, 0)
 	if err != nil {
+		_ = windows.CloseHandle(event)
 		_ = windows.CloseHandle(handle)
 		return nil, err
 	}
 	if original.id != watched.id {
+		_ = windows.CloseHandle(event)
 		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("share root changed while attaching cache watcher")
 	}
-	watcher := &windowsShareWatcher{handle: handle, emit: emit, done: make(chan struct{})}
+	watcher := &windowsShareWatcher{handle: handle, event: event, emit: emit, done: make(chan struct{})}
+	watcher.overlapped.HEvent = event
 	go watcher.run()
 	return watcher, nil
 }
@@ -65,10 +82,18 @@ func (w *windowsShareWatcher) Close() error {
 	if w == nil || !w.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	_ = windows.CancelIoEx(w.handle, nil)
-	err := windows.CloseHandle(w.handle)
+	// Serialize cancellation with request submission. Otherwise Close could see
+	// no pending request just before run submits one and then wait forever.
+	w.ioMu.Lock()
+	cancelErr := windows.CancelIoEx(w.handle, &w.overlapped)
+	w.ioMu.Unlock()
+	if errors.Is(cancelErr, windows.ERROR_NOT_FOUND) {
+		cancelErr = nil
+	}
 	<-w.done
-	return err
+	handleErr := windows.CloseHandle(w.handle)
+	eventErr := windows.CloseHandle(w.event)
+	return errors.Join(cancelErr, handleErr, eventErr)
 }
 
 func (w *windowsShareWatcher) run() {
@@ -81,10 +106,21 @@ func (w *windowsShareWatcher) run() {
 		windows.FILE_NOTIFY_CHANGE_LAST_WRITE |
 		windows.FILE_NOTIFY_CHANGE_CREATION |
 		windows.FILE_NOTIFY_CHANGE_SECURITY)
-	for !w.closed.Load() {
+	for {
 		var returned uint32
+		w.ioMu.Lock()
+		if w.closed.Load() {
+			w.ioMu.Unlock()
+			return
+		}
+		w.overlapped.Internal = 0
+		w.overlapped.InternalHigh = 0
 		err := windows.ReadDirectoryChanges(w.handle, &buffer[0], uint32(len(buffer)), true,
-			mask, &returned, nil, 0)
+			mask, nil, &w.overlapped, 0)
+		w.ioMu.Unlock()
+		if err == nil || errors.Is(err, windows.ERROR_IO_PENDING) {
+			err = windows.GetOverlappedResult(w.handle, &w.overlapped, &returned, true)
+		}
 		if err != nil {
 			if w.closed.Load() || errors.Is(err, windows.ERROR_OPERATION_ABORTED) || errors.Is(err, windows.ERROR_INVALID_HANDLE) {
 				return
