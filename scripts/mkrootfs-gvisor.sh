@@ -31,7 +31,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== extracting $IN"
-fsck.erofs --extract="$WORK/rootfs" "$IN" >/dev/null
+fsck.erofs --extract="$WORK/rootfs" --no-preserve "$IN" >/dev/null
 [ -x "$WORK/rootfs/sbin/crun" ] || { echo "no /sbin/crun in $IN — is this a nerdbox rootfs?" >&2; exit 1; }
 
 echo "== downloading runsc ($RUNSC_ARCH)"
@@ -52,7 +52,7 @@ cp "$WORK/crunshim" "$WORK/rootfs/sbin/crun"
 
 LABEL=$(basename "$OUT" .erofs | tr -cd 'a-zA-Z0-9._-' | cut -c1-15)
 echo "== packing $OUT"
-mkfs.erofs -b4096 -L "$LABEL" "$OUT.tmp" "$WORK/rootfs" >/dev/null
+mkfs.erofs --all-root -b4096 -zlz4 -L "$LABEL" "$OUT.tmp" "$WORK/rootfs" >/dev/null
 mv "$OUT.tmp" "$OUT"
 ls -lh "$OUT"
 echo "done: gantry start <name> -runtime runsc   (or -rootfs $OUT)"

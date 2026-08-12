@@ -54,8 +54,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: amd64, docker_arch: amd64, kernel_arch: x86_64, page_size: 4k }
-          - { name: arm64, docker_arch: arm64, kernel_arch: arm64, page_size: 16k }
+          - { name: amd64, docker_arch: amd64, kernel_arch: x86_64 }
+          - { name: arm64, docker_arch: arm64, kernel_arch: arm64 }
     steps:
       - uses: actions/checkout@v4
       - name: cache guest assets
@@ -63,30 +63,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/bundle
-          key: guest-assets-v0.2.1-${{ matrix.name }}-${{ hashFiles('scripts/mkimage.sh', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
+          key: guest-assets-v0.2.1-${{ matrix.name }}-${{ hashFiles('scripts/mkrootfs.sh', 'patches/nerdbox-v0.2.1-quiet-boot.patch', 'scripts/mkimage.sh', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
       - uses: docker/setup-buildx-action@v3
         if: steps.guest-cache.outputs.cache-hit != 'true'
       - name: install EROFS tools
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: sudo apt-get update && sudo apt-get install -y erofs-utils
-      - name: fetch guest source
-        if: steps.guest-cache.outputs.cache-hit != 'true'
-        run: git clone --depth 1 --branch v0.2.1 https://github.com/containerd/nerdbox.git "$RUNNER_TEMP/nerdbox"
       - name: build guest rootfs
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: |
-          mkdir -p "$RUNNER_TEMP/guest/rootfs" "$RUNNER_TEMP/bundle"
-          docker buildx build --progress=plain \
-            --file "$RUNNER_TEMP/nerdbox/Dockerfile" \
-            --platform "linux/${{ matrix.docker_arch }}" \
-            --target erofs \
-            --build-arg KERNEL_ARCH=${{ matrix.kernel_arch }} \
-            --build-arg KERNEL_PAGE_SIZE=${{ matrix.page_size }} \
-            --build-arg KERNEL_NPROC=2 \
-            --output "type=local,dest=$RUNNER_TEMP/guest/rootfs" \
-            "$RUNNER_TEMP/nerdbox"
-          cp "$RUNNER_TEMP/guest/rootfs/nerdbox-rootfs.erofs" \
-            "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs"
+          mkdir -p "$RUNNER_TEMP/bundle"
+          ./scripts/mkrootfs.sh \
+            "${{ matrix.kernel_arch }}" "$RUNNER_TEMP/bundle/nerdbox-rootfs.erofs"
       - name: build gVisor rootfs variant
         if: steps.guest-cache.outputs.cache-hit != 'true'
         # Produces bundle/nerdbox-rootfs-gvisor.erofs: /sbin/crun replaced by
