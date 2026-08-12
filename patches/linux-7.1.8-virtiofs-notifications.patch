@@ -1,0 +1,445 @@
+diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
+index 5aea3f4..d25069e 100644
+--- a/fs/fuse/dev.c
++++ b/fs/fuse/dev.c
+@@ -2302,6 +2302,26 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
+-	goto out;
++	goto out;
+-}
++}
+-
++
++/*
++ * Process an unsolicited notification supplied by an in-kernel transport.
++ * The ordinary /dev/fuse path accepts only userspace iterators; virtio-fs's
++ * Gantry notification queue owns a bounded kernel buffer instead.
++ */
++ssize_t fuse_dev_notify(struct fuse_dev *fud, void *buf, size_t len)
++{
++	struct fuse_copy_state cs;
++	struct kvec iov = { .iov_base = buf, .iov_len = len };
++	struct iov_iter iter;
++
++	if (!fud || !buf || len < sizeof(struct fuse_out_header))
++		return -EINVAL;
++
++	iov_iter_kvec(&iter, ITER_SOURCE, &iov, 1, len);
++	fuse_copy_init(&cs, false, &iter);
++	return fuse_dev_do_write(fud, &cs, len);
++}
++EXPORT_SYMBOL_GPL(fuse_dev_notify);
++
+-static ssize_t fuse_dev_write(struct kiocb *iocb, struct iov_iter *from)
++static ssize_t fuse_dev_write(struct kiocb *iocb, struct iov_iter *from)
+-{
++{
+-	struct fuse_copy_state cs;
++	struct fuse_copy_state cs;
+diff --git a/fs/fuse/fuse_i.h b/fs/fuse/fuse_i.h
+index 17423d4..ed0ff0d 100644
+--- a/fs/fuse/fuse_i.h
++++ b/fs/fuse/fuse_i.h
+@@ -1343,6 +1343,7 @@ struct fuse_dev *fuse_dev_alloc_install(struct fuse_conn *fc);
+-struct fuse_dev *fuse_dev_alloc(void);
++struct fuse_dev *fuse_dev_alloc(void);
+-void fuse_dev_install(struct fuse_dev *fud, struct fuse_conn *fc);
++void fuse_dev_install(struct fuse_dev *fud, struct fuse_conn *fc);
+-void fuse_dev_put(struct fuse_dev *fud);
++void fuse_dev_put(struct fuse_dev *fud);
++ssize_t fuse_dev_notify(struct fuse_dev *fud, void *buf, size_t len);
+-int fuse_send_init(struct fuse_mount *fm);
++int fuse_send_init(struct fuse_mount *fm);
+-
++
+-/**
++/**
+diff --git a/fs/fuse/virtio_fs.c b/fs/fuse/virtio_fs.c
+index 1230065..31687d1 100644
+--- a/fs/fuse/virtio_fs.c
++++ b/fs/fuse/virtio_fs.c
+@@ -39,10 +39,13 @@ static struct kset *virtio_fs_kset;
+-
++
+-enum {
++enum {
+-	VQ_HIPRIO,
++	VQ_HIPRIO,
+-	VQ_REQUEST
++	VQ_REQUEST,
++	VQ_NOTIFICATION
+-};
++};
+-
++
+-#define VQ_NAME_LEN	24
++#define VQ_NAME_LEN	24
++#define VIRTIO_FS_NOTIFICATION_BUFS	64
++#define VIRTIO_FS_NOTIFICATION_SIZE	(8 * 1024)
+-
++
+-/* Per-virtqueue state */
++/* Per-virtqueue state */
+-struct virtio_fs_vq {
++struct virtio_fs_vq {
+@@ -53,10 +56,13 @@ struct virtio_fs_vq {
+-	struct list_head end_reqs;	/* End these requests */
++	struct list_head end_reqs;	/* End these requests */
+-	struct work_struct dispatch_work;
++	struct work_struct dispatch_work;
+-	struct fuse_dev *fud;
++	struct fuse_dev *fud;
++	struct mutex notification_lock; /* protects notification_ready and fud */
++	bool notification_ready;
+-	bool connected;
++	bool connected;
+-	long in_flight;
++	long in_flight;
+-	struct completion in_flight_zero; /* No inflight requests */
++	struct completion in_flight_zero; /* No inflight requests */
+-	struct kobject *kobj;
++	struct kobject *kobj;
++	unsigned int notification_buffers;
+-	char name[VQ_NAME_LEN];
++	char name[VQ_NAME_LEN];
+-} ____cacheline_aligned_in_smp;
++} ____cacheline_aligned_in_smp;
+-
++
+@@ -69,6 +75,8 @@ struct virtio_fs {
+-	struct virtio_fs_vq *vqs;
++	struct virtio_fs_vq *vqs;
+-	unsigned int nvqs;               /* number of virtqueues */
++	unsigned int nvqs;               /* number of virtqueues */
+-	unsigned int num_request_queues; /* number of request queues */
++	unsigned int num_request_queues; /* number of request queues */
++	unsigned int notification_queue;
++	bool has_notifications;
+-	struct dax_device *dax_dev;
++	struct dax_device *dax_dev;
+-
++
+-	unsigned int *mq_map; /* index = cpu id, value = request vq id */
++	unsigned int *mq_map; /* index = cpu id, value = request vq id */
+@@ -96,6 +104,10 @@ struct virtio_fs_req_work {
+-	struct work_struct done_work;
++	struct work_struct done_work;
+-};
++};
+-
++
++struct virtio_fs_notification {
++	u8 buf[VIRTIO_FS_NOTIFICATION_SIZE];
++};
++
+-static int virtio_fs_enqueue_req(struct virtio_fs_vq *fsvq,
++static int virtio_fs_enqueue_req(struct virtio_fs_vq *fsvq,
+-				 struct fuse_req *req, bool in_flight,
++				 struct fuse_req *req, bool in_flight,
+-				 gfp_t gfp);
++				 gfp_t gfp);
+@@ -483,11 +495,15 @@ static void virtio_fs_free_devs(struct virtio_fs *fs)
+-	for (i = 0; i < fs->nvqs; i++) {
++	for (i = 0; i < fs->nvqs; i++) {
+-		struct virtio_fs_vq *fsvq = &fs->vqs[i];
++		struct virtio_fs_vq *fsvq = &fs->vqs[i];
+-
++
+-		if (!fsvq->fud)
++		mutex_lock(&fsvq->notification_lock);
++		if (!fsvq->fud) {
++			mutex_unlock(&fsvq->notification_lock);
+-			continue;
++			continue;
+-
++		}
++		fsvq->notification_ready = false;
+-		fuse_dev_put(fsvq->fud);
++		fuse_dev_put(fsvq->fud);
+-		fsvq->fud = NULL;
++		fsvq->fud = NULL;
++		mutex_unlock(&fsvq->notification_lock);
+-	}
++	}
+-}
++}
+-
++
+@@ -553,6 +569,104 @@ static void virtio_fs_hiprio_done_work(struct work_struct *work)
+-	spin_unlock(&fsvq->lock);
++	spin_unlock(&fsvq->lock);
+-}
++}
+-
++
++static int virtio_fs_queue_notification(struct virtio_fs_vq *fsvq,
++					struct virtio_fs_notification *notification)
++{
++	struct scatterlist sg;
++	bool kick;
++	int ret;
++
++	spin_lock(&fsvq->lock);
++	if (!fsvq->connected) {
++		spin_unlock(&fsvq->lock);
++		return -ENODEV;
++	}
++	sg_init_one(&sg, notification->buf, sizeof(notification->buf));
++	ret = virtqueue_add_inbuf(fsvq->vq, &sg, 1, notification, GFP_ATOMIC);
++	if (ret) {
++		spin_unlock(&fsvq->lock);
++		return ret;
++	}
++	kick = virtqueue_kick_prepare(fsvq->vq);
++	spin_unlock(&fsvq->lock);
++	if (kick)
++		virtqueue_notify(fsvq->vq);
++	return 0;
++}
++
++static void virtio_fs_notification_done_work(struct work_struct *work)
++{
++	struct virtio_fs_vq *fsvq = container_of(work, struct virtio_fs_vq,
++						 done_work);
++	struct virtio_fs_notification *notification;
++	unsigned int len;
++
++	for (;;) {
++		spin_lock(&fsvq->lock);
++		virtqueue_disable_cb(fsvq->vq);
++		notification = virtqueue_get_buf(fsvq->vq, &len);
++		if (!notification) {
++			if (!virtqueue_enable_cb(fsvq->vq)) {
++				spin_unlock(&fsvq->lock);
++				continue;
++			}
++			spin_unlock(&fsvq->lock);
++			break;
++		}
++		spin_unlock(&fsvq->lock);
++
++		mutex_lock(&fsvq->notification_lock);
++		if (len <= sizeof(notification->buf) && fsvq->notification_ready)
++			fuse_dev_notify(fsvq->fud, notification->buf, len);
++		mutex_unlock(&fsvq->notification_lock);
++		memset(notification->buf, 0, sizeof(notification->buf));
++		if (virtio_fs_queue_notification(fsvq, notification)) {
++			spin_lock(&fsvq->lock);
++			fsvq->notification_buffers--;
++			spin_unlock(&fsvq->lock);
++			kfree(notification);
++		}
++	}
++}
++
++static void virtio_fs_notification_dispatch_work(struct work_struct *work)
++{
++	(void)work;
++}
++
++static int virtio_fs_fill_notification_queue(struct virtio_fs_vq *fsvq)
++{
++	int ret = 0;
++
++	for (;;) {
++		struct virtio_fs_notification *notification;
++
++		spin_lock(&fsvq->lock);
++		if (fsvq->notification_buffers >= VIRTIO_FS_NOTIFICATION_BUFS) {
++			spin_unlock(&fsvq->lock);
++			break;
++		}
++		fsvq->notification_buffers++;
++		spin_unlock(&fsvq->lock);
++
++		notification = kzalloc_obj(*notification);
++		if (!notification) {
++			ret = -ENOMEM;
++			goto undo_count;
++		}
++		ret = virtio_fs_queue_notification(fsvq, notification);
++		if (ret) {
++			kfree(notification);
++undo_count:
++			spin_lock(&fsvq->lock);
++			fsvq->notification_buffers--;
++			spin_unlock(&fsvq->lock);
++			break;
++		}
++	}
++	return ret;
++}
++
+-static void virtio_fs_request_dispatch_work(struct work_struct *work)
++static void virtio_fs_request_dispatch_work(struct work_struct *work)
+-{
++{
+-	struct fuse_req *req;
++	struct fuse_req *req;
+@@ -930,6 +1044,7 @@ static void virtio_fs_init_vq(struct virtio_fs_vq *fsvq, char *name,
+-{
++{
+-	strscpy(fsvq->name, name, VQ_NAME_LEN);
++	strscpy(fsvq->name, name, VQ_NAME_LEN);
+-	spin_lock_init(&fsvq->lock);
++	spin_lock_init(&fsvq->lock);
++	mutex_init(&fsvq->notification_lock);
+-	INIT_LIST_HEAD(&fsvq->queued_reqs);
++	INIT_LIST_HEAD(&fsvq->queued_reqs);
+-	INIT_LIST_HEAD(&fsvq->end_reqs);
++	INIT_LIST_HEAD(&fsvq->end_reqs);
+-	init_completion(&fsvq->in_flight_zero);
++	init_completion(&fsvq->in_flight_zero);
+@@ -938,6 +1053,9 @@ static void virtio_fs_init_vq(struct virtio_fs_vq *fsvq, char *name,
+-		INIT_WORK(&fsvq->done_work, virtio_fs_requests_done_work);
++		INIT_WORK(&fsvq->done_work, virtio_fs_requests_done_work);
+-		INIT_WORK(&fsvq->dispatch_work,
++		INIT_WORK(&fsvq->dispatch_work,
+-				virtio_fs_request_dispatch_work);
++				virtio_fs_request_dispatch_work);
++	} else if (vq_type == VQ_NOTIFICATION) {
++		INIT_WORK(&fsvq->done_work, virtio_fs_notification_done_work);
++		INIT_WORK(&fsvq->dispatch_work, virtio_fs_notification_dispatch_work);
+-	} else {
++	} else {
+-		INIT_WORK(&fsvq->done_work, virtio_fs_hiprio_done_work);
++		INIT_WORK(&fsvq->done_work, virtio_fs_hiprio_done_work);
+-		INIT_WORK(&fsvq->dispatch_work,
++		INIT_WORK(&fsvq->dispatch_work,
+@@ -967,7 +1085,9 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+-	/* Truncate nr of request queues to nr_cpu_id */
++	/* Truncate nr of request queues to nr_cpu_id */
+-	fs->num_request_queues = min_t(unsigned int, fs->num_request_queues,
++	fs->num_request_queues = min_t(unsigned int, fs->num_request_queues,
+-					nr_cpu_ids);
++					nr_cpu_ids);
+-	fs->nvqs = VQ_REQUEST + fs->num_request_queues;
++	fs->has_notifications = virtio_has_feature(vdev, VIRTIO_FS_F_NOTIFICATION);
++	fs->notification_queue = VQ_REQUEST + fs->num_request_queues;
++	fs->nvqs = fs->notification_queue + fs->has_notifications;
+-	fs->vqs = kzalloc_objs(fs->vqs[VQ_HIPRIO], fs->nvqs);
++	fs->vqs = kzalloc_objs(fs->vqs[VQ_HIPRIO], fs->nvqs);
+-	if (!fs->vqs)
++	if (!fs->vqs)
+-		return -ENOMEM;
++		return -ENOMEM;
+@@ -987,7 +1107,7 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+-	vqs_info[VQ_HIPRIO].name = fs->vqs[VQ_HIPRIO].name;
++	vqs_info[VQ_HIPRIO].name = fs->vqs[VQ_HIPRIO].name;
+-
++
+-	/* Initialize the requests virtqueues */
++	/* Initialize the requests virtqueues */
+-	for (i = VQ_REQUEST; i < fs->nvqs; i++) {
++	for (i = VQ_REQUEST; i < fs->notification_queue; i++) {
+-		char vq_name[VQ_NAME_LEN];
++		char vq_name[VQ_NAME_LEN];
+-
++
+-		snprintf(vq_name, VQ_NAME_LEN, "requests.%u", i - VQ_REQUEST);
++		snprintf(vq_name, VQ_NAME_LEN, "requests.%u", i - VQ_REQUEST);
+@@ -995,6 +1115,12 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+-		vqs_info[i].callback = virtio_fs_vq_done;
++		vqs_info[i].callback = virtio_fs_vq_done;
+-		vqs_info[i].name = fs->vqs[i].name;
++		vqs_info[i].name = fs->vqs[i].name;
+-	}
++	}
++	if (fs->has_notifications) {
++		i = fs->notification_queue;
++		virtio_fs_init_vq(&fs->vqs[i], "notifications", VQ_NOTIFICATION);
++		vqs_info[i].callback = virtio_fs_vq_done;
++		vqs_info[i].name = fs->vqs[i].name;
++	}
+-
++
+-	ret = virtio_find_vqs(vdev, fs->nvqs, vqs, vqs_info, &desc);
++	ret = virtio_find_vqs(vdev, fs->nvqs, vqs, vqs_info, &desc);
+-	if (ret < 0)
++	if (ret < 0)
+@@ -1017,6 +1143,16 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+-/* Free virtqueues (device must already be reset) */
++/* Free virtqueues (device must already be reset) */
+-static void virtio_fs_cleanup_vqs(struct virtio_device *vdev)
++static void virtio_fs_cleanup_vqs(struct virtio_device *vdev)
+-{
++{
++	struct virtio_fs *fs = vdev->priv;
++
++	if (fs && fs->has_notifications && fs->vqs) {
++		struct virtio_fs_vq *fsvq = &fs->vqs[fs->notification_queue];
++		struct virtio_fs_notification *notification;
++
++		while ((notification = virtqueue_detach_unused_buf(fsvq->vq)))
++			kfree(notification);
++		fsvq->notification_buffers = 0;
++	}
+-	vdev->config->del_vqs(vdev);
++	vdev->config->del_vqs(vdev);
+-}
++}
+-
++
+@@ -1237,7 +1373,9 @@ static const struct virtio_device_id id_table[] = {
+-	{},
++	{},
+-};
++};
+-
++
+-static const unsigned int feature_table[] = {};
++static const unsigned int feature_table[] = {
++	VIRTIO_FS_F_NOTIFICATION,
++};
+-
++
+-static struct virtio_driver virtio_fs_driver = {
++static struct virtio_driver virtio_fs_driver = {
+-	.driver.name		= KBUILD_MODNAME,
++	.driver.name		= KBUILD_MODNAME,
+@@ -1607,10 +1745,16 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
+-		struct virtio_fs_vq *fsvq = &fs->vqs[i];
++		struct virtio_fs_vq *fsvq = &fs->vqs[i];
+-
++
+-		fuse_dev_install(fsvq->fud, fc);
++		fuse_dev_install(fsvq->fud, fc);
++		mutex_lock(&fsvq->notification_lock);
++		fsvq->notification_ready = true;
++		mutex_unlock(&fsvq->notification_lock);
+-	}
++	}
+-
++
+-	/* Previous unmount will stop all queues. Start these again */
++	/* Previous unmount will stop all queues. Start these again */
+-	virtio_fs_start_all_queues(fs);
++	virtio_fs_start_all_queues(fs);
++	if (fs->has_notifications &&
++	    virtio_fs_fill_notification_queue(&fs->vqs[fs->notification_queue]))
++		pr_warn("virtio-fs: could not fill notification queue\n");
+-	fuse_send_init(fm);
++	fuse_send_init(fm);
+-	mutex_unlock(&virtio_fs_mutex);
++	mutex_unlock(&virtio_fs_mutex);
+-	return 0;
++	return 0;
+diff --git a/include/uapi/linux/virtio_fs.h b/include/uapi/linux/virtio_fs.h
+index bea3829..5060130 100644
+--- a/include/uapi/linux/virtio_fs.h
++++ b/include/uapi/linux/virtio_fs.h
+@@ -16,6 +16,9 @@ struct virtio_fs_config {
+-	__le32 num_request_queues;
++	__le32 num_request_queues;
+-} __attribute__((packed));
++} __attribute__((packed));
+-
++
++/* Gantry extension: one device-to-driver FUSE notification virtqueue. */
++#define VIRTIO_FS_F_NOTIFICATION 23
++
+-/* For the id field in virtio_pci_shm_cap */
++/* For the id field in virtio_pci_shm_cap */
+-#define VIRTIO_FS_SHMCAP_ID_CACHE 0
++#define VIRTIO_FS_SHMCAP_ID_CACHE 0
+-
++

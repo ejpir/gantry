@@ -14,6 +14,7 @@ on:
       - '**/go.sum'
       - 'config/**'
       - 'guest/**'
+      - 'patches/**'
       - 'integrations/**/*.js'
       - 'integrations/**/*.sh'
       - 'integrations/**/*.ts'
@@ -30,6 +31,7 @@ on:
       - '**/go.sum'
       - 'config/**'
       - 'guest/**'
+      - 'patches/**'
       - 'integrations/**/*.js'
       - 'integrations/**/*.sh'
       - 'integrations/**/*.ts'
@@ -97,8 +99,9 @@ jobs:
   # 4K runsc twin; x86_64 is 4K-only.
   #
   # The kernel version is PINNED (VERSION in scripts/mkkernel.sh, with a
-  # pinned tarball sha256) — CI never floats to "latest". A bump touches
-  # ONLY the script; this job derives the version for its paths/keys.
+  # pinned tarball sha256) — CI never floats to "latest". A bump updates
+  # the script, versioned patches, and regenerated config baselines; this job
+  # derives the version for its paths/keys and builds that exact set.
   #
   # Caching: ccache only. The build tree is too big for the 2 GB
   # cache-entry limit on arm64 (two configs in one tree), a job that

@@ -42,5 +42,5 @@ echo "== build initramfs (scripted + interactive variants)"
 /tmp/mkinitramfs -out "$ARTIFACTS/initramfs-shell.cpio.gz" init=/tmp/gantry-init bin/busybox="$BUSYBOX"
 
 echo "done: $OUT"
-echo "Run with KVM:  $OUT run -kernel $ARTIFACTS/nerdbox-kernel-arm64_4k -initrd $ARTIFACTS/initramfs.cpio.gz"
+echo "Run with KVM:  $OUT run -kernel $ARTIFACTS/gantry-kernel-arm64-4k -initrd $ARTIFACTS/initramfs.cpio.gz"
 echo "No KVM? Test guest:  $ROOT/scripts/run-qemu-test.sh"

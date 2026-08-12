@@ -15,7 +15,7 @@ ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
 mkdir -p "$ARTIFACTS"
 
 BIN="${GANTRY_BIN:-$ARTIFACTS/gantry-darwin-arm64}"
-KERNEL="${KERNEL:-$ARTIFACTS/nerdbox-kernel-arm64}"   # 16K pages — the macOS build
+KERNEL="${KERNEL:-$ARTIFACTS/gantry-kernel-arm64}"   # 16K pages — the macOS build
 ROOTFS="$ARTIFACTS/nerdbox-rootfs-arm64.erofs"
 INITRD="$ARTIFACTS/initramfs-shell.cpio.gz"
 HOSTCTL="$ARTIFACTS/hostctl-darwin-arm64"

@@ -36,12 +36,12 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
 mkdir -p "$ARTIFACTS"
 
-VERSION=7.0.12   # must match config/gantry-kernel-*.config lineage
+VERSION=7.1.8   # must match config/gantry-kernel-*.config lineage
 # Fail closed on the tarball content: the kernels built here are published
 # as release artifacts, so they must come from exactly the audited bytes —
 # TLS to cdn.kernel.org is transport security, not content provenance.
 # From https://cdn.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
-TAR_SHA256=57edc9a41efc1ca6b797afa8f4a587a30da2af6bca7356eb56e1e1a4ada265da
+TAR_SHA256=ff01dcb449279d5b4cfccdb01fee639cf5ff1803f1749a77844dd33915422c49
 ARCH=${1:-$(uname -m)}
 case "$ARCH" in
 aarch64|arm64) ARCH=arm64 ;;

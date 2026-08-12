@@ -8,7 +8,7 @@
 set -e
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
-KERNEL="${KERNEL:-$ARTIFACTS/nerdbox-kernel-arm64_4k}"
+KERNEL="${KERNEL:-$ARTIFACTS/gantry-kernel-arm64-4k}"
 INITRD="$ARTIFACTS/initramfs-shell.cpio.gz"
 [ -f "$INITRD" ] || "$ROOT/scripts/build.sh"
 
