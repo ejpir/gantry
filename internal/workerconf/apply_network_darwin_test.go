@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -38,7 +39,7 @@ func TestApplyNetworkConfinedDarwin(t *testing.T) {
 	}
 	for _, marker := range []string{
 		"INHERITED-CHANNEL-OK", "TCP-LISTEN-OK", "UDP-LISTEN-OK",
-		"UNIX-SOCKET-DENIED", "RESOLVER-CONFIG-READABLE",
+		"UNIX-CONNECT-DENIED", "RESOLVER-CONFIG-READABLE",
 		"BROKERED-LOG-PIPE-OK", "LOG-PATH-DENIED", "RUNTIME-SYSCTL-OK",
 	} {
 		if !strings.Contains(text, marker) {
@@ -75,6 +76,12 @@ func networkConfinedDarwinHelper() {
 		_ = syscall.Close(fds[0])
 		_ = syscall.Close(fds[1])
 	}()
+	ipcPath := filepath.Join(os.Getenv("WORKERCONF_NETWORK_DIR"), "supervisor.sock")
+	ipc, err := net.Listen("unix", ipcPath)
+	if err != nil {
+		darwinHelperFatal("create supervisor Unix listener", err)
+	}
+	defer func() { _ = ipc.Close() }()
 
 	spec := NetworkSpec(2, "")
 	report, err := Apply(spec)
@@ -118,16 +125,19 @@ func networkConfinedDarwinHelper() {
 	_ = udp.Close()
 	println("UDP-LISTEN-OK")
 
-	created, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	// A socketpair is entirely process-local and grants no new authority, so
+	// Seatbelt may permit it. Connecting to a listener created before applying
+	// the profile is the actual local-IPC boundary: only inherited descriptors
+	// may connect the worker to its supervisor.
+	created, err := net.DialTimeout("unix", ipcPath, time.Second)
 	if err == nil {
-		_ = syscall.Close(created[0])
-		_ = syscall.Close(created[1])
-		darwinHelperFatal("new Unix socketpair unexpectedly succeeded", nil)
+		_ = created.Close()
+		darwinHelperFatal("new Unix connection unexpectedly succeeded", nil)
 	}
 	if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
-		darwinHelperFatal("new Unix socketpair", err)
+		darwinHelperFatal("new Unix connection", err)
 	}
-	println("UNIX-SOCKET-DENIED")
+	println("UNIX-CONNECT-DENIED")
 
 	if data, err := os.ReadFile("/etc/resolv.conf"); err != nil || len(data) == 0 {
 		darwinHelperFatal("read resolver config", err)
