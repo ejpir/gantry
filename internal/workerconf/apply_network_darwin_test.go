@@ -30,8 +30,15 @@ func TestApplyNetworkConfinedDarwin(t *testing.T) {
 		return
 	}
 	workdir := t.TempDir()
+	ipcDir, err := os.MkdirTemp("/tmp", "gantry-workerconf-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(ipcDir) })
+	ipcPath := filepath.Join(ipcDir, "supervisor.sock")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestApplyNetworkConfinedDarwin$", "-test.v")
-	cmd.Env = append(os.Environ(), "WORKERCONF_NETWORK_DARWIN_HELPER=1", "GODEBUG=netdns=go", "WORKERCONF_NETWORK_DIR="+workdir)
+	cmd.Env = append(os.Environ(), "WORKERCONF_NETWORK_DARWIN_HELPER=1", "GODEBUG=netdns=go",
+		"WORKERCONF_NETWORK_DIR="+workdir, "WORKERCONF_NETWORK_IPC="+ipcPath)
 	output, err := cmd.CombinedOutput()
 	text := string(output)
 	if err != nil {
@@ -76,7 +83,7 @@ func networkConfinedDarwinHelper() {
 		_ = syscall.Close(fds[0])
 		_ = syscall.Close(fds[1])
 	}()
-	ipcPath := filepath.Join(os.Getenv("WORKERCONF_NETWORK_DIR"), "supervisor.sock")
+	ipcPath := os.Getenv("WORKERCONF_NETWORK_IPC")
 	ipc, err := net.Listen("unix", ipcPath)
 	if err != nil {
 		darwinHelperFatal("create supervisor Unix listener", err)
