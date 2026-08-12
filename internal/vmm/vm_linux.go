@@ -84,7 +84,7 @@ func (kvmARM64Platform) run(m *Machine) error {
 	}
 	for _, vc := range b.vcpus {
 		vi := kvmVcpuInit{target: kvmArmTargetGenericV8}
-		vi.features[0] = (1 << kvmArmVcpuPowerOff) | (1 << kvmArmVcpuPSCI02)
+		vi.features[0] = kvmArmVCPUFeatures(vc.id)
 		if err := ioctl(vc.fd, kvmArmVcpuInit, unsafe.Pointer(&vi)); err != nil {
 			return fmt.Errorf("KVM_ARM_VCPU_INIT(%d): %w", vc.id, err)
 		}
@@ -135,7 +135,10 @@ func (b *kvmBackend) createGIC() error {
 	if err := set(kvmDevArmVGICGrpAddr, kvmVGICV3AddrTypeDist, gicdBase); err != nil {
 		return fmt.Errorf("GIC dist addr: %w", err)
 	}
-	if err := set(kvmDevArmVGICGrpAddr, kvmVGICV3AddrTypeRedist, gicrBase); err != nil {
+	// Legacy REDIST allocates only one redistributor. REDIST_REGION packs the
+	// region count into bits 63:52 and is required for SMP.
+	redistRegion := kvmArmRedistRegion(len(b.vcpus))
+	if err := set(kvmDevArmVGICGrpAddr, kvmVGICV3AddrTypeRedistRegion, redistRegion); err != nil {
 		return fmt.Errorf("GIC redist addr: %w", err)
 	}
 	if err := set(kvmDevArmVGICGrpCtrl, kvmDevArmVGICCtrlInit, 0); err != nil {
@@ -146,11 +149,11 @@ func (b *kvmBackend) createGIC() error {
 
 // irqLine asserts/deasserts a GIC interrupt line (INTID numbering).
 func (b *kvmBackend) irqLine(irq int, level bool) {
-	il := kvmIRQLevel{irq: uint32(irq)}
+	il := kvmIRQLevel{irq: kvmArmSPIIRQ(irq)}
 	if level {
 		il.level = 1
 	}
-	_ = ioctl(b.vcpus[0].fd, kvmIRQLine, unsafe.Pointer(&il)) // best effort
+	_ = ioctl(b.vmFD, kvmIRQLine, unsafe.Pointer(&il)) // best effort
 }
 
 func (vc *kvmVCPU) setReg(wordIndex uint64, val uint64) error {
@@ -185,6 +188,7 @@ func (b *kvmBackend) bootLoop() error {
 		go m.uart.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
+	m.bootTiming.start("vCPU entered KVM")
 	return b.runVCPU(vc, b.runVCPULoop)
 }
 

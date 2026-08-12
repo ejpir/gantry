@@ -17,6 +17,7 @@ const (
 	gicdBase = 0x08000000 // GICv3 distributor, 64 KiB
 	gicdSize = 0x10000
 	gicrBase = 0x080A0000 // GICv3 redistributors (2x64K frames per vCPU)
+	gicrSize = 0x20000
 
 	uartBase = 0x09000000 // PL011
 	uartSize = 0x1000
@@ -188,18 +189,16 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.propU32("reg", 0, ramBase, uint32(memSize>>32), uint32(memSize))
 	f.endNode()
 
-	// /cpus — one node per vCPU. reg is the MPIDR affinity: Aff1 = index
-	// (reg = i<<8), matching the MPIDRs the VMM assigns (and KVM's own
-	// vcpu->mpidr scheme). The kernel passes this value as the PSCI
-	// CPU_ON target, so the VMM decodes the vCPU id back from Aff1.
+	// /cpus — one node per vCPU. KVM assigns vCPU IDs to MPIDR Aff0, so
+	// these exact values are also the PSCI CPU_ON targets.
 	f.beginNode("cpus")
 	f.propU32("#address-cells", 1)
 	f.propU32("#size-cells", 0)
 	for i := 0; i < vcpus; i++ {
-		f.beginNode(fmt.Sprintf("cpu@%x", i<<8))
+		f.beginNode(fmt.Sprintf("cpu@%x", i))
 		f.propStr("device_type", "cpu")
 		f.propStr("compatible", "arm,armv8")
-		f.propU32("reg", uint32(i<<8))
+		f.propU32("reg", uint32(i))
 		f.propStr("enable-method", "psci")
 		f.endNode()
 	}
@@ -222,7 +221,7 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.propU32("#address-cells", 2)
 	f.propU32("#size-cells", 2)
 	f.propEmpty("interrupt-controller")
-	f.propU32("reg", 0, gicdBase, 0, gicdSize, 0, gicrBase, 0, uint32(vcpus)*0x20000)
+	f.propU32("reg", 0, gicdBase, 0, gicdSize, 0, gicrBase, 0, uint32(vcpus)*gicrSize)
 	f.propU32("#redistributor-regions", 1)
 	f.propU32("phandle", 1)
 	f.endNode()
