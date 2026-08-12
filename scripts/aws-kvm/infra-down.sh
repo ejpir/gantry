@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REGION="${REGION:-eu-west-1}"
-NAME=gantry-kvm-test
+NAME="${NAME:-gantry-kvm-test}"
 export AWS_DEFAULT_REGION="$REGION"
 TERMINATE=0; KEEP_VPCE=0
 for a in "$@"; do case "$a" in --terminate) TERMINATE=1;; --keep-vpce) KEEP_VPCE=1;; esac; done

@@ -6,4 +6,7 @@ package fuse
 
 import "fmt"
 
-func Print(obj any) string { return fmt.Sprintf("%+v", obj) }
+// %#v deliberately bypasses String methods. Several FUSE structs implement
+// String by calling Print, so the ordinary %v family recurses until the host
+// process exhausts its stack when protocol debugging is enabled.
+func Print(obj any) string { return fmt.Sprintf("%#v", obj) }

@@ -299,12 +299,10 @@ func (ps *ProtocolServer) HandleRequest(in [][]byte, out [][]byte) (int, Status)
 	// for both input and output.
 	//
 	// Our input data types have the InHeader embedded in the FooIn
-	// types, so we can never fully avoid copying.
-	inTogether := make([]byte, iovLen(in[:min(2, len(in))]))
-	copy(inTogether, in[0])
-	if len(in) > 1 {
-		copy(inTogether[len(in[0]):], in[1])
-	}
+	// types, so we can never fully avoid copying. A virtqueue may split both
+	// request data and payload at arbitrary descriptor/page boundaries.
+	inTogether := make([]byte, iovLen(in))
+	copyIOVToBytes(inTogether, in)
 	h, inSize, outSize, outPayloadSize, errno := parseRequest(inTogether, &ps.kernelSettings)
 	if errno != 0 {
 		return 0, errno
@@ -315,13 +313,10 @@ func (ps *ProtocolServer) HandleRequest(in [][]byte, out [][]byte) (int, Status)
 		suppressReply: h.SuppressReply,
 	}
 
-	if len(in) > 2 {
-		req.inPayload = in[2]
-	} else {
-		req.inPayload = inTogether[inSize:]
-	}
+	req.inPayload = inTogether[inSize:]
 
 	startOut := out
+	var payloadOut [][]byte
 	if !h.SuppressReply {
 		// validate the shape of the output iov. If we fail any of this, it's probably a programming error on our side, but
 		// since we can't trust the guest, be paranoid and return EIO instead.
@@ -343,32 +338,50 @@ func (ps *ProtocolServer) HandleRequest(in [][]byte, out [][]byte) (int, Status)
 			}
 		}
 
-		if len(out) > 0 {
-			if len(out[0]) < outPayloadSize {
-				ps.opts.Logger.Printf("op %s: got %v, payload iov should have %d bytes", h.Name, iovLens(startOut), outPayloadSize)
-				return 0, EIO
-			}
-			req.outPayload = out[0]
-			out = out[1:]
-		} else if outPayloadSize != 0 {
+		payloadOut = out
+		if iovLen(payloadOut) < outPayloadSize {
 			ps.opts.Logger.Printf("op %s: got %v, payload iov should have %d bytes", h.Name, iovLens(startOut), outPayloadSize)
 			return 0, EIO
 		}
+		if outPayloadSize != 0 {
+			req.outPayload = make([]byte, outPayloadSize)
+		}
 	}
 
-	beforePayload := req.outPayload
 	ps.protocolServer.handleRequest(h, &req)
-	if len(req.outPayload) > 0 && len(beforePayload) > 0 &&
-		&beforePayload[0] != &req.outPayload[0] {
-		n := copy(beforePayload, req.outPayload)
-		req.outPayload = beforePayload[:n]
+	if len(req.outPayload) > outPayloadSize {
+		ps.opts.Logger.Printf("op %s: produced %d payload bytes, response has room for %d", h.Name, len(req.outPayload), outPayloadSize)
+		return 0, EIO
 	}
+	copyBytesToIOV(payloadOut, req.outPayload)
 
 	// Per the virtio spec, vring_used_elem.len should hold the
 	// number of bytes the device wrote to the descriptor
 	// chain. Returning more  inflates the live-migration dirty-page
 	// log and violates the spec.
 	return int(sizeOfOutHeader) + len(req.outDataBuf) + len(req.outPayload), 0
+}
+
+func copyIOVToBytes(dst []byte, src [][]byte) int {
+	offset := 0
+	for _, part := range src {
+		offset += copy(dst[offset:], part)
+		if offset == len(dst) {
+			break
+		}
+	}
+	return offset
+}
+
+func copyBytesToIOV(dst [][]byte, src []byte) int {
+	offset := 0
+	for _, part := range dst {
+		offset += copy(part, src[offset:])
+		if offset == len(src) {
+			break
+		}
+	}
+	return offset
 }
 
 func iovLens(in [][]byte) []int {

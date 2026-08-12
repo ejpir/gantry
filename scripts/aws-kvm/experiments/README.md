@@ -10,6 +10,12 @@ python3 scripts/aws-kvm/ssm.py i-INSTANCE \
   scripts/aws-kvm/experiments/aws-x86-final-battery.sh 900
 ```
 
+For ARM64, `scripts/aws-kvm/infra-up-arm64.sh` and
+`infra-down-arm64.sh` select the dedicated `gantry-kvm-test-arm64` tag,
+AL2023 ARM64 AMI, and `c7g.metal`; see the parent README. The retained
+`aws-arm-*.sh`, cross-architecture SMP, and final-timing files were compared
+against their original `/tmp` copies and are byte-for-byte identical.
+
 All benchmark scripts start with `set +e`, as required by `ssm.py`, and clean
 up the sandboxes they create. File names inside each script record the exact
 experimental binaries, kernels, and root filesystems it used; either stage

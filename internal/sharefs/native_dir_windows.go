@@ -231,10 +231,11 @@ func (d *winShareDirStream) Seekdir(_ context.Context, off uint64) syscall.Errno
 	if d.export == nil || !d.export.usable() {
 		return syscall.ESTALE
 	}
-	if off > d.offset {
-		// Offsets are cookies this stream previously emitted. Reject an
-		// invented forward cookie without replaying a potentially huge host
-		// directory merely to discover that it does not exist.
+	// Zero-message OPENDIR creates a fresh stream for each READDIR request, so
+	// a legitimate continuation cookie is forward relative to a new stream.
+	// Replay from the pinned directory handle, bounded by the same live-node
+	// budget that limits guest-retained share state.
+	if off > uint64(maxLiveNodes)+2 {
 		return syscall.EINVAL
 	}
 	if off == d.offset {

@@ -12,7 +12,10 @@ import (
 )
 
 func winOpenAccess(flags uint32) uint32 {
-	access := uint32(0)
+	// FUSE CREATE/OPEN replies always include attributes gathered from the
+	// resulting handle. O_WRONLY does not otherwise grant FILE_READ_ATTRIBUTES
+	// on Windows, so request it independently of the guest data-access mode.
+	access := uint32(windows.FILE_READ_ATTRIBUTES)
 	switch flags & linuxOAccmode {
 	case 0:
 		access |= windows.FILE_GENERIC_READ

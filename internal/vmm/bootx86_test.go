@@ -92,6 +92,18 @@ func TestSetupX86BootPageTables(t *testing.T) {
 	}
 }
 
+func TestISAIRQGSI(t *testing.T) {
+	for irq := 0; irq < 16; irq++ {
+		want := irq
+		if irq == 0 {
+			want = 2
+		}
+		if got := isaIRQGSI(irq); got != want {
+			t.Errorf("ISA IRQ%d maps to GSI%d, want GSI%d", irq, got, want)
+		}
+	}
+}
+
 func TestSetupX86BootMPS(t *testing.T) {
 	ram := make([]byte, 16<<20)
 	if err := setupX86Boot(ram, "x", 512<<20, 4); err != nil {
@@ -229,5 +241,18 @@ func TestInsertKernelArgs(t *testing.T) {
 	}
 	if got := insertKernelArgs("console=ttyS0", "a=b"); got != "console=ttyS0 a=b" {
 		t.Errorf("no-separator case: %q", got)
+	}
+}
+
+func TestKernelArgPresent(t *testing.T) {
+	cmdline := "console=ttyS0 tsc_early_khz=2900000 -- tsc_early_khz=guest-flag"
+	if !kernelArgPresent(cmdline, "tsc_early_khz") {
+		t.Fatal("kernelArgPresent missed an assigned kernel argument")
+	}
+	if kernelArgPresent("console=ttyS0 -- tsc_early_khz=2900000", "tsc_early_khz") {
+		t.Fatal("kernelArgPresent inspected arguments after --")
+	}
+	if kernelArgPresent("console=ttyS0 notsc_early_khz=1", "tsc_early_khz") {
+		t.Fatal("kernelArgPresent accepted a suffix match")
 	}
 }

@@ -117,7 +117,7 @@ func probeNetDial(noNetwork bool) PropertyResult {
 	if os.IsPermission(err) || errors.Is(err, syscall.EPERM) {
 		return PropertyResult{Property: PropNetDial, State: StateEnforced, Detail: errString(err)}
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if isConnectionRefused(err) {
 		return PropertyResult{Property: PropNetDial, State: StateUnenforced, Detail: "connection refused (socket syscalls work)"}
 	}
 	return PropertyResult{Property: PropNetDial, State: StateIndeterminate, Detail: errString(err)}

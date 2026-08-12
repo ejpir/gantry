@@ -182,7 +182,7 @@ sha256_file() {
 		fi
 	fi
 } >"$OUT/metadata.tsv"
-printf 'sweep\tcpus\tmem_mib\trun\tdaemon_to_ready_ms\tdaemon_to_vcpu_ms\tvcpu_to_ready_ms\tcli_to_ready_ms\n' >"$raw"
+printf 'sweep\tcpus\tmem_mib\trun\tdaemon_to_ready_ms\tdaemon_to_vcpu_ms\tvcpu_to_ready_ms\tlauncher_to_resolved_ms\tlauncher_to_spawn_ms\tlauncher_to_ready_ms\tlauncher_to_commit_ms\tcli_to_ready_ms\n' >"$raw"
 
 cleanup() {
 	"$GANTRY" delete "$NAME" >/dev/null 2>&1 || true
@@ -202,7 +202,8 @@ save_sandbox_logs() {
 
 # Python starts its external timer immediately before spawning Gantry, so
 # Python's own startup is outside that sample. Internal raw timings come from
-# the daemon/worker's shared low-overhead boot clock.
+# the daemon/worker's shared low-overhead boot clock. Launcher milestones are
+# emitted into the CLI log and parsed separately below.
 measure_start() {
 	cpus=$1
 	mem=$2
@@ -304,6 +305,45 @@ print(f"{elapsed_ms:.3f}")
 PY
 }
 
+launcher_metrics() {
+	python3 - "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+text = Path(sys.argv[1]).read_text(errors="replace")
+
+def milestone(label):
+    match = re.search(
+        rf"boot-timing:\s+{re.escape(label)}\s+([0-9.]+) ms",
+        text,
+    )
+    if match is None:
+        sys.stderr.write(f"missing {label} launcher milestone\n")
+        raise SystemExit(1)
+    return float(match.group(1))
+
+resolved = milestone("launcher configuration resolved")
+published = milestone("launcher configuration published")
+spawned = milestone("launcher daemon spawned")
+ready = milestone("launcher readiness received")
+persisted = milestone("launcher configuration persisted")
+committed = milestone("launcher launch committed")
+if not (
+    resolved <= published <= spawned <= ready <= committed
+    and published <= persisted <= committed
+):
+    sys.stderr.write(
+        "launcher milestones are out of order: "
+        f"resolved={resolved:.3f} published={published:.3f} "
+        f"spawned={spawned:.3f} ready={ready:.3f} "
+        f"persisted={persisted:.3f} committed={committed:.3f}\n"
+    )
+    raise SystemExit(1)
+print(f"{resolved:.3f} {spawned:.3f} {ready:.3f} {committed:.3f}")
+PY
+}
+
 boot_metrics() {
 	python3 - "$sandbox_dir/daemon.log" "$sandbox_dir/worker-vmm.log" <<'PY'
 from pathlib import Path
@@ -379,11 +419,22 @@ run_one() {
 	daemon_ready=$1
 	daemon_vcpu=$2
 	guest_ready=$3
-	printf 'daemon %9s ms; guest %9s ms; CLI %9s ms\n' \
-		"$daemon_ready" "$guest_ready" "$cli_elapsed"
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	if ! launcher=$(launcher_metrics "$cli_log"); then
+		echo "FAILED (could not read launcher milestones)"
+		save_sandbox_logs "$label-failed"
+		exit 1
+	fi
+	set -- $launcher
+	launcher_resolved=$1
+	launcher_spawned=$2
+	launcher_ready=$3
+	launcher_committed=$4
+	printf 'daemon %9s ms; guest %9s ms; CLI %9s ms (resolve %s; spawn %s)\n' \
+		"$daemon_ready" "$guest_ready" "$cli_elapsed" "$launcher_resolved" "$launcher_spawned"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 		"$sweep" "$cpus" "$mem" "$run" "$daemon_ready" "$daemon_vcpu" \
-		"$guest_ready" "$cli_elapsed" >>"$raw"
+		"$guest_ready" "$launcher_resolved" "$launcher_spawned" "$launcher_ready" \
+		"$launcher_committed" "$cli_elapsed" >>"$raw"
 
 	if [ "$POST_READY_SECONDS" != 0 ]; then
 		sleep "$POST_READY_SECONDS"
@@ -417,9 +468,16 @@ if ! warmup_metrics=$(boot_metrics); then
 	save_sandbox_logs warmup-failed
 	exit 1
 fi
+if ! warmup_launcher=$(launcher_metrics "$warmup_log"); then
+	save_sandbox_logs warmup-failed
+	exit 1
+fi
 set -- $warmup_metrics
-printf '  cpus=%s mem=%s MiB: daemon %s ms; guest %s ms; CLI %s ms\n' \
-	"$BASE_CPUS" "$BASE_MEM" "$1" "$3" "$warmup_ms"
+daemon_ready=$1
+guest_ready=$3
+set -- $warmup_launcher
+printf '  cpus=%s mem=%s MiB: daemon %s ms; guest %s ms; CLI %s ms (resolve %s; spawn %s)\n' \
+	"$BASE_CPUS" "$BASE_MEM" "$daemon_ready" "$guest_ready" "$warmup_ms" "$1" "$2"
 if [ "$POST_READY_SECONDS" != 0 ]; then
 	sleep "$POST_READY_SECONDS"
 fi
@@ -469,6 +527,10 @@ metrics = (
     "daemon_to_ready_ms",
     "daemon_to_vcpu_ms",
     "vcpu_to_ready_ms",
+    "launcher_to_resolved_ms",
+    "launcher_to_spawn_ms",
+    "launcher_to_ready_ms",
+    "launcher_to_commit_ms",
     "cli_to_ready_ms",
 )
 

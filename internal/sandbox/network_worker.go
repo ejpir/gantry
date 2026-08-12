@@ -34,6 +34,7 @@ type netWorker struct {
 	portMu         sync.Mutex // serializes each complete port transaction
 	conf           *workerconf.Report
 	diagnostics    *boundedLogPipe
+	containment    workerContainment
 	diagnosticOnce sync.Once
 	diagnosticErr  error
 
@@ -58,6 +59,10 @@ func (w *netWorker) Err() error { return w.lifecycle.Err() }
 
 func (w *netWorker) setDead(err error) {
 	w.diagnosticOnce.Do(func() {
+		if w.containment != nil {
+			w.diagnosticErr = errors.Join(w.diagnosticErr, w.containment.Close())
+			w.containment = nil
+		}
 		if w.diagnostics != nil {
 			w.diagnosticErr = w.diagnostics.Close()
 		}

@@ -15,20 +15,20 @@ import "sync"
 const (
 	ioApicMMIOBase = 0xfec00000
 	ioApicMMIOSize = 0x20
-	ioApicID       = 0x20 // matches the MPS table entry
 	ioApicPins     = 24
 )
 
 type ioApic struct {
 	mu      sync.Mutex
+	id      uint32
 	regSel  uint32
 	rte     [ioApicPins]uint64
 	lines   [ioApicPins]bool
 	deliver func(dest uint32, vector uint32, level bool)
 }
 
-func newIOApic(deliver func(dest, vector uint32, level bool)) *ioApic {
-	a := &ioApic{deliver: deliver}
+func newIOApic(id uint32, deliver func(dest, vector uint32, level bool)) *ioApic {
+	a := &ioApic{id: id & 0xf, deliver: deliver}
 	for i := range a.rte {
 		a.rte[i] = 1 << 16 // masked
 	}
@@ -38,7 +38,7 @@ func newIOApic(deliver func(dest, vector uint32, level bool)) *ioApic {
 func (a *ioApic) readReg(reg uint32) uint32 {
 	switch {
 	case reg == 0x00:
-		return ioApicID << 24
+		return a.id << 24
 	case reg == 0x01:
 		return 0x11 | (ioApicPins-1)<<16 // version 0x11, max entry 23
 	case reg == 0x02:
@@ -56,7 +56,10 @@ func (a *ioApic) readReg(reg uint32) uint32 {
 func (a *ioApic) writeReg(reg, val uint32) {
 	switch {
 	case reg == 0x00:
-		return // ID: ignore writes
+		// The architectural ID field is writable. Linux repairs firmware ID
+		// conflicts through this register and verifies the result by reading it
+		// back, so ignoring the write causes repeated APIC MMIO exits.
+		a.id = (val >> 24) & 0xf
 	case reg >= 0x10 && reg < 0x10+2*ioApicPins:
 		i := (reg - 0x10) / 2
 		if reg&1 == 0 {

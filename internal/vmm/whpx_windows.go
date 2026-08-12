@@ -17,8 +17,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -26,6 +29,7 @@ import (
 
 var (
 	winhv                = windows.NewLazySystemDLL("WinHvPlatform.dll")
+	procGetCapability    = winhv.NewProc("WHvGetCapability")
 	procCreatePartition  = winhv.NewProc("WHvCreatePartition")
 	procSetPartitionProp = winhv.NewProc("WHvSetPartitionProperty")
 	procSetupPartition   = winhv.NewProc("WHvSetupPartition")
@@ -58,6 +62,11 @@ const (
 	whvRegCr3    = 0x1e
 	whvRegCr4    = 0x1f
 	whvRegEfer   = 0x2001
+	// The split-PIC path injects a CPU interrupt directly, bypassing WHPX's
+	// emulated LAPIC. Deliverability notifications make the vCPU exit once IF
+	// and the interrupt-shadow state permit the next queued vector.
+	whvRegPendingInterruption = 0x80000000
+	whvRegDeliverability      = 0x80000004
 )
 
 // exit reasons
@@ -66,6 +75,7 @@ const (
 	whvExitIoPort        = 0x02
 	whvExitUnrecoverable = 0x04
 	whvExitInvalidVpReg  = 0x05
+	whvExitInterruptWin  = 0x07
 	whvExitHalt          = 0x08
 	whvExitMsrAccess     = 0x1000
 	whvExitCpuid         = 0x1001
@@ -75,6 +85,7 @@ const (
 const (
 	whvPropProcessorCount         = 0x00001fff
 	whvPropLocalApicEmulationMode = 0x00001005
+	whvCapProcessorClockFrequency = 0x00001004
 	whvMapRead                    = 0x1
 	whvMapWrite                   = 0x2
 	whvMapExecute                 = 0x4
@@ -89,19 +100,56 @@ func whvCall(name string, proc *windows.LazyProc, args ...uintptr) error {
 	return nil
 }
 
+func whpxProcessorClockFrequency() (uint64, error) {
+	var frequency uint64
+	var written uint32
+	if err := whvCall("WHvGetCapability(ProcessorClockFrequency)", procGetCapability,
+		whvCapProcessorClockFrequency,
+		uintptr(unsafe.Pointer(&frequency)), unsafe.Sizeof(frequency),
+		uintptr(unsafe.Pointer(&written))); err != nil {
+		return 0, err
+	}
+	if written != uint32(unsafe.Sizeof(frequency)) {
+		return 0, fmt.Errorf("WHvGetCapability(ProcessorClockFrequency): wrote %d bytes, want %d",
+			written, unsafe.Sizeof(frequency))
+	}
+	return frequency, nil
+}
+
 type whpxBackend struct {
-	h         windows.Handle
-	m         *Machine
-	lifecycle *nativeBackendLifecycle
-	mu        sync.Mutex // serializes register file get/set per exit (cheap)
-	nativeMu  sync.RWMutex
-	runMu     sync.Mutex
-	runningVP []bool
-	exitCount uint64
+	h          windows.Handle
+	m          *Machine
+	lifecycle  *nativeBackendLifecycle
+	mu         sync.Mutex // serializes register file get/set per exit (cheap)
+	nativeMu   sync.RWMutex
+	runMu      sync.Mutex
+	runningVP  []bool
+	picPending []uint32 // guarded by runMu; PIC serialization keeps this short
+	picEpoch   uint64   // increments on enqueue; closes the stopped-to-running race
+	exitCount  uint64
+	stats      struct {
+		exits atomic.Uint64
+		halt  atomic.Uint64
+		mmio  atomic.Uint64
+		other atomic.Uint64
+	}
+	profilePorts   []uint64
+	profileMMIO    [2]uint64 // read, write
+	profileGPAs    map[uint64]uint64
+	profileSummary sync.Once
 
 	partitionCreated bool
 	mapped           bool
 	createdVPs       []bool
+}
+
+func (b *whpxBackend) runStats() runStats {
+	return runStats{
+		Exits: b.stats.exits.Load(),
+		WFI:   b.stats.halt.Load(),
+		MMIO:  b.stats.mmio.Load(),
+		Other: b.stats.other.Load(),
+	}
 }
 
 func (b *whpxBackend) cancelVCPUs() error {
@@ -137,6 +185,79 @@ func (b *whpxBackend) endRun(vp uint32) {
 	b.runMu.Lock()
 	b.runningVP[vp] = false
 	b.runMu.Unlock()
+}
+
+func (b *whpxBackend) picQueuedAfter(epoch uint64) bool {
+	b.runMu.Lock()
+	queued := b.picEpoch != epoch
+	b.runMu.Unlock()
+	return queued
+}
+
+// queuePICInterrupt requests a direct external-interrupt injection on the
+// vCPU thread. WHvSetVirtualProcessorRegisters cannot safely race a running
+// vCPU, so wake the run call and let runVPLoop publish the pending event.
+func (b *whpxBackend) queuePICInterrupt(vector uint32) {
+	if b.lifecycle.isStopping() {
+		return
+	}
+	b.runMu.Lock()
+	b.picPending = append(b.picPending, vector)
+	b.picEpoch++
+	running := len(b.runningVP) != 0 && b.runningVP[0]
+	b.runMu.Unlock()
+	if !running {
+		return
+	}
+	b.nativeMu.RLock()
+	defer b.nativeMu.RUnlock()
+	if b.lifecycle.isStopping() {
+		return
+	}
+	if err := whvCall("WHvCancelRunVirtualProcessor(PIC)", procCancelRunVP,
+		uintptr(b.h), 0, 0); err != nil && dbgIO {
+		fmt.Printf("[whpx] wake for PIC v=%#x: %v\n", vector, err)
+	}
+}
+
+func (b *whpxBackend) injectPICInterrupt(vp uint32, executionState uint16, rflags uint64) (uint64, error) {
+	b.runMu.Lock()
+	defer b.runMu.Unlock()
+	if len(b.picPending) == 0 {
+		return b.picEpoch, nil
+	}
+	// WHV_X64_VP_EXECUTION_STATE exposes InterruptionPending at bit 6 and
+	// InterruptShadow at bit 12; RFLAGS.IF is bit 9. WHPX has one pending
+	// interruption slot, so retain all vectors in our queue until that slot is
+	// known to be available from the most recent exit context.
+	ready := executionState&(1<<6|1<<12) == 0 && rflags&(1<<9) != 0
+	regs := make(map[uint32]whvRegValue, 2)
+	var vector uint32
+	if ready {
+		vector = b.picPending[0]
+		b.picPending = b.picPending[1:]
+		// WHV_X64_PENDING_INTERRUPTION_REGISTER: pending bit 0, type
+		// WHvX64PendingInterrupt (0) in bits 1..3, vector in bits 16..31.
+		regs[whvRegPendingInterruption] = u64Value(1 | uint64(byte(vector))<<16)
+	}
+	if len(b.picPending) != 0 {
+		// InterruptNotification is bit 1 of
+		// WHV_X64_DELIVERABILITY_NOTIFICATIONS_REGISTER.
+		regs[whvRegDeliverability] = u64Value(1 << 1)
+	}
+	if len(regs) != 0 {
+		if err := b.setRegs(vp, regs); err != nil {
+			return b.picEpoch, fmt.Errorf("inject PIC vector %#x: %w", vector, err)
+		}
+	}
+	if dbgIO {
+		if ready {
+			fmt.Printf("[whpx] pending interruption v=%#x published\n", vector)
+		} else {
+			fmt.Printf("[whpx] PIC waiting for interrupt window state=%#x rflags=%#x\n", executionState, rflags)
+		}
+	}
+	return b.picEpoch, nil
 }
 
 func (b *whpxBackend) releaseNative() error {
@@ -221,23 +342,25 @@ func (b *whpxBackend) getRegs(vp uint32, names []uint32) ([]whvRegValue, error) 
 	return vals, err
 }
 
-// gprs is a scratch register file (Rax..R15 = indices 0..15, matching both
-// the WHV register enum and the x86 ModRM encoding).
-func (b *whpxBackend) readGPRs(vp uint32) ([16]uint64, error) {
-	names := make([]uint32, 16)
-	for i := range names {
-		names[i] = uint32(i)
-	}
-	vals, err := b.getRegs(vp, names)
-	var g [16]uint64
-	for i := range vals {
-		g[i] = binary.LittleEndian.Uint64(vals[i][0:])
-	}
-	return g, err
+func (b *whpxBackend) writeGPR(vp uint32, idx int, v uint64) error {
+	return b.writeGPRs(vp, []uint32{uint32(idx)}, []uint64{v})
 }
 
-func (b *whpxBackend) writeGPR(vp uint32, idx int, v uint64) error {
-	return b.setRegs(vp, map[uint32]whvRegValue{uint32(idx): u64Value(v)})
+// writeGPRs updates a small explicit register set in one WHPX call. Exit
+// handling is latency-sensitive: doing RAX and RIP as separate calls for every
+// port/MMIO read made each guest access pay two host transitions.
+func (b *whpxBackend) writeGPRs(vp uint32, names []uint32, values []uint64) error {
+	if len(names) == 0 || len(names) != len(values) {
+		return fmt.Errorf("invalid WHPX register update: %d names, %d values", len(names), len(values))
+	}
+	regs := make([]whvRegValue, len(values))
+	for i, value := range values {
+		regs[i] = u64Value(value)
+	}
+	return whvCall("WHvSetVirtualProcessorRegisters", procSetVPRegs,
+		uintptr(b.h), uintptr(vp),
+		uintptr(unsafe.Pointer(&names[0])), uintptr(len(names)),
+		uintptr(unsafe.Pointer(&regs[0])))
 }
 
 // deliverInterrupt is the IO-APIC's delivery path into WHPX.
@@ -261,8 +384,12 @@ func (b *whpxBackend) deliverInterrupt(dest, vector uint32, level bool) {
 	binary.LittleEndian.PutUint32(ctrl[8:], dest)
 	binary.LittleEndian.PutUint32(ctrl[12:], vector)
 	if err := whvCall("WHvRequestInterrupt", procRequestInterrupt,
-		uintptr(b.h), uintptr(unsafe.Pointer(&ctrl[0])), 16); err != nil && dbgIO {
-		fmt.Printf("[whpx] interrupt v=%#x: %v\n", vector, err)
+		uintptr(b.h), uintptr(unsafe.Pointer(&ctrl[0])), 16); err != nil {
+		if dbgIO {
+			fmt.Printf("[whpx] interrupt v=%#x: %v\n", vector, err)
+		}
+	} else if dbgIO {
+		fmt.Printf("[whpx] interrupt v=%#x delivered\n", vector)
 	}
 }
 
@@ -288,6 +415,10 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 		partitionCreated: true,
 		createdVPs:       make([]bool, m.vcpus),
 		runningVP:        make([]bool, m.vcpus),
+	}
+	if m.bootTiming.profiling() {
+		b.profilePorts = make([]uint64, 1<<16)
+		b.profileGPAs = make(map[uint64]uint64)
 	}
 	mainClaimed := false
 	defer func() {
@@ -325,9 +456,29 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 	}
 	b.mapped = true
 
-	// userspace irqchip: IO-APIC delivering via WHvRequestInterrupt
-	m.x86.ioapic = newIOApic(b.deliverInterrupt)
-	m.interrupts.set(func(irq int, level bool) { m.x86.ioapic.raise(irq, level) })
+	// Stable default: userspace IO-APIC delivering into WHPX's emulated LAPIC.
+	// The experimental PIC path is opt-in because its edge/in-service model is
+	// not yet complete enough for sustained virtio interrupt delivery.
+	// Keep the register-visible ID identical to the one writeMPS publishes.
+	// A mismatch makes Linux repeatedly repair and re-read the IO-APIC ID,
+	// which is particularly expensive because every access exits through WHPX.
+	m.x86.ioapic = newIOApic(uint32(m.vcpus+1), b.deliverInterrupt)
+	if os.Getenv("GANTRY_WHPX_PIC") != "" {
+		m.x86.pic.setDeliver(b.queuePICInterrupt)
+		m.interrupts.set(func(irq int, level bool) {
+			m.x86.ioapic.raise(isaIRQGSI(irq), level)
+			// Diagnostic opt-out for the legacy PIT edge. Once Linux switches
+			// to WHPX's emulated LAPIC timer it can leave a concurrently queued
+			// PIC IRQ0 unacknowledged, which then blocks every lower-priority
+			// virtio interrupt. Automatic TSC calibration makes that PIT edge
+			// unnecessary on the tested WHPX path.
+			if irq != 0 || os.Getenv("GANTRY_WHPX_PIC_NOPIT") == "" {
+				m.x86.pic.raise(irq, level)
+			}
+		})
+	} else {
+		m.interrupts.set(func(irq int, level bool) { m.x86.ioapic.raise(isaIRQGSI(irq), level) })
+	}
 
 	for i := 0; i < m.vcpus; i++ {
 		if err := whvCall("WHvCreateVirtualProcessor", procCreateVP,
@@ -379,6 +530,8 @@ func (b *whpxBackend) bootLoop() error {
 		go m.x86.uartIO.stdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
+	m.bootTiming.setRunStats(b.runStats)
+	m.bootTiming.start("vCPU entered WHPX")
 	return b.runVPLoop(0)
 }
 
@@ -389,19 +542,64 @@ const (
 
 func (b *whpxBackend) runVPLoop(vp uint32) error {
 	buf := make([]byte, whvExitContextSize)
+	var executionState uint16
+	rflags := uint64(2) // initial BSP RFLAGS; interrupts start disabled
 	for {
+		picEpoch, err := b.injectPICInterrupt(vp, executionState, rflags)
+		if err != nil {
+			return err
+		}
 		if !b.beginRun(vp) {
 			return nil
 		}
-		err := whvCall("WHvRunVirtualProcessor", procRunVP,
+		// Close the queue-before-beginRun race without mistaking an existing
+		// backlog for a new arrival. A backlog must run one event at a time so
+		// WHPX can consume its single PendingEvent slot.
+		if b.picQueuedAfter(picEpoch) {
+			b.endRun(vp)
+			continue
+		}
+		var started time.Time
+		if b.m.bootTiming.profiling() {
+			started = time.Now()
+		}
+		err = whvCall("WHvRunVirtualProcessor", procRunVP,
 			uintptr(b.h), uintptr(vp),
 			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		var ran time.Duration
+		if !started.IsZero() {
+			ran = time.Since(started)
+		}
 		b.endRun(vp)
 		if err != nil {
 			if b.lifecycle.isStopping() {
 				return nil
 			}
 			return fmt.Errorf("WHvRunVirtualProcessor: %w", err)
+		}
+		// Every x64 exit carries this common VP context. Retain exactly the
+		// interruptibility fields needed before publishing the next PIC vector.
+		executionState = binary.LittleEndian.Uint16(buf[8:])
+		rflags = binary.LittleEndian.Uint64(buf[40:])
+		reason := binary.LittleEndian.Uint32(buf[0:])
+		if b.m.bootTiming.profiling() {
+			index := int(b.stats.exits.Add(1))
+			detail := ""
+			switch reason {
+			case whvExitHalt:
+				b.stats.halt.Add(1)
+			case whvExitMemoryAccess:
+				b.stats.mmio.Add(1)
+				detail = fmt.Sprintf(", gpa %#x", binary.LittleEndian.Uint64(buf[72:]))
+			default:
+				b.stats.other.Add(1)
+				if reason == whvExitIoPort {
+					detail = fmt.Sprintf(", port %#x", binary.LittleEndian.Uint16(buf[72:]))
+				}
+			}
+			if index <= 64 {
+				b.m.bootTiming.traceExit(index, ran, reason, 0, detail)
+			}
 		}
 		if dbgIO {
 			b.exitCount++
@@ -419,12 +617,15 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 				}
 			}
 		}
-		switch binary.LittleEndian.Uint32(buf[0:]) {
+		switch reason {
 		case whvExitMemoryAccess:
 			if err := b.handleMMIOExit(vp, buf); err != nil {
 				return err
 			}
 		case whvExitIoPort:
+			if b.profilePorts != nil {
+				b.profilePorts[binary.LittleEndian.Uint16(buf[72:])]++
+			}
 			if err := b.handleIOExit(vp, buf); err != nil {
 				return err
 			}
@@ -434,6 +635,8 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			if b.lifecycle.isStopping() {
 				return nil
 			}
+		case whvExitInterruptWin:
+			// A queued PIC vector is now deliverable; the next loop publishes it.
 		case whvExitUnrecoverable:
 			b.m.stdoutFlush()
 			rip := binary.LittleEndian.Uint64(buf[32:])
@@ -447,39 +650,93 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 		default:
 			// interrupt window, eoi, hypercall, rdtsc: nothing to do
 		}
+		if b.m.bootTiming.bootComplete() {
+			b.profileSummary.Do(b.printBootProfileSummary)
+		}
 	}
+}
+
+func (b *whpxBackend) printBootProfileSummary() {
+	if b.profilePorts == nil {
+		return
+	}
+	fmt.Printf("boot-profile: WHPX MMIO reads=%d writes=%d; top I/O ports:", b.profileMMIO[0], b.profileMMIO[1])
+	for range 16 {
+		port, count := -1, uint64(0)
+		for candidate, candidateCount := range b.profilePorts {
+			if candidateCount > count {
+				port, count = candidate, candidateCount
+			}
+		}
+		if port < 0 || count == 0 {
+			break
+		}
+		fmt.Printf(" %#x=%d", port, count)
+		b.profilePorts[port] = 0
+	}
+	fmt.Println()
+	fmt.Print("boot-profile: top MMIO addresses:")
+	for range 16 {
+		var page, count uint64
+		for candidate, candidateCount := range b.profileGPAs {
+			if candidateCount > count {
+				page, count = candidate, candidateCount
+			}
+		}
+		if count == 0 {
+			break
+		}
+		fmt.Printf(" %#x=%d", page, count)
+		delete(b.profileGPAs, page)
+	}
+	fmt.Println()
 }
 
 // handleMMIOExit emulates one MemoryAccess exit: decode the instruction,
 // service the device access, fill/read registers, advance RIP.
 func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	m := b.m
-	instrLen := int(buf[10] & 0x0f)
-	if instrLen == 0 {
-		instrLen = int(buf[48])
-	}
-	if instrLen < 1 || instrLen > 15 {
-		// WHPX does not populate either instruction-length field for
-		// MemoryAccess exits on current releases: hand the decoder the
-		// full instruction window and trust op.length for the advance.
-		instrLen = 15
-	}
-	instr := buf[52 : 52+instrLen]
+	// The common exit context's InstructionLength can be shorter than the
+	// instruction that caused a MemoryAccess exit. In particular, current
+	// WHPX releases have reported one byte for a two-byte `mov r/m32,r32`.
+	// The memory-access context still carries the complete 16-byte instruction
+	// window, so give the decoder the architectural 15-byte maximum and trust
+	// op.length for the RIP advance. The decoder ignores trailing bytes.
+	instr := buf[52 : 52+15]
 	gpa := binary.LittleEndian.Uint64(buf[72:])
+	if b.profileGPAs != nil {
+		b.profileGPAs[gpa]++
+	}
 
 	op, err := decodeX86MMIO(instr)
 	if err != nil {
 		return fmt.Errorf("mmio @ %#x: undecodable instruction % x: %w", gpa, instr, err)
 	}
 
+	if b.profilePorts != nil {
+		if op.isWrite {
+			b.profileMMIO[1]++
+		} else {
+			b.profileMMIO[0]++
+		}
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	gprs, err := b.readGPRs(vp)
-	if err != nil {
-		return err
+	// The exit already supplies the GPA, and the decoder identifies the one
+	// source/destination GPR. Do not fetch all 16 GPRs on every virtio access.
+	// Reads need no old register value; immediate writes need no register at
+	// all. Register writes fetch exactly their source in one WHPX call.
+	var regValue uint64
+	if op.isWrite && !op.immOK {
+		values, err := b.getRegs(vp, []uint32{uint32(op.reg)})
+		if err != nil {
+			return err
+		}
+		regValue = binary.LittleEndian.Uint64(values[0][0:])
 	}
-	getReg := func(i int) uint64 { return gprs[i] }
-	setReg := func(i int, v uint64) { gprs[i] = v }
+	getReg := func(int) uint64 { return regValue }
+	setReg := func(_ int, v uint64) { regValue = v }
 
 	devRead := func(width int) uint64 {
 		var v uint64
@@ -497,14 +754,15 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	}
 	applyX86MMIO(op, getReg, setReg, devRead, devWrite)
 
-	// write back changed registers + advanced RIP
-	if !op.isWrite {
-		if err := b.writeGPR(vp, op.reg, gprs[op.reg]); err != nil {
-			return err
-		}
+	// Commit the MMIO read result and advanced RIP together. Writes only need
+	// RIP; combining read updates removes one WHPX host transition per access.
+	rip := binary.LittleEndian.Uint64(buf[32:]) + uint64(op.length)
+	if op.isWrite {
+		return b.writeGPR(vp, whvRegRip, rip)
 	}
-	rip := binary.LittleEndian.Uint64(buf[32:])
-	return b.writeGPR(vp, whvRegRip, rip+uint64(op.length))
+	return b.writeGPRs(vp,
+		[]uint32{uint32(op.reg), whvRegRip},
+		[]uint64{regValue, rip})
 }
 
 // handleIOExit services one port-I/O exit (serial/CMOS/PIT/PIC/delay).
@@ -559,10 +817,19 @@ func (b *whpxBackend) handleIOExit(vp uint32, buf []byte) error {
 	default:
 		rax = uint64(v)
 	}
-	if err := b.writeGPR(vp, whvRegRax, rax); err != nil {
-		return err
+	// IN changes RAX and completes at the following RIP. Publish both in one
+	// WHPX call instead of paying two host transitions for every port read.
+	instrLen := int(buf[10] & 0x0f)
+	if instrLen == 0 {
+		instrLen = int(buf[48])
 	}
-	return advance()
+	if instrLen == 0 {
+		return fmt.Errorf("io exit @ %#x: zero instruction length", binary.LittleEndian.Uint64(buf[32:]))
+	}
+	rip := binary.LittleEndian.Uint64(buf[32:]) + uint64(instrLen)
+	return b.writeGPRs(vp,
+		[]uint32{whvRegRax, whvRegRip},
+		[]uint64{rax, rip})
 }
 
 // platformBackend selects the hypervisor backend for this build target.

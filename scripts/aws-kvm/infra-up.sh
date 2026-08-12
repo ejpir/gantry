@@ -7,7 +7,7 @@
 # SG): we add VPC endpoints for SSM/S3 and our own egress SG. The SSM
 # interface endpoints cost ~$7/mo each — infra-down.sh removes them.
 #
-# Override via env: REGION SUBNET_ID INSTANCE_TYPE BUCKET
+# Override via env: REGION SUBNET_ID INSTANCE_TYPE AMI_PARAM BUCKET NAME
 set -euo pipefail
 
 REGION="${REGION:-eu-west-1}"
@@ -16,7 +16,7 @@ INSTANCE_TYPE="${INSTANCE_TYPE:-c5.metal}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="${BUCKET:-gantry-kvm-test-$ACCOUNT}"
 ROLE=gantry-ssm-ec2
-NAME=gantry-kvm-test
+NAME="${NAME:-gantry-kvm-test}"
 export AWS_DEFAULT_REGION="$REGION"
 
 echo "== bucket =="

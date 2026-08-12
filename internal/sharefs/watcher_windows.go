@@ -23,9 +23,34 @@ func newPlatformShareWatcher(export *Export, emit func(shareWatchEvent)) (shareW
 	if export == nil || export.watchRootHandle == 0 {
 		return nil, fmt.Errorf("share root handle is unavailable")
 	}
-	handle, err := duplicateWinHandle(windows.Handle(export.watchRootHandle))
+	// ReadDirectoryChangesW is a blocking operation. A duplicated synchronous
+	// directory handle refers to the same NT file object as the export's pinned
+	// access handle, so the outstanding watch serializes later metadata I/O and
+	// deadlocks the guest's first LOOKUP. Open a distinct file object, then
+	// prove it still names the pinned directory before trusting it for cache
+	// coherence (the path may have been renamed between the two opens).
+	root := windows.Handle(export.watchRootHandle)
+	rootPath, err := winPathForHandle(root)
 	if err != nil {
 		return nil, err
+	}
+	handle, err := openWinRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	original, err := winInfoFromHandle(root, 0)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	watched, err := winInfoFromHandle(handle, 0)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	if original.id != watched.id {
+		_ = windows.CloseHandle(handle)
+		return nil, fmt.Errorf("share root changed while attaching cache watcher")
 	}
 	watcher := &windowsShareWatcher{handle: handle, emit: emit, done: make(chan struct{})}
 	go watcher.run()

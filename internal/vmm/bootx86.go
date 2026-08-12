@@ -190,11 +190,7 @@ func writeMPS(ram []byte, ncpus int) {
 		e[4] = 1 // source bus id 1 (ISA)
 		e[5] = byte(irq)
 		e[6] = ioapicID
-		if irq == 0 {
-			e[7] = 2
-		} else {
-			e[7] = byte(irq)
-		}
+		e[7] = byte(isaIRQGSI(irq))
 		p += 8
 	}
 
@@ -225,6 +221,18 @@ func writeMPS(ram []byte, ncpus int) {
 		sum += b
 	}
 	ct[7] = -sum
+}
+
+// isaIRQGSI returns the IO-APIC input advertised for an ISA interrupt.
+// The PC architecture routes the PIT's ISA IRQ0 to IO-APIC input 2; input 0
+// is not the timer route once the MPS table publishes explicit assignments.
+// KVM applies this override in its in-kernel routing table. Userspace irqchips
+// (WHPX) must apply the same translation before raising their input line.
+func isaIRQGSI(irq int) int {
+	if irq == 0 {
+		return 2
+	}
+	return irq
 }
 
 func putE820(b []byte, addr, size uint64, typ uint32) {

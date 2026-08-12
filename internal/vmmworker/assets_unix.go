@@ -1,10 +1,11 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package vmmworker
 
 import (
 	"fmt"
 	"os"
+	"runtime"
 )
 
 const maxInheritedDisks = 128
@@ -23,11 +24,14 @@ func (config Config) validate() error {
 	if config.NDisks > 1 {
 		return fmt.Errorf("split VMM supports at most one writable disk")
 	}
-	if config.NDisks > 0 && (!config.DisksPrelocked || config.MaxWritableFileSize == 0) {
+	if runtime.GOOS != "windows" && config.NDisks > 0 && (!config.DisksPrelocked || config.MaxWritableFileSize == 0) {
 		return fmt.Errorf("writable disks require a supervisor lock and file-size bound")
 	}
 	if config.NDisks == 0 && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
 		return fmt.Errorf("writable-disk lock metadata without writable disks")
+	}
+	if runtime.GOOS == "windows" && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
+		return fmt.Errorf("Windows writable disks must be locked by the worker process")
 	}
 	if config.VhostShares != config.HasSharedRAM {
 		return fmt.Errorf("vhost shares and shared guest RAM must be enabled together")

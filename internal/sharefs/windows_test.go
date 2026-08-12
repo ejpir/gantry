@@ -244,6 +244,76 @@ func TestWinExportFSNativePassthrough(t *testing.T) {
 	}
 }
 
+func TestWinExportFSCreateWhileWatcherIsActive(t *testing.T) {
+	root := t.TempDir()
+	backend, err := newWinExportFS(root, 124<<32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backend.Close() }()
+
+	export := &Export{watchRootHandle: uintptr(backend.root)}
+	watcher, err := newPlatformShareWatcher(export, func(shareWatchEvent) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = watcher.Close() }()
+
+	created, _, errno := backend.create("", "new.txt", 0x8241, 0o644)
+	if errno != 0 {
+		t.Fatalf("create with active watcher errno %d", fuse.ToStatus(errno))
+	}
+	if n, err := created.write([]byte("new"), 0); err != nil || n != 3 {
+		t.Fatalf("write with active watcher n=%d err=%v", n, err)
+	}
+	if err := created.close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "new.txt")); err != nil || string(got) != "new" {
+		t.Fatalf("host content %q err=%v", got, err)
+	}
+}
+
+func TestWinDirStreamReplaysForwardCookie(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	backend, err := newWinExportFS(root, 125<<32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backend.Close() }()
+	export := &Export{}
+	export.state.Store(int32(ExportActive))
+
+	first, errno := backend.readdir("", export)
+	if errno != 0 {
+		t.Fatalf("first readdir errno %d", fuse.ToStatus(errno))
+	}
+	for range 4 {
+		if _, errno := first.Next(); errno != 0 {
+			first.Close()
+			t.Fatalf("first stream errno %d", fuse.ToStatus(errno))
+		}
+	}
+	first.Close()
+
+	continued, errno := backend.readdir("", export)
+	if errno != 0 {
+		t.Fatalf("continued readdir errno %d", fuse.ToStatus(errno))
+	}
+	defer continued.Close()
+	if errno := continued.Seekdir(context.Background(), 4); errno != 0 {
+		t.Fatalf("seek continuation cookie errno %d", fuse.ToStatus(errno))
+	}
+	if continued.HasNext() {
+		t.Fatal("continuation after all four entries unexpectedly has data")
+	}
+}
+
 func TestWinExportFSRootRenameKeepsHandlePinned(t *testing.T) {
 	parent := t.TempDir()
 	original := filepath.Join(parent, "original")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/virtio"
@@ -151,8 +152,10 @@ func (m *Machine) attachBootDevices(arch string) error {
 	fmt.Printf("virtio-rng: entropy @ %#x irq %d\n", rngCore.Base(), rngCore.IRQ())
 
 	// arm64 needs the emulated RTC because HVF has no kvm-clock equivalent.
-	// x86 normally uses kvm-clock/ptp_kvm; forcing rtc0 there can stall runsc.
-	attachRTC := arch != "amd64"
+	// Linux x86 uses kvm-clock/ptp_kvm and leaves this off because registering
+	// rtc0 can stall runsc. WHPX exposes neither kvm clock, so Windows x86
+	// needs virtio-rtc to set and continuously synchronize guest wall time.
+	attachRTC := arch != "amd64" || runtime.GOOS == "windows"
 	if os.Getenv("GANTRY_RTC") != "" {
 		attachRTC = true
 	}
@@ -174,6 +177,12 @@ func (m *Machine) finishBoot(o Opts, ram []byte, initrdStart, initrdEnd uint64) 
 	m.vcpus = o.VCPUs
 	cmdline := o.Cmdline
 	if m.arch == "amd64" {
+		var err error
+		if cmdline, err = platformKernelArgs(cmdline, m.arch); err != nil {
+			// A missing/older capability is a performance degradation, not a
+			// correctness failure: retain Linux's normal calibration fallback.
+			fmt.Printf("WHPX: automatic early kernel arguments unavailable: %v\n", err)
+		}
 		var slots strings.Builder
 		for _, core := range m.virtios {
 			fmt.Fprintf(&slots, " virtio_mmio.device=0x%x@0x%x:%d",

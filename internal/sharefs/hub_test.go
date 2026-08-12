@@ -28,6 +28,7 @@ const (
 	fuseSymlink     = 6
 	fuseUnlink      = 10
 	fuseOpen        = 14
+	fuseRead        = 15
 	fuseWrite       = 16
 	fuseInit        = 26
 	fuseCreate      = 35
@@ -623,6 +624,58 @@ func TestShareHubPinsRenamedHostRoot(t *testing.T) {
 	}
 	if got := string(readOut[1][:9]); got != "old root\n" {
 		t.Fatalf("read %q, want content from the pinned (renamed) root", got)
+	}
+}
+
+func TestShareHubReadSupportsFragmentedVirtqueuePayload(t *testing.T) {
+	const content = "fragmented-response\n"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	fuseInitHub(t, hub)
+	publishHubShare(t, hub, "code", root, true)
+	tagNode, errno := hubLookup(t, hub, 2, 1, "code")
+	if errno != 0 {
+		t.Fatalf("share lookup errno %d", errno)
+	}
+	fileNode, errno := hubLookup(t, hub, 3, tagNode, "hello.txt")
+	if errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+
+	openIn := make([]byte, 8)
+	_, errno, openOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpen, 4, fileNode, len(openIn)), openIn}, 16, 16)
+	if errno != 0 {
+		t.Fatalf("open errno %d", errno)
+	}
+
+	const readSize = 128 << 10
+	readIn := make([]byte, 40)
+	copy(readIn[0:8], openOut[1][0:8])
+	binary.LittleEndian.PutUint32(readIn[16:20], readSize)
+	outSizes := []int{16, 16}
+	for capacity := 16; capacity < readSize; capacity += 4096 {
+		outSizes = append(outSizes, 4096)
+	}
+	n, errno, readOut := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseRead, 5, fileNode, len(readIn)), readIn}, outSizes...)
+	if errno != 0 {
+		t.Fatalf("fragmented read errno %d", errno)
+	}
+	if n != 16+len(content) {
+		t.Fatalf("fragmented read length %d, want %d", n, 16+len(content))
+	}
+	payload := append(append([]byte(nil), readOut[1]...), readOut[2]...)
+	if got := string(payload[:len(content)]); got != content {
+		t.Fatalf("fragmented read = %q, want %q", got, content)
 	}
 }
 

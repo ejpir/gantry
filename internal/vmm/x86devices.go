@@ -25,7 +25,7 @@ func (m *Machine) initX86() {
 		func(b byte) { m.stdoutWrite(b) })
 	m.x86.cmos = &cmosRTC{}
 	m.x86.pit = newPIT(func(level bool) { m.raise(0, level) })
-	m.x86.pic = &pic8259{}
+	m.x86.pic = newPIC(nil)
 	fmt.Printf("serial: %s (console=ttyS0)\n", m.x86.uartIO)
 }
 

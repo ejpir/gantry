@@ -562,6 +562,18 @@ func insertKernelArgs(cmdline, args string) string {
 	return cmdline + " " + args
 }
 
+func kernelArgPresent(cmdline, name string) bool {
+	if i := strings.Index(cmdline, " -- "); i >= 0 {
+		cmdline = cmdline[:i]
+	}
+	for _, field := range strings.Fields(cmdline) {
+		if field == name || strings.HasPrefix(field, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 // backend is the hypervisor contract: run a prepared machine until guest
 // shutdown/reset or error. One implementation per platform, selected by
 // build tags (KVM arm64/x86-64, HVF on macOS, WHPX on Windows) — see

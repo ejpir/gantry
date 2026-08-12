@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+type workerContainment interface {
+	Close() error
+}
+
 type workerPhase uint8
 
 const (
