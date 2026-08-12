@@ -54,13 +54,21 @@ func TestApplyNetworkConfined(t *testing.T) {
 			}
 		}
 	}
-	for _, property := range []string{PropFSRead, PropFSWrite, PropExec, PropFDTable, PropSyscall, PropProcEnum, PropTaskLimit} {
+	mountOK := !strings.Contains(strings.Join(report.Notes, " "), "mount tier unavailable")
+	properties := []string{PropFSWrite, PropExec, PropFDTable, PropSyscall, PropTaskLimit}
+	if mountOK {
+		properties = append(properties, PropFSRead, PropProcEnum)
+	}
+	for _, property := range properties {
 		if got := report.Property(property); got.State != StateEnforced {
 			t.Errorf("%s = %s (%s), want enforced\n%s", property, got.State, got.Detail, text)
 		}
 	}
 	if got := report.Property(PropNetDial).State; got != StateDisabled {
 		t.Errorf("net-dial = %s, want disabled for the network role", got)
+	}
+	if !mountOK {
+		t.Skipf("mount tier unavailable in this environment; non-mount network-worker tiers verified, notes: %v", report.Notes)
 	}
 }
 

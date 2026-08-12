@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -136,7 +137,12 @@ func TestBrokerSetResources(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1})
 	br := &broker{store: store, sessions: map[string]chan struct{}{}}
+	vcpus := 3
 	request := `{"op":"resources.set","id":"edit","resources":{"mem_mb":2048,"vcpus":3}}` + "\n"
+	if runtime.GOOS == "windows" {
+		vcpus = 1
+		request = `{"op":"resources.set","id":"edit","resources":{"mem_mb":2048,"vcpus":1}}` + "\n"
+	}
 	if got := brokerPipe(t, br, request); !strings.Contains(got, `"ok":true`) {
 		t.Fatalf("resp = %s", got)
 	}
@@ -144,7 +150,7 @@ func TestBrokerSetResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MemMB != 2048 || cfg.VCPUs != 3 {
+	if cfg.MemMB != 2048 || cfg.VCPUs != vcpus {
 		t.Fatalf("resources = %d MiB/%d CPU", cfg.MemMB, cfg.VCPUs)
 	}
 }

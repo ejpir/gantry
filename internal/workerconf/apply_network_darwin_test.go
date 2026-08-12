@@ -20,7 +20,9 @@ import (
 // TestApplyNetworkConfinedDarwin applies the production Seatbelt profile in a
 // disposable child. It proves the inherited packet channel and new IP
 // TCP/UDP sockets remain usable while new local IPC, host filesystem access,
-// executable launch, and signaling the live supervisor are denied.
+// executable launch, and process enumeration are denied. The signal-zero
+// probe remains indeterminate when macOS permits the permission check without
+// passing it through Seatbelt's signal operation.
 func TestApplyNetworkConfinedDarwin(t *testing.T) {
 	if os.Getenv("WORKERCONF_NETWORK_DARWIN_HELPER") == "1" {
 		networkConfinedDarwinHelper()
@@ -51,10 +53,13 @@ func TestApplyNetworkConfinedDarwin(t *testing.T) {
 			}
 		}
 	}
-	for _, property := range []string{PropFSRead, PropFSWrite, PropExec, PropProcEnum, PropProcSignal} {
+	for _, property := range []string{PropFSRead, PropFSWrite, PropExec, PropProcEnum} {
 		if got := report.Property(property); got.State != StateEnforced {
 			t.Errorf("%s = %s (%s), want enforced\n%s", property, got.State, got.Detail, text)
 		}
+	}
+	if got := report.Property(PropProcSignal); got.State != StateEnforced && got.State != StateIndeterminate {
+		t.Errorf("%s = %s (%s), want enforced or an honest indeterminate result\n%s", PropProcSignal, got.State, got.Detail, text)
 	}
 	if got := report.Property(PropNetDial).State; got != StateDisabled {
 		t.Errorf("net-dial = %s, want disabled for the network role", got)

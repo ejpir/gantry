@@ -120,7 +120,6 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	// now so worker death produces EOF on every channel instead of leaving the
 	// handshake parked until its deadline.
 	closeFiles(channelFiles)
-	channelFiles = nil
 	if err != nil {
 		return nil, fmt.Errorf("spawn vmm worker: %w", err)
 	}

@@ -42,16 +42,6 @@ func newPIC(deliver func(vector uint32)) *pic8259 {
 	}
 }
 
-func (p *pic8259) setDeliver(deliver func(vector uint32)) {
-	p.mu.Lock()
-	p.deliver = deliver
-	vector, fire := p.dispatchLocked()
-	p.mu.Unlock()
-	if fire && deliver != nil {
-		deliver(vector)
-	}
-}
-
 func (p *pic8259) ioRead(port uint16) byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()

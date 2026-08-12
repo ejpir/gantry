@@ -31,7 +31,7 @@ func (config Config) validate() error {
 		return fmt.Errorf("writable-disk lock metadata without writable disks")
 	}
 	if runtime.GOOS == "windows" && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
-		return fmt.Errorf("Windows writable disks must be locked by the worker process")
+		return fmt.Errorf("windows writable disks must be locked by the worker process")
 	}
 	if config.VhostShares != config.HasSharedRAM {
 		return fmt.Errorf("vhost shares and shared guest RAM must be enabled together")

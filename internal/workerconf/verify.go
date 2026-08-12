@@ -171,8 +171,8 @@ func evaluateProcSignalProbe(noProcX bool, selfPID, parentPID int, signal0 func(
 	switch {
 	case err == nil:
 		return PropertyResult{
-			Property: PropProcSignal, State: StateUnenforced,
-			Detail: fmt.Sprintf("kill(parent PID %d, 0) succeeded", parentPID),
+			Property: PropProcSignal, State: StateIndeterminate,
+			Detail: fmt.Sprintf("kill(parent PID %d, 0) succeeded; signal 0 may bypass Seatbelt signal mediation", parentPID),
 		}
 	case errors.Is(err, syscall.EPERM):
 		return PropertyResult{

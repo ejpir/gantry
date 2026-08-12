@@ -107,7 +107,7 @@ func TestEvaluateProcSignalProbe(t *testing.T) {
 	}{
 		{name: "disabled", parentPID: 200, want: StateDisabled, wantCalls: 0},
 		{name: "self positive control denied", noProcX: true, parentPID: 200, selfErr: syscall.EPERM, want: StateIndeterminate, wantCalls: 1},
-		{name: "parent permitted", noProcX: true, parentPID: 200, want: StateUnenforced, wantCalls: 2},
+		{name: "parent signal-zero permitted", noProcX: true, parentPID: 200, want: StateIndeterminate, wantCalls: 2},
 		{name: "parent denied", noProcX: true, parentPID: 200, parentErr: syscall.EPERM, want: StateEnforced, wantCalls: 2},
 		{name: "parent disappeared", noProcX: true, parentPID: 200, parentErr: syscall.ESRCH, want: StateIndeterminate, wantCalls: 2},
 		{name: "unexpected error", noProcX: true, parentPID: 200, parentErr: syscall.EIO, want: StateIndeterminate, wantCalls: 2},

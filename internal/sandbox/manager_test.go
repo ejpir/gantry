@@ -63,13 +63,16 @@ func TestManagerCreateRejectsUncachedImageWithoutNetwork(t *testing.T) {
 	t.Setenv("GANTRY_IMAGES", t.TempDir())
 	dir := t.TempDir()
 	rootfs := filepath.Join(dir, "rootfs.erofs")
-	// A real ELF kernel is unnecessary: resolution reaches the cache-only miss
-	// only after kernel architecture detection, so use the current test binary.
-	executable, err := os.Executable()
-	if err != nil {
+	// Resolution reaches the cache-only miss only after kernel architecture
+	// detection. Use a minimal x86-64 ELF header so the test is independent of
+	// the host executable format (PE on Windows, Mach-O on macOS).
+	kernel := filepath.Join(dir, "kernel")
+	kernelHeader := make([]byte, 0x40)
+	copy(kernelHeader, "\x7fELF")
+	kernelHeader[18] = 62 // EM_X86_64, little endian.
+	if err := os.WriteFile(kernel, kernelHeader, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	kernel := executable
 	if err := os.WriteFile(rootfs, []byte("rootfs"), 0o600); err != nil {
 		t.Fatal(err)
 	}

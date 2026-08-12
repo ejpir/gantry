@@ -3,7 +3,9 @@
 package atomicfile
 
 import (
+	"errors"
 	"os"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -27,7 +29,28 @@ func replace(from, to string, durable bool) error {
 	if durable {
 		flags |= windows.MOVEFILE_WRITE_THROUGH
 	}
-	return windows.MoveFileEx(fromPath, toPath, flags)
+	// MoveFileEx can transiently return ACCESS_DENIED or SHARING_VIOLATION
+	// when another writer is replacing the same destination. The temporary
+	// file is already closed, so retrying preserves the same atomic commit
+	// point and lets independent configuration writers serialize in-kernel.
+	deadline := time.Now().Add(time.Second)
+	delay := time.Millisecond
+	for {
+		err := windows.MoveFileEx(fromPath, toPath, flags)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(delay)
+		if delay < 10*time.Millisecond {
+			delay *= 2
+		}
+	}
 }
 
 // MOVEFILE_WRITE_THROUGH flushes the replacement on Windows. Opening a

@@ -18,7 +18,7 @@ func checkNilInterface(field string, value any) error {
 		return nil
 	}
 	switch v := reflect.ValueOf(value); v.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
 		if v.IsNil() {
 			return fmt.Errorf("opts.%s holds a nil %s: leave the field nil when there is none", field, v.Type())
 		}

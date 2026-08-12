@@ -234,7 +234,12 @@ if [ ! -f "$WORK/Makefile" ]; then
 	# Unpredictable archive path too: a predictable one lets another local
 	# user pre-plant a symlink and redirect the download over a user file.
 	ARCHIVE=$(mktemp "${TMPDIR:-/tmp}/linux-$VERSION.XXXXXX.tar.xz")
-	curl -fsSL -o "$ARCHIVE" \
+	# kernel.org occasionally resets an HTTP/2 stream on hosted runners
+	# (curl exit 92). The archive remains pinned and hash-verified below, so
+	# bounded HTTP/1.1 retries improve transport reliability without changing
+	# the trusted input.
+	curl --http1.1 -fsSL --retry 5 --retry-connrefused --retry-delay 2 \
+		--connect-timeout 30 -o "$ARCHIVE" \
 		https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-$VERSION.tar.xz
 	verify_sha256 "$ARCHIVE" "$TAR_SHA256" || {
 		echo "kernel tarball sha256 mismatch (want $TAR_SHA256) — refusing to build" >&2

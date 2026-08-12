@@ -32,7 +32,7 @@ func Apply(Spec) (*Report, error) {
 		return &rep, fmt.Errorf("inspect Windows confinement: token=%v job=%v", tokenErr, jobErr)
 	}
 	if !rep.Applied {
-		return &rep, fmt.Errorf("Windows worker token/job confinement not installed")
+		return &rep, fmt.Errorf("windows worker token/job confinement not installed")
 	}
 	return &rep, nil
 }

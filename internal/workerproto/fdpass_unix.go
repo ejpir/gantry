@@ -25,6 +25,12 @@ import (
 // FDTokenLen is the byte length of a transfer token.
 const FDTokenLen = 16
 
+// SCM_MAX_FD is 253 on the Unix hosts we support. Reading the full rights
+// payload matters even though the protocol accepts exactly one descriptor:
+// on Darwin, a truncated SCM_RIGHTS message can install descriptors that are
+// absent from the truncated control buffer, leaving no way to close them.
+const maxRightsPerMessage = 253
+
 const (
 	// Descriptor transfer surrounds a correlated RPC; a peer that does not
 	// consume it must not pin a supervisor handler and descriptor forever.
@@ -100,7 +106,7 @@ func recvFDMsg(conn net.Conn) ([FDTokenLen]byte, *os.File, error) {
 	if !ok {
 		return token, nil, fmt.Errorf("workerproto: fd passing needs a unix channel, got %T", conn)
 	}
-	oob := make([]byte, syscall.CmsgSpace(4))
+	oob := make([]byte, syscall.CmsgSpace(maxRightsPerMessage*4))
 	n, oobn, flags, _, err := uc.ReadMsgUnix(token[:], oob)
 	if err != nil {
 		return token, nil, fmt.Errorf("workerproto: recv fd: %w", err)

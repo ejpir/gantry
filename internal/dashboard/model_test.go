@@ -655,7 +655,11 @@ func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
 	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 30
-	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped, MemMB: 2048, VCPUs: 2}}
+	vcpus := 2
+	if runtime.GOOS == "windows" {
+		vcpus = 1 // Saving must satisfy WHPX's current single-vCPU limit.
+	}
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped, MemMB: 2048, VCPUs: vcpus}}
 	m.cursor = 0
 	m.openEditDialog()
 

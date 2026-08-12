@@ -179,20 +179,24 @@ func TestConfigStoreRejectsInvalidPersistedResources(t *testing.T) {
 func TestConfigStoreSetResources(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1, Shares: []string{"code=/tmp"}})
-	if err := store.SetResources(4096, 4); err != nil {
+	vcpus := 4
+	if runtime.GOOS == "windows" {
+		vcpus = 1 // WHPX SMP remains deliberately unavailable.
+	}
+	if err := store.SetResources(4096, vcpus); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := readSandboxConfig(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MemMB != 4096 || cfg.VCPUs != 4 || len(cfg.Shares) != 1 {
+	if cfg.MemMB != 4096 || cfg.VCPUs != vcpus || len(cfg.Shares) != 1 {
 		t.Fatalf("persisted resources = %+v", cfg)
 	}
 	if err := store.SetResources(4096, 9); err == nil {
 		t.Fatal("accepted more than 8 CPUs")
 	}
-	if got := store.Snapshot(); got.MemMB != 4096 || got.VCPUs != 4 {
+	if got := store.Snapshot(); got.MemMB != 4096 || got.VCPUs != vcpus {
 		t.Fatalf("invalid mutation changed store: %+v", got)
 	}
 }
