@@ -113,13 +113,16 @@ go test ./...
 | Linux arm64 | KVM | Implemented; requires `/dev/kvm` |
 | Linux x86-64 | KVM | Verified on EC2 `c5.metal` |
 | macOS arm64 | Hypervisor.framework | Verified; macOS 13+ |
-| Windows x86-64 | WHPX | Cross-build only, not boot-verified |
+| Windows x86-64 | WHPX | Verified on EC2 `m6i.metal`; currently one vCPU |
 
 ## Limitations
 
-Not (yet): Windows boot verification, snapshots. The trusted supervisor runs
-with the launching user's privileges; the guest-facing VMM worker is confined
-on Linux and macOS. Writable layers must not be shared between live VMs.
+Not (yet): snapshots. The trusted supervisor runs with the launching user's
+privileges; the guest-facing VMM worker is confined on Linux and macOS. On
+Windows it runs separately under a verified Job Object process boundary, but
+filesystem and ambient-network confinement remain unenforced, so
+`-process-isolation=required` fails closed. Writable layers must not be shared
+between live VMs.
 
 ## Acknowledgements
 
