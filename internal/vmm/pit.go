@@ -31,10 +31,19 @@ type pit8254 struct {
 	raise  func(level bool) // IRQ 0 line
 	cancel func()
 	nmi61  byte // port 0x61 shadow
+	now    func() time.Time
 }
 
 func newPIT(raise func(level bool)) *pit8254 {
-	return &pit8254{raise: raise}
+	return &pit8254{raise: raise, now: time.Now}
+}
+
+func (p *pit8254) ticksSince(start time.Time) uint64 {
+	elapsed := p.now().Sub(start)
+	if elapsed <= 0 {
+		return 0
+	}
+	return uint64(elapsed) * pitClockHz / uint64(time.Second)
 }
 
 func (p *pit8254) count(ch int) uint16 {
@@ -42,7 +51,7 @@ func (p *pit8254) count(ch int) uint16 {
 	if !c.running || c.reload == 0 {
 		return 0
 	}
-	ticks := uint64(time.Since(c.start).Nanoseconds()) * pitClockHz / 1e9
+	ticks := p.ticksSince(c.start)
 	if c.mode == 0 { // one-shot: count down to 0 and stop
 		if ticks >= uint64(c.reload) {
 			return 0
@@ -66,7 +75,7 @@ func (p *pit8254) ioRead(port uint16) byte {
 			v := p.nmi61 &^ 0x20
 			c := &p.ch[2]
 			if c.running && c.reload != 0 {
-				ticks := uint64(time.Since(c.start).Nanoseconds()) * pitClockHz / 1e9
+				ticks := p.ticksSince(c.start)
 				expired := false
 				if c.mode == 0 || c.mode == 4 { // one-shot: OUT high at terminal count
 					expired = ticks >= uint64(c.reload)
@@ -141,7 +150,7 @@ func (p *pit8254) ioWrite(port uint16, val byte) {
 	if c.reload == 0 {
 		c.reload = 0xffff // 0 means 65536; close enough for a tick source
 	}
-	c.start = time.Now()
+	c.start = p.now()
 	c.running = true
 	if idx == 0 && p.raise != nil {
 		p.armTimerLocked()

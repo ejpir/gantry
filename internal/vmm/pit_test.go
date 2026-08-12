@@ -2,7 +2,10 @@
 
 package vmm
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // Reprogramming channel 0 cancels the previous timer; the cancel must be
 // idempotent — the WHPX boot panicked with "close of closed channel" when
@@ -31,7 +34,9 @@ func TestPITReprogramChannel0NoPanic(t *testing.T) {
 // finding).
 func TestPITPort61OUT2Expires(t *testing.T) {
 	p := newPIT(func(bool) {})
-	// channel 2, lohi, mode 0 (one-shot), tiny count so it expires fast
+	now := time.Unix(1, 0)
+	p.now = func() time.Time { return now }
+	// channel 2, lohi, mode 0 (one-shot), one PIT tick
 	p.ioWrite(0x43, 0xb0)
 	p.ioWrite(0x42, 0x01)
 	p.ioWrite(0x42, 0x00)
@@ -39,10 +44,8 @@ func TestPITPort61OUT2Expires(t *testing.T) {
 	if v := p.ioRead(0x61); v&0x20 != 0 {
 		t.Fatalf("OUT2 set immediately after load: %#x", v)
 	}
-	for i := 0; i < 100000; i++ {
-		if v := p.ioRead(0x61); v&0x20 != 0 {
-			return
-		}
+	now = now.Add(time.Millisecond)
+	if v := p.ioRead(0x61); v&0x20 == 0 {
+		t.Fatalf("OUT2 did not set after expiry: %#x", v)
 	}
-	t.Fatal("OUT2 never set; calibration would spin")
 }
