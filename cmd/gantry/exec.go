@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/sandbox"
 	"github.com/ejpir/gantry/internal/secret"
 )
@@ -50,9 +51,9 @@ flags:`)
 		return 2
 	}
 
-	cfg, warnings, err := rf.Resolve(fs, func(format string, a ...any) {
-		fmt.Printf("gantry exec: "+format+"\n", a...)
-	})
+	progress := gutil.NewProgressPrinter(os.Stdout, "gantry exec: ")
+	cfg, warnings, err := rf.Resolve(fs, progress.Printf)
+	progress.Finish()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
 		return 1

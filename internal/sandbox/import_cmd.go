@@ -149,8 +149,10 @@ func importDockerSandbox(root, name, as, logPath, workspaceOwner string, dryRun 
 	}
 	defer func() { _ = sourceLock.Close() }()
 
-	say := func(format string, a ...any) { fmt.Printf("gantry import: "+format+"\n", a...) }
-	if err := plan.prepare(root, say); err != nil {
+	progress := gutil.NewProgressPrinter(os.Stdout, "gantry import: ")
+	err = plan.prepare(root, progress.Printf)
+	progress.Finish()
+	if err != nil {
 		return reportImportError(err)
 	}
 

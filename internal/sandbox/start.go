@@ -53,9 +53,9 @@ flags:`)
 
 	rf.Name = name
 	_ = fs.Parse(fargv)
-	cfg, warnings, err := rf.resolve(fs, func(format string, a ...any) {
-		fmt.Printf("gantry start: "+format+"\n", a...)
-	}, timeline.mark)
+	progress := gutil.NewProgressPrinter(os.Stdout, "gantry start: ")
+	cfg, warnings, err := rf.resolve(fs, progress.Printf, timeline.mark)
+	progress.Finish()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
