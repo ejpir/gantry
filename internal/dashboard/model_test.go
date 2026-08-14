@@ -12,6 +12,7 @@ import (
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	sandboxpkg "github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/selfupdate"
 	"github.com/ejpir/gantry/internal/shares"
 
 	tea "charm.land/bubbletea/v2"
@@ -534,13 +535,85 @@ func TestSandboxTUIBlockedDNSAddsQueriedDomain(t *testing.T) {
 	if !strings.Contains(plain, "DNS Allowlist") || !strings.Contains(plain, "allowDomains") {
 		t.Fatalf("DNS allowlist form is not explicit:\n%s", plain)
 	}
+	bounds := m.dialogBounds(tuiRuleAddDialog)
+	button, ok := m.dialogButtonRect(bounds, "Allow domain")
+	if !ok {
+		t.Fatal("rendered Allow domain button not found")
+	}
+	model, cmd := m.updateMouseClick(tea.Mouse{X: button.x + button.w/2, Y: button.y, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "rule add" {
+		t.Fatalf("Allow domain click = dialog %d action %q cmd=%v", m.dialog, m.busyAction, cmd)
+	}
 
-	m.closeDialog()
+	m.busyAction = ""
 	m.traffic[0].Allowed = true
-	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	model, cmd = m.updateKey(tea.KeyPressMsg{Code: 'a'})
 	m = *model.(*sandboxTUIModel)
 	if cmd == nil || m.dialog != tuiNoDialog || m.toast == nil || m.toast.title != "DNS already allowed" {
 		t.Fatalf("allowed DNS action = dialog %d toast=%#v cmd=%v", m.dialog, m.toast, cmd)
+	}
+}
+
+func TestSandboxTUIUpdateBadgeAndConfirmation(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 30
+	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
+
+	menu := ansi.Strip(m.renderMenuBar(tuiThemeFor(true), m.width))
+	if !strings.Contains(menu, "U ↑ v1.3.0") {
+		t.Fatalf("update badge missing:\n%s", menu)
+	}
+	rect := m.menuItemRects(m.width)["update"]
+	model, cmd := m.updateMouseClick(tea.Mouse{X: rect.x + rect.w/2, Y: rect.y, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if cmd != nil || m.dialog != tuiUpdateDialog {
+		t.Fatalf("badge click = dialog %d cmd=%v", m.dialog, cmd)
+	}
+
+	bounds := m.dialogBounds(tuiUpdateDialog)
+	cancel, ok := m.dialogButtonRect(bounds, "Cancel")
+	if !ok {
+		t.Fatal("update Cancel button not found")
+	}
+	model, cmd = m.updateMouseClick(tea.Mouse{X: cancel.x + cancel.w/2, Y: cancel.y, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if cmd != nil || m.dialog != tuiNoDialog {
+		t.Fatalf("update cancel = dialog %d cmd=%v", m.dialog, cmd)
+	}
+
+	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'U'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiUpdateDialog {
+		t.Fatalf("U opened dialog %d", m.dialog)
+	}
+	bounds = m.dialogBounds(tuiUpdateDialog)
+	update, ok := m.dialogButtonRect(bounds, "Update")
+	if !ok {
+		t.Fatal("update button not found")
+	}
+	model, cmd = m.updateMouseClick(tea.Mouse{X: update.x + update.w/2, Y: update.y, Button: tea.MouseLeft})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "update" || m.busyName != "v1.3.0" {
+		t.Fatalf("update click = dialog %d action=%q name=%q cmd=%v", m.dialog, m.busyAction, m.busyName, cmd)
+	}
+}
+
+func TestSandboxTUIQuitsAfterSuccessfulUpdate(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
+	m.busyAction = "update"
+	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil {
+		t.Fatal("successful update did not quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("successful update command = %T, want tea.QuitMsg", cmd())
+	}
+	if m.exitMessage == "" || m.updateStatus.Available {
+		t.Fatalf("post-update state = message %q status %+v", m.exitMessage, m.updateStatus)
 	}
 }
 

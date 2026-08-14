@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/selfupdate"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -31,9 +33,13 @@ func Run(service dashboardapi.Service) int {
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
 	)
-	if _, err := program.Run(); err != nil {
+	final, err := program.Run()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry tui:", err)
 		return 1
+	}
+	if result, ok := final.(*sandboxTUIModel); ok && result.exitMessage != "" {
+		fmt.Fprintln(os.Stderr, result.exitMessage)
 	}
 	return 0
 }
@@ -81,6 +87,7 @@ const (
 	tuiRuleRemoveDialog
 	tuiSecretAddDialog
 	tuiSecretRemoveDialog
+	tuiUpdateDialog
 )
 
 type tuiToastKind uint8
@@ -136,6 +143,12 @@ type tuiClipboardMsg struct {
 
 type tuiToastExpiredMsg struct{ gen uint64 }
 
+type tuiUpdateStatusMsg struct {
+	status selfupdate.Status
+	err    error
+	live   bool
+}
+
 type sandboxTUIModel struct {
 	service dashboardapi.Service
 	limits  dashboardapi.ResourceLimits
@@ -178,6 +191,10 @@ type sandboxTUIModel struct {
 	animating bool
 	toast     *tuiToast
 	toastGen  uint64
+
+	updateStatus  selfupdate.Status
+	updateChecked bool
+	exitMessage   string
 
 	dialog          tuiDialog
 	dialogScroll    int
@@ -333,6 +350,8 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 func (m sandboxTUIModel) Init() tea.Cmd {
 	return tea.Batch(
 		refreshSandboxesCmd(m.service),
+		cachedTUIUpdateCmd(),
+		checkTUIUpdateCmd(),
 		tuiTickCmd(),
 		m.spinner.Tick,
 		func() tea.Msg { return tea.RequestBackgroundColor() },
@@ -386,6 +405,14 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiToastExpiredMsg:
 		if m.toast != nil && m.toast.gen == msg.gen {
 			m.toast = nil
+		}
+		return m, nil
+	case tuiUpdateStatusMsg:
+		if msg.err == nil && (msg.live || !m.updateChecked) {
+			m.updateStatus = msg.status
+		}
+		if msg.live && msg.err == nil {
+			m.updateChecked = true
 		}
 		return m, nil
 	case tuiClipboardMsg:
@@ -465,6 +492,17 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 	m.busyAction = ""
 	m.busyName = ""
 	m.busyProgress = ""
+	if msg.action == "update" {
+		if msg.err != nil {
+			return m, m.showToast(tuiToastError, "Update failed", compactCommandError(msg.output, msg.err))
+		}
+		m.updateStatus = selfupdate.Status{Current: m.updateStatus.Latest, Latest: m.updateStatus.Latest}
+		m.exitMessage = lastOutputLine(msg.output)
+		if m.exitMessage == "" {
+			m.exitMessage = "Gantry updated. Restart the TUI to use the new release."
+		}
+		return m, tea.Quit
+	}
 	m.refreshing = true
 
 	kind, title, body := tuiToastSuccess, actionPastTense(msg.action), msg.name
@@ -485,6 +523,16 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 		}
 	}
 	return m, tea.Batch(refreshSandboxesCmd(m.service), m.showToast(kind, title, body))
+}
+
+func lastOutputLine(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if line := strings.TrimSpace(lines[index]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -613,8 +661,40 @@ func (m *sandboxTUIModel) updateGlobalKey(key string) (tea.Cmd, bool) {
 		return tea.Quit, true
 	case "r":
 		return m.refreshCmd(), true
+	case "U":
+		if m.updateStatus.Available {
+			m.dialog = tuiUpdateDialog
+			m.dialogScroll = 0
+			m.confirmRemove = false
+		}
+		return nil, true
 	}
 	return nil, m.updatePageKey(key)
+}
+
+var checkTUIUpdate = selfupdate.Refresh
+
+func cachedTUIUpdateCmd() tea.Cmd {
+	status, found, _ := selfupdate.Cached()
+	if !found {
+		return nil
+	}
+	return func() tea.Msg { return tuiUpdateStatusMsg{status: status} }
+}
+
+func checkTUIUpdateCmd() tea.Cmd {
+	if !selfupdate.Enabled() {
+		return nil
+	}
+	if _, _, fresh := selfupdate.Cached(); fresh {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		status, err := checkTUIUpdate(ctx)
+		return tuiUpdateStatusMsg{status: status, err: err, live: true}
+	}
 }
 
 func (m *sandboxTUIModel) updatePageKey(key string) bool {
@@ -1332,6 +1412,8 @@ func actionTitle(action string) string {
 		return "Add secret"
 	case "secret remove":
 		return "Delete secret"
+	case "update":
+		return "Update Gantry"
 	default:
 		return strings.Title(action) //nolint:staticcheck // action names are ASCII UI labels.
 	}
@@ -1373,6 +1455,8 @@ func actionPastTense(action string) string {
 		return "Secret added"
 	case "secret remove":
 		return "Secret deleted"
+	case "update":
+		return "Gantry updated"
 	default:
 		return actionTitle(action) + " complete"
 	}

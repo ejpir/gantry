@@ -106,10 +106,25 @@ func TestConfirmationDialogMouseDispatch(t *testing.T) {
 			test.configure(&m)
 			m.dialog = test.dialog
 			bounds := m.dialogBounds(test.dialog)
+			cancel, ok := m.dialogButtonRect(bounds, "Cancel")
+			if !ok {
+				t.Fatal("rendered cancel button not found")
+			}
+			cancelled, cancelCmd := m.updateMouseClick(tea.Mouse{X: cancel.x + cancel.w/2, Y: cancel.y, Button: tea.MouseLeft})
+			if got := cancelled.(*sandboxTUIModel); got.dialog != tuiNoDialog || cancelCmd != nil {
+				t.Fatalf("cancel click left dialog=%d cmd=%v", got.dialog, cancelCmd)
+			}
+
+			m.dialog = test.dialog
+			bounds = m.dialogBounds(test.dialog)
+			button, ok := m.dialogButtonRect(bounds, m.confirmationActionLabel())
+			if !ok {
+				t.Fatal("rendered confirmation button not found")
+			}
 
 			model, cmd := m.updateMouseClick(tea.Mouse{
-				X:      bounds.x + bounds.w - 2,
-				Y:      bounds.y + bounds.h - 3,
+				X:      button.x + button.w/2,
+				Y:      button.y,
 				Button: tea.MouseLeft,
 			})
 			got := model.(*sandboxTUIModel)

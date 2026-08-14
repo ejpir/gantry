@@ -265,13 +265,18 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 	if width >= 72 {
 		left += "  " + lipgloss.NewStyle().Foreground(theme.muted).Render("local microVM workspace")
 	}
-	right := lipgloss.NewStyle().Foreground(theme.secondary).Render("n ") +
-		lipgloss.NewStyle().Foreground(theme.text).Render("New") + "   " +
-		lipgloss.NewStyle().Foreground(theme.secondary).Render("? ") +
-		lipgloss.NewStyle().Foreground(theme.text).Render("Help")
-	if width < 58 {
-		right = lipgloss.NewStyle().Foreground(theme.secondary).Render("n New   ? Help")
+	items := m.menuItems(width)
+	rendered := make([]string, 0, len(items))
+	for _, item := range items {
+		keyColor, labelColor := theme.secondary, theme.text
+		if item.id == "update" {
+			keyColor, labelColor = theme.warning, theme.warning
+		}
+		rendered = append(rendered,
+			lipgloss.NewStyle().Bold(item.id == "update").Foreground(keyColor).Render(item.key+" ")+
+				lipgloss.NewStyle().Bold(item.id == "update").Foreground(labelColor).Render(item.label))
 	}
+	right := strings.Join(rendered, "   ")
 	innerWidth := maxInt(1, width-4)
 	line := joinSides(left, right, innerWidth)
 	style := lipgloss.NewStyle().
@@ -284,6 +289,40 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 		Height(tuiMenuHeight).
 		MaxHeight(tuiMenuHeight)
 	return renderSurface(style, theme.text, theme.panel, line)
+}
+
+type tuiMenuItem struct {
+	id    string
+	key   string
+	label string
+}
+
+func (m sandboxTUIModel) menuItems(width int) []tuiMenuItem {
+	items := make([]tuiMenuItem, 0, 3)
+	if m.updateStatus.Available {
+		items = append(items, tuiMenuItem{id: "update", key: "U", label: "↑ " + m.updateStatus.Latest})
+	}
+	if width >= 40 || !m.updateStatus.Available {
+		items = append(items, tuiMenuItem{id: "new", key: "n", label: "New"})
+	}
+	return append(items, tuiMenuItem{id: "help", key: "?", label: "Help"})
+}
+
+func (m sandboxTUIModel) menuItemRects(width int) map[string]tuiRect {
+	items := m.menuItems(width)
+	rects := make(map[string]tuiRect, len(items))
+	lines := strings.Split(ansi.Strip(m.renderMenuBar(tuiThemeFor(m.dark), width)), "\n")
+	if len(lines) <= 1 {
+		return rects
+	}
+	for _, item := range items {
+		label := item.key + " " + item.label
+		if offset := strings.LastIndex(lines[1], label); offset >= 0 {
+			x := lipgloss.Width(lines[1][:offset])
+			rects[item.id] = tuiRect{x: x, y: 1, w: lipgloss.Width(label), h: 1}
+		}
+	}
+	return rects
 }
 
 type tuiTabRect struct {
@@ -775,7 +814,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 72
 	case tuiInfoDialog:
 		idealWidth = 68
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
 		idealWidth = 54
 	case tuiCreateDialog:
 		idealWidth = 64
@@ -914,6 +953,9 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 	case tuiSecretRemoveDialog:
 		content = m.renderSecretRemoveDialog(theme, innerWidth)
 		border = theme.error
+	case tuiUpdateDialog:
+		content = m.renderUpdateDialog(theme, innerWidth)
+		border = theme.warning
 	}
 	return content, border
 }
@@ -959,13 +1001,17 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"r", "replace selected share"},
 		{"e (Rules)", "edit network policy"},
 	})
-	application := column("APPLICATION", [][2]string{
+	applicationRows := [][2]string{
 		{"?", "toggle this help"},
 		{"q / ctrl+c", "quit"},
 		{"ctrl+c / ctrl+v", "copy / paste focused field"},
 		{"click", "select a card"},
 		{"double-click", "open or start"},
-	})
+	}
+	if m.updateStatus.Available {
+		applicationRows = append([][2]string{{"U", "install " + m.updateStatus.Latest}}, applicationRows...)
+	}
+	application := column("APPLICATION", applicationRows)
 	var body string
 	if width >= 58 {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, navigation, strings.Repeat(" ", 3), actions, strings.Repeat(" ", 3), shareActions)
@@ -1106,6 +1152,23 @@ func (m sandboxTUIModel) renderRemoveDialog(theme tuiTheme, width int) string {
 	buttons := alignRight(cancel+"  "+remove, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
 	return header + "\n\n" + label + value + "\n\n" + warning + "\n\n" + question + "\n\n" + renderConfirmationFooter(buttons, hint)
+}
+
+func (m sandboxTUIModel) renderUpdateDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Update Gantry", width)
+	current := lipgloss.NewStyle().Foreground(theme.secondary).Render("Current:   ") +
+		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(defaultText(m.updateStatus.Current, "unknown"))
+	latest := lipgloss.NewStyle().Foreground(theme.secondary).Render("Available: ") +
+		lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render(defaultText(m.updateStatus.Latest, "unknown"))
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(
+		lipgloss.Wrap("Download the platform binary, verify its SHA-256 release sidecar, and replace Gantry in place.", width, ""),
+	)
+	note := lipgloss.NewStyle().Foreground(theme.muted).Render("The dashboard closes after a successful update; running sandboxes keep running.")
+	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
+	update := renderDialogButton(theme, "Update", m.confirmRemove, false)
+	buttons := alignRight(cancel+"  "+update, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
+	return header + "\n\n" + current + "\n" + latest + "\n\n" + description + "\n\n" + note + "\n\n" + renderConfirmationFooter(buttons, hint)
 }
 
 func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
@@ -1576,6 +1639,8 @@ func busyLabel(action string) string {
 		return "REMOVING"
 	case "open":
 		return "OPENING"
+	case "update":
+		return "UPDATING"
 	default:
 		return strings.ToUpper(action)
 	}

@@ -17,10 +17,9 @@ Download the latest release binary:
 curl -LO https://github.com/ejpir/gantry/releases/latest/download/gantry-linux-arm64
 chmod +x gantry-linux-arm64
 
-# macOS (Apple Silicon) — also needs an ad-hoc signature + entitlement
+# macOS (Apple Silicon) — release assets carry an ad-hoc Hypervisor signature
 curl -LO https://github.com/ejpir/gantry/releases/latest/download/gantry-darwin-arm64
-curl -LO https://raw.githubusercontent.com/ejpir/gantry/main/config/entitlements.plist
-codesign --force --sign - --entitlements entitlements.plist gantry-darwin-arm64
+chmod +x gantry-darwin-arm64
 xattr -d com.apple.quarantine gantry-darwin-arm64
 ```
 
@@ -48,6 +47,16 @@ published beside the asset (fail-closed), assets are immutable once
 published, and each artifact carries a Sigstore build-provenance
 attestation — verify with
 `gh attestation verify <file> --repo ejpir/gantry`.
+
+Tagged builds check for a new stable release at most once per day without
+holding up the command being run. A cached CLI notice points to
+`gantry update`; `gantry version` performs an explicit check. The dashboard
+shows an `↑ VERSION` badge when an update is available—press `U` or click the
+badge, then confirm to install it. Updates download the matching platform
+binary, verify its SHA-256 sidecar and executable format, and atomically
+replace the current executable. macOS additionally requires the release's
+verified Hypervisor entitlement; Windows completes replacement through a
+detached helper after the dashboard exits. Running sandboxes are not stopped.
 
 ## Use
 
@@ -107,6 +116,9 @@ attestation — verify with
 - **Dashboard and import** — create/start/stop/exec plus Traffic, Rules,
   Mounts, Ports, and Secrets views; `gantry import` adopts compatible sandbox
   state without re-pulling or flattening immutable image layers.
+- **In-place updates** — cached release notices in the CLI and dashboard,
+  verified `gantry update`, and a dashboard confirmation flow that leaves
+  running sandboxes untouched.
 - **Local manager API** — `gantry serve` provides lifecycle, bounded captured
   exec, operations, and SSE events as HTTP/JSON over a same-user Unix socket;
   see the checked-in [OpenAPI contract](api/managerapi/openapi.yaml).
