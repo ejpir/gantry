@@ -19,7 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const elevatedUpdateMessage = "Windows self-update is disabled for elevated processes; run Gantry unelevated from a user-writable installation or replace the binary manually"
+const elevatedUpdateMessage = "windows self-update is disabled for elevated processes; run Gantry unelevated from a user-writable installation or replace the binary manually"
 
 var processElevation = currentProcessElevation
 
