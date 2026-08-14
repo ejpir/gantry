@@ -171,7 +171,7 @@ func TestSessionExecRelaysOutputBeforeStart(t *testing.T) {
 	service := &execLifecycleTask{}
 	service.startHook = func() error {
 		peer := <-stdoutPeer
-		defer peer.Close()
+		defer func() { _ = peer.Close() }()
 		if err := peer.SetWriteDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
 			return err
 		}
