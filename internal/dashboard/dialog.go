@@ -350,6 +350,7 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 		m.createImage, cmd = m.createImage.Update(msg)
 	}
 	m.formError = ""
+	m.createErrFocus = -1
 	return m, cmd
 }
 
@@ -464,6 +465,7 @@ func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
 	m.dialog = tuiCreateDialog
 	m.dialogScroll = 0
 	m.formError = ""
+	m.createErrFocus = -1
 	m.createName.Reset()
 	m.createImage.Reset()
 	m.createCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, 1)
@@ -496,14 +498,19 @@ func (m *sandboxTUIModel) submitCreate() (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(m.createName.Value())
 	if err := m.service.ValidateCreate(name, uint(m.createMemory.Value), uint(m.createDisk.Value), m.createCPUs.Value, m.createIsolation); err != nil {
 		m.formError = err.Error()
+		m.createErrFocus = 0
 		switch dashboardErrorField(err) {
 		case "cpu":
+			m.createErrFocus = 4
 			return m, m.focusCreate(4)
 		case "memory":
+			m.createErrFocus = 5
 			return m, m.focusCreate(5)
 		case "disk":
+			m.createErrFocus = 6
 			return m, m.focusCreate(6)
 		case "isolation":
+			m.createErrFocus = 7
 			return m, m.focusCreate(7)
 		default:
 			return m, m.focusCreate(0)

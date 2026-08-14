@@ -845,6 +845,13 @@ func TestSandboxTUICreateValidation(t *testing.T) {
 	if m.formError == "" || m.busyAction != "" {
 		t.Fatalf("invalid create submission: error=%q busy=%q", m.formError, m.busyAction)
 	}
+	plain := ansi.Strip(m.renderCreateDialog(tuiThemeFor(true), 58))
+	nameAt := strings.Index(plain, "\nName\n")
+	errorAt := strings.Index(plain, "invalid sandbox name")
+	imageAt := strings.Index(plain, "\nOCI image")
+	if nameAt < 0 || errorAt <= nameAt || imageAt <= errorAt {
+		t.Fatalf("name error is not rendered beside its field:\n%s", plain)
+	}
 }
 
 func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {

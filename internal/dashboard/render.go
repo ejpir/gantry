@@ -1193,10 +1193,6 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 	isolationLabel := formLabel(theme, "Process isolation", m.createFocus == 7)
 	isolationValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.createIsolation) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
-	errorLine := ""
-	if m.formError != "" {
-		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
-	}
 	create := renderDialogButton(theme, "Create", m.createFocus == 8, false)
 	buttons := alignRight(create, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  enter continue  •  esc cancel")
@@ -1211,7 +1207,13 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 		diskLabel + "\n" + diskSlider,
 		isolationLabel + "\n" + isolationValue,
 	}
-	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+	if m.formError != "" && m.createErrFocus >= 0 && m.createErrFocus < len(fields) {
+		errorLine := lipgloss.NewStyle().Foreground(theme.error).Render(
+			lipgloss.Wrap(safeUIBlock(m.formError), width, ""),
+		)
+		fields[m.createErrFocus] += "\n" + errorLine
+	}
+	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter("", buttons, hint)
 }
 
 func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
