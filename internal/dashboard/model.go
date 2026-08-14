@@ -1370,6 +1370,26 @@ func compactCommandError(output string, err error) string {
 		return err.Error()
 	}
 	lines := strings.Split(output, "\n")
+	// Progress output is useful while an operation is running, but it must not
+	// displace the diagnostic once the command fails. In particular, a wrapped
+	// download progress line can consume the toast's entire two-line body.
+	diagnostics := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, progress := operationProgressLine(line); !progress {
+			diagnostics = append(diagnostics, line)
+		}
+	}
+	if len(diagnostics) > 0 {
+		lines = diagnostics
+	}
+	if errText := strings.TrimSpace(err.Error()); errText != "" &&
+		!strings.Contains(strings.Join(lines, "\n"), errText) {
+		lines = append(lines, errText)
+	}
 	if len(lines) > 3 {
 		lines = lines[len(lines)-3:]
 	}
