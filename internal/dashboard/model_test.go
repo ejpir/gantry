@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -614,6 +615,25 @@ func TestSandboxTUIQuitsAfterSuccessfulUpdate(t *testing.T) {
 	}
 	if m.exitMessage == "" || m.updateStatus.Available {
 		t.Fatalf("post-update state = message %q status %+v", m.exitMessage, m.updateStatus)
+	}
+}
+
+func TestCompactCommandErrorPrefersDiagnosticOverProgress(t *testing.T) {
+	output := strings.Join([]string{
+		"downloading gantry-darwin-arm64 [==============······]  74%",
+		"downloading gantry-darwin-arm64 [==================··]  93%",
+		"downloading gantry-darwin-arm64 [====================] 100%",
+		"gantry update: verify gantry-darwin-arm64: release binary lacks an enabled com.apple.security.hypervisor entitlement",
+	}, "\n")
+
+	got := compactCommandError(output, errors.New("exit status 1"))
+	if strings.Contains(got, "downloading ") {
+		t.Fatalf("error retained progress output: %q", got)
+	}
+	for _, want := range []string{"lacks an enabled", "exit status 1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q does not contain %q", got, want)
+		}
 	}
 }
 
