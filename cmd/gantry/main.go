@@ -46,6 +46,8 @@ usage:
   gantry stop <name>                # stop a sandbox
   gantry resume <name>              # boot a stopped sandbox from saved config
   gantry delete <name>              # stop + remove a sandbox
+  gantry version                    # show this and the latest Gantry release
+  gantry update                     # update Gantry in place
 
 -image accepts an OCI reference (debian:bookworm-slim,
 ghcr.io/org/app@sha256:...), an OCI layout dir, a docker save tar, or a
@@ -58,7 +60,10 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 }
 
 func main() {
-	os.Exit(runMain(os.Args[1:]))
+	args := os.Args[1:]
+	status := runMain(args)
+	maybeNotifyUpdate(args, status)
+	os.Exit(status)
 }
 
 func runMain(args []string) int {
@@ -103,6 +108,14 @@ func runMain(args []string) int {
 		return sandbox.CmdResume(name)
 	case "serve":
 		return sandbox.CmdServe(argv)
+	case "version":
+		return cmdVersion(argv)
+	case "update":
+		return cmdUpdate(argv)
+	case "_update-check":
+		return cmdUpdateCheck(argv)
+	case "_finish-update":
+		return cmdFinishUpdate(argv)
 	case "daemon":
 		if len(argv) < 1 || len(argv) > 2 {
 			return 2

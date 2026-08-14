@@ -313,15 +313,15 @@ jobs:
 
   build:
     name: build/${{ matrix.goos }}/${{ matrix.goarch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { goos: linux, goarch: amd64, ext: "" }
-          - { goos: linux, goarch: arm64, ext: "" }
-          - { goos: darwin, goarch: arm64, ext: "" }
-          - { goos: windows, goarch: amd64, ext: ".exe" }
+          - { goos: linux, goarch: amd64, ext: "", runner: ubuntu-latest }
+          - { goos: linux, goarch: arm64, ext: "", runner: ubuntu-latest }
+          - { goos: darwin, goarch: arm64, ext: "", runner: macos-14 }
+          - { goos: windows, goarch: amd64, ext: ".exe", runner: ubuntu-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -358,6 +358,10 @@ jobs:
           fi
           go build -trimpath -ldflags "-X github.com/ejpir/gantry/internal/guestasset.Version=${version}" \
             -o "$RUNNER_TEMP/dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/gantry
+          if [[ "${GOOS}" == darwin ]]; then
+            codesign --force --sign - --entitlements config/entitlements.plist \
+              "$RUNNER_TEMP/dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          fi
           go build -trimpath -o "$RUNNER_TEMP/dist/hostctl-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/hostctl
       - uses: actions/upload-artifact@v4
         with:

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,7 +54,7 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateRuleAddDialogKey(msg)
 	case tuiSecretAddDialog:
 		return m.updateSecretAddDialogKey(msg)
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
 		return m.updateConfirmationDialogKey(msg.String())
 	case tuiHelpDialog, tuiInfoDialog:
 		switch msg.String() {
@@ -278,9 +279,20 @@ func (m *sandboxTUIModel) submitConfirmationDialog() (tea.Model, tea.Cmd) {
 		return m.removeSelectedRule()
 	case tuiSecretRemoveDialog:
 		return m.removeSelectedSecret()
+	case tuiUpdateDialog:
+		return m.beginUpdate()
 	default:
 		return m, nil
 	}
+}
+
+func (m *sandboxTUIModel) beginUpdate() (tea.Model, tea.Cmd) {
+	if !m.updateStatus.Available {
+		m.closeDialog()
+		return m, nil
+	}
+	latest := m.updateStatus.Latest
+	return m.beginAction("update", latest, []string{"update", "--wait-pid", fmt.Sprint(os.Getpid())}, false)
 }
 
 func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1647,6 +1659,11 @@ func (m sandboxTUIModel) formControlRows(layout tuiFormRowLayout, afterFirstOffs
 // included so the visible button and its click target stay together when a
 // form gains or loses rows.
 func (m sandboxTUIModel) dialogButtonHit(mouse tea.Mouse, bounds tuiRect, label string) bool {
+	rect, ok := m.dialogButtonRect(bounds, label)
+	return ok && rect.contains(mouse.X, mouse.Y)
+}
+
+func (m sandboxTUIModel) dialogButtonRect(bounds tuiRect, label string) (tuiRect, bool) {
 	lines := strings.Split(ansi.Strip(m.renderDialog(tuiThemeFor(m.dark))), "\n")
 	for row := len(lines) - 1; row >= 0; row-- {
 		byteOffset := strings.LastIndex(lines[row], label)
@@ -1655,10 +1672,9 @@ func (m sandboxTUIModel) dialogButtonHit(mouse tea.Mouse, bounds tuiRect, label 
 		}
 		start := maxInt(0, lipgloss.Width(lines[row][:byteOffset])-2)
 		end := lipgloss.Width(lines[row][:byteOffset+len(label)]) + 2
-		relX, relY := mouse.X-bounds.x, mouse.Y-bounds.y
-		return relY == row && relX >= start && relX < end
+		return tuiRect{x: bounds.x + start, y: bounds.y + row, w: end - start, h: 1}, true
 	}
-	return false
+	return tuiRect{}, false
 }
 
 func (m *sandboxTUIModel) updateMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
@@ -1697,7 +1713,7 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m, nil
 	}
 	switch m.dialog {
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
 		return m.updateConfirmationDialogMouse(mouse, bounds)
 	case tuiCreateDialog:
 		return m.updateCreateDialogMouse(mouse, bounds)
@@ -1719,15 +1735,31 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 }
 
 func (m *sandboxTUIModel) updateConfirmationDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	if mouse.Y != bounds.y+bounds.h-3 {
-		return m, nil
-	}
-	if mouse.X < bounds.x+bounds.w/2 {
+	if m.dialogButtonHit(mouse, bounds, "Cancel") {
+		m.confirmRemove = false
 		m.closeDialog()
 		return m, nil
 	}
-	m.confirmRemove = true
-	return m.submitConfirmationDialog()
+	if action := m.confirmationActionLabel(); action != "" && m.dialogButtonHit(mouse, bounds, action) {
+		m.confirmRemove = true
+		return m.submitConfirmationDialog()
+	}
+	return m, nil
+}
+
+func (m sandboxTUIModel) confirmationActionLabel() string {
+	switch m.dialog {
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiRuleRemoveDialog:
+		return "Remove"
+	case tuiPortUnpublishDialog:
+		return "Unpublish"
+	case tuiSecretRemoveDialog:
+		return "Delete"
+	case tuiUpdateDialog:
+		return "Update"
+	default:
+		return ""
+	}
 }
 
 func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
@@ -1876,6 +1908,12 @@ func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRe
 	if m.ruleSandbox.open && m.ruleSandbox.chooseVisible(relY-rows[0].last-2) {
 		return m, nil
 	}
+	// DNS's compact ports explanation occupies the same approximate rows as
+	// the footer. Resolve the real rendered button before broad field hitboxes.
+	if m.dialogButtonHit(mouse, bounds, m.ruleAddButtonLabel()) {
+		m.ruleFocus = 5
+		return m.submitRuleAdd()
+	}
 	switch {
 	case rows[0].contains(relY):
 		m.ruleSandbox.Toggle()
@@ -1906,9 +1944,6 @@ func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRe
 			return m, nil
 		}
 		return m, m.focusRule(4)
-	case m.dialogButtonHit(mouse, bounds, m.ruleAddButtonLabel()):
-		m.ruleFocus = 5
-		return m.submitRuleAdd()
 	}
 	return m, nil
 }
@@ -1979,13 +2014,20 @@ func (m *sandboxTUIModel) updateMenuMouseClick(mouse tea.Mouse) (tea.Cmd, bool) 
 	if mouse.Y != 1 {
 		return nil, false
 	}
-	if mouse.X >= m.width-9 {
+	rects := m.menuItemRects(m.width)
+	if rects["help"].contains(mouse.X, mouse.Y) {
 		m.dialog = tuiHelpDialog
 		m.dialogScroll = 0
 		return nil, true
 	}
-	if mouse.X >= m.width-20 && m.busyAction == "" {
+	if rects["new"].contains(mouse.X, mouse.Y) && m.busyAction == "" {
 		return m.openCreateDialog(), true
+	}
+	if rects["update"].contains(mouse.X, mouse.Y) && m.busyAction == "" && m.updateStatus.Available {
+		m.dialog = tuiUpdateDialog
+		m.dialogScroll = 0
+		m.confirmRemove = false
+		return nil, true
 	}
 	return nil, false
 }

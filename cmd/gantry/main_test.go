@@ -29,6 +29,8 @@ func TestWriteMainHelpListsCommands(t *testing.T) {
 		"gantry stop <name>",
 		"gantry resume <name>",
 		"gantry delete <name>",
+		"gantry version",
+		"gantry update",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("top-level help missing %q:\n%s", want, got)

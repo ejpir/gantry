@@ -19,6 +19,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/miekg/dns v1.1.72
 	github.com/opencontainers/runtime-spec v1.3.0
+	golang.org/x/mod v0.36.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.44.0
 	google.golang.org/grpc v1.82.1
@@ -52,7 +53,6 @@ require (
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
