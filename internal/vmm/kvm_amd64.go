@@ -205,14 +205,16 @@ func (kvmX86Platform) run(m *Machine) error {
 		return fmt.Errorf("KVM_CREATE_PIT2: %w", err)
 	}
 
-	reg := kvmUserspaceMemoryRegion{
-		slot:          0,
-		guestPhysAddr: 0,
-		memorySize:    uint64(len(m.ram)),
-		userspaceAddr: uint64(uintptr(unsafe.Pointer(&m.ram[0]))),
-	}
-	if err := ioctl(vmFD, kvmSetUserMemoryRegion, unsafe.Pointer(&reg)); err != nil {
-		return fmt.Errorf("KVM_SET_USER_MEMORY_REGION: %w", err)
+	for slot, region := range x86RAMRegions(uint64(len(m.ram))) {
+		reg := kvmUserspaceMemoryRegion{
+			slot:          uint32(slot),
+			guestPhysAddr: region.guestBase,
+			memorySize:    region.size,
+			userspaceAddr: uint64(uintptr(unsafe.Pointer(&m.ram[region.hostOffset]))),
+		}
+		if err := ioctl(vmFD, kvmSetUserMemoryRegion, unsafe.Pointer(&reg)); err != nil {
+			return fmt.Errorf("KVM_SET_USER_MEMORY_REGION(slot %d, GPA %#x): %w", slot, region.guestBase, err)
+		}
 	}
 
 	// Host CPUID (incl. KVM paravirt leaves: kvm-clock, ...) for all vCPUs.

@@ -525,6 +525,12 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			if row == nil {
 				return nil, true
 			}
+			if strings.EqualFold(row.Protocol, "dns") && row.Allowed {
+				return m.showToast(tuiToastInfo, "DNS already allowed", "Only blocked DNS names can be added to allowDomains; remove exact entries from Rules."), true
+			}
+			if strings.EqualFold(row.Protocol, "dns") && (strings.TrimSpace(row.Host) == "" || row.Host == row.Address) {
+				return m.showToast(tuiToastInfo, "DNS name unavailable", "This observation does not contain a queried domain to add to allowDomains."), true
+			}
 			return m.openRuleAddDialog(), true
 		case "r":
 			row := m.selectedTraffic()

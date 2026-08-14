@@ -516,6 +516,34 @@ func TestSandboxTUITrafficSelectionSurvivesDNSRefresh(t *testing.T) {
 	}
 }
 
+func TestSandboxTUIBlockedDNSAddsQueriedDomain(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.page = tuiTrafficPage
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
+	m.traffic = []tuiTrafficRow{{
+		Sandbox: "dev", Host: "pi.dev", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: false,
+	}}
+
+	model, _ := m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiRuleAddDialog || m.ruleAction != "allow" || m.ruleProtocol != "dns" || m.ruleTarget.Value() != "pi.dev" || m.rulePorts.Value() != "" {
+		t.Fatalf("DNS allowlist form = dialog %d action %q proto %q target %q ports %q", m.dialog, m.ruleAction, m.ruleProtocol, m.ruleTarget.Value(), m.rulePorts.Value())
+	}
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "DNS Allowlist") || !strings.Contains(plain, "allowDomains") {
+		t.Fatalf("DNS allowlist form is not explicit:\n%s", plain)
+	}
+
+	m.closeDialog()
+	m.traffic[0].Allowed = true
+	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiNoDialog || m.toast == nil || m.toast.title != "DNS already allowed" {
+		t.Fatalf("allowed DNS action = dialog %d toast=%#v cmd=%v", m.dialog, m.toast, cmd)
+	}
+}
+
 func TestSandboxTUIRuleRemovalDistinguishesEntriesFromPosture(t *testing.T) {
 	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
 	m.loading = false

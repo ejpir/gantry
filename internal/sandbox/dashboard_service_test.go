@@ -11,7 +11,14 @@ import (
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/shares"
+	"github.com/ejpir/gantry/internal/vmm"
 )
+
+func TestDashboardResourceLimitsUseHostVCPUCapability(t *testing.T) {
+	if got, want := (dashboardService{}).ResourceLimits().MaxVCPUs, vmm.MaxSupportedVCPUs(); got != want {
+		t.Fatalf("dashboard max vCPUs = %d, want host capability %d", got, want)
+	}
+}
 
 func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	t.Setenv("GANTRY_HOME", t.TempDir())
@@ -220,6 +227,64 @@ func TestDashboardTrafficRulesPersistForAllProtocols(t *testing.T) {
 	}
 	if len(policy.Rules) != 1 || policy.RuleSummaries()[1].Protocol != "any" {
 		t.Fatalf("traffic removal left rules = %#v", policy.RuleSummaries())
+	}
+}
+
+func TestDashboardBlockedDNSAddsDomainAllowlistEntry(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	name := "dev"
+	if err := os.MkdirAll(sandboxDir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(policyPath, []byte(`{"default":"deny","allowDomains":["api.github.com"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, name, RunConfig{Net: true, MemMB: 512, VCPUs: 1, NetPol: policyPath})
+
+	service := dashboardService{}
+	request := dashboardapi.RuleRequest{
+		Sandbox: name, Action: "allow", Target: "Pi.DEV.", Proto: "dns",
+	}
+	if err := service.ValidateNetworkRule(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AddNetworkRule(request); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readSandboxConfig(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := netpol.Load(cfg.NetPol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.AllowDomains) != 2 || policy.AllowDomains[1] != "pi.dev" {
+		t.Fatalf("domains after DNS allow = %v", policy.AllowDomains)
+	}
+	if len(policy.Rules) != 0 {
+		t.Fatalf("DNS allow created L3/L4 rules: %#v", policy.RuleSummaries())
+	}
+
+	if err := service.RemoveTrafficRule(dashboardapi.Traffic{Sandbox: name, Host: "pi.dev", Address: "192.168.127.1", Protocol: "dns"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = readSandboxConfig(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = netpol.Load(cfg.NetPol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.AllowDomains) != 1 || policy.AllowDomains[0] != "api.github.com" {
+		t.Fatalf("domains after DNS removal = %v", policy.AllowDomains)
+	}
+
+	request.Action = "deny"
+	if err := service.ValidateNetworkRule(request); err == nil {
+		t.Fatal("DNS deny rule validated")
 	}
 }
 

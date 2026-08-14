@@ -139,6 +139,31 @@ func TestWithoutDomainNormalizesAndRemovesAllowlistEntry(t *testing.T) {
 	}
 }
 
+func TestWithDomainNormalizesAndDeduplicatesAllowlistEntry(t *testing.T) {
+	policy := mustParse(t, `{"default":"deny","allowDomains":["api.github.com"]}`)
+	next, err := WithDomain(policy, " Pi.DEV. ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err = WithDomain(next, "pi.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.AllowDomains) != 2 || next.AllowDomains[1] != "pi.dev" {
+		t.Fatalf("domains after additions = %v", next.AllowDomains)
+	}
+	if len(policy.AllowDomains) != 1 {
+		t.Fatalf("source policy was mutated: %v", policy.AllowDomains)
+	}
+	query := ipFrame(t, gatewayIP, protoUDP, 53, dnsQuery(t, "pi.dev"))
+	if policy.MatchTX(query) || !next.MatchTX(query) {
+		t.Fatal("added domain did not change the DNS query decision")
+	}
+	if _, err := WithDomain(next, " . "); err == nil {
+		t.Fatal("empty domain addition succeeded")
+	}
+}
+
 func TestPolicyReplaceAppliesToStableReceiver(t *testing.T) {
 	stable := DefaultPolicy()
 	public := [4]byte{8, 8, 8, 8}

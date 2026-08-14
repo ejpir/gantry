@@ -288,6 +288,9 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	}
 	setup.commit()
 	logf("task created")
+	// Attach the relays before Start so output from a process which runs to
+	// completion during Start cannot race ahead of the host-side reader.
+	stdoutDone := streams.relay(stdin, stdout)
 	if _, err := taskClient.Start(ctx, &v3.StartRequest{ID: options.ID}); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
@@ -299,7 +302,6 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 		_, _ = taskClient.ResizePty(ctx, &v3.ResizePtyRequest{ID: options.ID, Width: options.Cols, Height: options.Rows})
 	}
 
-	stdoutDone := streams.relay(stdin, stdout)
 	stopKill := watchKill(options.KillCh, func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer killCancel()

@@ -198,7 +198,7 @@ func cmdRun(argv []string) int {
 	guestCID := run.Uint64("guestcid", 3, "guest vsock context ID")
 	vsockListen := run.String("vsocklisten", "1026", "comma-separated guest ports accepting host connections (unix sockets at <vsockfwd>/listen-N.sock)")
 	memMB := run.Uint("mem", 512, "guest RAM in MiB")
-	vcpus := run.Int("cpus", 1, "guest vCPU count (SMP via PSCI CPU_ON; max 8)")
+	vcpus := run.Int("cpus", 1, fmt.Sprintf("guest vCPU count (SMP via PSCI CPU_ON; max %d on this host)", vmm.MaxSupportedVCPUs()))
 	append_ := run.String("append", "", "kernel cmdline (default depends on -rootfs)")
 	if err := run.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

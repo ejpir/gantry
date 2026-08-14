@@ -662,7 +662,7 @@ func (b *hvfBackend) failVCPU(id int, err error) {
 	}
 }
 
-// newVCPU creates one vCPU (id becomes MPIDR Aff1, matching the FDT cpu
+// newVCPU creates one vCPU (id becomes MPIDR Aff1, matching the FDT CPU
 // nodes and the GIC redistributors) and registers it.
 func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 	// Serialize creation: concurrent hv_vcpu_create from several threads
@@ -695,7 +695,7 @@ func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 	}()
 	vc.exit = exitInfo
 	// Aff1 = vcpu id so MPIDR matches the redistributor (libkrun does the same)
-	mpidr := uint64(0x80000000) | uint64(id)<<8
+	mpidr := uint64(0x80000000) | uint64(guestVCPUMPIDR(id))
 	if ret := hvVcpuSetSysReg(vc.vcpu, hvSysRegMpidrEl1, mpidr); ret != hvSuccess {
 		return nil, fmt.Errorf("hv_vcpu_set_sys_reg(MPIDR_EL1): %s", hvReturnString(ret))
 	}
@@ -1065,7 +1065,7 @@ func (vc *hvfVCPU) handlePSCI() error {
 		mpidr, _ := vc.getReg(hvRegX0 + 1)
 		entry, _ := vc.getReg(hvRegX0 + 2)
 		ctx, _ := vc.getReg(hvRegX0 + 3)
-		targetID := int((mpidr >> 8) & 0xff) // Aff1, matches FDT cpu@N
+		targetID := guestVCPUIndex(mpidr)
 		if err := vc.b.startVCPU(targetID, entry, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[psci] CPU_ON cpu%d entry=%#x failed: %v\n", targetID, entry, err)
 			_ = vc.setReg(hvRegX0, psciInvalid)

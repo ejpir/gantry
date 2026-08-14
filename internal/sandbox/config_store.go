@@ -115,7 +115,7 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 	return cfg
 }
 
-const maxSandboxVCPUs = vmm.MaxVCPUs
+var maxSandboxVCPUs = vmm.MaxSupportedVCPUs()
 
 const (
 	minSandboxMemMB = (vmm.MinMemoryBytes + (1 << 20) - 1) >> 20

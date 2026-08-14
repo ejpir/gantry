@@ -76,6 +76,13 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
+	// Readiness means both the guest RPC and the local authenticated control
+	// broker can accept work. Publishing it from connectGuest left a window in
+	// which `gantry start` returned successfully before ctl.sock existed, so an
+	// immediate `gantry exec` could race startup and produce no guest output.
+	if err := d.publishReady(); err != nil {
+		return daemonFailure(err)
+	}
 	return d.supervise()
 }
 

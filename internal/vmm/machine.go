@@ -423,7 +423,7 @@ type Opts struct {
 	VsockDial     func(port uint32) (net.Conn, error)
 	VsockNoListen bool
 	Interactive   bool // wire host stdin into the guest UART
-	VCPUs         int  // guest vCPU count (SMP); validated in [1, MaxVCPUs]
+	VCPUs         int  // guest vCPU count (SMP); validated against [MaxSupportedVCPUs]
 	GuestCID      uint64
 	VsockListen   []uint32 // guest ports accepting host-originated connections
 	Cmdline       string
@@ -506,7 +506,7 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	m.entry = entry
 	m.arch = arch
 	if arch == "amd64" {
-		m.mem = virtio.NewRAM(ram, 0)
+		m.mem = virtio.NewSplitRAM(ram, x86LowRAMEnd, x86HighRAMStart)
 	} else {
 		m.mem = virtio.NewRAM(ram, ramBase)
 	}

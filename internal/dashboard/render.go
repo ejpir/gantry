@@ -1374,8 +1374,15 @@ func (m sandboxTUIModel) renderNetworkPolicyDialog(theme tuiTheme, width int) st
 }
 
 func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
-	header := m.dialogHeader(theme, "Traffic Rule", width)
-	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Add a highest-priority rule for the selected observed connection.")
+	domainRule := m.ruleProtocol == "dns"
+	title := "Traffic Rule"
+	descriptionText := "Add a highest-priority rule for the selected observed connection."
+	if domainRule {
+		title = "DNS Allowlist"
+		descriptionText = "Add the queried domain to allowDomains for this sandbox."
+	}
+	header := m.dialogHeader(theme, title, width)
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(descriptionText)
 	sandboxLabel := formLabel(theme, "Sandbox", m.ruleFocus == 0)
 	sandboxField := m.ruleSandbox.View(theme, width, m.ruleFocus == 0)
 	actionLabel := formLabel(theme, "Decision", m.ruleFocus == 1)
@@ -1383,23 +1390,43 @@ func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
 	if m.ruleAction == "allow" {
 		actionColor = theme.success
 	}
+	actionHint := "  (space toggles)"
+	if domainRule {
+		actionHint = "  (domain allowlist)"
+	}
 	action := actionLabel + "  " + lipgloss.NewStyle().Bold(true).Foreground(actionColor).Render(m.ruleAction) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
-	targetLabel := formLabel(theme, "Destination", m.ruleFocus == 2)
+		lipgloss.NewStyle().Foreground(theme.muted).Render(actionHint)
+	targetName := "Destination"
+	if domainRule {
+		targetName = "Domain"
+	}
+	targetLabel := formLabel(theme, targetName, m.ruleFocus == 2)
 	targetField := renderInputField(theme, m.ruleTarget.View(), width, m.ruleFocus == 2)
 	protoLabel := formLabel(theme, "Protocol", m.ruleFocus == 3)
+	protoHint := "  (space cycles any/TCP/UDP/ICMP)"
+	if domainRule {
+		protoHint = "  (queried hostname)"
+	}
 	proto := protoLabel + "  " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToUpper(m.ruleProtocol)) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles any/TCP/UDP/ICMP)")
+		lipgloss.NewStyle().Foreground(theme.muted).Render(protoHint)
 	portsLabel := formLabel(theme, "Destination ports", m.ruleFocus == 4) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  TCP/UDP only")
 	portsField := renderInputField(theme, m.rulePorts.View(), width, m.ruleFocus == 4)
+	if domainRule {
+		portsLabel = formLabel(theme, "Destination ports", false)
+		portsField = lipgloss.NewStyle().Foreground(theme.muted).Render("not used for DNS allowlists")
+	}
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	button := renderDialogButton(theme, "Add rule", m.ruleFocus == 5, false)
+	button := renderDialogButton(theme, m.ruleAddButtonLabel(), m.ruleFocus == 5, false)
 	buttons := alignRight(button, width)
-	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  space toggle  •  enter continue  •  esc cancel")
+	hintText := "tab next  •  space toggle  •  enter continue  •  esc cancel"
+	if domainRule {
+		hintText = "tab next  •  enter continue  •  esc cancel"
+	}
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render(hintText)
 	gap := m.formSectionGap()
 	fields := []string{
 		sandboxLabel + "\n" + sandboxField,

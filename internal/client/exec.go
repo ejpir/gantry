@@ -74,6 +74,10 @@ func sessionExec(taskClient task.TTRPCTaskService, options SessionOptions, id st
 			resultErr = errors.Join(resultErr, fmt.Errorf("task Delete(exec): %w", err))
 		}
 	}()
+	// Attach the relays before Start. A short-lived process can write and exit
+	// inside Start; attaching afterwards loses that output before the guest
+	// stream endpoint is drained.
+	stdoutDone := streams.relay(stdin, stdout)
 	if _, err := taskClient.Start(ctx, &task.StartRequest{ID: id, ExecID: execID}); err != nil {
 		return fmt.Errorf("task Start(exec): %w", err)
 	}
@@ -82,7 +86,6 @@ func sessionExec(taskClient task.TTRPCTaskService, options SessionOptions, id st
 		_, _ = taskClient.ResizePty(ctx, &task.ResizePtyRequest{ID: id, ExecID: execID, Width: options.Cols, Height: options.Rows})
 	}
 
-	stdoutDone := streams.relay(stdin, stdout)
 	stopKill := watchKill(options.KillCh, func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer killCancel()

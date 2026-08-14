@@ -119,7 +119,7 @@ func TestResolveRejectsInvalidResources(t *testing.T) {
 	for _, args := range [][]string{
 		{"-mem", "0"},
 		{"-cpus", "0"},
-		{"-cpus", "9"},
+		{"-cpus", fmt.Sprint(maxSandboxVCPUs + 1)},
 	} {
 		if _, _, err := resolveSandbox(t, args...); err == nil {
 			t.Errorf("Resolve accepted invalid resources %v", args)

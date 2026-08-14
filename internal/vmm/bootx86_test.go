@@ -63,6 +63,47 @@ func TestSetupX86BootZeroPage(t *testing.T) {
 	}
 }
 
+func TestSetupX86BootHighMemoryE820(t *testing.T) {
+	ram := make([]byte, 16<<20)
+	const memSize = 22 << 30
+	if err := setupX86Boot(ram, "console=ttyS0", memSize, 1); err != nil {
+		t.Fatal(err)
+	}
+	zp := ram[x86ZeroPage:]
+	if got := zp[0x1e8]; got != 3 {
+		t.Fatalf("e820_entries = %d, want 3", got)
+	}
+	if addr := binary.LittleEndian.Uint64(zp[0x2d0+20:]); addr != x86MemHoleEnd {
+		t.Fatalf("e820[1].addr = %#x, want %#x", addr, x86MemHoleEnd)
+	}
+	if size := binary.LittleEndian.Uint64(zp[0x2d0+28:]); size != x86LowRAMEnd-x86MemHoleEnd {
+		t.Fatalf("e820[1].size = %#x, want %#x", size, x86LowRAMEnd-x86MemHoleEnd)
+	}
+	if addr := binary.LittleEndian.Uint64(zp[0x2d0+40:]); addr != x86HighRAMStart {
+		t.Fatalf("e820[2].addr = %#x, want %#x", addr, x86HighRAMStart)
+	}
+	if size := binary.LittleEndian.Uint64(zp[0x2d0+48:]); size != memSize-x86LowRAMEnd {
+		t.Fatalf("e820[2].size = %#x, want %#x", size, memSize-x86LowRAMEnd)
+	}
+}
+
+func TestX86RAMRegionsKeepHostRAMContiguousAroundGuestHole(t *testing.T) {
+	const memSize = 22 << 30
+	regions := x86RAMRegions(memSize)
+	if len(regions) != 2 {
+		t.Fatalf("regions = %#v", regions)
+	}
+	if regions[0] != (x86RAMRegion{size: x86LowRAMEnd}) {
+		t.Fatalf("low region = %#v", regions[0])
+	}
+	wantHigh := x86RAMRegion{
+		guestBase: x86HighRAMStart, hostOffset: x86LowRAMEnd, size: memSize - x86LowRAMEnd,
+	}
+	if regions[1] != wantHigh {
+		t.Fatalf("high region = %#v, want %#v", regions[1], wantHigh)
+	}
+}
+
 func TestSetupX86BootPageTables(t *testing.T) {
 	ram := make([]byte, 16<<20)
 	if err := setupX86Boot(ram, "x", 512<<20, 1); err != nil {

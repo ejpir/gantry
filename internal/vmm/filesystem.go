@@ -36,6 +36,9 @@ func (m *Machine) attachFilesystems(o Opts, inputs *prepareInputs) error {
 			if filesystem.Handler != nil || filesystem.Owner != nil {
 				return fmt.Errorf("virtio-fs %s: vhost endpoint conflicts with handler/owner", filesystem.Tag)
 			}
+			if m.arch == "amd64" && uint64(len(m.ram)) > x86LowRAMEnd {
+				return fmt.Errorf("virtio-fs %s: vhost shared RAM does not yet support the x86 high-memory hole", filesystem.Tag)
+			}
 			guestBase := uint64(ramBase)
 			if m.arch == "amd64" {
 				guestBase = 0

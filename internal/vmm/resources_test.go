@@ -139,10 +139,7 @@ type closeFunc func() error
 func (fn closeFunc) Close() error { return fn() }
 
 func TestValidateResources(t *testing.T) {
-	maximumVCPUs := MaxVCPUs
-	if runtime.GOOS == "windows" {
-		maximumVCPUs = 1 // WHPX SMP is rejected by the platform validator.
-	}
+	maximumVCPUs := MaxSupportedVCPUs()
 	for _, tc := range []struct {
 		name   string
 		memory uint64
@@ -154,12 +151,32 @@ func TestValidateResources(t *testing.T) {
 		{name: "below minimum", memory: MinMemoryBytes - 1, vcpus: 1},
 		{name: "above maximum", memory: MaxMemoryBytes + 1, vcpus: 1},
 		{name: "zero CPUs", memory: MinMemoryBytes, vcpus: 0},
-		{name: "too many CPUs", memory: MinMemoryBytes, vcpus: MaxVCPUs + 1},
+		{name: "too many CPUs", memory: MinMemoryBytes, vcpus: maximumVCPUs + 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateResources(tc.memory, tc.vcpus)
 			if (err == nil) != tc.ok {
 				t.Fatalf("ValidateResources(%d, %d) = %v, ok=%v", tc.memory, tc.vcpus, err, tc.ok)
+			}
+		})
+	}
+}
+
+func TestSupportedVCPUCountUsesHostAndPlatformCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		hostCPUs      int
+		platformLimit int
+		want          int
+	}{
+		{name: "host is smaller", hostCPUs: 12, platformLimit: 64, want: 12},
+		{name: "platform is smaller", hostCPUs: 12, platformLimit: 1, want: 1},
+		{name: "architectural ceiling", hostCPUs: MaxVCPUs + 10, platformLimit: MaxVCPUs + 20, want: MaxVCPUs},
+		{name: "defensive minimum", hostCPUs: 0, platformLimit: 0, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supportedVCPUCount(tc.hostCPUs, tc.platformLimit); got != tc.want {
+				t.Fatalf("supportedVCPUCount(%d, %d) = %d, want %d", tc.hostCPUs, tc.platformLimit, got, tc.want)
 			}
 		})
 	}

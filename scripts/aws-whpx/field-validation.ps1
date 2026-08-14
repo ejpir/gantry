@@ -157,5 +157,6 @@ finally {
     $null = Invoke-GantryBestEffort @("delete", $NetSandbox)
     $null = Invoke-GantryBestEffort @("stop", $RequiredSandbox)
     $null = Invoke-GantryBestEffort @("delete", $RequiredSandbox)
+    $null = Invoke-GantryBestEffort @("stop", $Sandbox)
     if (Test-Path $TestRoot) { Remove-Item -Recurse -Force $TestRoot }
 }

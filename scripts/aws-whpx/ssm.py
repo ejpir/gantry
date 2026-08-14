@@ -47,7 +47,7 @@ def invocation_args():
             ExpiresIn=3600,
         )
         script = (
-            "$ProgressPreference='SilentlyContinue'; "
+            "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
             f"Invoke-WebRequest -Uri '{url}' -OutFile '{destination}'"
         )
     else:

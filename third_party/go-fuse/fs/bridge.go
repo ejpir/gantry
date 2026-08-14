@@ -356,6 +356,30 @@ func (b *rawBridge) GantryResourceUsage() (nodes, handles int) {
 	return len(b.kernelNodeIds), len(b.files) - 1 - len(b.freeFiles)
 }
 
+// GantryPruneCandidates returns bounded guest-visible inode IDs that the
+// kernel may discard from its dentry cache. GANTRY PATCH: ProtocolServer uses
+// these for FUSE_NOTIFY_PRUNE when a long-running share approaches its inode
+// retention watermark. The synthetic root is excluded; the kernel decides
+// which of the remaining nodes are currently safe to forget.
+func (b *rawBridge) GantryPruneCandidates(limit int) []uint64 {
+	if limit <= 0 {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ids := make([]uint64, 0, min(limit, len(b.kernelNodeIds)))
+	for id := range b.kernelNodeIds {
+		if id == 1 {
+			continue
+		}
+		ids = append(ids, id)
+		if len(ids) == limit {
+			break
+		}
+	}
+	return ids
+}
+
 func (b *rawBridge) inode(id uint64) (*Inode, fuse.Status) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

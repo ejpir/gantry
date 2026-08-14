@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"runtime"
 	"sync"
 )
 
@@ -15,8 +16,29 @@ const (
 	// Individual loaders still validate the complete image range.
 	MinMemoryBytes = initrdOff + 1
 	MaxMemoryBytes = 1 << 40 // 1 TiB
-	MaxVCPUs       = 8
+	// MaxVCPUs is the VMM-wide architectural ceiling. The ARM memory map can
+	// fit 251 GIC redistributors below the first virtio-mmio device; the x86
+	// topology uses the same conservative ceiling. Hosts normally expose a
+	// smaller limit through MaxSupportedVCPUs.
+	MaxVCPUs = 251
 )
+
+// MaxSupportedVCPUs returns the number of vCPUs this host/backend can use.
+// Avoid offering more virtual processors than the host can schedule, while
+// retaining any backend-specific constraints.
+func MaxSupportedVCPUs() int {
+	return supportedVCPUCount(runtime.NumCPU(), platformMaxVCPUs())
+}
+
+func supportedVCPUCount(hostCPUs, platformLimit int) int {
+	if hostCPUs < 1 {
+		hostCPUs = 1
+	}
+	if platformLimit < 1 {
+		platformLimit = 1
+	}
+	return min(hostCPUs, platformLimit, MaxVCPUs)
+}
 
 // ValidateResources rejects resource requests before any large allocation.
 // Prepare calls it defensively even when a higher-level caller has already
@@ -31,9 +53,14 @@ func ValidateResources(memBytes uint64, vcpus int) error {
 		return fmt.Errorf("memory size %d exceeds this platform's address space", memBytes)
 	case vcpus < 1 || vcpus > MaxVCPUs:
 		return fmt.Errorf("CPUs must be between 1 and %d", MaxVCPUs)
-	default:
-		return validatePlatformResources(vcpus)
 	}
+	if err := validatePlatformResources(vcpus); err != nil {
+		return err
+	}
+	if maximum := MaxSupportedVCPUs(); vcpus > maximum {
+		return fmt.Errorf("CPUs must be between 1 and %d on this host", maximum)
+	}
+	return nil
 }
 
 func maxInt() int { return int(^uint(0) >> 1) }

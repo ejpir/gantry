@@ -2,14 +2,10 @@
 
 package vmm
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestValidateResourcesRejectsUnverifiedWHPXSMP(t *testing.T) {
-	err := ValidateResources(MinMemoryBytes, 2)
-	if err == nil || !strings.Contains(err.Error(), "exactly one vCPU") {
+func TestValidateResourcesAcceptsWHPXSMP(t *testing.T) {
+	if err := ValidateResources(MinMemoryBytes, 2); err != nil {
 		t.Fatalf("ValidateResources(..., 2) = %v", err)
 	}
 }
