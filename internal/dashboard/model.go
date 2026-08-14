@@ -129,6 +129,11 @@ type tuiProcessStreamMsg struct {
 	stream <-chan tuiProcessStreamEvent
 }
 
+type tuiClipboardMsg struct {
+	label string
+	err   error
+}
+
 type tuiToastExpiredMsg struct{ gen uint64 }
 
 type sandboxTUIModel struct {
@@ -175,6 +180,7 @@ type sandboxTUIModel struct {
 	toastGen  uint64
 
 	dialog          tuiDialog
+	dialogScroll    int
 	confirmRemove   bool
 	createFocus     int
 	createName      textinput.Model
@@ -339,6 +345,7 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.resizeInputs()
 		m.ensureCursorVisible()
+		m.ensureDialogFocusVisible()
 		return m, nil
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
@@ -381,12 +388,20 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = nil
 		}
 		return m, nil
+	case tuiClipboardMsg:
+		if msg.err != nil {
+			return m, m.showToast(tuiToastError, "Clipboard unavailable", msg.err.Error())
+		}
+		return m, m.showToast(tuiToastSuccess, "Copied", msg.label)
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
 	case tea.MouseClickMsg:
 		return m.updateMouseClick(msg.Mouse())
 	case tea.MouseWheelMsg:
 		return m.updateMouseWheel(msg.Mouse())
+	}
+	if m.dialog != tuiNoDialog {
+		return m.updateFocusedDialogInput(msg)
 	}
 	return m, nil
 }
@@ -528,6 +543,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 		case "d", "delete", "x":
 			if m.selectedMount() != nil {
 				m.dialog = tuiShareRemoveDialog
+				m.dialogScroll = 0
 				m.confirmRemove = false
 			}
 			return nil, true
@@ -547,6 +563,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			}
 			if removableRule(*row) {
 				m.dialog = tuiRuleRemoveDialog
+				m.dialogScroll = 0
 				m.confirmRemove = false
 				return nil, true
 			}
@@ -563,6 +580,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 		case "d", "delete", "x", "u":
 			if m.selectedPort() != nil {
 				m.dialog = tuiPortUnpublishDialog
+				m.dialogScroll = 0
 				m.confirmRemove = false
 			}
 			return nil, true
@@ -574,6 +592,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 		case "d", "delete", "x":
 			if m.selectedSecret() != nil {
 				m.dialog = tuiSecretRemoveDialog
+				m.dialogScroll = 0
 				m.confirmRemove = false
 			}
 			return nil, true
@@ -596,6 +615,7 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 	switch key {
 	case "?":
 		m.dialog = tuiHelpDialog
+		m.dialogScroll = 0
 	case "1":
 		m.setPage(tuiSandboxesPage)
 	case "2":
@@ -691,12 +711,14 @@ func (m *sandboxTUIModel) updateSandboxKey(key string) tea.Cmd {
 	case "i":
 		if m.selected() != nil {
 			m.dialog = tuiInfoDialog
+			m.dialogScroll = 0
 		}
 	case "e":
 		return m.openEditDialog()
 	case "d", "delete", "x":
 		if m.selected() != nil {
 			m.dialog = tuiRemoveDialog
+			m.dialogScroll = 0
 			m.confirmRemove = false
 		}
 	}
@@ -737,6 +759,7 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 
 func (m *sandboxTUIModel) beginAction(action, name string, argv []string, interactive bool) (tea.Model, tea.Cmd) {
 	m.dialog = tuiNoDialog
+	m.dialogScroll = 0
 	m.busyAction = action
 	m.busyName = name
 	m.busyProgress = ""

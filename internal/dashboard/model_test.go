@@ -956,6 +956,83 @@ func TestSandboxTUIEditDialogMatchesOverlayBounds(t *testing.T) {
 	}
 }
 
+func TestSandboxTUIOversizedDialogScrollsAndFollowsFocus(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 20
+	m.openCreateDialog()
+	theme := tuiThemeFor(m.dark)
+
+	initial := ansi.Strip(m.renderDialog(theme))
+	if m.dialogMaxScroll() == 0 || !strings.Contains(initial, "┃") || !strings.Contains(initial, "Name") {
+		t.Fatalf("oversized dialog has no initial scroll affordance: max=%d\n%s", m.dialogMaxScroll(), initial)
+	}
+
+	m.focusCreate(6)
+	disk := ansi.Strip(m.renderDialog(theme))
+	if m.dialogScroll == 0 || !strings.Contains(disk, "Persistent disk") || !strings.Contains(disk, "512 MiB") {
+		t.Fatalf("disk focus was not scrolled into view: scroll=%d\n%s", m.dialogScroll, disk)
+	}
+
+	m.focusCreate(8)
+	footer := ansi.Strip(m.renderDialog(theme))
+	if !strings.Contains(footer, "Create") || !strings.Contains(footer, "esc cancel") {
+		t.Fatalf("dialog footer was not reachable: scroll=%d\n%s", m.dialogScroll, footer)
+	}
+
+	m.focusCreate(0)
+	if m.dialogScroll != 0 {
+		t.Fatalf("returning focus to first field left scroll at %d", m.dialogScroll)
+	}
+	_, _ = m.updateMouseWheel(tea.Mouse{Button: tea.MouseWheelDown})
+	if m.dialogScroll == 0 {
+		t.Fatal("mouse wheel did not scroll dialog")
+	}
+	bounds := m.dialogBounds(tuiCreateDialog)
+	_, _ = m.updateMouseClick(tea.Mouse{
+		X: bounds.x + bounds.w - 2, Y: bounds.y + bounds.h - 3, Button: tea.MouseLeft,
+	})
+	if m.dialogScroll != m.dialogMaxScroll() {
+		t.Fatalf("scrollbar click = %d, want %d", m.dialogScroll, m.dialogMaxScroll())
+	}
+}
+
+func TestSandboxTUIDialogFieldsCopyAndPaste(t *testing.T) {
+	oldWrite := writeDashboardClipboard
+	var copied string
+	writeDashboardClipboard = func(value string) error {
+		copied = value
+		return nil
+	}
+	t.Cleanup(func() { writeDashboardClipboard = oldWrite })
+
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.openCreateDialog()
+	model, _ := m.Update(tea.PasteMsg{Content: "pasted-name"})
+	m = *model.(*sandboxTUIModel)
+	if m.createName.Value() != "pasted-name" {
+		t.Fatalf("bracketed paste = %q", m.createName.Value())
+	}
+	_, cmd := m.updateDialogKey(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("copy returned no command")
+	}
+	msg, ok := cmd().(tuiClipboardMsg)
+	if !ok || msg.err != nil || copied != "pasted-name" || msg.label != "sandbox name" {
+		t.Fatalf("copy result = %#v, clipboard %q", msg, copied)
+	}
+
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Image: "alpine:latest", ConfigPath: "/sandboxes/dev/sandbox.json"}}
+	m.cursor = 0
+	m.dialog = tuiInfoDialog
+	_, cmd = m.updateDialogKey(tea.KeyPressMsg{Code: 'c'})
+	msg, ok = cmd().(tuiClipboardMsg)
+	if !ok || msg.err != nil || !strings.Contains(copied, "Sandbox details") || !strings.Contains(copied, "/sandboxes/dev/sandbox.json") {
+		t.Fatalf("copy-all result = %#v, clipboard %q", msg, copied)
+	}
+}
+
 func TestSandboxTUIFormDialogsKeepFooterAndBorder(t *testing.T) {
 	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
 	m.loading = false

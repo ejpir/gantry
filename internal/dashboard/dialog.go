@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/secret"
 
@@ -17,9 +18,25 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+var writeDashboardClipboard = clipboard.WriteAll
+
 func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
-		return m, tea.Quit
+		return m, m.copyDialogCmd()
+	}
+	switch msg.String() {
+	case "ctrl+up":
+		m.scrollDialog(-1)
+		return m, nil
+	case "ctrl+down":
+		m.scrollDialog(1)
+		return m, nil
+	case "ctrl+pgup":
+		m.scrollDialog(-m.dialogViewportHeight())
+		return m, nil
+	case "ctrl+pgdown":
+		m.scrollDialog(m.dialogViewportHeight())
+		return m, nil
 	}
 	switch m.dialog {
 	case tuiCreateDialog:
@@ -40,11 +57,190 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateConfirmationDialogKey(msg.String())
 	case tuiHelpDialog, tuiInfoDialog:
 		switch msg.String() {
+		case "c":
+			return m, m.copyDialogCmd()
 		case "esc", "q", "?", "enter", "i":
 			m.closeDialog()
+		case "up", "k":
+			m.scrollDialog(-1)
+		case "down", "j":
+			m.scrollDialog(1)
+		case "pgup":
+			m.scrollDialog(-m.dialogViewportHeight())
+		case "pgdown", "space", " ":
+			m.scrollDialog(m.dialogViewportHeight())
+		case "home", "g":
+			m.dialogScroll = 0
+		case "end", "G":
+			m.dialogScroll = m.dialogMaxScroll()
 		}
 	}
 	return m, nil
+}
+
+func (m *sandboxTUIModel) updateFocusedDialogInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch m.dialog {
+	case tuiCreateDialog:
+		switch m.createFocus {
+		case 0:
+			m.createName, cmd = m.createName.Update(msg)
+		case 1:
+			m.createImage, cmd = m.createImage.Update(msg)
+		}
+	case tuiShareAddDialog:
+		switch m.shareFocus {
+		case 1:
+			m.shareTag, cmd = m.shareTag.Update(msg)
+		case 2:
+			m.sharePath, cmd = m.sharePath.Update(msg)
+		case 3:
+			m.shareMount, cmd = m.shareMount.Update(msg)
+		case 4:
+			m.shareOwner, cmd = m.shareOwner.Update(msg)
+		}
+	case tuiPortPublishDialog:
+		switch m.portFocus {
+		case 1:
+			m.portBind, cmd = m.portBind.Update(msg)
+		case 2:
+			m.portGuest, cmd = m.portGuest.Update(msg)
+		}
+	case tuiNetworkPolicyDialog:
+		if m.policyFocus == 1 {
+			m.policyPath, cmd = m.policyPath.Update(msg)
+		}
+	case tuiRuleAddDialog:
+		switch m.ruleFocus {
+		case 2:
+			m.ruleTarget, cmd = m.ruleTarget.Update(msg)
+		case 4:
+			m.rulePorts, cmd = m.rulePorts.Update(msg)
+		}
+	case tuiSecretAddDialog:
+		switch m.secretFocus {
+		case 1:
+			m.secretName, cmd = m.secretName.Update(msg)
+		case 2:
+			m.secretValue, cmd = m.secretValue.Update(msg)
+		}
+	}
+	return m, cmd
+}
+
+func (m sandboxTUIModel) copyDialogCmd() tea.Cmd {
+	value, label := m.dialogCopyValue()
+	return func() tea.Msg {
+		return tuiClipboardMsg{label: label, err: writeDashboardClipboard(value)}
+	}
+}
+
+func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
+	wholeDialog := func(label string) (string, string) {
+		_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+		return strings.TrimSpace(ansi.Strip(content)), label
+	}
+	switch m.dialog {
+	case tuiCreateDialog:
+		switch m.createFocus {
+		case 0:
+			return m.createName.Value(), "sandbox name"
+		case 1:
+			return m.createImage.Value(), "OCI image"
+		case 2:
+			return m.createRuntime, "runtime"
+		case 3:
+			return defaultText(m.createKernelSelection(), "auto"), "kernel"
+		case 4:
+			return strconv.Itoa(m.createCPUs.Value), "CPU count"
+		case 5:
+			return strconv.Itoa(m.createMemory.Value), "memory MiB"
+		case 6:
+			return strconv.Itoa(m.createDisk.Value), "disk MiB"
+		case 7:
+			return m.createIsolation, "process isolation"
+		}
+	case tuiEditDialog:
+		switch m.editFocus {
+		case 0:
+			return strconv.Itoa(m.editCPUs.Value), "CPU count"
+		case 1:
+			return strconv.Itoa(m.editMemory.Value), "memory MiB"
+		case 2:
+			return m.editIsolation, "process isolation"
+		}
+	case tuiShareAddDialog:
+		switch m.shareFocus {
+		case 0:
+			return m.shareSandbox.Value(), "sandbox"
+		case 1:
+			return m.shareTag.Value(), "share tag"
+		case 2:
+			return m.sharePath.Value(), "host path"
+		case 3:
+			return m.shareMount.Value(), "mount point"
+		case 4:
+			return m.shareOwner.Value(), "guest owner"
+		case 5:
+			if m.shareRO {
+				return "read-only", "share mode"
+			}
+			return "read-write", "share mode"
+		}
+	case tuiPortPublishDialog:
+		switch m.portFocus {
+		case 0:
+			return m.portSandbox.Value(), "sandbox"
+		case 1:
+			return m.portBind.Value(), "host bind"
+		case 2:
+			return m.portGuest.Value(), "guest port"
+		case 3:
+			if m.portUDP {
+				return "udp", "protocol"
+			}
+			return "tcp", "protocol"
+		}
+	case tuiNetworkPolicyDialog:
+		switch m.policyFocus {
+		case 0:
+			return m.policySandbox.Value(), "sandbox"
+		case 1:
+			return m.policyPath.Value(), "policy file"
+		case 2:
+			if m.policyLocal {
+				return "allowed", "local network override"
+			}
+			return "blocked", "local network override"
+		}
+	case tuiRuleAddDialog:
+		switch m.ruleFocus {
+		case 0:
+			return m.ruleSandbox.Value(), "sandbox"
+		case 1:
+			return m.ruleAction, "decision"
+		case 2:
+			return m.ruleTarget.Value(), "destination"
+		case 3:
+			return m.ruleProtocol, "protocol"
+		case 4:
+			return m.rulePorts.Value(), "destination ports"
+		}
+	case tuiSecretAddDialog:
+		switch m.secretFocus {
+		case 0:
+			return m.secretSandbox.Value(), "sandbox"
+		case 1:
+			return m.secretName.Value(), "secret name"
+		case 2:
+			return m.secretValue.Value(), "secret value"
+		}
+	case tuiInfoDialog:
+		return wholeDialog("sandbox details")
+	case tuiHelpDialog:
+		return wholeDialog("keyboard help")
+	}
+	return wholeDialog("dialog fields")
 }
 
 func (m *sandboxTUIModel) updateConfirmationDialogKey(key string) (tea.Model, tea.Cmd) {
@@ -251,6 +447,7 @@ func (m *sandboxTUIModel) createArgv(name string) []string {
 
 func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
 	m.dialog = tuiCreateDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.createName.Reset()
 	m.createImage.Reset()
@@ -269,6 +466,7 @@ func (m *sandboxTUIModel) focusCreate(index int) tea.Cmd {
 	m.createFocus = clampInt(index, 0, 8)
 	m.createName.Blur()
 	m.createImage.Blur()
+	m.ensureDialogFocusVisible()
 	switch m.createFocus {
 	case 0:
 		return m.createName.Focus()
@@ -308,6 +506,7 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 		return m.showToast(tuiToastError, "Cannot edit sandbox", "The saved sandbox configuration is unavailable.")
 	}
 	m.dialog = tuiEditDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.editCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, maxInt(1, selected.VCPUs))
 	m.editMemory = newResourceSlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 128, int(selected.MemMB))
@@ -412,6 +611,7 @@ func (m *sandboxTUIModel) setEditSliderBoundary(maximum bool) bool {
 
 func (m *sandboxTUIModel) focusEdit(index int) tea.Cmd {
 	m.editFocus = clampInt(index, 0, 3)
+	m.ensureDialogFocusVisible()
 	return nil
 }
 
@@ -434,6 +634,7 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		return m, m.focusEdit(1)
 	}
 	m.dialog = tuiNoDialog
+	m.dialogScroll = 0
 	m.busyAction = "edit"
 	m.busyName = selected.Name
 	return m, tea.Batch(saveSandboxResourcesCmd(m.service, selected.Name, memMB, vcpus, m.editIsolation, selected.State == tuiRunning), m.ensureAnimation())
@@ -571,6 +772,7 @@ func (m *sandboxTUIModel) openShareAddDialog(replace bool) tea.Cmd {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Wait for a starting sandbox to finish, or create one first.")
 	}
 	m.dialog = tuiShareAddDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.shareReplace = replace
 	m.shareRO = true
@@ -606,6 +808,7 @@ func (m *sandboxTUIModel) focusShare(index int) tea.Cmd {
 	m.sharePath.Blur()
 	m.shareMount.Blur()
 	m.shareOwner.Blur()
+	m.ensureDialogFocusVisible()
 	switch m.shareFocus {
 	case 1:
 		return m.shareTag.Focus()
@@ -650,6 +853,7 @@ func (m *sandboxTUIModel) openPortPublishDialog() tea.Cmd {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Port publishing requires a running sandbox with the embedded netstack.")
 	}
 	m.dialog = tuiPortPublishDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.portUDP = false
 	m.portBind.Reset()
@@ -662,6 +866,7 @@ func (m *sandboxTUIModel) focusPort(index int) tea.Cmd {
 	m.portFocus = clampInt(index, 0, 4)
 	m.portBind.Blur()
 	m.portGuest.Blur()
+	m.ensureDialogFocusVisible()
 	switch m.portFocus {
 	case 1:
 		return m.portBind.Focus()
@@ -706,6 +911,7 @@ func (m *sandboxTUIModel) openNetworkPolicyDialog() tea.Cmd {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Live policy updates require a running sandbox with the embedded netstack.")
 	}
 	m.dialog = tuiNetworkPolicyDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.syncNetworkPolicyFields()
 	m.resizeInputs()
@@ -723,6 +929,7 @@ func (m *sandboxTUIModel) openRuleAddDialog() tea.Cmd {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Rules require a network-enabled sandbox using the embedded netstack.")
 	}
 	m.dialog = tuiRuleAddDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.ruleTarget.Reset()
 	m.rulePorts.Reset()
@@ -814,6 +1021,7 @@ func (m *sandboxTUIModel) focusRule(index int) tea.Cmd {
 	m.ruleSandbox.open = false
 	m.ruleTarget.Blur()
 	m.rulePorts.Blur()
+	m.ensureDialogFocusVisible()
 	switch m.ruleFocus {
 	case 2:
 		return m.ruleTarget.Focus()
@@ -884,6 +1092,7 @@ func (m *sandboxTUIModel) openSecretAddDialog() tea.Cmd {
 		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before adding an in-memory secret.")
 	}
 	m.dialog = tuiSecretAddDialog
+	m.dialogScroll = 0
 	m.formError = ""
 	m.secretName.Reset()
 	m.secretValue.Reset()
@@ -927,6 +1136,7 @@ func (m *sandboxTUIModel) focusSecret(index int) tea.Cmd {
 	m.secretSandbox.open = false
 	m.secretName.Blur()
 	m.secretValue.Blur()
+	m.ensureDialogFocusVisible()
 	switch m.secretFocus {
 	case 1:
 		return m.secretName.Focus()
@@ -983,6 +1193,7 @@ func (m *sandboxTUIModel) syncNetworkPolicyFields() {
 func (m *sandboxTUIModel) focusNetworkPolicy(index int) tea.Cmd {
 	m.policyFocus = clampInt(index, 0, 3)
 	m.policyPath.Blur()
+	m.ensureDialogFocusVisible()
 	if m.policyFocus == 1 {
 		return m.policyPath.Focus()
 	}
@@ -1001,6 +1212,7 @@ func (m *sandboxTUIModel) submitNetworkPolicy() (tea.Model, tea.Cmd) {
 		return m, m.focusNetworkPolicy(1)
 	}
 	m.dialog = tuiNoDialog
+	m.dialogScroll = 0
 	m.busyAction = "netpolicy set"
 	m.busyName = name
 	return m, tea.Batch(setSandboxNetworkPolicyCmd(m.service, name, path, m.policyLocal), m.ensureAnimation())
@@ -1082,6 +1294,7 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 	}
 	if !plan.Live {
 		m.dialog = tuiNoDialog
+		m.dialogScroll = 0
 		m.busyAction = "share configure"
 		m.busyName = plan.Sandbox + "/" + plan.Tag
 		return m, tea.Batch(
@@ -1124,6 +1337,7 @@ func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
 
 func (m *sandboxTUIModel) closeDialog() {
 	m.dialog = tuiNoDialog
+	m.dialogScroll = 0
 	m.confirmRemove = false
 	m.formError = ""
 	m.createName.Blur()
@@ -1145,6 +1359,125 @@ func (m *sandboxTUIModel) closeDialog() {
 	m.secretValue.Reset()
 	m.secretSandbox.open = false
 	m.shareReplace = false
+}
+
+func (m sandboxTUIModel) dialogViewportHeight() int {
+	if m.dialog == tuiNoDialog {
+		return 1
+	}
+	_, height, _, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	return maxInt(1, height-4)
+}
+
+func (m sandboxTUIModel) dialogMaxScroll() int {
+	if m.dialog == tuiNoDialog {
+		return 0
+	}
+	_, height, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	return maxInt(0, lipgloss.Height(content)-maxInt(1, height-4))
+}
+
+func (m *sandboxTUIModel) scrollDialog(delta int) {
+	m.dialogScroll = clampInt(m.dialogScroll+delta, 0, m.dialogMaxScroll())
+}
+
+// ensureDialogFocusVisible follows keyboard focus through forms whose content
+// is taller than the terminal. Manual wheel scrolling remains undisturbed
+// until focus changes again.
+func (m *sandboxTUIModel) ensureDialogFocusVisible() {
+	if m.dialog == tuiNoDialog {
+		m.dialogScroll = 0
+		return
+	}
+	_, height, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	viewport := maxInt(1, height-4)
+	maxScroll := maxInt(0, lipgloss.Height(content)-viewport)
+	m.dialogScroll = clampInt(m.dialogScroll, 0, maxScroll)
+	needle, fromEnd := m.dialogFocusTarget()
+	if needle == "" || maxScroll == 0 {
+		return
+	}
+	if m.dialogFocusAtStart() {
+		m.dialogScroll = 0
+		return
+	}
+	lines := strings.Split(ansi.Strip(content), "\n")
+	line := -1
+	if fromEnd {
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.Contains(lines[i], needle) {
+				line = i
+				break
+			}
+		}
+	} else {
+		for i := minInt(2, len(lines)); i < len(lines); i++ {
+			if strings.Contains(lines[i], needle) {
+				line = i
+				break
+			}
+		}
+	}
+	if line < 0 {
+		return
+	}
+	if line < m.dialogScroll+1 {
+		m.dialogScroll = maxInt(0, line-1)
+	}
+	// Keep the focused label plus its value/control and one context row in
+	// view. Buttons resolve from the end and naturally clamp to maxScroll.
+	if line+2 >= m.dialogScroll+viewport {
+		m.dialogScroll = minInt(maxScroll, line+3-viewport)
+	}
+}
+
+func (m sandboxTUIModel) dialogFocusAtStart() bool {
+	switch m.dialog {
+	case tuiCreateDialog:
+		return m.createFocus == 0
+	case tuiEditDialog:
+		return m.editFocus == 0
+	case tuiShareAddDialog:
+		return m.shareFocus == 0
+	case tuiPortPublishDialog:
+		return m.portFocus == 0
+	case tuiNetworkPolicyDialog:
+		return m.policyFocus == 0
+	case tuiRuleAddDialog:
+		return m.ruleFocus == 0
+	case tuiSecretAddDialog:
+		return m.secretFocus == 0
+	default:
+		return false
+	}
+}
+
+func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
+	choose := func(index int, values []string) string {
+		if index < 0 || index >= len(values) {
+			return ""
+		}
+		return values[index]
+	}
+	switch m.dialog {
+	case tuiCreateDialog:
+		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create"}), m.createFocus == 8
+	case tuiEditDialog:
+		return choose(m.editFocus, []string{"CPUs", "Memory", "Process isolation", "Save"}), m.editFocus == 3
+	case tuiShareAddDialog:
+		_, _, button := m.shareDialogCopy()
+		return choose(m.shareFocus, []string{"Sandbox", "Tag", "Host path", "Mount point", "Guest owner", "Mode", button}), m.shareFocus == 6
+	case tuiPortPublishDialog:
+		return choose(m.portFocus, []string{"Sandbox", "Host bind", "Guest port", "Protocol", "Publish"}), m.portFocus == 4
+	case tuiNetworkPolicyDialog:
+		return choose(m.policyFocus, []string{"Sandbox", "Policy file", "Local network override", "Apply"}), m.policyFocus == 3
+	case tuiRuleAddDialog:
+		return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Destination", "Protocol", "Destination ports", "Add rule"}), m.ruleFocus == 5
+	case tuiSecretAddDialog:
+		return choose(m.secretFocus, []string{"Sandbox", "Name", "Value", "Add secret"}), m.secretFocus == 3
+	default:
+		return "", false
+	}
 }
 
 func (m *sandboxTUIModel) resizeInputs() {
@@ -1301,6 +1634,15 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		m.closeDialog()
 		return m, nil
 	}
+	if mouse.X == bounds.x+bounds.w-2 && mouse.Y >= bounds.y+2 && mouse.Y < bounds.y+bounds.h-2 {
+		viewport := m.dialogViewportHeight()
+		maxScroll := m.dialogMaxScroll()
+		if maxScroll > 0 {
+			trackRow := clampInt(mouse.Y-(bounds.y+2), 0, viewport-1)
+			m.dialogScroll = trackRow * maxScroll / maxInt(1, viewport-1)
+			return m, nil
+		}
+	}
 	// Every dialog has a close glyph in its title row (the dialog has one
 	// row of border and one row of vertical padding above it).
 	if mouse.Y >= bounds.y+1 && mouse.Y <= bounds.y+3 && mouse.X >= bounds.x+bounds.w-6 {
@@ -1349,7 +1691,7 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 		m.createFocus = 8
 		return m.submitCreate()
 	}
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	rows := m.formControlRows(createDialogRows, 0)
 	switch {
 	case rows[0].contains(relY):
@@ -1385,7 +1727,7 @@ func (m *sandboxTUIModel) updateEditDialogMouse(mouse tea.Mouse, bounds tuiRect)
 		m.editFocus = 3
 		return m.submitEdit()
 	}
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	switch {
 	case relY >= 6 && relY <= 8:
 		m.setSliderFromMouse(&m.editCPUs, bounds, mouse.X, "CPU")
@@ -1403,7 +1745,7 @@ func (m *sandboxTUIModel) updateEditDialogMouse(mouse tea.Mouse, bounds tuiRect)
 }
 
 func (m *sandboxTUIModel) updateShareDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	rows := m.formControlRows(shareDialogRows, m.shareSandbox.menuHeight())
 	if m.shareSandbox.open && m.shareSandbox.chooseVisible(relY-rows[0].last-2) {
 		return m, nil
@@ -1432,7 +1774,7 @@ func (m *sandboxTUIModel) updateShareDialogMouse(mouse tea.Mouse, bounds tuiRect
 }
 
 func (m *sandboxTUIModel) updatePortDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	rows := m.formControlRows(portDialogRows, m.portSandbox.menuHeight())
 	if m.portSandbox.open && m.portSandbox.chooseVisible(relY-rows[0].last-2) {
 		return m, nil
@@ -1456,7 +1798,7 @@ func (m *sandboxTUIModel) updatePortDialogMouse(mouse tea.Mouse, bounds tuiRect)
 }
 
 func (m *sandboxTUIModel) updateNetworkPolicyDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	rows := m.formControlRows(policyDialogRows, m.policySandbox.menuHeight())
 	before := m.policySandbox.Value()
 	if m.policySandbox.open && m.policySandbox.chooseVisible(relY-rows[0].last-2) {
@@ -1482,7 +1824,7 @@ func (m *sandboxTUIModel) updateNetworkPolicyDialogMouse(mouse tea.Mouse, bounds
 }
 
 func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	rows := m.formControlRows(ruleDialogRows, m.ruleSandbox.menuHeight())
 	if m.ruleSandbox.open && m.ruleSandbox.chooseVisible(relY-rows[0].last-2) {
 		return m, nil
@@ -1516,7 +1858,7 @@ func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRe
 }
 
 func (m *sandboxTUIModel) updateSecretAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y
+	relY := mouse.Y - bounds.y + m.dialogScroll
 	rows := m.formControlRows(secretDialogRows, m.secretSandbox.menuHeight())
 	if m.secretSandbox.open && m.secretSandbox.chooseVisible(relY-rows[0].last-2) {
 		return m, nil
@@ -1583,6 +1925,7 @@ func (m *sandboxTUIModel) updateMenuMouseClick(mouse tea.Mouse) (tea.Cmd, bool) 
 	}
 	if mouse.X >= m.width-9 {
 		m.dialog = tuiHelpDialog
+		m.dialogScroll = 0
 		return nil, true
 	}
 	if mouse.X >= m.width-20 && m.busyAction == "" {
@@ -1665,13 +2008,23 @@ func (m *sandboxTUIModel) cardActionAt(x int, card tuiRect) (tea.Model, tea.Cmd)
 		return m, m.openEditDialog()
 	case "delete":
 		m.dialog = tuiRemoveDialog
+		m.dialogScroll = 0
 		m.confirmRemove = false
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
-	if m.dialog != tuiNoDialog || m.busyAction != "" {
+	if m.dialog != tuiNoDialog {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			m.scrollDialog(-3)
+		case tea.MouseWheelDown:
+			m.scrollDialog(3)
+		}
+		return m, nil
+	}
+	if m.busyAction != "" {
 		return m, nil
 	}
 	m.lastClickAt = time.Time{}

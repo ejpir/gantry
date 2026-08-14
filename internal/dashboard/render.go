@@ -232,11 +232,15 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 	if indicator := m.renderActiveScrollbar(theme, layout); indicator != "" {
 		layers = append(layers, lipgloss.NewLayer(indicator).X(layout.width-1).Y(layout.contentY).Z(1))
 	}
-	if m.toast != nil && m.dialog == tuiNoDialog {
+	if m.toast != nil {
 		toast := m.renderToast(theme)
 		toastWidth := lipgloss.Width(toast)
+		z := 2
+		if m.dialog != tuiNoDialog {
+			z = 4
+		}
 		layers = append(layers, lipgloss.NewLayer(toast).
-			X(maxInt(0, layout.width-toastWidth-2)).Y(tuiMenuHeight+1).Z(2))
+			X(maxInt(0, layout.width-toastWidth-2)).Y(tuiMenuHeight+1).Z(z))
 	}
 	if m.dialog != tuiNoDialog {
 		dialog := m.renderDialog(theme)
@@ -826,7 +830,11 @@ func (m sandboxTUIModel) dialogBounds(kind tuiDialog) tuiRect {
 
 func (m sandboxTUIModel) renderDialog(theme tuiTheme) string {
 	width, height, content, border := m.dialogMeasured(theme, m.dialog)
-	content = truncateBlockLines(content, maxInt(1, height-4))
+	viewport := maxInt(1, height-4)
+	total := lipgloss.Height(content)
+	maxScroll := maxInt(0, total-viewport)
+	scroll := clampInt(m.dialogScroll, 0, maxScroll)
+	content = sliceBlockLines(content, scroll, viewport)
 	style := lipgloss.NewStyle().
 		Foreground(theme.text).
 		Background(theme.panel).
@@ -836,7 +844,37 @@ func (m sandboxTUIModel) renderDialog(theme tuiTheme) string {
 		Width(width).
 		Height(height).
 		MaxHeight(height)
-	return renderSurface(style, theme.text, theme.panel, content)
+	base := renderSurface(style, theme.text, theme.panel, content)
+	if maxScroll == 0 {
+		return base
+	}
+	scrollbar := renderDialogScrollbar(theme, viewport, total, scroll)
+	return lipgloss.NewCompositor(
+		lipgloss.NewLayer(base).X(0).Y(0).Z(0),
+		lipgloss.NewLayer(scrollbar).X(width-2).Y(2).Z(1),
+	).Render()
+}
+
+func renderDialogScrollbar(theme tuiTheme, viewport, total, scroll int) string {
+	if viewport <= 0 || total <= viewport {
+		return ""
+	}
+	thumbHeight := maxInt(1, viewport*viewport/total)
+	maxScroll := total - viewport
+	thumbStart := 0
+	if maxScroll > 0 {
+		thumbStart = (viewport - thumbHeight) * scroll / maxScroll
+	}
+	track := lipgloss.NewStyle().Foreground(theme.borderMuted).Background(theme.panel)
+	thumb := lipgloss.NewStyle().Foreground(theme.accent).Background(theme.panel)
+	lines := make([]string, viewport)
+	for i := range lines {
+		lines[i] = track.Render("│")
+		if i >= thumbStart && i < thumbStart+thumbHeight {
+			lines[i] = thumb.Render("┃")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidth int) (string, color.Color) {
@@ -924,6 +962,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 	application := column("APPLICATION", [][2]string{
 		{"?", "toggle this help"},
 		{"q / ctrl+c", "quit"},
+		{"ctrl+c / ctrl+v", "copy / paste focused field"},
 		{"click", "select a card"},
 		{"double-click", "open or start"},
 	})
@@ -1009,7 +1048,7 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 	appendPath("Disk image", sandbox.RWLayer)
 	appendPath("Policy file", sandbox.NetPolicy)
 	appendPath("Config", sandbox.ConfigPath)
-	footer := lipgloss.NewStyle().Foreground(theme.muted).Render("i / esc close")
+	footer := lipgloss.NewStyle().Foreground(theme.muted).Render("c copy all  •  i / esc close")
 	return header + "\n\n" + strings.Join(lines, "\n") + "\n\n" + strings.Join(paths, "\n\n") + "\n\n" + footer
 }
 
@@ -1613,12 +1652,14 @@ func truncateANSI(value string, width int) string {
 	return ansi.Truncate(value, width, "…")
 }
 
-func truncateBlockLines(value string, height int) string {
+func sliceBlockLines(value string, start, height int) string {
 	lines := strings.Split(value, "\n")
-	if len(lines) <= height {
+	if start <= 0 && len(lines) <= height {
 		return value
 	}
-	return strings.Join(lines[:height], "\n")
+	start = clampInt(start, 0, len(lines))
+	end := minInt(len(lines), start+maxInt(0, height))
+	return strings.Join(lines[start:end], "\n")
 }
 
 func intersperse(values []string, separator string) []string {
