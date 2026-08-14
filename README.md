@@ -114,7 +114,7 @@ attestation — verify with
 ## Build from source
 
 ```sh
-./scripts/build.sh        # needs Go 1.26.5+; outputs land in artifacts/
+./scripts/build.sh        # needs Go 1.26.6+; outputs land in artifacts/
 ./scripts/mkimage.sh alpine:latest artifacts/alpine.erofs   # rootfs image
 ./scripts/mkkernel.sh     # build the hardened guest kernel locally
 go test ./...

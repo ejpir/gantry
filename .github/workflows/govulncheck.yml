@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
       # Install with a CLEAN environment (see ci.yml lint job): GOOS/
       # GOARCH on the same step would cross-compile the tool for the
       # scan target into bin/<goos>_<goarch>/ instead of a runnable

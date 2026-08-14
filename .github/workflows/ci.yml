@@ -174,7 +174,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
       # The tool must build for the RUNNER (linux/amd64): with GOOS/
       # GOARCH set on the same step, go install cross-compiles it into
       # bin/<goos>_<goarch>/ (or .exe) and it cannot run. Install first
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
       - name: genproto check
         if: matrix.quality
         run: scripts/genproto.sh --check
@@ -326,7 +326,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
       - name: build packages
         run: go build ./...
         env:
