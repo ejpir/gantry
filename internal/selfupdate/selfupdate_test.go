@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -140,6 +141,12 @@ func TestWriteCacheUsesPrivateFile(t *testing.T) {
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Windows does not expose POSIX permission bits through FileMode; Chmod
+	// succeeds but Stat reports the regular-file default (0666). Cache
+	// creation and contents remain covered above on every platform.
+	if runtime.GOOS == "windows" {
+		return
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("cache mode = %o, want 600", got)

@@ -13,7 +13,7 @@ import (
 
 func TestVsockShutdownDrainsEarlierRW(t *testing.T) {
 	host, device := net.Pipe()
-	defer host.Close()
+	defer func() { _ = host.Close() }()
 
 	vs := NewVsock(3, t.TempDir())
 	memory := NewRAM(make([]byte, 2<<20), ramBase)
