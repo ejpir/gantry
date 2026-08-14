@@ -93,6 +93,7 @@ type managerCreateRequest struct {
 	OAuthBridge       *bool    `json:"oauthBridge,omitempty"`
 	ProcessIsolation  string   `json:"processIsolation,omitempty"`
 	MemoryMiB         uint     `json:"memoryMiB,omitempty"`
+	DiskSizeMiB       uint     `json:"diskSizeMiB,omitempty"`
 	CPUs              int      `json:"cpus,omitempty"`
 	SecretNames       []string `json:"secretNames,omitempty"`
 }
@@ -635,6 +636,11 @@ func resolveManagerCreate(request managerCreateRequest) (RunConfig, map[string]s
 	}
 	if request.MemoryMiB != 0 {
 		if err := set("mem", fmt.Sprint(request.MemoryMiB)); err != nil {
+			return RunConfig{}, nil, nil, err
+		}
+	}
+	if request.DiskSizeMiB != 0 {
+		if err := set("disk-size", fmt.Sprint(request.DiskSizeMiB)); err != nil {
 			return RunConfig{}, nil, nil, err
 		}
 	}

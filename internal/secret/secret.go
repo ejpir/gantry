@@ -32,6 +32,15 @@ func (v Value) Raw() string { return string(v) }
 
 var nameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// ValidateName validates a secret's environment-variable name without
+// resolving or handling its value.
+func ValidateName(name string) error {
+	if !nameRE.MatchString(name) {
+		return fmt.Errorf("bad secret name %q (want [A-Za-z_][A-Za-z0-9_]*)", name)
+	}
+	return nil
+}
+
 // Parse one -secret spec:
 //
 //	NAME            value from gantry's own environment (getenv)
@@ -42,8 +51,8 @@ var nameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func Parse(spec string, getenv func(string) (string, bool)) (name string, v Value, err error) {
 	if i := strings.Index(spec, "=@"); i > 0 {
 		name = spec[:i]
-		if !nameRE.MatchString(name) {
-			return "", "", fmt.Errorf("bad secret name %q (want [A-Za-z_][A-Za-z0-9_]*)", name)
+		if err := ValidateName(name); err != nil {
+			return "", "", err
 		}
 		b, err := os.ReadFile(spec[i+2:])
 		if err != nil {
@@ -54,8 +63,8 @@ func Parse(spec string, getenv func(string) (string, bool)) (name string, v Valu
 	if strings.Contains(spec, "=") {
 		return "", "", fmt.Errorf("refusing a secret value on the command line (visible in ps + shell history); use -secret %s (environment) or -secret %[1]s=@/path", strings.SplitN(spec, "=", 2)[0])
 	}
-	if !nameRE.MatchString(spec) {
-		return "", "", fmt.Errorf("bad secret name %q (want [A-Za-z_][A-Za-z0-9_]*)", spec)
+	if err := ValidateName(spec); err != nil {
+		return "", "", err
 	}
 	val, ok := getenv(spec)
 	if !ok {

@@ -61,6 +61,6 @@ func (p *ProgressPrinter) Finish() {
 }
 
 func isByteProgress(message string) bool {
-	return strings.HasPrefix(message, "downloading ") &&
+	return (strings.HasPrefix(message, "downloading ") || strings.HasPrefix(message, "creating persistent disk ")) &&
 		strings.Contains(message, "[") && strings.Contains(message, "]")
 }

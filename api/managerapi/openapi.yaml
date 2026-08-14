@@ -248,6 +248,7 @@ components:
         oauthBridge: { type: boolean, default: true }
         processIsolation: { type: string, enum: [auto, required, off], default: auto }
         memoryMiB: { type: integer, default: 512 }
+        diskSizeMiB: { type: integer, minimum: 512, maximum: 65536, default: 512 }
         cpus: { type: integer, default: 1 }
         secretNames:
           description: Names resolved from the manager's startup environment; values are never accepted over HTTP or persisted.

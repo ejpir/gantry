@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
@@ -42,6 +44,9 @@ func readSandboxConfig(dir string) (RunConfig, error) {
 	}
 	if err := validateSandboxResources(cfg.MemMB, cfg.VCPUs); err != nil {
 		return RunConfig{}, fmt.Errorf("invalid sandbox resources: %w", err)
+	}
+	if err := validateProcessIsolation(cfg.ProcessIsolation); err != nil {
+		return RunConfig{}, fmt.Errorf("invalid sandbox process isolation: %w", err)
 	}
 	return cfg, nil
 }
@@ -130,13 +135,29 @@ func validateSandboxResources(memMB uint, vcpus int) error {
 // SetResources persists the allocation used the next time the VM boots. A
 // running machine is intentionally not mutated in place; its broker owns this
 // store so the update cannot race live share or port configuration changes.
-func (s *ConfigStore) SetResources(memMB uint, vcpus int) error {
+func (s *ConfigStore) SetResources(memMB uint, vcpus int, processIsolation string) error {
 	if err := validateSandboxResources(memMB, vcpus); err != nil {
 		return err
 	}
+	mode := processIsolation
+	if mode != "" {
+		if err := validateProcessIsolation(mode); err != nil {
+			return err
+		}
+	}
 	return s.Mutate(func(cfg *RunConfig) error {
+		// An omitted/empty mode comes from resource-control clients that
+		// predate this field. Preserve their configured posture. The TUI sends
+		// the explicit spelling "auto" when that is what the user selects.
+		if mode == "" {
+			mode = cfg.ProcessIsolation
+		}
+		if err := validateProcessIsolation(mode); err != nil {
+			return err
+		}
 		cfg.MemMB = memMB
 		cfg.VCPUs = vcpus
+		cfg.ProcessIsolation = normalizedProcessIsolation(mode)
 		return nil
 	})
 }
@@ -145,6 +166,26 @@ func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {
 	return s.Mutate(func(cfg *RunConfig) error {
 		cfg.NetPol = path
 		cfg.AllowLN = allowLocal
+		return nil
+	})
+}
+
+func (s *ConfigStore) SetSecretName(name string, present bool) error {
+	if err := secret.ValidateName(name); err != nil {
+		return err
+	}
+	return s.Mutate(func(cfg *RunConfig) error {
+		names := make([]string, 0, len(cfg.SecretNames)+1)
+		for _, existing := range cfg.SecretNames {
+			if existing != name {
+				names = append(names, existing)
+			}
+		}
+		if present {
+			names = append(names, name)
+			sort.Strings(names)
+		}
+		cfg.SecretNames = names
 		return nil
 	})
 }

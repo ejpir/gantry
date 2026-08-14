@@ -151,6 +151,165 @@ type Rule struct {
 	Ports []PortRange
 }
 
+// RuleSpec is the validated, user-facing spelling of one explicit egress
+// rule. CIDR may be empty for all destinations; Protocol may be any, tcp,
+// udp, or icmp. Ports uses the policy file's comma-separated port/range syntax
+// and is meaningful only for TCP or UDP.
+type RuleSpec struct {
+	Action   string
+	CIDR     string
+	Protocol string
+	Ports    string
+}
+
+// WithRule returns a detached copy with spec as the highest-priority explicit
+// rule. Existing rules with the same selector are replaced, which makes an
+// observed traffic decision safely togglable instead of leaving a prior rule
+// ahead of the new override. It uses the policy-file parser for validation.
+func WithRule(policy *Policy, spec RuleSpec) (*Policy, error) {
+	if spec.Action != "allow" && spec.Action != "deny" {
+		return nil, fmt.Errorf("network policy: action must be allow or deny, got %q", spec.Action)
+	}
+	if spec.Protocol != "any" && spec.Protocol != "tcp" && spec.Protocol != "udp" && spec.Protocol != "icmp" {
+		return nil, fmt.Errorf("network policy: protocol must be any, tcp, udp, or icmp, got %q", spec.Protocol)
+	}
+	if spec.Ports != "" && spec.Protocol != "tcp" && spec.Protocol != "udp" {
+		return nil, fmt.Errorf("network policy: ports require tcp or udp, got %q", spec.Protocol)
+	}
+	ruleData, err := json.Marshal(filePolicy{
+		Rules: []fileRule{{Action: spec.Action, CIDR: spec.CIDR, Proto: spec.Protocol, Ports: spec.Ports}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	parsedRule, err := Parse(ruleData)
+	if err != nil {
+		return nil, err
+	}
+	clone, err := clonePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	rule := parsedRule.Rules[0]
+	rules := []Rule{rule}
+	for _, existing := range clone.Rules {
+		if !sameRuleSelector(existing, rule) {
+			rules = append(rules, existing)
+		}
+	}
+	clone.Rules = rules
+	refreshPortScopedDeny(clone)
+	return clone, nil
+}
+
+// WithoutMatchingRule removes explicit rules with spec's selector, regardless
+// of allow/deny action. It is used to remove a Traffic-tab override after the
+// observed decision has changed.
+func WithoutMatchingRule(policy *Policy, spec RuleSpec) (*Policy, error) {
+	// Validate and normalize through WithRule, then use its first rule only as
+	// the canonical selector; do not retain the synthetic override.
+	canonical, err := WithRule(DefaultPolicy(), spec)
+	if err != nil {
+		return nil, err
+	}
+	want := canonical.Rules[0]
+	clone, err := clonePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]Rule, 0, len(clone.Rules))
+	removed := false
+	for _, existing := range clone.Rules {
+		if sameRuleSelector(existing, want) {
+			removed = true
+			continue
+		}
+		rules = append(rules, existing)
+	}
+	if !removed {
+		return nil, fmt.Errorf("network policy: no matching explicit rule")
+	}
+	clone.Rules = rules
+	refreshPortScopedDeny(clone)
+	return clone, nil
+}
+
+// WithoutRule returns a detached copy without the zero-based explicit rule.
+// Built-in and default summary rows are intentionally not addressable.
+func WithoutRule(policy *Policy, index int) (*Policy, error) {
+	clone, err := clonePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(clone.Rules) {
+		return nil, fmt.Errorf("network policy: rule %d does not exist", index+1)
+	}
+	clone.Rules = append(clone.Rules[:index], clone.Rules[index+1:]...)
+	refreshPortScopedDeny(clone)
+	return clone, nil
+}
+
+// WithoutDomain returns a detached copy without a domain allowlist entry.
+// Domain spelling is normalized the same way as policy parsing. Duplicate
+// entries are removed together because they represent the same permission.
+func WithoutDomain(policy *Policy, domain string) (*Policy, error) {
+	clone, err := clonePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
+		return nil, fmt.Errorf("network policy: empty domain")
+	}
+	domains := make([]string, 0, len(clone.AllowDomains))
+	removed := false
+	for _, existing := range clone.AllowDomains {
+		if existing == domain {
+			removed = true
+			continue
+		}
+		domains = append(domains, existing)
+	}
+	if !removed {
+		return nil, fmt.Errorf("network policy: domain %q does not exist", domain)
+	}
+	clone.AllowDomains = domains
+	return clone, nil
+}
+
+func sameRuleSelector(a, b Rule) bool {
+	if a.Proto != b.Proto || len(a.Ports) != len(b.Ports) {
+		return false
+	}
+	if (a.CIDR == nil) != (b.CIDR == nil) || (a.CIDR != nil && a.CIDR.String() != b.CIDR.String()) {
+		return false
+	}
+	for i := range a.Ports {
+		if a.Ports[i] != b.Ports[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func refreshPortScopedDeny(policy *Policy) {
+	policy.hasPortScopedDeny = false
+	for _, rule := range policy.Rules {
+		if rule.Deny && len(rule.Ports) > 0 {
+			policy.hasPortScopedDeny = true
+			return
+		}
+	}
+}
+
+func clonePolicy(policy *Policy) (*Policy, error) {
+	data, err := Marshal(policy)
+	if err != nil {
+		return nil, err
+	}
+	return Parse(data)
+}
+
 // PortRange is an inclusive [Lo, Hi] destination-port interval.
 type PortRange struct{ Lo, Hi uint16 }
 

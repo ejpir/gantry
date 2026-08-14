@@ -12,6 +12,7 @@ package sandbox
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"github.com/ejpir/gantry/internal/client"
@@ -41,15 +42,16 @@ type RunConfig struct {
 	// layer blobs), attached as-is — e.g. another stack's store. When
 	// set, Image is empty and the guest mounts fsmeta with every layer
 	// blob as a device= option.
-	LayerSet *client.LayerSet `json:"layerset,omitempty"`
-	RWLayer  string           `json:"rwlayer,omitempty"`
-	RW       bool             `json:"rw"`
-	Shares   []string         `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
-	Ports    []string         `json:"ports,omitempty"`  // canonical IP:HOST:GUEST[/PROTO] publish specs
-	Net      bool             `json:"net"`
-	GVProxy  string           `json:"gvproxy,omitempty"`
-	NetPol   string           `json:"net_policy,omitempty"`
-	AllowLN  bool             `json:"allow_local_net,omitempty"`
+	LayerSet       *client.LayerSet `json:"layerset,omitempty"`
+	RWLayer        string           `json:"rwlayer,omitempty"`
+	RWLayerSizeMiB uint             `json:"rwlayer_size_mib,omitempty"`
+	RW             bool             `json:"rw"`
+	Shares         []string         `json:"shares,omitempty"` // raw TAG=PATH[,ro] specs, absolute
+	Ports          []string         `json:"ports,omitempty"`  // canonical IP:HOST:GUEST[/PROTO] publish specs
+	Net            bool             `json:"net"`
+	GVProxy        string           `json:"gvproxy,omitempty"`
+	NetPol         string           `json:"net_policy,omitempty"`
+	AllowLN        bool             `json:"allow_local_net,omitempty"`
 	// OAuthBridge controls the bounded host loopback callback bridge. Nil
 	// means enabled, preserving the default for configs written before this
 	// field existed; a non-nil false value is the persisted opt-out.
@@ -79,6 +81,7 @@ type RunFlags struct {
 	Name                                    string
 	Kernel, Rootfs, Runtime, Image, RWLayer *string
 	LayerSet                                *string
+	RWLayerSizeMiB                          *uint
 	RW                                      *bool
 	Shares                                  *gutil.StrList
 	Publish                                 *gutil.StrList
@@ -101,6 +104,7 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: release Alpine image; staged Debian/shell image in development)`),
 		RWLayer:          fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
+		RWLayerSizeMiB:   fs.Uint("disk-size", defaultRWLayerSizeMiB, "persistent writable disk size in MiB (used only when creating the per-sandbox layer)"),
 		LayerSet:         fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
 		RW:               fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
 		Net:              fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
@@ -134,6 +138,22 @@ environment) or NAME=@/path; repeatable. NAME=literal is refused`)
 // used so configs written before oauth_bridge existed also inherit the default.
 func (c RunConfig) OAuthBridgeEnabled() bool {
 	return c.OAuthBridge == nil || *c.OAuthBridge
+}
+
+func normalizedProcessIsolation(mode string) string {
+	if mode == "" {
+		return "auto"
+	}
+	return mode
+}
+
+func validateProcessIsolation(mode string) error {
+	switch normalizedProcessIsolation(mode) {
+	case "auto", "required", "off":
+		return nil
+	default:
+		return fmt.Errorf("process isolation must be auto, required, or off, got %q", mode)
+	}
 }
 
 // ResolveSecrets parses -secret/-secret-file into the value map (CLI

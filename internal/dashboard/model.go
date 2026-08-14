@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
+	"github.com/ejpir/gantry/internal/secret"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -51,6 +52,7 @@ const (
 	tuiRulesPage
 	tuiMountsPage
 	tuiPortsPage
+	tuiSecretsPage
 	tuiPageCount
 )
 
@@ -59,6 +61,7 @@ type tuiTrafficRow = dashboardapi.Traffic
 type tuiRuleRow = dashboardapi.Rule
 type tuiMountRow = dashboardapi.Mount
 type tuiPortRow = dashboardapi.Port
+type tuiSecretRow = dashboardapi.Secret
 
 type tuiDialog uint8
 
@@ -74,6 +77,10 @@ const (
 	tuiPortPublishDialog
 	tuiPortUnpublishDialog
 	tuiNetworkPolicyDialog
+	tuiRuleAddDialog
+	tuiRuleRemoveDialog
+	tuiSecretAddDialog
+	tuiSecretRemoveDialog
 )
 
 type tuiToastKind uint8
@@ -98,6 +105,7 @@ type tuiRefreshMsg struct {
 	rules     []tuiRuleRow
 	mounts    []tuiMountRow
 	ports     []tuiPortRow
+	secrets   []tuiSecretRow
 	err       error
 	at        time.Time
 }
@@ -144,6 +152,9 @@ type sandboxTUIModel struct {
 	ports         []tuiPortRow
 	portCursor    int
 	portScroll    int
+	secrets       []tuiSecretRow
+	secretCursor  int
+	secretScroll  int
 
 	width  int
 	height int
@@ -163,37 +174,50 @@ type sandboxTUIModel struct {
 	toast     *tuiToast
 	toastGen  uint64
 
-	dialog        tuiDialog
-	confirmRemove bool
-	createFocus   int
-	createName    textinput.Model
-	createImage   textinput.Model
-	createCPUs    resourceSlider
-	createMemory  resourceSlider
-	createRuntime string   // "crun" (default) or "runsc"
-	createKernels []string // staged kernel paths; index 0 in the UI is "auto"
-	createKernel  int
-	editFocus     int
-	editCPUs      resourceSlider
-	editMemory    resourceSlider
-	shareFocus    int
-	shareSandbox  sandboxPicker
-	shareTag      textinput.Model
-	sharePath     textinput.Model
-	shareMount    textinput.Model
-	shareOwner    textinput.Model
-	shareRO       bool
-	shareReplace  bool
-	portFocus     int
-	portSandbox   sandboxPicker
-	portBind      textinput.Model
-	portGuest     textinput.Model
-	portUDP       bool
-	policyFocus   int
-	policySandbox sandboxPicker
-	policyPath    textinput.Model
-	policyLocal   bool
-	formError     string
+	dialog          tuiDialog
+	confirmRemove   bool
+	createFocus     int
+	createName      textinput.Model
+	createImage     textinput.Model
+	createCPUs      resourceSlider
+	createMemory    resourceSlider
+	createDisk      resourceSlider
+	createRuntime   string   // "crun" (default) or "runsc"
+	createKernels   []string // staged kernel paths; index 0 in the UI is "auto"
+	createKernel    int
+	createIsolation string
+	editFocus       int
+	editCPUs        resourceSlider
+	editMemory      resourceSlider
+	editIsolation   string
+	shareFocus      int
+	shareSandbox    sandboxPicker
+	shareTag        textinput.Model
+	sharePath       textinput.Model
+	shareMount      textinput.Model
+	shareOwner      textinput.Model
+	shareRO         bool
+	shareReplace    bool
+	portFocus       int
+	portSandbox     sandboxPicker
+	portBind        textinput.Model
+	portGuest       textinput.Model
+	portUDP         bool
+	policyFocus     int
+	policySandbox   sandboxPicker
+	policyPath      textinput.Model
+	policyLocal     bool
+	ruleFocus       int
+	ruleSandbox     sandboxPicker
+	ruleTarget      textinput.Model
+	rulePorts       textinput.Model
+	ruleAction      string
+	ruleProtocol    string
+	secretFocus     int
+	secretSandbox   sandboxPicker
+	secretName      textinput.Model
+	secretValue     textinput.Model
+	formError       string
 
 	lastClickIndex int
 	lastClickAt    time.Time
@@ -211,6 +235,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	image.Prompt = ""
 	createCPUs := newResourceSlider(1, limits.MaxVCPUs, 1, 1)
 	createMemory := newResourceSlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), 128, 512)
+	createDisk := newResourceSlider(int(limits.MinDiskSizeMiB), int(limits.MaxDiskSizeMiB), 512, int(limits.DefaultDiskSizeMiB))
 	editCPUs := newResourceSlider(1, limits.MaxVCPUs, 1, 1)
 	editMemory := newResourceSlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), 128, 512)
 	shareTag := textinput.New()
@@ -241,33 +266,59 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	policyPath.Placeholder = "blank uses the built-in default"
 	policyPath.CharLimit = 4096
 	policyPath.Prompt = ""
+	ruleTarget := textinput.New()
+	ruleTarget.Placeholder = "203.0.113.10 or 203.0.113.0/24 (blank = all)"
+	ruleTarget.CharLimit = 64
+	ruleTarget.Prompt = ""
+	rulePorts := textinput.New()
+	rulePorts.Placeholder = "443 or 8000-9000 (blank = any)"
+	rulePorts.CharLimit = 128
+	rulePorts.Prompt = ""
+	secretName := textinput.New()
+	secretName.Placeholder = "GITHUB_TOKEN"
+	secretName.CharLimit = 128
+	secretName.Prompt = ""
+	secretValue := textinput.New()
+	secretValue.Placeholder = "value is never displayed or persisted"
+	secretValue.CharLimit = 1 << 20
+	secretValue.Prompt = ""
+	secretValue.EchoMode = textinput.EchoPassword
+	secretValue.EchoCharacter = '•'
 
 	m := sandboxTUIModel{
-		service:        service,
-		limits:         limits,
-		width:          100,
-		height:         30,
-		dark:           true,
-		loading:        true,
-		refreshing:     true,
-		spinner:        sp,
-		animating:      true,
-		createName:     name,
-		createImage:    image,
-		createCPUs:     createCPUs,
-		createMemory:   createMemory,
-		createRuntime:  "crun",
-		editCPUs:       editCPUs,
-		editMemory:     editMemory,
-		shareTag:       shareTag,
-		sharePath:      sharePath,
-		shareMount:     shareMount,
-		shareOwner:     shareOwner,
-		shareRO:        true,
-		portBind:       portBind,
-		portGuest:      portGuest,
-		policyPath:     policyPath,
-		lastClickIndex: -1,
+		service:         service,
+		limits:          limits,
+		width:           100,
+		height:          30,
+		dark:            true,
+		loading:         true,
+		refreshing:      true,
+		spinner:         sp,
+		animating:       true,
+		createName:      name,
+		createImage:     image,
+		createCPUs:      createCPUs,
+		createMemory:    createMemory,
+		createDisk:      createDisk,
+		createRuntime:   "crun",
+		createIsolation: "auto",
+		editCPUs:        editCPUs,
+		editMemory:      editMemory,
+		shareTag:        shareTag,
+		sharePath:       sharePath,
+		shareMount:      shareMount,
+		shareOwner:      shareOwner,
+		shareRO:         true,
+		portBind:        portBind,
+		portGuest:       portGuest,
+		policyPath:      policyPath,
+		ruleTarget:      ruleTarget,
+		rulePorts:       rulePorts,
+		ruleAction:      "deny",
+		ruleProtocol:    "tcp",
+		secretName:      secretName,
+		secretValue:     secretValue,
+		lastClickIndex:  -1,
 	}
 	m.applyInputTheme()
 	return m
@@ -356,12 +407,13 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	if selected := m.selected(); selected != nil {
 		selectedName = selected.Name
 	}
-	trafficKey, ruleKey, mountKey, portKey := m.selectedTableKeys()
+	trafficKey, ruleKey, mountKey, portKey, secretKey := m.selectedTableKeys()
 	m.sandboxes = msg.sandboxes
 	m.traffic = msg.traffic
 	m.rules = msg.rules
 	m.mounts = msg.mounts
 	m.ports = msg.ports
+	m.secrets = msg.secrets
 
 	target := m.selectNext
 	if target == "" {
@@ -388,7 +440,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	} else if !found && m.cursor > len(m.sandboxes) {
 		m.cursor = len(m.sandboxes)
 	}
-	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey)
+	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey, secretKey)
 	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 	return m, m.ensureAnimation()
@@ -451,6 +503,24 @@ func (m *sandboxTUIModel) updateBusyKey(key string) tea.Cmd {
 
 func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 	switch m.page {
+	case tuiTrafficPage:
+		switch key {
+		case "a":
+			row := m.selectedTraffic()
+			if row == nil {
+				return nil, true
+			}
+			return m.openRuleAddDialog(), true
+		case "r":
+			row := m.selectedTraffic()
+			if row == nil {
+				return nil, true
+			}
+			_, cmd := m.removeSelectedTrafficRule()
+			return cmd, true
+		case "R":
+			return m.refreshCmd(), true
+		}
 	case tuiMountsPage:
 		switch key {
 		case "a":
@@ -467,8 +537,24 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			return m.refreshCmd(), true
 		}
 	case tuiRulesPage:
-		if key == "e" || key == "p" {
+		switch key {
+		case "e", "p":
 			return m.openNetworkPolicyDialog(), true
+		case "d", "delete", "x":
+			row := m.selectedRule()
+			if row == nil {
+				return nil, true
+			}
+			if removableRule(*row) {
+				m.dialog = tuiRuleRemoveDialog
+				m.confirmRemove = false
+				return nil, true
+			}
+			return m.showToast(
+				tuiToastInfo,
+				"Effective rule",
+				"Built-in and default rows cannot be deleted. Press e to edit the network policy.",
+			), true
 		}
 	case tuiPortsPage:
 		switch key {
@@ -477,6 +563,17 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 		case "d", "delete", "x", "u":
 			if m.selectedPort() != nil {
 				m.dialog = tuiPortUnpublishDialog
+				m.confirmRemove = false
+			}
+			return nil, true
+		}
+	case tuiSecretsPage:
+		switch key {
+		case "a":
+			return m.openSecretAddDialog(), true
+		case "d", "delete", "x":
+			if m.selectedSecret() != nil {
+				m.dialog = tuiSecretRemoveDialog
 				m.confirmRemove = false
 			}
 			return nil, true
@@ -509,6 +606,8 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 		m.setPage(tuiMountsPage)
 	case "5":
 		m.setPage(tuiPortsPage)
+	case "6":
+		m.setPage(tuiSecretsPage)
 	case "tab", "]":
 		m.cyclePage(1)
 	case "shift+tab", "[":
@@ -699,7 +798,7 @@ func receiveTUIProcessStream(stream <-chan tuiProcessStreamEvent) tea.Msg {
 }
 
 // tuiProcessOutput retains the command's complete diagnostic output while
-// forwarding only bounded download-progress lines to Bubble Tea. stdout and
+// forwarding only bounded operation-progress lines to Bubble Tea. stdout and
 // stderr may be copied concurrently by os/exec, hence the shared lock.
 type tuiProcessOutput struct {
 	mu      sync.Mutex
@@ -720,7 +819,7 @@ func (w *tuiProcessOutput) Write(p []byte) (int, error) {
 		}
 		line := strings.TrimSuffix(w.pending[:newline], "\r")
 		w.pending = w.pending[newline+1:]
-		if line, ok := downloadProgressLine(line); ok {
+		if line, ok := operationProgressLine(line); ok {
 			progress = append(progress, line)
 		}
 	}
@@ -741,8 +840,13 @@ func (w *tuiProcessOutput) String() string {
 	return w.output.String()
 }
 
-func downloadProgressLine(line string) (string, bool) {
-	start := strings.Index(line, "downloading ")
+func operationProgressLine(line string) (string, bool) {
+	start := -1
+	for _, marker := range []string{"downloading ", "creating persistent disk "} {
+		if index := strings.Index(line, marker); index >= 0 && (start < 0 || index < start) {
+			start = index
+		}
+	}
 	if start < 0 {
 		return "", false
 	}
@@ -753,16 +857,52 @@ func downloadProgressLine(line string) (string, bool) {
 	return line, true
 }
 
-func saveSandboxResourcesCmd(service dashboardapi.Service, name string, memMB uint, vcpus int, running bool) tea.Cmd {
+func saveSandboxResourcesCmd(service dashboardapi.Service, name string, memMB uint, vcpus int, processIsolation string, running bool) tea.Cmd {
 	return func() tea.Msg {
-		err := service.SetResources(name, memMB, vcpus)
-		body := fmt.Sprintf("%d CPU · %d MiB RAM", vcpus, memMB)
+		err := service.SetResources(name, memMB, vcpus, processIsolation)
+		body := fmt.Sprintf("%d CPU · %d MiB RAM · isolation %s", vcpus, memMB, processIsolation)
 		if running {
 			body += " · restart to apply"
 		} else {
 			body += " · applies on next start"
 		}
 		return tuiProcessDoneMsg{action: "edit", name: name, output: body, err: err}
+	}
+}
+
+func addNetworkRuleCmd(service dashboardapi.Service, request dashboardapi.RuleRequest) tea.Cmd {
+	return func() tea.Msg {
+		err := service.AddNetworkRule(request)
+		return tuiProcessDoneMsg{action: "rule add", name: request.Sandbox, err: err}
+	}
+}
+
+func removeNetworkRuleCmd(service dashboardapi.Service, row tuiRuleRow) tea.Cmd {
+	return func() tea.Msg {
+		err := service.RemoveNetworkRule(row)
+		return tuiProcessDoneMsg{action: "rule remove", name: row.Sandbox + "/" + row.Source, err: err}
+	}
+}
+
+func removeTrafficRuleCmd(service dashboardapi.Service, row tuiTrafficRow) tea.Cmd {
+	return func() tea.Msg {
+		err := service.RemoveTrafficRule(row)
+		return tuiProcessDoneMsg{action: "rule remove", name: row.Sandbox + "/" + row.Address, err: err}
+	}
+}
+
+func addSecretCmd(service dashboardapi.Service, request dashboardapi.SecretRequest) tea.Cmd {
+	return func() tea.Msg {
+		err := service.AddSecret(request)
+		request.Value = secret.Value("")
+		return tuiProcessDoneMsg{action: "secret add", name: request.Sandbox + "/" + request.Name, err: err}
+	}
+}
+
+func removeSecretCmd(service dashboardapi.Service, row tuiSecretRow) tea.Cmd {
+	return func() tea.Msg {
+		err := service.RemoveSecret(row)
+		return tuiProcessDoneMsg{action: "secret remove", name: row.Sandbox + "/" + row.Name, err: err}
 	}
 }
 
@@ -851,6 +991,20 @@ func (m *sandboxTUIModel) selectedRule() *tuiRuleRow {
 		return nil
 	}
 	return &m.rules[m.rulesCursor]
+}
+
+func (m *sandboxTUIModel) selectedTraffic() *tuiTrafficRow {
+	if m.trafficCursor < 0 || m.trafficCursor >= len(m.traffic) {
+		return nil
+	}
+	return &m.traffic[m.trafficCursor]
+}
+
+func (m *sandboxTUIModel) selectedSecret() *tuiSecretRow {
+	if m.secretCursor < 0 || m.secretCursor >= len(m.secrets) {
+		return nil
+	}
+	return &m.secrets[m.secretCursor]
 }
 
 func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
@@ -961,6 +1115,8 @@ func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
 		return &m.mountCursor, &m.mountScroll, len(m.mounts)
 	case tuiPortsPage:
 		return &m.portCursor, &m.portScroll, len(m.ports)
+	case tuiSecretsPage:
+		return &m.secretCursor, &m.secretScroll, len(m.secrets)
 	default:
 		return nil, nil, 0
 	}
@@ -995,7 +1151,7 @@ func (m *sandboxTUIModel) ensureTableCursorVisible() {
 	*scroll = clampInt(*scroll, 0, maxInt(0, count-visible))
 }
 
-func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port string) {
+func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret string) {
 	if m.trafficCursor >= 0 && m.trafficCursor < len(m.traffic) {
 		traffic = trafficRowKey(m.traffic[m.trafficCursor])
 	}
@@ -1008,10 +1164,13 @@ func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port string)
 	if m.portCursor >= 0 && m.portCursor < len(m.ports) {
 		port = portRowKey(m.ports[m.portCursor])
 	}
+	if m.secretCursor >= 0 && m.secretCursor < len(m.secrets) {
+		secret = secretRowKey(m.secrets[m.secretCursor])
+	}
 	return
 }
 
-func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port string) {
+func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, secret string) {
 	for i := range m.traffic {
 		if traffic != "" && trafficRowKey(m.traffic[i]) == traffic {
 			m.trafficCursor = i
@@ -1036,14 +1195,28 @@ func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port stri
 			break
 		}
 	}
+	for i := range m.secrets {
+		if secret != "" && secretRowKey(m.secrets[i]) == secret {
+			m.secretCursor = i
+			break
+		}
+	}
 	m.trafficCursor = clampTableCursor(m.trafficCursor, len(m.traffic))
 	m.rulesCursor = clampTableCursor(m.rulesCursor, len(m.rules))
 	m.mountCursor = clampTableCursor(m.mountCursor, len(m.mounts))
 	m.portCursor = clampTableCursor(m.portCursor, len(m.ports))
+	m.secretCursor = clampTableCursor(m.secretCursor, len(m.secrets))
 }
 
 func trafficRowKey(row tuiTrafficRow) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%t", row.Sandbox, row.Address, row.Protocol, row.Port, row.Allowed)
+	// DNS traffic is keyed by queried host in the recorder, but every query is
+	// sent to the same gateway address and port. Include Host so a refresh does
+	// not collapse several DNS rows onto the first (most recently sorted) one.
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%t", row.Sandbox, row.Host, row.Address, row.Protocol, row.Port, row.Allowed)
+}
+
+func removableRule(row tuiRuleRow) bool {
+	return strings.HasPrefix(row.Source, "rule ") || row.Source == "domain"
 }
 
 func ruleRowKey(row tuiRuleRow) string {
@@ -1058,6 +1231,8 @@ func portRowKey(row tuiPortRow) string {
 	return strings.Join([]string{row.Sandbox, row.Bind, row.Proto}, "\x00")
 }
 
+func secretRowKey(row tuiSecretRow) string { return row.Sandbox + "\x00" + row.Name }
+
 func clampTableCursor(cursor, count int) int {
 	if count == 0 {
 		return 0
@@ -1071,7 +1246,7 @@ func refreshSandboxesCmd(service dashboardapi.Service) tea.Cmd {
 		sanitizeSnapshot(&data)
 		return tuiRefreshMsg{
 			sandboxes: data.Sandboxes, traffic: data.Traffic,
-			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, err: err, at: time.Now(),
+			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, secrets: data.Secrets, err: err, at: time.Now(),
 		}
 	}
 }
@@ -1120,6 +1295,14 @@ func actionTitle(action string) string {
 		return "Edit sandbox"
 	case "netpolicy set":
 		return "Apply network policy"
+	case "rule add":
+		return "Add network rule"
+	case "rule remove":
+		return "Remove network rule"
+	case "secret add":
+		return "Add secret"
+	case "secret remove":
+		return "Delete secret"
 	default:
 		return strings.Title(action) //nolint:staticcheck // action names are ASCII UI labels.
 	}
@@ -1153,6 +1336,14 @@ func actionPastTense(action string) string {
 		return "Sandbox updated"
 	case "netpolicy set":
 		return "Network policy applied"
+	case "rule add":
+		return "Network rule added"
+	case "rule remove":
+		return "Network rule removed"
+	case "secret add":
+		return "Secret added"
+	case "secret remove":
+		return "Secret deleted"
 	default:
 		return actionTitle(action) + " complete"
 	}

@@ -178,22 +178,28 @@ func TestConfigStoreRejectsInvalidPersistedResources(t *testing.T) {
 
 func TestConfigStoreSetResources(t *testing.T) {
 	dir := t.TempDir()
-	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1, Shares: []string{"code=/tmp"}})
+	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1, Shares: []string{"code=/tmp"}, ProcessIsolation: "required"})
 	vcpus := 4
 	if runtime.GOOS == "windows" {
 		vcpus = 1 // WHPX SMP remains deliberately unavailable.
 	}
-	if err := store.SetResources(4096, vcpus); err != nil {
+	if err := store.SetResources(4096, vcpus, ""); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := readSandboxConfig(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MemMB != 4096 || cfg.VCPUs != vcpus || len(cfg.Shares) != 1 {
+	if cfg.MemMB != 4096 || cfg.VCPUs != vcpus || len(cfg.Shares) != 1 || cfg.ProcessIsolation != "required" {
 		t.Fatalf("persisted resources = %+v", cfg)
 	}
-	if err := store.SetResources(4096, 9); err == nil {
+	if err := store.SetResources(4096, vcpus, "off"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().ProcessIsolation; got != "off" {
+		t.Fatalf("process isolation = %q, want off", got)
+	}
+	if err := store.SetResources(4096, 9, "off"); err == nil {
 		t.Fatal("accepted more than 8 CPUs")
 	}
 	if got := store.Snapshot(); got.MemMB != 4096 || got.VCPUs != vcpus {

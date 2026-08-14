@@ -62,7 +62,8 @@ attestation — verify with
 ./gantry-linux-arm64 stop dev      # resume / delete work as expected
 
 # interactive dashboard (auto-starts in a terminal): cards, create/start/
-# stop/exec, and Traffic / Rules / Mounts / Ports views — tab or 1–5 to switch
+# stop/exec, and Traffic / Rules / Mounts / Ports / Secrets views — tab or 1–6
+# to switch
 ./gantry-linux-arm64 tui
 
 # persistent local HTTP/JSON manager over ~/.gantry/manager.sock
@@ -85,12 +86,14 @@ attestation — verify with
   adding a new host path to a confined macOS VM requires a restart.
 - **Networking** — embedded netstack, local networks blocked by default, and
   CIDR/proto/port/DNS egress rules. Policies are replaceable live with
-  `gantry net-policy set`; Traffic and Rules views show activity and policy.
+  `gantry net-policy set`; the Traffic view can add an allow/deny override for
+  a selected destination using any, TCP, UDP, or ICMP and remove it again.
 - **Port publishing** — TCP/UDP host-to-guest forwards, loopback by default:
   `-p 8080:80`; publish/unpublish live with `gantry ports` or the dashboard.
 - **Secrets** — `-secret NAME`, `NAME=@file`, or `-secret-file`; values travel
   memory-only to per-exec process specs, never argv, sandbox state, or the
-  daemon environment.
+  daemon environment. The Secrets view lists names and can load/delete values
+  without ever displaying or persisting them.
 - **OAuth sign-in bridge** — enabled by default for agent CLIs (codex, claude,
   pi) that sign in via a localhost callback. The daemon spots the printed
   authorize URL, binds a bounded/approved loopback port on the host, and
@@ -98,10 +101,12 @@ attestation — verify with
   `gantry start NAME -oauth-bridge=false` to opt out;
   `GANTRY_OAUTH_BRIDGE=1|0` is the global enable/disable override.
 - **Persistence and resources** — named sandboxes get private locked writable
-  layers plus configurable memory/vCPUs; dashboard edits apply on next boot.
+  ext4 layers plus configurable disk size, memory, vCPUs, and process
+  isolation. The disk is formatted in pure Go on first start (no elevation or
+  host filesystem tools); dashboard resource edits apply on next boot.
 - **Dashboard and import** — create/start/stop/exec plus Traffic, Rules,
-  Mounts, and Ports views; `gantry import` adopts compatible sandbox state
-  without re-pulling or flattening immutable image layers.
+  Mounts, Ports, and Secrets views; `gantry import` adopts compatible sandbox
+  state without re-pulling or flattening immutable image layers.
 - **Local manager API** — `gantry serve` provides lifecycle, bounded captured
   exec, operations, and SSE events as HTTP/JSON over a same-user Unix socket;
   see the checked-in [OpenAPI contract](api/managerapi/openapi.yaml).

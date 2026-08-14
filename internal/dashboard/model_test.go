@@ -46,9 +46,10 @@ func TestSanitizeSnapshotCoversServiceData(t *testing.T) {
 	snapshot := dashboardapi.Snapshot{
 		Sandboxes: []dashboardapi.Sandbox{{Name: "dev", Image: "\x1b[31malpine\x1b[0m\nnext"}},
 		Mounts:    []dashboardapi.Mount{{Sandbox: "dev", Error: "first\nsecond"}},
+		Secrets:   []dashboardapi.Secret{{Sandbox: "dev", Name: "TOKEN\x1b[2J", State: "loaded\nspoof"}},
 	}
 	sanitizeSnapshot(&snapshot)
-	if snapshot.Sandboxes[0].Image != "alpine next" || snapshot.Mounts[0].Error != "first second" {
+	if snapshot.Sandboxes[0].Image != "alpine next" || snapshot.Mounts[0].Error != "first second" || snapshot.Secrets[0].Name != "TOKEN" || snapshot.Secrets[0].State != "loaded spoof" {
 		t.Fatalf("snapshot was not sanitized: %#v", snapshot)
 	}
 }
@@ -384,7 +385,7 @@ func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 	}}
 	view := m.View()
 	plain := ansi.Strip(view.Content)
-	for _, want := range []string{"GANTRY", "SANDBOXES", "TRAFFIC", "RULES", "MOUNTS", "PORTS", "dev", "RUNNING", "alpine:latest", "New Sandbox"} {
+	for _, want := range []string{"GANTRY", "SANDBOXES", "TRAFFIC", "RULES", "MOUNTS", "PORTS", "SECRETS", "dev", "RUNNING", "alpine:latest", "New Sandbox"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, plain)
 		}
@@ -412,6 +413,7 @@ func TestSandboxTUIRenderSizes(t *testing.T) {
 		m.rules = []tuiRuleRow{{Sandbox: "dev", Action: "allow", Target: "public internet", Proto: "any"}}
 		m.mounts = []tuiMountRow{{Sandbox: "dev", Tag: "code", Host: "/tmp/code", Guest: "/workspace"}}
 		m.ports = []tuiPortRow{{Sandbox: "dev", Bind: "127.0.0.1:8080", Guest: 80, Proto: "tcp", State: "bound"}}
+		m.secrets = []tuiSecretRow{{Sandbox: "dev", Name: "TOKEN", State: "required next start"}}
 		for page := tuiSandboxesPage; page < tuiPageCount; page++ {
 			m.page = page
 			for _, dialog := range []tuiDialog{tuiNoDialog, tuiHelpDialog, tuiInfoDialog, tuiRemoveDialog, tuiCreateDialog, tuiEditDialog} {
@@ -463,6 +465,49 @@ func TestSandboxTUITableNavigationKeepsSelectionVisible(t *testing.T) {
 	}
 }
 
+func TestSandboxTUITrafficSelectionSurvivesDNSRefresh(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.page = tuiTrafficPage
+	m.traffic = []tuiTrafficRow{
+		{Sandbox: "dev", Host: "api.example.com", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: true},
+		{Sandbox: "dev", Host: "cdn.example.com", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: true},
+	}
+	m.trafficCursor = 0
+
+	_, _ = m.handleRefresh(tuiRefreshMsg{
+		at: time.Now(),
+		traffic: []tuiTrafficRow{
+			{Sandbox: "dev", Host: "cdn.example.com", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: true},
+			{Sandbox: "dev", Host: "api.example.com", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: true},
+		},
+	})
+	if selected := m.selectedTraffic(); selected == nil || selected.Host != "api.example.com" {
+		t.Fatalf("traffic selection after refresh = %#v, want api.example.com", selected)
+	}
+}
+
+func TestSandboxTUIRuleRemovalDistinguishesEntriesFromPosture(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.page = tuiRulesPage
+	m.rules = []tuiRuleRow{{Sandbox: "dev", Target: "example.com", Source: "domain"}}
+
+	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'd'})
+	m = *model.(*sandboxTUIModel)
+	if cmd != nil || m.dialog != tuiRuleRemoveDialog {
+		t.Fatalf("domain removal = dialog %d cmd=%v", m.dialog, cmd)
+	}
+
+	m.closeDialog()
+	m.rules = []tuiRuleRow{{Sandbox: "dev", Target: "public internet", Source: "default"}}
+	model, cmd = m.updateKey(tea.KeyPressMsg{Code: 'd'})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiNoDialog || m.toast == nil || m.toast.title != "Effective rule" {
+		t.Fatalf("default removal feedback = dialog %d toast=%#v cmd=%v", m.dialog, m.toast, cmd)
+	}
+}
+
 func TestSandboxTUIKeepsCreateSelectionAcrossStaleRefresh(t *testing.T) {
 	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
 	m.loading = false
@@ -506,6 +551,83 @@ func TestSandboxTUIStreamsDownloadProgress(t *testing.T) {
 	plain := ansi.Strip(m.View().Content)
 	if !strings.Contains(plain, "50%") || !strings.Contains(plain, "gantry-kernel-x86_64") {
 		t.Fatalf("dashboard does not render download progress:\n%s", plain)
+	}
+}
+
+func TestSandboxTUIStreamsPersistentDiskProgress(t *testing.T) {
+	events := make(chan tuiProcessStreamEvent, 1)
+	output := &tuiProcessOutput{events: events}
+	line := "gantry start: creating persistent disk [==========··········]  50% (4096 MiB)"
+	if _, err := output.Write([]byte(line + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if event := <-events; event.progress != strings.TrimPrefix(line, "gantry start: ") {
+		t.Fatalf("streamed progress = %q", event.progress)
+	}
+}
+
+func TestSandboxTUITrafficRulesSupportEveryProtocolPosture(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.page = tuiTrafficPage
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
+	m.traffic = []tuiTrafficRow{{
+		Sandbox: "dev", Address: "203.0.113.9", Protocol: "icmp", Allowed: true,
+	}}
+
+	model, _ := m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiRuleAddDialog || m.ruleAction != "deny" || m.ruleProtocol != "icmp" || m.ruleTarget.Value() != "203.0.113.9" || m.rulePorts.Value() != "" {
+		t.Fatalf("ICMP traffic rule form = dialog %d action %q proto %q target %q ports %q", m.dialog, m.ruleAction, m.ruleProtocol, m.ruleTarget.Value(), m.rulePorts.Value())
+	}
+
+	m.ruleFocus = 3
+	_, _ = m.updateRuleAddDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.ruleProtocol != "any" {
+		t.Fatalf("protocol after ICMP = %q, want any", m.ruleProtocol)
+	}
+	m.closeDialog()
+	m.traffic[0].Protocol = "ip"
+	m.traffic[0].Allowed = false
+	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	m = *model.(*sandboxTUIModel)
+	if m.ruleAction != "allow" || m.ruleProtocol != "any" {
+		t.Fatalf("generic IP traffic rule = action %q proto %q", m.ruleAction, m.ruleProtocol)
+	}
+	m.closeDialog()
+	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'r'})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.busyAction != "rule remove" {
+		t.Fatalf("traffic rule removal = busy %q cmd=%v", m.busyAction, cmd)
+	}
+}
+
+func TestSandboxTUISecretsAreListedAndWriteOnly(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.page = tuiSecretsPage
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
+	m.secrets = []tuiSecretRow{{Sandbox: "dev", Name: "API_TOKEN", State: "loaded"}}
+	plain := ansi.Strip(m.View().Content)
+	if !strings.Contains(plain, "API_TOKEN") || !strings.Contains(plain, "loaded") {
+		t.Fatalf("secret list is incomplete:\n%s", plain)
+	}
+
+	model, _ := m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiSecretAddDialog {
+		t.Fatalf("secret add dialog = %d", m.dialog)
+	}
+	m.secretName.SetValue("NEW_TOKEN")
+	m.secretValue.SetValue("never-render-this")
+	m.focusSecret(2)
+	plain = ansi.Strip(m.View().Content)
+	if strings.Contains(plain, "never-render-this") || !strings.Contains(plain, "••") {
+		t.Fatalf("secret value was not masked:\n%s", plain)
+	}
+	m.closeDialog()
+	if m.secretValue.Value() != "" {
+		t.Fatal("closing the secret dialog retained the value")
 	}
 }
 
@@ -647,8 +769,18 @@ func TestSandboxTUICreateResourceSliders(t *testing.T) {
 	if m.createMemory.Value != 640 {
 		t.Fatalf("memory slider = %d, want 640", m.createMemory.Value)
 	}
+	m.focusCreate(6)
+	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.createDisk.Value != 1024 {
+		t.Fatalf("disk slider = %d, want 1024", m.createDisk.Value)
+	}
+	m.focusCreate(7)
+	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.createIsolation != "required" {
+		t.Fatalf("isolation choice = %q, want required", m.createIsolation)
+	}
 	argv := strings.Join(m.createArgv("bigger"), " ")
-	if !strings.Contains(argv, "-cpus 2") || !strings.Contains(argv, "-mem 640") {
+	if !strings.Contains(argv, "-cpus 2") || !strings.Contains(argv, "-mem 640") || !strings.Contains(argv, "-disk-size 1024") || !strings.Contains(argv, "-process-isolation required") {
 		t.Fatalf("create argv = %q", argv)
 	}
 }
@@ -881,7 +1013,7 @@ func TestSandboxTUIFormDialogsUseSpaciousSections(t *testing.T) {
 		render func() string
 		labels []string
 	}{
-		{name: "create", render: func() string { return m.renderCreateDialog(theme, 58) }, labels: []string{"Name", "OCI image", "Runtime", "Kernel", "CPUs", "Memory"}},
+		{name: "create", render: func() string { return m.renderCreateDialog(theme, 58) }, labels: []string{"Name", "OCI image", "Runtime", "Kernel", "CPUs", "Memory", "Persistent disk", "Process isolation"}},
 		{name: "mount", render: func() string { return m.renderShareAddDialog(theme, 62) }, labels: []string{"Sandbox", "Tag", "Host path", "Mount point", "Guest owner", "Mode"}},
 		{name: "port", render: func() string { return m.renderPortPublishDialog(theme, 62) }, labels: []string{"Host bind", "Guest port", "Protocol"}},
 		{name: "policy", render: func() string { return m.renderNetworkPolicyDialog(theme, 62) }, labels: []string{"Sandbox", "Policy file", "Local network override"}},

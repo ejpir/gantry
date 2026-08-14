@@ -207,6 +207,8 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 		body = m.renderMountsView(theme, layout)
 	case tuiPortsPage:
 		body = m.renderPortsView(theme, layout)
+	case tuiSecretsPage:
+		body = m.renderSecretsView(theme, layout)
 	default:
 		body = m.renderCardGrid(theme, layout)
 	}
@@ -292,6 +294,7 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 		fmt.Sprintf("3 NET RULES %d", len(m.rules)),
 		fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 		fmt.Sprintf("5 PORTS %d", len(m.ports)),
+		fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
 	}
 	if width < 82 {
 		labels = []string{
@@ -300,6 +303,7 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 			fmt.Sprintf("3 RULES %d", len(m.rules)),
 			fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 			fmt.Sprintf("5 PORTS %d", len(m.ports)),
+			fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
 		}
 	}
 	if width < 50 {
@@ -408,6 +412,14 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 			}
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d bound  •  %d saved", bound, len(m.ports)-bound))
+	case tuiSecretsPage:
+		loaded := 0
+		for _, item := range m.secrets {
+			if item.State == "loaded" {
+				loaded++
+			}
+		}
+		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d names  •  %d loaded", len(m.secrets), loaded))
 	default:
 		running, starting := 0, 0
 		for _, sandbox := range m.sandboxes {
@@ -656,13 +668,15 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 func (m sandboxTUIModel) contextHints() [][2]string {
 	switch m.page {
 	case tuiTrafficPage:
-		return [][2]string{{"↑/↓", "inspect"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
+		return [][2]string{{"↑/↓", "inspect"}, {"a", "allow/block"}, {"r", "remove rule"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiRulesPage:
-		return [][2]string{{"↑/↓", "inspect"}, {"e", "edit policy"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
+		return [][2]string{{"↑/↓", "inspect"}, {"d", "remove entry"}, {"e", "edit policy"}, {"tab", "next view"}, {"r", "refresh"}, {"?", "help"}}
 	case tuiMountsPage:
 		return [][2]string{{"a", "add share"}, {"d", "remove share"}, {"r", "replace"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiPortsPage:
 		return [][2]string{{"p", "publish"}, {"d", "unpublish"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
+	case tuiSecretsPage:
+		return [][2]string{{"a", "add secret"}, {"d", "delete"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	}
 	if m.onNewCard() {
 		return [][2]string{{"enter", "create"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
@@ -755,7 +769,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 72
 	case tuiInfoDialog:
 		idealWidth = 68
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog:
 		idealWidth = 54
 	case tuiCreateDialog:
 		idealWidth = 64
@@ -765,7 +779,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 68
 	case tuiShareAddDialog:
 		idealWidth = 68
-	case tuiNetworkPolicyDialog:
+	case tuiNetworkPolicyDialog, tuiRuleAddDialog, tuiSecretAddDialog:
 		idealWidth = 68
 	}
 	width = minInt(idealWidth, maxInt(24, m.width-4))
@@ -788,7 +802,7 @@ func (m sandboxTUIModel) dialogSize(kind tuiDialog) (int, int) {
 // control is more important in a short terminal. Compact layouts keep the same
 // fields and keyboard order with the blank separator rows removed.
 func (m sandboxTUIModel) formDialogsSpacious() bool {
-	return m.height >= 35 && !m.shareSandbox.open && !m.portSandbox.open && !m.policySandbox.open
+	return m.height >= 35 && !m.shareSandbox.open && !m.portSandbox.open && !m.policySandbox.open && !m.ruleSandbox.open && !m.secretSandbox.open
 }
 
 func (m sandboxTUIModel) formSectionGap() string {
@@ -850,6 +864,16 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 		content = m.renderPortPublishDialog(theme, innerWidth)
 	case tuiNetworkPolicyDialog:
 		content = m.renderNetworkPolicyDialog(theme, innerWidth)
+	case tuiRuleAddDialog:
+		content = m.renderRuleAddDialog(theme, innerWidth)
+	case tuiRuleRemoveDialog:
+		content = m.renderRuleRemoveDialog(theme, innerWidth)
+		border = theme.error
+	case tuiSecretAddDialog:
+		content = m.renderSecretAddDialog(theme, innerWidth)
+	case tuiSecretRemoveDialog:
+		content = m.renderSecretRemoveDialog(theme, innerWidth)
+		border = theme.error
 	}
 	return content, border
 }
@@ -878,13 +902,13 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"g / G", "first / last row"},
 		{"mouse wheel", "scroll the view"},
 		{"tab / S-tab", "switch views"},
-		{"1 … 5", "jump to a view"},
+		{"1 … 6", "jump to a view"},
 	})
 	actions := column("SANDBOX ACTIONS", [][2]string{
 		{"enter", "open or start"},
 		{"s", "start / stop"},
 		{"n", "create a sandbox"},
-		{"e", "edit CPU / memory"},
+		{"e", "edit resources / isolation"},
 		{"i", "show details"},
 		{"d", "remove"},
 		{"r", "refresh"},
@@ -942,6 +966,7 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		{"Image", sandbox.Image},
 		{"Runtime", sandbox.Runtime},
 		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.VCPUs), sandbox.MemMB)},
+		{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
 		{"Storage", map[bool]string{true: "writable overlay", false: "read-only"}[sandbox.RW]},
 		{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
 		{"Traffic", "↑ " + formatBytes(sandbox.TXBytes) + "  ↓ " + formatBytes(sandbox.RXBytes)},
@@ -1001,11 +1026,16 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 	cpuSlider := m.createCPUs.View(theme, width, m.createFocus == 4, "CPU")
 	memoryLabel := formLabel(theme, "Memory", m.createFocus == 5)
 	memorySlider := m.createMemory.View(theme, width, m.createFocus == 5, "MiB")
+	diskLabel := formLabel(theme, "Persistent disk", m.createFocus == 6)
+	diskSlider := m.createDisk.View(theme, width, m.createFocus == 6, "MiB")
+	isolationLabel := formLabel(theme, "Process isolation", m.createFocus == 7)
+	isolationValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.createIsolation) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	create := renderDialogButton(theme, "Create", m.createFocus == 6, false)
+	create := renderDialogButton(theme, "Create", m.createFocus == 8, false)
 	buttons := alignRight(create, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  enter continue  •  esc cancel")
 	gap := m.formSectionGap()
@@ -1016,6 +1046,8 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 		kernelLabel + "\n" + kernelValue,
 		cpuLabel + "\n" + cpuSlider,
 		memoryLabel + "\n" + memorySlider,
+		diskLabel + "\n" + diskSlider,
+		isolationLabel + "\n" + isolationValue,
 	}
 	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
 }
@@ -1031,6 +1063,9 @@ func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
 	cpuSlider := m.editCPUs.View(theme, width, m.editFocus == 0, "CPU")
 	memoryLabel := formLabel(theme, "Memory", m.editFocus == 1)
 	memorySlider := m.editMemory.View(theme, width, m.editFocus == 1, "MiB")
+	isolationLabel := formLabel(theme, "Process isolation", m.editFocus == 2)
+	isolationValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.editIsolation) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
 	note := "Applied when the sandbox next starts."
 	if sandbox.State == tuiRunning {
 		note = "Restart the sandbox to apply this allocation."
@@ -1040,10 +1075,10 @@ func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	save := renderDialogButton(theme, "Save", m.editFocus == 2, false)
+	save := renderDialogButton(theme, "Save", m.editFocus == 3, false)
 	buttons := alignRight(save, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText("←/→ adjust  •  PgUp/PgDn jump  •  tab next  •  esc cancel", width))
-	return header + "\n" + description + "\n\n" + cpuLabel + "\n" + cpuSlider + "\n\n" + memoryLabel + "\n" + memorySlider + "\n\n" + noteLine + "\n" + renderFormFooter(errorLine, buttons, hint)
+	return header + "\n" + description + "\n\n" + cpuLabel + "\n" + cpuSlider + "\n\n" + memoryLabel + "\n" + memorySlider + "\n\n" + isolationLabel + "\n" + isolationValue + "\n\n" + noteLine + "\n" + renderFormFooter(errorLine, buttons, hint)
 }
 
 func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) string {
@@ -1237,6 +1272,98 @@ func (m sandboxTUIModel) renderNetworkPolicyDialog(theme tuiTheme, width int) st
 		note,
 	}
 	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Traffic Rule", width)
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Add a highest-priority rule for the selected observed connection.")
+	sandboxLabel := formLabel(theme, "Sandbox", m.ruleFocus == 0)
+	sandboxField := m.ruleSandbox.View(theme, width, m.ruleFocus == 0)
+	actionLabel := formLabel(theme, "Decision", m.ruleFocus == 1)
+	actionColor := theme.error
+	if m.ruleAction == "allow" {
+		actionColor = theme.success
+	}
+	action := actionLabel + "  " + lipgloss.NewStyle().Bold(true).Foreground(actionColor).Render(m.ruleAction) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
+	targetLabel := formLabel(theme, "Destination", m.ruleFocus == 2)
+	targetField := renderInputField(theme, m.ruleTarget.View(), width, m.ruleFocus == 2)
+	protoLabel := formLabel(theme, "Protocol", m.ruleFocus == 3)
+	proto := protoLabel + "  " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToUpper(m.ruleProtocol)) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles any/TCP/UDP/ICMP)")
+	portsLabel := formLabel(theme, "Destination ports", m.ruleFocus == 4) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  TCP/UDP only")
+	portsField := renderInputField(theme, m.rulePorts.View(), width, m.ruleFocus == 4)
+	errorLine := ""
+	if m.formError != "" {
+		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
+	}
+	button := renderDialogButton(theme, "Add rule", m.ruleFocus == 5, false)
+	buttons := alignRight(button, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  space toggle  •  enter continue  •  esc cancel")
+	gap := m.formSectionGap()
+	fields := []string{
+		sandboxLabel + "\n" + sandboxField,
+		action,
+		targetLabel + "\n" + targetField,
+		proto,
+		portsLabel + "\n" + portsField,
+	}
+	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func (m sandboxTUIModel) renderRuleRemoveDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Remove Network Rule", width)
+	row := m.selectedRule()
+	if row == nil {
+		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No removable policy entry selected.")
+	}
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " · " + row.Source)
+	detail := lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToUpper(row.Action) + " " + row.Target + " " + strings.ToUpper(row.Proto) + " " + defaultText(row.Ports, "any port"))
+	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Remove this policy entry?")
+	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
+	remove := renderDialogButton(theme, "Remove", m.confirmRemove, true)
+	buttons := alignRight(cancel+"  "+remove, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
+	return header + "\n\n" + value + "\n" + detail + "\n\n" + question + "\n\n" + renderConfirmationFooter(buttons, hint)
+}
+
+func (m sandboxTUIModel) renderSecretAddDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Add Secret", width)
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Load a secret into a running sandbox for future sessions.")
+	sandboxLabel := formLabel(theme, "Sandbox", m.secretFocus == 0)
+	sandboxField := m.secretSandbox.View(theme, width, m.secretFocus == 0)
+	nameLabel := formLabel(theme, "Name", m.secretFocus == 1)
+	nameField := renderInputField(theme, m.secretName.View(), width, m.secretFocus == 1)
+	valueLabel := formLabel(theme, "Value", m.secretFocus == 2) + lipgloss.NewStyle().Foreground(theme.muted).Render("  write-only")
+	valueField := renderInputField(theme, m.secretValue.View(), width, m.secretFocus == 2)
+	note := lipgloss.NewStyle().Foreground(theme.warning).Render("Memory-only. Export the same name before restarting this sandbox.")
+	errorLine := ""
+	if m.formError != "" {
+		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
+	}
+	button := renderDialogButton(theme, "Add secret", m.secretFocus == 3, false)
+	buttons := alignRight(button, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  enter continue  •  esc cancel")
+	gap := m.formSectionGap()
+	fields := []string{sandboxLabel + "\n" + sandboxField, nameLabel + "\n" + nameField, valueLabel + "\n" + valueField, note}
+	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func (m sandboxTUIModel) renderSecretRemoveDialog(theme tuiTheme, width int) string {
+	header := m.dialogHeader(theme, "Delete Secret", width)
+	row := m.selectedSecret()
+	if row == nil {
+		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No secret selected.")
+	}
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Name)
+	warning := lipgloss.NewStyle().Foreground(theme.error).Render("Future sessions will no longer receive this secret.")
+	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Delete this secret?")
+	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
+	remove := renderDialogButton(theme, "Delete", m.confirmRemove, true)
+	buttons := alignRight(cancel+"  "+remove, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
+	return header + "\n\n" + value + "\n\n" + warning + "\n\n" + question + "\n\n" + renderConfirmationFooter(buttons, hint)
 }
 
 func renderFormFooter(errorLine, buttons, hint string) string {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
+	"github.com/ejpir/gantry/internal/secret"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -31,7 +32,11 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updatePortDialogKey(msg)
 	case tuiNetworkPolicyDialog:
 		return m.updateNetworkPolicyDialogKey(msg)
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog:
+	case tuiRuleAddDialog:
+		return m.updateRuleAddDialogKey(msg)
+	case tuiSecretAddDialog:
+		return m.updateSecretAddDialogKey(msg)
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog:
 		return m.updateConfirmationDialogKey(msg.String())
 	case tuiHelpDialog, tuiInfoDialog:
 		switch msg.String() {
@@ -70,6 +75,10 @@ func (m *sandboxTUIModel) submitConfirmationDialog() (tea.Model, tea.Cmd) {
 		return m.removeSelectedShare()
 	case tuiPortUnpublishDialog:
 		return m.unpublishSelectedPort()
+	case tuiRuleRemoveDialog:
+		return m.removeSelectedRule()
+	case tuiSecretRemoveDialog:
+		return m.removeSelectedSecret()
 	default:
 		return m, nil
 	}
@@ -81,9 +90,9 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 		m.closeDialog()
 		return m, nil
 	case "tab", "down":
-		return m, m.focusCreate((m.createFocus + 1) % 7)
+		return m, m.focusCreate((m.createFocus + 1) % 9)
 	case "shift+tab", "up":
-		return m, m.focusCreate((m.createFocus + 6) % 7)
+		return m, m.focusCreate((m.createFocus + 8) % 9)
 	case "left", "h":
 		if m.adjustCreateChoice(-1) {
 			return m, nil
@@ -93,7 +102,7 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 			return m, nil
 		}
 	case " ", "space":
-		if m.createFocus == 2 || m.createFocus == 3 {
+		if m.createFocus == 2 || m.createFocus == 3 || m.createFocus == 7 {
 			m.adjustCreateChoice(1)
 			return m, nil
 		}
@@ -116,7 +125,7 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 	case "ctrl+enter":
 		return m.submitCreate()
 	case "enter":
-		if m.createFocus < 6 {
+		if m.createFocus < 8 {
 			return m, m.focusCreate(m.createFocus + 1)
 		}
 		return m.submitCreate()
@@ -145,6 +154,9 @@ func (m *sandboxTUIModel) adjustCreateChoice(delta int) bool {
 	case 3:
 		m.cycleCreateKernel(delta)
 		return true
+	case 7:
+		m.createIsolation = cycleIsolation(m.createIsolation, delta)
+		return true
 	default:
 		return m.adjustCreateSlider(delta)
 	}
@@ -158,6 +170,9 @@ func (m *sandboxTUIModel) adjustCreateSlider(delta int) bool {
 	case 5:
 		m.createMemory.Adjust(delta)
 		return true
+	case 6:
+		m.createDisk.Adjust(delta)
+		return true
 	default:
 		return false
 	}
@@ -170,6 +185,8 @@ func (m *sandboxTUIModel) setCreateSliderBoundary(maximum bool) bool {
 		slider = &m.createCPUs
 	case 5:
 		slider = &m.createMemory
+	case 6:
+		slider = &m.createDisk
 	default:
 		return false
 	}
@@ -223,6 +240,12 @@ func (m *sandboxTUIModel) createArgv(name string) []string {
 	if m.createMemory.Value != 512 {
 		argv = append(argv, "-mem", strconv.Itoa(m.createMemory.Value))
 	}
+	if m.createDisk.Value != int(m.limits.DefaultDiskSizeMiB) {
+		argv = append(argv, "-disk-size", strconv.Itoa(m.createDisk.Value))
+	}
+	if m.createIsolation != "auto" {
+		argv = append(argv, "-process-isolation", m.createIsolation)
+	}
 	return argv
 }
 
@@ -233,15 +256,17 @@ func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
 	m.createImage.Reset()
 	m.createCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, 1)
 	m.createMemory = newResourceSlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 128, 512)
+	m.createDisk = newResourceSlider(int(m.limits.MinDiskSizeMiB), int(m.limits.MaxDiskSizeMiB), 512, int(m.limits.DefaultDiskSizeMiB))
 	m.createRuntime = "crun"
 	m.createKernels = m.service.KernelChoices()
 	m.createKernel = 0
+	m.createIsolation = "auto"
 	m.resizeInputs()
 	return m.focusCreate(0)
 }
 
 func (m *sandboxTUIModel) focusCreate(index int) tea.Cmd {
-	m.createFocus = clampInt(index, 0, 6)
+	m.createFocus = clampInt(index, 0, 8)
 	m.createName.Blur()
 	m.createImage.Blur()
 	switch m.createFocus {
@@ -256,13 +281,17 @@ func (m *sandboxTUIModel) focusCreate(index int) tea.Cmd {
 
 func (m *sandboxTUIModel) submitCreate() (tea.Model, tea.Cmd) {
 	name := strings.TrimSpace(m.createName.Value())
-	if err := m.service.ValidateCreate(name, uint(m.createMemory.Value), m.createCPUs.Value); err != nil {
+	if err := m.service.ValidateCreate(name, uint(m.createMemory.Value), uint(m.createDisk.Value), m.createCPUs.Value, m.createIsolation); err != nil {
 		m.formError = err.Error()
 		switch dashboardErrorField(err) {
 		case "cpu":
 			return m, m.focusCreate(4)
 		case "memory":
 			return m, m.focusCreate(5)
+		case "disk":
+			return m, m.focusCreate(6)
+		case "isolation":
+			return m, m.focusCreate(7)
 		default:
 			return m, m.focusCreate(0)
 		}
@@ -282,6 +311,10 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 	m.formError = ""
 	m.editCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, maxInt(1, selected.VCPUs))
 	m.editMemory = newResourceSlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 128, int(selected.MemMB))
+	m.editIsolation = selected.ProcessIsolation
+	if m.editIsolation == "" {
+		m.editIsolation = "auto"
+	}
 	m.resizeInputs()
 	return m.focusEdit(0)
 }
@@ -292,15 +325,28 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 		m.closeDialog()
 		return m, nil
 	case "tab", "down":
-		return m, m.focusEdit((m.editFocus + 1) % 3)
+		return m, m.focusEdit((m.editFocus + 1) % 4)
 	case "shift+tab", "up":
-		return m, m.focusEdit((m.editFocus + 2) % 3)
+		return m, m.focusEdit((m.editFocus + 3) % 4)
 	case "left", "h":
 		if m.adjustEditSlider(-1) {
 			return m, nil
 		}
+		if m.editFocus == 2 {
+			m.editIsolation = cycleIsolation(m.editIsolation, -1)
+			return m, nil
+		}
 	case "right", "l":
 		if m.adjustEditSlider(1) {
+			return m, nil
+		}
+		if m.editFocus == 2 {
+			m.editIsolation = cycleIsolation(m.editIsolation, 1)
+			return m, nil
+		}
+	case " ", "space":
+		if m.editFocus == 2 {
+			m.editIsolation = cycleIsolation(m.editIsolation, 1)
 			return m, nil
 		}
 	case "pgup":
@@ -322,7 +368,7 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 	case "ctrl+enter":
 		return m.submitEdit()
 	case "enter":
-		if m.editFocus < 2 {
+		if m.editFocus < 3 {
 			return m, m.focusEdit(m.editFocus + 1)
 		}
 		return m.submitEdit()
@@ -365,7 +411,7 @@ func (m *sandboxTUIModel) setEditSliderBoundary(maximum bool) bool {
 }
 
 func (m *sandboxTUIModel) focusEdit(index int) tea.Cmd {
-	m.editFocus = clampInt(index, 0, 2)
+	m.editFocus = clampInt(index, 0, 3)
 	return nil
 }
 
@@ -376,18 +422,33 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	memMB, vcpus := uint(m.editMemory.Value), m.editCPUs.Value
-	err := m.service.ValidateResources(memMB, vcpus)
+	err := m.service.ValidateResources(memMB, vcpus, m.editIsolation)
 	if err != nil {
 		m.formError = err.Error()
 		if strings.Contains(err.Error(), "CPU") {
 			return m, m.focusEdit(0)
+		}
+		if strings.Contains(err.Error(), "isolation") {
+			return m, m.focusEdit(2)
 		}
 		return m, m.focusEdit(1)
 	}
 	m.dialog = tuiNoDialog
 	m.busyAction = "edit"
 	m.busyName = selected.Name
-	return m, tea.Batch(saveSandboxResourcesCmd(m.service, selected.Name, memMB, vcpus, selected.State == tuiRunning), m.ensureAnimation())
+	return m, tea.Batch(saveSandboxResourcesCmd(m.service, selected.Name, memMB, vcpus, m.editIsolation, selected.State == tuiRunning), m.ensureAnimation())
+}
+
+func cycleIsolation(current string, delta int) string {
+	choices := []string{"auto", "required", "off"}
+	index := 0
+	for i, choice := range choices {
+		if choice == current {
+			index = i
+			break
+		}
+	}
+	return choices[(index+delta+len(choices))%len(choices)]
 }
 
 type tuiFormKeyAction uint8
@@ -651,6 +712,265 @@ func (m *sandboxTUIModel) openNetworkPolicyDialog() tea.Cmd {
 	return m.focusNetworkPolicy(0)
 }
 
+func (m *sandboxTUIModel) openRuleAddDialog() tea.Cmd {
+	preferred := ""
+	if row := m.selectedTraffic(); row != nil {
+		preferred = row.Sandbox
+	}
+	if !m.ruleSandbox.ResetWhere(m.sandboxes, preferred, func(sandbox tuiSandbox) bool {
+		return sandbox.State != tuiStarting && sandbox.Net && sandbox.GVProxy == ""
+	}) {
+		return m.showToast(tuiToastInfo, "No eligible sandbox", "Rules require a network-enabled sandbox using the embedded netstack.")
+	}
+	m.dialog = tuiRuleAddDialog
+	m.formError = ""
+	m.ruleTarget.Reset()
+	m.rulePorts.Reset()
+	m.ruleAction = "deny"
+	m.ruleProtocol = "any"
+	if row := m.selectedTraffic(); row != nil {
+		m.ruleTarget.SetValue(row.Address)
+		switch row.Protocol {
+		case "tcp", "udp", "icmp":
+			m.ruleProtocol = row.Protocol
+		}
+		if row.Port != 0 && (m.ruleProtocol == "tcp" || m.ruleProtocol == "udp") {
+			m.rulePorts.SetValue(strconv.Itoa(int(row.Port)))
+		}
+		if !row.Allowed {
+			m.ruleAction = "allow"
+		}
+	}
+	m.resizeInputs()
+	return m.focusRule(0)
+}
+
+func (m *sandboxTUIModel) updateRuleAddDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.ruleFocus == 0 && m.ruleSandbox.HandleKey(msg.String()) {
+		return m, nil
+	}
+	key := msg.String()
+	switch key {
+	case "esc":
+		m.closeDialog()
+		return m, nil
+	case "tab", "down":
+		return m, m.focusRule((m.ruleFocus + 1) % 6)
+	case "shift+tab", "up":
+		return m, m.focusRule((m.ruleFocus + 5) % 6)
+	case "left", "right", " ", "space":
+		switch m.ruleFocus {
+		case 1:
+			if m.ruleAction == "deny" {
+				m.ruleAction = "allow"
+			} else {
+				m.ruleAction = "deny"
+			}
+			return m, nil
+		case 3:
+			delta := 1
+			if key == "left" {
+				delta = -1
+			}
+			m.cycleRuleProtocol(delta)
+			if m.ruleProtocol != "tcp" && m.ruleProtocol != "udp" {
+				m.rulePorts.Reset()
+			}
+			return m, nil
+		}
+	case "ctrl+enter":
+		return m.submitRuleAdd()
+	case "enter":
+		if m.ruleFocus < 5 {
+			return m, m.focusRule(m.ruleFocus + 1)
+		}
+		return m.submitRuleAdd()
+	}
+	var cmd tea.Cmd
+	switch m.ruleFocus {
+	case 2:
+		m.ruleTarget, cmd = m.ruleTarget.Update(msg)
+	case 4:
+		m.rulePorts, cmd = m.rulePorts.Update(msg)
+	}
+	m.formError = ""
+	return m, cmd
+}
+
+func (m *sandboxTUIModel) cycleRuleProtocol(delta int) {
+	choices := []string{"any", "tcp", "udp", "icmp"}
+	index := 0
+	for i, choice := range choices {
+		if choice == m.ruleProtocol {
+			index = i
+			break
+		}
+	}
+	m.ruleProtocol = choices[(index+delta+len(choices))%len(choices)]
+}
+
+func (m *sandboxTUIModel) focusRule(index int) tea.Cmd {
+	m.ruleFocus = clampInt(index, 0, 5)
+	m.ruleSandbox.open = false
+	m.ruleTarget.Blur()
+	m.rulePorts.Blur()
+	switch m.ruleFocus {
+	case 2:
+		return m.ruleTarget.Focus()
+	case 4:
+		return m.rulePorts.Focus()
+	default:
+		return nil
+	}
+}
+
+func (m *sandboxTUIModel) submitRuleAdd() (tea.Model, tea.Cmd) {
+	request := dashboardapi.RuleRequest{
+		Sandbox: m.ruleSandbox.Value(), Action: m.ruleAction,
+		Target: strings.TrimSpace(m.ruleTarget.Value()), Proto: m.ruleProtocol,
+		Ports: strings.TrimSpace(m.rulePorts.Value()),
+	}
+	if request.Sandbox == "" {
+		m.formError = "no eligible sandbox"
+		return m, m.focusRule(0)
+	}
+	if err := m.service.ValidateNetworkRule(request); err != nil {
+		m.formError = err.Error()
+		switch dashboardErrorField(err) {
+		case "action":
+			return m, m.focusRule(1)
+		case "target":
+			return m, m.focusRule(2)
+		case "protocol":
+			return m, m.focusRule(3)
+		default:
+			return m, m.focusRule(4)
+		}
+	}
+	m.closeDialog()
+	m.busyAction = "rule add"
+	m.busyName = request.Sandbox
+	return m, tea.Batch(addNetworkRuleCmd(m.service, request), m.ensureAnimation())
+}
+
+func (m *sandboxTUIModel) removeSelectedRule() (tea.Model, tea.Cmd) {
+	row := m.selectedRule()
+	if row == nil {
+		m.closeDialog()
+		return m, nil
+	}
+	m.closeDialog()
+	m.busyAction = "rule remove"
+	m.busyName = row.Sandbox + "/" + row.Source
+	return m, tea.Batch(removeNetworkRuleCmd(m.service, *row), m.ensureAnimation())
+}
+
+func (m *sandboxTUIModel) removeSelectedTrafficRule() (tea.Model, tea.Cmd) {
+	row := m.selectedTraffic()
+	if row == nil {
+		return m, nil
+	}
+	m.busyAction = "rule remove"
+	m.busyName = row.Sandbox + "/" + row.Address
+	return m, tea.Batch(removeTrafficRuleCmd(m.service, *row), m.ensureAnimation())
+}
+
+func (m *sandboxTUIModel) openSecretAddDialog() tea.Cmd {
+	preferred := ""
+	if row := m.selectedSecret(); row != nil {
+		preferred = row.Sandbox
+	}
+	if !m.secretSandbox.Reset(m.sandboxes, preferred) {
+		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before adding an in-memory secret.")
+	}
+	m.dialog = tuiSecretAddDialog
+	m.formError = ""
+	m.secretName.Reset()
+	m.secretValue.Reset()
+	m.resizeInputs()
+	return m.focusSecret(0)
+}
+
+func (m *sandboxTUIModel) updateSecretAddDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.secretFocus == 0 && m.secretSandbox.HandleKey(msg.String()) {
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.closeDialog()
+		return m, nil
+	case "tab", "down":
+		return m, m.focusSecret((m.secretFocus + 1) % 4)
+	case "shift+tab", "up":
+		return m, m.focusSecret((m.secretFocus + 3) % 4)
+	case "ctrl+enter":
+		return m.submitSecretAdd()
+	case "enter":
+		if m.secretFocus < 3 {
+			return m, m.focusSecret(m.secretFocus + 1)
+		}
+		return m.submitSecretAdd()
+	}
+	var cmd tea.Cmd
+	switch m.secretFocus {
+	case 1:
+		m.secretName, cmd = m.secretName.Update(msg)
+	case 2:
+		m.secretValue, cmd = m.secretValue.Update(msg)
+	}
+	m.formError = ""
+	return m, cmd
+}
+
+func (m *sandboxTUIModel) focusSecret(index int) tea.Cmd {
+	m.secretFocus = clampInt(index, 0, 3)
+	m.secretSandbox.open = false
+	m.secretName.Blur()
+	m.secretValue.Blur()
+	switch m.secretFocus {
+	case 1:
+		return m.secretName.Focus()
+	case 2:
+		return m.secretValue.Focus()
+	default:
+		return nil
+	}
+}
+
+func (m *sandboxTUIModel) submitSecretAdd() (tea.Model, tea.Cmd) {
+	request := dashboardapi.SecretRequest{
+		Sandbox: m.secretSandbox.Value(), Name: strings.TrimSpace(m.secretName.Value()), Value: secret.Value(m.secretValue.Value()),
+	}
+	if err := m.service.ValidateSecret(request); err != nil {
+		m.formError = err.Error()
+		switch dashboardErrorField(err) {
+		case "sandbox":
+			return m, m.focusSecret(0)
+		case "name":
+			return m, m.focusSecret(1)
+		default:
+			return m, m.focusSecret(2)
+		}
+	}
+	m.secretValue.Reset()
+	m.closeDialog()
+	m.busyAction = "secret add"
+	m.busyName = request.Sandbox + "/" + request.Name
+	return m, tea.Batch(addSecretCmd(m.service, request), m.ensureAnimation())
+}
+
+func (m *sandboxTUIModel) removeSelectedSecret() (tea.Model, tea.Cmd) {
+	row := m.selectedSecret()
+	if row == nil {
+		m.closeDialog()
+		return m, nil
+	}
+	m.closeDialog()
+	m.busyAction = "secret remove"
+	m.busyName = row.Sandbox + "/" + row.Name
+	return m, tea.Batch(removeSecretCmd(m.service, *row), m.ensureAnimation())
+}
+
 func (m *sandboxTUIModel) syncNetworkPolicyFields() {
 	m.policyPath.Reset()
 	m.policyLocal = false
@@ -817,6 +1137,13 @@ func (m *sandboxTUIModel) closeDialog() {
 	m.portSandbox.open = false
 	m.policyPath.Blur()
 	m.policySandbox.open = false
+	m.ruleTarget.Blur()
+	m.rulePorts.Blur()
+	m.ruleSandbox.open = false
+	m.secretName.Blur()
+	m.secretValue.Blur()
+	m.secretValue.Reset()
+	m.secretSandbox.open = false
 	m.shareReplace = false
 }
 
@@ -837,6 +1164,12 @@ func (m *sandboxTUIModel) resizeInputs() {
 	m.portGuest.SetWidth(portFieldWidth)
 	policyWidth, _ := m.dialogSize(tuiNetworkPolicyDialog)
 	m.policyPath.SetWidth(maxInt(12, policyWidth-10))
+	ruleWidth, _ := m.dialogSize(tuiRuleAddDialog)
+	m.ruleTarget.SetWidth(maxInt(12, ruleWidth-10))
+	m.rulePorts.SetWidth(maxInt(12, ruleWidth-10))
+	secretWidth, _ := m.dialogSize(tuiSecretAddDialog)
+	m.secretName.SetWidth(maxInt(12, secretWidth-10))
+	m.secretValue.SetWidth(maxInt(12, secretWidth-10))
 }
 
 func (m *sandboxTUIModel) applyInputTheme() {
@@ -858,6 +1191,10 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	m.portBind.SetStyles(styles)
 	m.portGuest.SetStyles(styles)
 	m.policyPath.SetStyles(styles)
+	m.ruleTarget.SetStyles(styles)
+	m.rulePorts.SetStyles(styles)
+	m.secretName.SetStyles(styles)
+	m.secretValue.SetStyles(styles)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(theme.accent)
 }
 
@@ -885,8 +1222,8 @@ type tuiFormRowLayout struct {
 
 var (
 	createDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 7}, {9, 11}, {13, 14}, {15, 16}, {17, 19}, {20, 22}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 17}, {19, 20}, {22, 23}, {25, 26}},
+		compact:  []tuiFormRowSpan{{5, 7}, {9, 11}, {13, 14}, {15, 16}, {17, 19}, {20, 22}, {23, 25}, {26, 27}},
+		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 17}, {19, 20}, {22, 23}, {25, 26}, {28, 29}, {31, 32}},
 	}
 	shareDialogRows = tuiFormRowLayout{
 		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 16}, {17, 20}, {21, 24}, {25, 26}},
@@ -899,6 +1236,14 @@ var (
 	policyDialogRows = tuiFormRowLayout{
 		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 13}},
 		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 16}},
+	}
+	ruleDialogRows = tuiFormRowLayout{
+		compact:  []tuiFormRowSpan{{5, 8}, {9, 10}, {11, 14}, {15, 16}, {17, 20}},
+		spacious: []tuiFormRowSpan{{6, 9}, {11, 12}, {14, 17}, {19, 20}, {22, 25}},
+	}
+	secretDialogRows = tuiFormRowLayout{
+		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 16}},
+		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 19}},
 	}
 )
 
@@ -963,7 +1308,7 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m, nil
 	}
 	switch m.dialog {
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog:
 		return m.updateConfirmationDialogMouse(mouse, bounds)
 	case tuiCreateDialog:
 		return m.updateCreateDialogMouse(mouse, bounds)
@@ -975,6 +1320,10 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m.updatePortDialogMouse(mouse, bounds)
 	case tuiNetworkPolicyDialog:
 		return m.updateNetworkPolicyDialogMouse(mouse, bounds)
+	case tuiRuleAddDialog:
+		return m.updateRuleAddDialogMouse(mouse, bounds)
+	case tuiSecretAddDialog:
+		return m.updateSecretAddDialogMouse(mouse, bounds)
 	default:
 		return m, nil
 	}
@@ -997,7 +1346,7 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 	// approximate field-row ranges. In compact terminals the Create button can
 	// share a row covered by the memory slider's generous mouse target.
 	if m.dialogButtonHit(mouse, bounds, "Create") {
-		m.createFocus = 6
+		m.createFocus = 8
 		return m.submitCreate()
 	}
 	relY := mouse.Y - bounds.y
@@ -1019,11 +1368,23 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 	case rows[5].contains(relY):
 		m.setSliderFromMouse(&m.createMemory, bounds, mouse.X, "MiB")
 		return m, m.focusCreate(5)
+	case rows[6].contains(relY):
+		m.setSliderFromMouse(&m.createDisk, bounds, mouse.X, "MiB")
+		return m, m.focusCreate(6)
+	case rows[7].contains(relY):
+		m.createFocus = 7
+		m.createIsolation = cycleIsolation(m.createIsolation, 1)
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateEditDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
+	// Find the rendered footer first: at compact heights its hitbox can share
+	// rows with the deliberately generous field targets below.
+	if m.dialogButtonHit(mouse, bounds, "Save") {
+		m.editFocus = 3
+		return m.submitEdit()
+	}
 	relY := mouse.Y - bounds.y
 	switch {
 	case relY >= 6 && relY <= 8:
@@ -1032,12 +1393,13 @@ func (m *sandboxTUIModel) updateEditDialogMouse(mouse tea.Mouse, bounds tuiRect)
 	case relY >= 10 && relY <= 12:
 		m.setSliderFromMouse(&m.editMemory, bounds, mouse.X, "MiB")
 		return m, m.focusEdit(1)
-	case m.dialogButtonHit(mouse, bounds, "Save"):
+	case relY >= 14 && relY <= 16:
 		m.editFocus = 2
-		return m.submitEdit()
+		m.editIsolation = cycleIsolation(m.editIsolation, 1)
 	default:
 		return m, nil
 	}
+	return m, nil
 }
 
 func (m *sandboxTUIModel) updateShareDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
@@ -1115,6 +1477,61 @@ func (m *sandboxTUIModel) updateNetworkPolicyDialogMouse(mouse tea.Mouse, bounds
 	case m.dialogButtonHit(mouse, bounds, "Apply"):
 		m.policyFocus = 3
 		return m.submitNetworkPolicy()
+	}
+	return m, nil
+}
+
+func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
+	relY := mouse.Y - bounds.y
+	rows := m.formControlRows(ruleDialogRows, m.ruleSandbox.menuHeight())
+	if m.ruleSandbox.open && m.ruleSandbox.chooseVisible(relY-rows[0].last-2) {
+		return m, nil
+	}
+	switch {
+	case rows[0].contains(relY):
+		m.ruleSandbox.Toggle()
+		return m, m.focusRule(0)
+	case rows[1].contains(relY):
+		m.ruleFocus = 1
+		if m.ruleAction == "deny" {
+			m.ruleAction = "allow"
+		} else {
+			m.ruleAction = "deny"
+		}
+	case rows[2].contains(relY):
+		return m, m.focusRule(2)
+	case rows[3].contains(relY):
+		m.ruleFocus = 3
+		m.cycleRuleProtocol(1)
+		if m.ruleProtocol != "tcp" && m.ruleProtocol != "udp" {
+			m.rulePorts.Reset()
+		}
+	case rows[4].contains(relY):
+		return m, m.focusRule(4)
+	case m.dialogButtonHit(mouse, bounds, "Add rule"):
+		m.ruleFocus = 5
+		return m.submitRuleAdd()
+	}
+	return m, nil
+}
+
+func (m *sandboxTUIModel) updateSecretAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
+	relY := mouse.Y - bounds.y
+	rows := m.formControlRows(secretDialogRows, m.secretSandbox.menuHeight())
+	if m.secretSandbox.open && m.secretSandbox.chooseVisible(relY-rows[0].last-2) {
+		return m, nil
+	}
+	switch {
+	case rows[0].contains(relY):
+		m.secretSandbox.Toggle()
+		return m, m.focusSecret(0)
+	case rows[1].contains(relY):
+		return m, m.focusSecret(1)
+	case rows[2].contains(relY):
+		return m, m.focusSecret(2)
+	case m.dialogButtonHit(mouse, bounds, "Add secret"):
+		m.secretFocus = 3
+		return m.submitSecretAdd()
 	}
 	return m, nil
 }

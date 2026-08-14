@@ -3,6 +3,7 @@ package sandbox
 import (
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,14 +97,9 @@ func TestDefaultRWLayerCreatesPerSandbox(t *testing.T) {
 	t.Setenv("GANTRY_HOME", filepath.Join(home, "sandboxes"))
 	t.Chdir(t.TempDir()) // no ./rwlayer.ext4 template here
 
-	p, _, err := defaultRWLayer("dev1", "sha256:img")
+	p, _, err := defaultRWLayer("dev1", "sha256:img", defaultRWLayerSizeMiB, nil)
 	if err != nil {
-		// host may lack e2fsprogs AND the template: then the error must
-		// at least be actionable
-		if !strings.Contains(err.Error(), "mkrwlayer.sh") {
-			t.Fatalf("unhelpful error: %v", err)
-		}
-		return
+		t.Fatal(err)
 	}
 	want := filepath.Join(home, "rwlayers", "dev1.ext4")
 	if p != want {
@@ -192,10 +188,6 @@ func TestResolveUsesPerSandboxRWLayer(t *testing.T) {
 	}
 	cfg, _, err := rf.Resolve(fs, nil)
 	if err != nil {
-		// acceptable on hosts without e2fsprogs and no template
-		if strings.Contains(err.Error(), "mkrwlayer.sh") {
-			t.Skip("no ext4 tooling on this host")
-		}
 		t.Fatal(err)
 	}
 	if !strings.Contains(cfg.RWLayer, filepath.Join("rwlayers", "dev9.ext4")) {
@@ -206,9 +198,12 @@ func TestResolveUsesPerSandboxRWLayer(t *testing.T) {
 	}
 }
 
-func TestInflateBlankRWLayer(t *testing.T) {
+func TestCreateRWLayer(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "blank.ext4")
-	if err := inflateBlankRWLayer(p); err != nil {
+	var progress []string
+	if _, err := createRWLayer(p, defaultRWLayerSizeMiB, func(format string, args ...any) {
+		progress = append(progress, fmt.Sprintf(format, args...))
+	}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(p)
@@ -220,7 +215,7 @@ func TestInflateBlankRWLayer(t *testing.T) {
 	}
 	info, err := gutil.ProbeExt4(p)
 	if err != nil {
-		t.Fatalf("inflated template is not valid ext4: %v", err)
+		t.Fatalf("created image is not valid ext4: %v", err)
 	}
 	if info.ErrorCount != 0 {
 		t.Errorf("fresh template has errors: %+v", info)
@@ -231,4 +226,20 @@ func TestInflateBlankRWLayer(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = st
+	if len(progress) < 4 || !strings.Contains(progress[0], "0%") || !strings.Contains(progress[len(progress)-1], "100%") {
+		t.Fatalf("progress = %v", progress)
+	}
+}
+
+func TestValidateRWLayerSize(t *testing.T) {
+	for _, size := range []uint{minRWLayerSizeMiB, defaultRWLayerSizeMiB, maxRWLayerSizeMiB} {
+		if err := validateRWLayerSize(size); err != nil {
+			t.Errorf("validateRWLayerSize(%d) = %v", size, err)
+		}
+	}
+	for _, size := range []uint{minRWLayerSizeMiB - 1, maxRWLayerSizeMiB + 1} {
+		if err := validateRWLayerSize(size); err == nil {
+			t.Errorf("validateRWLayerSize(%d) unexpectedly succeeded", size)
+		}
+	}
 }

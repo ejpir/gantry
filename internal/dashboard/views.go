@@ -22,6 +22,8 @@ func pageTitle(page tuiPage) string {
 		return "MOUNTS"
 	case tuiPortsPage:
 		return "PORTS"
+	case tuiSecretsPage:
+		return "SECRETS"
 	default:
 		return "SANDBOXES"
 	}
@@ -37,6 +39,8 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 		return len(m.mounts)
 	case tuiPortsPage:
 		return len(m.ports)
+	case tuiSecretsPage:
+		return len(m.secrets)
 	default:
 		return len(m.sandboxes)
 	}
@@ -163,6 +167,43 @@ func (m sandboxTUIModel) renderTrafficDetail(theme tuiTheme, width int) []string
 
 func (m sandboxTUIModel) renderRulesView(theme tuiTheme, layout tuiDashboardLayout) string {
 	return m.renderStandardTable(theme, layout, tuiRulesPage, "Loading network rules…", "No network rules", "Create a sandbox to see its effective egress policy.")
+}
+
+func (m sandboxTUIModel) renderSecretsView(theme tuiTheme, layout tuiDashboardLayout) string {
+	return m.renderStandardTable(theme, layout, tuiSecretsPage, "Loading secret names…", "No secrets configured", "Press a to load a memory-only secret into a running sandbox.")
+}
+
+func (m sandboxTUIModel) renderSecretsHeader(theme tuiTheme, width int) string {
+	style := lipgloss.NewStyle().Bold(true).Foreground(theme.muted)
+	nameWidth := maxInt(12, width-30)
+	line := tableCell("SANDBOX", 13) + " " + tableCell("NAME", nameWidth) + " " + tableCell("STATE", 15)
+	return style.Render(truncateANSI(line, width))
+}
+
+func (m sandboxTUIModel) renderSecretRow(theme tuiTheme, row tuiSecretRow, width int) string {
+	stateColor := theme.warning
+	icon := "○"
+	if row.State == "loaded" {
+		stateColor = theme.success
+		icon = "✓"
+	}
+	nameWidth := maxInt(12, width-30)
+	state := lipgloss.NewStyle().Foreground(stateColor).Render(icon + " " + row.State)
+	return tableCell(row.Sandbox, 13) + " " + tableCell(row.Name, nameWidth) + " " + tableCell(state, 15)
+}
+
+func (m sandboxTUIModel) renderSecretDetail(theme tuiTheme, width int) []string {
+	if m.secretCursor < 0 || m.secretCursor >= len(m.secrets) || m.tableDetailHeight() == 0 {
+		return nil
+	}
+	row := m.secrets[m.secretCursor]
+	return []string{
+		m.renderTableSeparator(theme, width),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Name),
+		lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Sandbox + "  •  " + row.State),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("Values are write-only, memory-only, and never shown in this table."),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("Export this name before restarting the sandbox."),
+	}
 }
 
 func (m sandboxTUIModel) renderRulesHeader(theme tuiTheme, width int) string {
@@ -422,6 +463,8 @@ func (m sandboxTUIModel) tableRenderPosition(page tuiPage) (scroll, cursor int) 
 		return m.mountScroll, m.mountCursor
 	case tuiPortsPage:
 		return m.portScroll, m.portCursor
+	case tuiSecretsPage:
+		return m.secretScroll, m.secretCursor
 	default:
 		return 0, 0
 	}
@@ -437,6 +480,8 @@ func (m sandboxTUIModel) renderTableHeader(theme tuiTheme, page tuiPage, width i
 		return m.renderMountsHeader(theme, width)
 	case tuiPortsPage:
 		return m.renderPortsHeader(theme, width)
+	case tuiSecretsPage:
+		return m.renderSecretsHeader(theme, width)
 	default:
 		return ""
 	}
@@ -452,6 +497,8 @@ func (m sandboxTUIModel) renderTableRow(theme tuiTheme, page tuiPage, index, wid
 		return m.renderMountRow(theme, m.mounts[index], width)
 	case tuiPortsPage:
 		return m.renderPortRow(theme, m.ports[index], width)
+	case tuiSecretsPage:
+		return m.renderSecretRow(theme, m.secrets[index], width)
 	default:
 		return ""
 	}
@@ -467,6 +514,8 @@ func (m sandboxTUIModel) renderTableDetail(theme tuiTheme, page tuiPage, width i
 		return m.renderMountDetail(theme, width)
 	case tuiPortsPage:
 		return m.renderPortDetail(theme, width)
+	case tuiSecretsPage:
+		return m.renderSecretDetail(theme, width)
 	default:
 		return nil
 	}

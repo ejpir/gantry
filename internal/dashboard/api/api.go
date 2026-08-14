@@ -6,6 +6,8 @@ package api
 import (
 	"os/exec"
 	"time"
+
+	"github.com/ejpir/gantry/internal/secret"
 )
 
 type SandboxState string
@@ -32,6 +34,7 @@ type Sandbox struct {
 	Shares           int
 	MemMB            uint
 	VCPUs            int
+	ProcessIsolation string
 	Dir              string
 	ConfigPath       string
 	Updated          time.Time
@@ -68,6 +71,14 @@ type Rule struct {
 	Error   bool
 }
 
+type RuleRequest struct {
+	Sandbox string
+	Action  string
+	Target  string
+	Proto   string
+	Ports   string
+}
+
 type Mount struct {
 	Sandbox  string
 	Tag      string
@@ -90,18 +101,34 @@ type Port struct {
 	Error   string
 }
 
+type Secret struct {
+	Sandbox string
+	Name    string
+	State   string
+}
+
+type SecretRequest struct {
+	Sandbox string
+	Name    string
+	Value   secret.Value
+}
+
 type Snapshot struct {
 	Sandboxes []Sandbox
 	Traffic   []Traffic
 	Rules     []Rule
 	Mounts    []Mount
 	Ports     []Port
+	Secrets   []Secret
 }
 
 type ResourceLimits struct {
-	MinMemoryMB uint
-	MaxMemoryMB uint
-	MaxVCPUs    int
+	MinMemoryMB        uint
+	MaxMemoryMB        uint
+	MinDiskSizeMiB     uint
+	MaxDiskSizeMiB     uint
+	DefaultDiskSizeMiB uint
+	MaxVCPUs           int
 }
 
 type PolicyResult struct {
@@ -162,11 +189,18 @@ type Service interface {
 	ResourceLimits() ResourceLimits
 	KernelChoices() []string
 	DefaultShareMount(tag string) string
-	ValidateCreate(name string, memMB uint, vcpus int) error
-	ValidateResources(memMB uint, vcpus int) error
-	SetResources(name string, memMB uint, vcpus int) error
+	ValidateCreate(name string, memMB, diskSizeMiB uint, vcpus int, processIsolation string) error
+	ValidateResources(memMB uint, vcpus int, processIsolation string) error
+	SetResources(name string, memMB uint, vcpus int, processIsolation string) error
 	ValidateNetworkPolicy(path string, allowLocal bool) error
 	SetNetworkPolicy(name, path string, allowLocal bool) (PolicyResult, error)
+	ValidateNetworkRule(RuleRequest) error
+	AddNetworkRule(RuleRequest) error
+	RemoveNetworkRule(Rule) error
+	RemoveTrafficRule(Traffic) error
+	ValidateSecret(SecretRequest) error
+	AddSecret(SecretRequest) error
+	RemoveSecret(Secret) error
 	PlanShare(ShareRequest) (SharePlan, error)
 	ConfigureShare(SharePlan) error
 	RemoveShare(Mount) error

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 
@@ -37,6 +38,7 @@ type broker struct {
 	ports      *PortManager
 	netPolicy  *NetworkPolicyManager
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
+	secretMu   sync.RWMutex
 
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
@@ -59,14 +61,26 @@ type brokerRequest struct {
 	Port      *brokerPortRequest          `json:"port,omitempty"`
 	Resources *brokerResourceRequest      `json:"resources,omitempty"`
 	NetPolicy *brokerNetworkPolicyRequest `json:"net_policy,omitempty"`
+	Secret    *brokerSecretRequest        `json:"secret,omitempty"`
 }
 
 type brokerResourceRequest struct {
-	MemMB uint `json:"mem_mb"`
-	VCPUs int  `json:"vcpus"`
+	MemMB            uint   `json:"mem_mb"`
+	VCPUs            int    `json:"vcpus"`
+	ProcessIsolation string `json:"process_isolation,omitempty"`
 }
 
 type brokerResourceResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type brokerSecretRequest struct {
+	Name  string       `json:"name"`
+	Value secret.Value `json:"value,omitempty"`
+}
+
+type brokerSecretResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }
@@ -182,6 +196,8 @@ func (br *broker) handle(c net.Conn) {
 		br.resourceControl(c, req)
 	case "netpolicy.set", "netpolicy.get":
 		br.networkPolicyControl(c, req)
+	case "secret.set", "secret.remove":
+		br.secretControl(c, req)
 	case "session":
 		br.session(c, r, req)
 	case "sessionctl":
@@ -189,6 +205,59 @@ func (br *broker) handle(c net.Conn) {
 	default:
 		_, _ = fmt.Fprintln(c, `{"error":"unknown op"}`)
 	}
+}
+
+func (br *broker) secretControl(c net.Conn, req brokerRequest) {
+	respond := func(resp brokerSecretResponse) { _ = json.NewEncoder(c).Encode(&resp) }
+	if br.store == nil {
+		respond(brokerSecretResponse{Error: "config store unavailable"})
+		return
+	}
+	if req.Secret == nil {
+		respond(brokerSecretResponse{Error: "secret settings are required"})
+		return
+	}
+	if err := secret.ValidateName(req.Secret.Name); err != nil {
+		respond(brokerSecretResponse{Error: err.Error()})
+		return
+	}
+	br.secretMu.Lock()
+	defer br.secretMu.Unlock()
+	present := req.Op == "secret.set"
+	next := make(map[string]secret.Value, len(br.secrets)+1)
+	for name, value := range br.secrets {
+		next[name] = value
+	}
+	if present {
+		next[req.Secret.Name] = req.Secret.Value
+	} else {
+		delete(next, req.Secret.Name)
+	}
+	if _, err := secretsHandshakeJSON(next); err != nil {
+		respond(brokerSecretResponse{Error: err.Error()})
+		return
+	}
+	err := br.store.SetSecretName(req.Secret.Name, present)
+	if err != nil && !atomicfile.Committed(err) {
+		respond(brokerSecretResponse{Error: err.Error()})
+		return
+	}
+	br.secrets = next
+	if err != nil {
+		respond(brokerSecretResponse{Error: "secret updated but configuration durability is uncertain: " + err.Error()})
+		return
+	}
+	respond(brokerSecretResponse{OK: true})
+}
+
+func (br *broker) secretEnv() []string {
+	br.secretMu.RLock()
+	defer br.secretMu.RUnlock()
+	copy := make(map[string]secret.Value, len(br.secrets))
+	for name, value := range br.secrets {
+		copy[name] = value
+	}
+	return secret.Env(copy)
 }
 
 func (br *broker) resourceControl(c net.Conn, req brokerRequest) {
@@ -203,7 +272,7 @@ func (br *broker) resourceControl(c net.Conn, req brokerRequest) {
 		respond(brokerResourceResponse{Error: "resource settings are required"})
 		return
 	}
-	if err := br.store.SetResources(req.Resources.MemMB, req.Resources.VCPUs); err != nil {
+	if err := br.store.SetResources(req.Resources.MemMB, req.Resources.VCPUs, req.Resources.ProcessIsolation); err != nil {
 		respond(brokerResourceResponse{Error: err.Error()})
 		return
 	}

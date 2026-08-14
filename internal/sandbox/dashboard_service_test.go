@@ -66,6 +66,9 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	if len(got.Mounts) != 2 || got.Mounts[0].Tag != "code" || got.Mounts[0].Guest != "/host/code" || got.Mounts[1].Error == "" {
 		t.Fatalf("mount rows = %#v", got.Mounts)
 	}
+	if len(got.Secrets) != 1 || got.Secrets[0].Sandbox != "alpha" || got.Secrets[0].Name != "TOKEN" || got.Secrets[0].State != "required next start" {
+		t.Fatalf("secret rows = %#v", got.Secrets)
+	}
 	if !got.Sandboxes[1].ConfigError {
 		t.Fatal("missing sandbox.json should be surfaced on the card")
 	}
@@ -151,6 +154,89 @@ func TestDashboardPlansShareAndPortInputs(t *testing.T) {
 	}
 	if _, err := service.PlanPort(dashboardapi.PortRequest{Bind: "example.com:8080", Guest: "80"}); err == nil {
 		t.Fatal("hostname bind was accepted")
+	}
+}
+
+func TestDashboardTrafficRulesPersistForAllProtocols(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	name := "dev"
+	if err := os.MkdirAll(sandboxDir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, name, RunConfig{Net: true, MemMB: 512, VCPUs: 1})
+	service := dashboardService{}
+	if err := service.AddNetworkRule(dashboardapi.RuleRequest{
+		Sandbox: name, Action: "deny", Target: "203.0.113.9", Proto: "any",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AddNetworkRule(dashboardapi.RuleRequest{
+		Sandbox: name, Action: "allow", Target: "203.0.113.9", Proto: "icmp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readSandboxConfig(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := netpol.Load(cfg.NetPol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := policy.RuleSummaries()
+	if len(policy.Rules) != 2 || summaries[1].Protocol != "icmp" || summaries[2].Protocol != "any" {
+		t.Fatalf("persisted policy rules = %#v", summaries)
+	}
+
+	if err := service.RemoveTrafficRule(dashboardapi.Traffic{
+		Sandbox: name, Address: "203.0.113.9", Protocol: "icmp",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = readSandboxConfig(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = netpol.Load(cfg.NetPol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Rules) != 1 || policy.RuleSummaries()[1].Protocol != "any" {
+		t.Fatalf("traffic removal left rules = %#v", policy.RuleSummaries())
+	}
+}
+
+func TestDashboardDomainRuleCanBeRemoved(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	name := "dev"
+	if err := os.MkdirAll(sandboxDir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(policyPath, []byte(`{"default":"deny","allowDomains":["example.com","api.github.com"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, name, RunConfig{Net: true, MemMB: 512, VCPUs: 1, NetPol: policyPath})
+
+	service := dashboardService{}
+	if err := service.RemoveNetworkRule(dashboardapi.Rule{
+		Sandbox: name, Target: "example.com", Source: "domain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := readSandboxConfig(sandboxDir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := netpol.Load(cfg.NetPol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.AllowDomains) != 1 || policy.AllowDomains[0] != "api.github.com" {
+		t.Fatalf("domains after dashboard removal = %v", policy.AllowDomains)
+	}
+	if err := service.RemoveNetworkRule(dashboardapi.Rule{Sandbox: name, Source: "default"}); err == nil {
+		t.Fatal("default posture row removal succeeded")
 	}
 }
 

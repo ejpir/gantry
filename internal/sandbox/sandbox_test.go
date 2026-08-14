@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ejpir/gantry/internal/secret"
 )
 
 func TestValidSandboxName(t *testing.T) {
@@ -152,6 +154,49 @@ func TestBrokerSetResources(t *testing.T) {
 	}
 	if cfg.MemMB != 2048 || cfg.VCPUs != vcpus {
 		t.Fatalf("resources = %d MiB/%d CPU", cfg.MemMB, cfg.VCPUs)
+	}
+}
+
+func TestBrokerMutatesSecretsWithoutPersistingValues(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{})
+	br := &broker{store: store, secrets: map[string]secret.Value{}, sessions: map[string]chan struct{}{}}
+	request := brokerRequest{
+		Op: "secret.set", ID: "add-secret",
+		Secret: &brokerSecretRequest{Name: "API_TOKEN", Value: secret.Value("super-secret-value")},
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := brokerPipe(t, br, string(raw)+"\n"); !strings.Contains(got, `"ok":true`) {
+		t.Fatalf("set response = %s", got)
+	}
+	configRaw, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(configRaw), "super-secret-value") {
+		t.Fatal("secret value was persisted in sandbox.json")
+	}
+	if !strings.Contains(string(configRaw), "API_TOKEN") {
+		t.Fatalf("secret name was not persisted: %s", configRaw)
+	}
+	if got := br.secretEnv(); len(got) != 1 || got[0] != "API_TOKEN=super-secret-value" {
+		t.Fatalf("live secret environment = %v", got)
+	}
+
+	request.Op = "secret.remove"
+	request.Secret.Value = ""
+	raw, err = json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := brokerPipe(t, br, string(raw)+"\n"); !strings.Contains(got, `"ok":true`) {
+		t.Fatalf("remove response = %s", got)
+	}
+	if got := br.secretEnv(); len(got) != 0 {
+		t.Fatalf("removed secret still live: %v", got)
 	}
 }
 

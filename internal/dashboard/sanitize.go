@@ -53,4 +53,10 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 		row.State = safeUILine(row.State)
 		row.Error = safeUILine(row.Error)
 	}
+	for i := range snapshot.Secrets {
+		row := &snapshot.Secrets[i]
+		row.Sandbox = safeUILine(row.Sandbox)
+		row.Name = safeUILine(row.Name)
+		row.State = safeUILine(row.State)
+	}
 }

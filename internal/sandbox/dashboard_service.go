@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ejpir/gantry/internal/atomicfile"
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
@@ -40,9 +43,12 @@ func (dashboardService) Command(argv ...string) (*exec.Cmd, error) {
 
 func (dashboardService) ResourceLimits() dashboardapi.ResourceLimits {
 	return dashboardapi.ResourceLimits{
-		MinMemoryMB: uint(minSandboxMemMB),
-		MaxMemoryMB: uint(maxSandboxMemMB),
-		MaxVCPUs:    maxSandboxVCPUs,
+		MinMemoryMB:        uint(minSandboxMemMB),
+		MaxMemoryMB:        uint(maxSandboxMemMB),
+		MinDiskSizeMiB:     minRWLayerSizeMiB,
+		MaxDiskSizeMiB:     maxRWLayerSizeMiB,
+		DefaultDiskSizeMiB: defaultRWLayerSizeMiB,
+		MaxVCPUs:           maxSandboxVCPUs,
 	}
 }
 
@@ -50,7 +56,7 @@ func (dashboardService) KernelChoices() []string { return guestasset.KernelChoic
 
 func (dashboardService) DefaultShareMount(tag string) string { return defaultHubCtrPath(tag) }
 
-func (dashboardService) ValidateCreate(name string, memMB uint, vcpus int) error {
+func (dashboardService) ValidateCreate(name string, memMB, diskSizeMiB uint, vcpus int, processIsolation string) error {
 	if err := ValidateSandboxName(name); err != nil {
 		return dashboardapi.Invalid("name", err)
 	}
@@ -64,15 +70,24 @@ func (dashboardService) ValidateCreate(name string, memMB uint, vcpus int) error
 		}
 		return dashboardapi.Invalid(field, err)
 	}
+	if err := validateRWLayerSize(diskSizeMiB); err != nil {
+		return dashboardapi.Invalid("disk", err)
+	}
+	if err := validateProcessIsolation(processIsolation); err != nil {
+		return dashboardapi.Invalid("isolation", err)
+	}
 	return nil
 }
 
-func (dashboardService) ValidateResources(memMB uint, vcpus int) error {
-	return validateSandboxResources(memMB, vcpus)
+func (dashboardService) ValidateResources(memMB uint, vcpus int, processIsolation string) error {
+	if err := validateSandboxResources(memMB, vcpus); err != nil {
+		return err
+	}
+	return validateProcessIsolation(processIsolation)
 }
 
-func (dashboardService) SetResources(name string, memMB uint, vcpus int) error {
-	return setSandboxResources(name, memMB, vcpus)
+func (dashboardService) SetResources(name string, memMB uint, vcpus int, processIsolation string) error {
+	return setSandboxResources(name, memMB, vcpus, processIsolation)
 }
 
 func (dashboardService) ValidateNetworkPolicy(path string, allowLocal bool) error {
@@ -83,6 +98,201 @@ func (dashboardService) ValidateNetworkPolicy(path string, allowLocal bool) erro
 func (dashboardService) SetNetworkPolicy(name, path string, allowLocal bool) (dashboardapi.PolicyResult, error) {
 	entry, err := setSandboxNetworkPolicy(name, path, allowLocal)
 	return dashboardapi.PolicyResult{Path: entry.Path, Description: entry.Description}, err
+}
+
+func (dashboardService) ValidateNetworkRule(request dashboardapi.RuleRequest) error {
+	_, err := normalizedDashboardRule(request)
+	return err
+}
+
+func (dashboardService) AddNetworkRule(request dashboardapi.RuleRequest) error {
+	spec, err := normalizedDashboardRule(request)
+	if err != nil {
+		return err
+	}
+	return mutateDashboardNetworkPolicy(request.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
+		return netpol.WithRule(policy, spec)
+	})
+}
+
+func (dashboardService) RemoveNetworkRule(row dashboardapi.Rule) error {
+	const prefix = "rule "
+	switch {
+	case strings.HasPrefix(row.Source, prefix):
+		number, err := strconv.Atoi(strings.TrimPrefix(row.Source, prefix))
+		if err != nil || number < 1 {
+			return fmt.Errorf("invalid policy rule source %q", row.Source)
+		}
+		return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
+			return netpol.WithoutRule(policy, number-1)
+		})
+	case row.Source == "domain":
+		return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
+			return netpol.WithoutDomain(policy, row.Target)
+		})
+	default:
+		return fmt.Errorf("effective %s rows cannot be removed; edit the network policy instead", row.Source)
+	}
+}
+
+func (dashboardService) RemoveTrafficRule(row dashboardapi.Traffic) error {
+	request, err := dashboardRuleForTraffic(row, "allow")
+	if err != nil {
+		return err
+	}
+	spec, err := normalizedDashboardRule(request)
+	if err != nil {
+		return err
+	}
+	return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
+		return netpol.WithoutMatchingRule(policy, spec)
+	})
+}
+
+func (dashboardService) ValidateSecret(request dashboardapi.SecretRequest) error {
+	if err := ValidateSandboxName(request.Sandbox); err != nil {
+		return dashboardapi.Invalid("sandbox", err)
+	}
+	if err := secret.ValidateName(strings.TrimSpace(request.Name)); err != nil {
+		return dashboardapi.Invalid("name", err)
+	}
+	if request.Value == "" {
+		return dashboardapi.Invalid("value", fmt.Errorf("secret value is required"))
+	}
+	if len(request.Value) > secretsHandshakeMaxBytes {
+		return dashboardapi.Invalid("value", fmt.Errorf("secret value is too large"))
+	}
+	wireProbe := brokerRequest{
+		Op: "secret.set", ID: strings.Repeat("x", 64),
+		Secret: &brokerSecretRequest{Name: strings.TrimSpace(request.Name), Value: request.Value},
+	}
+	wire, err := json.Marshal(wireProbe)
+	if err != nil || len(wire)+1 > controlMaxRequestBytes {
+		return dashboardapi.Invalid("value", fmt.Errorf("secret value is too large for a live control request"))
+	}
+	if _, alive := sandboxPID(request.Sandbox); !alive {
+		return dashboardapi.Invalid("sandbox", fmt.Errorf("start the sandbox before adding an in-memory secret"))
+	}
+	return nil
+}
+
+func (service dashboardService) AddSecret(request dashboardapi.SecretRequest) error {
+	if err := service.ValidateSecret(request); err != nil {
+		return err
+	}
+	return mutateSandboxSecret(request.Sandbox, "secret.set", strings.TrimSpace(request.Name), request.Value)
+}
+
+func (dashboardService) RemoveSecret(row dashboardapi.Secret) error {
+	if err := ValidateSandboxName(row.Sandbox); err != nil {
+		return err
+	}
+	if err := secret.ValidateName(row.Name); err != nil {
+		return err
+	}
+	if _, alive := sandboxPID(row.Sandbox); alive {
+		return mutateSandboxSecret(row.Sandbox, "secret.remove", row.Name, "")
+	}
+	store, err := LoadConfigStore(sandboxDir(row.Sandbox))
+	if err != nil {
+		return err
+	}
+	return store.SetSecretName(row.Name, false)
+}
+
+func mutateSandboxSecret(name, op, secretName string, value secret.Value) error {
+	req := brokerRequest{Op: op, ID: newControlRequestID("secret"), Secret: &brokerSecretRequest{Name: secretName, Value: value}}
+	resp, err := callControl[brokerSecretResponse](name, req)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		if resp.Error == "" {
+			resp.Error = "secret update failed"
+		}
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
+}
+
+func dashboardRuleForTraffic(row dashboardapi.Traffic, action string) (dashboardapi.RuleRequest, error) {
+	proto := strings.ToLower(row.Protocol)
+	if proto != "tcp" && proto != "udp" && proto != "icmp" {
+		proto = "any"
+	}
+	if _, err := netip.ParseAddr(row.Address); err != nil {
+		return dashboardapi.RuleRequest{}, fmt.Errorf("traffic destination %q is not an IP address", row.Address)
+	}
+	ports := ""
+	if row.Port != 0 && (proto == "tcp" || proto == "udp") {
+		ports = strconv.Itoa(int(row.Port))
+	}
+	return dashboardapi.RuleRequest{
+		Sandbox: row.Sandbox, Action: action, Target: row.Address,
+		Proto: proto, Ports: ports,
+	}, nil
+}
+
+func normalizedDashboardRule(request dashboardapi.RuleRequest) (netpol.RuleSpec, error) {
+	spec := netpol.RuleSpec{
+		Action:   strings.ToLower(strings.TrimSpace(request.Action)),
+		CIDR:     strings.TrimSpace(request.Target),
+		Protocol: strings.ToLower(strings.TrimSpace(request.Proto)),
+		Ports:    strings.TrimSpace(request.Ports),
+	}
+	if spec.CIDR != "" && !strings.Contains(spec.CIDR, "/") {
+		address, err := netip.ParseAddr(spec.CIDR)
+		if err != nil || !address.Is4() {
+			return netpol.RuleSpec{}, dashboardapi.Invalid("target", fmt.Errorf("target must be an IPv4 address or CIDR"))
+		}
+		spec.CIDR = address.String() + "/32"
+	}
+	if _, err := netpol.WithRule(netpol.DefaultPolicy(), spec); err != nil {
+		field := "ports"
+		switch {
+		case strings.Contains(err.Error(), "action"):
+			field = "action"
+		case strings.Contains(err.Error(), "protocol") || strings.Contains(err.Error(), "proto"):
+			field = "protocol"
+		case strings.Contains(err.Error(), "cidr"):
+			field = "target"
+		}
+		return netpol.RuleSpec{}, dashboardapi.Invalid(field, err)
+	}
+	return spec, nil
+}
+
+func mutateDashboardNetworkPolicy(name string, mutate func(*netpol.Policy) (*netpol.Policy, error)) error {
+	if err := ValidateSandboxName(name); err != nil {
+		return err
+	}
+	cfg, err := readSandboxConfig(sandboxDir(name))
+	if err != nil {
+		return err
+	}
+	_, policy, err := resolveNetworkPolicy(cfg.NetPol, cfg.AllowLN)
+	if err != nil {
+		return err
+	}
+	next, err := mutate(policy)
+	if err != nil {
+		return err
+	}
+	data, err := netpol.Marshal(next)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(data)
+	dir := filepath.Join(sandboxDir(name), "network-policies")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%x.json", digest[:12]))
+	if err := atomicfile.WriteFileDurable(path, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	_, err = setSandboxNetworkPolicy(name, path, cfg.AllowLN)
+	return err
 }
 
 func (dashboardService) PlanShare(req dashboardapi.ShareRequest) (dashboardapi.SharePlan, error) {
@@ -258,6 +468,7 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 				sandbox.Runtime = cfg.Runtime
 			}
 			sandbox.RW, sandbox.Net, sandbox.Shares = cfg.RW, cfg.Net, len(cfg.Shares)
+			sandbox.ProcessIsolation = normalizedProcessIsolation(cfg.ProcessIsolation)
 			sandbox.GVProxy = cfg.GVProxy
 			sandbox.NetPolicy = cfg.NetPol
 			sandbox.AllowLocal = cfg.AllowLN
@@ -308,6 +519,13 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			}
 		}
 		if configOK {
+			secretState := "required next start"
+			if sandbox.State == dashboardapi.Running {
+				secretState = "loaded"
+			}
+			for _, secretName := range cfg.SecretNames {
+				data.Secrets = append(data.Secrets, dashboardapi.Secret{Sandbox: sandbox.Name, Name: secretName, State: secretState})
+			}
 			data.Rules = append(data.Rules, loadDashboardRules(name, cfg)...)
 			mounts, live := loadDashboardMounts(name, cfg, sandbox.State == dashboardapi.Running)
 			data.Mounts = append(data.Mounts, mounts...)
@@ -339,6 +557,12 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			return data.Ports[i].Bind < data.Ports[j].Bind
 		}
 		return data.Ports[i].Sandbox < data.Ports[j].Sandbox
+	})
+	sort.SliceStable(data.Secrets, func(i, j int) bool {
+		if data.Secrets[i].Sandbox == data.Secrets[j].Sandbox {
+			return data.Secrets[i].Name < data.Secrets[j].Name
+		}
+		return data.Secrets[i].Sandbox < data.Secrets[j].Sandbox
 	})
 	return data, nil
 }

@@ -12,27 +12,24 @@ package sandbox
 // per-sandbox, and the pairing is recorded and enforced.
 
 import (
-	"bytes"
-	"compress/gzip"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 
+	backendfile "github.com/diskfs/go-diskfs/backend/file"
+	"github.com/diskfs/go-diskfs/filesystem/ext4"
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/gutil"
 )
 
-// blankRWLayer is a 512 MiB ext4 with /upper + /work, gzipped (~0.5 MB).
-// Deterministic, built by scripts/mkblankrwlayer.sh; embedded so per-sandbox
-// layers need no host e2fsprogs (stock macOS has none).
-//
-//go:embed assets/blank.ext4.gz
-var blankRWLayer []byte
+const (
+	defaultRWLayerSizeMiB = 512
+	minRWLayerSizeMiB     = 512
+	maxRWLayerSizeMiB     = 64 << 10
+)
 
 // rwlayersRoot is ~/.gantry/rwlayers (sibling of the sandboxes dir so a
 // `gantry start` state wipe never deletes user data).
@@ -51,7 +48,7 @@ func rwlayerPairingPath(layer string) string { return layer + ".image" }
 
 // defaultRWLayer returns the per-sandbox rwlayer, creating it on first
 // use. Pairing is checked by the caller (checkRWLayerPairing).
-func defaultRWLayer(name, imageID string) (string, []string, error) {
+func defaultRWLayer(name, imageID string, sizeMiB uint, progress func(string, ...any)) (string, []string, error) {
 	p := defaultRWLayerPath(name)
 	if gutil.FileExists(p) {
 		// Layers hold persistent filesystem data: 0600/0700 now, but
@@ -65,101 +62,103 @@ func defaultRWLayer(name, imageID string) (string, []string, error) {
 	if err := os.MkdirAll(rwlayersRoot(), 0o700); err != nil {
 		return "", nil, err
 	}
-	warns, err := createRWLayer(p)
+	warns, err := createRWLayer(p, sizeMiB, progress)
 	if err != nil {
-		return "", nil, fmt.Errorf("creating rwlayer %s: %w\n(create it manually with ./scripts/mkrwlayer.sh %s 512)", p, err, p)
+		return "", nil, fmt.Errorf("creating rwlayer %s: %w", p, err)
 	}
 	return p, warns, nil
 }
 
-// createRWLayer makes a 512 MiB sparse ext4 with the /upper and /work
-// directories overlayfs needs — without root. Strategy: host e2fsprogs
-// when present (mkfs.ext4 + debugfs); otherwise inflate the embedded
-// blank template. (An earlier revision cloned ./rwlayer.ext4 instead —
-// that cloned whatever damage the shared layer already had, and
-// SEEK_HOLE is unreliable on shared-repo filesystems. Deterministic or
-// nothing.)
-func createRWLayer(path string) ([]string, error) {
-	mkfs, err1 := exec.LookPath("mkfs.ext4")
-	debugfs, err2 := exec.LookPath("debugfs")
-	if err1 == nil && err2 == nil {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			return nil, err
-		}
-		if err := f.Truncate(512 << 20); err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		_ = f.Close()
-		if out, err := exec.Command(mkfs, "-q", "-F", "-L", "rwlayer", path).CombinedOutput(); err != nil {
-			_ = os.Remove(path)
-			return nil, fmt.Errorf("mkfs.ext4: %v: %s", err, out)
-		}
-		for _, dir := range []string{"/upper", "/work"} {
-			if out, err := exec.Command(debugfs, "-w", "-R", "mkdir "+dir, path).CombinedOutput(); err != nil {
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("debugfs mkdir %s: %v: %s", dir, err, out)
-			}
-		}
-		return nil, nil
-	}
-	if err := inflateBlankRWLayer(path); err != nil {
+// createRWLayer makes a sparse ext4 filesystem with the /upper and /work
+// directories overlayfs needs. Formatting and directory creation are pure Go:
+// hosts do not need e2fsprogs, root privileges, or a mounted loop device.
+// A complete temporary image is synced and then published with no-replace
+// semantics, so interruption or concurrent starts cannot expose a partial
+// persistent disk.
+func createRWLayer(path string, sizeMiB uint, progress func(string, ...any)) (retWarnings []string, retErr error) {
+	if err := validateRWLayerSize(sizeMiB); err != nil {
 		return nil, err
 	}
+	reportRWLayerProgress(progress, sizeMiB, 0)
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".rwlayer-*.ext4")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+	// backend/file creates with O_EXCL so it cannot inherit stale contents.
+	if err := os.Remove(tmpPath); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary rwlayer: %w", err))
+		}
+	}()
+
+	sizeBytes := int64(sizeMiB) << 20
+	storage, err := backendfile.CreateFromPath(tmpPath, sizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	storageOpen := true
+	defer func() {
+		if storageOpen {
+			retErr = errors.Join(retErr, storage.Close())
+		}
+	}()
+	reportRWLayerProgress(progress, sizeMiB, 10)
+	fs, err := ext4.Create(storage, sizeBytes, 0, 512, &ext4.Params{VolumeName: "rwlayer"})
+	if err != nil {
+		return nil, fmt.Errorf("format ext4: %w", err)
+	}
+	reportRWLayerProgress(progress, sizeMiB, 90)
+	for _, dir := range []string{"upper", "work"} {
+		if err := fs.Mkdir(dir); err != nil {
+			return nil, fmt.Errorf("create /%s: %w", dir, err)
+		}
+	}
+	if err := fs.Close(); err != nil {
+		return nil, fmt.Errorf("close ext4: %w", err)
+	}
+	if file, err := storage.Sys(); err == nil {
+		if err := file.Sync(); err != nil {
+			return nil, fmt.Errorf("sync ext4: %w", err)
+		}
+	}
+	if err := storage.Close(); err != nil {
+		return nil, fmt.Errorf("close rwlayer: %w", err)
+	}
+	storageOpen = false
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		return nil, fmt.Errorf("publish rwlayer: %w", err)
+	}
+	reportRWLayerProgress(progress, sizeMiB, 100)
 	return nil, nil
 }
 
-// inflateBlankRWLayer writes the embedded blank ext4 to path, sparsely
-// (zero 1 MiB chunks are skipped, so the 512 MiB layer costs only its
-// real metadata).
-func inflateBlankRWLayer(path string) error {
-	gz, err := gzip.NewReader(bytes.NewReader(blankRWLayer))
-	if err != nil {
-		return err
+func validateRWLayerSize(sizeMiB uint) error {
+	if sizeMiB < minRWLayerSizeMiB || sizeMiB > maxRWLayerSizeMiB {
+		return fmt.Errorf("-disk-size must be between %d and %d MiB, got %d", minRWLayerSizeMiB, maxRWLayerSizeMiB, sizeMiB)
 	}
-	defer func() { _ = gz.Close() }()
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 1<<20)
-	var off int64
-	for {
-		n, err := io.ReadFull(gz, buf)
-		if err == io.EOF {
-			break
-		}
-		if err != nil && err != io.ErrUnexpectedEOF {
-			_ = out.Close()
-			_ = os.Remove(path)
-			return err
-		}
-		chunk := buf[:n]
-		if !allZero(chunk) {
-			if _, werr := out.WriteAt(chunk, off); werr != nil {
-				_ = out.Close()
-				_ = os.Remove(path)
-				return werr
-			}
-		}
-		off += int64(n)
-	}
-	if err := out.Truncate(off); err != nil {
-		_ = out.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	return out.Close()
+	return nil
 }
 
-func allZero(b []byte) bool {
-	for _, v := range b {
-		if v != 0 {
-			return false
-		}
+func reportRWLayerProgress(progress func(string, ...any), sizeMiB uint, percent int) {
+	if progress == nil {
+		return
 	}
-	return true
+	const width = 20
+	filled := percent * width / 100
+	bar := strings.Repeat("=", filled) + strings.Repeat("·", width-filled)
+	progress("creating persistent disk [%s] %3d%% (%d MiB)", bar, percent, sizeMiB)
 }
 
 // checkRWLayerPairing refuses to attach a layer whose recorded image

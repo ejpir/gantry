@@ -35,6 +35,19 @@ func TestProgressPrinterKeepsPipeUpdatesDelimited(t *testing.T) {
 	}
 }
 
+func TestProgressPrinterRepaintsPersistentDiskCreation(t *testing.T) {
+	var output bytes.Buffer
+	progress := newProgressPrinter(&output, "gantry start: ", true)
+	progress.Printf("creating persistent disk [····]   0%% (4096 MiB)")
+	progress.Printf("creating persistent disk [====] 100%% (4096 MiB)")
+	progress.Finish()
+
+	got := output.String()
+	if strings.Count(got, "\n") != 1 || !strings.Contains(got, "\r\x1b[2Kgantry start: creating persistent disk [====] 100%") {
+		t.Fatalf("persistent disk progress was not repainted: %q", got)
+	}
+}
+
 func TestProgressPrinterFinishTerminatesActiveRow(t *testing.T) {
 	var output bytes.Buffer
 	progress := newProgressPrinter(&output, "", true)

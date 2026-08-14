@@ -119,6 +119,26 @@ func TestPolicyRuleSummaries(t *testing.T) {
 	}
 }
 
+func TestWithoutDomainNormalizesAndRemovesAllowlistEntry(t *testing.T) {
+	policy := mustParse(t, `{
+		"default":"deny",
+		"allowDomains":["example.com","api.github.com","example.com"]
+	}`)
+	next, err := WithoutDomain(policy, " Example.COM. ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.AllowDomains) != 1 || next.AllowDomains[0] != "api.github.com" {
+		t.Fatalf("domains after removal = %v", next.AllowDomains)
+	}
+	if len(policy.AllowDomains) != 3 {
+		t.Fatalf("source policy was mutated: %v", policy.AllowDomains)
+	}
+	if _, err := WithoutDomain(next, "missing.example"); err == nil {
+		t.Fatal("missing domain removal succeeded")
+	}
+}
+
 func TestPolicyReplaceAppliesToStableReceiver(t *testing.T) {
 	stable := DefaultPolicy()
 	public := [4]byte{8, 8, 8, 8}
@@ -529,5 +549,38 @@ func TestMarshalRoundTrip(t *testing.T) {
 	}
 	if _, err := Parse(raw); err != nil {
 		t.Fatalf("default policy round trip: %v (%s)", err, raw)
+	}
+}
+
+func TestInteractiveRulesCoverAnyAndICMPProtocols(t *testing.T) {
+	base := DefaultPolicy()
+	denied, err := WithRule(base, RuleSpec{
+		Action: "deny", CIDR: "203.0.113.9/32", Protocol: "any",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := [4]byte{203, 0, 113, 9}
+	for _, protocol := range []uint8{protoICMP, protoTCP, protoUDP, 47} {
+		if denied.Allows(destination, protocol, 443) {
+			t.Errorf("any-protocol deny allowed IP protocol %d", protocol)
+		}
+	}
+
+	allowed, err := WithRule(denied, RuleSpec{
+		Action: "allow", CIDR: "203.0.113.9/32", Protocol: "icmp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed.Allows(destination, protoICMP, 0) {
+		t.Fatal("ICMP override was not applied")
+	}
+	if allowed.Allows(destination, protoTCP, 443) {
+		t.Fatal("ICMP override unexpectedly allowed TCP")
+	}
+
+	if _, err := WithRule(base, RuleSpec{Action: "deny", Protocol: "icmp", Ports: "53"}); err == nil {
+		t.Fatal("port-scoped ICMP rule was accepted")
 	}
 }

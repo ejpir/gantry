@@ -106,8 +106,12 @@ func (r *runResolver) initialize() error {
 	if err := validateSandboxResources(*r.flags.MemMB, *r.flags.VCPUs); err != nil {
 		return err
 	}
+	if err := validateRWLayerSize(*r.flags.RWLayerSizeMiB); err != nil {
+		return err
+	}
 	r.cfg.MemMB = *r.flags.MemMB
 	r.cfg.VCPUs = *r.flags.VCPUs
+	r.cfg.RWLayerSizeMiB = *r.flags.RWLayerSizeMiB
 	return nil
 }
 
@@ -238,10 +242,9 @@ func (r *runResolver) resolveWritableLayer() error {
 	case r.cfg.RWLayer != "":
 	case r.explicit.rw && !*r.flags.RW:
 		// An explicitly read-only VM cannot attach a writable layer. In
-		// particular, do not inflate the implicit 512 MiB per-sandbox ext4:
-		// on macOS this wasted hundreds of milliseconds on every fresh start.
+		// particular, do not format the implicit per-sandbox ext4.
 	case r.flags.Name != "":
-		path, warnings, err := defaultRWLayer(r.flags.Name, r.cfg.imageIdentity())
+		path, warnings, err := defaultRWLayer(r.flags.Name, r.cfg.imageIdentity(), r.cfg.RWLayerSizeMiB, r.report)
 		if err != nil {
 			return err
 		}
@@ -321,9 +324,7 @@ func (r *runResolver) resolveSessionOptions() error {
 	}
 	r.cfg.SecretNames = names
 	r.cfg.ProcessIsolation = *r.flags.ProcessIsolation
-	switch r.cfg.ProcessIsolation {
-	case "", "auto", "required", "off":
-	default:
+	if err := validateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
 		return fmt.Errorf("-process-isolation must be auto, required, or off, got %q", r.cfg.ProcessIsolation)
 	}
 	r.cfg.NetPol = *r.flags.NetPol

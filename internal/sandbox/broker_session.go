@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
-	"github.com/ejpir/gantry/internal/secret"
 )
 
 // sessionProtocolVersion versions the session-control channel: the
@@ -165,7 +164,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
 		LayerSet:       br.cfg.LayerSet,
 		Args:           req.Args,
 		Cwd:            req.Cwd,
-		Secrets:        secret.Env(br.secrets),
+		Secrets:        br.secretEnv(),
 		// one VM = one container workload with a well-known id, so a
 		// concurrent session can find it and Exec into it instead of
 		// fighting over the rw rootfs stack with a second Create
