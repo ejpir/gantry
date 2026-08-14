@@ -36,19 +36,36 @@ const (
 
 	x86MemHoleStart = 0x9fc00    // end of usable low memory
 	x86MemHoleEnd   = 0x100000   // kernel load base / end of ISA hole
-	x86MaxRAM       = 0xc0000000 // keep RAM below the virtio-mmio window
+	x86LowRAMEnd    = 0xc0000000 // 3 GiB: start of the virtio/platform MMIO hole
+	x86HighRAMStart = 0x100000000
 
 	x86MPSFloatingPtr = 0xf0000 // scanned by default_find_smp_config()
 	x86MPSConfigTable = 0xf0100
 )
 
+// x86RAMRegion maps one contiguous part of the host RAM allocation into the
+// PC guest-physical layout. RAM above 3 GiB is relocated above the traditional
+// 3-4 GiB MMIO hole while remaining contiguous in the host allocation.
+type x86RAMRegion struct {
+	guestBase  uint64
+	hostOffset uint64
+	size       uint64
+}
+
+func x86RAMRegions(memSize uint64) []x86RAMRegion {
+	lowSize := min(memSize, uint64(x86LowRAMEnd))
+	regions := []x86RAMRegion{{size: lowSize}}
+	if memSize > lowSize {
+		regions = append(regions, x86RAMRegion{
+			guestBase: x86HighRAMStart, hostOffset: lowSize, size: memSize - lowSize,
+		})
+	}
+	return regions
+}
+
 // setupX86Boot writes boot_params, e820, the cmdline, identity-mapped page
 // tables (4 GiB, 2 MiB pages), the GDT and the MPS table into guest RAM.
 func setupX86Boot(ram []byte, cmdline string, memSize uint64, ncpus int) error {
-	if memSize > x86MaxRAM {
-		return fmt.Errorf("x86-64 backend supports up to %d MiB of RAM (device window at %#x); got %d MiB",
-			x86MaxRAM>>20, x86MMIOBase, memSize>>20)
-	}
 	if len(cmdline)+1 > x86CmdlineMax {
 		return fmt.Errorf("kernel cmdline too long (%d > %d)", len(cmdline), x86CmdlineMax)
 	}
@@ -58,7 +75,13 @@ func setupX86Boot(ram []byte, cmdline string, memSize uint64, ncpus int) error {
 	zp := ram[x86ZeroPage:]
 
 	// --- struct boot_params / setup_header fields ---
-	zp[0x1e8] = 2                                              // e820_entries
+	e820Entries := byte(2)
+	lowSize := memSize
+	if memSize > x86LowRAMEnd {
+		e820Entries = 3
+		lowSize = x86LowRAMEnd
+	}
+	zp[0x1e8] = e820Entries                                    // e820_entries
 	binary.LittleEndian.PutUint16(zp[0x1fa:], 0xffff)          // vid_mode = normal
 	binary.LittleEndian.PutUint16(zp[0x206:], 0x020d)          // header version 2.13
 	zp[0x210] = 0xff                                           // type_of_loader = undefined bootloader
@@ -68,9 +91,12 @@ func setupX86Boot(ram []byte, cmdline string, memSize uint64, ncpus int) error {
 	binary.LittleEndian.PutUint32(zp[0x238:], x86CmdlineMax-1) // cmdline_size (protocol >= 2.06)
 	// hardware_subarch (0x23c) = 0: PC
 
-	// --- e820: [0, 0x9fc00) RAM, [0x100000, memSize) RAM ---
+	// --- e820: low RAM around the ISA hole; optional high RAM above 4 GiB ---
 	putE820(zp[0x2d0:], 0, x86MemHoleStart, 1)
-	putE820(zp[0x2d0+20:], x86MemHoleEnd, memSize-x86MemHoleEnd, 1)
+	putE820(zp[0x2d0+20:], x86MemHoleEnd, lowSize-x86MemHoleEnd, 1)
+	if e820Entries == 3 {
+		putE820(zp[0x2d0+40:], x86HighRAMStart, memSize-x86LowRAMEnd, 1)
+	}
 
 	// --- cmdline ---
 	copy(ram[x86CmdlineAddr:], cmdline)

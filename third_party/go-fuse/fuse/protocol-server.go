@@ -193,6 +193,47 @@ func (ps *ProtocolServer) GantryResourceUsage() (nodes, handles int) {
 	return 0, 0
 }
 
+// GantryPruneResources asks the guest kernel to release up to limit cached
+// inode references. GANTRY PATCH: ordinary kernel FUSE mounts reclaim these
+// under memory pressure; Gantry also requests reclamation proactively so a
+// legitimate large tree walk does not trip the supervisor's retention bound.
+func (ps *ProtocolServer) GantryPruneResources(limit int) Status {
+	const maxPruneNodes = (8<<10 - 16 - 16) / 8
+	if limit <= 0 {
+		return OK
+	}
+	limit = min(limit, maxPruneNodes)
+	provider, ok := ps.fileSystem.(interface {
+		GantryPruneCandidates(limit int) []uint64
+	})
+	if !ok {
+		return ENOSYS
+	}
+	ps.kernelSettingsMu.RLock()
+	settings := ps.kernelSettings
+	ps.kernelSettingsMu.RUnlock()
+	if settings.Major < 7 || (settings.Major == 7 && settings.Minor < 45) {
+		return ENOSYS
+	}
+	ps.gantryNotificationMu.RLock()
+	ready := ps.gantryNotificationSink != nil
+	ps.gantryNotificationMu.RUnlock()
+	if !ready {
+		return EAGAIN
+	}
+	ids := provider.GantryPruneCandidates(limit)
+	if len(ids) == 0 {
+		return OK
+	}
+	data := make([]byte, 16)
+	binary.LittleEndian.PutUint32(data[0:4], uint32(len(ids)))
+	payload := make([]byte, 8*len(ids))
+	for i, id := range ids {
+		binary.LittleEndian.PutUint64(payload[i*8:], id)
+	}
+	return ps.sendGantryNotification(NOTIFY_PRUNE, data, payload)
+}
+
 // GantrySetNotificationSink installs the transport for unsolicited reverse
 // invalidations. The callback receives a call-scoped contiguous frame.
 func (ps *ProtocolServer) GantrySetNotificationSink(sink func([]byte) Status) {
@@ -339,6 +380,13 @@ func (ps *ProtocolServer) HandleRequest(in [][]byte, out [][]byte) (int, Status)
 		}
 
 		payloadOut = out
+		// READLINK has no request field declaring the maximum response size.
+		// The guest communicates that limit solely through the remaining
+		// writable descriptors, so use their aggregate capacity. Other
+		// variable-size operations carry an explicit size parsed above.
+		if h.OpCode == int(_OP_READLINK) {
+			outPayloadSize = iovLen(payloadOut)
+		}
 		if iovLen(payloadOut) < outPayloadSize {
 			ps.opts.Logger.Printf("op %s: got %v, payload iov should have %d bytes", h.Name, iovLens(startOut), outPayloadSize)
 			return 0, EIO

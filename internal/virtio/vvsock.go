@@ -93,10 +93,14 @@ type vsockConn struct {
 	guestTx      uint32 // payload bytes the guest sent us (credit accounting)
 	outQBytes    int    // payload bytes currently sitting in outQ
 	closed       bool
-	established  bool          // host-originated conns wait for the guest's RESPONSE
-	outQ         [][]byte      // guest->host payloads awaiting socket write
-	outSig       chan struct{} // 1-cap; signals pumpOut
-	done         chan struct{} // closed on conn teardown; stops pumpOut
+	// guestShutdown records a guest SHUTDOWN received after its final RW.
+	// pumpOut owns the actual close so every earlier payload reaches nc first.
+	guestShutdown bool
+	shutdownHdr   vsockHdr
+	established   bool          // host-originated conns wait for the guest's RESPONSE
+	outQ          [][]byte      // guest->host payloads awaiting socket write
+	outSig        chan struct{} // 1-cap; signals pumpOut
+	done          chan struct{} // closed on conn teardown; stops pumpOut
 }
 
 func connKey(srcPort, dstPort uint32) uint64 { return uint64(srcPort)<<32 | uint64(dstPort) }
@@ -374,9 +378,24 @@ func (v *Vsock) handleTx() {
 				v.tryFlush()
 			}
 
-		case vsockOpShutdown, vsockOpRST:
+		case vsockOpShutdown:
 			if c != nil {
-				v.closeConn(c, hdr, hdr.op == vsockOpShutdown)
+				// RW and SHUTDOWN descriptors commonly arrive in the same TX
+				// notification. pumpOut cannot acquire core.mu until handleTx
+				// returns, so closing here races ahead of the queued final RW and
+				// silently drops short command output. Let pumpOut drain the FIFO,
+				// then close the host socket to deliver EOF in byte order.
+				c.guestShutdown = true
+				c.shutdownHdr = hdr
+				select {
+				case c.outSig <- struct{}{}:
+				default:
+				}
+			}
+
+		case vsockOpRST:
+			if c != nil {
+				v.closeConn(c, hdr, false)
 			}
 		}
 	}
@@ -391,6 +410,11 @@ func (v *Vsock) pumpOut(c *vsockConn) {
 	for {
 		v.core.mu.Lock()
 		if len(c.outQ) == 0 {
+			if c.guestShutdown && !c.closed {
+				v.closeConn(c, c.shutdownHdr, true)
+				v.core.mu.Unlock()
+				return
+			}
 			v.core.mu.Unlock()
 			select {
 			case <-c.done: // conn torn down (closeConn/reset)

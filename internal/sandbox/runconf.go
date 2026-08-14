@@ -114,7 +114,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
-		VCPUs:            fs.Int("cpus", 1, "guest vCPU count (max 8)"),
+		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", maxSandboxVCPUs)),
 		Shares:           &gutil.StrList{},
 		Publish:          &gutil.StrList{},
 		Secrets:          &gutil.StrList{},

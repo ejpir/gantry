@@ -23,6 +23,7 @@ type execLifecycleTask struct {
 	mu        sync.Mutex
 	events    []string
 	startErr  error
+	startHook func() error
 	deleteErr error
 }
 
@@ -39,6 +40,11 @@ func (f *execLifecycleTask) Exec(context.Context, *task.ExecProcessRequest) (*em
 
 func (f *execLifecycleTask) Start(context.Context, *task.StartRequest) (*task.StartResponse, error) {
 	f.record("start")
+	if f.startHook != nil {
+		if err := f.startHook(); err != nil {
+			return &task.StartResponse{}, err
+		}
+	}
 	return &task.StartResponse{}, f.startErr
 }
 
@@ -92,6 +98,51 @@ func testStreamDial() func() (net.Conn, error) {
 	}
 }
 
+// startBlockingOutputDial returns the guest side of stdout after its stream
+// handshake. Writing to that net.Pipe blocks until the client's relay is
+// already reading, which makes relay-before-Start ordering deterministic.
+func startBlockingOutputDial() (func() (net.Conn, error), <-chan net.Conn) {
+	var mu sync.Mutex
+	stream := 0
+	stdoutPeer := make(chan net.Conn, 1)
+	dial := func() (net.Conn, error) {
+		client, server := net.Pipe()
+		mu.Lock()
+		current := stream
+		stream++
+		mu.Unlock()
+		go func() {
+			_ = server.SetDeadline(time.Now().Add(2 * time.Second))
+			var size [4]byte
+			if _, err := io.ReadFull(server, size[:]); err != nil {
+				_ = server.Close()
+				return
+			}
+			name := make([]byte, binary.BigEndian.Uint32(size[:]))
+			if _, err := io.ReadFull(server, name); err != nil {
+				_ = server.Close()
+				return
+			}
+			packet := make([]byte, 4+len(name))
+			binary.BigEndian.PutUint32(packet[:4], uint32(len(name)))
+			copy(packet[4:], name)
+			if _, err := server.Write(packet); err != nil {
+				_ = server.Close()
+				return
+			}
+			_ = server.SetDeadline(time.Time{})
+			if current == 0 {
+				_, _ = io.Copy(io.Discard, server)
+				_ = server.Close()
+				return
+			}
+			stdoutPeer <- server
+		}()
+		return client, nil
+	}
+	return dial, stdoutPeer
+}
+
 func TestSessionExecDeletesProcessAfterWait(t *testing.T) {
 	t.Parallel()
 	service := &execLifecycleTask{}
@@ -111,6 +162,34 @@ func TestSessionExecDeletesProcessAfterWait(t *testing.T) {
 	}
 	if want := []string{"exec", "start", "wait", "delete"}; !reflect.DeepEqual(service.Events(), want) {
 		t.Fatalf("events = %v, want %v", service.Events(), want)
+	}
+}
+
+func TestSessionExecRelaysOutputBeforeStart(t *testing.T) {
+	t.Parallel()
+	dial, stdoutPeer := startBlockingOutputDial()
+	service := &execLifecycleTask{}
+	service.startHook = func() error {
+		peer := <-stdoutPeer
+		defer peer.Close()
+		if err := peer.SetWriteDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			return err
+		}
+		_, err := peer.Write([]byte("fast output"))
+		return err
+	}
+	var output strings.Builder
+	err := sessionExec(service, SessionOptions{
+		Args:       []string{"true"},
+		ImgCfg:     &image.Config{},
+		StreamDial: dial,
+		Quiet:      true,
+	}, "sandbox", strings.NewReader(""), &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "fast output") {
+		t.Fatalf("stdout = %q, want fast process output", output.String())
 	}
 }
 

@@ -220,6 +220,9 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		case 1:
 			return m.ruleAction, "decision"
 		case 2:
+			if m.ruleProtocol == "dns" {
+				return m.ruleTarget.Value(), "domain"
+			}
 			return m.ruleTarget.Value(), "destination"
 		case 3:
 			return m.ruleProtocol, "protocol"
@@ -933,19 +936,29 @@ func (m *sandboxTUIModel) openRuleAddDialog() tea.Cmd {
 	m.formError = ""
 	m.ruleTarget.Reset()
 	m.rulePorts.Reset()
+	m.ruleTarget.Placeholder = "203.0.113.10 or 203.0.113.0/24 (blank = all)"
+	m.ruleTarget.CharLimit = 64
 	m.ruleAction = "deny"
 	m.ruleProtocol = "any"
 	if row := m.selectedTraffic(); row != nil {
-		m.ruleTarget.SetValue(row.Address)
-		switch row.Protocol {
-		case "tcp", "udp", "icmp":
-			m.ruleProtocol = row.Protocol
-		}
-		if row.Port != 0 && (m.ruleProtocol == "tcp" || m.ruleProtocol == "udp") {
-			m.rulePorts.SetValue(strconv.Itoa(int(row.Port)))
-		}
-		if !row.Allowed {
+		if strings.EqualFold(row.Protocol, "dns") {
+			m.ruleTarget.Placeholder = "pi.dev"
+			m.ruleTarget.CharLimit = 253
+			m.ruleTarget.SetValue(row.Host)
+			m.ruleProtocol = "dns"
 			m.ruleAction = "allow"
+		} else {
+			m.ruleTarget.SetValue(row.Address)
+			switch row.Protocol {
+			case "tcp", "udp", "icmp":
+				m.ruleProtocol = row.Protocol
+			}
+			if row.Port != 0 && (m.ruleProtocol == "tcp" || m.ruleProtocol == "udp") {
+				m.rulePorts.SetValue(strconv.Itoa(int(row.Port)))
+			}
+			if !row.Allowed {
+				m.ruleAction = "allow"
+			}
 		}
 	}
 	m.resizeInputs()
@@ -962,12 +975,15 @@ func (m *sandboxTUIModel) updateRuleAddDialogKey(msg tea.KeyPressMsg) (tea.Model
 		m.closeDialog()
 		return m, nil
 	case "tab", "down":
-		return m, m.focusRule((m.ruleFocus + 1) % 6)
+		return m, m.advanceRuleFocus(1)
 	case "shift+tab", "up":
-		return m, m.focusRule((m.ruleFocus + 5) % 6)
+		return m, m.advanceRuleFocus(-1)
 	case "left", "right", " ", "space":
 		switch m.ruleFocus {
 		case 1:
+			if m.ruleProtocol == "dns" {
+				return m, nil
+			}
 			if m.ruleAction == "deny" {
 				m.ruleAction = "allow"
 			} else {
@@ -975,6 +991,9 @@ func (m *sandboxTUIModel) updateRuleAddDialogKey(msg tea.KeyPressMsg) (tea.Model
 			}
 			return m, nil
 		case 3:
+			if m.ruleProtocol == "dns" {
+				return m, nil
+			}
 			delta := 1
 			if key == "left" {
 				delta = -1
@@ -989,7 +1008,7 @@ func (m *sandboxTUIModel) updateRuleAddDialogKey(msg tea.KeyPressMsg) (tea.Model
 		return m.submitRuleAdd()
 	case "enter":
 		if m.ruleFocus < 5 {
-			return m, m.focusRule(m.ruleFocus + 1)
+			return m, m.advanceRuleFocus(1)
 		}
 		return m.submitRuleAdd()
 	}
@@ -998,7 +1017,9 @@ func (m *sandboxTUIModel) updateRuleAddDialogKey(msg tea.KeyPressMsg) (tea.Model
 	case 2:
 		m.ruleTarget, cmd = m.ruleTarget.Update(msg)
 	case 4:
-		m.rulePorts, cmd = m.rulePorts.Update(msg)
+		if m.ruleProtocol != "dns" {
+			m.rulePorts, cmd = m.rulePorts.Update(msg)
+		}
 	}
 	m.formError = ""
 	return m, cmd
@@ -1014,6 +1035,29 @@ func (m *sandboxTUIModel) cycleRuleProtocol(delta int) {
 		}
 	}
 	m.ruleProtocol = choices[(index+delta+len(choices))%len(choices)]
+}
+
+func (m *sandboxTUIModel) advanceRuleFocus(delta int) tea.Cmd {
+	choices := []int{0, 1, 2, 3, 4, 5}
+	if m.ruleProtocol == "dns" {
+		choices = []int{0, 2, 5}
+	}
+	index := 0
+	for i, choice := range choices {
+		if choice == m.ruleFocus {
+			index = i
+			break
+		}
+	}
+	index = (index + delta + len(choices)) % len(choices)
+	return m.focusRule(choices[index])
+}
+
+func (m sandboxTUIModel) ruleAddButtonLabel() string {
+	if m.ruleProtocol == "dns" {
+		return "Allow domain"
+	}
+	return "Add rule"
 }
 
 func (m *sandboxTUIModel) focusRule(index int) tea.Cmd {
@@ -1472,6 +1516,9 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 	case tuiNetworkPolicyDialog:
 		return choose(m.policyFocus, []string{"Sandbox", "Policy file", "Local network override", "Apply"}), m.policyFocus == 3
 	case tuiRuleAddDialog:
+		if m.ruleProtocol == "dns" {
+			return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Domain", "Protocol", "Destination ports", m.ruleAddButtonLabel()}), m.ruleFocus == 5
+		}
 		return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Destination", "Protocol", "Destination ports", "Add rule"}), m.ruleFocus == 5
 	case tuiSecretAddDialog:
 		return choose(m.secretFocus, []string{"Sandbox", "Name", "Value", "Add secret"}), m.secretFocus == 3
@@ -1834,6 +1881,9 @@ func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRe
 		m.ruleSandbox.Toggle()
 		return m, m.focusRule(0)
 	case rows[1].contains(relY):
+		if m.ruleProtocol == "dns" {
+			return m, nil
+		}
 		m.ruleFocus = 1
 		if m.ruleAction == "deny" {
 			m.ruleAction = "allow"
@@ -1843,14 +1893,20 @@ func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRe
 	case rows[2].contains(relY):
 		return m, m.focusRule(2)
 	case rows[3].contains(relY):
+		if m.ruleProtocol == "dns" {
+			return m, nil
+		}
 		m.ruleFocus = 3
 		m.cycleRuleProtocol(1)
 		if m.ruleProtocol != "tcp" && m.ruleProtocol != "udp" {
 			m.rulePorts.Reset()
 		}
 	case rows[4].contains(relY):
+		if m.ruleProtocol == "dns" {
+			return m, nil
+		}
 		return m, m.focusRule(4)
-	case m.dialogButtonHit(mouse, bounds, "Add rule"):
+	case m.dialogButtonHit(mouse, bounds, m.ruleAddButtonLabel()):
 		m.ruleFocus = 5
 		return m.submitRuleAdd()
 	}

@@ -206,8 +206,6 @@ func (d *daemonRuntime) connectGuest() error {
 			return result.err
 		}
 		d.rpc = result.client
-		d.bootLog("guest RPC connected (READY)")
-		d.publishReady()
 		return nil
 	case err := <-guestErr:
 		_ = listener.Close()
@@ -215,7 +213,13 @@ func (d *daemonRuntime) connectGuest() error {
 	}
 }
 
-func (d *daemonRuntime) publishReady() {
+func (d *daemonRuntime) publishReady() error {
+	if d.control == nil || d.broker == nil {
+		return fmt.Errorf("refusing to publish readiness before the control broker is listening")
+	}
+	// Keep the historical timing label, but record it only after startControl
+	// has installed ctl.sock and launched the broker accept loop.
+	d.bootLog("guest RPC connected (READY)")
 	_ = os.WriteFile(filepath.Join(d.dir, "ready"), []byte("1\n"), 0o600)
 	if err := notifyDaemonReady(d.readySocket); err != nil {
 		// The parent may have exited or fallen back to ready-file polling;
@@ -223,4 +227,5 @@ func (d *daemonRuntime) publishReady() {
 		fmt.Fprintln(os.Stderr, "daemon: parent readiness notification:", err)
 	}
 	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
+	return nil
 }

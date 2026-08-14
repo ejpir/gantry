@@ -3,6 +3,7 @@
 package sharefs
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -33,6 +34,7 @@ const (
 	fuseInit        = 26
 	fuseCreate      = 35
 	fuseGetattr     = 3
+	fuseReadlink    = 5
 	fuseGetxattr    = 22
 	fuseOpendir     = 27
 	fuseReaddirplus = 44
@@ -43,9 +45,49 @@ const (
 	linuxENOSYS     = 38
 )
 
+func TestShareHubReadlinkUsesResponsePayloadCapacity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows shares do not expose host symlinks")
+	}
+	root := t.TempDir()
+	target := "some/relative/target"
+	if err := os.Symlink(target, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	fuseInitHub(t, hub)
+	publishHubShare(t, hub, "work", root, false)
+	tagNode, errno := hubLookup(t, hub, 2, 1, "work")
+	if errno != 0 {
+		t.Fatalf("share lookup errno %d", errno)
+	}
+	linkNode, errno := hubLookup(t, hub, 3, tagNode, "link")
+	if errno != 0 {
+		t.Fatalf("symlink lookup errno %d", errno)
+	}
+
+	n, errno, out := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseReadlink, 4, linkNode, 0)}, 16, 3, 61)
+	if errno != 0 {
+		t.Fatalf("READLINK errno %d", errno)
+	}
+	if want := 16 + len(target); n != want {
+		t.Fatalf("READLINK response size = %d, want %d", n, want)
+	}
+	if got := string(bytes.Join(out[1:], nil)[:len(target)]); got != target {
+		t.Fatalf("READLINK target = %q, want %q", got, target)
+	}
+}
+
 type resourceLimitHandler struct {
 	nodes, handles int
 	calls          int
+	prunes         int
+	pruneStatus    fuse.Status
 }
 
 func TestShareHubSetattrDoesNotFollowFinalSymlink(t *testing.T) {
@@ -112,30 +154,99 @@ func (h *resourceLimitHandler) GantryResourceUsage() (nodes, handles int) {
 	return h.nodes, h.handles
 }
 
-func TestShareRequestGuardFailsClosedOnRetainedResources(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		nodes   int
-		handles int
-	}{
-		{name: "nodes", nodes: maxLiveNodes + 1},
-		{name: "handles", handles: shareHandleLimit() + 1},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			handler := &resourceLimitHandler{nodes: test.nodes, handles: test.handles}
-			guard := newRequestGuard()
-			guard.setReporter(handler)
-			if n, status := guard.handle(handler, nil, nil); n != 0 || status != fuse.EIO {
-				t.Fatalf("limit response = %d/%v, want 0/EIO", n, status)
-			}
-			handler.nodes, handler.handles = 0, 0
-			if n, status := guard.handle(handler, nil, nil); n != 0 || status != fuse.EIO {
-				t.Fatalf("post-limit response = %d/%v, want 0/EIO", n, status)
-			}
-			if handler.calls != 1 {
-				t.Fatalf("failed guard invoked handler %d times", handler.calls)
-			}
-		})
+func (h *resourceLimitHandler) GantryPruneResources(int) fuse.Status {
+	h.prunes++
+	return h.pruneStatus
+}
+
+func TestShareRequestGuardBackpressuresWithoutPoisoningShare(t *testing.T) {
+	handler := &resourceLimitHandler{nodes: maxLiveNodes + 1, handles: shareHandleLimit() + 1}
+	guard := newRequestGuard()
+	guard.setReporter(handler)
+	lookup := [][]byte{fuseInHeader(fuseLookup, 1, 1, 0)}
+	if n, status := guard.handle(handler, lookup, nil); n != 0 || status != fuse.EAGAIN {
+		t.Fatalf("node-pressure response = %d/%v, want 0/EAGAIN", n, status)
+	}
+	open := [][]byte{fuseInHeader(fuseOpen, 2, 1, 0)}
+	if n, status := guard.handle(handler, open, nil); n != 0 || status != fuse.EMFILE {
+		t.Fatalf("handle-pressure response = %d/%v, want 0/EMFILE", n, status)
+	}
+	// Existing-node operations and cleanup remain available under pressure.
+	readlink := [][]byte{fuseInHeader(fuseReadlink, 3, 1, 0)}
+	if n, status := guard.handle(handler, readlink, nil); n != 7 || status != fuse.OK {
+		t.Fatalf("READLINK under pressure = %d/%v, want 7/OK", n, status)
+	}
+	handler.nodes, handler.handles = 0, 0
+	if n, status := guard.handle(handler, lookup, nil); n != 7 || status != fuse.OK {
+		t.Fatalf("recovered response = %d/%v, want 7/OK", n, status)
+	}
+	if handler.calls != 2 {
+		t.Fatalf("handler invoked %d times, want 2", handler.calls)
+	}
+}
+
+func TestShareRequestGuardPrunesBeforeNodeWatermark(t *testing.T) {
+	handler := &resourceLimitHandler{nodes: pruneNodeMark}
+	guard := newRequestGuard()
+	guard.setReporter(handler)
+	getattr := [][]byte{fuseInHeader(fuseGetattr, 1, 1, 0)}
+	if _, status := guard.handle(handler, getattr, nil); status != fuse.OK {
+		t.Fatal(status)
+	}
+	if handler.prunes != 1 {
+		t.Fatalf("prune calls = %d, want 1", handler.prunes)
+	}
+	if _, status := guard.handle(handler, getattr, nil); status != fuse.OK {
+		t.Fatal(status)
+	}
+	if handler.prunes != 1 {
+		t.Fatalf("unchanged usage caused %d prune calls, want 1", handler.prunes)
+	}
+	handler.nodes += resourcePruneSize
+	if _, status := guard.handle(handler, getattr, nil); status != fuse.OK {
+		t.Fatal(status)
+	}
+	if handler.prunes != 2 {
+		t.Fatalf("grown usage caused %d prune calls, want 2", handler.prunes)
+	}
+}
+
+func TestShareHubPrunesRetainedNodes(t *testing.T) {
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	payload := make([]byte, 64)
+	binary.LittleEndian.PutUint32(payload[0:4], 7)
+	binary.LittleEndian.PutUint32(payload[4:8], 45)
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseInit, 1, 0, len(payload)), payload}, 16, 64); errno != 0 {
+		t.Fatalf("FUSE_INIT errno %d", errno)
+	}
+	publishHubShare(t, hub, "work", t.TempDir(), false)
+	if _, errno := hubLookup(t, hub, 2, 1, "work"); errno != 0 {
+		t.Fatalf("share lookup errno %d", errno)
+	}
+
+	notifications := make(chan []byte, 1)
+	hub.SetNotificationSink(func(message []byte) fuse.Status {
+		notifications <- append([]byte(nil), message...)
+		return fuse.OK
+	})
+	if status := hub.protocol.GantryPruneResources(10); status != fuse.OK {
+		t.Fatalf("prune status = %v", status)
+	}
+	message := <-notifications
+	if !fusewire.ValidNotification(message) {
+		t.Fatalf("invalid prune notification: %x", message)
+	}
+	if code := int32(binary.LittleEndian.Uint32(message[4:8])); code != fuse.NOTIFY_PRUNE {
+		t.Fatalf("notification code = %d, want %d", code, fuse.NOTIFY_PRUNE)
+	}
+	count := binary.LittleEndian.Uint32(message[16:20])
+	if count == 0 || len(message) != 32+int(count)*8 {
+		t.Fatalf("prune count/size = %d/%d", count, len(message))
 	}
 }
 
@@ -511,6 +622,12 @@ func TestShareHubDynamicNamespace(t *testing.T) {
 	}
 
 	dir := t.TempDir()
+	// testing.TempDir creates its numbered child with 0777 and the process
+	// umask. Pin the mode this assertion is intended to exercise so the test
+	// does not depend on whether the runner uses umask 0002 or 0022.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hello\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

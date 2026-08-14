@@ -1,6 +1,7 @@
 package vmm
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -8,17 +9,20 @@ import (
 func TestFDTMultiCPU(t *testing.T) {
 	fdt := buildGuestFDT(512<<20, 0, 0, "console=ttyAMA0", 2, 2)
 	s := string(fdt)
-	// Node names carry KVM's MPIDR Aff0 value: cpu@0, cpu@1.
-	for _, want := range []string{"cpu@0", "cpu@1"} {
+	// Node names carry the MPIDR affinity used by the selected host backend.
+	for i := range 2 {
+		want := fmt.Sprintf("cpu@%x\x00", guestVCPUMPIDR(i))
 		if !strings.Contains(s, want) {
 			t.Errorf("2-vCPU FDT missing %q", want)
 		}
 	}
-	if strings.Contains(s, "cpu@2") {
-		t.Error("2-vCPU FDT has a cpu@2 node")
+	unexpected := fmt.Sprintf("cpu@%x\x00", guestVCPUMPIDR(2))
+	if strings.Contains(s, unexpected) {
+		t.Errorf("2-vCPU FDT has a %q node", unexpected)
 	}
 	fdt1 := buildGuestFDT(512<<20, 0, 0, "", 1)
-	if strings.Contains(string(fdt1), "cpu@1") {
+	second := fmt.Sprintf("cpu@%x\x00", guestVCPUMPIDR(1))
+	if strings.Contains(string(fdt1), second) {
 		t.Error("default FDT has more than one cpu node")
 	}
 }

@@ -101,11 +101,24 @@ func (dashboardService) SetNetworkPolicy(name, path string, allowLocal bool) (da
 }
 
 func (dashboardService) ValidateNetworkRule(request dashboardapi.RuleRequest) error {
+	if dashboardDomainRule(request) {
+		_, err := normalizedDashboardDomain(request)
+		return err
+	}
 	_, err := normalizedDashboardRule(request)
 	return err
 }
 
 func (dashboardService) AddNetworkRule(request dashboardapi.RuleRequest) error {
+	if dashboardDomainRule(request) {
+		domain, err := normalizedDashboardDomain(request)
+		if err != nil {
+			return err
+		}
+		return mutateDashboardNetworkPolicy(request.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
+			return netpol.WithDomain(policy, domain)
+		})
+	}
 	spec, err := normalizedDashboardRule(request)
 	if err != nil {
 		return err
@@ -136,6 +149,14 @@ func (dashboardService) RemoveNetworkRule(row dashboardapi.Rule) error {
 }
 
 func (dashboardService) RemoveTrafficRule(row dashboardapi.Traffic) error {
+	if strings.EqualFold(row.Protocol, "dns") {
+		if strings.TrimSpace(row.Host) == "" {
+			return fmt.Errorf("DNS traffic does not identify a queried domain")
+		}
+		return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
+			return netpol.WithoutDomain(policy, row.Host)
+		})
+	}
 	request, err := dashboardRuleForTraffic(row, "allow")
 	if err != nil {
 		return err
@@ -147,6 +168,24 @@ func (dashboardService) RemoveTrafficRule(row dashboardapi.Traffic) error {
 	return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
 		return netpol.WithoutMatchingRule(policy, spec)
 	})
+}
+
+func dashboardDomainRule(request dashboardapi.RuleRequest) bool {
+	return strings.EqualFold(strings.TrimSpace(request.Proto), "dns")
+}
+
+func normalizedDashboardDomain(request dashboardapi.RuleRequest) (string, error) {
+	if !strings.EqualFold(strings.TrimSpace(request.Action), "allow") {
+		return "", dashboardapi.Invalid("action", fmt.Errorf("DNS domains can only be added to the allowlist"))
+	}
+	if strings.TrimSpace(request.Ports) != "" {
+		return "", dashboardapi.Invalid("ports", fmt.Errorf("DNS domain rules do not use destination ports"))
+	}
+	policy, err := netpol.WithDomain(netpol.DefaultPolicy(), request.Target)
+	if err != nil {
+		return "", dashboardapi.Invalid("target", err)
+	}
+	return policy.AllowDomains[0], nil
 }
 
 func (dashboardService) ValidateSecret(request dashboardapi.SecretRequest) error {

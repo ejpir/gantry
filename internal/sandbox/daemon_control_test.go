@@ -3,6 +3,8 @@ package sandbox
 import (
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -38,5 +40,30 @@ func TestCloseVMDevicesPreservesSplitWorkerFailure(t *testing.T) {
 	}
 	if runtime.runner != nil {
 		t.Fatal("closed runner retained for deferred teardown")
+	}
+}
+
+func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
+	dir := t.TempDir()
+	runtime := &daemonRuntime{dir: dir}
+	if err := runtime.publishReady(); err == nil {
+		t.Fatal("publishReady succeeded without a control listener")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ready")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ready marker before control startup: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	runtime.control = listener
+	runtime.broker = &broker{}
+	if err := runtime.publishReady(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ready")); err != nil {
+		t.Fatalf("ready marker after control startup: %v", err)
 	}
 }

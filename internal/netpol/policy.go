@@ -249,17 +249,38 @@ func WithoutRule(policy *Policy, index int) (*Policy, error) {
 	return clone, nil
 }
 
-// WithoutDomain returns a detached copy without a domain allowlist entry.
-// Domain spelling is normalized the same way as policy parsing. Duplicate
-// entries are removed together because they represent the same permission.
-func WithoutDomain(policy *Policy, domain string) (*Policy, error) {
+// WithDomain returns a detached copy with domain in the DNS allowlist.
+// Domain spelling is normalized the same way as policy parsing, and adding an
+// existing entry is idempotent.
+func WithDomain(policy *Policy, domain string) (*Policy, error) {
+	domain, err := normalizeDomain(domain)
+	if err != nil {
+		return nil, err
+	}
 	clone, err := clonePolicy(policy)
 	if err != nil {
 		return nil, err
 	}
-	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
-	if domain == "" {
-		return nil, fmt.Errorf("network policy: empty domain")
+	for _, existing := range clone.AllowDomains {
+		if existing == domain {
+			return clone, nil
+		}
+	}
+	clone.AllowDomains = append(clone.AllowDomains, domain)
+	return clone, nil
+}
+
+// WithoutDomain returns a detached copy without a domain allowlist entry.
+// Domain spelling is normalized the same way as policy parsing. Duplicate
+// entries are removed together because they represent the same permission.
+func WithoutDomain(policy *Policy, domain string) (*Policy, error) {
+	domain, err := normalizeDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+	clone, err := clonePolicy(policy)
+	if err != nil {
+		return nil, err
 	}
 	domains := make([]string, 0, len(clone.AllowDomains))
 	removed := false
@@ -275,6 +296,14 @@ func WithoutDomain(policy *Policy, domain string) (*Policy, error) {
 	}
 	clone.AllowDomains = domains
 	return clone, nil
+}
+
+func normalizeDomain(domain string) (string, error) {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" {
+		return "", fmt.Errorf("network policy: empty domain")
+	}
+	return domain, nil
 }
 
 func sameRuleSelector(a, b Rule) bool {

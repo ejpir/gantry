@@ -11,7 +11,9 @@ package vmm
 // (pic.go), 16550 UART (uart16550.go) and CMOS RTC (cmos.go) are userspace.
 // MMIO exits carry instruction bytes (no operand value), so writes are
 // decoded with x86emul.go. WHPX's in-kernel LAPIC delivers virtual interrupts.
-// Resource validation admits one BSP until INIT/SIPI AP startup is supported.
+// Each virtual processor has its own host run-loop thread. WHPX creates APs
+// with StartupSuspend set, then its emulated LAPIC releases them when the BSP
+// sends the normal INIT/SIPI sequence.
 
 import (
 	"encoding/binary"
@@ -122,24 +124,26 @@ type whpxBackend struct {
 	lifecycle  *nativeBackendLifecycle
 	mu         sync.Mutex // serializes register file get/set per exit (cheap)
 	nativeMu   sync.RWMutex
+	cancelMu   sync.Mutex
 	runMu      sync.Mutex
 	runningVP  []bool
 	picPending []uint32 // guarded by runMu; PIC serialization keeps this short
 	picEpoch   uint64   // increments on enqueue; closes the stopped-to-running race
-	exitCount  uint64
+	exitCount  atomic.Uint64
 	stats      struct {
 		exits atomic.Uint64
 		halt  atomic.Uint64
 		mmio  atomic.Uint64
 		other atomic.Uint64
 	}
+	profileMu      sync.Mutex
 	profilePorts   []uint64
 	profileMMIO    [2]uint64 // read, write
 	profileGPAs    map[uint64]uint64
 	profileSummary sync.Once
 
 	partitionCreated bool
-	mapped           bool
+	mappedRAM        []x86RAMRegion
 	createdVPs       []bool
 }
 
@@ -153,6 +157,8 @@ func (b *whpxBackend) runStats() runStats {
 }
 
 func (b *whpxBackend) cancelVCPUs() error {
+	b.cancelMu.Lock()
+	defer b.cancelMu.Unlock()
 	b.runMu.Lock()
 	running := make([]int, 0, len(b.runningVP))
 	for vp, active := range b.runningVP {
@@ -274,13 +280,14 @@ func (b *whpxBackend) releaseNative() error {
 		}
 		b.createdVPs[vp] = false
 	}
-	if b.mapped {
+	for index := len(b.mappedRAM) - 1; index >= 0; index-- {
+		region := b.mappedRAM[index]
 		if err := whvCall("WHvUnmapGpaRange", procUnmapGpaRange,
-			uintptr(b.h), 0, uintptr(len(b.m.ram))); err != nil {
-			errs = append(errs, fmt.Errorf("unmap WHPX guest RAM: %w", err))
+			uintptr(b.h), uintptr(region.guestBase), uintptr(region.size)); err != nil {
+			errs = append(errs, fmt.Errorf("unmap WHPX guest RAM at GPA %#x: %w", region.guestBase, err))
 		}
-		b.mapped = false
 	}
+	b.mappedRAM = nil
 	if b.partitionCreated {
 		if err := whvCall("WHvDeletePartition", procDeletePartition, uintptr(b.h)); err != nil {
 			errs = append(errs, fmt.Errorf("delete WHPX partition: %w", err))
@@ -449,12 +456,14 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 	if err := whvCall("WHvSetupPartition", procSetupPartition, uintptr(h)); err != nil {
 		return err
 	}
-	if err := whvCall("WHvMapGpaRange", procMapGpaRange,
-		uintptr(h), uintptr(unsafe.Pointer(&m.ram[0])), 0,
-		uintptr(len(m.ram)), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
-		return fmt.Errorf("WHvMapGpaRange: %w", err)
+	for _, region := range x86RAMRegions(uint64(len(m.ram))) {
+		if err := whvCall("WHvMapGpaRange", procMapGpaRange,
+			uintptr(h), uintptr(unsafe.Pointer(&m.ram[region.hostOffset])), uintptr(region.guestBase),
+			uintptr(region.size), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
+			return fmt.Errorf("WHvMapGpaRange(GPA %#x, size %d): %w", region.guestBase, region.size, err)
+		}
+		b.mappedRAM = append(b.mappedRAM, region)
 	}
-	b.mapped = true
 
 	// Stable default: userspace IO-APIC delivering into WHPX's emulated LAPIC.
 	// The experimental PIC path is opt-in because its edge/in-service model is
@@ -532,7 +541,52 @@ func (b *whpxBackend) bootLoop() error {
 	}
 	m.bootTiming.setRunStats(b.runStats)
 	m.bootTiming.start("vCPU entered WHPX")
+	if err := b.startSecondaryVCPUs(); err != nil {
+		return err
+	}
 	return b.runVPLoop(0)
+}
+
+// startSecondaryVCPUs enters every WHPX AP on its own locked OS thread. APs
+// initially block in WHPX with StartupSuspend set; Linux's INIT/SIPI sequence
+// through the emulated LAPIC supplies their actual startup state.
+func (b *whpxBackend) startSecondaryVCPUs() error {
+	started := make(chan bool, max(0, b.m.vcpus-1))
+	for id := 1; id < b.m.vcpus; id++ {
+		go func(vp uint32) {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			if !b.lifecycle.claimWorker() {
+				started <- false
+				return
+			}
+			defer b.lifecycle.workerDone()
+			started <- true
+			if b.lifecycle.isStopping() {
+				return
+			}
+			b.failVCPU(vp, b.runVPLoop(vp))
+		}(uint32(id))
+	}
+	for range b.m.vcpus - 1 {
+		if !<-started {
+			return errMachineClosed
+		}
+	}
+	return nil
+}
+
+func (b *whpxBackend) failVCPU(vp uint32, err error) {
+	if err == nil || b.lifecycle.isStopping() {
+		return
+	}
+	workerErr := fmt.Errorf("WHPX vCPU %d: %w", vp, err)
+	b.lifecycle.recordError(workerErr)
+	fmt.Fprintf(os.Stderr, "\n[cpu%d] run loop: %v\n", vp, err)
+	b.lifecycle.stop()
+	if cancelErr := b.cancelVCPUs(); cancelErr != nil {
+		b.lifecycle.recordError(cancelErr)
+	}
 }
 
 const (
@@ -545,9 +599,13 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 	var executionState uint16
 	rflags := uint64(2) // initial BSP RFLAGS; interrupts start disabled
 	for {
-		picEpoch, err := b.injectPICInterrupt(vp, executionState, rflags)
-		if err != nil {
-			return err
+		var picEpoch uint64
+		var err error
+		if vp == 0 {
+			picEpoch, err = b.injectPICInterrupt(vp, executionState, rflags)
+			if err != nil {
+				return err
+			}
 		}
 		if !b.beginRun(vp) {
 			return nil
@@ -555,7 +613,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 		// Close the queue-before-beginRun race without mistaking an existing
 		// backlog for a new arrival. A backlog must run one event at a time so
 		// WHPX can consume its single PendingEvent slot.
-		if b.picQueuedAfter(picEpoch) {
+		if vp == 0 && b.picQueuedAfter(picEpoch) {
 			b.endRun(vp)
 			continue
 		}
@@ -602,18 +660,18 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			}
 		}
 		if dbgIO {
-			b.exitCount++
-			if b.exitCount <= 500 || b.exitCount%100000 == 0 {
+			exitCount := b.exitCount.Add(1)
+			if exitCount <= 500 || exitCount%100000 == 0 {
 				reason := binary.LittleEndian.Uint32(buf[0:])
 				if reason == whvExitIoPort {
 					fmt.Printf("[whpx] exit io rip=%#x port=%#x info=%#x len=%d/%d (n=%d)\n",
 						binary.LittleEndian.Uint64(buf[32:]),
 						binary.LittleEndian.Uint16(buf[72:]),
 						binary.LittleEndian.Uint32(buf[68:]),
-						buf[10]&0x0f, buf[48], b.exitCount)
+						buf[10]&0x0f, buf[48], exitCount)
 				} else {
 					fmt.Printf("[whpx] exit %#x rip=%#x (n=%d)\n", reason,
-						binary.LittleEndian.Uint64(buf[32:]), b.exitCount)
+						binary.LittleEndian.Uint64(buf[32:]), exitCount)
 				}
 			}
 		}
@@ -624,7 +682,9 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			}
 		case whvExitIoPort:
 			if b.profilePorts != nil {
+				b.profileMu.Lock()
 				b.profilePorts[binary.LittleEndian.Uint16(buf[72:])]++
+				b.profileMu.Unlock()
 			}
 			if err := b.handleIOExit(vp, buf); err != nil {
 				return err
@@ -660,6 +720,8 @@ func (b *whpxBackend) printBootProfileSummary() {
 	if b.profilePorts == nil {
 		return
 	}
+	b.profileMu.Lock()
+	defer b.profileMu.Unlock()
 	fmt.Printf("boot-profile: WHPX MMIO reads=%d writes=%d; top I/O ports:", b.profileMMIO[0], b.profileMMIO[1])
 	for range 16 {
 		port, count := -1, uint64(0)
@@ -705,7 +767,9 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	instr := buf[52 : 52+15]
 	gpa := binary.LittleEndian.Uint64(buf[72:])
 	if b.profileGPAs != nil {
+		b.profileMu.Lock()
 		b.profileGPAs[gpa]++
+		b.profileMu.Unlock()
 	}
 
 	op, err := decodeX86MMIO(instr)
@@ -714,11 +778,13 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	}
 
 	if b.profilePorts != nil {
+		b.profileMu.Lock()
 		if op.isWrite {
 			b.profileMMIO[1]++
 		} else {
 			b.profileMMIO[0]++
 		}
+		b.profileMu.Unlock()
 	}
 
 	b.mu.Lock()

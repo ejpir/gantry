@@ -110,6 +110,33 @@ func usedPop(mem *RAM, qn uint32) (usedElem, bool) {
 	return usedAt(mem, qn, n-1), true
 }
 
+func TestSplitRAMTranslatesHighGuestAddresses(t *testing.T) {
+	ram := make([]byte, 12)
+	mem := NewSplitRAM(ram, 4, 0x10)
+	if err := mem.writeAt(2, []byte{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.writeAt(0x10, []byte{3, 4, 5}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ram; got[2] != 1 || got[3] != 2 || got[4] != 3 || got[6] != 5 {
+		t.Fatalf("host RAM translation = %v", got)
+	}
+	var high [3]byte
+	if err := mem.readAt(0x10, high[:]); err != nil || high != [3]byte{3, 4, 5} {
+		t.Fatalf("high RAM read = %v, %v", high, err)
+	}
+	for _, span := range []struct{ addr, size uint64 }{
+		{4, 1},        // start of the guest hole
+		{3, 2},        // crosses from low RAM into the hole
+		{0x10 + 7, 2}, // crosses the end of high RAM
+	} {
+		if mem.contains(span.addr, span.size) {
+			t.Errorf("contains(%#x, %d) accepted an unmapped span", span.addr, span.size)
+		}
+	}
+}
+
 func TestVirtioBlkRead(t *testing.T) {
 	// backing image: 1 MiB, sector i filled with byte i
 	img := filepath.Join(t.TempDir(), "rootfs.img")

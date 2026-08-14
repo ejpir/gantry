@@ -1,5 +1,6 @@
 # build artifacts (regenerate: ./scripts/build.sh)
 /artifacts/
+/.codex-kernel-lean/
 /gantry
 /hostctl
 /cmd/hostctl/hostctl

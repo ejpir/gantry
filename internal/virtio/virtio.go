@@ -42,30 +42,59 @@ const (
 	virtqMaxChainDescriptors = 65
 )
 
-// RAM is a device's view of guest physical memory. base is the guest physical
-// address of ram[0] (0x40000000 on arm64, 0 on x86-64).
+// RAM is a device's view of guest physical memory. Most machines expose one
+// contiguous region; x86 machines with more than 3 GiB use two regions around
+// the traditional 3-4 GiB platform-device hole.
 type RAM struct {
-	mu   sync.RWMutex
-	ram  []byte
-	base uint64
+	mu      sync.RWMutex
+	ram     []byte
+	regions []ramRegion
 }
 
-// NewRAM wraps the guest RAM slice; base is the guest physical address of
-// ram[0] (0x40000000 on arm64, 0 on x86-64).
-func NewRAM(ram []byte, base uint64) *RAM { return &RAM{ram: ram, base: base} }
+type ramRegion struct {
+	guestBase uint64
+	hostBase  uint64
+	size      uint64
+}
+
+// NewRAM wraps one contiguous guest RAM slice; base is the guest physical
+// address of ram[0] (0x40000000 on arm64, 0 on small x86-64 guests).
+func NewRAM(ram []byte, base uint64) *RAM {
+	return &RAM{ram: ram, regions: []ramRegion{{guestBase: base, size: uint64(len(ram))}}}
+}
+
+// NewSplitRAM wraps a host-contiguous allocation whose tail appears at a
+// higher guest-physical address. It is used by x86 to leave its platform MMIO
+// hole unmapped without wasting host memory on the hole.
+func NewSplitRAM(ram []byte, lowSize, highBase uint64) *RAM {
+	if uint64(len(ram)) <= lowSize {
+		return NewRAM(ram, 0)
+	}
+	return &RAM{ram: ram, regions: []ramRegion{
+		{size: lowSize},
+		{guestBase: highBase, hostBase: lowSize, size: uint64(len(ram)) - lowSize},
+	}}
+}
 
 func (m *RAM) size() uint64 { return uint64(len(m.ram)) }
 
 // contains reports whether [addr, addr+n) lies fully inside guest RAM.
 func (m *RAM) contains(addr, n uint64) bool {
-	return addr >= m.base && n <= uint64(len(m.ram)) && addr-m.base <= uint64(len(m.ram))-n
+	_, ok := m.rangeOff(addr, n)
+	return ok
 }
 
-func (m *RAM) off(addr uint64) (uint64, error) {
-	if addr < m.base || addr >= m.base+uint64(len(m.ram)) {
-		return 0, fmt.Errorf("guest addr %#x outside RAM", addr)
+func (m *RAM) rangeOff(addr, n uint64) (uint64, bool) {
+	for _, region := range m.regions {
+		if addr < region.guestBase {
+			continue
+		}
+		regionOffset := addr - region.guestBase
+		if regionOffset <= region.size && n <= region.size-regionOffset {
+			return region.hostBase + regionOffset, true
+		}
 	}
-	return addr - m.base, nil
+	return 0, false
 }
 
 // Guest RAM is shared between vCPU exit handlers and every device goroutine.
@@ -73,12 +102,9 @@ func (m *RAM) off(addr uint64) (uint64, error) {
 // paths) see a coherent memory instead of raw slice races; it is leaf-level
 // (held only for the copy), so it can't deadlock against device locks.
 func (m *RAM) readAt(addr uint64, p []byte) error {
-	o, err := m.off(addr)
-	if err != nil {
-		return err
-	}
-	if o+uint64(len(p)) > uint64(len(m.ram)) {
-		return fmt.Errorf("guest read %#x+%d overflows RAM", addr, len(p))
+	o, ok := m.rangeOff(addr, uint64(len(p)))
+	if !ok {
+		return fmt.Errorf("guest read %#x+%d outside RAM", addr, len(p))
 	}
 	m.mu.RLock()
 	copy(p, m.ram[o:o+uint64(len(p))])
@@ -86,12 +112,9 @@ func (m *RAM) readAt(addr uint64, p []byte) error {
 	return nil
 }
 func (m *RAM) writeAt(addr uint64, p []byte) error {
-	o, err := m.off(addr)
-	if err != nil {
-		return err
-	}
-	if o+uint64(len(p)) > uint64(len(m.ram)) {
-		return fmt.Errorf("guest write %#x+%d overflows RAM", addr, len(p))
+	o, ok := m.rangeOff(addr, uint64(len(p)))
+	if !ok {
+		return fmt.Errorf("guest write %#x+%d outside RAM", addr, len(p))
 	}
 	m.mu.Lock()
 	copy(m.ram[o:o+uint64(len(p))], p)

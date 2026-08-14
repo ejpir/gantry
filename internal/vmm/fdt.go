@@ -189,16 +189,18 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.propU32("reg", 0, ramBase, uint32(memSize>>32), uint32(memSize))
 	f.endNode()
 
-	// /cpus — one node per vCPU. KVM assigns vCPU IDs to MPIDR Aff0, so
-	// these exact values are also the PSCI CPU_ON targets.
+	// /cpus — one node per vCPU. The affinity must match the MPIDR assigned
+	// by the host backend because Linux passes this value back as the PSCI
+	// CPU_ON target. KVM uses Aff0; Hypervisor.framework uses Aff1.
 	f.beginNode("cpus")
 	f.propU32("#address-cells", 1)
 	f.propU32("#size-cells", 0)
 	for i := 0; i < vcpus; i++ {
-		f.beginNode(fmt.Sprintf("cpu@%x", i))
+		mpidr := guestVCPUMPIDR(i)
+		f.beginNode(fmt.Sprintf("cpu@%x", mpidr))
 		f.propStr("device_type", "cpu")
 		f.propStr("compatible", "arm,armv8")
-		f.propU32("reg", uint32(i))
+		f.propU32("reg", mpidr)
 		f.propStr("enable-method", "psci")
 		f.endNode()
 	}

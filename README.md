@@ -125,7 +125,7 @@ go test ./...
 | Linux arm64 | KVM | Implemented; requires `/dev/kvm` |
 | Linux x86-64 | KVM | Verified on EC2 `c5.metal` |
 | macOS arm64 | Hypervisor.framework | Verified; macOS 13+ |
-| Windows x86-64 | WHPX | Verified on EC2 `m6i.metal`; currently one vCPU |
+| Windows x86-64 | WHPX | Verified on EC2 `m6i.metal`, including SMP |
 
 ## Limitations
 
