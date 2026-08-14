@@ -56,7 +56,10 @@ badge, then confirm to install it. Updates download the matching platform
 binary, verify its SHA-256 sidecar and executable format, and atomically
 replace the current executable. macOS additionally requires the release's
 verified Hypervisor entitlement; Windows completes replacement through a
-detached helper after the dashboard exits. Running sandboxes are not stopped.
+detached helper after the dashboard exits. For privilege safety, Windows
+self-update refuses elevated processes; install Gantry in a user-writable
+location or replace an administrator-managed binary manually. Running
+sandboxes are not stopped.
 
 ## Use
 
