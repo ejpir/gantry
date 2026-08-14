@@ -200,6 +200,7 @@ type sandboxTUIModel struct {
 	dialogScroll    int
 	confirmRemove   bool
 	createFocus     int
+	createErrFocus  int
 	createName      textinput.Model
 	createImage     textinput.Model
 	createCPUs      resourceSlider
@@ -318,6 +319,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		refreshing:      true,
 		spinner:         sp,
 		animating:       true,
+		createErrFocus:  -1,
 		createName:      name,
 		createImage:     image,
 		createCPUs:      createCPUs,
