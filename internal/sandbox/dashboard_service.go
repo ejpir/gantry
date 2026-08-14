@@ -457,6 +457,7 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 		configOK := false
 		if raw, readErr := os.ReadFile(sandbox.ConfigPath); readErr == nil && json.Unmarshal(raw, &cfg) == nil {
 			configOK = true
+			sandbox.Kernel = cfg.Kernel
 			sandbox.Image = cfg.ImageRef
 			if sandbox.Image == "" {
 				sandbox.Image = filepath.Base(cfg.Image)
@@ -467,7 +468,9 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			if cfg.Runtime != "" {
 				sandbox.Runtime = cfg.Runtime
 			}
-			sandbox.RW, sandbox.Net, sandbox.Shares = cfg.RW, cfg.Net, len(cfg.Shares)
+			sandbox.RW, sandbox.RWLayer = cfg.RW, cfg.RWLayer
+			sandbox.DiskSizeMiB = dashboardDiskSizeMiB(cfg)
+			sandbox.Net, sandbox.Shares, sandbox.Ports = cfg.Net, len(cfg.Shares), len(cfg.Ports)
 			sandbox.ProcessIsolation = normalizedProcessIsolation(cfg.ProcessIsolation)
 			sandbox.GVProxy = cfg.GVProxy
 			sandbox.NetPolicy = cfg.NetPol
@@ -565,6 +568,16 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 		return data.Secrets[i].Sandbox < data.Secrets[j].Sandbox
 	})
 	return data, nil
+}
+
+func dashboardDiskSizeMiB(cfg RunConfig) uint {
+	if cfg.RWLayer != "" {
+		if info, err := os.Stat(cfg.RWLayer); err == nil && info.Size() > 0 {
+			const mib = int64(1 << 20)
+			return uint((info.Size() + mib - 1) / mib)
+		}
+	}
+	return cfg.RWLayerSizeMiB
 }
 
 func loadDashboardRules(sandbox string, cfg RunConfig) []dashboardapi.Rule {

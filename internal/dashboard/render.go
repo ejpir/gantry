@@ -3,6 +3,7 @@ package dashboard
 import (
 	"fmt"
 	"image/color"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -16,7 +17,7 @@ const (
 	tuiMenuHeight   = 3
 	tuiTabsHeight   = 3
 	tuiStatusHeight = 2
-	tuiCardHeight   = 9
+	tuiCardHeight   = 10
 	tuiCardGapX     = 2
 	tuiCardGapY     = 1
 )
@@ -514,6 +515,7 @@ func (m sandboxTUIModel) renderSandboxCard(theme tuiTheme, layout tuiDashboardLa
 	}
 	compute := fmt.Sprintf("%s · %dc · %dMB", runtimeName, maxInt(1, sandbox.VCPUs), sandbox.MemMB)
 	computeLine := labeledValue(theme, "compute", compute, innerWidth)
+	storageLine := labeledValue(theme, "storage", sandboxStorageSummary(sandbox, false), innerWidth)
 	network := "offline"
 	if sandbox.Net {
 		network = "connected"
@@ -530,7 +532,7 @@ func (m sandboxTUIModel) renderSandboxCard(theme tuiTheme, layout tuiDashboardLa
 	networkLine := labeledValue(theme, "network", network, innerWidth)
 	actions := m.renderCardActions(theme, sandbox, selected, innerWidth)
 
-	lines := []string{header, separator, image, computeLine, networkLine, separator, actions}
+	lines := []string{header, separator, image, computeLine, storageLine, networkLine, separator, actions}
 	if layout.cardHeight < tuiCardHeight {
 		lines = compactCardLines(lines, maxInt(1, layout.cardHeight-2))
 	}
@@ -965,15 +967,25 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		{"State", state},
 		{"Image", sandbox.Image},
 		{"Runtime", sandbox.Runtime},
+		{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
 		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.VCPUs), sandbox.MemMB)},
 		{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
-		{"Storage", map[bool]string{true: "writable overlay", false: "read-only"}[sandbox.RW]},
+		{"Storage", sandboxStorageSummary(*sandbox, true)},
 		{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
-		{"Traffic", "↑ " + formatBytes(sandbox.TXBytes) + "  ↓ " + formatBytes(sandbox.RXBytes)},
-		{"Blocked", fmt.Sprintf("%d packets", sandbox.DroppedPackets)},
-		{"Shares", fmt.Sprintf("%d", sandbox.Shares)},
-		{"Secrets", sandbox.Secrets},
 	}
+	if sandbox.Net {
+		rows = append(rows,
+			[2]string{"Local access", map[bool]string{true: "allowed", false: "blocked"}[sandbox.AllowLocal]},
+			[2]string{"Policy", pathBaseOr(sandbox.NetPolicy, "built-in default")},
+		)
+	}
+	rows = append(rows,
+		[2]string{"Traffic", "↑ " + formatBytes(sandbox.TXBytes) + "  ↓ " + formatBytes(sandbox.RXBytes)},
+		[2]string{"Blocked", fmt.Sprintf("%d packets", sandbox.DroppedPackets)},
+		[2]string{"Shares", fmt.Sprintf("%d", sandbox.Shares)},
+		[2]string{"Published", fmt.Sprintf("%d ports", sandbox.Ports)},
+		[2]string{"Secrets", sandbox.Secrets},
+	)
 	if sandbox.PID > 0 {
 		rows = append(rows, [2]string{"VMM PID", fmt.Sprint(sandbox.PID)})
 	}
@@ -986,10 +998,58 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		}
 		lines = append(lines, label+value)
 	}
-	pathLabel := lipgloss.NewStyle().Foreground(theme.muted).Render("Config")
-	path := lipgloss.Wrap(sandbox.ConfigPath, width, "")
+	var paths []string
+	appendPath := func(label, path string) {
+		if path == "" {
+			return
+		}
+		paths = append(paths, lipgloss.NewStyle().Foreground(theme.muted).Render(label)+"\n"+lipgloss.Wrap(path, width, ""))
+	}
+	appendPath("Kernel asset", sandbox.Kernel)
+	appendPath("Disk image", sandbox.RWLayer)
+	appendPath("Policy file", sandbox.NetPolicy)
+	appendPath("Config", sandbox.ConfigPath)
 	footer := lipgloss.NewStyle().Foreground(theme.muted).Render("i / esc close")
-	return header + "\n\n" + strings.Join(lines, "\n") + "\n\n" + pathLabel + "\n" + path + "\n\n" + footer
+	return header + "\n\n" + strings.Join(lines, "\n") + "\n\n" + strings.Join(paths, "\n\n") + "\n\n" + footer
+}
+
+func sandboxStorageSummary(sandbox tuiSandbox, details bool) string {
+	if sandbox.RWLayer == "" {
+		if sandbox.RW {
+			return "writable overlay"
+		}
+		return "read-only root filesystem"
+	}
+	mode := "read-only"
+	if sandbox.RW {
+		mode = "writable"
+	}
+	if sandbox.DiskSizeMiB == 0 {
+		return mode + " persistent disk"
+	}
+	size := formatDiskSizeMiB(sandbox.DiskSizeMiB, details)
+	if details {
+		return size + " persistent ext4 · " + mode
+	}
+	return size + " persistent · " + mode
+}
+
+func formatDiskSizeMiB(size uint, details bool) string {
+	unitMiB, unitGiB := "MB", "GB"
+	if details {
+		unitMiB, unitGiB = "MiB", "GiB"
+	}
+	if size >= 1024 && size%1024 == 0 {
+		return fmt.Sprintf("%d%s", size/1024, unitGiB)
+	}
+	return fmt.Sprintf("%d%s", size, unitMiB)
+}
+
+func pathBaseOr(path, fallback string) string {
+	if path == "" {
+		return fallback
+	}
+	return filepath.Base(path)
 }
 
 func (m sandboxTUIModel) renderRemoveDialog(theme tuiTheme, width int) string {

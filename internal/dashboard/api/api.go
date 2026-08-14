@@ -24,14 +24,18 @@ type Sandbox struct {
 	PID              int
 	Image            string
 	Runtime          string
+	Kernel           string
 	Secrets          string
 	SecretCount      int
 	RW               bool
+	RWLayer          string
+	DiskSizeMiB      uint
 	Net              bool
 	GVProxy          string
 	NetPolicy        string
 	AllowLocal       bool
 	Shares           int
+	Ports            int
 	MemMB            uint
 	VCPUs            int
 	ProcessIsolation string

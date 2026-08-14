@@ -447,6 +447,35 @@ func TestSandboxTUIResponsiveGrid(t *testing.T) {
 	}
 }
 
+func TestSandboxTUICardAndDetailsShowStorageAndOperationalMetadata(t *testing.T) {
+	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{
+		Name: "dev", State: tuiRunning, PID: 42, Image: "alpine:latest", Runtime: "crun",
+		Kernel: "/cache/assets/v0.0.6/gantry-kernel-arm64", MemMB: 1024, VCPUs: 2,
+		RW: true, RWLayer: "/data/dev.ext4", DiskSizeMiB: 2048,
+		Net: true, NetPolicy: "/policies/locked.json", AllowLocal: false,
+		Shares: 1, Ports: 2, Secrets: "TOKEN", ConfigPath: "/sandboxes/dev/sandbox.json",
+	}}
+	theme := tuiThemeFor(m.dark)
+	card := ansi.Strip(m.renderSandboxCard(theme, m.dashboardLayout(), m.sandboxes[0], true))
+	for _, want := range []string{"storage", "2GB", "persistent"} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("card missing %q:\n%s", want, card)
+		}
+	}
+	details := ansi.Strip(m.renderInfoDialog(theme, 68))
+	for _, want := range []string{
+		"gantry-kernel-arm64", "2GiB persistent ext4", "Published", "2 ports",
+		"Local access", "blocked", "locked.json", "Kernel asset", "/data/dev.ext4",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+}
+
 func TestSandboxTUITableNavigationKeepsSelectionVisible(t *testing.T) {
 	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
 	m.loading = false

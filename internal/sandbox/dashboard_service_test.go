@@ -20,10 +20,17 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	rwLayer := filepath.Join(t.TempDir(), "alpha.ext4")
+	if err := os.WriteFile(rwLayer, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(rwLayer, 2<<30); err != nil {
+		t.Fatal(err)
+	}
 	writeDashboardTestConfig(t, "alpha", RunConfig{
-		Image: "/cache/alpine.erofs", ImageRef: "alpine:latest", Runtime: "crun",
-		RW: true, Net: true, MemMB: 768, VCPUs: 2,
-		Shares: []string{"code=/tmp"}, SecretNames: []string{"TOKEN"},
+		Image: "/cache/alpine.erofs", ImageRef: "alpine:latest", Runtime: "crun", Kernel: "/cache/gantry-kernel-arm64",
+		RW: true, RWLayer: rwLayer, RWLayerSizeMiB: 1024, Net: true, MemMB: 768, VCPUs: 2,
+		Shares: []string{"code=/tmp"}, Ports: []string{"127.0.0.1:8080:80"}, SecretNames: []string{"TOKEN"},
 	})
 	traffic := netpol.TrafficSnapshot{
 		Version: 1, TXBytes: 1200, RXBytes: 3400, DroppedPackets: 2,
@@ -54,6 +61,9 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	if alpha.Runtime != "crun" || alpha.MemMB != 768 || alpha.VCPUs != 2 || alpha.Shares != 1 {
 		t.Fatalf("alpha runtime metadata = %#v", alpha)
 	}
+	if alpha.Kernel != "/cache/gantry-kernel-arm64" || alpha.RWLayer != rwLayer || alpha.DiskSizeMiB != 2048 || alpha.Ports != 1 {
+		t.Fatalf("alpha storage metadata = %#v", alpha)
+	}
 	if alpha.TXBytes != 1200 || alpha.RXBytes != 3400 || alpha.DroppedPackets != 2 {
 		t.Fatalf("alpha traffic totals = %#v", alpha)
 	}
@@ -71,6 +81,13 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	}
 	if !got.Sandboxes[1].ConfigError {
 		t.Fatal("missing sandbox.json should be surfaced on the card")
+	}
+}
+
+func TestDashboardDiskSizeFallsBackToConfiguredCapacity(t *testing.T) {
+	cfg := RunConfig{RWLayer: filepath.Join(t.TempDir(), "missing.ext4"), RWLayerSizeMiB: 4096}
+	if got := dashboardDiskSizeMiB(cfg); got != 4096 {
+		t.Fatalf("disk size = %d MiB, want configured 4096 MiB", got)
 	}
 }
 
