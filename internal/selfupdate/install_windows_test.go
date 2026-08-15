@@ -79,6 +79,9 @@ func TestUpdateScriptDoesNotInterpolatePaths(t *testing.T) {
 	if !strings.Contains(script, "$waitPid=42") {
 		t.Fatalf("update script does not contain wait PID: %s", script)
 	}
+	if !strings.Contains(script, "MoveFileEx($staged,$target,9)") {
+		t.Fatalf("update script does not use atomic replacement: %s", script)
+	}
 }
 
 func TestEncodePowerShellUsesUTF16LE(t *testing.T) {
