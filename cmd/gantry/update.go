@@ -84,21 +84,6 @@ func cmdUpdateCheck(argv []string) int {
 	return 0
 }
 
-func cmdFinishUpdate(argv []string) int {
-	flags := flag.NewFlagSet("_finish-update", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	target := flags.String("target", "", "replacement target")
-	staged := flags.String("staged", "", "verified staged executable")
-	waitPID := flags.Int("wait-pid", 0, "process to wait for")
-	if err := flags.Parse(argv); err != nil || flags.NArg() != 0 || *waitPID < 0 {
-		return 2
-	}
-	if err := selfupdate.Finish(*target, *staged, *waitPID); err != nil {
-		return 1
-	}
-	return 0
-}
-
 func maybeNotifyUpdate(argv []string, statusCode int) {
 	if statusCode != 0 || !selfupdate.Enabled() || !term.IsTerminal(int(os.Stderr.Fd())) || skipUpdateNotice(argv) {
 		return
@@ -117,7 +102,7 @@ func skipUpdateNotice(argv []string) bool {
 		return true // the TUI performs its own asynchronous check
 	}
 	switch argv[0] {
-	case "tui", "version", "update", "serve", "daemon", "_update-check", "_finish-update", "_net-worker", "_vmm-worker":
+	case "tui", "version", "update", "serve", "daemon", "_update-check", "_net-worker", "_vmm-worker":
 		return true
 	default:
 		return false
