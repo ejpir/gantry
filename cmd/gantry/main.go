@@ -114,8 +114,6 @@ func runMain(args []string) int {
 		return cmdUpdate(argv)
 	case "_update-check":
 		return cmdUpdateCheck(argv)
-	case "_finish-update":
-		return cmdFinishUpdate(argv)
 	case "daemon":
 		if len(argv) < 1 || len(argv) > 2 {
 			return 2

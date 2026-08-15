@@ -18,8 +18,3 @@ func installStaged(staged, target string, _ int) (bool, error) {
 	}
 	return false, nil
 }
-
-// Finish is the hidden Windows replacement helper entry point.
-func Finish(string, string, int) error {
-	return fmt.Errorf("deferred update completion is only used on Windows")
-}

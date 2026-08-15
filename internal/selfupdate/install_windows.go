@@ -3,17 +3,16 @@
 package selfupdate
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"syscall"
-	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -21,96 +20,96 @@ import (
 
 const elevatedUpdateMessage = "windows self-update is disabled for elevated processes; run Gantry unelevated from a user-writable installation or replace the binary manually"
 
-var processElevation = currentProcessElevation
+var (
+	processElevation = currentProcessElevation
+	systemDirectory  = windows.GetSystemDirectory
+)
 
 func installStaged(staged, target string, waitPID int) (bool, error) {
 	if err := requireUnelevatedProcess(); err != nil {
 		return false, err
 	}
-	// stageBinary has already proved that target's directory is writable and
-	// placed the verified payload there. Keep the helper in the same directory
-	// instead of crossing into user cache, which may have weaker permissions
-	// than an installation directory.
-	helper, helperPath, err := createLockedUpdateHelper(filepath.Dir(target))
-	if err != nil {
-		return false, fmt.Errorf("create update helper: %w", err)
-	}
-	cleanup := true
-	defer func() {
-		_ = helper.Close()
-		if cleanup {
-			_ = os.Remove(helperPath)
-		}
-	}()
-	source, err := os.Open(staged)
-	if err != nil {
-		return false, fmt.Errorf("open staged update: %w", err)
-	}
-	if _, err := io.Copy(helper, source); err != nil {
-		_ = source.Close()
-		return false, fmt.Errorf("copy update helper: %w", err)
-	}
-	if err := source.Close(); err != nil {
-		return false, fmt.Errorf("close staged update: %w", err)
-	}
-	if err := helper.Sync(); err != nil {
-		return false, fmt.Errorf("sync update helper: %w", err)
-	}
 	if waitPID <= 0 {
 		waitPID = os.Getpid()
 	}
-	command := exec.Command(helperPath, "_finish-update",
-		"--target", target, "--staged", staged, "--wait-pid", strconv.Itoa(waitPID))
+	command, err := windowsUpdateCommand(staged, target, waitPID)
+	if err != nil {
+		return false, err
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008, // DETACHED_PROCESS
 		HideWindow:    true,
 	}
 	if err := command.Start(); err != nil {
-		return false, fmt.Errorf("start update helper: %w", err)
+		return false, fmt.Errorf("start Windows update process: %w", err)
 	}
-	// createLockedUpdateHelper denies concurrent write and delete opens. Keep
-	// that handle alive through CreateProcess so the path cannot be replaced
-	// between verification/copy and image mapping.
-	cleanup = false
-	_ = helper.Close()
-	// Once Start succeeds the helper owns staged. A Release failure must not
-	// make the caller delete the file out from under that running helper.
+	// Once Start succeeds the detached process owns staged. A Release failure
+	// must not make the caller delete the file out from under that process.
 	_ = command.Process.Release()
 	return true, nil
 }
 
-// createLockedUpdateHelper creates a random file without sharing write or
-// delete access. os.CreateTemp on Windows shares writes, which permits a
-// same-user process to modify a helper while its creator still has it open.
-func createLockedUpdateHelper(dir string) (*os.File, string, error) {
-	for range 32 {
-		var entropy [16]byte
-		if _, err := rand.Read(entropy[:]); err != nil {
-			return nil, "", fmt.Errorf("generate helper name: %w", err)
-		}
-		path := filepath.Join(dir, ".gantry-update-helper-"+hex.EncodeToString(entropy[:])+".exe")
-		pathPtr, err := windows.UTF16PtrFromString(path)
-		if err != nil {
-			return nil, "", err
-		}
-		handle, err := windows.CreateFile(
-			pathPtr,
-			windows.GENERIC_READ|windows.GENERIC_WRITE,
-			windows.FILE_SHARE_READ,
-			nil,
-			windows.CREATE_NEW,
-			windows.FILE_ATTRIBUTE_NORMAL,
-			0,
-		)
-		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-			continue
-		}
-		if err != nil {
-			return nil, "", err
-		}
-		return os.NewFile(uintptr(handle), path), path, nil
+func windowsUpdateCommand(staged, target string, waitPID int) (*exec.Cmd, error) {
+	systemDir, err := systemDirectory()
+	if err != nil {
+		return nil, fmt.Errorf("locate Windows system directory: %w", err)
 	}
-	return nil, "", fmt.Errorf("allocate unique update helper name")
+	powerShell := filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe")
+	if info, err := os.Stat(powerShell); err != nil {
+		return nil, fmt.Errorf("locate Windows PowerShell: %w", err)
+	} else if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("windows PowerShell path is not a regular file: %s", powerShell)
+	}
+	command := exec.Command(powerShell,
+		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-EncodedCommand", encodePowerShell(updateScript(staged, target, waitPID)),
+	)
+	// Keep native DLL and executable lookup away from caller-controlled working
+	// directories. The executable itself is also addressed by its absolute path.
+	command.Dir = systemDir
+	return command, nil
+}
+
+func updateScript(staged, target string, waitPID int) string {
+	// The path values are base64-encoded separately, so no path characters can
+	// become PowerShell syntax. waitPID is formatted as a decimal integer.
+	staged64 := base64.StdEncoding.EncodeToString([]byte(staged))
+	target64 := base64.StdEncoding.EncodeToString([]byte(target))
+	return `$ErrorActionPreference='Stop'
+$staged=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + staged64 + `'))
+$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + target64 + `'))
+$waitPid=` + strconv.Itoa(waitPID) + `
+if ($waitPid -gt 0) {
+  try {
+    $process=[Diagnostics.Process]::GetProcessById($waitPid)
+    $process.WaitForExit()
+    $process.Dispose()
+  } catch [ArgumentException] {}
+}
+$deadline=[DateTime]::UtcNow.AddMinutes(1)
+while ($true) {
+  try {
+    [IO.File]::Replace($staged,$target,$null,$true)
+    exit 0
+  } catch [IO.IOException] {
+    if ([DateTime]::UtcNow -ge $deadline) { exit 1 }
+    Start-Sleep -Milliseconds 50
+  } catch [UnauthorizedAccessException] {
+    if ([DateTime]::UtcNow -ge $deadline) { exit 1 }
+    Start-Sleep -Milliseconds 50
+  } catch {
+    exit 1
+  }
+}`
+}
+
+func encodePowerShell(script string) string {
+	units := utf16.Encode([]rune(script))
+	encoded := make([]byte, len(units)*2)
+	for index, unit := range units {
+		binary.LittleEndian.PutUint16(encoded[index*2:], unit)
+	}
+	return base64.StdEncoding.EncodeToString(encoded)
 }
 
 func currentProcessElevation() (bool, error) {
@@ -139,53 +138,6 @@ func requireUnelevatedProcess() error {
 	}
 	if elevated {
 		return errors.New(elevatedUpdateMessage)
-	}
-	return nil
-}
-
-// Finish waits for the process using the old executable to leave, then moves
-// the verified staged binary into place. It runs in a detached helper copy so
-// neither the old nor new target is the executing image.
-func Finish(target, staged string, waitPID int) error {
-	if err := requireUnelevatedProcess(); err != nil {
-		return err
-	}
-	if target == "" || staged == "" {
-		return fmt.Errorf("update helper requires target and staged paths")
-	}
-	if waitPID > 0 {
-		process, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(waitPID))
-		if err == nil {
-			_, _ = windows.WaitForSingleObject(process, windows.INFINITE)
-			_ = windows.CloseHandle(process)
-		}
-	}
-	from, err := windows.UTF16PtrFromString(staged)
-	if err != nil {
-		return err
-	}
-	to, err := windows.UTF16PtrFromString(target)
-	if err != nil {
-		return err
-	}
-	deadline := time.Now().Add(time.Minute)
-	for {
-		err = windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
-		if err == nil {
-			break
-		}
-		if (!errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION)) || time.Now().After(deadline) {
-			return fmt.Errorf("finish Gantry update: %w", err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	// Windows cannot unlink the executing helper. Scheduling deletion at the
-	// next reboot prevents helper copies from accumulating indefinitely.
-	helper, helperErr := os.Executable()
-	if helperErr == nil {
-		if helperPath, pathErr := windows.UTF16PtrFromString(helper); pathErr == nil {
-			_ = windows.MoveFileEx(helperPath, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
-		}
 	}
 	return nil
 }
