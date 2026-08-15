@@ -1006,7 +1006,9 @@ func (vc *hvfVCPU) handleDataAbort(syn uint64) error {
 	// DR read): apply them NOW, before the guest re-enters — otherwise the
 	// level-triggered line stays high, refires with nothing to handle, and
 	// Linux disables the IRQ ("nobody cared").
-	vc.b.applyPendingIRQs()
+	if err := vc.b.applyPendingIRQs(); err != nil {
+		return err
+	}
 	vc.advancePC()
 	return nil
 }

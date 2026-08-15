@@ -33,14 +33,24 @@ func TestSerializedIRQQueueDoesNotReorderConcurrentBatches(t *testing.T) {
 	go func() { firstDone <- queue.apply(apply) }()
 	<-firstEntered
 
-	queuedNewer := make(chan struct{})
+	// Producers must remain free to enqueue and kick vCPUs while an older
+	// Hypervisor.framework injection is in progress.
+	queuedNewer := make(chan struct{}, 1)
 	go func() {
 		queue.push(irqChange{irq: 73, level: false})
-		close(queuedNewer)
+		queuedNewer <- struct{}{}
 	}()
 	select {
 	case <-queuedNewer:
-		t.Fatal("newer IRQ change bypassed an in-progress batch")
+	case <-time.After(2 * time.Second):
+		t.Fatal("IRQ producer blocked behind an in-progress injection")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- queue.apply(apply) }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("newer IRQ batch bypassed an in-progress batch: %v", err)
 	case <-time.After(25 * time.Millisecond):
 	}
 
@@ -48,8 +58,7 @@ func TestSerializedIRQQueueDoesNotReorderConcurrentBatches(t *testing.T) {
 	if err := <-firstDone; err != nil {
 		t.Fatal(err)
 	}
-	<-queuedNewer
-	if err := queue.apply(apply); err != nil {
+	if err := <-secondDone; err != nil {
 		t.Fatal(err)
 	}
 
