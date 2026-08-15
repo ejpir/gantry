@@ -1,5 +1,7 @@
 # Gantry
 
+[![CI](https://github.com/ejpir/gantry/actions/workflows/ci.yml/badge.svg)](https://github.com/ejpir/gantry/actions/workflows/ci.yml)
+
 Gantry runs OCI images in lightweight Linux microVMs. It is a standalone Go
 VMM and CLI: Docker, containerd, and libkrun are not required.
 
