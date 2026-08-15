@@ -79,6 +79,13 @@ func updateScript(staged, target string, waitPID int) string {
 $staged=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + staged64 + `'))
 $target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + target64 + `'))
 $waitPid=` + strconv.Itoa(waitPID) + `
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class GantryUpdate {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern bool MoveFileEx(string existing, string replacement, uint flags);
+}
+'@
 if ($waitPid -gt 0) {
   try {
     $process=[Diagnostics.Process]::GetProcessById($waitPid)
@@ -88,18 +95,19 @@ if ($waitPid -gt 0) {
 }
 $deadline=[DateTime]::UtcNow.AddMinutes(1)
 while ($true) {
-  try {
-    [IO.File]::Replace($staged,$target,$null,$true)
+  if ([GantryUpdate]::MoveFileEx($staged,$target,9)) {
     exit 0
-  } catch [IO.IOException] {
-    if ([DateTime]::UtcNow -ge $deadline) { exit 1 }
-    Start-Sleep -Milliseconds 50
-  } catch [UnauthorizedAccessException] {
-    if ([DateTime]::UtcNow -ge $deadline) { exit 1 }
-    Start-Sleep -Milliseconds 50
-  } catch {
+  }
+  $errorCode=[Runtime.InteropServices.Marshal]::GetLastWin32Error()
+  if (($errorCode -ne 5) -and ($errorCode -ne 32)) {
+    [Console]::Error.WriteLine("MoveFileEx failed with Windows error $errorCode")
     exit 1
   }
+  if ([DateTime]::UtcNow -ge $deadline) {
+    [Console]::Error.WriteLine("MoveFileEx timed out with Windows error $errorCode")
+    exit 1
+  }
+  Start-Sleep -Milliseconds 50
 }`
 }
 
