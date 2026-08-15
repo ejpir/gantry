@@ -119,24 +119,30 @@ func Run(control, data net.Conn) (retErr error) {
 	// link — malformed framing or a vanished VMM — which is FATAL to
 	// the worker: the supervisor then fails the sandbox rather than run
 	// a guest with no policy enforcement point.
-	pumpDead := make(chan struct{})
+	type pumpFailure struct {
+		direction string
+		err       error
+	}
+	pumpDead := make(chan pumpFailure, 1)
 	var pumpOnce sync.Once
-	dead := func() { pumpOnce.Do(func() { close(pumpDead) }) }
+	dead := func(direction string, err error) {
+		pumpOnce.Do(func() { pumpDead <- pumpFailure{direction: direction, err: err} })
+	}
 	go func() {
-		pumpFrames(dev, data, func(frame []byte) bool {
+		err := pumpFrames(dev, data, func(frame []byte) bool {
 			allowed := policy.MatchTX(frame)
 			traffic.ObserveTX(frame, allowed)
 			return allowed
 		})
-		dead()
+		dead("egress (VMM to netstack)", err)
 	}()
 	go func() {
-		pumpFrames(data, dev, func(frame []byte) bool {
+		err := pumpFrames(data, dev, func(frame []byte) bool {
 			policy.ObserveRX(frame)
 			traffic.ObserveRX(frame)
 			return true
 		})
-		dead()
+		dead("ingress (netstack to VMM)", err)
 	}()
 
 	state := &state{
@@ -170,7 +176,7 @@ func Run(control, data net.Conn) (retErr error) {
 	select {
 	case err := <-serveErr:
 		return err
-	case <-pumpDead:
+	case failure := <-pumpDead:
 		// Data link died: unwind the serve loop (EOF) and report fatal
 		// — unless the supervisor's graceful shutdown raced us, which
 		// is the normal Close path (shutdown RPC, THEN channels close).
@@ -179,7 +185,7 @@ func Run(control, data net.Conn) (retErr error) {
 		if state.shutdownRequested.Load() {
 			return nil
 		}
-		return fmt.Errorf("network data link closed")
+		return fmt.Errorf("network %s pump failed: %w", failure.direction, failure.err)
 	}
 }
 
@@ -189,24 +195,22 @@ func Run(control, data net.Conn) (retErr error) {
 // pump blocked on a half-live link. One frame in flight, no queues —
 // buffering is the kernel socket buffer plus the netstack's own, both
 // bounded.
-func pumpFrames(dst, src net.Conn, admit func(frame []byte) bool) {
+func pumpFrames(dst, src net.Conn, admit func(frame []byte) bool) error {
+	defer func() { _ = dst.Close() }()
+	defer func() { _ = src.Close() }()
 	buf := make([]byte, workerproto.MaxFrame)
 	var writer workerproto.FrameWriter
 	for {
 		n, err := workerproto.ReadFrame(src, buf)
 		if err != nil {
-			_ = dst.Close()
-			_ = src.Close()
-			return
+			return fmt.Errorf("read frame: %w", err)
 		}
 		frame := buf[:n]
 		if !admit(frame) {
 			continue // policy drop: silent, like any Ethernet drop
 		}
 		if err := writer.WriteFrame(dst, frame); err != nil {
-			_ = dst.Close()
-			_ = src.Close()
-			return
+			return fmt.Errorf("write frame: %w", err)
 		}
 	}
 }

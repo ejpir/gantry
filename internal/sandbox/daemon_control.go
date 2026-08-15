@@ -73,11 +73,34 @@ func (d *daemonRuntime) supervise() int {
 		return 1
 	case <-workerDead:
 		// Losing the network worker also loses the policy enforcement point.
-		fmt.Fprintln(os.Stderr, "daemon: network worker died:", d.network.Worker.Err())
+		// A VMM death closes the network data socket and can make both worker
+		// notifications ready together. Give the VMM watcher a brief chance to
+		// publish its authoritative process state so we do not report the
+		// dependent network EOF as the root cause.
+		if waitForClosed(vmmDead, 100*time.Millisecond) {
+			fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.runner.Err())
+			fmt.Fprintln(os.Stderr, "daemon: network worker also died:", d.network.Worker.Err())
+		} else {
+			fmt.Fprintln(os.Stderr, "daemon: network worker died:", d.network.Worker.Err())
+		}
 		return 1
 	case <-vmmDead:
 		fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.runner.Err())
 		return 1
+	}
+}
+
+func waitForClosed(done <-chan struct{}, timeout time.Duration) bool {
+	if done == nil {
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 

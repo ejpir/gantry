@@ -10,7 +10,9 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/ejpir/gantry/internal/fusewire"
 )
@@ -112,6 +114,7 @@ func (e *VhostEndpoint) NewDevice(tag string, memory *os.File, guestBase, memory
 			guestBase:  guestBase,
 			memorySize: memorySize,
 			queues:     e.queues,
+			traceCalls: os.Getenv("GANTRY_VHOST_STATS") == "1",
 		}
 		e.control = nil
 		e.queues = nil
@@ -129,6 +132,12 @@ type vhostQueueSnapshot struct {
 	configured, started bool
 }
 
+type vhostCallStats struct {
+	completions atomic.Uint64
+	total       atomic.Int64
+	maximum     atomic.Int64
+}
+
 // VhostFS is the virtio-mmio frontend retained in the VMM process. Queue data
 // is never copied through control: the backend maps guest RAM and consumes the
 // rings directly. The only hot-path operations here are eight-byte doorbells.
@@ -141,6 +150,8 @@ type VhostFS struct {
 	memorySize uint64
 	queues     []VhostQueueFiles
 	configured [virtioFSQueueCount]vhostQueueSnapshot
+	callStats  [virtioFSQueueCount]vhostCallStats
+	traceCalls bool
 
 	setupOnce sync.Once
 	setupErr  error
@@ -298,7 +309,7 @@ func (v *VhostFS) configureQueue(index int, q *virtq) error {
 	return nil
 }
 
-func (v *VhostFS) readCalls(_ int, file *os.File) {
+func (v *VhostFS) readCalls(index int, file *os.File) {
 	defer v.callWG.Done()
 	var payload [8]byte
 	for {
@@ -306,8 +317,31 @@ func (v *VhostFS) readCalls(_ int, file *os.File) {
 			return
 		}
 		if v.core != nil {
+			started := time.Now()
 			v.core.RaiseExternalUsedInterrupt()
+			v.observeCall(index, time.Since(started))
 		}
+	}
+}
+
+func (v *VhostFS) observeCall(index int, elapsed time.Duration) {
+	if !v.traceCalls || index < 0 || index >= len(v.callStats) {
+		return
+	}
+	stats := &v.callStats[index]
+	total := stats.total.Add(int64(elapsed))
+	for previous := stats.maximum.Load(); int64(elapsed) > previous; previous = stats.maximum.Load() {
+		if stats.maximum.CompareAndSwap(previous, int64(elapsed)) {
+			break
+		}
+	}
+	completions := stats.completions.Add(1)
+	if completions%25000 == 0 {
+		fmt.Fprintf(os.Stderr,
+			"vhost-fs-call-stats: queue=%d completions=%d irq-total=%s irq-avg=%s irq-max=%s\n",
+			index, completions, time.Duration(total).Round(time.Millisecond),
+			time.Duration(total/int64(completions)).Round(time.Microsecond),
+			time.Duration(stats.maximum.Load()).Round(time.Microsecond))
 	}
 }
 

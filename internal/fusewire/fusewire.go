@@ -63,25 +63,27 @@ func ValidNotification(message []byte) bool {
 		binary.LittleEndian.Uint64(message[8:16]) != 0 {
 		return false
 	}
-	code := int32(binary.LittleEndian.Uint32(message[4:8]))
+	// FUSE notification constants are exposed by go-fuse as negative Status
+	// values, but fuse_out_header.error carries the positive enum on the wire.
+	code := binary.LittleEndian.Uint32(message[4:8])
 	switch code {
-	case -2: // FUSE_NOTIFY_INVAL_INODE
+	case 2: // FUSE_NOTIFY_INVAL_INODE
 		return len(message) == outHeaderSize+24
-	case -3: // FUSE_NOTIFY_INVAL_ENTRY
+	case 3: // FUSE_NOTIFY_INVAL_ENTRY
 		if len(message) < outHeaderSize+16+1 {
 			return false
 		}
 		nameLen := int(binary.LittleEndian.Uint32(message[outHeaderSize+8 : outHeaderSize+12]))
 		return nameLen > 0 && len(message) == outHeaderSize+16+nameLen+1 && message[len(message)-1] == 0
-	case -6: // FUSE_NOTIFY_DELETE
+	case 6: // FUSE_NOTIFY_DELETE
 		if len(message) < outHeaderSize+24+1 {
 			return false
 		}
 		nameLen := int(binary.LittleEndian.Uint32(message[outHeaderSize+16 : outHeaderSize+20]))
 		return nameLen > 0 && len(message) == outHeaderSize+24+nameLen+1 && message[len(message)-1] == 0
-	case -8: // FUSE_NOTIFY_INC_EPOCH
+	case 8: // FUSE_NOTIFY_INC_EPOCH
 		return len(message) == outHeaderSize
-	case -9: // FUSE_NOTIFY_PRUNE
+	case 9: // FUSE_NOTIFY_PRUNE
 		if len(message) < outHeaderSize+16 {
 			return false
 		}

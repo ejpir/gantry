@@ -251,7 +251,10 @@ func (g *vhostWireGuest) init() {
 	payload := fusePayload(64)
 	binary.LittleEndian.PutUint32(payload[0:4], 7)
 	binary.LittleEndian.PutUint32(payload[4:8], 45)
-	binary.LittleEndian.PutUint32(payload[12:16], uint32(fuse.CAP_READDIRPLUS|fuse.CAP_READDIRPLUS_AUTO|fuse.CAP_NO_OPENDIR_SUPPORT))
+	capabilities := uint64(fuse.CAP_READDIRPLUS | fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT |
+		fuse.CAP_INIT_EXT | fuse.CAP_GANTRY_READDIR_EOF)
+	binary.LittleEndian.PutUint32(payload[12:16], uint32(capabilities))
+	binary.LittleEndian.PutUint32(payload[16:20], uint32(capabilities>>32))
 	errno, _ := g.request(fuse.OpInit, 0, payload, 16, 64)
 	if errno != 0 {
 		g.t.Fatalf("INIT errno %d", errno)
@@ -348,6 +351,12 @@ func (g *vhostWireGuest) readDir(node, handle, offset uint64) ([]fuse.DirEntry, 
 			g.t.Fatalf("READDIR trailing %d-byte fragment", len(payloadOut))
 		}
 		nameLength := int(binary.LittleEndian.Uint32(payloadOut[16:20]))
+		if nameLength == 0 && gantryReadDirEOF(payloadOut) {
+			if len(payloadOut) != 24 {
+				g.t.Fatalf("READDIR EOF marker has %d trailing bytes", len(payloadOut)-24)
+			}
+			break
+		}
 		consumed := (24 + nameLength + 7) &^ 7
 		if nameLength < 0 || consumed > len(payloadOut) {
 			g.t.Fatalf("READDIR invalid name/record length %d/%d", nameLength, len(payloadOut))
@@ -395,6 +404,12 @@ func (g *vhostWireGuest) readDirPlus(node, handle, offset uint64) ([]vhostDirEnt
 		}
 		dirent := payloadOut[entryOutLen:]
 		nameLength := int(binary.LittleEndian.Uint32(dirent[16:20]))
+		if nameLength == 0 && gantryReadDirEOF(dirent) {
+			if len(payloadOut) != entryOutLen+24 {
+				g.t.Fatalf("READDIRPLUS EOF marker has %d trailing bytes", len(payloadOut)-entryOutLen-24)
+			}
+			break
+		}
 		consumed := (entryOutLen + 24 + nameLength + 7) &^ 7
 		if nameLength < 0 || consumed > len(payloadOut) {
 			g.t.Fatalf("READDIRPLUS invalid name/record length %d/%d", nameLength, len(payloadOut))
@@ -413,6 +428,13 @@ func (g *vhostWireGuest) readDirPlus(node, handle, offset uint64) ([]vhostDirEnt
 		payloadOut = payloadOut[consumed:]
 	}
 	return entries, offset
+}
+
+func gantryReadDirEOF(dirent []byte) bool {
+	return len(dirent) >= 24 &&
+		binary.LittleEndian.Uint64(dirent[0:8]) == fuse.GANTRY_READDIR_EOF_INO &&
+		binary.LittleEndian.Uint64(dirent[8:16]) == fuse.GANTRY_READDIR_EOF_OFF &&
+		binary.LittleEndian.Uint32(dirent[20:24]) == fuse.GANTRY_READDIR_EOF_TYPE
 }
 
 func (g *vhostWireGuest) releaseDir(node, handle uint64) {
@@ -580,7 +602,7 @@ func TestVhostFSShareHubReverseInvalidation(t *testing.T) {
 	if !fusewire.ValidNotification(message) {
 		t.Fatalf("invalid notification frame: %x", message)
 	}
-	if code := int32(binary.LittleEndian.Uint32(message[4:8])); code != fuse.NOTIFY_INVAL_ENTRY {
+	if code := int32(binary.LittleEndian.Uint32(message[4:8])); code != -fuse.NOTIFY_INVAL_ENTRY {
 		t.Fatalf("notification code = %d, want INVAL_ENTRY", code)
 	}
 }

@@ -73,6 +73,10 @@ type DirEntryList struct {
 
 	// pointer to the last serialized _Dirent. Used by FixMode().
 	lastDirent *_Dirent
+
+	gantryEOF       bool
+	gantryEOFMarked bool
+	gantryEOFPrefix int
 }
 
 // NewDirEntryList creates a DirEntryList with the given data buffer
@@ -91,6 +95,34 @@ func NewDirEntryList(data []byte, off uint64) *DirEntryList {
 func (l *DirEntryList) AddDirEntry(e DirEntry) bool {
 	// TODO: take pointer arg, merge with AddDirLookupEntry.
 	return l.addDirEntry(&e, 0)
+}
+
+func (l *DirEntryList) enableGantryEOF(prefix int) {
+	l.gantryEOF = true
+	l.gantryEOFPrefix = prefix
+}
+
+// MarkEOF appends Gantry's negotiated end-of-directory marker. It returns
+// false when the marker was not negotiated or does not fit; in that case the
+// guest safely discovers EOF with the ordinary follow-up request.
+func (l *DirEntryList) MarkEOF() bool {
+	if !l.gantryEOF || l.gantryEOFMarked {
+		return false
+	}
+	markerSize := l.gantryEOFPrefix + direntSize
+	oldLen := len(l.buf)
+	if oldLen+markerSize > l.size {
+		return false
+	}
+	l.buf = l.buf[:oldLen+markerSize]
+	clear(l.buf[oldLen:])
+	marker := (*_Dirent)(unsafe.Pointer(&l.buf[oldLen+l.gantryEOFPrefix]))
+	marker.Ino = GANTRY_READDIR_EOF_INO
+	marker.Off = GANTRY_READDIR_EOF_OFF
+	marker.NameLen = 0
+	marker.Typ = GANTRY_READDIR_EOF_TYPE
+	l.gantryEOFMarked = true
+	return true
 }
 
 func (l *DirEntryList) addDirEntry(e *DirEntry, prefix int) bool {

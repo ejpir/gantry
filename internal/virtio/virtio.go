@@ -132,9 +132,12 @@ type virtq struct {
 	lastAvail uint16 // next avail index to consume
 }
 
-// numValid reports whether the guest programmed a usable ring size.
-// Ring index math does % uint16(q.num); num==0 would divide by zero.
-func (q *virtq) numValid() bool { return q.num >= 1 && q.num <= virtqSize }
+// numValid reports whether the guest programmed a usable split-ring size.
+// Ring index math does % uint16(q.num); num==0 would divide by zero, and the
+// virtio split-ring format requires the queue size to be a power of two.
+func (q *virtq) numValid() bool {
+	return q.num >= 1 && q.num <= virtqSize && q.num&(q.num-1) == 0
+}
 
 type desc struct {
 	addr  uint64
@@ -299,8 +302,9 @@ func (c *Core) MMIOWrite(off uint64, val uint32) {
 			c.queueSel = int(val)
 		}
 	case off == 0x038: // QueueNum — clamp: an untrusted guest could write
-		// 0 (divide-by-zero in the ring index math) or >QueueNumMax.
-		if val >= 1 && val <= virtqSize {
+		// 0 (divide-by-zero in the ring index math), a non-power-of-two split
+		// ring size, or a value greater than QueueNumMax.
+		if val >= 1 && val <= virtqSize && val&(val-1) == 0 {
 			c.queues[c.queueSel].num = val
 		}
 	case off == 0x044: // QueueReady — refuse to arm a queue with no valid size
@@ -321,6 +325,9 @@ func (c *Core) MMIOWrite(off uint64, val uint32) {
 		// the guest's EOI clears the pending state (libkrun semantics).
 	case off == 0x070: // Status
 		if val == 0 {
+			c.featureSel = 0
+			c.driverFeat = 0
+			c.driverSel = 0
 			c.status = 0
 			c.isr = 0
 			c.queueSel = 0
@@ -356,6 +363,9 @@ func (c *Core) MMIOWrite(off uint64, val uint32) {
 
 func (c *Core) descAt(q *virtq, i uint16) (desc, error) {
 	var d desc
+	if uint32(i) >= q.num {
+		return d, fmt.Errorf("descriptor index %d outside queue size %d", i, q.num)
+	}
 	var buf [16]byte
 	if err := c.mem.readAt(q.descAddr+uint64(i)*16, buf[:]); err != nil {
 		return d, err
@@ -420,6 +430,12 @@ func (c *Core) availChain(qn int) (uint16, []desc, bool) {
 	if availIdx == q.lastAvail {
 		return 0, nil, false
 	}
+	// The available ring holds q.num entries. A larger producer/consumer
+	// distance means the guest overwrote entries that have not been consumed;
+	// do not walk attacker-controlled work proportional to a 16-bit index gap.
+	if uint16(availIdx-q.lastAvail) > uint16(q.num) {
+		return 0, nil, false
+	}
 	// one chain per notify iteration step
 	var headBuf [2]byte
 	if err := c.mem.readAt(q.availAddr+4+uint64(q.lastAvail%uint16(q.num))*2, headBuf[:]); err != nil {
@@ -436,7 +452,13 @@ func (c *Core) availChain(qn int) (uint16, []desc, bool) {
 		return 0, nil, false
 	}
 	for {
-		if len(chain) == cap(chain) {
+		if len(chain) >= int(q.num) || len(chain) == cap(chain) {
+			return 0, nil, false
+		}
+		// VIRTIO_F_RING_INDIRECT_DESC is not advertised by this transport.
+		// Treating an unnegotiated indirect table as an ordinary data buffer
+		// gives malformed guests surprising access to descriptor parsing paths.
+		if d.flags&vringDescFIndirect != 0 {
 			return 0, nil, false
 		}
 		chain = append(chain, d)

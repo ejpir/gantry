@@ -59,6 +59,9 @@ func (n *shareNode) WrapChild(ctx context.Context, ops fs.InodeEmbedder) fs.Inod
 }
 
 func (n *shareNode) OnForget() {
+	if n.export != nil {
+		shareDirectoryCache(n.export).forget(n.StableAttr().Ino)
+	}
 	if n.export != nil && n.export.coherence != nil {
 		n.export.coherence.forget(n.EmbeddedInode())
 	}

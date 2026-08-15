@@ -56,6 +56,58 @@ func TestBoundedLogPipeRetainsRecentBytesWithinCap(t *testing.T) {
 	}
 }
 
+func TestBoundedLogSinkPreservesPreviousRunTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "worker.log")
+	for _, marker := range []string{"first-run-crash\n", "second-run-start\n"} {
+		sink, err := newBoundedLogSink(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sink.Write([]byte(marker)); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "first-run-crash\nsecond-run-start\n"; got != want {
+		t.Fatalf("log across reopen = %q, want %q", got, want)
+	}
+}
+
+func TestRotatePreviousLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "daemon.log")
+	previous := path + ".previous"
+	if err := os.WriteFile(previous, []byte("older"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// With no current log, the last useful previous log must survive.
+	if err := rotatePreviousLog(path); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(previous); err != nil || string(data) != "older" {
+		t.Fatalf("previous without current = %q, %v", data, err)
+	}
+
+	if err := os.WriteFile(path, []byte("latest crash"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rotatePreviousLog(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("current log still exists after rotation: %v", err)
+	}
+	if data, err := os.ReadFile(previous); err != nil || string(data) != "latest crash" {
+		t.Fatalf("rotated previous = %q, %v", data, err)
+	}
+}
+
 func TestBoundedLogPipeWriterIsNotRegularFile(t *testing.T) {
 	pipe, err := newBoundedLogPipe(filepath.Join(t.TempDir(), "worker.log"))
 	if err != nil {

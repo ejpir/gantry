@@ -1,0 +1,58 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-virtqueue
+  cancel-in-progress: false
+
+jobs:
+  virtqueue:
+    name: virtqueue/${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzVirtqueueChain
+          - FuzzVirtqueueMMIO
+    env:
+      GOMEMLIMIT: 512MiB
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      - name: restore generated corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/go-cache/fuzz
+          key: virtqueue-fuzz-${{ runner.os }}-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            virtqueue-fuzz-${{ runner.os }}-${{ matrix.target }}-
+      - name: fuzz virtqueue
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: >-
+          go test ./internal/virtio
+          -run='^$'
+          -fuzz="^${FUZZ_TARGET}$"
+          -fuzztime=15m
+          -parallel=2
+          -timeout=18m
+      - name: upload minimized failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtqueue-fuzz-failure-${{ matrix.target }}-${{ github.run_id }}
+          path: internal/virtio/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 14

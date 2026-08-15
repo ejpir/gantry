@@ -34,6 +34,7 @@ type netWorker struct {
 	portMu         sync.Mutex // serializes each complete port transaction
 	conf           *workerconf.Report
 	diagnostics    *boundedLogPipe
+	diagnosticPath string
 	containment    workerContainment
 	diagnosticOnce sync.Once
 	diagnosticErr  error
@@ -68,6 +69,9 @@ func (w *netWorker) setDead(err error) {
 		}
 	})
 	err = errors.Join(err, w.diagnosticErr)
+	if err != nil && w.diagnosticPath != "" {
+		err = errors.Join(err, workerDiagnosticTail("net-worker", w.diagnosticPath))
+	}
 	w.lifecycle.Exit(err)
 }
 
@@ -150,7 +154,11 @@ func startNetWorker(cfg networkworker.Config, workdir string) (*netWorker, net.C
 	if err != nil {
 		return nil, nil, err
 	}
-	w := &netWorker{cmd: cmd, data: dataSup, diagnostics: diagnostics, lifecycle: newWorkerLifecycle()}
+	diagnosticPath := filepath.Join(workdir, "worker-net.log")
+	w := &netWorker{
+		cmd: cmd, data: dataSup, diagnostics: diagnostics,
+		diagnosticPath: diagnosticPath, lifecycle: newWorkerLifecycle(),
+	}
 	if cmd != nil {
 		w.kill = func() error { return cmd.Kill() }
 		go func() { w.setDead(waitProcess(cmd, "net-worker")) }()

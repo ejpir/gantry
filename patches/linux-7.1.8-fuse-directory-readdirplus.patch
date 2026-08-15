@@ -1,0 +1,98 @@
+diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
+--- a/fs/fuse/readdir.c
++++ b/fs/fuse/readdir.c
+@@ -128,9 +128,42 @@ static bool fuse_emit(struct file *file, struct dir_context *ctx,
+ 			dirent->type | FILLDIR_FLAG_NOINTR);
+ }
+ 
++/*
++ * Gantry's share server returns READDIRPLUS lookup data only for directories.
++ * Keep adaptive READDIRPLUS active while a page is directory-dense enough to
++ * amortize its larger records; file-only pages retain compact READDIR. Dots do
++ * not represent children and must not make every directory look dense.
++ */
++#define GANTRY_READDIRPLUS_DIR_RATIO 16
++
++static bool gantry_child_dirent(const struct fuse_dirent *dirent)
++{
++	if (dirent->namelen == 1 && dirent->name[0] == '.')
++		return false;
++	if (dirent->namelen == 2 && dirent->name[0] == '.' &&
++	    dirent->name[1] == '.')
++		return false;
++	return true;
++}
++
++static void gantry_adapt_readdirplus(struct file *file, unsigned int entries,
++				     unsigned int directories)
++{
++	struct inode *dir = file_inode(file);
++	struct fuse_conn *fc = get_fuse_conn(dir);
++
++	if (fc->readdirplus_auto && directories &&
++	    (u64)directories * GANTRY_READDIRPLUS_DIR_RATIO >= entries)
++		set_bit(FUSE_I_ADVISE_RDPLUS,
++			&get_fuse_inode(dir)->state);
++}
++
+ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
+ 			 struct dir_context *ctx)
+ {
++	unsigned int entries = 0;
++	unsigned int directories = 0;
++
+ 	while (nbytes >= FUSE_NAME_OFFSET) {
+ 		struct fuse_dirent *dirent = (struct fuse_dirent *) buf;
+ 		size_t reclen = FUSE_DIRENT_SIZE(dirent);
+@@ -143,12 +176,18 @@ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
+ 
+ 		if (!fuse_emit(file, ctx, dirent))
+ 			break;
++		if (gantry_child_dirent(dirent)) {
++			entries++;
++			if (dirent->type == DT_DIR)
++				directories++;
++		}
+ 
+ 		buf += reclen;
+ 		nbytes -= reclen;
+ 		ctx->pos = dirent->off;
+ 	}
+ 
++	gantry_adapt_readdirplus(file, entries, directories);
+ 	return 0;
+ }
+ 
+@@ -298,6 +337,8 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+ 	struct fuse_direntplus *direntplus;
+ 	struct fuse_dirent *dirent;
+ 	size_t reclen;
++	unsigned int entries = 0;
++	unsigned int directories = 0;
+ 	int over = 0;
+ 	int ret;
+ 
+@@ -321,8 +362,14 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+ 			   which we did not link.
+ 			*/
+ 			over = !fuse_emit(file, ctx, dirent);
+-			if (!over)
++			if (!over) {
+ 				ctx->pos = dirent->off;
++				if (gantry_child_dirent(dirent)) {
++					entries++;
++					if (dirent->type == DT_DIR)
++						directories++;
++				}
++			}
+ 		}
+ 
+ 		buf += reclen;
+@@ -333,6 +380,7 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+ 			fuse_force_forget(file, direntplus->entry_out.nodeid);
+ 	}
+ 
++	gantry_adapt_readdirplus(file, entries, directories);
+ 	return 0;
+ }
+ 

@@ -211,6 +211,24 @@ func TestShareRequestGuardPrunesBeforeNodeWatermark(t *testing.T) {
 	}
 }
 
+func TestShareRequestGuardAllowsBoundedPruneHeadroom(t *testing.T) {
+	handler := &resourceLimitHandler{nodes: nodePruneWatermark}
+	guard := newRequestGuard()
+	guard.setReporter(handler)
+	lookup := [][]byte{fuseInHeader(fuseLookup, 1, 1, 0)}
+	if n, status := guard.handle(handler, lookup, nil); n != 7 || status != fuse.OK {
+		t.Fatalf("lookup in prune headroom = %d/%v, want 7/OK", n, status)
+	}
+	if handler.prunes == 0 {
+		t.Fatal("lookup in prune headroom did not request reclamation")
+	}
+
+	handler.nodes = maxLiveNodes
+	if n, status := guard.handle(handler, lookup, nil); n != 0 || status != fuse.EAGAIN {
+		t.Fatalf("lookup at hard limit = %d/%v, want 0/EAGAIN", n, status)
+	}
+}
+
 func TestShareHubPrunesRetainedNodes(t *testing.T) {
 	hub, err := NewHub()
 	if err != nil {
@@ -241,8 +259,9 @@ func TestShareHubPrunesRetainedNodes(t *testing.T) {
 	if !fusewire.ValidNotification(message) {
 		t.Fatalf("invalid prune notification: %x", message)
 	}
-	if code := int32(binary.LittleEndian.Uint32(message[4:8])); code != fuse.NOTIFY_PRUNE {
-		t.Fatalf("notification code = %d, want %d", code, fuse.NOTIFY_PRUNE)
+	wantCode := int32(-fuse.NOTIFY_PRUNE)
+	if code := int32(binary.LittleEndian.Uint32(message[4:8])); code != wantCode {
+		t.Fatalf("notification code = %d, want %d", code, wantCode)
 	}
 	count := binary.LittleEndian.Uint32(message[16:20])
 	if count == 0 || len(message) != 32+int(count)*8 {
@@ -264,6 +283,9 @@ func fuseInitHub(t *testing.T, hub *Hub) {
 	payload := make([]byte, 64)
 	binary.LittleEndian.PutUint32(payload[0:4], 7)
 	binary.LittleEndian.PutUint32(payload[4:8], 38)
+	capabilities := uint64(fuse.CAP_INIT_EXT | fuse.CAP_GANTRY_READDIR_EOF)
+	binary.LittleEndian.PutUint32(payload[12:16], uint32(capabilities))
+	binary.LittleEndian.PutUint32(payload[16:20], uint32(capabilities>>32))
 	if _, errno, _ := hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseInit, 1, 0, len(payload)), payload}, 16, 64); errno != 0 {
 		t.Fatalf("FUSE_INIT errno %d", errno)
@@ -297,16 +319,26 @@ func TestShareHubNegotiatesAdaptiveReadDirPlus(t *testing.T) {
 	payload := make([]byte, 64)
 	binary.LittleEndian.PutUint32(payload[0:4], 7)
 	binary.LittleEndian.PutUint32(payload[4:8], 38)
-	binary.LittleEndian.PutUint32(payload[12:16], uint32(fuse.CAP_READDIRPLUS|fuse.CAP_READDIRPLUS_AUTO|fuse.CAP_NO_OPENDIR_SUPPORT))
+	capabilities := uint64(fuse.CAP_READDIRPLUS | fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT |
+		fuse.CAP_INIT_EXT | fuse.CAP_GANTRY_READDIR_EOF)
+	binary.LittleEndian.PutUint32(payload[12:16], uint32(capabilities))
+	binary.LittleEndian.PutUint32(payload[16:20], uint32(capabilities>>32))
 	_, errno, out := hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseInit, 1, 0, len(payload)), payload}, 16, 64)
 	if errno != 0 {
 		t.Fatalf("FUSE_INIT errno %d", errno)
 	}
-	flags := uint64(binary.LittleEndian.Uint32(out[1][12:16]))
-	want := uint64(fuse.CAP_READDIRPLUS | fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT)
+	flags := uint64(binary.LittleEndian.Uint32(out[1][12:16])) |
+		uint64(binary.LittleEndian.Uint32(out[1][32:36]))<<32
+	want := uint64(fuse.CAP_READDIRPLUS | fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_GANTRY_READDIR_EOF)
+	if runtime.GOOS != "windows" {
+		want |= fuse.CAP_NO_OPENDIR_SUPPORT
+	}
 	if flags&want != want {
-		t.Fatalf("FUSE_INIT flags %#x, want adaptive READDIRPLUS %#x", flags, want)
+		t.Fatalf("FUSE_INIT flags %#x, want adaptive READDIRPLUS and Gantry EOF %#x", flags, want)
+	}
+	if runtime.GOOS == "windows" && flags&fuse.CAP_NO_OPENDIR_SUPPORT != 0 {
+		t.Fatalf("FUSE_INIT flags %#x unexpectedly enabled zero-message OPENDIR on Windows", flags)
 	}
 }
 
@@ -330,12 +362,19 @@ func TestShareHubReadDirPlusOnlyPrefetchesDirectories(t *testing.T) {
 		t.Fatalf("tree lookup errno %d", errno)
 	}
 	opendirIn := make([]byte, 8)
-	_, errno, _ = hubReq(t, hub,
+	_, errno, openOut := hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseOpendir, 3, treeNode, len(opendirIn)), opendirIn}, 16, 16)
-	if errno != -linuxENOSYS {
+	var dirHandle uint64
+	if runtime.GOOS == "windows" {
+		if errno != 0 {
+			t.Fatalf("Windows persistent opendir errno %d", errno)
+		}
+		dirHandle = binary.LittleEndian.Uint64(openOut[1][:8])
+	} else if errno != -linuxENOSYS {
 		t.Fatalf("opendir errno %d, want Linux ENOSYS for zero-message mode", errno)
 	}
 	readIn := make([]byte, 40)
+	binary.LittleEndian.PutUint64(readIn[0:8], dirHandle)
 	binary.LittleEndian.PutUint32(readIn[16:20], 4096)
 	n, errno, readOut := hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseReaddirplus, 4, treeNode, len(readIn)), readIn}, 16, 4096)
@@ -347,6 +386,7 @@ func TestShareHubReadDirPlusOnlyPrefetchesDirectories(t *testing.T) {
 	}
 	const entryOutSize = 128
 	entries := make(map[string]uint64)
+	sawEOF := false
 	payload := readOut[1][:n-16]
 	for len(payload) != 0 {
 		if len(payload) < entryOutSize+24 {
@@ -354,6 +394,16 @@ func TestShareHubReadDirPlusOnlyPrefetchesDirectories(t *testing.T) {
 		}
 		dirent := payload[entryOutSize:]
 		nameLength := int(binary.LittleEndian.Uint32(dirent[16:20]))
+		if nameLength == 0 && binary.LittleEndian.Uint64(dirent[0:8]) == fuse.GANTRY_READDIR_EOF_INO &&
+			binary.LittleEndian.Uint64(dirent[8:16]) == fuse.GANTRY_READDIR_EOF_OFF &&
+			binary.LittleEndian.Uint32(dirent[20:24]) == fuse.GANTRY_READDIR_EOF_TYPE {
+			sawEOF = true
+			payload = payload[entryOutSize+24:]
+			if len(payload) != 0 {
+				t.Fatalf("%d bytes follow READDIRPLUS EOF marker", len(payload))
+			}
+			break
+		}
 		recordLength := (entryOutSize + 24 + nameLength + 7) &^ 7
 		if nameLength < 0 || recordLength > len(payload) {
 			t.Fatalf("invalid dirent-plus name/record length %d/%d", nameLength, len(payload))
@@ -367,6 +417,9 @@ func TestShareHubReadDirPlusOnlyPrefetchesDirectories(t *testing.T) {
 	}
 	if entries["regular"] != 0 {
 		t.Fatalf("regular READDIRPLUS entry eagerly instantiated node %d", entries["regular"])
+	}
+	if !sawEOF {
+		t.Fatal("negotiated READDIRPLUS response omitted EOF marker")
 	}
 }
 
@@ -647,7 +700,9 @@ func TestShareHubDynamicNamespace(t *testing.T) {
 	opendirIn := make([]byte, 8)
 	_, errno, _ = hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseOpendir, 31, tagNode, len(opendirIn)), opendirIn}, 16, 16)
-	if errno != -linuxENOSYS {
+	if runtime.GOOS == "windows" && errno != 0 {
+		t.Fatalf("Windows export root opendir errno %d", errno)
+	} else if runtime.GOOS != "windows" && errno != -linuxENOSYS {
 		t.Fatalf("export root opendir errno %d, want Linux ENOSYS", errno)
 	}
 	fileNode, errno := hubLookup(t, hub, 4, tagNode, "hello.txt")

@@ -243,15 +243,23 @@ func TestNetWorkerPortTransactionsAreIdempotent(t *testing.T) {
 // must broadcast death independently of Err retrieval.
 func TestNetWorkerDoneConsumptionDoesNotBlockClose(t *testing.T) {
 	want := errors.New("worker failed")
+	diagnosticPath := filepath.Join(t.TempDir(), "worker-net.log")
+	if err := os.WriteFile(diagnosticPath, []byte("net-worker: exact pump failure\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var kills atomic.Int32
 	w := &netWorker{
-		lifecycle: newWorkerLifecycle(),
+		lifecycle:      newWorkerLifecycle(),
+		diagnosticPath: diagnosticPath,
 		kill: func() error {
 			kills.Add(1)
 			return nil
 		},
 	}
 	w.setDead(want)
+	if err := w.Err(); err == nil || !strings.Contains(err.Error(), "exact pump failure") {
+		t.Fatalf("worker error omitted diagnostic tail: %v", err)
+	}
 
 	// Model the daemon selecting the death notification before deferred
 	// cleanup calls Close.
@@ -1270,8 +1278,9 @@ func TestWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 	t.Setenv("GANTRY_DEBUG_RTC", "1")
 	t.Setenv("GANTRY_PREFAULT_RAM", "1")
 	t.Setenv("GANTRY_BOOT_PROFILE", "1")
+	t.Setenv("GANTRY_VHOST_STATS", "1")
 
-	want := []string{"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1", "GANTRY_BOOT_PROFILE=1"}
+	want := []string{"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1", "GANTRY_BOOT_PROFILE=1", "GANTRY_VHOST_STATS=1"}
 	if got := workerEnv(); !slices.Equal(got, want) {
 		t.Fatalf("worker environment = %v, want only the non-secret debug switches %v", got, want)
 	}
@@ -1284,6 +1293,7 @@ func TestWorkerEnvironmentCarriesNothingByDefault(t *testing.T) {
 	t.Setenv("GANTRY_DEBUG_RTC", "")
 	t.Setenv("GANTRY_PREFAULT_RAM", "")
 	t.Setenv("GANTRY_BOOT_PROFILE", "")
+	t.Setenv("GANTRY_VHOST_STATS", "")
 	if got := workerEnv(); len(got) != 0 {
 		t.Fatalf("worker environment = %v, want empty", got)
 	}

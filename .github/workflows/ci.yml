@@ -22,6 +22,7 @@ on:
       - 'scripts/**'
       - '.golangci.yaml'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/fuzz.yml'
   pull_request:
     paths:
       - '**.go'
@@ -39,6 +40,7 @@ on:
       - 'scripts/**'
       - '.golangci.yaml'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/fuzz.yml'
   workflow_dispatch:
 
 permissions:
@@ -228,6 +230,36 @@ jobs:
       - name: go test -race
         if: matrix.race
         run: go test -race -count=1 ./...
+
+  fuzz-virtqueue:
+    name: fuzz/virtqueue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      - name: fuzz virtqueue parser and MMIO transport
+        env:
+          GOMEMLIMIT: 512MiB
+        run: |
+          for target in FuzzVirtqueueChain FuzzVirtqueueMMIO; do
+            go test ./internal/virtio \
+              -run='^$' \
+              -fuzz="^${target}$" \
+              -fuzztime=30s \
+              -parallel=2 \
+              -timeout=2m
+          done
+      - name: upload minimized failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtqueue-fuzz-failure
+          path: internal/virtio/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 7
 
   native-smoke:
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}

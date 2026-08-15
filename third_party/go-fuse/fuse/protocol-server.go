@@ -28,6 +28,7 @@ type protocolServer struct {
 
 	kernelSettingsMu sync.RWMutex
 	kernelSettings   InitIn
+	negotiatedCaps   uint64
 
 	opts *MountOptions
 
@@ -35,6 +36,13 @@ type protocolServer struct {
 	retrieveMu   sync.Mutex
 	retrieveNext uint64
 	retrieveTab  map[uint64]*retrieveCacheRequest // notifyUnique -> retrieve request
+}
+
+func (ps *protocolServer) hasCapability(capability uint64) bool {
+	ps.kernelSettingsMu.RLock()
+	enabled := ps.negotiatedCaps&capability != 0
+	ps.kernelSettingsMu.RUnlock()
+	return enabled
 }
 
 func (ms *protocolServer) handleRequest(h *operationHandler, req *request) {
@@ -261,7 +269,11 @@ func (ps *ProtocolServer) sendGantryNotification(code int32, data, payload []byt
 	total := 16 + len(data) + len(payload)
 	header := make([]byte, 16)
 	binary.LittleEndian.PutUint32(header[0:4], uint32(total))
-	binary.LittleEndian.PutUint32(header[4:8], uint32(code))
+	// go-fuse represents notifications as negative Status values. The FUSE
+	// wire header carries the corresponding positive enum in its error field;
+	// request.serializeHeader performs the same negation for the ordinary
+	// /dev/fuse path.
+	binary.LittleEndian.PutUint32(header[4:8], uint32(-code))
 	return ps.protocolServer.gantryNotify([][]byte{header, data, payload})
 }
 

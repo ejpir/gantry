@@ -33,27 +33,36 @@ type vhostOpcodeStats struct {
 }
 
 type vhostShareStats struct {
-	mu       sync.Mutex
-	started  time.Time
-	requests uint64
-	errors   uint64
-	handler  time.Duration
-	maximum  time.Duration
-	byOpcode map[uint32]*vhostOpcodeStats
-	records  [64]vhostShareRecord
+	mu                sync.Mutex
+	started           time.Time
+	lastFinished      time.Time
+	maximumRequestGap time.Duration
+	requestGapAfter   uint64
+	requests          uint64
+	errors            uint64
+	handler           time.Duration
+	maximum           time.Duration
+	byOpcode          map[uint32]*vhostOpcodeStats
+	records           [64]vhostShareRecord
 }
 
 func newVhostShareStats() *vhostShareStats {
 	if os.Getenv("GANTRY_VHOST_STATS") == "" {
 		return nil
 	}
-	return &vhostShareStats{started: time.Now(), byOpcode: make(map[uint32]*vhostOpcodeStats)}
+	started := time.Now()
+	return &vhostShareStats{
+		started: started, lastFinished: started,
+		byOpcode: make(map[uint32]*vhostOpcodeStats),
+	}
 }
 
 func (s *vhostShareStats) observe(in, out [][]byte, written int, status fuse.Status, elapsed time.Duration) {
 	if s == nil {
 		return
 	}
+	finished := time.Now()
+	started := finished.Add(-elapsed)
 	var opcode uint32
 	var unique uint64
 	if len(in) != 0 && len(in[0]) >= 16 {
@@ -78,6 +87,16 @@ func (s *vhostShareStats) observe(in, out [][]byte, written int, status fuse.Sta
 	}
 
 	s.mu.Lock()
+	if started.After(s.lastFinished) {
+		gap := started.Sub(s.lastFinished)
+		if gap > s.maximumRequestGap {
+			s.maximumRequestGap = gap
+			s.requestGapAfter = s.requests
+		}
+	}
+	if finished.After(s.lastFinished) {
+		s.lastFinished = finished
+	}
 	s.requests++
 	record.request = s.requests
 	s.records[(s.requests-1)%uint64(len(s.records))] = record
@@ -151,9 +170,10 @@ func (s *vhostShareStats) logLocked() {
 	}
 	wall := time.Since(s.started)
 	fmt.Fprintf(os.Stderr,
-		"vhost-share-stats: requests=%d errors=%d wall=%s handler-total=%s handler-avg=%s handler-max=%s ops(count/avg/max)=[%s]\n",
+		"vhost-share-stats: requests=%d errors=%d wall=%s handler-total=%s handler-avg=%s handler-max=%s request-gap-max=%s(after=%d) ops(count/avg/max)=[%s]\n",
 		s.requests, s.errors, wall.Round(time.Millisecond), s.handler.Round(time.Millisecond),
-		time.Duration(int64(s.handler)/int64(s.requests)).Round(time.Microsecond), s.maximum.Round(time.Microsecond), operations.String())
+		time.Duration(int64(s.handler)/int64(s.requests)).Round(time.Microsecond), s.maximum.Round(time.Microsecond),
+		s.maximumRequestGap.Round(time.Millisecond), s.requestGapAfter, operations.String())
 }
 
 func fuseOpcodeName(opcode uint32) string {
@@ -186,6 +206,8 @@ func fuseOpcodeName(opcode uint32) string {
 		return "releasedir"
 	case 34:
 		return "interrupt"
+	case 40:
+		return "poll"
 	case 42:
 		return "batch-forget"
 	case 44:

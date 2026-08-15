@@ -2,7 +2,7 @@ diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
 index 5aea3f4..d25069e 100644
 --- a/fs/fuse/dev.c
 +++ b/fs/fuse/dev.c
-@@ -2302,6 +2302,26 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
+@@ -2302,6 +2302,30 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
 -	goto out;
 +	goto out;
 -}
@@ -17,13 +17,17 @@ index 5aea3f4..d25069e 100644
 +ssize_t fuse_dev_notify(struct fuse_dev *fud, void *buf, size_t len)
 +{
 +	struct fuse_copy_state cs;
-+	struct kvec iov = { .iov_base = buf, .iov_len = len };
++	struct bio_vec bvec;
 +	struct iov_iter iter;
 +
 +	if (!fud || !buf || len < sizeof(struct fuse_out_header))
 +		return -EINVAL;
 +
-+	iov_iter_kvec(&iter, ITER_SOURCE, &iov, 1, len);
++	/*
++	 * fuse_copy_fill() consumes pages; ITER_KVEC is not supported there.
++	 */
++	bvec_set_virt(&bvec, buf, len);
++	iov_iter_bvec(&iter, ITER_SOURCE, &bvec, 1, len);
 +	fuse_copy_init(&cs, false, &iter);
 +	return fuse_dev_do_write(fud, &cs, len);
 +}
@@ -164,7 +168,7 @@ index 1230065..31687d1 100644
 +}
 -
 +
-@@ -553,6 +569,104 @@ static void virtio_fs_hiprio_done_work(struct work_struct *work)
+@@ -553,6 +569,110 @@ static void virtio_fs_hiprio_done_work(struct work_struct *work)
 -	spin_unlock(&fsvq->lock);
 +	spin_unlock(&fsvq->lock);
 -}
@@ -218,8 +222,14 @@ index 1230065..31687d1 100644
 +		spin_unlock(&fsvq->lock);
 +
 +		mutex_lock(&fsvq->notification_lock);
-+		if (len <= sizeof(notification->buf) && fsvq->notification_ready)
-+			fuse_dev_notify(fsvq->fud, notification->buf, len);
++		if (len <= sizeof(notification->buf) && fsvq->notification_ready) {
++			ssize_t ret = fuse_dev_notify(fsvq->fud,
++						      notification->buf, len);
++
++			if (ret < 0)
++				pr_err_ratelimited("virtio-fs: reverse notification rejected: %zd\n",
++						    ret);
++		}
 +		mutex_unlock(&fsvq->notification_lock);
 +		memset(notification->buf, 0, sizeof(notification->buf));
 +		if (virtio_fs_queue_notification(fsvq, notification)) {
@@ -275,7 +285,7 @@ index 1230065..31687d1 100644
 +{
 -	struct fuse_req *req;
 +	struct fuse_req *req;
-@@ -930,6 +1044,7 @@ static void virtio_fs_init_vq(struct virtio_fs_vq *fsvq, char *name,
+@@ -930,6 +1050,7 @@ static void virtio_fs_init_vq(struct virtio_fs_vq *fsvq, char *name,
 -{
 +{
 -	strscpy(fsvq->name, name, VQ_NAME_LEN);
@@ -289,7 +299,7 @@ index 1230065..31687d1 100644
 +	INIT_LIST_HEAD(&fsvq->end_reqs);
 -	init_completion(&fsvq->in_flight_zero);
 +	init_completion(&fsvq->in_flight_zero);
-@@ -938,6 +1053,9 @@ static void virtio_fs_init_vq(struct virtio_fs_vq *fsvq, char *name,
+@@ -938,6 +1059,9 @@ static void virtio_fs_init_vq(struct virtio_fs_vq *fsvq, char *name,
 -		INIT_WORK(&fsvq->done_work, virtio_fs_requests_done_work);
 +		INIT_WORK(&fsvq->done_work, virtio_fs_requests_done_work);
 -		INIT_WORK(&fsvq->dispatch_work,
@@ -305,7 +315,7 @@ index 1230065..31687d1 100644
 +		INIT_WORK(&fsvq->done_work, virtio_fs_hiprio_done_work);
 -		INIT_WORK(&fsvq->dispatch_work,
 +		INIT_WORK(&fsvq->dispatch_work,
-@@ -967,7 +1085,9 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+@@ -967,7 +1091,9 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
 -	/* Truncate nr of request queues to nr_cpu_id */
 +	/* Truncate nr of request queues to nr_cpu_id */
 -	fs->num_request_queues = min_t(unsigned int, fs->num_request_queues,
@@ -322,7 +332,7 @@ index 1230065..31687d1 100644
 +	if (!fs->vqs)
 -		return -ENOMEM;
 +		return -ENOMEM;
-@@ -987,7 +1107,7 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+@@ -987,7 +1113,7 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
 -	vqs_info[VQ_HIPRIO].name = fs->vqs[VQ_HIPRIO].name;
 +	vqs_info[VQ_HIPRIO].name = fs->vqs[VQ_HIPRIO].name;
 -
@@ -337,7 +347,7 @@ index 1230065..31687d1 100644
 +
 -		snprintf(vq_name, VQ_NAME_LEN, "requests.%u", i - VQ_REQUEST);
 +		snprintf(vq_name, VQ_NAME_LEN, "requests.%u", i - VQ_REQUEST);
-@@ -995,6 +1115,12 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+@@ -995,6 +1121,12 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
 -		vqs_info[i].callback = virtio_fs_vq_done;
 +		vqs_info[i].callback = virtio_fs_vq_done;
 -		vqs_info[i].name = fs->vqs[i].name;
@@ -356,7 +366,7 @@ index 1230065..31687d1 100644
 +	ret = virtio_find_vqs(vdev, fs->nvqs, vqs, vqs_info, &desc);
 -	if (ret < 0)
 +	if (ret < 0)
-@@ -1017,6 +1143,16 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
+@@ -1017,6 +1149,16 @@ static int virtio_fs_setup_vqs(struct virtio_device *vdev,
 -/* Free virtqueues (device must already be reset) */
 +/* Free virtqueues (device must already be reset) */
 -static void virtio_fs_cleanup_vqs(struct virtio_device *vdev)
@@ -379,7 +389,7 @@ index 1230065..31687d1 100644
 +}
 -
 +
-@@ -1237,7 +1373,9 @@ static const struct virtio_device_id id_table[] = {
+@@ -1237,7 +1379,9 @@ static const struct virtio_device_id id_table[] = {
 -	{},
 +	{},
 -};
@@ -396,7 +406,7 @@ index 1230065..31687d1 100644
 +static struct virtio_driver virtio_fs_driver = {
 -	.driver.name		= KBUILD_MODNAME,
 +	.driver.name		= KBUILD_MODNAME,
-@@ -1607,10 +1745,16 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
+@@ -1607,10 +1751,16 @@ static int virtio_fs_fill_super(struct super_block *sb, struct fs_context *fsc)
 -		struct virtio_fs_vq *fsvq = &fs->vqs[i];
 +		struct virtio_fs_vq *fsvq = &fs->vqs[i];
 -

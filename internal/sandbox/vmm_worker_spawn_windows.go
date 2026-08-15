@@ -171,7 +171,8 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	w := &vmmWorker{
 		proc: proc, client: workerproto.NewClient(ctrlSup), fdChan: fdSup,
 		bridge: bridgeSup, bridgeE: make(chan error, 1), share: shareSup,
-		diagnostics: workerLog, containment: containment, lifecycle: newWorkerLifecycle(),
+		diagnostics: workerLog, diagnosticPath: logPath,
+		containment: containment, lifecycle: newWorkerLifecycle(),
 		confReport: ack.Confinement,
 	}
 	go func() {

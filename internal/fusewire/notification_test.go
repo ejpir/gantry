@@ -25,14 +25,15 @@ func TestValidNotification(t *testing.T) {
 		message []byte
 		valid   bool
 	}{
-		{name: "inode", message: notificationFrame(-2, inode), valid: true},
-		{name: "entry", message: notificationFrame(-3, entry), valid: true},
-		{name: "epoch", message: notificationFrame(-8, nil), valid: true},
-		{name: "prune", message: notificationFrame(-9, prune), valid: true},
-		{name: "store rejected", message: notificationFrame(-4, inode)},
+		{name: "inode", message: notificationFrame(2, inode), valid: true},
+		{name: "entry", message: notificationFrame(3, entry), valid: true},
+		{name: "epoch", message: notificationFrame(8, nil), valid: true},
+		{name: "prune", message: notificationFrame(9, prune), valid: true},
+		{name: "negative notification rejected", message: notificationFrame(-9, prune)},
+		{name: "store rejected", message: notificationFrame(4, inode)},
 		{name: "request response rejected", message: notificationFrame(0, nil)},
-		{name: "entry no nul", message: notificationFrame(-3, entry[:len(entry)-1])},
-		{name: "oversize", message: notificationFrame(-8, make([]byte, MaxNotificationBytes))},
+		{name: "entry no nul", message: notificationFrame(3, entry[:len(entry)-1])},
+		{name: "oversize", message: notificationFrame(8, make([]byte, MaxNotificationBytes))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := ValidNotification(test.message); got != test.valid {

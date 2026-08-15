@@ -145,7 +145,7 @@ func newBoundedLogSink(path string) (io.WriteCloser, error) {
 	if path == "" {
 		return discardWriteCloser{}, nil
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,23 @@ func newBoundedLogSink(path string) (io.WriteCloser, error) {
 		_ = file.Close()
 		return nil, err
 	}
-	return &boundedLogSink{file: file}, nil
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	sink := &boundedLogSink{file: file, size: info.Size()}
+	if sink.size > boundedLogMaxBytes {
+		if err := sink.compact(); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	if _, err := file.Seek(0, io.SeekEnd); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return sink, nil
 }
 
 func (s *boundedLogSink) Write(data []byte) (int, error) {

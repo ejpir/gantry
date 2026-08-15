@@ -283,6 +283,16 @@ const (
 	CAP_ALLOW_IDMAP          = (1 << 40)
 	CAP_OVER_IO_URING        = (1 << 41)
 	CAP_REQUEST_TIMEOUT      = (1 << 42)
+
+	// CAP_GANTRY_READDIR_EOF is a private Gantry guest/server extension.
+	// When negotiated, READDIR and READDIRPLUS may terminate their payload
+	// with the marker below so the guest does not issue a second request just
+	// to discover EOF. Stock kernels never advertise the private high bit.
+	CAP_GANTRY_READDIR_EOF = (1 << 63)
+
+	GANTRY_READDIR_EOF_INO  = uint64(0x47414e545259454f) // "GANTRYEO"
+	GANTRY_READDIR_EOF_OFF  = uint64(0x46555345454f4621) // "FUSEEOF!"
+	GANTRY_READDIR_EOF_TYPE = uint32(0xff)
 )
 
 type InitIn struct {

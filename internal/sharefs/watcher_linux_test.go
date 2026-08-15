@@ -11,18 +11,20 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-func waitNotificationCode(t *testing.T, notifications <-chan []byte, want int32) {
+func waitNotificationCode(t *testing.T, notifications <-chan []byte, status int32) {
 	t.Helper()
 	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
 	for {
 		select {
 		case message := <-notifications:
-			if notificationCode(message) == want {
+			// go-fuse exposes notifications as negative Status values, while
+			// fuse_out_header.error contains the positive enum on the wire.
+			if notificationCode(message) == -status {
 				return
 			}
 		case <-timer.C:
-			t.Fatalf("timed out waiting for FUSE notification %d", want)
+			t.Fatalf("timed out waiting for FUSE notification %d", -status)
 		}
 	}
 }

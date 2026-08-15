@@ -2,12 +2,85 @@ package networkworker
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
+
+func TestPumpFramesReportsReadFailure(t *testing.T) {
+	dst, dstPeer := net.Pipe()
+	src, srcPeer := net.Pipe()
+	defer func() { _ = dstPeer.Close() }()
+	defer func() { _ = srcPeer.Close() }()
+
+	done := make(chan error, 1)
+	go func() { done <- pumpFrames(dst, src, func([]byte) bool { return true }) }()
+	if err := srcPeer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, io.EOF) || !strings.Contains(err.Error(), "read frame") {
+			t.Fatalf("pump error = %v, want read-frame EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pump did not report source closure")
+	}
+}
+
+func TestPumpFramesReportsMalformedFrame(t *testing.T) {
+	dst, dstPeer := net.Pipe()
+	src, srcPeer := net.Pipe()
+	defer func() { _ = dstPeer.Close() }()
+	defer func() { _ = srcPeer.Close() }()
+
+	done := make(chan error, 1)
+	go func() { done <- pumpFrames(dst, src, func([]byte) bool { return true }) }()
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], workerproto.MaxFrame+1)
+	if _, err := srcPeer.Write(header[:]); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "frame length") {
+			t.Fatalf("pump error = %v, want frame-length failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pump did not reject malformed frame")
+	}
+}
+
+func TestPumpFramesReportsWriteFailure(t *testing.T) {
+	dst, dstPeer := net.Pipe()
+	src, srcPeer := net.Pipe()
+	defer func() { _ = srcPeer.Close() }()
+	if err := dstPeer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- pumpFrames(dst, src, func([]byte) bool { return true }) }()
+	if err := workerproto.WriteFrame(srcPeer, make([]byte, 64)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "write frame") {
+			t.Fatalf("pump error = %v, want write-frame failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pump did not report destination closure")
+	}
+}
 
 func testRequest(t *testing.T, body any) workerproto.Request {
 	t.Helper()

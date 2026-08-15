@@ -135,6 +135,9 @@ func doInit(server *protocolServer, req *request) {
 	}
 
 	kernelFlags = kernelFlags &^ server.opts.DisabledCapabilities
+	server.kernelSettingsMu.Lock()
+	server.negotiatedCaps = kernelFlags
+	server.kernelSettingsMu.Unlock()
 
 	// maxPages is the maximum request size we want the kernel to use, in units of
 	// memory pages (usually 4kiB). Linux v4.19 and older ignore this and always use
@@ -186,6 +189,9 @@ func doCreate(server *protocolServer, req *request) {
 func doReadDir(server *protocolServer, req *request) {
 	in := (*ReadIn)(req.inData())
 	out := NewDirEntryList(req.outPayload, uint64(in.Offset))
+	if server.hasCapability(CAP_GANTRY_READDIR_EOF) {
+		out.enableGantryEOF(0)
+	}
 	code := server.fileSystem.ReadDir(req.cancel, in, out)
 	req.outPayload = out.bytes()
 	req.status = code
@@ -194,6 +200,9 @@ func doReadDir(server *protocolServer, req *request) {
 func doReadDirPlus(server *protocolServer, req *request) {
 	in := (*ReadIn)(req.inData())
 	out := NewDirEntryList(req.outPayload, uint64(in.Offset))
+	if server.hasCapability(CAP_GANTRY_READDIR_EOF) {
+		out.enableGantryEOF(int(unsafe.Sizeof(EntryOut{})))
+	}
 
 	code := server.fileSystem.ReadDirPlus(req.cancel, in, out)
 	req.outPayload = out.bytes()

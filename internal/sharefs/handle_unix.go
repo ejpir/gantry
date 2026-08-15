@@ -257,7 +257,9 @@ func (d *shareDirHandle) Lookup(ctx context.Context, name string, out *fuse.Entr
 		}
 		cacheEntry(d.export, out)
 		if out.Mode&syscall.S_IFMT == syscall.S_IFDIR {
-			shareDirectoryCache(d.export).prefetch(inode.StableAttr().Ino, dirFD, name, out.Ino)
+			shareDirectoryCache(d.export).prefetch(
+				inode.StableAttr().Ino, d.node.StableAttr().Ino, dirFD, name, out.Ino,
+			)
 		}
 	}
 	return inode, errno

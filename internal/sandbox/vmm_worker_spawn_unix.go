@@ -293,16 +293,17 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	_ = assets.NetConn.Close()
 
 	w := &vmmWorker{
-		proc:        proc,
-		client:      workerproto.NewClient(ctrlSup),
-		fdChan:      fdSup,
-		bridge:      bridgeSup,
-		bridgeE:     make(chan error, 1),
-		share:       shareSup,
-		diagnostics: workerLog,
-		diskLocks:   diskLocks,
-		lifecycle:   newWorkerLifecycle(),
-		confReport:  ack.Confinement,
+		proc:           proc,
+		client:         workerproto.NewClient(ctrlSup),
+		fdChan:         fdSup,
+		bridge:         bridgeSup,
+		bridgeE:        make(chan error, 1),
+		share:          shareSup,
+		diagnostics:    workerLog,
+		diagnosticPath: logPath,
+		diskLocks:      diskLocks,
+		lifecycle:      newWorkerLifecycle(),
+		confReport:     ack.Confinement,
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{

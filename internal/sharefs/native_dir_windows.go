@@ -235,11 +235,11 @@ func (d *winShareDirStream) Seekdir(_ context.Context, off uint64) syscall.Errno
 	// a legitimate continuation cookie is forward relative to a new stream.
 	// Replay from the pinned directory handle, bounded by the same live-node
 	// budget that limits guest-retained share state.
-	if off > uint64(maxLiveNodes)+2 {
-		return syscall.EINVAL
-	}
 	if off == d.offset {
 		return 0
+	}
+	if off > uint64(maxLiveNodes)+2 {
+		return syscall.EINVAL
 	}
 	d.valid, d.pageOff, d.restart, d.offset, d.dots = 0, 0, 1, 0, 0
 	d.eof, d.ready, d.nextErr = false, false, 0

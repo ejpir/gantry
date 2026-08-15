@@ -48,6 +48,30 @@ aarch64|arm64) ARCH=arm64 ;;
 amd64|x86_64)  ARCH=x86_64 ;;
 *) echo "usage: mkkernel.sh [arm64|x86_64]"; exit 1 ;;
 esac
+
+# Select the conventional GNU cross prefix when the requested kernel arch
+# differs from the build host. Kbuild's ARCH changes source selection only;
+# without CROSS_COMPILE it still invokes the host gcc, producing opaque
+# target-option errors such as ARM gcc rejecting x86's -m64. An explicit CC
+# or CROSS_COMPILE remains authoritative for CI/clang/custom toolchains.
+HOST_ARCH=$(uname -m)
+case "$HOST_ARCH" in
+aarch64|arm64) HOST_ARCH=arm64 ;;
+amd64|x86_64)  HOST_ARCH=x86_64 ;;
+esac
+if [ "$HOST_ARCH" != "$ARCH" ] && [ -z "${CC:-}" ] && [ -z "${CROSS_COMPILE:-}" ]; then
+	case "$ARCH" in
+	arm64)  CROSS_COMPILE=aarch64-linux-gnu- ;;
+	x86_64) CROSS_COMPILE=x86_64-linux-gnu- ;;
+	esac
+fi
+if [ -n "${CROSS_COMPILE:-}" ] && [ -z "${CC:-}" ]; then
+	command -v "${CROSS_COMPILE}gcc" >/dev/null 2>&1 || {
+		echo "missing cross compiler: ${CROSS_COMPILE}gcc" >&2
+		exit 1
+	}
+	export CROSS_COMPILE
+fi
 PAGES=${PAGES:-16k}   # arm64 only; x86_64 is always 4K
 
 # ERRATA=strip drops the CPU errata workarounds for third-party arm64 silicon
@@ -264,6 +288,37 @@ fi
 if ! grep -q 'fuse_dev_notify(struct fuse_dev' fs/fuse/dev.c ||
 	! grep -q 'virtio_fs_fill_notification_queue' fs/fuse/virtio_fs.c; then
 	echo "kernel tree contains an incomplete $NOTIFY_PATCH" >&2
+	exit 1
+fi
+# Linux's adaptive READDIRPLUS heuristic returns to compact READDIR after the
+# first page until a later lookup miss asks for PLUS again. Wide tree walkers
+# read the parent before descending, so that hint arrives too late and every
+# remaining directory needs its own LOOKUP. Continue PLUS only for pages with
+# at least one directory per sixteen visible children; file-heavy directories
+# retain upstream's compact records. This is independent of reverse notify so
+# reused build trees can adopt it without replaying the notification patch.
+READDIRPLUS_PATCH="$ROOT/patches/linux-$VERSION-fuse-directory-readdirplus.patch"
+if ! grep -q 'gantry_adapt_readdirplus' fs/fuse/readdir.c; then
+	patch -p1 < "$READDIRPLUS_PATCH"
+fi
+if ! grep -q '^#define GANTRY_READDIRPLUS_DIR_RATIO 16$' fs/fuse/readdir.c ||
+	! grep -q 'gantry_adapt_readdirplus(file, entries, directories)' fs/fuse/readdir.c; then
+	echo "kernel tree contains an incomplete $READDIRPLUS_PATCH" >&2
+	exit 1
+fi
+# Gantry owns both ends of the virtio-fs connection. Negotiate a private
+# FUSE_INIT bit and append an explicit marker when a directory response also
+# reaches EOF. Stock kernels and servers never negotiate the extension; the
+# fallback remains the ordinary zero-length follow-up READDIR.
+READDIR_EOF_PATCH="$ROOT/patches/linux-$VERSION-fuse-readdir-eof.patch"
+if ! grep -q 'FUSE_GANTRY_READDIR_EOF' include/uapi/linux/fuse.h; then
+	patch -p1 < "$READDIR_EOF_PATCH"
+fi
+if ! grep -q '^#define FUSE_GANTRY_READDIR_EOF[[:space:]]*(1ULL << 63)$' include/uapi/linux/fuse.h ||
+	! grep -q 'gantry_readdir_eof' fs/fuse/fuse_i.h ||
+	! grep -q 'FUSE_REQUEST_TIMEOUT | FUSE_GANTRY_READDIR_EOF' fs/fuse/inode.c ||
+	! grep -q 'fuse_gantry_mark_readdir_eof(file, ctx->pos)' fs/fuse/readdir.c; then
+	echo "kernel tree contains an incomplete $READDIR_EOF_PATCH" >&2
 	exit 1
 fi
 # Early userspace performs synchronous RCU operations while mounting its

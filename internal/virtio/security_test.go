@@ -97,12 +97,12 @@ func newTestBlkCore(t *testing.T) (*Core, *RAM) {
 	return core, mem
 }
 
-// QueueNum=0 used to divide by zero in the ring index math; QueueNum larger
-// than QueueNumMax must not arm the ring either.
+// QueueNum=0 used to divide by zero in the ring index math; non-power-of-two
+// sizes and values larger than QueueNumMax must not arm the split ring either.
 func TestQueueNumClamp(t *testing.T) {
 	core, mem := newTestBlkCore(t)
 
-	for _, num := range []uint32{0, 1 << 16, 0xdeadbeef} {
+	for _, num := range []uint32{0, 3, 127, 1 << 16, 0xdeadbeef} {
 		core.MMIOWrite(0x030, 0)   // QueueSel
 		core.MMIOWrite(0x038, num) // QueueNum (malicious)
 		core.MMIOWrite(0x044, 1)   // QueueReady
@@ -115,6 +115,10 @@ func TestQueueNumClamp(t *testing.T) {
 	setupQueue(mem, core, 0, 8)
 	if !core.queues[0].ready || core.queues[0].num != 8 {
 		t.Fatalf("valid queue setup broken: %+v", core.queues[0])
+	}
+	core.MMIOWrite(0x038, 3)
+	if core.queues[0].num != 8 {
+		t.Fatalf("invalid queue size replaced valid size: %+v", core.queues[0])
 	}
 }
 

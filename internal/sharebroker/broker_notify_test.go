@@ -56,7 +56,7 @@ func (h *brokerNotificationHandler) notificationSink() fusewire.NotificationSink
 func brokerEpochNotification() []byte {
 	message := make([]byte, 16)
 	binary.LittleEndian.PutUint32(message[0:4], uint32(len(message)))
-	code := int32(fuse.NOTIFY_INC_EPOCH)
+	code := int32(-fuse.NOTIFY_INC_EPOCH)
 	binary.LittleEndian.PutUint32(message[4:8], uint32(code))
 	return message
 }

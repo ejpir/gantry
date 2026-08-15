@@ -178,7 +178,7 @@ var netWorkerSpawnHook func(argv *[]string, env *[]string)
 // Most GANTRY_* knobs travel in bootstrap config; these diagnostic-only
 // switches must be present before the worker constructs the VMM.
 func workerEnv() []string {
-	out := make([]string, 0, 3)
+	out := make([]string, 0, 4)
 	// GANTRY_DEBUG_RTC is a debug pass-through (worker-side postmortem
 	// logging); it carries no secret material.
 	if os.Getenv("GANTRY_DEBUG_RTC") != "" {
@@ -193,6 +193,12 @@ func workerEnv() []string {
 	// exit tracing. The low-overhead timeline itself travels in bootstrap.
 	if os.Getenv("GANTRY_BOOT_PROFILE") == "1" {
 		out = append(out, "GANTRY_BOOT_PROFILE=1")
+	}
+	// GANTRY_VHOST_STATS enables aggregate, worker-local FUSE request
+	// timings. It carries no authority and is consumed only by the VMM
+	// worker after the vhost backend has been constructed.
+	if os.Getenv("GANTRY_VHOST_STATS") == "1" {
+		out = append(out, "GANTRY_VHOST_STATS=1")
 	}
 	return out
 }

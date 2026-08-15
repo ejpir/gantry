@@ -3,6 +3,8 @@
 package virtio
 
 import (
+	"fmt"
+	"os"
 	"sync"
 
 	"github.com/ejpir/gantry/internal/fusewire"
@@ -32,16 +34,25 @@ type fsNotificationQueue struct {
 
 	core   *Core
 	source fusewire.NotificationSource
+	debug  bool
 
 	attached bool
 	closed   bool
-	slots    []fsNotificationSlot
-	pending  [][]byte
-	bytes    int
+	// A notification may be emitted synchronously by a FUSE request handler.
+	// That handler runs under Core.mu, so delivery must be deferred until the
+	// MMIO request returns instead of trying to acquire Core.mu recursively.
+	flushScheduled bool
+	slots          []fsNotificationSlot
+	pending        [][]byte
+	bytes          int
 }
 
 func newFSNotificationQueue(core *Core, source fusewire.NotificationSource) *fsNotificationQueue {
-	return &fsNotificationQueue{core: core, source: source}
+	return &fsNotificationQueue{
+		core:   core,
+		source: source,
+		debug:  os.Getenv("GANTRY_DEBUG_FS") != "",
+	}
 }
 
 // acceptAvailable is called with Core.mu held.
@@ -92,20 +103,37 @@ func (q *fsNotificationQueue) enqueue(message []byte) fuse.Status {
 	}
 	q.pending = append(q.pending, copyOfMessage)
 	q.bytes += len(copyOfMessage)
+	startFlush := !q.flushScheduled
+	if startFlush {
+		q.flushScheduled = true
+	}
 	q.mu.Unlock()
 
+	if startFlush {
+		go q.flush()
+	}
+	return fuse.OK
+}
+
+// flush acquires Core.mu only after the notification source has returned to
+// its caller. FUSE handlers can therefore enqueue reverse notifications while
+// Core.MMIOWrite is dispatching a request without self-deadlocking the vCPU.
+// flushScheduled bounds this to one delivery goroutine per pending burst.
+func (q *fsNotificationQueue) flush() {
 	q.core.mu.Lock()
 	q.mu.Lock()
+	pendingBefore := len(q.pending)
+	slotsBefore := len(q.slots)
 	if !q.closed {
 		q.flushLocked(&q.core.queues[virtioFSNotificationQ])
 	}
-	closed := q.closed
+	if q.debug {
+		fmt.Fprintf(os.Stderr, "virtio-fs: notification flush: delivered=%d pending=%d slots=%d (before=%d/%d)\n",
+			pendingBefore-len(q.pending), len(q.pending), len(q.slots), pendingBefore, slotsBefore)
+	}
+	q.flushScheduled = false
 	q.mu.Unlock()
 	q.core.mu.Unlock()
-	if closed {
-		return fuse.EIO
-	}
-	return fuse.OK
 }
 
 // flushLocked requires both Core.mu and q.mu.

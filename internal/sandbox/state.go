@@ -1,12 +1,15 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+const workerDiagnosticTailBytes = 16 << 10
 
 // Sandbox lifecycle: create/start/stop/ls/delete + exec.
 // A sandbox is a long-lived VMM daemon holding the single
@@ -26,6 +29,7 @@ import (
 //	console.log       guest serial console
 //	gvproxy.log       network backend log
 //	daemon.log        daemon stdout/stderr
+//	daemon.log.previous  preceding run's daemon log (survives restart)
 
 func sandboxRoot() string {
 	if d := os.Getenv("GANTRY_HOME"); d != "" {
@@ -134,4 +138,34 @@ func readFileTail(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	return io.ReadAll(io.LimitReader(file, limit))
+}
+
+func workerDiagnosticTail(role, path string) error {
+	tail, err := readFileTail(path, workerDiagnosticTailBytes)
+	if err != nil {
+		return fmt.Errorf("read %s diagnostics: %w", role, err)
+	}
+	if len(tail) == 0 {
+		return nil
+	}
+	// A tail may begin in the middle of a line. Mark that explicitly rather
+	// than making the fragment look like a complete worker diagnostic.
+	if tail[0] != '\n' {
+		tail = append([]byte("..."), tail...)
+	}
+	return errors.New(role + " diagnostics:\n" + string(tail))
+}
+
+func rotatePreviousLog(path string) error {
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	previous := path + ".previous"
+	if err := os.Remove(previous); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(path, previous)
 }

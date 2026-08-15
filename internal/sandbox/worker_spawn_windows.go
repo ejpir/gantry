@@ -162,6 +162,9 @@ func workerEnv() []string {
 	if os.Getenv("GANTRY_BOOT_PROFILE") == "1" {
 		out = append(out, "GANTRY_BOOT_PROFILE=1")
 	}
+	if os.Getenv("GANTRY_VHOST_STATS") == "1" {
+		out = append(out, "GANTRY_VHOST_STATS=1")
+	}
 	if os.Getenv("GANTRY_WHPX_PIC") != "" {
 		out = append(out, "GANTRY_WHPX_PIC=1")
 	}

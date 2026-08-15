@@ -82,7 +82,7 @@ func TestWatcherHealthyMetadataTTLAndInvalidations(t *testing.T) {
 			t.Fatalf("notifications = %v, want INVAL_ENTRY and INVAL_INODE", codes)
 		}
 	}
-	if !codes[fuse.NOTIFY_INVAL_ENTRY] || !codes[fuse.NOTIFY_INVAL_INODE] {
+	if !codes[-fuse.NOTIFY_INVAL_ENTRY] || !codes[-fuse.NOTIFY_INVAL_INODE] {
 		t.Fatalf("notification codes = %v", codes)
 	}
 
@@ -92,7 +92,7 @@ func TestWatcherHealthyMetadataTTLAndInvalidations(t *testing.T) {
 	for !foundEpoch {
 		select {
 		case message := <-notifications:
-			foundEpoch = notificationCode(message) == fuse.NOTIFY_INC_EPOCH
+			foundEpoch = notificationCode(message) == -fuse.NOTIFY_INC_EPOCH
 		case <-deadline:
 			t.Fatal("watcher loss did not emit INC_EPOCH")
 		}

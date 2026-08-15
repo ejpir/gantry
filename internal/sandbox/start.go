@@ -385,7 +385,12 @@ func launchSandboxLockedTimingIO(name string, cfg RunConfig, secrets map[string]
 		writeLine(errorOutput, label+":", err)
 		return 1
 	}
-	logf, err := os.Create(filepath.Join(dir, "daemon.log"))
+	daemonLogPath := filepath.Join(dir, "daemon.log")
+	if err := rotatePreviousLog(daemonLogPath); err != nil {
+		writeLine(errorOutput, label+": preserve previous daemon log:", err)
+		return 1
+	}
+	logf, err := os.Create(daemonLogPath)
 	if err != nil {
 		writeLine(errorOutput, label+":", err)
 		return 1

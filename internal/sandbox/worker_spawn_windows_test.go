@@ -17,7 +17,7 @@ func TestWindowsWorkersDoNotAllocateConsoleWindows(t *testing.T) {
 func TestWindowsWorkerEnvironmentIsAnExplicitAllowlist(t *testing.T) {
 	for _, key := range []string{
 		"SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP",
-		"GANTRY_DEBUG_RTC", "GANTRY_PREFAULT_RAM", "GANTRY_BOOT_PROFILE",
+		"GANTRY_DEBUG_RTC", "GANTRY_PREFAULT_RAM", "GANTRY_BOOT_PROFILE", "GANTRY_VHOST_STATS",
 		"GANTRY_WHPX_PIC", "GANTRY_WHPX_PIC_NOPIT",
 	} {
 		t.Setenv(key, "")
@@ -28,11 +28,12 @@ func TestWindowsWorkerEnvironmentIsAnExplicitAllowlist(t *testing.T) {
 	t.Setenv("SystemRoot", `C:\Windows`)
 	t.Setenv("TEMP", `C:\Temp`)
 	t.Setenv("GANTRY_BOOT_PROFILE", "1")
+	t.Setenv("GANTRY_VHOST_STATS", "1")
 	t.Setenv("GANTRY_WHPX_PIC", "enabled")
 	t.Setenv("GANTRY_WHPX_PIC_NOPIT", "enabled")
 
 	want := []string{
-		`SystemRoot=C:\Windows`, `TEMP=C:\Temp`, "GANTRY_BOOT_PROFILE=1",
+		`SystemRoot=C:\Windows`, `TEMP=C:\Temp`, "GANTRY_BOOT_PROFILE=1", "GANTRY_VHOST_STATS=1",
 		"GANTRY_WHPX_PIC=1", "GANTRY_WHPX_PIC_NOPIT=1",
 	}
 	if got := workerEnv(); !slices.Equal(got, want) {

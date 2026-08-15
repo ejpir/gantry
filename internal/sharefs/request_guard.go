@@ -14,9 +14,15 @@ import (
 )
 
 const (
-	maxLiveNodes      = 64 << 10
-	resourcePruneSize = (fusewire.MaxNotificationBytes - 16 - 16) / 8
-	pruneNodeMark     = maxLiveNodes - resourcePruneSize
+	// Start reclaiming at 64K, but retain a separate bounded headroom window.
+	// Reverse notifications are asynchronous: a fast tree walk can allocate
+	// more than one notification batch before the guest processes the first
+	// one. Treating the prune watermark itself as the hard limit makes that
+	// legitimate burst fail with EAGAIN.
+	nodePruneWatermark = 64 << 10
+	maxLiveNodes       = 2 * nodePruneWatermark
+	resourcePruneSize  = (fusewire.MaxNotificationBytes - 16 - 16) / 8
+	pruneNodeMark      = nodePruneWatermark - resourcePruneSize
 )
 
 type resourceReporter interface {
@@ -35,13 +41,14 @@ type resourcePruner interface {
 type requestGuard struct {
 	reporter       resourceReporter
 	pruner         resourcePruner
+	debug          bool
 	failed         atomic.Bool
 	pressureLogged atomic.Bool
 	prunedAt       atomic.Int64
 }
 
 func newRequestGuard() *requestGuard {
-	return new(requestGuard)
+	return &requestGuard{debug: os.Getenv("GANTRY_DEBUG_FS") != ""}
 }
 
 func (g *requestGuard) setReporter(handler fusewire.Handler) {
@@ -107,6 +114,10 @@ func (g *requestGuard) maintainNodeBudget(nodes int) {
 		return
 	}
 	status := g.pruner.GantryPruneResources(resourcePruneSize)
+	if g.debug {
+		fmt.Fprintf(os.Stderr, "sharefs: prune request: nodes=%d limit=%d status=%v\n",
+			nodes, resourcePruneSize, status)
+	}
 	switch status {
 	case fuse.OK:
 		g.prunedAt.Store(int64(nodes))

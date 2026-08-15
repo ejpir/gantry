@@ -31,23 +31,24 @@ import (
 // client, fd channel (send side), bridge serve loop, and lifecycle. It
 // implements vmmRunner.
 type vmmWorker struct {
-	proc        *os.Process
-	client      *workerproto.Client // control (fd 3)
-	fdChan      net.Conn            // fd 5, send side
-	fdSend      sync.Mutex          // serialize SCM_RIGHTS sends
-	bridge      net.Conn
-	bridgeE     chan error
-	share       net.Conn // fd 6 peer: supervisor side of the FUSE relay
-	shareE      chan error
-	diagnostics *boundedLogPipe
-	containment workerContainment
-	diskLocks   []*os.File
-	revokeOnce  sync.Once
-	revokeErr   error
-	lifecycle   *workerLifecycle
-	waitMu      sync.Mutex // protects lazy lifecycle-context initialization
-	waitCtx     context.Context
-	waitCancel  context.CancelFunc
+	proc           *os.Process
+	client         *workerproto.Client // control (fd 3)
+	fdChan         net.Conn            // fd 5, send side
+	fdSend         sync.Mutex          // serialize SCM_RIGHTS sends
+	bridge         net.Conn
+	bridgeE        chan error
+	share          net.Conn // fd 6 peer: supervisor side of the FUSE relay
+	shareE         chan error
+	diagnostics    *boundedLogPipe
+	diagnosticPath string
+	containment    workerContainment
+	diskLocks      []*os.File
+	revokeOnce     sync.Once
+	revokeErr      error
+	lifecycle      *workerLifecycle
+	waitMu         sync.Mutex // protects lazy lifecycle-context initialization
+	waitCtx        context.Context
+	waitCancel     context.CancelFunc
 	// Local-netstack counters live in the confined worker. Periodic pulls
 	// are cancellable; vm.wait/vm.close responses furnish the final snapshot
 	// before the control channel dies.
@@ -70,6 +71,9 @@ func (w *vmmWorker) Err() error { return w.lifecycle.Err() }
 
 func (w *vmmWorker) setDead(err error) {
 	err = errors.Join(err, w.revokeWorkerCapabilities())
+	if err != nil && w.diagnosticPath != "" {
+		err = errors.Join(err, workerDiagnosticTail("vmm-worker", w.diagnosticPath))
+	}
 	// Publish death before closing the relay so the broker goroutine can
 	// distinguish process teardown from an independent protocol failure.
 	w.lifecycle.Exit(err)

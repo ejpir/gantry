@@ -1408,6 +1408,12 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 		}
 
 		if de == nil {
+			// A replay after an interrupted READDIR has exhausted only the
+			// saved response, not necessarily the underlying stream. Let the
+			// next request resume normally instead of claiming EOF early.
+			if !interruptedRead {
+				out.MarkEOF()
+			}
 			break
 		}
 

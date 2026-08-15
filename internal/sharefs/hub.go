@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,11 @@ type Hub struct {
 // their configured shares before vmm.Prepare and can add more while running.
 func NewHub() (*Hub, error) {
 	debug := os.Getenv("GANTRY_DEBUG_FS") != ""
+	zeroMessageOpenDir := runtime.GOOS != "windows"
+	capabilities := uint64(fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_GANTRY_READDIR_EOF)
+	if zeroMessageOpenDir {
+		capabilities |= fuse.CAP_NO_OPENDIR_SUPPORT
+	}
 	h := &Hub{
 		exports: map[string]*Export{},
 		all:     map[*Export]struct{}{},
@@ -72,7 +78,7 @@ func NewHub() (*Hub, error) {
 			FsName:               shares.HubTag,
 			Name:                 "virtiofs",
 			MaxWrite:             128 << 10,
-			ExtraCapabilities:    fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT,
+			ExtraCapabilities:    capabilities,
 			IgnoreSecurityLabels: true,
 			PanicHandler:         h.guard.containPanic,
 		},
@@ -80,14 +86,14 @@ func NewHub() (*Hub, error) {
 		AttrTimeout:        &zero,
 		NegativeTimeout:    &zero,
 		ReadDirPlusLookup:  prefetchReadDirPlusEntry,
-		ZeroMessageOpenDir: true,
+		ZeroMessageOpenDir: zeroMessageOpenDir,
 	})
 	h.protocol = fuse.NewProtocolServer(raw, &fuse.MountOptions{
 		Debug:                debug,
 		FsName:               shares.HubTag,
 		Name:                 "virtiofs",
 		MaxWrite:             128 << 10,
-		ExtraCapabilities:    fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_NO_OPENDIR_SUPPORT,
+		ExtraCapabilities:    capabilities,
 		IgnoreSecurityLabels: true,
 		PanicHandler:         h.guard.containPanic,
 	})
