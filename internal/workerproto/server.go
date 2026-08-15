@@ -131,12 +131,9 @@ func (server *requestServer) handle(request Request, handler Handler, orderedAft
 	body, handlerErr := invokeHandler(handler, request)
 	shutdown := errors.Is(handlerErr, ErrShutdown)
 	response := responseFor(request, body, handlerErr, shutdown)
-	if err := server.writeResponse(response); err != nil {
+	if err := server.writeResponse(response, shutdown); err != nil {
 		server.terminate(fmt.Errorf("workerproto: write response for %q: %w", request.Op, err))
 		return
-	}
-	if shutdown {
-		server.terminate(nil)
 	}
 }
 
@@ -168,7 +165,7 @@ func responseFor(request Request, body any, handlerErr error, shutdown bool) Res
 	return response
 }
 
-func (server *requestServer) writeResponse(response Response) error {
+func (server *requestServer) writeResponse(response Response, shutdown bool) error {
 	server.writeMu.Lock()
 	defer server.writeMu.Unlock()
 	select {
@@ -176,7 +173,18 @@ func (server *requestServer) writeResponse(response Response) error {
 		return server.terminalError()
 	default:
 	}
-	return server.writer.writeMessage(server.conn, response)
+	if err := server.writer.writeMessage(server.conn, response); err != nil {
+		return err
+	}
+	if shutdown {
+		// Publishing the final response and stopping the relationship are one
+		// atomic operation with respect to response writers. Without this, an
+		// already-running handler can acquire writeMu after the final response,
+		// race the client closing its endpoint, and replace a clean shutdown with
+		// its expected EPIPE.
+		server.terminate(nil)
+	}
+	return nil
 }
 
 // terminate closes the relationship exactly once. Closing conn interrupts the

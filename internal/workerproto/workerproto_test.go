@@ -608,3 +608,54 @@ func TestShutdownOpRespondsThenReturns(t *testing.T) {
 		t.Fatal("ServeRequests did not return after shutdown")
 	}
 }
+
+func TestShutdownResponseStopsLateWriter(t *testing.T) {
+	client, peer := net.Pipe()
+	defer func() { _ = client.Close() }()
+	server := requestServer{conn: peer, done: make(chan struct{})}
+
+	readFinal := make(chan Response, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		var response Response
+		if err := ReadMessage(client, &response); err != nil {
+			readErr <- err
+			return
+		}
+		readFinal <- response
+	}()
+
+	final := Response{ID: 2, OK: true, Body: json.RawMessage(`{"final":"state"}`)}
+	if err := server.writeResponse(final, true); err != nil {
+		t.Fatalf("write shutdown response: %v", err)
+	}
+	select {
+	case got := <-readFinal:
+		if got.ID != final.ID || !got.OK || string(got.Body) != string(final.Body) {
+			t.Fatalf("shutdown response = %+v, want %+v", got, final)
+		}
+	case err := <-readErr:
+		t.Fatalf("read shutdown response: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("shutdown response was not published")
+	}
+	select {
+	case <-server.done:
+	default:
+		t.Fatal("server remained writable after publishing shutdown response")
+	}
+
+	// This models vm.wait returning as vm.close completes. A response that lost
+	// the race is discarded; it must not write to the closed connection or turn
+	// graceful shutdown into a broken-pipe error.
+	if err := server.writeResponse(Response{ID: 1, OK: true}, false); err != nil {
+		t.Fatalf("late response after graceful shutdown: %v", err)
+	}
+	var extra Response
+	if err := ReadMessage(client, &extra); err == nil {
+		t.Fatalf("late response reached client: %+v", extra)
+	}
+	if err := server.terminalError(); err != nil {
+		t.Fatalf("late response replaced graceful shutdown: %v", err)
+	}
+}
