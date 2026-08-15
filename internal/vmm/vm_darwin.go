@@ -41,7 +41,7 @@ type hvfBackend struct {
 	vmCreated bool
 	mapped    bool
 
-	irqs     serializedIRQQueue
+	irqs     serializedIRQDelivery
 	shutdown *nativeThreadTeardown
 
 	vcpuMu  sync.Mutex
@@ -104,14 +104,41 @@ type hvfVCPU struct {
 	seenMMIO map[uint64]bool
 }
 
-// queueIRQ records an IRQ line change and kicks ALL vCPUs out so a run
-// loop applies it promptly. Safe to call from any goroutine.
-func (b *hvfBackend) queueIRQ(irq int, level bool) {
+// deliverIRQ injects the VM-global GIC line change on the calling device thread.
+// hv_gic_set_spi is itself the guest wakeup for an SPI; deferring it until a
+// vCPU exits loses interrupts when hv_vcpus_exit lands between run calls.
+func (b *hvfBackend) deliverIRQ(irq int, level bool) {
 	if b.lifecycle.isStopping() {
 		return
 	}
-	b.irqs.push(irqChange{irq: irq, level: level})
-	_ = b.kickVCPUs()
+	err := b.irqs.inject(irqChange{irq: irq, level: level}, func(irq int, level bool) error {
+		if b.debug {
+			fmt.Printf("[gic] set_spi(%d, %v)\n", irq, level)
+		}
+		if ret := hvGicSetSpi(uint32(irq), level); ret != hvSuccess {
+			return fmt.Errorf("hv_gic_set_spi: %s", hvReturnString(ret))
+		}
+		return nil
+	})
+	if err != nil {
+		b.lifecycle.recordError(err)
+		b.lifecycle.stop()
+		if kickErr := b.kickVCPUs(); kickErr != nil {
+			b.lifecycle.recordError(kickErr)
+		}
+		return
+	}
+	b.wakeIdleVCPUs()
+}
+
+// wakeIdleVCPUs releases run-loop threads parked after a trapped WFI. vCPUs
+// currently in hv_vcpu_run are woken by the injected GIC interrupt itself.
+func (b *hvfBackend) wakeIdleVCPUs() {
+	b.vcpuMu.Lock()
+	for _, vc := range b.vcpus {
+		vc.signalWake()
+	}
+	b.vcpuMu.Unlock()
 }
 
 func (b *hvfBackend) kickVCPUs() error {
@@ -203,21 +230,6 @@ func (b *hvfBackend) finishVCPU(vc *hvfVCPU) {
 	if vc != nil {
 		b.destroyVCPU(vc)
 	}
-}
-
-// applyPendingIRQs runs on a run-loop thread right before hv_vcpu_run. SPI
-// changes are global, but their order is not: applying successive batches on
-// different vCPUs can otherwise invert an assert/deassert pair.
-func (b *hvfBackend) applyPendingIRQs() error {
-	return b.irqs.apply(func(irq int, level bool) error {
-		if b.debug {
-			fmt.Printf("[gic] set_spi(%d, %v)\n", irq, level)
-		}
-		if ret := hvGicSetSpi(uint32(irq), level); ret != hvSuccess {
-			return fmt.Errorf("hv_gic_set_spi(%d, %v): %s", irq, level, hvReturnString(ret))
-		}
-		return nil
-	})
 }
 
 func (vc *hvfVCPU) dumpState(why string) {
@@ -605,12 +617,11 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		return err
 	}
 
-	// All HVF calls are serialized on each vCPU's own run-loop thread:
-	// device models (possibly called from other goroutines, e.g. the stdin
-	// pump) only enqueue IRQ changes; a run loop applies them before
-	// hv_vcpu_run. Calling HVF concurrently from multiple threads corrupts
-	// its state (this caused hv_vcpu_run to return garbage codes).
-	m.interrupts.set(func(irq int, level bool) { b.queueIRQ(irq, level) })
+	// vCPU-specific HVF calls stay on each vCPU's owning run-loop thread.
+	// VM-global GIC injection is safe from device threads and is serialized by
+	// deliverIRQ so concurrent devices cannot overlap framework calls or reorder
+	// interrupt-line transitions.
+	m.interrupts.set(func(irq int, level bool) { b.deliverIRQ(irq, level) })
 
 	fmt.Printf("booting guest under Hypervisor.framework (%d vCPU max)\n", m.vcpus)
 	fmt.Println("------------------------------------------------")
@@ -770,9 +781,6 @@ func (vc *hvfVCPU) runLoop() error {
 	for {
 		if vc.b.lifecycle.isStopping() {
 			return nil
-		}
-		if err := vc.b.applyPendingIRQs(); err != nil {
-			return err
 		}
 		if firstRun {
 			if vc.id == 0 {
@@ -1001,13 +1009,6 @@ func (vc *hvfVCPU) handleDataAbort(syn uint64) error {
 		if srt < 31 {
 			_ = vc.setReg(hvRegX0+srt, val)
 		}
-	}
-	// Device MMIO may have changed IRQ lines (e.g. UART FIFO drained by a
-	// DR read): apply them NOW, before the guest re-enters — otherwise the
-	// level-triggered line stays high, refires with nothing to handle, and
-	// Linux disables the IRQ ("nobody cared").
-	if err := vc.b.applyPendingIRQs(); err != nil {
-		return err
 	}
 	vc.advancePC()
 	return nil

@@ -8,10 +8,8 @@ import (
 	"time"
 )
 
-func TestSerializedIRQQueueDoesNotReorderConcurrentBatches(t *testing.T) {
-	var queue serializedIRQQueue
-	queue.push(irqChange{irq: 73, level: true})
-
+func TestSerializedIRQDeliveryDoesNotOverlapConcurrentInjections(t *testing.T) {
+	var delivery serializedIRQDelivery
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var appliedMu sync.Mutex
@@ -30,27 +28,20 @@ func TestSerializedIRQQueueDoesNotReorderConcurrentBatches(t *testing.T) {
 	}
 
 	firstDone := make(chan error, 1)
-	go func() { firstDone <- queue.apply(apply) }()
+	go func() {
+		firstDone <- delivery.inject(irqChange{irq: 73, level: true}, apply)
+	}()
 	<-firstEntered
 
-	// Producers must remain free to enqueue and kick vCPUs while an older
-	// Hypervisor.framework injection is in progress.
-	queuedNewer := make(chan struct{}, 1)
+	// The second setter must not enter Hypervisor.framework until the first
+	// call has returned; this also preserves the chosen mutex acquisition order.
+	secondDone := make(chan error, 1)
 	go func() {
-		queue.push(irqChange{irq: 73, level: false})
-		queuedNewer <- struct{}{}
+		secondDone <- delivery.inject(irqChange{irq: 73, level: false}, apply)
 	}()
 	select {
-	case <-queuedNewer:
-	case <-time.After(2 * time.Second):
-		t.Fatal("IRQ producer blocked behind an in-progress injection")
-	}
-
-	secondDone := make(chan error, 1)
-	go func() { secondDone <- queue.apply(apply) }()
-	select {
 	case err := <-secondDone:
-		t.Fatalf("newer IRQ batch bypassed an in-progress batch: %v", err)
+		t.Fatalf("second IRQ injection overlapped the first: %v", err)
 	case <-time.After(25 * time.Millisecond):
 	}
 
@@ -68,12 +59,11 @@ func TestSerializedIRQQueueDoesNotReorderConcurrentBatches(t *testing.T) {
 	}
 }
 
-func TestSerializedIRQQueueReportsSetterFailure(t *testing.T) {
-	var queue serializedIRQQueue
-	queue.push(irqChange{irq: 73, level: true})
+func TestSerializedIRQDeliveryReportsSetterFailure(t *testing.T) {
+	var delivery serializedIRQDelivery
 	want := errors.New("set SPI failed")
-	err := queue.apply(func(int, bool) error { return want })
+	err := delivery.inject(irqChange{irq: 73, level: true}, func(int, bool) error { return want })
 	if !errors.Is(err, want) {
-		t.Fatalf("apply error = %v, want %v", err, want)
+		t.Fatalf("inject error = %v, want %v", err, want)
 	}
 }

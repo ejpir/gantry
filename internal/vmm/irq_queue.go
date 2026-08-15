@@ -10,39 +10,21 @@ type irqChange struct {
 	level bool
 }
 
-// serializedIRQQueue preserves line-change order across concurrent vCPU run
-// loops without blocking producers while a Hypervisor.framework call is in
-// progress. applyMu prevents a newer batch from being injected before an older
-// one, while pendingMu remains available to the completion goroutine so it can
-// enqueue the next line change and kick vCPUs out of hv_vcpu_run.
-type serializedIRQQueue struct {
-	applyMu   sync.Mutex
-	pendingMu sync.Mutex
-	pending   []irqChange
+// serializedIRQDelivery applies VM-global interrupt line changes synchronously
+// and in order. A deferred queue coupled to hv_vcpus_exit has a lost-wakeup
+// window: an exit request made while a vCPU is between hv_vcpu_run calls does
+// not affect its next entry. Direct GIC injection is the wakeup mechanism for
+// SPIs; serialization only prevents concurrent producers from reordering line
+// transitions or entering Hypervisor.framework together.
+type serializedIRQDelivery struct {
+	mu sync.Mutex
 }
 
-func (q *serializedIRQQueue) push(change irqChange) {
-	q.pendingMu.Lock()
-	q.pending = append(q.pending, change)
-	q.pendingMu.Unlock()
-}
-
-func (q *serializedIRQQueue) apply(set func(irq int, level bool) error) error {
-	q.applyMu.Lock()
-	defer q.applyMu.Unlock()
-
-	for {
-		q.pendingMu.Lock()
-		pending := q.pending
-		q.pending = nil
-		q.pendingMu.Unlock()
-		if len(pending) == 0 {
-			return nil
-		}
-		for index, change := range pending {
-			if err := set(change.irq, change.level); err != nil {
-				return fmt.Errorf("apply IRQ change %d/%d: %w", index+1, len(pending), err)
-			}
-		}
+func (d *serializedIRQDelivery) inject(change irqChange, set func(irq int, level bool) error) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := set(change.irq, change.level); err != nil {
+		return fmt.Errorf("inject IRQ %d level %t: %w", change.irq, change.level, err)
 	}
+	return nil
 }

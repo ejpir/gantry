@@ -317,12 +317,10 @@ func (c *Core) MMIOWrite(off uint64, val uint32) {
 		c.isr &^= val
 		if c.isr == 0 {
 			// The irq line follows the device's pending state; lowering it
-			// matters on edge-triggered setups (x86 IO-APIC): a later raise
-			// must produce a fresh edge.
+			// matters on level/edge-emulated setups such as x86 IO-APIC. HVF
+			// ignores false for an edge-triggered SPI, as specified by Apple.
 			c.irqLine(c.irq, false)
 		}
-		// note: no line deassert — hv_gic interrupts are trigger-only;
-		// the guest's EOI clears the pending state (libkrun semantics).
 	case off == 0x070: // Status
 		if val == 0 {
 			c.featureSel = 0
