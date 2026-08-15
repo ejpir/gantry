@@ -41,9 +41,8 @@ type hvfBackend struct {
 	vmCreated bool
 	mapped    bool
 
-	irqMu       sync.Mutex
-	pendingIRQs []irqChange
-	shutdown    *nativeThreadTeardown
+	irqs     serializedIRQQueue
+	shutdown *nativeThreadTeardown
 
 	vcpuMu  sync.Mutex
 	vcpus   []*hvfVCPU
@@ -105,20 +104,13 @@ type hvfVCPU struct {
 	seenMMIO map[uint64]bool
 }
 
-type irqChange struct {
-	irq   int
-	level bool
-}
-
 // queueIRQ records an IRQ line change and kicks ALL vCPUs out so a run
 // loop applies it promptly. Safe to call from any goroutine.
 func (b *hvfBackend) queueIRQ(irq int, level bool) {
 	if b.lifecycle.isStopping() {
 		return
 	}
-	b.irqMu.Lock()
-	b.pendingIRQs = append(b.pendingIRQs, irqChange{irq, level})
-	b.irqMu.Unlock()
+	b.irqs.push(irqChange{irq: irq, level: level})
 	_ = b.kickVCPUs()
 }
 
@@ -213,20 +205,19 @@ func (b *hvfBackend) finishVCPU(vc *hvfVCPU) {
 	}
 }
 
-// applyPendingIRQs runs on a run-loop thread right before hv_vcpu_run.
-// SPI changes are global (hv_gic state), so it doesn't matter which vCPU
-// applies them.
-func (b *hvfBackend) applyPendingIRQs() {
-	b.irqMu.Lock()
-	qs := b.pendingIRQs
-	b.pendingIRQs = nil
-	b.irqMu.Unlock()
-	for _, q := range qs {
+// applyPendingIRQs runs on a run-loop thread right before hv_vcpu_run. SPI
+// changes are global, but their order is not: applying successive batches on
+// different vCPUs can otherwise invert an assert/deassert pair.
+func (b *hvfBackend) applyPendingIRQs() error {
+	return b.irqs.apply(func(irq int, level bool) error {
 		if b.debug {
-			fmt.Printf("[gic] set_spi(%d, %v)\n", q.irq, q.level)
+			fmt.Printf("[gic] set_spi(%d, %v)\n", irq, level)
 		}
-		hvGicSetSpi(uint32(q.irq), q.level)
-	}
+		if ret := hvGicSetSpi(uint32(irq), level); ret != hvSuccess {
+			return fmt.Errorf("hv_gic_set_spi(%d, %v): %s", irq, level, hvReturnString(ret))
+		}
+		return nil
+	})
 }
 
 func (vc *hvfVCPU) dumpState(why string) {
@@ -780,7 +771,9 @@ func (vc *hvfVCPU) runLoop() error {
 		if vc.b.lifecycle.isStopping() {
 			return nil
 		}
-		vc.b.applyPendingIRQs()
+		if err := vc.b.applyPendingIRQs(); err != nil {
+			return err
+		}
 		if firstRun {
 			if vc.id == 0 {
 				// Capture immediately before the boot vCPU's first hv_vcpu_run.
