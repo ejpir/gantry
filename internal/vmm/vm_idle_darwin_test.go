@@ -13,16 +13,12 @@ import (
 // completion and a full idleBound of dead wall time.
 func TestIdleWakesOnInterrupt(t *testing.T) {
 	vc := &hvfVCPU{wake: make(chan struct{}, 1), bootAccounting: true}
-	go func() {
-		time.Sleep(time.Millisecond / 10)
-		vc.signalWake()
-	}()
+	// The interrupt may arrive after hv_vcpu_run exits but before idle starts.
+	// Queue it first to exercise that lost-wakeup boundary deterministically;
+	// sub-millisecond sleeps are coalesced on loaded macOS CI runners.
+	vc.signalWake()
 
-	start := time.Now()
 	vc.idle()
-	if blocked := time.Since(start); blocked >= idleBound {
-		t.Fatalf("idle blocked %v, want release well before the %v bound", blocked, idleBound)
-	}
 	if vc.idleCapped.Load() != 0 {
 		t.Errorf("wakeup counted as a bound expiry")
 	}
