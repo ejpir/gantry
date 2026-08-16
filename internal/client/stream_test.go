@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -124,6 +125,40 @@ func TestClaimStreamTimesOutWhenPeerWithholdsAck(t *testing.T) {
 		t.Fatalf("claimStream timeout took %v", elapsed)
 	}
 	<-requestRead
+}
+
+func TestSessionStreamsRelayClosesStdinAtSourceEOF(t *testing.T) {
+	stdin, stdinPeer := net.Pipe()
+	stdout, stdoutPeer := net.Pipe()
+	streams := &sessionStreams{
+		stdin:  sessionStream{id: "stdin-test", conn: stdin},
+		stdout: sessionStream{id: "stdout-test", conn: stdout},
+	}
+	defer streams.close()
+	defer func() { _ = stdinPeer.Close() }()
+	defer func() { _ = stdoutPeer.Close() }()
+
+	stdoutDone := streams.relayOutput(io.Discard)
+	streams.relayInput(strings.NewReader("payload"))
+	if err := stdinPeer.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(stdinPeer)
+	if err != nil {
+		t.Fatalf("read stdin through EOF: %v", err)
+	}
+	if string(payload) != "payload" {
+		t.Fatalf("stdin payload = %q, want payload", payload)
+	}
+
+	if err := stdoutPeer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stdoutDone:
+	case <-time.After(time.Second):
+		t.Fatal("stdout relay did not stop")
+	}
 }
 
 func BenchmarkClaimStream(b *testing.B) {

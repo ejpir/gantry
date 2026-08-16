@@ -293,13 +293,16 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	logf("task created")
 	// Attach the relays before Start so output from a process which runs to
 	// completion during Start cannot race ahead of the host-side reader.
-	stdoutDone := streams.relay(stdin, stdout)
+	stdoutDone := streams.relayOutput(stdout)
 	if _, err := taskClient.Start(ctx, &v3.StartRequest{ID: options.ID}); err != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
 		cleanupContainer(cleanupCtx, taskClient, mountClient, options, bundlePath, setup.owned, func(string, ...any) {})
 		return fmt.Errorf("task Start: %w", err)
 	}
+	// Preserve fast process output by attaching stdout before Start while
+	// deferring stdin data and EOF until the guest has committed stdio setup.
+	streams.relayInput(stdin)
 	logf("task started — shell is live (type 'exit' to leave)")
 	if options.Terminal && options.Cols != 0 && options.Rows != 0 {
 		_, _ = taskClient.ResizePty(ctx, &v3.ResizePtyRequest{ID: options.ID, Width: options.Cols, Height: options.Rows})

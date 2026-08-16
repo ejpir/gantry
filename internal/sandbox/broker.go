@@ -59,6 +59,7 @@ type brokerRequest struct {
 	Cols      uint32                      `json:"cols,omitempty"`
 	Rows      uint32                      `json:"rows,omitempty"`
 	Terminal  bool                        `json:"terminal,omitempty"`
+	Quiet     bool                        `json:"quiet,omitempty"`
 	Share     *brokerShareRequest         `json:"share,omitempty"`
 	Port      *brokerPortRequest          `json:"port,omitempty"`
 	Resources *brokerResourceRequest      `json:"resources,omitempty"`

@@ -68,10 +68,11 @@ func (f *execLifecycleTask) Events() []string {
 	return append([]string(nil), f.events...)
 }
 
-func testStreamDial() (func() (net.Conn, error), func()) {
+func testStreamDial() (func() (net.Conn, error), func(), <-chan struct{}) {
 	var mu sync.Mutex
 	stream := 0
 	stdoutPeer := make(chan net.Conn)
+	stdinEOF := make(chan struct{})
 	dial := func() (net.Conn, error) {
 		client, server := net.Pipe()
 		mu.Lock()
@@ -95,8 +96,9 @@ func testStreamDial() (func() (net.Conn, error), func()) {
 			if _, err := server.Write(packet); err != nil {
 				return
 			}
-			if current == 0 { // stdin: drain until session cleanup closes it.
+			if current == 0 { // stdin: drain through the relay's explicit EOF close.
 				_, _ = io.Copy(io.Discard, server)
+				close(stdinEOF)
 				return
 			}
 			// The guest owns stdout after the handshake and closes it when the
@@ -109,7 +111,7 @@ func testStreamDial() (func() (net.Conn, error), func()) {
 	closeOutput := func() {
 		closeOnce.Do(func() { _ = (<-stdoutPeer).Close() })
 	}
-	return dial, closeOutput
+	return dial, closeOutput, stdinEOF
 }
 
 // startBlockingOutputDial returns the guest side of stdout after its stream
@@ -159,9 +161,25 @@ func startBlockingOutputDial() (func() (net.Conn, error), <-chan net.Conn) {
 
 func TestSessionExecDeletesProcessAfterWait(t *testing.T) {
 	t.Parallel()
-	dial, closeOutput := testStreamDial()
+	dial, closeOutput, stdinEOF := testStreamDial()
 	defer closeOutput()
-	service := &execLifecycleTask{waitHook: closeOutput}
+	service := &execLifecycleTask{
+		startHook: func() error {
+			select {
+			case <-stdinEOF:
+				return errors.New("stdin reached EOF before task Start")
+			default:
+				return nil
+			}
+		},
+		waitHook: func() {
+			select {
+			case <-stdinEOF:
+			case <-time.After(time.Second):
+			}
+			closeOutput()
+		},
+	}
 	status := 0
 	err := sessionExec(service, SessionOptions{
 		Args:       []string{"true"},
@@ -212,7 +230,7 @@ func TestSessionExecRelaysOutputBeforeStart(t *testing.T) {
 func TestSessionExecDeletesProcessAfterStartFailure(t *testing.T) {
 	t.Parallel()
 	startErr := errors.New("start failed")
-	dial, closeOutput := testStreamDial()
+	dial, closeOutput, _ := testStreamDial()
 	defer closeOutput()
 	service := &execLifecycleTask{startErr: startErr}
 	err := sessionExec(service, SessionOptions{
@@ -232,7 +250,7 @@ func TestSessionExecDeletesProcessAfterStartFailure(t *testing.T) {
 func TestSessionExecReportsDeleteFailure(t *testing.T) {
 	t.Parallel()
 	deleteErr := errors.New("delete failed")
-	dial, closeOutput := testStreamDial()
+	dial, closeOutput, _ := testStreamDial()
 	defer closeOutput()
 	service := &execLifecycleTask{waitHook: closeOutput, deleteErr: deleteErr}
 	err := sessionExec(service, SessionOptions{

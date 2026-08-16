@@ -97,7 +97,7 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 		_ = killSandboxSession(name, id)
 	})
 	defer stopDataCancel()
-	if err := json.NewEncoder(data).Encode(&brokerRequest{Op: "session", ID: id, Args: request.Args, Cwd: request.Cwd}); err != nil {
+	if err := json.NewEncoder(data).Encode(&brokerRequest{Op: "session", ID: id, Args: request.Args, Cwd: request.Cwd, Quiet: true}); err != nil {
 		return capturedExecResult{}, fmt.Errorf("send session request: %w", err)
 	}
 	dataR := bufio.NewReader(data)

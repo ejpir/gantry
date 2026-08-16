@@ -175,6 +175,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
 		Cols:             req.Cols,
 		Rows:             req.Rows,
 		Terminal:         req.Terminal,
+		Quiet:            req.Quiet,
 		KillCh:           killCh,
 		ExitStatus:       &status,
 	}, stdin, stdout)

@@ -77,10 +77,13 @@ func sessionExec(taskClient task.TTRPCTaskService, options SessionOptions, id st
 	// Attach the relays before Start. A short-lived process can write and exit
 	// inside Start; attaching afterwards loses that output before the guest
 	// stream endpoint is drained.
-	stdoutDone := streams.relay(stdin, stdout)
+	stdoutDone := streams.relayOutput(stdout)
 	if _, err := taskClient.Start(ctx, &task.StartRequest{ID: id, ExecID: execID}); err != nil {
 		return fmt.Errorf("task Start(exec): %w", err)
 	}
+	// Start stdout before task Start so fast output cannot be lost, but do not
+	// send or close stdin until Start has committed the process's stdio setup.
+	streams.relayInput(stdin)
 	logf("exec process started in container %s (type 'exit' to leave)", id)
 	if options.Terminal && options.Cols != 0 && options.Rows != 0 {
 		_, _ = taskClient.ResizePty(ctx, &task.ResizePtyRequest{ID: id, ExecID: execID, Width: options.Cols, Height: options.Rows})

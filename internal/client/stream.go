@@ -143,8 +143,18 @@ func (streams *sessionStreams) close() {
 	_ = streams.stdout.conn.Close()
 }
 
-func (streams *sessionStreams) relay(stdin io.Reader, stdout io.Writer) <-chan struct{} {
-	go func() { _, _ = io.Copy(streams.stdin.conn, stdin) }()
+func (streams *sessionStreams) relayInput(stdin io.Reader) {
+	go func() {
+		_, _ = io.Copy(streams.stdin.conn, stdin)
+		// stdin is a dedicated one-way stream. Closing it after the source
+		// reaches EOF is the protocol's EOF signal to the guest process. Merely
+		// returning from io.Copy leaves readers such as cat blocked until the
+		// whole session is torn down, which in turn waits for that process.
+		_ = streams.stdin.conn.Close()
+	}()
+}
+
+func (streams *sessionStreams) relayOutput(stdout io.Writer) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(stdout, streams.stdout.conn)
