@@ -429,6 +429,25 @@ func TestLocalNetWall(t *testing.T) {
 	}
 }
 
+func TestIsLocalIP(t *testing.T) {
+	for _, test := range []struct {
+		address string
+		local   bool
+	}{
+		{address: "10.1.2.3", local: true},
+		{address: "169.254.169.254", local: true},
+		{address: "127.0.0.1", local: true},
+		{address: "100.64.0.1", local: true},
+		{address: "224.0.0.251", local: true},
+		{address: "8.8.8.8", local: false},
+		{address: "2001:4860:4860::8888", local: false},
+	} {
+		if got := IsLocalIP(net.ParseIP(test.address)); got != test.local {
+			t.Errorf("IsLocalIP(%s) = %t, want %t", test.address, got, test.local)
+		}
+	}
+}
+
 func TestLocalWallBeatsDNSSnoop(t *testing.T) {
 	// rebinding: an allowlisted domain resolving to a LAN IP must NOT
 	// punch through the local wall

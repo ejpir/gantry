@@ -195,8 +195,18 @@ func (c RunConfig) applyProxyPolicyWithResolver(policy *netpol.Policy, resolver 
 	unique := make(map[string]struct{}, len(addresses))
 	for _, address := range addresses {
 		if v4 := address.To4(); v4 != nil {
+			// These endpoint rules take priority over the local-network wall.
+			// Never synthesize that exception unless local access was explicitly
+			// enabled: a proxy hostname may return a poisoned or malicious DNS
+			// answer for metadata, the host alias, or another LAN service.
+			if !policy.AllowLocal && netpol.IsLocalIP(v4) {
+				continue
+			}
 			unique[v4.String()] = struct{}{}
 		}
+	}
+	if len(unique) == 0 {
+		return nil, fmt.Errorf("proxy host %s has no permitted IPv4 address", proxy.hostname)
 	}
 	ordered := make([]string, 0, len(unique))
 	for address := range unique {

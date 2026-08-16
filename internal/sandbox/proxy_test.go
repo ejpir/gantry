@@ -114,6 +114,50 @@ func TestProxyPolicyAllowsEndpointAndBlocksDirectWeb(t *testing.T) {
 	}
 }
 
+func TestProxyPolicyRejectsLocalEndpointsUnlessAllowed(t *testing.T) {
+	local := net.ParseIP("169.254.169.254")
+	cfg := RunConfig{Net: true, ProxyURL: "http://proxy.example:80", ProxyEnforce: true}
+
+	if _, err := cfg.applyProxyPolicyWithResolver(netpol.DefaultPolicy(), staticProxyResolver{
+		"proxy.example": {{IP: local}},
+	}); err == nil || !strings.Contains(err.Error(), "no permitted IPv4 address") {
+		t.Fatalf("local-only proxy resolution returned error %v", err)
+	}
+
+	policy, err := cfg.applyProxyPolicyWithResolver(netpol.DefaultPolicy(), staticProxyResolver{
+		"proxy.example": {{IP: local}, {IP: net.ParseIP("203.0.113.10")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Allows([4]byte{169, 254, 169, 254}, 6, 80) {
+		t.Fatal("proxy policy allowed a DNS-resolved metadata endpoint")
+	}
+	if !policy.Allows([4]byte{203, 0, 113, 10}, 6, 80) {
+		t.Fatal("proxy policy discarded a public endpoint")
+	}
+
+	allowLocal := netpol.DefaultPolicy()
+	allowLocal.AllowLocal = true
+	policy, err = cfg.applyProxyPolicyWithResolver(allowLocal, staticProxyResolver{
+		"proxy.example": {{IP: local}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.Allows([4]byte{169, 254, 169, 254}, 6, 80) {
+		t.Fatal("proxy policy blocked a local endpoint when local access is enabled")
+	}
+}
+
+func TestProxyPolicyRejectsLocalLiteral(t *testing.T) {
+	cfg := RunConfig{Net: true, ProxyURL: "http://169.254.169.254:80"}
+	if _, err := cfg.applyProxyPolicyWithResolver(netpol.DefaultPolicy(), nil); err == nil ||
+		!strings.Contains(err.Error(), "no permitted IPv4 address") {
+		t.Fatalf("local literal proxy returned error %v", err)
+	}
+}
+
 func TestResolveProxyFlags(t *testing.T) {
 	cfg, _, err := resolveSandbox(t,
 		"-proxy", "HTTP://proxy.example:3128/",

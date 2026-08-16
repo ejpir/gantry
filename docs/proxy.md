@@ -37,5 +37,8 @@ default-deny network policy when every non-proxy destination must be blocked.
 The proxy hostname is resolved when the sandbox network starts. Restart the
 sandbox to refresh changed proxy addresses. When DNS filtering is configured,
 Gantry permits resolving the proxy hostname without adding its answers to the
-policy's broad dynamic allow table. Enforcement requires the embedded netstack
-and cannot be combined with `-gvproxy`.
+policy's broad dynamic allow table. Answers in LAN, loopback, link-local,
+metadata, host-alias, or other ranges protected by the local-network wall are
+discarded; startup fails if no permitted IPv4 endpoint remains. A proxy in one
+of those ranges requires the explicit `-allow-local-net` opt-in. Enforcement
+requires the embedded netstack and cannot be combined with `-gvproxy`.

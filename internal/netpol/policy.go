@@ -137,6 +137,17 @@ func isLocal(dst [4]byte) bool {
 	return false
 }
 
+// IsLocalIP reports whether an IPv4 address belongs to a network protected by
+// the default local-network wall. Non-IPv4 addresses return false because the
+// embedded sandbox network is IPv4-only.
+func IsLocalIP(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	return isLocal([4]byte(v4))
+}
+
 // DefaultPolicy is the posture when no policy file is supplied: the
 // internet is reachable, the local network (LAN, link-local, the host's
 // NAT alias) is not. Equivalent to {"default": "allow"} with AllowLocal
