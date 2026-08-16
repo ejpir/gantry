@@ -37,5 +37,8 @@ pi-attach.tar
 /pi-session-*.html
 /integrations/pi-container/pi-export-*.html
 
-# design/audit notes kept locally, not published
-/docs/
+# Design and audit notes kept locally, not published. The public Gantry
+# manual is the only tracked subtree under docs/.
+/docs/*
+!/docs/gantry/
+!/docs/gantry/**

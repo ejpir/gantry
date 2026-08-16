@@ -77,6 +77,12 @@ List sandboxes or start the local HTTP/JSON manager:
 The manager listens on `~/.gantry/manager.sock`. Its API is documented in the
 [OpenAPI contract](api/managerapi/openapi.yaml).
 
+## Documentation
+
+The [Gantry manual](docs/gantry/README.md) covers installation, everyday
+usage, images, networking, host shares, credentials, the manager API,
+architecture, and the security model.
+
 ## What Gantry supports
 
 - **OCI images:** registry references, OCI layouts, Docker save archives, and
@@ -112,8 +118,8 @@ Gantry injects the upper- and lowercase `HTTP_PROXY`, `HTTPS_PROXY`,
 `ALL_PROXY`, and `NO_PROXY` variables. `-proxy-enforce` also blocks direct TCP
 80/443 and UDP 443 through the host-side egress policy, while allowing only the
 resolved proxy addresses on the configured port. See
-[forward-proxy routing](docs/proxy.md) for supported URL schemes, bypasses, and
-enforcement limits.
+[forward-proxy routing](docs/gantry/networking.md#use-an-upstream-proxy) for
+supported URL schemes, bypasses, and enforcement limits.
 
 ## Updates
 
