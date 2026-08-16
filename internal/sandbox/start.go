@@ -342,6 +342,29 @@ func launchSandboxLockedTimingIO(name string, cfg RunConfig, secrets map[string]
 		writeLine(errorOutput, label+":", err)
 		return 1
 	}
+	if !replaceConfig && !transient {
+		var progressPrinter *gutil.ProgressPrinter
+		progress := func(format string, values ...any) {
+			writef(output, label+": "+format+"\n", values...)
+		}
+		if file, ok := output.(*os.File); ok {
+			progressPrinter = gutil.NewProgressPrinter(file, label+": ")
+			progress = progressPrinter.Printf
+		}
+		oldKernel := cfg.Kernel
+		refreshed, changed, err := refreshSavedKernelForRestart(dir, cfg, progress)
+		if progressPrinter != nil {
+			progressPrinter.Finish()
+		}
+		if err != nil {
+			writeLine(errorOutput, label+":", err)
+			return 1
+		}
+		cfg = refreshed
+		if changed && cfg.Kernel != oldKernel {
+			writef(output, "%s: updated saved kernel to %s\n", label, cfg.Kernel)
+		}
+	}
 	cleanupSandboxRuntime(dir)
 	mark("launcher state directory prepared")
 	var configDurable <-chan error

@@ -85,6 +85,9 @@ func NetMarker(sock string, conn net.Conn) string {
 // backend. workdir holds the gvproxy socket/log when an external gvproxy
 // is used. A nil *Network (with nil error) means -net=false.
 func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
+	if err := validateProxyConfig(c); err != nil {
+		return nil, err
+	}
 	if (c.NetPol != "" || c.AllowLN) && c.GVProxy != "" {
 		return nil, fmt.Errorf("-net-policy/-allow-local-net require the embedded netstack (drop -gvproxy)")
 	}
@@ -104,6 +107,11 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	}
 	if policy == nil && c.Net {
 		policy = netpol.DefaultPolicy() // internet yes, local net no
+	}
+	var err error
+	policy, err = c.applyProxyPolicy(policy)
+	if err != nil {
+		return nil, err
 	}
 	if !c.Net {
 		return &Network{Policy: policy}, nil

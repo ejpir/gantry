@@ -1,0 +1,129 @@
+package sandbox
+
+import (
+	"context"
+	"net"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/ejpir/gantry/internal/netpol"
+)
+
+type staticProxyResolver map[string][]net.IPAddr
+
+func (r staticProxyResolver) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	return append([]net.IPAddr(nil), r[host]...), nil
+}
+
+func TestProxyEnvironment(t *testing.T) {
+	cfg := RunConfig{ProxyURL: "http://proxy.example:3128"}
+	want := []string{
+		"HTTP_PROXY=http://proxy.example:3128",
+		"HTTPS_PROXY=http://proxy.example:3128",
+		"ALL_PROXY=http://proxy.example:3128",
+		"http_proxy=http://proxy.example:3128",
+		"https_proxy=http://proxy.example:3128",
+		"all_proxy=http://proxy.example:3128",
+		"NO_PROXY=" + defaultNoProxy,
+		"no_proxy=" + defaultNoProxy,
+	}
+	if got := cfg.proxyEnvironment(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("proxy environment = %#v, want %#v", got, want)
+	}
+
+	cfg.NoProxy = "localhost,.corp.example"
+	got := cfg.proxyEnvironment()
+	if got[len(got)-2] != "NO_PROXY=localhost,.corp.example" || got[len(got)-1] != "no_proxy=localhost,.corp.example" {
+		t.Fatalf("custom no-proxy not applied: %v", got)
+	}
+}
+
+func TestValidateProxyConfig(t *testing.T) {
+	valid := []RunConfig{
+		{Net: true, ProxyURL: "http://proxy.example:3128"},
+		{Net: true, ProxyURL: "https://proxy.example"},
+		{Net: true, ProxyURL: "socks5h://proxy.example:1080", ProxyEnforce: true},
+	}
+	for _, cfg := range valid {
+		if err := validateProxyConfig(cfg); err != nil {
+			t.Errorf("validateProxyConfig(%+v) = %v", cfg, err)
+		}
+	}
+
+	invalid := []RunConfig{
+		{Net: true, ProxyURL: "ftp://proxy.example"},
+		{Net: true, ProxyURL: "http://user:password@proxy.example"},
+		{Net: true, ProxyURL: "socks5://proxy.example"},
+		{Net: false, ProxyURL: "http://proxy.example"},
+		{Net: true, ProxyEnforce: true},
+		{Net: true, NoProxy: "localhost"},
+		{Net: true, ProxyURL: "http://proxy.example", ProxyEnforce: true, GVProxy: "gvproxy"},
+	}
+	for _, cfg := range invalid {
+		if err := validateProxyConfig(cfg); err == nil {
+			t.Errorf("validateProxyConfig(%+v) succeeded", cfg)
+		}
+	}
+}
+
+func TestProxyPolicyAllowsEndpointAndBlocksDirectWeb(t *testing.T) {
+	base, err := netpol.Parse([]byte(`{"default":"allow","allowDomains":["api.example"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := RunConfig{Net: true, ProxyURL: "http://proxy.example:3128", ProxyEnforce: true}
+	policy, err := cfg.applyProxyPolicyWithResolver(base, staticProxyResolver{
+		"proxy.example": {
+			{IP: net.ParseIP("203.0.113.20")},
+			{IP: net.ParseIP("203.0.113.10")},
+			{IP: net.ParseIP("2001:db8::1")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Rules) < 4 {
+		t.Fatalf("effective rules = %#v", policy.Rules)
+	}
+	if got := policy.Rules[0].CIDR.String(); got != "203.0.113.10/32" {
+		t.Fatalf("first endpoint rule = %s, want deterministic ascending address", got)
+	}
+	for _, address := range [][4]byte{{203, 0, 113, 10}, {203, 0, 113, 20}} {
+		if !policy.Allows(address, 6, 3128) {
+			t.Errorf("proxy endpoint %v:3128 blocked", address)
+		}
+		if policy.Allows(address, 6, 443) {
+			t.Errorf("proxy endpoint %v received an overly broad exception", address)
+		}
+	}
+	if policy.Allows([4]byte{8, 8, 8, 8}, 6, 80) || policy.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+		t.Fatal("direct TCP web egress remains allowed")
+	}
+	if policy.Allows([4]byte{8, 8, 8, 8}, 17, 443) {
+		t.Fatal("direct QUIC egress remains allowed")
+	}
+	if !policy.Allows([4]byte{8, 8, 8, 8}, 6, 22) {
+		t.Fatal("proxy enforcement unexpectedly blocked non-web traffic")
+	}
+	if !strings.Contains(strings.Join(policy.ResolveDomains, ","), "proxy.example") {
+		t.Fatalf("proxy hostname missing from DNS-only list: %v", policy.ResolveDomains)
+	}
+	if strings.Contains(strings.Join(policy.AllowDomains, ","), "proxy.example") {
+		t.Fatalf("proxy hostname received a broad dynamic allow: %v", policy.AllowDomains)
+	}
+}
+
+func TestResolveProxyFlags(t *testing.T) {
+	cfg, _, err := resolveSandbox(t,
+		"-proxy", "HTTP://proxy.example:3128/",
+		"-no-proxy", "localhost,.corp.example",
+		"-proxy-enforce",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProxyURL != "http://proxy.example:3128/" || cfg.NoProxy != "localhost,.corp.example" || !cfg.ProxyEnforce {
+		t.Fatalf("resolved proxy config = %+v", cfg)
+	}
+}

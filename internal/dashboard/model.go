@@ -59,6 +59,7 @@ const (
 	tuiMountsPage
 	tuiPortsPage
 	tuiSecretsPage
+	tuiPacketsPage
 	tuiPageCount
 )
 
@@ -88,6 +89,7 @@ const (
 	tuiSecretAddDialog
 	tuiSecretRemoveDialog
 	tuiUpdateDialog
+	tuiPacketDetailDialog
 )
 
 type tuiToastKind uint8
@@ -118,6 +120,8 @@ type tuiRefreshMsg struct {
 }
 
 type tuiTickMsg struct{}
+
+type tuiPacketPollMsg struct{}
 
 type tuiProcessDoneMsg struct {
 	action string
@@ -173,6 +177,15 @@ type sandboxTUIModel struct {
 	secrets       []tuiSecretRow
 	secretCursor  int
 	secretScroll  int
+	packets       []tuiPacketRow
+	packetCursor  int
+	packetScroll  int
+	packetAfter   map[string]uint64
+	packetLoading bool
+	packetPaused  bool
+	packetError   string
+	packetEvicted uint64
+	packetDetail  *tuiPacketRow
 
 	width  int
 	height int
@@ -344,6 +357,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		secretName:      secretName,
 		secretValue:     secretValue,
 		lastClickIndex:  -1,
+		packetAfter:     make(map[string]uint64),
 	}
 	m.applyInputTheme()
 	return m
@@ -396,6 +410,13 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, refreshSandboxesCmd(m.service))
 		}
 		return m, tea.Batch(cmds...)
+	case tuiPacketPollMsg:
+		if m.page == tuiPacketsPage && !m.packetPaused {
+			return m, m.refreshPacketsCmd()
+		}
+		return m, nil
+	case tuiPacketCaptureMsg:
+		return m.handlePacketCapture(msg)
 	case tuiProcessDoneMsg:
 		return m.handleProcessDone(msg)
 	case tuiProcessStreamMsg:
@@ -653,6 +674,8 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			}
 			return nil, true
 		}
+	case tuiPacketsPage:
+		return m.updatePacketActionKey(key)
 	}
 	return nil, false
 }
@@ -671,7 +694,12 @@ func (m *sandboxTUIModel) updateGlobalKey(key string) (tea.Cmd, bool) {
 		}
 		return nil, true
 	}
-	return nil, m.updatePageKey(key)
+	previous := m.page
+	handled := m.updatePageKey(key)
+	if handled && previous != tuiPacketsPage && m.page == tuiPacketsPage {
+		return m.refreshPacketsCmd(), true
+	}
+	return nil, handled
 }
 
 var checkTUIUpdate = selfupdate.Refresh
@@ -716,6 +744,8 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 		m.setPage(tuiPortsPage)
 	case "6":
 		m.setPage(tuiSecretsPage)
+	case "7":
+		m.setPage(tuiPacketsPage)
 	case "tab", "]":
 		m.cyclePage(1)
 	case "shift+tab", "[":
@@ -1228,6 +1258,8 @@ func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
 		return &m.portCursor, &m.portScroll, len(m.ports)
 	case tuiSecretsPage:
 		return &m.secretCursor, &m.secretScroll, len(m.secrets)
+	case tuiPacketsPage:
+		return &m.packetCursor, &m.packetScroll, len(m.packets)
 	default:
 		return nil, nil, 0
 	}

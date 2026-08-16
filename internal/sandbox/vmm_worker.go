@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/sharebroker"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/vmmworker"
@@ -320,6 +321,12 @@ func (w *vmmWorker) trafficSnapshotContext(ctx context.Context) (netpol.TrafficS
 	var snap netpol.TrafficSnapshot
 	err := w.client.CallContext(ctx, "traffic.snapshot", struct{}{}, &snap)
 	return snap, err
+}
+
+func (w *vmmWorker) Capture(request packetcapture.Request) (packetcapture.Snapshot, error) {
+	var snapshot packetcapture.Snapshot
+	err := w.client.Call("capture.read", request, &snapshot)
+	return snapshot, err
 }
 
 // SetPolicy pushes a live egress-policy swap to the worker (local-

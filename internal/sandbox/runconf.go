@@ -26,10 +26,16 @@ import (
 // RunConfig is the fully-resolved description of one gantry VM run.
 // sandbox.json is this struct.
 type RunConfig struct {
-	Kernel  string `json:"kernel"`
-	Rootfs  string `json:"rootfs"`
-	Runtime string `json:"runtime,omitempty"`
-	Image   string `json:"image"`
+	Kernel string `json:"kernel"`
+	// KernelPolicy records whether Kernel follows Gantry releases or was
+	// explicitly selected by the user. Release-managed kernels are refreshed
+	// when a stopped sandbox is started by a newer Gantry binary; pinned
+	// kernels are never replaced. Empty is reserved for legacy configs and is
+	// migrated conservatively at the next restart.
+	KernelPolicy string `json:"kernel_policy,omitempty"`
+	Rootfs       string `json:"rootfs"`
+	Runtime      string `json:"runtime,omitempty"`
+	Image        string `json:"image"`
 	// ImageRef/ImageDigest/ImageCfg record an OCI image resolution
 	// (-image given a reference, OCI layout, or docker save tar instead
 	// of a plain .erofs file). The daemon uses the already-built EROFS at
@@ -52,6 +58,9 @@ type RunConfig struct {
 	GVProxy        string           `json:"gvproxy,omitempty"`
 	NetPol         string           `json:"net_policy,omitempty"`
 	AllowLN        bool             `json:"allow_local_net,omitempty"`
+	ProxyURL       string           `json:"proxy,omitempty"`
+	NoProxy        string           `json:"no_proxy,omitempty"`
+	ProxyEnforce   bool             `json:"proxy_enforce,omitempty"`
 	// OAuthBridge controls the bounded host loopback callback bridge. Nil
 	// means enabled, preserving the default for configs written before this
 	// field existed; a non-nil false value is the persisted opt-out.
@@ -88,6 +97,8 @@ type RunFlags struct {
 	Net                                     *bool
 	GVProxy, NetPol                         *string
 	AllowLN                                 *bool
+	ProxyURL, NoProxy                       *string
+	ProxyEnforce                            *bool
 	OAuthBridge                             *bool
 	ProcessIsolation                        *string
 	MemMB                                   *uint
@@ -111,6 +122,9 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		GVProxy:          fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
 		NetPol:           fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
 		AllowLN:          fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
+		ProxyURL:         fs.String("proxy", "", "route guest HTTP(S) through this http(s) or socks5(h) proxy URL"),
+		NoProxy:          fs.String("no-proxy", "", "comma-separated proxy bypasses (default: localhost and loopback)"),
+		ProxyEnforce:     fs.Bool("proxy-enforce", false, "block direct TCP 80/443 and UDP 443 except to the configured proxy"),
 		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),

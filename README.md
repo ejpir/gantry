@@ -86,7 +86,8 @@ The manager listens on `~/.gantry/manager.sock`. Its API is documented in the
 - **Runtimes:** `crun` by default, or in-VM gVisor with `-runtime runsc`.
 - **Host shares:** read-only virtio-fs exports, with live add/remove on Linux.
 - **Networking:** deny-by-default access to local networks, live egress rules,
-  DNS allowlists, traffic inspection, and TCP/UDP port publishing.
+  DNS allowlists, traffic inspection, forward-proxy routing, and TCP/UDP port
+  publishing.
 - **Secrets:** values are delivered in memory to an exec session and are never
   stored in sandbox state or command-line arguments.
 - **Agent sign-in:** localhost OAuth callbacks for Codex, Claude, and Pi can be
@@ -95,6 +96,24 @@ The manager listens on `~/.gantry/manager.sock`. Its API is documented in the
   rules, mounts, ports, and secrets.
 
 Run `gantry --help` or a command with `--help` for the complete CLI reference.
+
+## Forward proxy
+
+Route HTTP and HTTPS-aware tools in every guest process through an existing
+forward proxy without embedding another proxy server:
+
+```sh
+./gantry start dev -image alpine:latest \
+  -proxy http://proxy.example:3128 \
+  -proxy-enforce
+```
+
+Gantry injects the upper- and lowercase `HTTP_PROXY`, `HTTPS_PROXY`,
+`ALL_PROXY`, and `NO_PROXY` variables. `-proxy-enforce` also blocks direct TCP
+80/443 and UDP 443 through the host-side egress policy, while allowing only the
+resolved proxy addresses on the configured port. See
+[forward-proxy routing](docs/proxy.md) for supported URL schemes, bypasses, and
+enforcement limits.
 
 ## Updates
 

@@ -209,6 +209,7 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		"vsock.connect":    state.connectVsock,
 		"net.policy":       state.setPolicy,
 		"traffic.snapshot": state.trafficSnapshot,
+		"capture.read":     state.capture,
 		"shutdown": func(workerproto.Request) (any, error) {
 			return nil, workerproto.ErrShutdown
 		},

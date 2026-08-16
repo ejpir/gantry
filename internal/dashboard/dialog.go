@@ -56,11 +56,11 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateSecretAddDialogKey(msg)
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
 		return m.updateConfirmationDialogKey(msg.String())
-	case tuiHelpDialog, tuiInfoDialog:
+	case tuiHelpDialog, tuiInfoDialog, tuiPacketDetailDialog:
 		switch msg.String() {
 		case "c":
 			return m, m.copyDialogCmd()
-		case "esc", "q", "?", "enter", "i":
+		case "esc", "q", "?", "enter", "i", "d":
 			m.closeDialog()
 		case "up", "k":
 			m.scrollDialog(-1)
@@ -241,6 +241,8 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		}
 	case tuiInfoDialog:
 		return wholeDialog("sandbox details")
+	case tuiPacketDetailDialog:
+		return wholeDialog("packet details")
 	case tuiHelpDialog:
 		return wholeDialog("keyboard help")
 	}
@@ -1401,6 +1403,7 @@ func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
 func (m *sandboxTUIModel) closeDialog() {
 	m.dialog = tuiNoDialog
 	m.dialogScroll = 0
+	m.packetDetail = nil
 	m.confirmRemove = false
 	m.formError = ""
 	m.createName.Blur()
@@ -1977,7 +1980,11 @@ func (m *sandboxTUIModel) updateSecretAddDialogMouse(mouse tea.Mouse, bounds tui
 }
 
 func (m *sandboxTUIModel) updateDashboardMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	previous := m.page
 	if m.updateTabMouseClick(mouse) {
+		if previous != tuiPacketsPage && m.page == tuiPacketsPage {
+			return m, m.refreshPacketsCmd()
+		}
 		return m, nil
 	}
 	if cmd, handled := m.updateMenuMouseClick(mouse); handled {

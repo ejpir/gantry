@@ -57,6 +57,9 @@ type SessionOptions struct {
 	Cwd string
 	// Secrets enter only the in-memory process spec, never config.json.
 	Secrets []string
+	// Environment contains non-secret runtime overrides. It is applied to the
+	// long-lived container and each exec, after image variables and Secrets.
+	Environment []string
 }
 
 func (options SessionOptions) workingDir() string {
@@ -248,7 +251,7 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 		return sessionExec(taskClient, options, options.ID, stdin, stdout)
 	}
 
-	config, err := configJSONWithTransportCwd(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, true, options.Cwd)
+	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, true, options.Cwd, options.Environment)
 	if err != nil {
 		return err
 	}
@@ -346,7 +349,7 @@ func ensureSandboxContainer(client *ttrpc.Client, taskClient v3.TTRPCTaskService
 		return fmt.Errorf("sandbox task %q exists in state %s and did not reach running", options.ID, state.Status)
 	}
 
-	config, err := configJSONWithTransport(options.Shares, options.ShareTransport, options.RW, containerInitArgs, nil, false)
+	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, containerInitArgs, nil, false, "", options.Environment)
 	if err != nil {
 		return err
 	}

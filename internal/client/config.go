@@ -91,6 +91,10 @@ func configJSONWithTransport(entries []ShareEntry, transport *shares.Transport, 
 }
 
 func configJSONWithTransportCwd(entries []ShareEntry, transport *shares.Transport, rw bool, args []string, img *image.Config, terminal bool, cwd string) (string, error) {
+	return configJSONWithTransportCwdEnv(entries, transport, rw, args, img, terminal, cwd, nil)
+}
+
+func configJSONWithTransportCwdEnv(entries []ShareEntry, transport *shares.Transport, rw bool, args []string, img *image.Config, terminal bool, cwd string, environment []string) (string, error) {
 	uid, gid := img.IDs()
 	if cwd == "" {
 		cwd = img.WorkdirOr()
@@ -112,7 +116,7 @@ func configJSONWithTransportCwd(entries []ShareEntry, transport *shares.Transpor
 			Terminal: terminal,
 			User:     specs.User{UID: uid, GID: gid},
 			Args:     args,
-			Env:      img.EnvWith("TERM=xterm"),
+			Env:      processEnvironment(img, environment),
 			Cwd:      cwd,
 			Capabilities: &specs.LinuxCapabilities{
 				Bounding:  containerCapabilities,

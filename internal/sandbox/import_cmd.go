@@ -284,6 +284,7 @@ func (p *dockerImportPlan) prepare(root string, say func(string, ...any)) error 
 		return err
 	}
 	p.config.Kernel = kernel
+	p.config.KernelPolicy = kernelPolicyRelease
 	p.config.Rootfs = rootfs
 	p.config.Ports = ports
 	p.config.NetPol = netpolPath

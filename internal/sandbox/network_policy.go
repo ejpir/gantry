@@ -81,6 +81,10 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
+	policy, err = m.store.Snapshot().applyProxyPolicy(policy)
+	if err != nil {
+		return NetworkPolicyEntry{}, err
+	}
 	// Apply live FIRST and persist only on success, rolling the live
 	// state back if persistence fails: the on-disk config must never
 	// claim a policy the running sandbox does not enforce, and the
@@ -115,6 +119,10 @@ func (m *NetworkPolicyManager) Get() (NetworkPolicyEntry, error) {
 		return makeNetworkPolicyEntry(cfg.NetPol, cfg.AllowLN, m.current, "active"), nil
 	}
 	_, policy, err := resolveNetworkPolicy(cfg.NetPol, cfg.AllowLN)
+	if err != nil {
+		return NetworkPolicyEntry{}, err
+	}
+	policy, err = cfg.applyProxyPolicy(policy)
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
@@ -154,11 +162,15 @@ func setSandboxNetworkPolicy(name, path string, allowLocal bool) (NetworkPolicyE
 		return networkPolicyRPC(name, "netpolicy.set", &brokerNetworkPolicyRequest{Path: path, AllowLocal: allowLocal})
 	}
 
+	store, err := LoadConfigStore(sandboxDir(name))
+	if err != nil {
+		return NetworkPolicyEntry{}, err
+	}
 	path, policy, err := resolveNetworkPolicy(path, allowLocal)
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
-	store, err := LoadConfigStore(sandboxDir(name))
+	policy, err = store.Snapshot().applyProxyPolicy(policy)
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}

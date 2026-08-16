@@ -18,6 +18,7 @@ const (
 	OpPortStatus      = "port.status"
 	OpPortList        = "port.list"
 	OpTrafficSnapshot = "traffic.snapshot"
+	OpCapture         = "capture.read"
 	OpShutdown        = "shutdown"
 )
 

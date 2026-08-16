@@ -225,6 +225,9 @@ components:
         cpus: { type: integer }
         memoryMiB: { type: integer }
         writable: { type: boolean }
+        proxy: { type: string, format: uri }
+        noProxy: { type: string }
+        proxyEnforce: { type: boolean }
     CreateSandboxRequest:
       type: object
       required: [name, image]
@@ -245,6 +248,9 @@ components:
         net: { type: boolean, default: true }
         networkPolicy: { type: string }
         allowLocalNetwork: { type: boolean, default: false }
+        proxy: { type: string, format: uri }
+        noProxy: { type: string }
+        proxyEnforce: { type: boolean, default: false }
         oauthBridge: { type: boolean, default: true }
         processIsolation: { type: string, enum: [auto, required, off], default: auto }
         memoryMiB: { type: integer, default: 512 }

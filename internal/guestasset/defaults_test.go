@@ -153,3 +153,25 @@ func TestGVisorVariantsAreIdempotent(t *testing.T) {
 		t.Fatalf("non-arm64 GVisorKernel = %q", kernel)
 	}
 }
+
+func TestIsManagedReleaseKernel(t *testing.T) {
+	gantry, _ := kernelNames(runtime.GOARCH)
+	managed := filepath.Join(t.TempDir(), "gantry", "assets", "v0.0.7", gantry)
+	if !IsManagedReleaseKernel(managed) {
+		t.Fatalf("versioned Gantry kernel was not recognized: %s", managed)
+	}
+	if runtime.GOARCH == "arm64" && !IsManagedReleaseKernel(managed+"-4k") {
+		t.Fatalf("versioned Gantry 4K kernel was not recognized: %s-4k", managed)
+	}
+
+	for _, path := range []string{
+		filepath.Join(t.TempDir(), gantry),
+		filepath.Join(t.TempDir(), "gantry", "assets", "latest", gantry),
+		filepath.Join(t.TempDir(), "other", "assets", "v0.0.7", gantry),
+		filepath.Join(t.TempDir(), "gantry", "assets", "v0.0.7", "custom-kernel"),
+	} {
+		if IsManagedReleaseKernel(path) {
+			t.Errorf("custom/ambiguous path was recognized as managed: %s", path)
+		}
+	}
+}

@@ -514,6 +514,12 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			sandbox.GVProxy = cfg.GVProxy
 			sandbox.NetPolicy = cfg.NetPol
 			sandbox.AllowLocal = cfg.AllowLN
+			sandbox.Proxy = cfg.ProxyURL
+			sandbox.NoProxy = cfg.NoProxy
+			if sandbox.Proxy != "" && sandbox.NoProxy == "" {
+				sandbox.NoProxy = defaultNoProxy
+			}
+			sandbox.ProxyEnforce = cfg.ProxyEnforce
 			if cfg.MemMB > 0 {
 				sandbox.MemMB = cfg.MemMB
 			}
@@ -639,7 +645,19 @@ func loadDashboardRules(sandbox string, cfg RunConfig) []dashboardapi.Rule {
 		policy.AllowLocal = true
 	}
 	summaries := policy.RuleSummaries()
-	rows := make([]dashboardapi.Rule, 0, len(summaries))
+	rows := make([]dashboardapi.Rule, 0, len(summaries)+3)
+	if proxy, err := parseForwardProxy(cfg.ProxyURL); err == nil && proxy.url != "" {
+		rows = append(rows, dashboardapi.Rule{
+			Sandbox: sandbox, Action: "allow", Target: proxy.hostname,
+			Proto: "tcp", Ports: strconv.Itoa(int(proxy.port)), Source: "proxy endpoint",
+		})
+		if cfg.ProxyEnforce {
+			rows = append(rows,
+				dashboardapi.Rule{Sandbox: sandbox, Action: "deny", Target: "all destinations", Proto: "tcp", Ports: "80,443", Source: "proxy enforcement"},
+				dashboardapi.Rule{Sandbox: sandbox, Action: "deny", Target: "all destinations", Proto: "udp", Ports: "443", Source: "proxy enforcement"},
+			)
+		}
+	}
 	for _, summary := range summaries {
 		rows = append(rows, dashboardapi.Rule{
 			Sandbox: sandbox, Action: summary.Action, Target: summary.Target,

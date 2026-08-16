@@ -164,6 +164,43 @@ func TestWithDomainNormalizesAndDeduplicatesAllowlistEntry(t *testing.T) {
 	}
 }
 
+func TestResolveDomainAllowsDNSWithoutLearningBroadPermission(t *testing.T) {
+	policy := mustParse(t, `{"default":"deny","allowDomains":["api.example"]}`)
+	next, err := WithResolveDomain(policy, " Proxy.Example. ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.ResolveDomains) != 1 || next.ResolveDomains[0] != "proxy.example" {
+		t.Fatalf("resolve-only domains = %v", next.ResolveDomains)
+	}
+	if !next.MatchTX(ipFrame(t, gatewayIP, protoUDP, 53, dnsQuery(t, "proxy.example"))) {
+		t.Fatal("resolve-only DNS query was blocked")
+	}
+	if next.MatchTX(ipFrame(t, gatewayIP, protoUDP, 53, dnsQuery(t, "other.example"))) {
+		t.Fatal("unlisted DNS query was allowed")
+	}
+	answer := ipFrame(t, "192.168.127.2", protoUDP, 12345, dnsAnswer(t, "proxy.example", "203.0.113.5"))
+	binary.BigEndian.PutUint16(answer[14+20:14+22], 53)
+	next.ObserveRX(answer)
+	if next.DynamicSize() != 0 {
+		t.Fatal("resolve-only answer entered the dynamic allow table")
+	}
+	if next.Allows([4]byte{203, 0, 113, 5}, protoTCP, 443) {
+		t.Fatal("resolve-only answer granted broad egress")
+	}
+	raw, err := Marshal(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roundTrip.ResolveDomains) != 1 || roundTrip.ResolveDomains[0] != "proxy.example" {
+		t.Fatalf("resolve-only domain lost in round trip: %s", raw)
+	}
+}
+
 func TestPolicyReplaceAppliesToStableReceiver(t *testing.T) {
 	stable := DefaultPolicy()
 	public := [4]byte{8, 8, 8, 8}

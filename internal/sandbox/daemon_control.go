@@ -50,6 +50,7 @@ func (d *daemonRuntime) startControl() error {
 		shares:     d.shares,
 		ports:      d.ports,
 		netPolicy:  NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
+		capture:    packetCaptureBackendFor(d.network, d.runner),
 		sessions:   map[string]chan struct{}{},
 		sessionCtl: map[string]net.Conn{},
 		shutdown:   d.shutdown,

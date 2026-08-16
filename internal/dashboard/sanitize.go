@@ -17,6 +17,8 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 		row.RWLayer = safeUILine(row.RWLayer)
 		row.GVProxy = safeUILine(row.GVProxy)
 		row.NetPolicy = safeUILine(row.NetPolicy)
+		row.Proxy = safeUILine(row.Proxy)
+		row.NoProxy = safeUILine(row.NoProxy)
 		row.Dir = safeUILine(row.Dir)
 		row.ConfigPath = safeUILine(row.ConfigPath)
 	}

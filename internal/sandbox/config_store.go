@@ -48,6 +48,9 @@ func readSandboxConfig(dir string) (RunConfig, error) {
 	if err := validateProcessIsolation(cfg.ProcessIsolation); err != nil {
 		return RunConfig{}, fmt.Errorf("invalid sandbox process isolation: %w", err)
 	}
+	if err := validateProxyConfig(cfg); err != nil {
+		return RunConfig{}, fmt.Errorf("invalid sandbox proxy: %w", err)
+	}
 	return cfg, nil
 }
 

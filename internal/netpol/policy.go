@@ -62,6 +62,10 @@ type Policy struct {
 	DefaultAllow bool     `json:"-"`
 	Rules        []Rule   `json:"-"`
 	AllowDomains []string `json:"-"` // normalized: lower-case, no trailing dot
+	// ResolveDomains may be queried through the gateway resolver but their
+	// answers do not enter the dynamic allow table. It supports narrow,
+	// IP/port-scoped exceptions such as a configured forward proxy.
+	ResolveDomains []string `json:"-"`
 	// AllowLocal permits destinations on the local network: RFC1918,
 	// loopback, link-local (incl. the cloud metadata endpoint), CGNAT,
 	// multicast, and the host itself (the .254 NAT alias). It is false by
@@ -270,6 +274,26 @@ func WithDomain(policy *Policy, domain string) (*Policy, error) {
 	return clone, nil
 }
 
+// WithResolveDomain returns a detached policy that permits DNS queries for
+// domain without turning the returned addresses into broad dynamic allows.
+func WithResolveDomain(policy *Policy, domain string) (*Policy, error) {
+	domain, err := normalizeDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+	clone, err := clonePolicy(policy)
+	if err != nil {
+		return nil, err
+	}
+	for _, existing := range clone.ResolveDomains {
+		if existing == domain {
+			return clone, nil
+		}
+	}
+	clone.ResolveDomains = append(clone.ResolveDomains, domain)
+	return clone, nil
+}
+
 // WithoutDomain returns a detached copy without a domain allowlist entry.
 // Domain spelling is normalized the same way as policy parsing. Duplicate
 // entries are removed together because they represent the same permission.
@@ -350,10 +374,11 @@ type fileRule struct {
 }
 
 type filePolicy struct {
-	Default      string     `json:"default"` // "allow" (default) | "deny"
-	AllowLocal   *bool      `json:"allowLocal,omitempty"`
-	Rules        []fileRule `json:"rules"`
-	AllowDomains []string   `json:"allowDomains"`
+	Default        string     `json:"default"` // "allow" (default) | "deny"
+	AllowLocal     *bool      `json:"allowLocal,omitempty"`
+	Rules          []fileRule `json:"rules"`
+	AllowDomains   []string   `json:"allowDomains"`
+	ResolveDomains []string   `json:"resolveDomains,omitempty"`
 }
 
 // Load parses a JSON policy file.
@@ -424,11 +449,18 @@ func Parse(data []byte) (*Policy, error) {
 		p.AllowLocal = *fp.AllowLocal
 	}
 	for _, d := range fp.AllowDomains {
-		d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
-		if d == "" {
+		d, err := normalizeDomain(d)
+		if err != nil {
 			return nil, fmt.Errorf("network policy: empty domain in allowDomains")
 		}
 		p.AllowDomains = append(p.AllowDomains, d)
+	}
+	for _, d := range fp.ResolveDomains {
+		d, err := normalizeDomain(d)
+		if err != nil {
+			return nil, fmt.Errorf("network policy: empty domain in resolveDomains")
+		}
+		p.ResolveDomains = append(p.ResolveDomains, d)
 	}
 	return p, nil
 }
@@ -467,7 +499,7 @@ func (p *Policy) RuleSummaries() []RuleSummary {
 	if p == nil {
 		return nil
 	}
-	out := make([]RuleSummary, 0, len(p.Rules)+len(p.AllowDomains)+3)
+	out := make([]RuleSummary, 0, len(p.Rules)+len(p.AllowDomains)+len(p.ResolveDomains)+3)
 	out = append(out, RuleSummary{
 		Action: "deny", Target: "IPv6 and non-IPv4 traffic", Protocol: "ether", Source: "built-in",
 	})
@@ -495,6 +527,9 @@ func (p *Policy) RuleSummaries() []RuleSummary {
 	}
 	for _, domain := range p.AllowDomains {
 		out = append(out, RuleSummary{Action: "allow", Target: domain, Protocol: "dns", Source: "domain"})
+	}
+	for _, domain := range p.ResolveDomains {
+		out = append(out, RuleSummary{Action: "resolve", Target: domain, Protocol: "dns", Source: "DNS only"})
 	}
 	localAction := "deny"
 	if p.AllowLocal {
@@ -542,6 +577,9 @@ func (p *Policy) Describe() string {
 	}
 	if len(p.AllowDomains) > 0 {
 		s += fmt.Sprintf(", domains: %s", strings.Join(p.AllowDomains, ", "))
+	}
+	if len(p.ResolveDomains) > 0 {
+		s += fmt.Sprintf(", resolve only: %s", strings.Join(p.ResolveDomains, ", "))
 	}
 	return s
 }
@@ -643,10 +681,10 @@ func (p *Policy) matchGatewayService(pp parsedPacket) bool {
 	// domain allowlist no single frame of a fragmented datagram can be
 	// attributed to a query name — and non-first fragments carry no ports
 	// at all — so fail closed or split queries walk around the filter.
-	if pp.fragmented && len(p.AllowDomains) > 0 && (pp.proto == protoUDP || pp.proto == protoTCP) {
+	if pp.fragmented && p.dnsFilterActive() && (pp.proto == protoUDP || pp.proto == protoTCP) {
 		return false
 	}
-	if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 && len(p.AllowDomains) > 0 {
+	if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 && p.dnsFilterActive() {
 		return p.dnsQueryAllowed(pp)
 	}
 	return true
@@ -681,7 +719,7 @@ func (p *Policy) dnsQueryAllowed(pp parsedPacket) bool {
 		return false
 	}
 	for _, q := range msg.Question {
-		if !p.domainAllowed(q.Name) {
+		if !p.dnsDomainAllowed(q.Name) {
 			return false
 		}
 	}
@@ -834,8 +872,20 @@ func (p *Policy) DynamicSize() int {
 // domainAllowed matches exact names and "*.suffix" patterns; a wildcard
 // also matches the bare suffix ("*.docker.io" ⊇ "docker.io").
 func (p *Policy) domainAllowed(name string) bool {
+	return domainMatches(p.AllowDomains, name)
+}
+
+func (p *Policy) dnsDomainAllowed(name string) bool {
+	return domainMatches(p.AllowDomains, name) || domainMatches(p.ResolveDomains, name)
+}
+
+func (p *Policy) dnsFilterActive() bool {
+	return len(p.AllowDomains) != 0 || len(p.ResolveDomains) != 0
+}
+
+func domainMatches(domains []string, name string) bool {
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
-	for _, d := range p.AllowDomains {
+	for _, d := range domains {
 		if strings.HasPrefix(d, "*.") {
 			suf := d[2:]
 			if name == suf || strings.HasSuffix(name, "."+suf) {
@@ -883,7 +933,7 @@ func Marshal(p *Policy) ([]byte, error) {
 	if cur == nil {
 		return nil, fmt.Errorf("network policy: cannot marshal nil policy")
 	}
-	fp := filePolicy{AllowDomains: cur.AllowDomains}
+	fp := filePolicy{AllowDomains: cur.AllowDomains, ResolveDomains: cur.ResolveDomains}
 	if !cur.DefaultAllow {
 		fp.Default = "deny"
 	}

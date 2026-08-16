@@ -17,6 +17,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
@@ -527,6 +528,12 @@ func (w *netWorker) trafficSnapshotContext(ctx context.Context) (netpol.TrafficS
 	var out netpol.TrafficSnapshot
 	err := w.client.CallContext(ctx, networkworker.OpTrafficSnapshot, nil, &out)
 	return out, err
+}
+
+func (w *netWorker) Capture(request packetcapture.Request) (packetcapture.Snapshot, error) {
+	var snapshot packetcapture.Snapshot
+	err := w.client.Call(networkworker.OpCapture, request, &snapshot)
+	return snapshot, err
 }
 
 // Close asks the worker for its final traffic snapshot and graceful shutdown,

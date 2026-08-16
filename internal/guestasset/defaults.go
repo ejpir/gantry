@@ -75,6 +75,22 @@ func DefaultKernel() string {
 	return releaseAssetPath(gantry)
 }
 
+// IsManagedReleaseKernel reports whether path has the layout used by a
+// versioned Gantry release cache. It is intentionally strict: callers use it
+// only to migrate sandbox configs written before kernel provenance was
+// persisted, so an ambiguous/custom path must remain pinned.
+func IsManagedReleaseKernel(path string) bool {
+	if !downloadable(filepath.Base(path), kernelAsset) {
+		return false
+	}
+	versionDir := filepath.Dir(filepath.Clean(path))
+	if !releaseVersionRE.MatchString(filepath.Base(versionDir)) {
+		return false
+	}
+	assetsDir := filepath.Dir(versionDir)
+	return filepath.Base(assetsDir) == "assets" && filepath.Base(filepath.Dir(assetsDir)) == "gantry"
+}
+
 // KernelChoices returns staged kernels for the host architecture in artifact
 // search order. It does no downloading and is intended for explicit user
 // selection; callers should use DefaultKernel for unattended boot.

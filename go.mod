@@ -16,6 +16,7 @@ require (
 	github.com/diskfs/go-diskfs v1.9.4
 	github.com/ebitengine/purego v0.10.2
 	github.com/erofs/go-erofs v0.3.2-0.20260721150545-622ddde0629e
+	github.com/google/gopacket v1.1.19
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/miekg/dns v1.1.72
 	github.com/opencontainers/runtime-spec v1.3.0
@@ -38,7 +39,6 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/containerd/log v0.1.1-0.20260403072107-cb1839ebf76b // indirect
 	github.com/google/btree v1.1.2 // indirect
-	github.com/google/gopacket v1.1.19 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048 // indirect
 	github.com/insomniacslk/dhcp v0.0.0-20250919081422-f80a1952f48e // indirect

@@ -66,15 +66,18 @@ type managerEvent struct {
 }
 
 type managerSandbox struct {
-	Name        string `json:"name"`
-	State       string `json:"state"`
-	PID         int    `json:"pid,omitempty"`
-	Image       string `json:"image,omitempty"`
-	ImageRef    string `json:"imageRef,omitempty"`
-	ImageDigest string `json:"imageDigest,omitempty"`
-	CPUs        int    `json:"cpus,omitempty"`
-	MemoryMiB   uint   `json:"memoryMiB,omitempty"`
-	Writable    bool   `json:"writable"`
+	Name         string `json:"name"`
+	State        string `json:"state"`
+	PID          int    `json:"pid,omitempty"`
+	Image        string `json:"image,omitempty"`
+	ImageRef     string `json:"imageRef,omitempty"`
+	ImageDigest  string `json:"imageDigest,omitempty"`
+	CPUs         int    `json:"cpus,omitempty"`
+	MemoryMiB    uint   `json:"memoryMiB,omitempty"`
+	Writable     bool   `json:"writable"`
+	Proxy        string `json:"proxy,omitempty"`
+	NoProxy      string `json:"noProxy,omitempty"`
+	ProxyEnforce bool   `json:"proxyEnforce,omitempty"`
 }
 
 type managerCreateRequest struct {
@@ -90,6 +93,9 @@ type managerCreateRequest struct {
 	Net               *bool    `json:"net,omitempty"`
 	NetworkPolicy     string   `json:"networkPolicy,omitempty"`
 	AllowLocalNetwork bool     `json:"allowLocalNetwork,omitempty"`
+	Proxy             string   `json:"proxy,omitempty"`
+	NoProxy           string   `json:"noProxy,omitempty"`
+	ProxyEnforce      bool     `json:"proxyEnforce,omitempty"`
 	OAuthBridge       *bool    `json:"oauthBridge,omitempty"`
 	ProcessIsolation  string   `json:"processIsolation,omitempty"`
 	MemoryMiB         uint     `json:"memoryMiB,omitempty"`
@@ -599,6 +605,7 @@ func resolveManagerCreate(request managerCreateRequest) (RunConfig, map[string]s
 	for _, setting := range []struct{ name, value string }{
 		{"image", request.Image}, {"kernel", request.Kernel}, {"rootfs", request.Rootfs},
 		{"runtime", request.Runtime}, {"rwlayer", request.RWLayer}, {"net-policy", request.NetworkPolicy},
+		{"proxy", request.Proxy}, {"no-proxy", request.NoProxy},
 		{"process-isolation", request.ProcessIsolation},
 	} {
 		if setting.value != "" {
@@ -631,6 +638,11 @@ func resolveManagerCreate(request managerCreateRequest) (RunConfig, map[string]s
 	}
 	if request.AllowLocalNetwork {
 		if err := set("allow-local-net", "true"); err != nil {
+			return RunConfig{}, nil, nil, err
+		}
+	}
+	if request.ProxyEnforce {
+		if err := set("proxy-enforce", "true"); err != nil {
 			return RunConfig{}, nil, nil, err
 		}
 	}
@@ -725,10 +737,15 @@ func inspectManagerSandbox(name string) (managerSandbox, error) {
 	if cfg.ImageRef != "" {
 		imageName = cfg.ImageRef
 	}
+	noProxy := cfg.NoProxy
+	if cfg.ProxyURL != "" && noProxy == "" {
+		noProxy = defaultNoProxy
+	}
 	return managerSandbox{
 		Name: name, State: state, PID: pid, Image: imageName,
 		ImageRef: cfg.ImageRef, ImageDigest: cfg.ImageDigest,
 		CPUs: cfg.VCPUs, MemoryMiB: cfg.MemMB, Writable: cfg.RW,
+		Proxy: cfg.ProxyURL, NoProxy: noProxy, ProxyEnforce: cfg.ProxyEnforce,
 	}, nil
 }
 

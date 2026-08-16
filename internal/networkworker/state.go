@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
@@ -284,6 +285,14 @@ func (s *state) listPorts(workerproto.Request) (any, error) {
 
 func (s *state) trafficSnapshot(workerproto.Request) (any, error) {
 	return s.traffic.Snapshot(), nil
+}
+
+func (s *state) capture(request workerproto.Request) (any, error) {
+	var body packetcapture.Request
+	if err := workerproto.DecodeBody(request, &body); err != nil {
+		return nil, fmt.Errorf("capture.read: %w", err)
+	}
+	return s.traffic.Capture(body)
 }
 
 func (s *state) shutdown(workerproto.Request) (any, error) {

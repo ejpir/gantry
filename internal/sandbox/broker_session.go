@@ -165,6 +165,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
 		Args:           req.Args,
 		Cwd:            req.Cwd,
 		Secrets:        br.secretEnv(),
+		Environment:    br.cfg.proxyEnvironment(),
 		// one VM = one container workload with a well-known id, so a
 		// concurrent session can find it and Exec into it instead of
 		// fighting over the rw rootfs stack with a second Create

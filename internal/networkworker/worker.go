@@ -161,6 +161,7 @@ func Run(control, data net.Conn) (retErr error) {
 			OpPortStatus:      state.portStatus,
 			OpPortList:        state.listPorts,
 			OpTrafficSnapshot: state.trafficSnapshot,
+			OpCapture:         state.capture,
 			OpShutdown:        state.shutdown,
 		}, workerproto.ServeOptions{OrderedOps: map[string]bool{
 			OpPolicyPrepare: true,

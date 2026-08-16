@@ -371,6 +371,9 @@ func TestResolveDownloadsKernel(t *testing.T) {
 	if b, _ := os.ReadFile(cfg.Kernel); string(b) != "downloaded-kernel" {
 		t.Errorf("kernel content = %q, want the downloaded payload", b)
 	}
+	if cfg.KernelPolicy != kernelPolicyRelease {
+		t.Errorf("default kernel policy = %q, want %q", cfg.KernelPolicy, kernelPolicyRelease)
+	}
 }
 
 func TestResolveRunscDownloads4kKernel(t *testing.T) {
@@ -410,6 +413,9 @@ func TestResolvePreservesExplicitCustomKernel(t *testing.T) {
 	}
 	if cfg.Kernel != want {
 		t.Fatalf("explicit kernel = %q, want unchanged path %q", cfg.Kernel, want)
+	}
+	if cfg.KernelPolicy != kernelPolicyPinned {
+		t.Fatalf("explicit kernel policy = %q, want %q", cfg.KernelPolicy, kernelPolicyPinned)
 	}
 	if body, err := os.ReadFile(cfg.Kernel); err != nil || string(body) != "caller-owned kernel" {
 		t.Fatalf("explicit kernel changed: body=%q err=%v", body, err)

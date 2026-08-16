@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 
@@ -37,6 +38,7 @@ type broker struct {
 	shares     *ShareManager
 	ports      *PortManager
 	netPolicy  *NetworkPolicyManager
+	capture    packetCaptureBackend
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 	secretMu   sync.RWMutex
 
@@ -62,6 +64,7 @@ type brokerRequest struct {
 	Resources *brokerResourceRequest      `json:"resources,omitempty"`
 	NetPolicy *brokerNetworkPolicyRequest `json:"net_policy,omitempty"`
 	Secret    *brokerSecretRequest        `json:"secret,omitempty"`
+	Capture   *packetcapture.Request      `json:"capture,omitempty"`
 }
 
 type brokerResourceRequest struct {
@@ -198,6 +201,8 @@ func (br *broker) handle(c net.Conn) {
 		br.networkPolicyControl(c, req)
 	case "secret.set", "secret.remove":
 		br.secretControl(c, req)
+	case "capture.read":
+		br.captureControl(c, req)
 	case "session":
 		br.session(c, r, req)
 	case "sessionctl":

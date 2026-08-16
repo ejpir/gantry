@@ -24,6 +24,8 @@ func pageTitle(page tuiPage) string {
 		return "PORTS"
 	case tuiSecretsPage:
 		return "SECRETS"
+	case tuiPacketsPage:
+		return "PACKETS"
 	default:
 		return "SANDBOXES"
 	}
@@ -41,12 +43,17 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 		return len(m.ports)
 	case tuiSecretsPage:
 		return len(m.secrets)
+	case tuiPacketsPage:
+		return len(m.packets)
 	default:
 		return len(m.sandboxes)
 	}
 }
 
 func (m sandboxTUIModel) tableDetailHeight() int {
+	if m.page == tuiPacketsPage && m.dashboardLayout().contentHeight >= 14 {
+		return 6
+	}
 	if m.dashboardLayout().contentHeight >= 12 {
 		return 5
 	}
@@ -465,6 +472,8 @@ func (m sandboxTUIModel) tableRenderPosition(page tuiPage) (scroll, cursor int) 
 		return m.portScroll, m.portCursor
 	case tuiSecretsPage:
 		return m.secretScroll, m.secretCursor
+	case tuiPacketsPage:
+		return m.packetScroll, m.packetCursor
 	default:
 		return 0, 0
 	}
@@ -482,6 +491,8 @@ func (m sandboxTUIModel) renderTableHeader(theme tuiTheme, page tuiPage, width i
 		return m.renderPortsHeader(theme, width)
 	case tuiSecretsPage:
 		return m.renderSecretsHeader(theme, width)
+	case tuiPacketsPage:
+		return m.renderPacketsHeader(theme, width)
 	default:
 		return ""
 	}
@@ -499,6 +510,8 @@ func (m sandboxTUIModel) renderTableRow(theme tuiTheme, page tuiPage, index, wid
 		return m.renderPortRow(theme, m.ports[index], width)
 	case tuiSecretsPage:
 		return m.renderSecretRow(theme, m.secrets[index], width)
+	case tuiPacketsPage:
+		return m.renderPacketRow(theme, m.packets[index], width)
 	default:
 		return ""
 	}
@@ -516,6 +529,8 @@ func (m sandboxTUIModel) renderTableDetail(theme tuiTheme, page tuiPage, width i
 		return m.renderPortDetail(theme, width)
 	case tuiSecretsPage:
 		return m.renderSecretDetail(theme, width)
+	case tuiPacketsPage:
+		return m.renderPacketDetail(theme, width)
 	default:
 		return nil
 	}

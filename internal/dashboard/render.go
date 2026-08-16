@@ -210,6 +210,8 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 		body = m.renderPortsView(theme, layout)
 	case tuiSecretsPage:
 		body = m.renderSecretsView(theme, layout)
+	case tuiPacketsPage:
+		body = m.renderPacketsView(theme, layout)
 	default:
 		body = m.renderCardGrid(theme, layout)
 	}
@@ -339,6 +341,7 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 		fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 		fmt.Sprintf("5 PORTS %d", len(m.ports)),
 		fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
+		fmt.Sprintf("7 PACKETS %d", len(m.packets)),
 	}
 	if width < 82 {
 		labels = []string{
@@ -348,6 +351,7 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 			fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 			fmt.Sprintf("5 PORTS %d", len(m.ports)),
 			fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
+			fmt.Sprintf("7 PKTS %d", len(m.packets)),
 		}
 	}
 	if width < 50 {
@@ -388,7 +392,7 @@ func (m sandboxTUIModel) renderTabs(theme tuiTheme, width int) string {
 		right = m.spinner.View() + lipgloss.NewStyle().Foreground(theme.muted).Render(" syncing")
 	}
 	line := left.String()
-	if width >= 96 && right != "" {
+	if width >= 96 && right != "" && lipgloss.Width(line)+lipgloss.Width(right)+4 <= width {
 		line = joinSides(line, "  "+right+"  ", width)
 	} else {
 		line = truncateANSI(line, width)
@@ -464,6 +468,12 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 			}
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d names  •  %d loaded", len(m.secrets), loaded))
+	case tuiPacketsPage:
+		state := "live"
+		if m.packetPaused {
+			state = "paused"
+		}
+		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d captured  •  %d evicted  •  %s", len(m.packets), m.packetEvicted, state))
 	default:
 		running, starting := 0, 0
 		for _, sandbox := range m.sandboxes {
@@ -722,6 +732,8 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 		return [][2]string{{"p", "publish"}, {"d", "unpublish"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	case tuiSecretsPage:
 		return [][2]string{{"a", "add secret"}, {"d", "delete"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
+	case tuiPacketsPage:
+		return [][2]string{{"↑/↓", "select"}, {"d", "details"}, {"space", "pause"}, {"c", "clear"}, {"tab", "next view"}, {"?", "help"}}
 	}
 	if m.onNewCard() {
 		return [][2]string{{"enter", "create"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
@@ -814,6 +826,8 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 72
 	case tuiInfoDialog:
 		idealWidth = 68
+	case tuiPacketDetailDialog:
+		idealWidth = 96
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
 		idealWidth = 54
 	case tuiCreateDialog:
@@ -924,6 +938,8 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 		content = m.renderHelpDialog(theme, innerWidth)
 	case tuiInfoDialog:
 		content = m.renderInfoDialog(theme, innerWidth)
+	case tuiPacketDetailDialog:
+		content = m.renderPacketDetailDialog(theme, innerWidth)
 	case tuiRemoveDialog:
 		content = m.renderRemoveDialog(theme, innerWidth)
 		border = theme.error
@@ -984,7 +1000,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"g / G", "first / last row"},
 		{"mouse wheel", "scroll the view"},
 		{"tab / S-tab", "switch views"},
-		{"1 … 6", "jump to a view"},
+		{"1 … 7", "jump to a view"},
 	})
 	actions := column("SANDBOX ACTIONS", [][2]string{
 		{"enter", "open or start"},
@@ -995,11 +1011,14 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"d", "remove"},
 		{"r", "refresh"},
 	})
-	shareActions := column("MOUNT ACTIONS", [][2]string{
+	viewActions := column("VIEW ACTIONS", [][2]string{
 		{"a", "add a host share"},
 		{"d", "remove selected share"},
 		{"r", "replace selected share"},
 		{"e (Rules)", "edit network policy"},
+		{"space (Pkts)", "pause packet display"},
+		{"c (Packets)", "clear packet capture"},
+		{"d (Packets)", "inspect packet contents"},
 	})
 	applicationRows := [][2]string{
 		{"?", "toggle this help"},
@@ -1014,7 +1033,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 	application := column("APPLICATION", applicationRows)
 	var body string
 	if width >= 58 {
-		body = lipgloss.JoinHorizontal(lipgloss.Top, navigation, strings.Repeat(" ", 3), actions, strings.Repeat(" ", 3), shareActions)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, navigation, strings.Repeat(" ", 3), actions, strings.Repeat(" ", 3), viewActions)
 		body += "\n\n" + application
 	} else {
 		binding := func(key, description string) string {
@@ -1023,14 +1042,15 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		}
 		navigation = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("NAVIGATION"),
-			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…5", "jump"),
+			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…7", "jump"),
 			binding("g / G", "first / last") + "  ·  " + binding("wheel", "scroll"),
 		}, "\n")
 		actions = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("SANDBOX ACTIONS"),
 			binding("enter", "open / start") + "  ·  " + binding("s", "start / stop"),
 			binding("n", "create") + "  ·  " + binding("i", "details") + "  ·  " + binding("d", "remove"),
-			binding("r", "refresh") + "  ·  " + binding("a/d/r", "share add/remove/replace") + "  ·  " + binding("e", "policy (Rules)"),
+			binding("r", "refresh") + "  ·  " + binding("e", "policy") + "  ·  " + binding("a/d/r", "mounts"),
+			binding("d", "packet details") + "  ·  " + binding("space/c", "pause/clear packets"),
 		}, "\n")
 		application = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("APPLICATION"),
@@ -1063,6 +1083,19 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 			[2]string{"Local access", map[bool]string{true: "allowed", false: "blocked"}[sandbox.AllowLocal]},
 			[2]string{"Policy", pathBaseOr(sandbox.NetPolicy, "built-in default")},
 		)
+		if sandbox.Proxy != "" {
+			mode := "environment routing"
+			if sandbox.ProxyEnforce {
+				mode = "direct web egress blocked"
+			}
+			rows = append(rows,
+				[2]string{"Proxy", sandbox.Proxy},
+				[2]string{"Proxy mode", mode},
+			)
+			if sandbox.NoProxy != "" {
+				rows = append(rows, [2]string{"No proxy", sandbox.NoProxy})
+			}
+		}
 	}
 	rows = append(rows,
 		[2]string{"Traffic", "↑ " + formatBytes(sandbox.TXBytes) + "  ↓ " + formatBytes(sandbox.RXBytes)},

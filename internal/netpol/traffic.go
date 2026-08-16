@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/miekg/dns"
 )
 
@@ -80,6 +81,7 @@ type TrafficRecorder struct {
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+	capture   *packetcapture.Recorder
 }
 
 // TrafficEpoch merges cumulative snapshots from one remote recorder into a
@@ -119,6 +121,7 @@ func NewTrafficRecorder(path string) *TrafficRecorder {
 		dnsNames: make(map[[4]byte]trafficDNSName),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+		capture:  packetcapture.NewRecorder(0, 0, 0),
 	}
 	if path == "" {
 		// Confined workers use an in-memory recorder and expose snapshots over
@@ -407,6 +410,7 @@ func (r *TrafficRecorder) ObserveTX(frame []byte, allowed bool) {
 	if r == nil || len(frame) == 0 {
 		return
 	}
+	r.capture.ObserveTX(frame, allowed)
 	now := time.Now()
 	pp, arp, ok := parseFrame(frame)
 
@@ -454,6 +458,7 @@ func (r *TrafficRecorder) ObserveRX(frame []byte) {
 	if r == nil || len(frame) == 0 {
 		return
 	}
+	r.capture.ObserveRX(frame)
 	now := time.Now()
 	pp, arp, ok := parseFrame(frame)
 

@@ -27,6 +27,7 @@ type ShellOptions struct {
 	ID          string
 	ImgCfg      *image.Config
 	Secrets     []string
+	Environment []string
 	ExitStatus  *int
 }
 
@@ -40,6 +41,7 @@ func (options ShellOptions) sessionOptions(entries []ShareEntry) SessionOptions 
 		ID:               options.ID,
 		ImgCfg:           options.ImgCfg,
 		Secrets:          options.Secrets,
+		Environment:      options.Environment,
 		ExitStatus:       options.ExitStatus,
 		ExecIntoExisting: true,
 	}

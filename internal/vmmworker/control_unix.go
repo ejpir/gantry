@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -54,6 +55,17 @@ func (state *workerState) trafficSnapshot(workerproto.Request) (any, error) {
 		return nil, fmt.Errorf("traffic.snapshot: no local netstack recorder in this topology")
 	}
 	return state.traffic.Snapshot(), nil
+}
+
+func (state *workerState) capture(request workerproto.Request) (any, error) {
+	if state.traffic == nil {
+		return nil, fmt.Errorf("capture.read: no local netstack recorder in this topology")
+	}
+	var body packetcapture.Request
+	if err := workerproto.DecodeBody(request, &body); err != nil {
+		return nil, fmt.Errorf("capture.read: %w", err)
+	}
+	return state.traffic.Capture(body)
 }
 
 func forwardVsock(bridge *workerproto.Client, fds *workerproto.FDMux, port uint32) (net.Conn, error) {

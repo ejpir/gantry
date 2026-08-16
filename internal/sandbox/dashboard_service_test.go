@@ -91,6 +91,21 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	}
 }
 
+func TestDashboardShowsProxyConfigurationAndRules(t *testing.T) {
+	cfg := RunConfig{
+		Net: true, ProxyURL: "http://proxy.example:3128",
+		NoProxy: "localhost,.corp.example", ProxyEnforce: true,
+	}
+	rules := loadDashboardRules("agent", cfg)
+	if len(rules) < 3 || rules[0].Target != "proxy.example" || rules[0].Ports != "3128" || rules[0].Source != "proxy endpoint" {
+		t.Fatalf("proxy endpoint rule = %#v", rules)
+	}
+	if rules[1].Action != "deny" || rules[1].Proto != "tcp" || rules[1].Ports != "80,443" ||
+		rules[2].Action != "deny" || rules[2].Proto != "udp" || rules[2].Ports != "443" {
+		t.Fatalf("proxy enforcement rules = %#v", rules[:3])
+	}
+}
+
 func TestDashboardDiskSizeFallsBackToConfiguredCapacity(t *testing.T) {
 	cfg := RunConfig{RWLayer: filepath.Join(t.TempDir(), "missing.ext4"), RWLayerSizeMiB: 4096}
 	if got := dashboardDiskSizeMiB(cfg); got != 4096 {

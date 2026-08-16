@@ -82,6 +82,32 @@ func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
 	}
 }
 
+func TestNetworkPolicyManagerPreservesProxyEnforcement(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{
+		Net: true, ProxyURL: "http://203.0.113.5:3128", ProxyEnforce: true,
+	})
+	live := netpol.DefaultPolicy()
+	manager := NewNetworkPolicyManager(store, newLocalBackend(&vnet.Stack{}, live), live)
+
+	entry, err := manager.Set("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Allows([4]byte{8, 8, 8, 8}, 6, 443) {
+		t.Fatal("live policy replacement bypassed proxy-only HTTPS enforcement")
+	}
+	if !live.Allows([4]byte{203, 0, 113, 5}, 6, 3128) {
+		t.Fatal("live policy replacement blocked the configured proxy")
+	}
+	if !strings.Contains(entry.Description, "3 rules") {
+		t.Fatalf("effective policy description = %q, want proxy overlay rules", entry.Description)
+	}
+	if cfg := store.Snapshot(); cfg.NetPol != "" || !cfg.ProxyEnforce {
+		t.Fatalf("persisted config lost base/proxy separation: %+v", cfg)
+	}
+}
+
 func TestNetworkPolicyManagerPersistenceFailureRestoresSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{Net: true})

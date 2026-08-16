@@ -118,6 +118,11 @@ func (r *runResolver) initialize() error {
 func (r *runResolver) resolveRuntime() error {
 	r.cfg.Runtime = *r.flags.Runtime
 	r.cfg.Kernel = *r.flags.Kernel
+	if r.explicit.kernel {
+		r.cfg.KernelPolicy = kernelPolicyPinned
+	} else {
+		r.cfg.KernelPolicy = kernelPolicyRelease
+	}
 	r.cfg.Rootfs = *r.flags.Rootfs
 	switch r.cfg.Runtime {
 	case "crun":
@@ -286,6 +291,16 @@ func (r *runResolver) resolveNetworking() error {
 	r.cfg.Ports = append([]string(nil), (*r.flags.Publish)...)
 	r.cfg.Net = *r.flags.Net
 	r.cfg.GVProxy = *r.flags.GVProxy
+	proxy, err := parseForwardProxy(*r.flags.ProxyURL)
+	if err != nil {
+		return err
+	}
+	r.cfg.ProxyURL = proxy.url
+	r.cfg.NoProxy = *r.flags.NoProxy
+	r.cfg.ProxyEnforce = *r.flags.ProxyEnforce
+	if err := validateProxyConfig(r.cfg); err != nil {
+		return err
+	}
 	if len(r.cfg.Ports) != 0 {
 		if !r.cfg.Net {
 			return fmt.Errorf("port publishing requires networking (remove -net=false)")

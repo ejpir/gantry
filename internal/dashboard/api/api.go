@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -34,6 +35,9 @@ type Sandbox struct {
 	GVProxy          string
 	NetPolicy        string
 	AllowLocal       bool
+	Proxy            string
+	NoProxy          string
+	ProxyEnforce     bool
 	Shares           int
 	Ports            int
 	MemMB            uint
@@ -209,4 +213,5 @@ type Service interface {
 	ConfigureShare(SharePlan) error
 	RemoveShare(Mount) error
 	PlanPort(PortRequest) (string, error)
+	CapturePackets(name string, request packetcapture.Request) (packetcapture.Snapshot, error)
 }
