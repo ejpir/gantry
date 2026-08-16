@@ -43,7 +43,7 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 
 GANTRY=${GANTRY:-$default_gantry}
-KERNEL=${KERNEL:-$ROOT/artifacts/gantry-kernel-arm64-rngcap}
+KERNEL=${KERNEL:-$ROOT/artifacts/gantry-kernel-arm64}
 RUNS=${1:-${RUNS:-7}}
 IMAGE=${2:-${IMAGE:-alpine:latest}}
 CPU_LIST=${CPU_LIST:-"1 2 4 8"}

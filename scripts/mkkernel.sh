@@ -17,10 +17,9 @@
 #   PROBE=idreg ./scripts/mkkernel.sh arm64    # instrumented boot diagnosis,
 #                                      # NOT a release artifact — see PROBE
 #                                      # → artifacts/gantry-kernel-arm64-probe
-#   FIX=rngcap ./scripts/mkkernel.sh arm64     # the RNDR capability-cache
-#                                      # fix: boot to init 277 -> 107 ms on
-#                                      # Apple silicon — see FIX below
-#                                      # → artifacts/gantry-kernel-arm64-rngcap
+#   FIX=none ./scripts/mkkernel.sh arm64       # omit the default arm64 RNDR
+#                                      # capability cache for comparison
+#                                      # → artifacts/gantry-kernel-arm64-no-rngcap
 #
 # The CLI downloads these exact names from the GitHub release page when
 # they are not staged locally, so build once, attach to a release, and
@@ -118,7 +117,7 @@ idreg) PROBE_SUFFIX=-probe; PROBE_ARGS= ;;
 *) echo "PROBE must be none or idreg" >&2; exit 1 ;;
 esac
 
-# FIX=rngcap applies what the probes found (arm64 only): arm64 answers "does
+# The standard arm64 kernel applies what the probes found: arm64 answers "does
 # this cpu have RNDR?" through this_cpu_has_cap(), which is uncached BY
 # DESIGN — it re-reads ID_AA64ISAR0_EL1, and under Hypervisor.framework that
 # read traps to EL2 (~0.96 us). SLAB freelist randomisation asks once per slab
@@ -127,14 +126,22 @@ esac
 # becoming 7. Unlike CONFIG_SLAB_FREELIST_RANDOM=n it keeps the hardening
 # kernel-hardening.sh asks for.
 #
-# It is a deliberate divergence from upstream, so it stays opt-in and named:
-# on a system whose cpus genuinely differ in RNDR support, the cached answer
-# is the first answering cpu's. Independent of PROBE — combine them to watch
-# the read count collapse, use FIX alone for a kernel without probe printks.
-FIX=${FIX:-none}
+# Gantry presents homogeneous virtual CPU capabilities, and the cached path is
+# used only during early boot before arm64 finalizes its system-wide capability
+# alternatives. Promote it to the release default; FIX=none retains a named,
+# unpatched comparison build. Independent of PROBE — combine PROBE=idreg with
+# either setting to watch the read count collapse or reproduce the baseline.
+if [ -z "${FIX+x}" ]; then
+	case "$ARCH" in
+	arm64)  FIX=rngcap ;;
+	x86_64) FIX=none ;;
+	esac
+fi
 case "$FIX" in
-none)   FIX_SUFFIX= ;;
-rngcap) FIX_SUFFIX=-rngcap; PROBE_ARGS="$PROBE_ARGS --fix-rngcap" ;;
+none)
+	if [ "$ARCH" = arm64 ]; then FIX_SUFFIX=-no-rngcap; else FIX_SUFFIX=; fi
+	;;
+rngcap) FIX_SUFFIX=; PROBE_ARGS="$PROBE_ARGS --fix-rngcap" ;;
 *) echo "FIX must be none or rngcap" >&2; exit 1 ;;
 esac
 if [ "$PROBE$FIX" != nonenone ] && [ "$ARCH" != arm64 ]; then
@@ -337,10 +344,22 @@ if ! grep -q 'gantry_trigger_deferred_smp' net/vmw_vsock/virtio_transport.c ||
 fi
 # After extraction (so the sha256 covers exactly the audited bytes) and
 # before configuring, since the probe compiles into the kernel.
+RNGCAP_HEADER=arch/arm64/include/asm/archrandom.h
+if [ "$ARCH" = arm64 ] && [ "$FIX" = none ] &&
+	grep -q 'gantry_cached_has_rng' "$RNGCAP_HEADER"; then
+	echo "refusing to label a reused RNDR-patched WORK tree as FIX=none" >&2
+	echo "use a fresh WORK directory for the -no-rngcap comparison build" >&2
+	exit 1
+fi
 if [ "$PROBE$FIX" != nonenone ]; then
 	# shellcheck disable=SC2086 # PROBE_ARGS is a deliberate word split
 	python3 "$ROOT/scripts/kernel-boot-probe.py" "$WORK" \
 		--dump-at "${PROBE_DUMP_AT:-1000}" $PROBE_ARGS
+fi
+if [ "$ARCH" = arm64 ] && [ "$FIX" = rngcap ] &&
+	! grep -q 'gantry_cached_has_rng' "$RNGCAP_HEADER"; then
+	echo "kernel tree is missing the default arm64 RNDR capability cache" >&2
+	exit 1
 fi
 [ -f .config ] || {
 	# Baseline: the committed gantry config. BASE_CONFIG may also point at

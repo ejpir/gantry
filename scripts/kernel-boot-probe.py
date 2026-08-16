@@ -88,10 +88,9 @@ RNGCAP_HELPER = """
  * ID_AA64ISAR0_EL1 to answer for the CURRENT cpu. Under Hypervisor.framework
  * that read traps to EL2 (~0.96 us), and SLAB freelist randomisation asks
  * once per slab object: 141408 reads inside kmem_cache_init, ~136 ms of boot.
- * The boot cpu's RNDR capability does not change while it is answering, so
- * cache it. Caveat: on a system whose cpus genuinely differ here, this
- * reports the first answering cpu's result — which is why it is a build
- * option and not the default. */
+ * Gantry exposes the same RNDR capability to every virtual CPU. Cache the
+ * early answer; after arm64 finalizes system capabilities, the surrounding
+ * upstream helper switches to its patched-alternative system-wide check. */
 static inline bool gantry_cached_has_rng(void)
 {
 	static int cached = -1;

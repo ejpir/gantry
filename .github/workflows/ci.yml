@@ -98,7 +98,8 @@ jobs:
   # Gantry's own hardened guest kernels (scripts/mkkernel.sh). These are
   # what the CLI downloads from the release page on first start, and what
   # the native smoke test boots. arm64 builds both the 16K default and the
-  # 4K runsc twin; x86_64 is 4K-only.
+  # 4K runsc twin; both arm64 variants include the early RNDR capability
+  # cache, while x86_64 is 4K-only.
   #
   # The kernel version is PINNED (VERSION in scripts/mkkernel.sh, with a
   # pinned tarball sha256) — CI never floats to "latest". A bump updates
@@ -130,7 +131,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'patches/linux-*.patch', 'scripts/mkkernel.sh', 'scripts/kernel-hardening.sh') }}
+          key: kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-${{ hashFiles('config/gantry-kernel-*.config', 'patches/linux-*.patch', 'scripts/mkkernel.sh', 'scripts/kernel-boot-probe.py', 'scripts/kernel-hardening.sh') }}
           restore-keys: |
             kernel-ccache-${{ steps.kver.outputs.v }}-${{ matrix.arch }}-
             kernel-ccache-${{ matrix.arch }}-
