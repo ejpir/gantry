@@ -16,9 +16,6 @@ $Image = Value-OrDefault "GANTRY_TEST_IMAGE" (Join-Path $Root "debian-netprobe-n
 $MemoryMiB = [int](Value-OrDefault "GANTRY_TEST_MEMORY_MIB" "1024")
 
 $env:GANTRY_HOME = $StateRoot
-$env:GANTRY_EXTRA_CMDLINE = "noapic"
-$env:GANTRY_WHPX_PIC = "1"
-$env:GANTRY_WHPX_PIC_NOPIT = "1"
 
 function Invoke-Gantry([string[]]$CommandArgs) {
     & $script:Gantry @CommandArgs

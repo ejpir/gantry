@@ -227,5 +227,21 @@ func (d *daemonRuntime) publishReady() error {
 		fmt.Fprintln(os.Stderr, "daemon: parent readiness notification:", err)
 	}
 	fmt.Println("daemon: guest RPC connection held; broker on ctl.sock")
+	// Readiness is the contract boundary for the small-boot-memory design.
+	// Publish both durable and event-driven readiness before asking Linux to
+	// online the configured tail; the request may immediately consume a guest
+	// CPU for memory-block initialization, but must never delay the launcher.
+	runner, machine := d.runner, d.machine
+	go func() {
+		if runner != nil {
+			if err := runner.RequestHotMemory(); err != nil {
+				fmt.Fprintln(os.Stderr, "daemon: request post-readiness guest memory:", err)
+			}
+		} else if machine != nil {
+			if err := machine.RequestHotMemory(); err != nil {
+				fmt.Fprintln(os.Stderr, "daemon: request post-readiness guest memory:", err)
+			}
+		}
+	}()
 	return nil
 }

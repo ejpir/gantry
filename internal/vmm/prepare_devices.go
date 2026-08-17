@@ -189,7 +189,10 @@ func (m *Machine) finishBoot(o Opts, ram []byte, initrdStart, initrdEnd uint64) 
 				x86MMIOStride, core.Base(), core.IRQ())
 		}
 		cmdline = insertKernelArgs(cmdline, strings.TrimSpace(slots.String()))
-		if err := setupX86Boot(ram, cmdline, o.MemSize, m.vcpus); err != nil {
+		if m.x86HotMemSize != 0 {
+			cmdline = insertKernelArgs(cmdline, "memhp_default_state=online_kernel")
+		}
+		if err := setupX86Boot(ram, cmdline, m.x86BootMemSize, m.vcpus); err != nil {
 			return err
 		}
 		fmt.Printf("boot params @ %#x, cmdline @ %#x (%d bytes), MPS @ %#x\n",

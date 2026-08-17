@@ -297,7 +297,7 @@ func cmdRun(argv []string) int {
 			return 1
 		}
 		cmdline = vmm.DefaultCmdline(arch, *rootfs, *initrd, *guestCID, *netEndpoint, netMAC, *netDHCP)
-		cmdline = vmm.WithDeferredSMP(cmdline, *vcpus)
+		cmdline = vmm.WithDeferredSMP(cmdline, *vcpus, memBytes)
 	}
 
 	var listenPorts []uint32

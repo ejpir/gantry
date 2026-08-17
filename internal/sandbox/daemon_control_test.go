@@ -5,14 +5,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type closeFailureRunner struct {
-	done    chan struct{}
-	err     error
-	calls   int
-	onClose func() error
+	done     chan struct{}
+	err      error
+	calls    int
+	hotCalls atomic.Int32
+	onClose  func() error
 }
 
 func (*closeFailureRunner) Wait() error { return nil }
@@ -25,6 +28,7 @@ func (r *closeFailureRunner) Close() error {
 }
 func (r *closeFailureRunner) Done() <-chan struct{}             { return r.done }
 func (r *closeFailureRunner) Err() error                        { return nil }
+func (r *closeFailureRunner) RequestHotMemory() error           { r.hotCalls.Add(1); return nil }
 func (*closeFailureRunner) DialStream(uint32) (net.Conn, error) { return nil, errors.New("unused") }
 
 func TestCloseVMDevicesPreservesSplitWorkerFailure(t *testing.T) {
@@ -60,8 +64,17 @@ func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 	runtime.control = listener
 	runtime.broker = &broker{}
+	runner := &closeFailureRunner{done: make(chan struct{})}
+	runtime.runner = runner
 	if err := runtime.publishReady(); err != nil {
 		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for runner.hotCalls.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if calls := runner.hotCalls.Load(); calls != 1 {
+		t.Fatalf("post-readiness hot-memory requests = %d, want 1", calls)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ready")); err != nil {
 		t.Fatalf("ready marker after control startup: %v", err)

@@ -57,6 +57,10 @@ func (state *workerState) trafficSnapshot(workerproto.Request) (any, error) {
 	return state.traffic.Snapshot(), nil
 }
 
+func (state *workerState) requestHotMemory(workerproto.Request) (any, error) {
+	return nil, state.runner.RequestHotMemory()
+}
+
 func (state *workerState) capture(request workerproto.Request) (any, error) {
 	if state.traffic == nil {
 		return nil, fmt.Errorf("capture.read: no local netstack recorder in this topology")

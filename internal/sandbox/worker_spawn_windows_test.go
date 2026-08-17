@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -14,10 +15,52 @@ func TestWindowsWorkersDoNotAllocateConsoleWindows(t *testing.T) {
 	}
 }
 
+func TestWindowsAutoSkipsUnavailableNetworkWorkerConfinement(t *testing.T) {
+	called := false
+	old := netWorkerSpawnHook
+	netWorkerSpawnHook = func(*[]string, *[]string) { called = true }
+	t.Cleanup(func() { netWorkerSpawnHook = old })
+
+	network, err := (RunConfig{Net: true, ProcessIsolation: "auto"}).StartNetwork(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer network.Close()
+	if called {
+		t.Fatal("auto mode spawned a network worker whose confinement is unavailable")
+	}
+	if network.Split {
+		t.Fatal("auto mode reported a split network worker")
+	}
+	found := false
+	for _, detail := range network.Degraded {
+		found = found || strings.Contains(detail, "confinement unavailable on windows")
+	}
+	if !found {
+		t.Fatalf("missing Windows network-worker degradation: %v", network.Degraded)
+	}
+}
+
+func TestWindowsRequiredRejectsUnavailableNetworkWorkerConfinement(t *testing.T) {
+	called := false
+	old := netWorkerSpawnHook
+	netWorkerSpawnHook = func(*[]string, *[]string) { called = true }
+	t.Cleanup(func() { netWorkerSpawnHook = old })
+
+	_, err := (RunConfig{Net: true, ProcessIsolation: "required"}).StartNetwork(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "confinement unavailable on windows") {
+		t.Fatalf("required mode error = %v", err)
+	}
+	if called {
+		t.Fatal("required mode spawned a network worker after detecting unavailable confinement")
+	}
+}
+
 func TestWindowsWorkerEnvironmentIsAnExplicitAllowlist(t *testing.T) {
 	for _, key := range []string{
 		"SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP",
 		"GANTRY_DEBUG_RTC", "GANTRY_PREFAULT_RAM", "GANTRY_BOOT_PROFILE", "GANTRY_VHOST_STATS",
+		"GANTRY_VIRTIO_MEM",
 		"GANTRY_WHPX_PIC", "GANTRY_WHPX_PIC_NOPIT",
 	} {
 		t.Setenv(key, "")
@@ -29,11 +72,13 @@ func TestWindowsWorkerEnvironmentIsAnExplicitAllowlist(t *testing.T) {
 	t.Setenv("TEMP", `C:\Temp`)
 	t.Setenv("GANTRY_BOOT_PROFILE", "1")
 	t.Setenv("GANTRY_VHOST_STATS", "1")
+	t.Setenv("GANTRY_VIRTIO_MEM", "on")
 	t.Setenv("GANTRY_WHPX_PIC", "enabled")
 	t.Setenv("GANTRY_WHPX_PIC_NOPIT", "enabled")
 
 	want := []string{
 		`SystemRoot=C:\Windows`, `TEMP=C:\Temp`, "GANTRY_BOOT_PROFILE=1", "GANTRY_VHOST_STATS=1",
+		"GANTRY_VIRTIO_MEM=1",
 		"GANTRY_WHPX_PIC=1", "GANTRY_WHPX_PIC_NOPIT=1",
 	}
 	if got := workerEnv(); !slices.Equal(got, want) {

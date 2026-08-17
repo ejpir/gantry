@@ -56,8 +56,8 @@ Invoke-WebRequest `
   -OutFile gantry.exe
 ```
 
-Place `gantry.exe` in a user-writable directory on `PATH`. Administrator-owned
-installations must be updated manually.
+Place `gantry.exe` on `PATH`. Both user-owned and administrator-managed
+installations can use the verified in-place updater.
 
 ## Verify the installation
 
@@ -108,4 +108,3 @@ $ go test ./...
 ```
 
 After installation, [run your first sandbox](get-started.md).
-

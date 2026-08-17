@@ -309,6 +309,10 @@ func (w *vmmWorker) Close() error {
 	return w.closeErr
 }
 
+func (w *vmmWorker) RequestHotMemory() error {
+	return w.client.Call("vm.hot-memory", nil, nil)
+}
+
 // TrafficSnapshot pulls the worker's in-memory enforcement counters
 // (local-netstack topology only).
 func (w *vmmWorker) TrafficSnapshot() (netpol.TrafficSnapshot, error) {

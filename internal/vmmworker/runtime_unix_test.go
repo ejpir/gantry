@@ -9,12 +9,17 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/workerconf"
+	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-type countingRunner struct{ closes atomic.Int32 }
+type countingRunner struct {
+	closes      atomic.Int32
+	hotRequests atomic.Int32
+}
 
 func (*countingRunner) Run() error                             { return nil }
 func (runner *countingRunner) Close() error                    { runner.closes.Add(1); return nil }
+func (runner *countingRunner) RequestHotMemory() error         { runner.hotRequests.Add(1); return nil }
 func (*countingRunner) InjectVsockConn(uint32, net.Conn) error { return nil }
 
 func TestKeepFDsMatchesDescriptorTable(t *testing.T) {
@@ -80,6 +85,17 @@ func TestRunnerCloseIsIdempotent(t *testing.T) {
 	calls.Wait()
 	if got := runner.closes.Load(); got != 1 {
 		t.Fatalf("runner closes = %d, want 1", got)
+	}
+}
+
+func TestHotMemoryRequestReachesRunner(t *testing.T) {
+	runner := new(countingRunner)
+	state := workerState{runner: runner}
+	if _, err := state.requestHotMemory(workerproto.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.hotRequests.Load(); got != 1 {
+		t.Fatalf("hot-memory requests = %d, want 1", got)
 	}
 }
 

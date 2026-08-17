@@ -137,6 +137,25 @@ func TestSplitRAMTranslatesHighGuestAddresses(t *testing.T) {
 	}
 }
 
+func TestSplitRAMCanDeferHighRegion(t *testing.T) {
+	ram := make([]byte, 12)
+	mem := NewSplitRAM(ram, 4, 0x10)
+	mem.DeferHighRegion()
+	if err := mem.writeAt(2, []byte{1}); err != nil {
+		t.Fatalf("low-region write while high deferred: %v", err)
+	}
+	if err := mem.writeAt(0x10, []byte{2}); err == nil {
+		t.Fatal("write to deferred high region succeeded")
+	}
+	mem.EnableHighRegion()
+	if err := mem.writeAt(0x10, []byte{3}); err != nil {
+		t.Fatalf("write to enabled high region: %v", err)
+	}
+	if ram[4] != 3 {
+		t.Fatalf("enabled high-region byte = %d, want 3", ram[4])
+	}
+}
+
 func TestVirtioBlkRead(t *testing.T) {
 	// backing image: 1 MiB, sector i filled with byte i
 	img := filepath.Join(t.TempDir(), "rootfs.img")

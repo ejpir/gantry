@@ -181,20 +181,28 @@ type Machine struct {
 	mem   *virtio.RAM
 	entry uint64
 	arch  string // "arm64" | "amd64"
-	fdt   []byte
-	uart  *pl011 // arm64 console (MMIO)
+	// x86BootMemSize is the ordinary e820/low mapping. With the opt-in
+	// virtio-mem path, the rest of ram is mapped above 4 GiB and hot-added by
+	// Linux instead of delaying early boot page initialization.
+	x86BootMemSize uint64
+	x86LowRAMSize  uint64
+	x86HotMemSize  uint64
+	fdt            []byte
+	uart           *pl011 // arm64 console (MMIO)
 	// x86 clusters the legacy PC devices (16550 console, CMOS RTC, PIT,
 	// PIC, I/O APIC): they exist only on the x86 boot paths (KVM on
 	// linux/amd64, WHPX on Windows) and the whole cluster is build-gated
 	// so arm64 builds carry no dead emulation code (x86devices.go).
-	x86         x86Devices
-	virtios     []*virtio.Core
-	rootBlkCore *virtio.Core    // boot rootfs (/dev/vda), for first-request timing
-	vsockCore   *virtio.Core    // transport slot, for first-packet timing
-	vsock       *virtio.Vsock   // nil when no vsock device attached
-	interrupts  interruptRouter // published by the backend; disabled before native teardown
-	kvmFD       *os.File        // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
-	stdinDone   chan struct{}
+	x86            x86Devices
+	virtios        []*virtio.Core
+	rootBlkCore    *virtio.Core    // boot rootfs (/dev/vda), for first-request timing
+	vsockCore      *virtio.Core    // transport slot, for first-packet timing
+	vsock          *virtio.Vsock   // nil when no vsock device attached
+	hotMem         *virtio.Mem     // nil unless the opt-in x86 virtio-mem path is active
+	hotMemDeferred bool            // tail publication is owned by the daemon-ready edge
+	interrupts     interruptRouter // published by the backend; disabled before native teardown
+	kvmFD          *os.File        // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
+	stdinDone      chan struct{}
 	// consoleStdin wires host stdin into the guest UART (interactive `run`;
 	// off for `exec`, where the terminal belongs to the container session).
 	consoleStdin bool
@@ -259,6 +267,8 @@ func (m *Machine) Close() error {
 		m.rootBlkCore = nil
 		m.vsockCore = nil
 		m.vsock = nil
+		m.hotMem = nil
+		m.hotMemDeferred = false
 		m.lifecycle = machineClosed
 		m.resourceMu.Unlock()
 		m.closeErr = errors.Join(errs...)
@@ -274,7 +284,11 @@ const (
 	x86MMIOStride = 0x1000
 )
 
-var x86MMIOIRQs = []int{3, 5, 6, 7, 9, 10, 11, 12}
+// IRQs 13-15 are the legacy FPU/IDE lines, but this firmwareless machine has
+// neither an FPU interrupt nor IDE controllers. The MPS table already routes
+// all three through the userspace IO-APIC, so they are valid additional
+// virtio-mmio slots for full sandboxes that also attach virtio-mem.
+var x86MMIOIRQs = []int{3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15}
 
 // addVirtio attaches one virtio-mmio device at the next free slot.
 func (m *Machine) addVirtio(dev virtio.Device, name string) (*virtio.Core, error) {
@@ -460,6 +474,32 @@ func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 	return nil
 }
 
+// RequestHotMemory publishes the opt-in virtio-mem capacity after the daemon
+// has accepted the guest RPC connection. It is a no-op for ordinary machines.
+// Keeping this edge in the host readiness lifecycle prevents Linux hotplug
+// work from racing and occasionally starving the final guest boot steps.
+func (m *Machine) RequestHotMemory() error {
+	m.resourceMu.Lock()
+	defer m.resourceMu.Unlock()
+	if m.hotMem == nil || !m.hotMemDeferred {
+		return nil
+	}
+	if m.lifecycle != machineRunning || m.backend == nil {
+		return fmt.Errorf("request hot memory: machine is not running")
+	}
+	// Windows deliberately leaves the tail uncommitted and unmapped during
+	// boot. Publish it to Linux only after the native backend makes every GPA
+	// accessible; other backends use demand-paged mappings established at run.
+	if mapper, ok := m.backend.(interface{ mapHotMemory() error }); ok {
+		if err := mapper.mapHotMemory(); err != nil {
+			return err
+		}
+	}
+	m.mem.EnableHighRegion()
+	m.hotMem.RequestAll()
+	return nil
+}
+
 func Prepare(o Opts) (result *Machine, resultErr error) {
 	inputs, inputErr := collectPrepareInputs(o)
 	var m *Machine
@@ -490,23 +530,54 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	if m.consoleW == nil {
 		m.consoleW = os.Stdout
 	}
-	// guest RAM is allocated by the backend (it must be mapped into the
-	// hypervisor); here we only fill it.
-	ram, err := allocGuestRAM(o.MemSize, o.SharedRAM)
+	arch, err := KernelArchFile(o.Kernel)
+	if err != nil {
+		return nil, err
+	}
+	initialCommit := o.MemSize
+	virtioMemBootSize, virtioMemEnabled := uint64(0), false
+	virtioMemDeferred := false
+	if arch == "amd64" {
+		virtioMemBootSize, virtioMemEnabled = x86VirtioMemLayout(o.MemSize, os.Getenv("GANTRY_VIRTIO_MEM"))
+		virtioMemDeferred = virtioMemEnabled && (o.VsockFwd != "" || o.VsockDial != nil)
+		if virtioMemDeferred {
+			initialCommit = virtioMemBootSize
+		}
+	}
+	// Guest RAM is allocated by the platform layer. Windows reserves the full
+	// range but commits only the boot region for virtio-mem; mmap hosts remain
+	// demand-paged and therefore ignore initialCommit.
+	ram, err := allocGuestRAM(o.MemSize, initialCommit, o.SharedRAM)
 	if err != nil {
 		return nil, err
 	}
 	m.ram = ram
-	prefaultGuestRAM(m.bootTiming, ram)
+	// The Windows virtio-mem tail is still reserved/no-access here. Prefault
+	// only memory that belongs to the boot phase; the tail is committed by the
+	// WHPX backend immediately before it becomes visible to Linux.
+	prefaultGuestRAM(m.bootTiming, ram[:initialCommit])
 
-	entry, arch, err := loadKernel(o.Kernel, ram)
+	entry, loadedArch, err := loadKernel(o.Kernel, ram)
 	if closeErr := inputs.closeFile(o.Kernel); err != nil || closeErr != nil {
 		return nil, errors.Join(err, closeErr)
+	}
+	if loadedArch != arch {
+		return nil, fmt.Errorf("kernel architecture changed while loading: %s to %s", arch, loadedArch)
 	}
 	m.entry = entry
 	m.arch = arch
 	if arch == "amd64" {
-		m.mem = virtio.NewSplitRAM(ram, x86LowRAMEnd, x86HighRAMStart)
+		m.x86BootMemSize = o.MemSize
+		m.x86LowRAMSize = min(o.MemSize, uint64(x86LowRAMEnd))
+		if virtioMemEnabled {
+			m.x86BootMemSize = virtioMemBootSize
+			m.x86LowRAMSize = virtioMemBootSize
+			m.x86HotMemSize = o.MemSize - virtioMemBootSize
+		}
+		m.mem = virtio.NewSplitRAM(ram, m.x86LowRAMSize, x86HighRAMStart)
+		if virtioMemDeferred {
+			m.mem.DeferHighRegion()
+		}
 	} else {
 		m.mem = virtio.NewRAM(ram, ramBase)
 	}
@@ -523,6 +594,23 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 		m.initX86()
 	} else {
 		m.uart = newPL011(m.raise, func(b byte) { m.stdoutWrite(b) })
+	}
+	if m.x86HotMemSize != 0 {
+		memory, err := virtio.NewMem(x86HighRAMStart, m.x86HotMemSize, x86VirtioMemBlockSize)
+		if err != nil {
+			return nil, err
+		}
+		if virtioMemDeferred {
+			memory.DeferRequested()
+			m.hotMemDeferred = true
+		}
+		m.hotMem = memory
+		core, err := m.addVirtio(memory, "mem")
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("virtio-mem: boot %d MiB, hot-add %d MiB @ %#x irq %d\n",
+			m.x86BootMemSize>>20, m.x86HotMemSize>>20, core.Base(), core.IRQ())
 	}
 
 	// Read-only container images deliberately skip the writable-disk flock:

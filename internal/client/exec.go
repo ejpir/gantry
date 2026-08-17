@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +21,16 @@ import (
 
 func init() {
 	typeurl.Register(&specs.Process{}, "types.containerd.io", "opencontainers/runtime-spec", "1", "Process")
+}
+
+var sessionExecSequence atomic.Uint64
+
+// nextSessionExecID remains unique when several host sessions arrive within
+// one guest clock tick. That is common under WHPX: Linux's early wall clock
+// can return the same UnixNano value to concurrent goroutines, and the shim
+// rejects the second process as AlreadyExists.
+func nextSessionExecID(containerID string) string {
+	return fmt.Sprintf("%s-exec-%d-%d", containerID, time.Now().UnixNano(), sessionExecSequence.Add(1))
 }
 
 // sessionExec runs a process inside the sandbox's long-lived container. It
@@ -40,7 +51,7 @@ func sessionExec(taskClient task.TTRPCTaskService, options SessionOptions, id st
 	defer streams.close()
 	logf("exec: stdio streams open, sending Exec")
 
-	execID := fmt.Sprintf("%s-exec-%d", id, time.Now().UnixNano())
+	execID := nextSessionExecID(id)
 	uid, gid := options.ImgCfg.IDs()
 	process := &specs.Process{
 		Terminal: options.Terminal,

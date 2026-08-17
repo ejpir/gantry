@@ -20,6 +20,10 @@
 #   FIX=none ./scripts/mkkernel.sh arm64       # omit the default arm64 RNDR
 #                                      # capability cache for comparison
 #                                      # → artifacts/gantry-kernel-arm64-no-rngcap
+#   INITCALL_DEBUG=1 ./scripts/mkkernel.sh x86_64
+#                                      # retain initcall timestamps in dmesg;
+#                                      # diagnostic artifact, not for release
+#                                      # → artifacts/gantry-kernel-x86_64-initcall
 #
 # The CLI downloads these exact names from the GitHub release page when
 # they are not staged locally, so build once, attach to a release, and
@@ -72,6 +76,12 @@ if [ -n "${CROSS_COMPILE:-}" ] && [ -z "${CC:-}" ]; then
 	export CROSS_COMPILE
 fi
 PAGES=${PAGES:-16k}   # arm64 only; x86_64 is always 4K
+INITCALL_DEBUG=${INITCALL_DEBUG:-0}
+case "$INITCALL_DEBUG" in
+0) INITCALL_SUFFIX= ;;
+1) INITCALL_SUFFIX=-initcall ;;
+*) echo "INITCALL_DEBUG must be 0 or 1" >&2; exit 1 ;;
+esac
 
 # ERRATA=strip drops the CPU errata workarounds for third-party arm64 silicon
 # (arm64 only). It exists to measure one boot cost: every capability the guest
@@ -213,7 +223,7 @@ arm64)
 x86_64)
 	KARCH=x86
 	PAGES=4k
-	OUT=${OUT:-$ARTIFACTS/gantry-kernel-x86_64}
+	OUT=${OUT:-$ARTIFACTS/gantry-kernel-x86_64$INITCALL_SUFFIX}
 	TARGET=vmlinux
 	RESULT=vmlinux
 	;;
@@ -246,7 +256,7 @@ else
 	# fix. Keep container, network, filesystem, and memory-hardening features.
 	DISABLES="$DISABLES
 ACPI NUMA X86_MCE                       # no ACPI tables, NUMA nodes, or physical MCE
-CPU_FREQ CPU_IDLE MEMORY_HOTPLUG        # fixed virtual CPUs and RAM
+CPU_FREQ CPU_IDLE                       # fixed virtual CPUs; RAM may use virtio-mem
 THERMAL VFIO XFS_FS                     # no sensors, device assignment, or XFS root
 BLK_DEV_RAM BLK_DEV_LOOP                # all guest disks are virtio-blk
 VIRTIO_PMEM VIRTIO_BALLOON VIRTIO_IOMMU # devices Gantry does not expose
@@ -404,7 +414,18 @@ done
 if [ "$ARCH" = x86_64 ]; then
 	# INPUT and VT default to y unless EXPERT exposes their prompts. Gantry's
 	# x86 console is the 8250 serial driver, so neither subsystem is needed.
-	scripts/config --enable EXPERT --disable INPUT --disable VT --disable VGA_CONSOLE
+	# The Windows large-RAM boot path exposes the tail through built-in
+	# virtio-mem, which requires hot-remove and contiguous allocation even
+	# though Gantry currently only grows memory after boot.
+	scripts/config --enable EXPERT --disable INPUT --disable VT --disable VGA_CONSOLE \
+		--enable MEMORY_HOTPLUG --enable MEMORY_HOTREMOVE --enable CONTIG_ALLOC \
+		--enable VIRTIO_MEM
+fi
+if [ "$INITCALL_DEBUG" = 1 ]; then
+	# Keep printk's normal console level low at runtime and collect these
+	# timestamps from dmesg after READY; a verbose serial console would add
+	# a VM exit per byte and invalidate the boot phase being measured.
+	scripts/config --enable INITCALL_DEBUG
 fi
 # ERRATA=strip: turn off every errata workaround the baseline enabled, rather
 # than a hand-kept list — the set changes with each kernel bump, and a stale

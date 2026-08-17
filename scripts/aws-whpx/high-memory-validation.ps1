@@ -14,12 +14,10 @@ $Kernel = Value-OrDefault "GANTRY_TEST_KERNEL" (Join-Path $Root "gantry-kernel-x
 $Rootfs = Value-OrDefault "GANTRY_TEST_ROOTFS" (Join-Path $Root "nerdbox-rootfs-x86_64-noinline-plain-4k.erofs")
 $Image = Value-OrDefault "GANTRY_TEST_IMAGE" (Join-Path $Root "debian-netprobe-nn-ca2-4k.erofs")
 $MemoryMiB = [int](Value-OrDefault "GANTRY_TEST_MEMORY_MIB" "22528")
+$CPUCount = [int](Value-OrDefault "GANTRY_TEST_CPUS" "4")
 $TouchGiB = [int](Value-OrDefault "GANTRY_TEST_TOUCH_GIB" "5")
 
 $env:GANTRY_HOME = $StateRoot
-$env:GANTRY_EXTRA_CMDLINE = "noapic"
-$env:GANTRY_WHPX_PIC = "1"
-$env:GANTRY_WHPX_PIC_NOPIT = "1"
 
 function Invoke-Gantry([string[]]$CommandArgs) {
     & $script:Gantry @CommandArgs
@@ -51,26 +49,33 @@ try {
     Invoke-Gantry @(
         "start", $Sandbox,
         "-kernel", $Kernel,
-        "-rootfs", $Rootfs,
-        "-image", $Image,
-        "-mem", "$MemoryMiB",
-        "-cpus", "1",
+		"-rootfs", $Rootfs,
+		"-image", $Image,
+		"-mem", "$MemoryMiB",
+        "-cpus", "$CPUCount",
         "-process-isolation", "auto"
     )
 
-    $meminfo = & $Gantry exec $Sandbox -- awk '/^MemTotal:/ {print $2}' /proc/meminfo
-    if ($LASTEXITCODE -ne 0) { throw "reading guest MemTotal failed with exit code $LASTEXITCODE" }
-    $memTotalKiB = 0L
-    foreach ($line in $meminfo) {
-        if ("$line" -match '^\s*(\d+)\s*$') {
-            $memTotalKiB = [long]$Matches[1]
-        }
-    }
-    $minimumKiB = [long]($MemoryMiB - 512) * 1024
-    if ($memTotalKiB -lt $minimumKiB) {
-        throw "guest MemTotal $memTotalKiB KiB is below expected minimum $minimumKiB KiB"
-    }
-    "PASS guest reports $memTotalKiB KiB from a $MemoryMiB MiB configuration"
+	$memTotalKiB = 0L
+	$minimumKiB = [long]($MemoryMiB - 512) * 1024
+	$memoryDeadline = [DateTime]::UtcNow.AddSeconds(60)
+	$memoryClock = [Diagnostics.Stopwatch]::StartNew()
+	do {
+		$meminfo = & $Gantry exec $Sandbox -- awk '/^MemTotal:/ {print $2}' /proc/meminfo
+		if ($LASTEXITCODE -ne 0) { throw "reading guest MemTotal failed with exit code $LASTEXITCODE" }
+		foreach ($line in $meminfo) {
+			if ("$line" -match '^\s*(\d+)\s*$') {
+				$memTotalKiB = [long]$Matches[1]
+			}
+		}
+		if ($memTotalKiB -ge $minimumKiB) { break }
+		Start-Sleep -Milliseconds 100
+	} while ([DateTime]::UtcNow -lt $memoryDeadline)
+	$memoryClock.Stop()
+	if ($memTotalKiB -lt $minimumKiB) {
+		throw "guest MemTotal $memTotalKiB KiB is below expected minimum $minimumKiB KiB"
+	}
+	"PASS guest reports $memTotalKiB KiB from a $MemoryMiB MiB configuration after $([Math]::Round($memoryClock.Elapsed.TotalMilliseconds, 3)) ms"
 
     $workerBytes = 1024 * 1024 * 1024
     $workerCode = '$n=' + $workerBytes + '; $x="x"x$n; for($i=0;$i<$n;$i+=4096){substr($x,$i,1)="y"} sleep 5;'
@@ -80,7 +85,7 @@ try {
     }
     $touchScript = ($workers -join ' ') + " wait; echo touched-workers=$TouchGiB"
     Invoke-Gantry @("exec", $Sandbox, "--", "sh", "-c", $touchScript)
-    "PASS guest process touched $TouchGiB GiB, necessarily exercising RAM above the 3 GiB low region"
+    "PASS guest process touched $TouchGiB GiB, necessarily exercising RAM above the 512 MiB boot region"
     $passed = $true
 }
 finally {

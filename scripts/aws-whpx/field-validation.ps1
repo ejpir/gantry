@@ -22,9 +22,6 @@ $IsolationPath = Join-Path (Join-Path $StateRoot $Sandbox) "isolation.json"
 
 $env:GANTRY_HOME = $StateRoot
 $env:GANTRY_BOOT_TIMING = "1"
-$env:GANTRY_EXTRA_CMDLINE = "noapic"
-$env:GANTRY_WHPX_PIC = "1"
-$env:GANTRY_WHPX_PIC_NOPIT = "1"
 
 function Invoke-Gantry([string[]]$CommandArgs) {
     & $script:Gantry @CommandArgs

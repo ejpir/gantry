@@ -132,9 +132,9 @@ an update notice, and the dashboard shows an `↑ VERSION` badge.
 ```
 
 Updates are downloaded beside the installed binary, verified, and replaced
-atomically. Updating does not stop running sandboxes. On Windows, run Gantry
-unelevated from a user-writable installation; administrator-managed installs
-must be updated manually.
+atomically. Updating does not stop running sandboxes. On Windows, elevated
+updates protect the verified staged payload with an administrator-only ACL
+before the detached replacement helper takes ownership of it.
 
 Release binaries and guest assets are verified against their SHA-256 sidecars.
 Release artifacts also include Sigstore build provenance:

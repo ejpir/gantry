@@ -30,6 +30,9 @@ type vmmRunner interface {
 	Wait() error
 	// Close flushes devices and stops the worker (idempotent).
 	Close() error
+	// RequestHotMemory starts post-readiness virtio-mem expansion (a no-op
+	// when the machine uses an ordinary e820 memory map).
+	RequestHotMemory() error
 	// Done closes when the worker process is reaped; Err reports how.
 	Done() <-chan struct{}
 	Err() error
@@ -40,6 +43,15 @@ type vmmRunner interface {
 // guestNetMAC is the fixed MAC the embedded netstack expects the guest to
 // use (gvproxy-compatible pairing with the gateway MAC).
 var guestNetMAC = [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
+
+func virtioMemWorkerEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_VIRTIO_MEM"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
 
 // Opts assembles vmm.Opts for the run. vsockFwd is the per-run socket
 // directory. envExtra enables the GANTRY_EXTRA_CMDLINE debug knob (the
@@ -121,12 +133,13 @@ func (c RunConfig) Opts(n *Network, vsockFwd string, envExtra bool) (vmm.Opts, e
 			}
 		}
 	}
+	memSize := uint64(c.MemMB) << 20
 	cmdline := vmm.DefaultCmdline(arch, c.Rootfs, "", 3, NetMarker(sock, conn), guestNetMAC, true)
-	cmdline = vmm.WithDeferredSMP(cmdline, c.VCPUs)
+	cmdline = vmm.WithDeferredSMP(cmdline, c.VCPUs, memSize)
 	if envExtra {
 		cmdline = gutil.InsertExtraCmdline(cmdline)
 	}
-	o.MemSize = uint64(c.MemMB) << 20
+	o.MemSize = memSize
 	o.NetEndpoint = sock
 	o.NetConn = conn
 	o.NetMAC = guestNetMAC

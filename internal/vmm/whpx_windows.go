@@ -144,6 +144,7 @@ type whpxBackend struct {
 
 	partitionCreated bool
 	mappedRAM        []x86RAMRegion
+	hotMemoryMapped  bool
 	createdVPs       []bool
 }
 
@@ -233,26 +234,33 @@ func (b *whpxBackend) injectPICInterrupt(vp uint32, executionState uint16, rflag
 		return b.picEpoch, nil
 	}
 	// WHV_X64_VP_EXECUTION_STATE exposes InterruptionPending at bit 6 and
-	// InterruptShadow at bit 12; RFLAGS.IF is bit 9. WHPX has one pending
+	// InterruptShadow at bit 7; RFLAGS.IF is bit 9. WHPX has one pending
 	// interruption slot, so retain all vectors in our queue until that slot is
 	// known to be available from the most recent exit context.
-	ready := executionState&(1<<6|1<<12) == 0 && rflags&(1<<9) != 0
-	regs := make(map[uint32]whvRegValue, 2)
+	ready := executionState&(1<<6|1<<7) == 0 && rflags&(1<<9) != 0
+	names := make([]uint32, 0, 2)
+	values := make([]uint64, 0, 2)
 	var vector uint32
 	if ready {
 		vector = b.picPending[0]
 		b.picPending = b.picPending[1:]
 		// WHV_X64_PENDING_INTERRUPTION_REGISTER: pending bit 0, type
 		// WHvX64PendingInterrupt (0) in bits 1..3, vector in bits 16..31.
-		regs[whvRegPendingInterruption] = u64Value(1 | uint64(byte(vector))<<16)
+		names = append(names, whvRegPendingInterruption)
+		values = append(values, 1|uint64(byte(vector))<<16)
 	}
 	if len(b.picPending) != 0 {
 		// InterruptNotification is bit 1 of
 		// WHV_X64_DELIVERABILITY_NOTIFICATIONS_REGISTER.
-		regs[whvRegDeliverability] = u64Value(1 << 1)
+		names = append(names, whvRegDeliverability)
+		values = append(values, 1<<1)
 	}
-	if len(regs) != 0 {
-		if err := b.setRegs(vp, regs); err != nil {
+	if len(names) != 0 {
+		// WHPX requires PendingInterruption to precede the notification register
+		// when both are updated. A map made that order nondeterministic and the
+		// Windows 2022 WHPX build faulted inside WinHvPlatform.dll rather than
+		// returning an HRESULT when it received the reverse order.
+		if err := b.writeGPRs(vp, names, values); err != nil {
 			return b.picEpoch, fmt.Errorf("inject PIC vector %#x: %w", vector, err)
 		}
 	}
@@ -300,6 +308,47 @@ func (b *whpxBackend) releaseNative() error {
 
 func (b *whpxBackend) Close() error {
 	return b.lifecycle.close(b.cancelVCPUs, b.releaseNative)
+}
+
+// mapRAMRegionLocked commits a reserved host range before publishing its GPA
+// mapping to WHPX. nativeMu must be held so teardown cannot delete the
+// partition between the commit and WHvMapGpaRange.
+func (b *whpxBackend) mapRAMRegionLocked(region x86RAMRegion) error {
+	if err := commitGuestRAM(b.m.ram, region.hostOffset, region.size); err != nil {
+		return err
+	}
+	if err := whvCall("WHvMapGpaRange", procMapGpaRange,
+		uintptr(b.h), uintptr(unsafe.Pointer(&b.m.ram[region.hostOffset])), uintptr(region.guestBase),
+		uintptr(region.size), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
+		return fmt.Errorf("WHvMapGpaRange(GPA %#x, size %d): %w", region.guestBase, region.size, err)
+	}
+	b.mappedRAM = append(b.mappedRAM, region)
+	return nil
+}
+
+// mapHotMemory installs the virtio-mem tail after daemon readiness. The
+// request advertised to Linux is sent only after this method returns, so the
+// guest can never plug a block whose host pages or GPA mapping are absent.
+func (b *whpxBackend) mapHotMemory() error {
+	b.nativeMu.Lock()
+	defer b.nativeMu.Unlock()
+	if b.hotMemoryMapped {
+		return nil
+	}
+	if !b.partitionCreated || b.h == 0 {
+		return fmt.Errorf("map hot memory: WHPX partition is closed")
+	}
+	regions := b.m.x86RAMRegions()
+	if len(regions) != 2 || b.m.hotMem == nil {
+		return fmt.Errorf("map hot memory: invalid x86 memory layout")
+	}
+	start := time.Now()
+	if err := b.mapRAMRegionLocked(regions[1]); err != nil {
+		return fmt.Errorf("map virtio-mem tail: %w", err)
+	}
+	b.hotMemoryMapped = true
+	b.m.bootTiming.note("virtio-mem tail committed+mapped", start, time.Now())
+	return nil
 }
 
 // whvRegValue is one WHV_REGISTER_VALUE (16 bytes).
@@ -456,13 +505,14 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 	if err := whvCall("WHvSetupPartition", procSetupPartition, uintptr(h)); err != nil {
 		return err
 	}
-	for _, region := range x86RAMRegions(uint64(len(m.ram))) {
-		if err := whvCall("WHvMapGpaRange", procMapGpaRange,
-			uintptr(h), uintptr(unsafe.Pointer(&m.ram[region.hostOffset])), uintptr(region.guestBase),
-			uintptr(region.size), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
-			return fmt.Errorf("WHvMapGpaRange(GPA %#x, size %d): %w", region.guestBase, region.size, err)
+	regions := m.x86RAMRegions()
+	if m.hotMemDeferred {
+		regions = regions[:1]
+	}
+	for _, region := range regions {
+		if err := b.mapRAMRegionLocked(region); err != nil {
+			return err
 		}
-		b.mappedRAM = append(b.mappedRAM, region)
 	}
 
 	// Stable default: userspace IO-APIC delivering into WHPX's emulated LAPIC.

@@ -104,6 +104,46 @@ func TestX86RAMRegionsKeepHostRAMContiguousAroundGuestHole(t *testing.T) {
 	}
 }
 
+func TestX86VirtioMemLayout(t *testing.T) {
+	const mib = uint64(1 << 20)
+	for _, test := range []struct {
+		name       string
+		memory     uint64
+		setting    string
+		wantBoot   uint64
+		wantEnable bool
+	}{
+		{name: "off", memory: 22 * 1024 * mib, wantBoot: 22 * 1024 * mib},
+		{name: "small", memory: 512 * mib, setting: "1", wantBoot: 512 * mib},
+		{name: "aligned", memory: 22 * 1024 * mib, setting: "on", wantBoot: 512 * mib, wantEnable: true},
+		{name: "remainder", memory: 1025 * mib, setting: "true", wantBoot: 513 * mib, wantEnable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			boot, enabled := x86VirtioMemLayout(test.memory, test.setting)
+			if boot != test.wantBoot || enabled != test.wantEnable {
+				t.Fatalf("layout = (%d MiB, %v), want (%d MiB, %v)", boot>>20, enabled, test.wantBoot>>20, test.wantEnable)
+			}
+			if enabled && (test.memory-boot)%x86VirtioMemBlockSize != 0 {
+				t.Fatalf("hot-add tail %#x is not block aligned", test.memory-boot)
+			}
+		})
+	}
+}
+
+func TestX86RAMRegionsWithVirtioMemBootRegion(t *testing.T) {
+	regions := x86RAMRegionsWithLow(22<<30, 512<<20)
+	if len(regions) != 2 {
+		t.Fatalf("region count = %d, want 2", len(regions))
+	}
+	if regions[0] != (x86RAMRegion{size: 512 << 20}) {
+		t.Fatalf("low region = %+v", regions[0])
+	}
+	want := x86RAMRegion{guestBase: x86HighRAMStart, hostOffset: 512 << 20, size: 22<<30 - 512<<20}
+	if regions[1] != want {
+		t.Fatalf("hot-add region = %+v, want %+v", regions[1], want)
+	}
+}
+
 func TestSetupX86BootPageTables(t *testing.T) {
 	ram := make([]byte, 16<<20)
 	if err := setupX86Boot(ram, "x", 512<<20, 1); err != nil {

@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 )
+
+const windowsEagerSMPMemoryBytes = 8 << 30
 
 // bootLogLevel caps kernel printk at KERN_WARNING on the console:
 // every console byte crosses an MMIO exit round-trip through the VMM,
@@ -60,10 +63,16 @@ func guestHardeningParams() string {
 // remaining CPUs after vminitd submits its first vsock packet. This keeps SMP
 // RCU grace periods out of early filesystem/cgroup initialization while still
 // making every configured CPU available as the control plane becomes ready.
-// Stock and older kernels safely ignore the namespaced parameter. Set
-// GANTRY_DEFER_SMP=0 (also accepts false, no, and off) to retain eager bringup.
-func WithDeferredSMP(cmdline string, vcpus int) string {
-	if vcpus <= 1 || deferredSMPDisabled() {
+//
+// Large Windows guests are the exception. Linux initializes deferred struct
+// pages before userspace, and WHPX measurements show that bringing configured
+// CPUs up eagerly lets the kernel parallelize that RAM-proportional work. Set
+// GANTRY_DEFER_SMP=1 (also accepts true, yes, and on) to force the old deferred
+// behavior, or 0 (also false, no, and off) to force eager bringup. Stock and
+// older kernels safely ignore the namespaced parameter.
+func WithDeferredSMP(cmdline string, vcpus int, memBytes uint64) string {
+	policyMemBytes := smpPolicyMemory(runtime.GOOS, memBytes, os.Getenv("GANTRY_VIRTIO_MEM"))
+	if !shouldDeferSMP(runtime.GOOS, vcpus, policyMemBytes, os.Getenv("GANTRY_DEFER_SMP")) {
 		return cmdline
 	}
 	separator := strings.Index(cmdline, " -- ")
@@ -74,13 +83,29 @@ func WithDeferredSMP(cmdline string, vcpus int) string {
 	return cmdline[:separator] + " gantry.defer_smp=1" + cmdline[separator:]
 }
 
-func deferredSMPDisabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_DEFER_SMP"))) {
-	case "0", "false", "no", "off":
-		return true
-	default:
+func smpPolicyMemory(hostOS string, memBytes uint64, virtioMemSetting string) uint64 {
+	if hostOS == "windows" {
+		if bootSize, enabled := x86VirtioMemLayout(memBytes, virtioMemSetting); enabled {
+			// Only the boot region participates in early initialization. Let
+			// the owned kernel bring the other CPUs online together with the
+			// post-READY memory request triggered by the first vsock packet.
+			return bootSize
+		}
+	}
+	return memBytes
+}
+
+func shouldDeferSMP(hostOS string, vcpus int, memBytes uint64, setting string) bool {
+	if vcpus <= 1 {
 		return false
 	}
+	switch strings.ToLower(strings.TrimSpace(setting)) {
+	case "0", "false", "no", "off":
+		return false
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return hostOS != "windows" || memBytes < windowsEagerSMPMemoryBytes
 }
 
 // defaultCmdline mirrors nerdbox's libkrun instance.go (PL011 on arm64,

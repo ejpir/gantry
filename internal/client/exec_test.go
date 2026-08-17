@@ -17,6 +17,29 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
+func TestSessionExecIDsAreUniqueUnderConcurrency(t *testing.T) {
+	const count = 1000
+	ids := make(chan string, count)
+	var workers sync.WaitGroup
+	for range count {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ids <- nextSessionExecID("sb")
+		}()
+	}
+	workers.Wait()
+	close(ids)
+
+	seen := make(map[string]struct{}, count)
+	for id := range ids {
+		if _, duplicate := seen[id]; duplicate {
+			t.Fatalf("duplicate exec ID %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
 type execLifecycleTask struct {
 	task.TTRPCTaskService
 

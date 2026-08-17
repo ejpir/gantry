@@ -10,7 +10,8 @@ import (
 // allocGuestRAM reserves the guest's memory; the backend maps it into the VM
 // with hv_vm_map afterwards. Split VMMs use a shared backing descriptor so a
 // vhost-style filesystem backend can map the same guest pages directly.
-func allocGuestRAM(size uint64, backing *os.File) ([]byte, error) {
+func allocGuestRAM(size, initialCommit uint64, backing *os.File) ([]byte, error) {
+	_ = initialCommit // mmap is demand-paged; no separate commit phase is needed.
 	fd := -1
 	flags := syscall.MAP_PRIVATE | syscall.MAP_ANON
 	if backing != nil {

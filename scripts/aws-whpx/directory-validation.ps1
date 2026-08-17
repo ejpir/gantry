@@ -25,9 +25,6 @@ $GuestRoot = "/root/gantry-dirscan"
 $ShareTag = "dirscan"
 
 $env:GANTRY_HOME = $StateRoot
-$env:GANTRY_EXTRA_CMDLINE = "noapic"
-$env:GANTRY_WHPX_PIC = "1"
-$env:GANTRY_WHPX_PIC_NOPIT = "1"
 
 function Invoke-Gantry([string[]]$CommandArgs) {
     & $script:Gantry @CommandArgs

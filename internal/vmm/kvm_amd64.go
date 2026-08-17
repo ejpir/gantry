@@ -205,7 +205,7 @@ func (kvmX86Platform) run(m *Machine) error {
 		return fmt.Errorf("KVM_CREATE_PIT2: %w", err)
 	}
 
-	for slot, region := range x86RAMRegions(uint64(len(m.ram))) {
+	for slot, region := range m.x86RAMRegions() {
 		reg := kvmUserspaceMemoryRegion{
 			slot:          uint32(slot),
 			guestPhysAddr: region.guestBase,

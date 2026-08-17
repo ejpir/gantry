@@ -79,6 +79,8 @@ func (f *fakeVMM) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 	return nil
 }
 
+func (f *fakeVMM) RequestHotMemory() error { return nil }
+
 func (f *fakeVMM) lastInjected() net.Conn {
 	f.mu.Lock()
 	defer f.mu.Unlock()

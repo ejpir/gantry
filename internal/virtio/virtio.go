@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // virtio-mmio transport (version 2) + split virtqueues.
@@ -46,9 +47,11 @@ const (
 // contiguous region; x86 machines with more than 3 GiB use two regions around
 // the traditional 3-4 GiB platform-device hole.
 type RAM struct {
-	mu      sync.RWMutex
-	ram     []byte
-	regions []ramRegion
+	mu           sync.RWMutex
+	ram          []byte
+	regions      []ramRegion
+	highDeferred bool
+	highEnabled  atomic.Bool
 }
 
 type ramRegion struct {
@@ -76,6 +79,21 @@ func NewSplitRAM(ram []byte, lowSize, highBase uint64) *RAM {
 	}}
 }
 
+// DeferHighRegion removes the split high region from device DMA validation
+// until EnableHighRegion is called. The VMM uses this with virtio-mem so a
+// malformed pre-hotplug descriptor cannot make a device touch Windows pages
+// that are still reserved/no-access. Call it during machine preparation,
+// before device workers or vCPUs start.
+func (m *RAM) DeferHighRegion() {
+	if len(m.regions) > 1 {
+		m.highDeferred = true
+		m.highEnabled.Store(false)
+	}
+}
+
+// EnableHighRegion publishes the already-committed/mapped tail to device DMA.
+func (m *RAM) EnableHighRegion() { m.highEnabled.Store(true) }
+
 func (m *RAM) size() uint64 { return uint64(len(m.ram)) }
 
 // contains reports whether [addr, addr+n) lies fully inside guest RAM.
@@ -85,7 +103,10 @@ func (m *RAM) contains(addr, n uint64) bool {
 }
 
 func (m *RAM) rangeOff(addr, n uint64) (uint64, bool) {
-	for _, region := range m.regions {
+	for index, region := range m.regions {
+		if index > 0 && m.highDeferred && !m.highEnabled.Load() {
+			continue
+		}
 		if addr < region.guestBase {
 			continue
 		}

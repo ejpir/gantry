@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const (
@@ -39,6 +40,9 @@ const (
 	x86LowRAMEnd    = 0xc0000000 // 3 GiB: start of the virtio/platform MMIO hole
 	x86HighRAMStart = 0x100000000
 
+	x86VirtioMemBootSize  = 512 << 20
+	x86VirtioMemBlockSize = 128 << 20
+
 	x86MPSFloatingPtr = 0xf0000 // scanned by default_find_smp_config()
 	x86MPSConfigTable = 0xf0100
 )
@@ -53,7 +57,11 @@ type x86RAMRegion struct {
 }
 
 func x86RAMRegions(memSize uint64) []x86RAMRegion {
-	lowSize := min(memSize, uint64(x86LowRAMEnd))
+	return x86RAMRegionsWithLow(memSize, min(memSize, uint64(x86LowRAMEnd)))
+}
+
+func x86RAMRegionsWithLow(memSize, lowSize uint64) []x86RAMRegion {
+	lowSize = min(lowSize, memSize)
 	regions := []x86RAMRegion{{size: lowSize}}
 	if memSize > lowSize {
 		regions = append(regions, x86RAMRegion{
@@ -61,6 +69,27 @@ func x86RAMRegions(memSize uint64) []x86RAMRegion {
 		})
 	}
 	return regions
+}
+
+// x86VirtioMemLayout keeps enough ordinary e820 RAM for the kernel and early
+// userspace, while aligning the hot-added tail to x86's 128 MiB memory-block
+// granularity. It is deliberately opt-in until the Gantry binary and its owned
+// kernel can be upgraded atomically: an older kernel would otherwise ignore
+// the device and see only the boot region.
+func x86VirtioMemLayout(memSize uint64, setting string) (bootSize uint64, enabled bool) {
+	switch strings.ToLower(strings.TrimSpace(setting)) {
+	case "1", "true", "yes", "on":
+	default:
+		return memSize, false
+	}
+	if memSize <= x86VirtioMemBootSize {
+		return memSize, false
+	}
+	bootSize = x86VirtioMemBootSize + memSize%x86VirtioMemBlockSize
+	if bootSize >= memSize || bootSize > x86LowRAMEnd {
+		return memSize, false
+	}
+	return bootSize, true
 }
 
 // setupX86Boot writes boot_params, e820, the cmdline, identity-mapped page

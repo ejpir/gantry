@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/ejpir/gantry/internal/netpol"
@@ -134,6 +135,16 @@ func (c RunConfig) StartNetwork(workdir string) (*Network, error) {
 	}
 	if c.splitNetWorkerWanted() && os.Getenv("GANTRY_NET_PCAP") != "" {
 		err := fmt.Errorf("split network worker does not support GANTRY_NET_PCAP without host-path authority")
+		if c.ProcessIsolation == "required" {
+			return nil, fmt.Errorf("process isolation required but unavailable: %w", err)
+		}
+		n.Degraded = append(n.Degraded, "network-worker: "+err.Error())
+	} else if c.splitNetWorkerWanted() && !networkWorkerConfinementPlatform {
+		// Windows has the worker transport, but its confinement implementation
+		// deliberately refuses every mode except off. In auto mode, do not pay
+		// for a process re-exec and authenticated handshake whose only possible
+		// result is that refusal; build the same in-supervisor fallback directly.
+		err := fmt.Errorf("split network worker confinement unavailable on %s", runtime.GOOS)
 		if c.ProcessIsolation == "required" {
 			return nil, fmt.Errorf("process isolation required but unavailable: %w", err)
 		}

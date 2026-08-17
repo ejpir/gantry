@@ -20,6 +20,7 @@ import (
 type Runner interface {
 	Run() error
 	Close() error
+	RequestHotMemory() error
 	InjectVsockConn(guestPort uint32, conn net.Conn) error
 }
 
@@ -46,8 +47,9 @@ func NewRuntime() Runtime {
 
 type machineRunner struct{ machine *vmm.Machine }
 
-func (r machineRunner) Run() error   { return vmm.Run(r.machine) }
-func (r machineRunner) Close() error { return r.machine.Close() }
+func (r machineRunner) Run() error              { return vmm.Run(r.machine) }
+func (r machineRunner) Close() error            { return r.machine.Close() }
+func (r machineRunner) RequestHotMemory() error { return r.machine.RequestHotMemory() }
 func (r machineRunner) InjectVsockConn(port uint32, conn net.Conn) error {
 	return r.machine.InjectVsockConn(port, conn)
 }
@@ -206,6 +208,7 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 	return workerproto.ServeRequests(control, map[string]workerproto.Handler{
 		"vm.wait":          state.wait,
 		"vm.close":         state.closeVM,
+		"vm.hot-memory":    state.requestHotMemory,
 		"vsock.connect":    state.connectVsock,
 		"net.policy":       state.setPolicy,
 		"traffic.snapshot": state.trafficSnapshot,
