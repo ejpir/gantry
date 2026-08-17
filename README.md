@@ -152,6 +152,26 @@ gh attestation verify <file> --repo ejpir/gantry
 | macOS arm64 | Hypervisor.framework | Verified on macOS 13+ |
 | Windows x86-64 | WHPX | Experimental; verified on EC2 `m6i.metal` |
 
+## Startup performance
+
+Measured cold-guest startup to RPC readiness with warm host file caches:
+
+| Host | Backend | Configuration | Observed startup |
+|---|---|---|---:|
+| Linux arm64 | KVM | 1 vCPU, 512 MiB, network off | **72.9 ms** median CLI-to-ready |
+| macOS arm64 | Hypervisor.framework | 1 vCPU, 512 MiB, network off | **94.1 ms** median CLI-to-ready |
+| Linux x86-64 | KVM | 1 vCPU, 512 MiB, network off | **177.8 ms** median CLI-to-ready |
+| Windows x86-64 | WHPX | 1 vCPU, 512 MiB, split VMM worker | **approximately 400 ms** daemon-to-ready (371–446 ms observed) |
+
+The Linux and macOS rows use the same benchmark and report full CLI latency.
+The experimental Windows result is a daemon-to-RPC range from native WHPX
+field runs, so it is useful as an engineering baseline rather than a strict
+cross-host comparison. Large Windows guests use a 512 MiB boot region and
+virtio-mem hot-add, keeping configured RAM size out of the pre-vCPU critical
+path. Reproduce the measurements with
+[`scripts/bench-boot-scaling.sh`](scripts/bench-boot-scaling.sh) and the
+[`scripts/aws-whpx`](scripts/aws-whpx) validation scripts.
+
 ## Isolation and limitations
 
 Each sandbox runs in its own VM. The trusted supervisor runs with the launching
