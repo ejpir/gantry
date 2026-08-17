@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/ejpir/gantry/internal/gutil"
@@ -27,6 +28,8 @@ func (kvmARM64Platform) run(m *Machine) error {
 	// thread-affine; critical on HVF, good hygiene on KVM).
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	phaseStart := time.Now()
+	m.bootTiming.note("KVM runner scheduled", phaseStart, phaseStart)
 
 	kvmFD, err := m.takeKVM()
 	if err != nil {
@@ -44,15 +47,19 @@ func (kvmARM64Platform) run(m *Machine) error {
 			_ = b.Close()
 		}
 	}()
+	m.bootTiming.note("KVM device opened", phaseStart, time.Now())
 
+	phaseStart = time.Now()
 	vmFD, err := k.createVM()
 	if err != nil {
 		return fmt.Errorf("KVM_CREATE_VM: %w", err)
 	}
 	b.vmFD = vmFD
 	b.vmOpen = true
+	m.bootTiming.note("KVM VM created", phaseStart, time.Now())
 
 	// register guest RAM
+	phaseStart = time.Now()
 	reg := kvmUserspaceMemoryRegion{
 		slot:          0,
 		guestPhysAddr: ramBase,
@@ -62,13 +69,17 @@ func (kvmARM64Platform) run(m *Machine) error {
 	if err := ioctl(vmFD, kvmSetUserMemoryRegion, unsafe.Pointer(&reg)); err != nil {
 		return fmt.Errorf("KVM_SET_USER_MEMORY_REGION: %w", err)
 	}
+	m.bootTiming.note("KVM RAM slots installed", phaseStart, time.Now())
 
+	phaseStart = time.Now()
 	sz, _, errno := syscall.Syscall(syscall.SYS_IOCTL, k.fd, kvmGetVcpuMmapSize, 0)
 	if errno != 0 {
 		return fmt.Errorf("KVM_GET_VCPU_MMAP_SIZE: %w", errno)
 	}
+	m.bootTiming.note("KVM capabilities queried", phaseStart, time.Now())
 	// Create all vCPUs up front; secondaries start powered off and the
 	// kernel brings them up with in-kernel PSCI CPU_ON.
+	phaseStart = time.Now()
 	for i := 0; i < m.vcpus; i++ {
 		r, _, errno := syscall.Syscall(syscall.SYS_IOCTL, vmFD, kvmCreateVcpu, uintptr(i))
 		if errno != 0 {
@@ -76,12 +87,16 @@ func (kvmARM64Platform) run(m *Machine) error {
 		}
 		b.vcpus = append(b.vcpus, &kvmVCPU{id: i, fd: r})
 	}
+	m.bootTiming.note("KVM vCPUs created", phaseStart, time.Now())
 	// KVM mandates the vGIC be created after every VCPU exists but before
 	// any is initialized: KVM_CREATE_VCPU fails once the GIC is live, and
 	// KVM_ARM_VCPU_INIT requires the GIC to be there.
+	phaseStart = time.Now()
 	if err := b.createGIC(); err != nil {
 		return err
 	}
+	m.bootTiming.note("KVM GIC created", phaseStart, time.Now())
+	phaseStart = time.Now()
 	for _, vc := range b.vcpus {
 		vi := kvmVcpuInit{target: kvmArmTargetGenericV8}
 		vi.features[0] = kvmArmVCPUFeatures(vc.id)
@@ -95,6 +110,7 @@ func (kvmARM64Platform) run(m *Machine) error {
 		}
 		vc.run = kvmRunStruct{data: runBuf}
 	}
+	m.bootTiming.note("KVM vCPUs initialized", phaseStart, time.Now())
 
 	b.prepareVCPURuns()
 	defer b.abandonVCPURuns()
@@ -164,6 +180,7 @@ func (vc *kvmVCPU) setReg(wordIndex uint64, val uint64) error {
 func (b *kvmBackend) bootLoop() error {
 	m := b.m
 	vc := b.vcpus[0]
+	phaseStart := time.Now()
 	// arm64 Linux boot protocol: x0 = FDT phys, x1..x3 = 0, PC = kernel
 	// entry, PSTATE = EL1h with DAIF masked, MMU off.
 	if err := vc.setReg(0, fdtAddr); err != nil {
@@ -180,6 +197,7 @@ func (b *kvmBackend) bootLoop() error {
 	if err := vc.setReg(33, pstateEL1hMask); err != nil { // pstate
 		return fmt.Errorf("set pstate: %w", err)
 	}
+	m.bootTiming.note("KVM BSP registers set", phaseStart, time.Now())
 
 	fmt.Printf("booting guest (%d vCPU max; type 'exit' in guest shell or Ctrl-A X to quit)\n", m.vcpus)
 	fmt.Println("------------------------------------------------")
