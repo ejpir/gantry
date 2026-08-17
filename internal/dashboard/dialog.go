@@ -3,7 +3,6 @@ package dashboard
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -294,7 +293,9 @@ func (m *sandboxTUIModel) beginUpdate() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	latest := m.updateStatus.Latest
-	return m.beginAction("update", latest, []string{"update", "--wait-pid", fmt.Sprint(os.Getpid())}, false)
+	// No PID handoff: the updater renames the running executable aside and
+	// installs in place, so it never has to wait for this process to exit.
+	return m.beginAction("update", latest, []string{"update"}, false)
 }
 
 func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {

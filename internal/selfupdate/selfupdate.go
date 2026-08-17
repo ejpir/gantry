@@ -48,13 +48,12 @@ type Status struct {
 	Available bool
 }
 
-// Result describes an installed or staged update. Deferred is true on
-// platforms that must finish replacement after the current executable exits.
+// Result describes an installed update. Replacement always completes before
+// Apply returns; every platform can rename an executable that is running.
 type Result struct {
 	Previous   string
 	Installed  string
 	Executable string
-	Deferred   bool
 }
 
 type cacheEntry struct {
@@ -177,7 +176,7 @@ func defaultCacheFile() string {
 
 // Apply downloads the latest platform binary and its checksum sidecar, then
 // replaces the current executable atomically or stages a post-exit handoff.
-func Apply(ctx context.Context, waitPID int, progress func(string, ...any)) (Result, error) {
+func Apply(ctx context.Context, progress func(string, ...any)) (Result, error) {
 	status, err := Refresh(ctx)
 	if err != nil {
 		return Result{}, err
@@ -202,14 +201,12 @@ func Apply(ctx context.Context, waitPID int, progress func(string, ...any)) (Res
 			_ = os.Remove(staged)
 		}
 	}()
-	deferred, err := installStaged(staged, target, waitPID)
-	if err != nil {
+	if err := installStaged(staged, target); err != nil {
 		return Result{}, err
 	}
 	committed = true
 	return Result{
-		Previous: status.Current, Installed: status.Latest,
-		Executable: target, Deferred: deferred,
+		Previous: status.Current, Installed: status.Latest, Executable: target,
 	}, nil
 }
 

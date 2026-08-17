@@ -4,17 +4,10 @@ package selfupdate
 
 import (
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"syscall"
-	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -24,175 +17,85 @@ const protectedUpdateSDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
 
 var (
 	processElevation = currentProcessElevation
-	systemDirectory  = windows.GetSystemDirectory
+	moveFile         = windows.MoveFileEx
 )
 
-func installStaged(staged, target string, waitPID int) (bool, error) {
-	elevated, err := prepareStagedUpdate(staged)
+// installStaged replaces the running executable in process, leaving no helper
+// behind. Windows lets a running image be renamed, so the live executable is
+// moved aside and the verified payload takes the freed path immediately.
+//
+// This deliberately avoids the obvious alternative of handing the swap to a
+// detached child that waits for this process to exit. That design needed an
+// interpreter launched with a base64-encoded command and a hidden window, and
+// under an elevated caller a SYSTEM scheduled task registered under a random
+// name and unregistered right after starting. Endpoint protection cannot tell
+// that sequence apart from a dropper installing persistence, and Defender's
+// static model scores the strings alone: doing the work here removes both the
+// behavior and the strings.
+func installStaged(staged, target string) error {
+	if err := protectStagedUpdate(staged); err != nil {
+		return err
+	}
+	retired, err := retiredPath(target)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if waitPID <= 0 {
-		waitPID = os.Getpid()
+	// Renaming the image this process is executing from is safe: the open
+	// section keeps running against the renamed file, and the rename only
+	// frees the target path so the replacement can take it.
+	if err := moveFilePath(target, retired, windows.MOVEFILE_REPLACE_EXISTING); err != nil {
+		return fmt.Errorf("move running Gantry executable aside: %w", err)
 	}
-	command, err := windowsUpdateCommand(staged, target, waitPID)
-	if err != nil {
-		return false, err
-	}
-	if elevated {
-		command, err = windowsScheduledUpdateCommand(command)
-		if err != nil {
-			return false, err
+	if err := moveFilePath(staged, target,
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
+		// Never leave the installation with no executable at target.
+		if restore := moveFilePath(retired, target, windows.MOVEFILE_REPLACE_EXISTING); restore != nil {
+			return fmt.Errorf("install Gantry executable %s: %w (restoring %s failed: %v)",
+				target, err, retired, restore)
 		}
-		if output, err := command.CombinedOutput(); err != nil {
-			return false, fmt.Errorf("schedule elevated Windows update: %w: %s", err, output)
-		}
-		return true, nil
+		return fmt.Errorf("install Gantry executable %s: %w", target, err)
 	}
-	command.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x00000008 | // DETACHED_PROCESS
-			windows.CREATE_BREAKAWAY_FROM_JOB,
-		HideWindow: true,
-	}
-	if err := command.Start(); err != nil {
-		return false, fmt.Errorf("start Windows update process: %w", err)
-	}
-	// Once Start succeeds the detached process owns staged. A Release failure
-	// must not make the caller delete the file out from under that process.
-	_ = command.Process.Release()
-	return true, nil
+	discardRetired(retired)
+	return nil
 }
 
-func windowsUpdateCommand(staged, target string, waitPID int) (*exec.Cmd, error) {
-	systemDir, err := systemDirectory()
-	if err != nil {
-		return nil, fmt.Errorf("locate Windows system directory: %w", err)
-	}
-	powerShell := filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe")
-	if info, err := os.Stat(powerShell); err != nil {
-		return nil, fmt.Errorf("locate Windows PowerShell: %w", err)
-	} else if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("windows PowerShell path is not a regular file: %s", powerShell)
-	}
-	command := exec.Command(powerShell,
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodePowerShell(updateScript(staged, target, waitPID)),
-	)
-	// Keep native DLL and executable lookup away from caller-controlled working
-	// directories. The executable itself is also addressed by its absolute path.
-	command.Dir = systemDir
-	return command, nil
-}
-
-// windowsScheduledUpdateCommand turns the elevated helper into a one-shot
-// Task Scheduler action. Service managers (including SSM Run Command) can
-// place callers in a kill-on-close job, which also kills an ordinary detached
-// descendant when the command returns. Task Scheduler creates the updater in
-// its own service context, outside that caller-owned job. The registration
-// process waits until the action is running and then removes the task; deleting
-// a running task does not terminate its action.
-func windowsScheduledUpdateCommand(helper *exec.Cmd) (*exec.Cmd, error) {
+// retiredPath names the replaced executable. The random suffix keeps repeated
+// updates and a leftover from an earlier one from colliding, and the leading
+// dot matches how stageBinary names its own sibling temporaries.
+func retiredPath(target string) (string, error) {
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
-		return nil, fmt.Errorf("name elevated Windows update task: %w", err)
+		return "", fmt.Errorf("name replaced Gantry executable: %w", err)
 	}
-	taskName := "Gantry-SelfUpdate-" + hex.EncodeToString(suffix[:])
-	systemDir, err := systemDirectory()
+	return filepath.Join(filepath.Dir(target),
+		"."+filepath.Base(target)+".old-"+hex.EncodeToString(suffix[:])), nil
+}
+
+// discardRetired removes the replaced executable. This process still has the
+// image mapped, so the unlink normally fails until exit; scheduling it for the
+// next boot is a best effort that needs privileges the caller may not hold. A
+// leftover sibling is harmless either way — it never shadows target.
+func discardRetired(retired string) {
+	if os.Remove(retired) == nil {
+		return
+	}
+	_ = moveFilePath(retired, "", windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+}
+
+// moveFilePath wraps MoveFileEx in path handling. An empty destination is the
+// documented way to spell "delete" for MOVEFILE_DELAY_UNTIL_REBOOT.
+func moveFilePath(from, to string, flags uint32) error {
+	source, err := windows.UTF16PtrFromString(from)
 	if err != nil {
-		return nil, fmt.Errorf("locate Windows system directory: %w", err)
+		return fmt.Errorf("invalid path %q: %w", from, err)
 	}
-	powerShell := filepath.Join(systemDir, "WindowsPowerShell", "v1.0", "powershell.exe")
-	if len(helper.Args) == 0 || !strings.EqualFold(helper.Args[0], powerShell) {
-		return nil, fmt.Errorf("invalid elevated Windows update helper")
+	var destination *uint16
+	if to != "" {
+		if destination, err = windows.UTF16PtrFromString(to); err != nil {
+			return fmt.Errorf("invalid path %q: %w", to, err)
+		}
 	}
-	helperArgs := strings.Join(helper.Args[1:], " ")
-	script := scheduledUpdateScript(powerShell, helperArgs, taskName)
-	command := exec.Command(powerShell,
-		"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodePowerShell(script),
-	)
-	command.Dir = systemDir
-	return command, nil
-}
-
-func scheduledUpdateScript(powerShell, helperArgs, taskName string) string {
-	decode := func(value string) string {
-		return "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" +
-			base64.StdEncoding.EncodeToString([]byte(value)) + "'))"
-	}
-	return `$ErrorActionPreference='Stop'
-$powerShell=` + decode(powerShell) + `
-$arguments=` + decode(helperArgs) + `
-$taskName=` + decode(taskName) + `
-$action=New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
-$principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
-try {
-  Start-ScheduledTask -TaskName $taskName
-  $deadline=[DateTime]::UtcNow.AddSeconds(10)
-  while ((Get-ScheduledTask -TaskName $taskName).State -ne 'Running') {
-    if ([DateTime]::UtcNow -ge $deadline) { throw 'elevated update task did not start' }
-    Start-Sleep -Milliseconds 10
-  }
-} catch {
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-  throw
-}
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-`
-}
-
-func updateScript(staged, target string, waitPID int) string {
-	// The path values are base64-encoded separately, so no path characters can
-	// become PowerShell syntax. waitPID is formatted as a decimal integer.
-	staged64 := base64.StdEncoding.EncodeToString([]byte(staged))
-	target64 := base64.StdEncoding.EncodeToString([]byte(target))
-	return `$ErrorActionPreference='Stop'
-$staged=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + staged64 + `'))
-$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('` + target64 + `'))
-$waitPid=` + strconv.Itoa(waitPID) + `
-$lock=[IO.File]::Open($staged,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-Add-Type -TypeDefinition @'
-using System.Runtime.InteropServices;
-public static class GantryUpdate {
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  public static extern bool MoveFileEx(string existing, string replacement, uint flags);
-}
-'@
-if ($waitPid -gt 0) {
-  try {
-    $process=[Diagnostics.Process]::GetProcessById($waitPid)
-    $process.WaitForExit()
-    $process.Dispose()
-  } catch [ArgumentException] {}
-}
-$lock.Dispose()
-$deadline=[DateTime]::UtcNow.AddMinutes(1)
-while ($true) {
-  if ([GantryUpdate]::MoveFileEx($staged,$target,9)) {
-    exit 0
-  }
-  $errorCode=[Runtime.InteropServices.Marshal]::GetLastWin32Error()
-  if (($errorCode -ne 5) -and ($errorCode -ne 32)) {
-    [Console]::Error.WriteLine("MoveFileEx failed with Windows error $errorCode")
-    exit 1
-  }
-  if ([DateTime]::UtcNow -ge $deadline) {
-    [Console]::Error.WriteLine("MoveFileEx timed out with Windows error $errorCode")
-    exit 1
-  }
-  Start-Sleep -Milliseconds 50
-}`
-}
-
-func encodePowerShell(script string) string {
-	units := utf16.Encode([]rune(script))
-	encoded := make([]byte, len(units)*2)
-	for index, unit := range units {
-		binary.LittleEndian.PutUint16(encoded[index*2:], unit)
-	}
-	return base64.StdEncoding.EncodeToString(encoded)
+	return moveFile(source, destination, flags)
 }
 
 func currentProcessElevation() (bool, error) {
@@ -214,31 +117,32 @@ func currentProcessElevation() (bool, error) {
 	return elevated != 0, nil
 }
 
-// prepareStagedUpdate closes the privilege boundary that originally required
-// all elevated Windows updates to be rejected. The verified payload is owned
-// by Administrators, gets a protected SYSTEM/Administrators-only DACL, and is
-// held without write/delete sharing by the detached helper until replacement.
-// Unelevated installs retain their user-owned ACL so the same user can finish
-// the update normally.
-func prepareStagedUpdate(staged string) (bool, error) {
+// protectStagedUpdate closes the window between verifying the payload and
+// moving it into place. stageBinary writes the staged file next to target,
+// which can be a directory a lesser-privileged user may write to; when this
+// process is elevated, the file gets an Administrators owner and a protected
+// SYSTEM/Administrators-only DACL so nothing can swap its contents after the
+// checksum check. Unelevated installs keep their user-owned ACL so the same
+// user can still finish the update.
+func protectStagedUpdate(staged string) error {
 	elevated, err := processElevation()
 	if err != nil {
-		return false, err
+		return err
 	}
 	if !elevated {
-		return false, nil
+		return nil
 	}
 	descriptor, err := windows.SecurityDescriptorFromString(protectedUpdateSDDL)
 	if err != nil {
-		return false, fmt.Errorf("build protected update permissions: %w", err)
+		return fmt.Errorf("build protected update permissions: %w", err)
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {
-		return false, fmt.Errorf("read protected update owner: %w", err)
+		return fmt.Errorf("read protected update owner: %w", err)
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
-		return false, fmt.Errorf("read protected update permissions: %w", err)
+		return fmt.Errorf("read protected update permissions: %w", err)
 	}
 	securityInformation := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION |
 		windows.DACL_SECURITY_INFORMATION |
@@ -246,7 +150,7 @@ func prepareStagedUpdate(staged string) (bool, error) {
 	if err := windows.SetNamedSecurityInfo(
 		staged, windows.SE_FILE_OBJECT, securityInformation, owner, nil, dacl, nil,
 	); err != nil {
-		return false, fmt.Errorf("protect elevated staged update: %w", err)
+		return fmt.Errorf("protect elevated staged update: %w", err)
 	}
-	return true, nil
+	return nil
 }

@@ -9,12 +9,9 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 )
 
-func installStaged(staged, target string, _ int) (bool, error) {
+func installStaged(staged, target string) error {
 	if err := os.Rename(staged, target); err != nil {
-		return false, fmt.Errorf("replace Gantry executable %s: %w", target, err)
+		return fmt.Errorf("replace Gantry executable %s: %w", target, err)
 	}
-	if err := atomicfile.MakeDurable(target); err != nil {
-		return false, err
-	}
-	return false, nil
+	return atomicfile.MakeDurable(target)
 }
