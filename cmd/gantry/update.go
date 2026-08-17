@@ -43,7 +43,6 @@ func cmdVersion(argv []string) int {
 func cmdUpdate(argv []string) int {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	waitPID := flags.Int("wait-pid", 0, "process that must exit before replacing a locked executable")
 	flags.Usage = func() { _, _ = fmt.Fprintln(flags.Output(), "usage: gantry update") }
 	if err := flags.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -51,11 +50,11 @@ func cmdUpdate(argv []string) int {
 		}
 		return 2
 	}
-	if flags.NArg() != 0 || *waitPID < 0 {
+	if flags.NArg() != 0 {
 		flags.Usage()
 		return 2
 	}
-	result, err := selfupdate.Apply(context.Background(), *waitPID, func(format string, values ...any) {
+	result, err := selfupdate.Apply(context.Background(), func(format string, values ...any) {
 		fmt.Fprintf(os.Stderr, format+"\n", values...)
 	})
 	if err != nil {
@@ -66,34 +65,72 @@ func cmdUpdate(argv []string) int {
 		_, _ = fmt.Fprintf(os.Stdout, "gantry %s is already up to date\n", result.Installed)
 		return 0
 	}
-	if result.Deferred {
-		_, _ = fmt.Fprintf(os.Stdout, "gantry %s verified and staged; installation will finish when Gantry exits\n", result.Installed)
-		return 0
-	}
 	_, _ = fmt.Fprintf(os.Stdout, "updated Gantry %s → %s in %s\n", result.Previous, result.Installed, result.Executable)
 	return 0
 }
 
-func cmdUpdateCheck(argv []string) int {
-	if len(argv) != 0 {
-		return 2
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_, _ = selfupdate.Refresh(ctx)
-	return 0
+const (
+	// updateCheckTimeout bounds the release lookup itself.
+	updateCheckTimeout = 30 * time.Second
+	// updateCheckGrace bounds how long exiting waits on a lookup that has not
+	// finished. Most commands outlast the request, so this rarely applies.
+	updateCheckGrace = time.Second
+)
+
+// updateCheck is a release-status refresh running alongside the command the
+// user actually asked for.
+//
+// It used to run in a detached child process with a hidden window, started as
+// the parent exited. A program silently spawning a windowless copy of itself
+// that then reaches out to the network is a shape endpoint protection treats
+// as malicious, and it bought nothing that a goroutine cannot do: the check is
+// one HTTP request whose only output is a cache file read by the next run.
+type updateCheck struct {
+	done   chan struct{}
+	cancel context.CancelFunc
 }
 
-func maybeNotifyUpdate(argv []string, statusCode int) {
+// startUpdateCheck begins a refresh if the cached status is stale. It runs
+// concurrently with the command so the lookup costs no wall clock of its own.
+func startUpdateCheck(argv []string) *updateCheck {
+	if !selfupdate.Enabled() || skipUpdateNotice(argv) || !term.IsTerminal(int(os.Stderr.Fd())) {
+		return nil
+	}
+	if _, _, fresh := selfupdate.Cached(); fresh {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
+	check := &updateCheck{done: make(chan struct{}), cancel: cancel}
+	go func() {
+		defer close(check.done)
+		_, _ = selfupdate.Refresh(ctx)
+	}()
+	return check
+}
+
+// wait gives an unfinished check a short grace period so its result reaches
+// the cache. Gantry's exit status never depends on it, so an unreachable
+// GitHub costs updateCheckGrace and nothing else.
+func (c *updateCheck) wait() {
+	if c == nil {
+		return
+	}
+	defer c.cancel()
+	select {
+	case <-c.done:
+	case <-time.After(updateCheckGrace):
+	}
+}
+
+func maybeNotifyUpdate(argv []string, statusCode int, check *updateCheck) {
+	check.wait()
 	if statusCode != 0 || !selfupdate.Enabled() || !term.IsTerminal(int(os.Stderr.Fd())) || skipUpdateNotice(argv) {
 		return
 	}
-	status, _, fresh := selfupdate.Cached()
-	if status.Available {
+	// A check that finished during this run has already updated the cache, so
+	// a new release can be reported in the run that discovered it.
+	if status, _, _ := selfupdate.Cached(); status.Available {
 		fmt.Fprintf(os.Stderr, "\nUpdate available: Gantry %s (current %s). Run `gantry update`.\n", status.Latest, status.Current)
-	}
-	if !fresh {
-		_ = startBackgroundUpdateCheck()
 	}
 }
 
@@ -102,7 +139,7 @@ func skipUpdateNotice(argv []string) bool {
 		return true // the TUI performs its own asynchronous check
 	}
 	switch argv[0] {
-	case "tui", "version", "update", "serve", "daemon", "_update-check", "_net-worker", "_vmm-worker":
+	case "tui", "version", "update", "serve", "daemon", "_net-worker", "_vmm-worker":
 		return true
 	default:
 		return false

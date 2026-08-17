@@ -3,19 +3,21 @@
 package selfupdate
 
 import (
-	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
 )
+
+func unelevated(t *testing.T) {
+	t.Helper()
+	old := processElevation
+	processElevation = func() (bool, error) { return false, nil }
+	t.Cleanup(func() { processElevation = old })
+}
 
 func TestWindowsUpdateProtectsElevatedPayload(t *testing.T) {
 	old := processElevation
@@ -26,12 +28,8 @@ func TestWindowsUpdateProtectsElevatedPayload(t *testing.T) {
 	if err := os.WriteFile(staged, []byte("verified"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	elevated, err := prepareStagedUpdate(staged)
-	if err != nil {
+	if err := protectStagedUpdate(staged); err != nil {
 		t.Fatal(err)
-	}
-	if !elevated {
-		t.Fatal("prepareStagedUpdate did not report elevated process")
 	}
 	descriptor, err := windows.GetNamedSecurityInfo(staged, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
@@ -64,12 +62,14 @@ func TestWindowsUpdateFailsClosedWhenElevationQueryFails(t *testing.T) {
 	processElevation = func() (bool, error) { return false, wantErr }
 	t.Cleanup(func() { processElevation = old })
 
-	if _, err := prepareStagedUpdate("staged"); !errors.Is(err, wantErr) {
-		t.Fatalf("prepareStagedUpdate elevation query error = %v, want %v", err, wantErr)
+	if err := installStaged("staged", "target"); !errors.Is(err, wantErr) {
+		t.Fatalf("installStaged elevation query error = %v, want %v", err, wantErr)
 	}
 }
 
-func TestWindowsUpdateCommandReplacesTarget(t *testing.T) {
+func TestWindowsInstallStagedReplacesTarget(t *testing.T) {
+	unelevated(t)
+
 	dir := t.TempDir()
 	target := filepath.Join(dir, "gantry.exe")
 	staged := filepath.Join(dir, "gantry update ' verified.exe")
@@ -79,12 +79,8 @@ func TestWindowsUpdateCommandReplacesTarget(t *testing.T) {
 	if err := os.WriteFile(staged, []byte("new"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command, err := windowsUpdateCommand(staged, target, 0)
-	if err != nil {
+	if err := installStaged(staged, target); err != nil {
 		t.Fatal(err)
-	}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("run Windows update process: %v: %s", err, output)
 	}
 	contents, err := os.ReadFile(target)
 	if err != nil {
@@ -96,89 +92,126 @@ func TestWindowsUpdateCommandReplacesTarget(t *testing.T) {
 	if _, err := os.Stat(staged); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("staged file error = %v, want not exist", err)
 	}
+	// The replaced executable is not mapped here, so it unlinks immediately
+	// rather than falling back to a delete on the next boot.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".old-") {
+			t.Fatalf("replaced executable %s was left behind", entry.Name())
+		}
+	}
 }
 
-func TestWindowsDetachedUpdateReplacesAfterParentExit(t *testing.T) {
-	const childEnv = "GANTRY_DETACHED_UPDATE_TEST_CHILD"
-	if os.Getenv(childEnv) == "1" {
-		deferred, err := installStaged(os.Getenv("GANTRY_DETACHED_UPDATE_STAGED"), os.Getenv("GANTRY_DETACHED_UPDATE_TARGET"), os.Getpid())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !deferred {
-			t.Fatal("Windows update was not deferred")
-		}
-		return
-	}
+// TestWindowsInstallStagedReplacesRunningImage covers the property the whole
+// design rests on: a running executable can be renamed out of the target path.
+func TestWindowsInstallStagedReplacesRunningImage(t *testing.T) {
+	unelevated(t)
 
 	dir := t.TempDir()
-	target := filepath.Join(dir, "gantry.exe")
-	staged := filepath.Join(dir, "gantry.update.exe")
-	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+	target := filepath.Join(dir, "running.exe")
+	staged := filepath.Join(dir, "staged.exe")
+	// os.Args[0] is the running test binary; copying it gives a real PE that
+	// can be launched and held open while the swap happens.
+	image, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, image, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(staged, []byte("new"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	child := exec.Command(os.Args[0], "-test.run=^TestWindowsDetachedUpdateReplacesAfterParentExit$")
-	child.Env = append(os.Environ(),
-		childEnv+"=1",
-		"GANTRY_DETACHED_UPDATE_STAGED="+staged,
-		"GANTRY_DETACHED_UPDATE_TARGET="+target,
-	)
-	if output, err := child.CombinedOutput(); err != nil {
-		t.Fatalf("run update parent: %v: %s", err, output)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		contents, err := os.ReadFile(target)
-		if err == nil && string(contents) == "new" {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	contents, err := os.ReadFile(target)
-	t.Fatalf("detached update did not replace target: contents=%q err=%v", contents, err)
-}
-
-func TestUpdateScriptDoesNotInterpolatePaths(t *testing.T) {
-	staged := `C:\users\me\gantry update ' staged.exe`
-	target := `C:\users\me\gantry target.exe`
-	script := updateScript(staged, target, 42)
-	if strings.Contains(script, staged) || strings.Contains(script, target) {
-		t.Fatalf("update script contains an unencoded path: %s", script)
-	}
-	for _, path := range []string{staged, target} {
-		encoded := base64.StdEncoding.EncodeToString([]byte(path))
-		if !strings.Contains(script, "'"+encoded+"'") {
-			t.Fatalf("update script does not contain encoded path %q", path)
-		}
-	}
-	if !strings.Contains(script, "$waitPid=42") {
-		t.Fatalf("update script does not contain wait PID: %s", script)
-	}
-	if !strings.Contains(script, "MoveFileEx($staged,$target,9)") {
-		t.Fatalf("update script does not use atomic replacement: %s", script)
-	}
-	if !strings.Contains(script, "$lock=[IO.File]::Open($staged") || !strings.Contains(script, "$lock.Dispose()") {
-		t.Fatalf("update script does not lock the staged payload: %s", script)
-	}
-}
-
-func TestEncodePowerShellUsesUTF16LE(t *testing.T) {
-	want := "Write-Output '✓'"
-	data, err := base64.StdEncoding.DecodeString(encodePowerShell(want))
+	running, err := os.StartProcess(target, []string{target, "-test.run=^$", "-test.timeout=30s"},
+		&os.ProcAttr{Files: []*os.File{nil, nil, nil}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(data)%2 != 0 {
-		t.Fatalf("encoded command has odd byte length %d", len(data))
+	defer func() {
+		_ = running.Kill()
+		_, _ = running.Wait()
+	}()
+
+	if err := installStaged(staged, target); err != nil {
+		t.Fatalf("installStaged over a running image: %v", err)
 	}
-	units := make([]uint16, len(data)/2)
-	for index := range units {
-		units[index] = binary.LittleEndian.Uint16(data[index*2:])
+	contents, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := string(utf16.Decode(units)); got != want {
-		t.Fatalf("decoded command = %q, want %q", got, want)
+	if string(contents) != "new" {
+		t.Fatalf("target contents = %q, want new", contents)
+	}
+}
+
+func TestWindowsInstallStagedRestoresTargetWhenReplacementFails(t *testing.T) {
+	unelevated(t)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "gantry.exe")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The staged file never exists, so moving it into place must fail after
+	// the running executable has already been renamed aside.
+	staged := filepath.Join(dir, "missing.exe")
+	err := installStaged(staged, target)
+	if err == nil {
+		t.Fatal("installStaged succeeded with no staged payload")
+	}
+	if strings.Contains(err.Error(), "restoring") {
+		t.Fatalf("installStaged failed to restore the original executable: %v", err)
+	}
+	contents, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("original executable was not restored: %v", readErr)
+	}
+	if string(contents) != "old" {
+		t.Fatalf("restored contents = %q, want old", contents)
+	}
+}
+
+func TestWindowsRetiredPathIsUniqueSibling(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "gantry.exe")
+	first, err := retiredPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := retiredPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("retiredPath is not unique: %s", first)
+	}
+	for _, path := range []string{first, second} {
+		if filepath.Dir(path) != filepath.Dir(target) {
+			t.Fatalf("retiredPath %s is not a sibling of %s", path, target)
+		}
+		if !strings.HasPrefix(filepath.Base(path), ".gantry.exe.old-") {
+			t.Fatalf("retiredPath %s does not carry the retired prefix", path)
+		}
+	}
+}
+
+// TestWindowsInstallUsesNoHelperProcess guards the property this package was
+// rewritten for: the update must not shell out. A helper reintroduces the
+// encoded-interpreter and scheduled-task behavior that endpoint protection
+// scores as a dropper installing persistence.
+func TestWindowsInstallUsesNoHelperProcess(t *testing.T) {
+	source, err := os.ReadFile("install_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"os/exec", "exec.Command", "powershell", "EncodedCommand",
+		"ScheduledTask", "DllImport", "CREATE_BREAKAWAY_FROM_JOB",
+	} {
+		if strings.Contains(string(source), forbidden) {
+			t.Errorf("install_windows.go reintroduced %q", forbidden)
+		}
 	}
 }

@@ -55,13 +55,13 @@ func TestApplyVerifiesAndReplacesExecutable(t *testing.T) {
 	httpClient = server.Client()
 
 	var progress []string
-	result, err := Apply(context.Background(), 0, func(format string, values ...any) {
+	result, err := Apply(context.Background(), func(format string, values ...any) {
 		progress = append(progress, fmt.Sprintf(format, values...))
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Previous != "v1.0.0" || result.Installed != "v1.1.0" || result.Executable != target || result.Deferred {
+	if result.Previous != "v1.0.0" || result.Installed != "v1.1.0" || result.Executable != target {
 		t.Fatalf("result = %+v", result)
 	}
 	got, err := os.ReadFile(target)
@@ -107,7 +107,7 @@ func TestApplyRejectsChecksumMismatch(t *testing.T) {
 	releaseDownloadBase = server.URL + "/download"
 	httpClient = server.Client()
 
-	if _, err := Apply(context.Background(), 0, nil); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+	if _, err := Apply(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("Apply mismatch error = %v", err)
 	}
 	if got, _ := os.ReadFile(target); string(got) != "old" {

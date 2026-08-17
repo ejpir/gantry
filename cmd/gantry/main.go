@@ -61,8 +61,9 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 
 func main() {
 	args := os.Args[1:]
+	check := startUpdateCheck(args)
 	status := runMain(args)
-	maybeNotifyUpdate(args, status)
+	maybeNotifyUpdate(args, status, check)
 	os.Exit(status)
 }
 
@@ -112,8 +113,6 @@ func runMain(args []string) int {
 		return cmdVersion(argv)
 	case "update":
 		return cmdUpdate(argv)
-	case "_update-check":
-		return cmdUpdateCheck(argv)
 	case "daemon":
 		if len(argv) < 1 || len(argv) > 2 {
 			return 2
