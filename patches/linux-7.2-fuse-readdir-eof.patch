@@ -1,0 +1,163 @@
+diff --git a/fs/fuse/fuse_i.h b/fs/fuse/fuse_i.h
+index 85f738c..935f0ac 100644
+--- a/fs/fuse/fuse_i.h
++++ b/fs/fuse/fuse_i.h
+@@ -302,6 +302,10 @@ struct fuse_file {
+ 		/** @version: Version of cache we are reading */
+ 		u64 version;
+ 
++		/* Position explicitly marked as EOF by a Gantry server */
++		loff_t eof_pos;
++		bool eof;
++
+ 	} readdir;
+ 
+ 	/** @polled_node: RB node to be linked on fuse_conn->polled_files */
+@@ -624,6 +628,9 @@ struct fuse_conn {
+ 	/** @readdirplus_auto: Does the filesystem want adaptive readdirplus? */
+ 	unsigned readdirplus_auto:1;
+ 
++	/** @gantry_readdir_eof: Server sends Gantry's explicit READDIR EOF marker */
++	unsigned gantry_readdir_eof:1;
++
+ 	/**
+ 	 * @async_dio: Does the filesystem support asynchronous direct-IO
+ 	 * submission?
+diff --git a/fs/fuse/inode.c b/fs/fuse/inode.c
+index d975073..6220a59 100644
+--- a/fs/fuse/inode.c
++++ b/fs/fuse/inode.c
+@@ -1320,6 +1320,8 @@ static void process_init_reply(struct fuse_args *args, int error)
+ 				if (flags & FUSE_READDIRPLUS_AUTO)
+ 					fc->readdirplus_auto = 1;
+ 			}
++			if (flags & FUSE_GANTRY_READDIR_EOF)
++				fc->gantry_readdir_eof = 1;
+ 			if (flags & FUSE_ASYNC_DIO)
+ 				fc->async_dio = 1;
+ 			if (flags & FUSE_WRITEBACK_CACHE)
+@@ -1462,7 +1464,7 @@ static struct fuse_init_args *fuse_new_init(struct fuse_mount *fm)
+ 		FUSE_SECURITY_CTX | FUSE_CREATE_SUPP_GROUP |
+ 		FUSE_HAS_EXPIRE_ONLY | FUSE_DIRECT_IO_ALLOW_MMAP |
+ 		FUSE_NO_EXPORT_SUPPORT | FUSE_HAS_RESEND | FUSE_ALLOW_IDMAP |
+-		FUSE_REQUEST_TIMEOUT;
++		FUSE_REQUEST_TIMEOUT | FUSE_GANTRY_READDIR_EOF;
+ #ifdef CONFIG_FUSE_DAX
+ 	if (fm->fc->dax)
+ 		flags |= FUSE_MAP_ALIGNMENT;
+diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
+index 8c69b2e..44ad676 100644
+--- a/fs/fuse/readdir.c
++++ b/fs/fuse/readdir.c
+@@ -156,6 +156,34 @@ static void gantry_adapt_readdirplus(struct file *file, unsigned int entries,
+ 			&get_fuse_inode(dir)->state);
+ }
+ 
++/*
++ * The marker is only meaningful on a connection that negotiated the
++ * extension. A guest may mount FUSE filesystems Gantry does not serve; for
++ * those a zero-length dirent must keep returning -EIO rather than silently
++ * truncating the directory.
++ */
++static bool fuse_gantry_is_readdir_eof(struct file *file,
++				       const struct fuse_dirent *dirent)
++{
++	struct fuse_conn *fc = get_fuse_conn(file_inode(file));
++
++	return fc->gantry_readdir_eof &&
++		!dirent->namelen &&
++		dirent->ino == FUSE_GANTRY_READDIR_EOF_INO &&
++		dirent->off == FUSE_GANTRY_READDIR_EOF_OFF &&
++		dirent->type == FUSE_GANTRY_READDIR_EOF_TYPE;
++}
++
++static void fuse_gantry_mark_readdir_eof(struct file *file, loff_t pos)
++{
++	struct fuse_file *ff = file->private_data;
++
++	ff->readdir.eof = true;
++	ff->readdir.eof_pos = pos;
++	if (ff->open_flags & FOPEN_CACHE_DIR)
++		fuse_readdir_cache_end(file, pos);
++}
++
+ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
+ 			 struct dir_context *ctx)
+ {
+@@ -165,6 +193,10 @@ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
+ 	while (nbytes >= FUSE_NAME_OFFSET) {
+ 		struct fuse_dirent *dirent = (struct fuse_dirent *) buf;
+ 		size_t reclen = FUSE_DIRENT_SIZE(dirent);
++		if (fuse_gantry_is_readdir_eof(file, dirent)) {
++			fuse_gantry_mark_readdir_eof(file, ctx->pos);
++			break;
++		}
+ 		if (!dirent->namelen || dirent->namelen > FUSE_NAME_MAX)
+ 			return -EIO;
+ 		if (reclen > nbytes)
+@@ -343,6 +375,11 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+ 		direntplus = (struct fuse_direntplus *) buf;
+ 		dirent = &direntplus->dirent;
+ 		reclen = FUSE_DIRENTPLUS_SIZE(direntplus);
++		if (fuse_gantry_is_readdir_eof(file, dirent)) {
++			if (!over)
++				fuse_gantry_mark_readdir_eof(file, ctx->pos);
++			break;
++		}
+ 
+ 		if (!dirent->namelen || dirent->namelen > FUSE_NAME_MAX)
+ 			return -EIO;
+@@ -453,7 +490,9 @@ static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
+ 	if (!res) {
+ 		struct fuse_file *ff = file->private_data;
+ 
+-		if (ff->open_flags & FOPEN_CACHE_DIR)
++		if (fc->gantry_readdir_eof)
++			fuse_gantry_mark_readdir_eof(file, ctx->pos);
++		else if (ff->open_flags & FOPEN_CACHE_DIR)
+ 			fuse_readdir_cache_end(file, ctx->pos);
+ 		goto out;
+ 	}
+@@ -693,6 +732,11 @@ int fuse_readdir(struct file *file, struct dir_context *ctx)
+ 
+ 	if (fuse_is_bad(inode))
+ 		return -EIO;
++	if (ff->readdir.eof) {
++		if (ff->readdir.eof_pos == ctx->pos)
++			return 0;
++		ff->readdir.eof = false;
++	}
+ 
+ 	err = UNCACHED;
+ 	if (ff->open_flags & FOPEN_CACHE_DIR)
+diff --git a/include/uapi/linux/fuse.h b/include/uapi/linux/fuse.h
+index c13e1f9..8ac6d05 100644
+--- a/include/uapi/linux/fuse.h
++++ b/include/uapi/linux/fuse.h
+@@ -448,6 +448,8 @@ struct fuse_file_lock {
+  * FUSE_OVER_IO_URING: Indicate that client supports io-uring
+  * FUSE_REQUEST_TIMEOUT: kernel supports timing out requests.
+  *			 init_out.request_timeout contains the timeout (in secs)
++ * FUSE_GANTRY_READDIR_EOF: private Gantry extension allowing READDIR and
++ *			READDIRPLUS replies to carry an explicit EOF marker
+  */
+ #define FUSE_ASYNC_READ		(1 << 0)
+ #define FUSE_POSIX_LOCKS	(1 << 1)
+@@ -495,6 +497,17 @@ struct fuse_file_lock {
+ #define FUSE_ALLOW_IDMAP	(1ULL << 40)
+ #define FUSE_OVER_IO_URING	(1ULL << 41)
+ #define FUSE_REQUEST_TIMEOUT	(1ULL << 42)
++/*
++ * Private extensions grow down from bit 63 so upstream can keep allocating
++ * upwards from FUSE_REQUEST_TIMEOUT without colliding. Renumber from the top
++ * if another private bit is ever needed.
++ */
++#define FUSE_GANTRY_READDIR_EOF	(1ULL << 63)
++
++/* Private marker carried as the last fuse_dirent in a negotiated reply. */
++#define FUSE_GANTRY_READDIR_EOF_INO	0x47414e545259454fULL
++#define FUSE_GANTRY_READDIR_EOF_OFF	0x46555345454f4621ULL
++#define FUSE_GANTRY_READDIR_EOF_TYPE	0xff
+ 
+ /**
+  * CUSE INIT request/reply flags

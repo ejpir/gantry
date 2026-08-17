@@ -124,9 +124,29 @@ jobs:
       - uses: actions/checkout@v4
       - name: install build deps
         run: sudo apt-get update && sudo apt-get install -y flex bison bc xz-utils python3 libelf-dev libssl-dev ccache
-      - name: read pinned kernel version
+      - name: verify pinned kernel inputs
         id: kver
-        run: echo "v=$(sed -n 's/^VERSION=\([0-9.]*\).*/\1/p' scripts/mkkernel.sh)" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          set -eu
+          version=$(sed -n 's/^VERSION=\([0-9.]*\).*/\1/p' scripts/mkkernel.sh)
+          test -n "$version"
+          for name in \
+            deferred-smp \
+            fuse-directory-readdirplus \
+            fuse-readdir-eof \
+            virtiofs-notifications
+          do
+            test -f "patches/linux-$version-$name.patch"
+          done
+          stale=$(find patches -maxdepth 1 -type f -name 'linux-*.patch' \
+            ! -name "linux-$version-*.patch" -print)
+          if [ -n "$stale" ]; then
+            echo "stale kernel patches do not match Linux $version:" >&2
+            echo "$stale" >&2
+            exit 1
+          fi
+          echo "v=$version" >> "$GITHUB_OUTPUT"
       - name: cache ccache
         uses: actions/cache@v4
         with:

@@ -1,7 +1,8 @@
 diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
+index 0e13214..8c69b2e 100644
 --- a/fs/fuse/readdir.c
 +++ b/fs/fuse/readdir.c
-@@ -128,9 +128,42 @@ static bool fuse_emit(struct file *file, struct dir_context *ctx,
+@@ -126,9 +126,42 @@ static bool fuse_emit(struct file *file, struct dir_context *ctx,
  			dirent->type | FILLDIR_FLAG_NOINTR);
  }
  
@@ -44,7 +45,7 @@ diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
  	while (nbytes >= FUSE_NAME_OFFSET) {
  		struct fuse_dirent *dirent = (struct fuse_dirent *) buf;
  		size_t reclen = FUSE_DIRENT_SIZE(dirent);
-@@ -143,12 +176,18 @@ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
+@@ -141,12 +174,18 @@ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
  
  		if (!fuse_emit(file, ctx, dirent))
  			break;
@@ -63,7 +64,7 @@ diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
  	return 0;
  }
  
-@@ -298,6 +337,8 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+@@ -295,6 +334,8 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
  	struct fuse_direntplus *direntplus;
  	struct fuse_dirent *dirent;
  	size_t reclen;
@@ -72,7 +73,7 @@ diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
  	int over = 0;
  	int ret;
  
-@@ -321,8 +362,14 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+@@ -318,8 +359,14 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
  			   which we did not link.
  			*/
  			over = !fuse_emit(file, ctx, dirent);
@@ -88,7 +89,7 @@ diff --git a/fs/fuse/readdir.c b/fs/fuse/readdir.c
  		}
  
  		buf += reclen;
-@@ -333,6 +380,7 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
+@@ -330,6 +377,7 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
  			fuse_force_forget(file, direntplus->entry_out.nodeid);
  	}
  

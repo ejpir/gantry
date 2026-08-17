@@ -1,31 +1,22 @@
 diff --git a/net/vmw_vsock/virtio_transport.c b/net/vmw_vsock/virtio_transport.c
-index 57f2d6e..f04caa0 100644
+index 96c9fe8d3..7580c7937 100644
 --- a/net/vmw_vsock/virtio_transport.c
 +++ b/net/vmw_vsock/virtio_transport.c
 @@ -13,6 +13,10 @@
--#include <linux/module.h>
-+#include <linux/module.h>
--#include <linux/list.h>
-+#include <linux/list.h>
--#include <linux/atomic.h>
-+#include <linux/atomic.h>
+ #include <linux/module.h>
+ #include <linux/list.h>
+ #include <linux/atomic.h>
 +#include <linux/cpu.h>
 +#include <linux/init.h>
 +#include <linux/smp.h>
 +#include <linux/workqueue.h>
--#include <linux/virtio.h>
-+#include <linux/virtio.h>
--#include <linux/virtio_ids.h>
-+#include <linux/virtio_ids.h>
--#include <linux/virtio_config.h>
-+#include <linux/virtio_config.h>
-@@ -27,6 +31,77 @@ static struct virtio_vsock __rcu *the_virtio_vsock;
--static DEFINE_MUTEX(the_virtio_vsock_mutex); /* protects the_virtio_vsock */
-+static DEFINE_MUTEX(the_virtio_vsock_mutex); /* protects the_virtio_vsock */
--static struct virtio_transport virtio_transport; /* forward declaration */
-+static struct virtio_transport virtio_transport; /* forward declaration */
--
-+
+ #include <linux/virtio.h>
+ #include <linux/virtio_ids.h>
+ #include <linux/virtio_config.h>
+@@ -27,6 +31,83 @@ static struct virtio_vsock __rcu *the_virtio_vsock;
+ static DEFINE_MUTEX(the_virtio_vsock_mutex); /* protects the_virtio_vsock */
+ static struct virtio_transport virtio_transport; /* forward declaration */
+ 
 +/*
 + * Gantry's control plane becomes usable when PID 1 sends its first virtio-vsock
 + * packet.  Bringing every secondary CPU online before that point makes early
@@ -79,7 +70,13 @@ index 57f2d6e..f04caa0 100644
 +
 +static void gantry_trigger_deferred_smp(void)
 +{
++	/*
++	 * Every packet crosses this path for the life of the guest, so settle
++	 * into a plain load once the online has already been kicked off; the
++	 * atomic_xchg only has to serialise the one transition.
++	 */
 +	if (!gantry_defer_smp ||
++	    atomic_read(&gantry_deferred_smp_triggered) ||
 +	    atomic_xchg(&gantry_deferred_smp_triggered, 1))
 +		return;
 +	mod_delayed_work(system_unbound_wq, &gantry_deferred_smp_work, 0);
@@ -97,24 +94,15 @@ index 57f2d6e..f04caa0 100644
 +static inline void gantry_trigger_deferred_smp(void) { }
 +#endif
 +
--struct virtio_vsock {
-+struct virtio_vsock {
--	struct virtio_device *vdev;
-+	struct virtio_device *vdev;
--	struct virtqueue *vqs[VSOCK_VQ_MAX];
-+	struct virtqueue *vqs[VSOCK_VQ_MAX];
-@@ -273,6 +348,8 @@ virtio_transport_send_pkt(struct sk_buff *skb, struct net *net)
--
-+
--out_rcu:
-+out_rcu:
--	rcu_read_unlock();
-+	rcu_read_unlock();
+ struct virtio_vsock {
+ 	struct virtio_device *vdev;
+ 	struct virtqueue *vqs[VSOCK_VQ_MAX];
+@@ -273,6 +354,8 @@ virtio_transport_send_pkt(struct sk_buff *skb, struct net *net)
+ 
+ out_rcu:
+ 	rcu_read_unlock();
 +	if (len >= 0)
 +		gantry_trigger_deferred_smp();
--	return len;
-+	return len;
--}
-+}
--
-+
+ 	return len;
+ }
+ 
