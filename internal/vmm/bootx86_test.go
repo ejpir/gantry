@@ -108,18 +108,21 @@ func TestX86VirtioMemLayout(t *testing.T) {
 	const mib = uint64(1 << 20)
 	for _, test := range []struct {
 		name       string
+		hostOS     string
 		memory     uint64
 		setting    string
 		wantBoot   uint64
 		wantEnable bool
 	}{
-		{name: "off", memory: 22 * 1024 * mib, wantBoot: 22 * 1024 * mib},
-		{name: "small", memory: 512 * mib, setting: "1", wantBoot: 512 * mib},
-		{name: "aligned", memory: 22 * 1024 * mib, setting: "on", wantBoot: 512 * mib, wantEnable: true},
-		{name: "remainder", memory: 1025 * mib, setting: "true", wantBoot: 513 * mib, wantEnable: true},
+		{name: "windows default", hostOS: "windows", memory: 22 * 1024 * mib, wantBoot: 512 * mib, wantEnable: true},
+		{name: "windows disabled", hostOS: "windows", memory: 22 * 1024 * mib, setting: "off", wantBoot: 22 * 1024 * mib},
+		{name: "linux default", hostOS: "linux", memory: 22 * 1024 * mib, wantBoot: 22 * 1024 * mib},
+		{name: "small", hostOS: "windows", memory: 512 * mib, setting: "1", wantBoot: 512 * mib},
+		{name: "aligned", hostOS: "linux", memory: 22 * 1024 * mib, setting: "on", wantBoot: 512 * mib, wantEnable: true},
+		{name: "remainder", hostOS: "windows", memory: 1025 * mib, setting: "true", wantBoot: 513 * mib, wantEnable: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			boot, enabled := x86VirtioMemLayout(test.memory, test.setting)
+			boot, enabled := x86VirtioMemLayout(test.hostOS, test.memory, test.setting)
 			if boot != test.wantBoot || enabled != test.wantEnable {
 				t.Fatalf("layout = (%d MiB, %v), want (%d MiB, %v)", boot>>20, enabled, test.wantBoot>>20, test.wantEnable)
 			}

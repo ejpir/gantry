@@ -73,12 +73,17 @@ func x86RAMRegionsWithLow(memSize, lowSize uint64) []x86RAMRegion {
 
 // x86VirtioMemLayout keeps enough ordinary e820 RAM for the kernel and early
 // userspace, while aligning the hot-added tail to x86's 128 MiB memory-block
-// granularity. It is deliberately opt-in until the Gantry binary and its owned
-// kernel can be upgraded atomically: an older kernel would otherwise ignore
-// the device and see only the boot region.
-func x86VirtioMemLayout(memSize uint64, setting string) (bootSize uint64, enabled bool) {
+// granularity. Windows uses this layout by default; other hosts retain their
+// demand-paged direct mappings unless explicitly enabled for validation.
+func x86VirtioMemLayout(hostOS string, memSize uint64, setting string) (bootSize uint64, enabled bool) {
 	switch strings.ToLower(strings.TrimSpace(setting)) {
 	case "1", "true", "yes", "on":
+	case "0", "false", "no", "off":
+		return memSize, false
+	case "":
+		if hostOS != "windows" {
+			return memSize, false
+		}
 	default:
 		return memSize, false
 	}

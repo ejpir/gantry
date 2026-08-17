@@ -17,14 +17,14 @@ $MemoryList = (Value-OrDefault "GANTRY_TEST_MEMORY_LIST" "512,4096,16384,22528")
 $Repeats = [int](Value-OrDefault "GANTRY_TEST_REPEATS" "5")
 $CPUCount = [int](Value-OrDefault "GANTRY_TEST_CPUS" "1")
 $QemuTimeoutSeconds = [int](Value-OrDefault "GANTRY_TEST_QEMU_TIMEOUT_SECONDS" "30")
-$VirtioMem = Value-OrDefault "GANTRY_TEST_VIRTIO_MEM" "0"
+$VirtioMem = Value-OrDefault "GANTRY_TEST_VIRTIO_MEM" "1"
 
 foreach ($path in @($Gantry, $Qemu, $Kernel, $Rootfs, $Image)) {
     if (-not (Test-Path $path -PathType Leaf)) { throw "required file missing: $path" }
 }
 New-Item -ItemType Directory -Force -Path $ResultRoot | Out-Null
 $env:GANTRY_HOME = Join-Path $ResultRoot "state"
-if ($VirtioMem -eq "1") { $env:GANTRY_VIRTIO_MEM = "1" } else { Remove-Item Env:GANTRY_VIRTIO_MEM -ErrorAction SilentlyContinue }
+if ($VirtioMem -eq "0") { $env:GANTRY_VIRTIO_MEM = "0" } else { $env:GANTRY_VIRTIO_MEM = "1" }
 
 function Invoke-GantryBestEffort([string[]]$CommandArgs) {
     $oldPreference = $ErrorActionPreference

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -181,7 +182,7 @@ type Machine struct {
 	mem   *virtio.RAM
 	entry uint64
 	arch  string // "arm64" | "amd64"
-	// x86BootMemSize is the ordinary e820/low mapping. With the opt-in
+	// x86BootMemSize is the ordinary e820/low mapping. With the Windows
 	// virtio-mem path, the rest of ram is mapped above 4 GiB and hot-added by
 	// Linux instead of delaying early boot page initialization.
 	x86BootMemSize uint64
@@ -198,7 +199,7 @@ type Machine struct {
 	rootBlkCore    *virtio.Core    // boot rootfs (/dev/vda), for first-request timing
 	vsockCore      *virtio.Core    // transport slot, for first-packet timing
 	vsock          *virtio.Vsock   // nil when no vsock device attached
-	hotMem         *virtio.Mem     // nil unless the opt-in x86 virtio-mem path is active
+	hotMem         *virtio.Mem     // nil unless the x86 virtio-mem path is active
 	hotMemDeferred bool            // tail publication is owned by the daemon-ready edge
 	interrupts     interruptRouter // published by the backend; disabled before native teardown
 	kvmFD          *os.File        // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
@@ -385,6 +386,16 @@ func (m *Machine) virtioAt(phys uint64) *virtio.Core {
 	return device
 }
 
+// x86RAMRegions is also compiled for the Windows/arm64 package-load scan:
+// WHPX rejects that host architecture before runtime, but keeping its source
+// selected lets govulncheck analyze the Windows backend call graph.
+func (m *Machine) x86RAMRegions() []x86RAMRegion { //nolint:unused
+	if m.x86LowRAMSize == 0 {
+		return x86RAMRegions(uint64(len(m.ram)))
+	}
+	return x86RAMRegionsWithLow(uint64(len(m.ram)), m.x86LowRAMSize)
+}
+
 type Opts struct {
 	MemSize uint64
 	// Boot assets are OPEN DESCRIPTORS, not paths: the supervisor resolves
@@ -474,7 +485,7 @@ func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 	return nil
 }
 
-// RequestHotMemory publishes the opt-in virtio-mem capacity after the daemon
+// RequestHotMemory publishes virtio-mem capacity after the daemon
 // has accepted the guest RPC connection. It is a no-op for ordinary machines.
 // Keeping this edge in the host readiness lifecycle prevents Linux hotplug
 // work from racing and occasionally starving the final guest boot steps.
@@ -538,7 +549,7 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	virtioMemBootSize, virtioMemEnabled := uint64(0), false
 	virtioMemDeferred := false
 	if arch == "amd64" {
-		virtioMemBootSize, virtioMemEnabled = x86VirtioMemLayout(o.MemSize, os.Getenv("GANTRY_VIRTIO_MEM"))
+		virtioMemBootSize, virtioMemEnabled = x86VirtioMemLayout(runtime.GOOS, o.MemSize, os.Getenv("GANTRY_VIRTIO_MEM"))
 		virtioMemDeferred = virtioMemEnabled && (o.VsockFwd != "" || o.VsockDial != nil)
 		if virtioMemDeferred {
 			initialCommit = virtioMemBootSize

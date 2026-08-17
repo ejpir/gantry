@@ -57,7 +57,7 @@ func TestWindowsLargeMemoryUsesEagerSMP(t *testing.T) {
 
 func TestVirtioMemUsesBootRegionForDeferredSMPPolicy(t *testing.T) {
 	const total = uint64(22 << 30)
-	policyMemory := smpPolicyMemory("windows", total, "1")
+	policyMemory := smpPolicyMemory("windows", total, "")
 	if policyMemory != x86VirtioMemBootSize {
 		t.Fatalf("SMP policy memory = %d MiB, want %d MiB", policyMemory>>20, x86VirtioMemBootSize>>20)
 	}

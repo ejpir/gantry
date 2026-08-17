@@ -85,3 +85,14 @@ func TestWindowsWorkerEnvironmentIsAnExplicitAllowlist(t *testing.T) {
 		t.Fatalf("worker environment = %v, want %v", got, want)
 	}
 }
+
+func TestWindowsVirtioMemWorkerDefaultsOnAndCanDisable(t *testing.T) {
+	t.Setenv("GANTRY_VIRTIO_MEM", "")
+	if got := virtioMemWorkerSetting(); got != "1" {
+		t.Fatalf("default virtio-mem worker setting = %q, want 1", got)
+	}
+	t.Setenv("GANTRY_VIRTIO_MEM", "off")
+	if got := virtioMemWorkerSetting(); got != "0" {
+		t.Fatalf("disabled virtio-mem worker setting = %q, want 0", got)
+	}
+}

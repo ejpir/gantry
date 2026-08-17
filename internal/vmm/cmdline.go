@@ -85,7 +85,7 @@ func WithDeferredSMP(cmdline string, vcpus int, memBytes uint64) string {
 
 func smpPolicyMemory(hostOS string, memBytes uint64, virtioMemSetting string) uint64 {
 	if hostOS == "windows" {
-		if bootSize, enabled := x86VirtioMemLayout(memBytes, virtioMemSetting); enabled {
+		if bootSize, enabled := x86VirtioMemLayout(hostOS, memBytes, virtioMemSetting); enabled {
 			// Only the boot region participates in early initialization. Let
 			// the owned kernel bring the other CPUs online together with the
 			// post-READY memory request triggered by the first vsock packet.

@@ -200,8 +200,8 @@ func workerEnv() []string {
 	if os.Getenv("GANTRY_VHOST_STATS") == "1" {
 		out = append(out, "GANTRY_VHOST_STATS=1")
 	}
-	if virtioMemWorkerEnabled() {
-		out = append(out, "GANTRY_VIRTIO_MEM=1")
+	if setting := virtioMemWorkerSetting(); setting != "" {
+		out = append(out, "GANTRY_VIRTIO_MEM="+setting)
 	}
 	return out
 }

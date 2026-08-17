@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/gutil"
@@ -44,12 +45,25 @@ type vmmRunner interface {
 // use (gvproxy-compatible pairing with the gateway MAC).
 var guestNetMAC = [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
 
-func virtioMemWorkerEnabled() bool {
+func virtioMemWorkerSetting() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_VIRTIO_MEM"))) {
 	case "1", "true", "yes", "on":
-		return true
+		return "1"
+	case "0", "false", "no", "off":
+		return "0"
+	case "":
+		if runtime.GOOS == "windows" {
+			return "1"
+		}
+		return ""
 	default:
-		return false
+		// Preserve the VMM's conservative handling of unknown values. Windows
+		// workers need an explicit zero so their platform default does not turn
+		// an invalid parent setting back on.
+		if runtime.GOOS == "windows" {
+			return "0"
+		}
+		return ""
 	}
 }
 
