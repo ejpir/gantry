@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
 // piSandboxName derives the per-project sandbox name from the directory
@@ -78,7 +79,7 @@ func ensurePiSandbox(cfg *piConfig, cwd, name string) int {
 	if cfg.restart {
 		CmdDelete(name)
 	}
-	if _, alive := sandboxPID(name); alive {
+	if _, alive := layout.PID(name); alive {
 		return 0
 	}
 	if cfg.image == "" {

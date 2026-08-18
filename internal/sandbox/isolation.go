@@ -7,15 +7,9 @@ import (
 	"strings"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/workerconf"
 )
-
-func effectiveProcessIsolation(mode string) string {
-	if mode == "" {
-		return "auto"
-	}
-	return mode
-}
 
 // isolationState is the machine-readable effective isolation of a running
 // sandbox (dir/isolation.json, 0600). It reports only successfully installed
@@ -34,7 +28,7 @@ type isolationState struct {
 
 // writeIsolationState persists the effective runtime topology and the VMM
 // worker's verified confinement report for CLI and dashboard consumers.
-func writeIsolationState(dir string, cfg RunConfig, network *Network, splitVMM bool, confinement *workerconf.Report) error {
+func writeIsolationState(dir string, cfg config.RunConfig, network *Network, splitVMM bool, confinement *workerconf.Report) error {
 	state := isolationState{
 		Version:            2,
 		Topology:           "monolithic",
@@ -85,7 +79,7 @@ func writeIsolationState(dir string, cfg RunConfig, network *Network, splitVMM b
 		if !network.Split && cfg.Net && cfg.GVProxy == "" {
 			degraded = append(degraded, "network worker not established")
 		}
-		if !splitVMM && effectiveProcessIsolation(cfg.ProcessIsolation) != "off" {
+		if !splitVMM && config.EffectiveProcessIsolation(cfg.ProcessIsolation) != "off" {
 			degraded = append(degraded, "vmm worker not established")
 		}
 	}

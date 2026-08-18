@@ -11,6 +11,9 @@ import (
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
 )
@@ -36,9 +39,9 @@ func collectExplicitRunFlags(fs *flag.FlagSet) (set explicitRunFlags) {
 }
 
 type runResolver struct {
-	flags      *RunFlags
+	flags      *config.RunFlags
 	explicit   explicitRunFlags
-	cfg        RunConfig
+	cfg        config.RunConfig
 	warnings   []string
 	progress   func(string, ...any)
 	cachedOnly bool
@@ -47,18 +50,18 @@ type runResolver struct {
 // Resolve turns parsed flags into an absolute, fully-defaulted RunConfig.
 // Warnings are non-fatal degradations surfaced by the caller. Progress may be
 // nil; when present, slow registry and asset operations report synchronously.
-func (f *RunFlags) Resolve(fs *flag.FlagSet, progress func(string, ...any)) (RunConfig, []string, error) {
-	return f.resolve(fs, progress, nil)
+func Resolve(f *config.RunFlags, fs *flag.FlagSet, progress func(string, ...any)) (config.RunConfig, []string, error) {
+	return resolveFlags(f, fs, progress, nil)
 }
 
 // resolve is Resolve with optional low-overhead launcher milestones. Keeping
 // the hook here attributes work before the daemon exists (asset checks, image
 // freshness, and writable-layer setup) without changing normal CLI output.
-func (f *RunFlags) resolve(fs *flag.FlagSet, progress func(string, ...any), milestone func(string)) (RunConfig, []string, error) {
-	return f.resolveWithPolicy(fs, progress, milestone, false)
+func resolveFlags(f *config.RunFlags, fs *flag.FlagSet, progress func(string, ...any), milestone func(string)) (config.RunConfig, []string, error) {
+	return resolveFlagsWithPolicy(f, fs, progress, milestone, false)
 }
 
-func (f *RunFlags) resolveWithPolicy(fs *flag.FlagSet, progress func(string, ...any), milestone func(string), cachedOnly bool) (RunConfig, []string, error) {
+func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(string, ...any), milestone func(string), cachedOnly bool) (config.RunConfig, []string, error) {
 	r := runResolver{
 		flags:      f,
 		explicit:   collectExplicitRunFlags(fs),
@@ -103,10 +106,10 @@ func (f *RunFlags) resolveWithPolicy(fs *flag.FlagSet, progress func(string, ...
 }
 
 func (r *runResolver) initialize() error {
-	if err := validateSandboxResources(*r.flags.MemMB, *r.flags.VCPUs); err != nil {
+	if err := config.ValidateSandboxResources(*r.flags.MemMB, *r.flags.VCPUs); err != nil {
 		return err
 	}
-	if err := validateRWLayerSize(*r.flags.RWLayerSizeMiB); err != nil {
+	if err := config.ValidateRWLayerSize(*r.flags.RWLayerSizeMiB); err != nil {
 		return err
 	}
 	r.cfg.MemMB = *r.flags.MemMB
@@ -119,9 +122,9 @@ func (r *runResolver) resolveRuntime() error {
 	r.cfg.Runtime = *r.flags.Runtime
 	r.cfg.Kernel = *r.flags.Kernel
 	if r.explicit.kernel {
-		r.cfg.KernelPolicy = kernelPolicyPinned
+		r.cfg.KernelPolicy = config.KernelPolicyPinned
 	} else {
-		r.cfg.KernelPolicy = kernelPolicyRelease
+		r.cfg.KernelPolicy = config.KernelPolicyRelease
 	}
 	r.cfg.Rootfs = *r.flags.Rootfs
 	switch r.cfg.Runtime {
@@ -201,7 +204,7 @@ func (r *runResolver) resolveImage() error {
 		}
 		r.cfg.LayerSet = layers
 	}
-	if r.cfg.LayerSet != nil || isErofsFile(r.cfg.Image) {
+	if r.cfg.LayerSet != nil || config.IsErofsFile(r.cfg.Image) {
 		return nil
 	}
 
@@ -249,7 +252,7 @@ func (r *runResolver) resolveWritableLayer() error {
 		// An explicitly read-only VM cannot attach a writable layer. In
 		// particular, do not format the implicit per-sandbox ext4.
 	case r.flags.Name != "":
-		path, warnings, err := defaultRWLayer(r.flags.Name, r.cfg.imageIdentity(), r.cfg.RWLayerSizeMiB, r.report)
+		path, warnings, err := rwlayer.Default(r.flags.Name, r.cfg.ImageIdentity(), r.cfg.RWLayerSizeMiB, r.report)
 		if err != nil {
 			return err
 		}
@@ -274,13 +277,13 @@ func (r *runResolver) resolveWritableLayer() error {
 	if r.cfg.RWLayer == "" {
 		return nil
 	}
-	if warning := rwlayerHealthWarning(r.cfg.RWLayer); warning != "" {
+	if warning := rwlayer.HealthWarning(r.cfg.RWLayer); warning != "" {
 		r.warnings = append(r.warnings, warning)
 	}
 	if explicitLayer {
 		return nil
 	}
-	return checkRWLayerPairing(r.cfg.RWLayer, r.cfg.imageIdentity())
+	return rwlayer.CheckPairing(r.cfg.RWLayer, r.cfg.ImageIdentity())
 }
 
 func (r *runResolver) resolveNetworking() error {
@@ -291,14 +294,14 @@ func (r *runResolver) resolveNetworking() error {
 	r.cfg.Ports = append([]string(nil), (*r.flags.Publish)...)
 	r.cfg.Net = *r.flags.Net
 	r.cfg.GVProxy = *r.flags.GVProxy
-	proxy, err := parseForwardProxy(*r.flags.ProxyURL)
+	proxy, err := config.ParseForwardProxy(*r.flags.ProxyURL)
 	if err != nil {
 		return err
 	}
-	r.cfg.ProxyURL = proxy.url
+	r.cfg.ProxyURL = proxy.URL
 	r.cfg.NoProxy = *r.flags.NoProxy
 	r.cfg.ProxyEnforce = *r.flags.ProxyEnforce
-	if err := validateProxyConfig(r.cfg); err != nil {
+	if err := config.ValidateProxyConfig(r.cfg); err != nil {
 		return err
 	}
 	if len(r.cfg.Ports) != 0 {
@@ -312,11 +315,11 @@ func (r *runResolver) resolveNetworking() error {
 
 	seen := make(map[string]struct{}, len(r.cfg.Ports))
 	for index, spec := range r.cfg.Ports {
-		normalized, err := NormalizePortSpec(spec)
+		normalized, err := config.NormalizePortSpec(spec)
 		if err != nil {
 			return fmt.Errorf("invalid -p %q: %w", spec, err)
 		}
-		mapping, err := ParsePortSpec(normalized)
+		mapping, err := config.ParsePortSpec(normalized)
 		if err != nil {
 			return fmt.Errorf("normalize -p %q: %w", spec, err)
 		}
@@ -327,7 +330,7 @@ func (r *runResolver) resolveNetworking() error {
 		r.cfg.Ports[index] = normalized
 	}
 	if r.cfg.GVProxy != "" && !strings.ContainsRune(r.cfg.GVProxy, os.PathSeparator) && gutil.FileExists(r.cfg.GVProxy) {
-		r.cfg.GVProxy = absPath(r.cfg.GVProxy)
+		r.cfg.GVProxy = layout.AbsPath(r.cfg.GVProxy)
 	}
 	return nil
 }
@@ -339,7 +342,7 @@ func (r *runResolver) resolveSessionOptions() error {
 	}
 	r.cfg.SecretNames = names
 	r.cfg.ProcessIsolation = *r.flags.ProcessIsolation
-	if err := validateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
+	if err := config.ValidateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
 		return fmt.Errorf("-process-isolation must be auto, required, or off, got %q", r.cfg.ProcessIsolation)
 	}
 	r.cfg.NetPol = *r.flags.NetPol

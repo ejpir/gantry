@@ -5,29 +5,25 @@ import (
 	"path/filepath"
 
 	"github.com/ejpir/gantry/internal/guestasset"
-)
-
-const (
-	kernelPolicyRelease = "release"
-	kernelPolicyPinned  = "pinned"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
 // refreshKernelForRestart resolves the kernel that the current Gantry release
 // should boot. Explicit kernels remain pinned. Legacy configs are considered
 // release-managed only when their path unambiguously matches Gantry's
 // versioned release-cache layout.
-func refreshKernelForRestart(cfg RunConfig, progress func(string, ...any)) (RunConfig, bool, error) {
+func refreshKernelForRestart(cfg config.RunConfig, progress func(string, ...any)) (config.RunConfig, bool, error) {
 	original := cfg
 	switch cfg.KernelPolicy {
-	case kernelPolicyRelease:
+	case config.KernelPolicyRelease:
 		// Already known to follow Gantry releases.
-	case kernelPolicyPinned:
+	case config.KernelPolicyPinned:
 		return cfg, false, nil
 	case "":
 		if guestasset.IsManagedReleaseKernel(cfg.Kernel) {
-			cfg.KernelPolicy = kernelPolicyRelease
+			cfg.KernelPolicy = config.KernelPolicyRelease
 		} else {
-			cfg.KernelPolicy = kernelPolicyPinned
+			cfg.KernelPolicy = config.KernelPolicyPinned
 			return cfg, kernelSelectionChanged(original, cfg), nil
 		}
 	default:
@@ -50,20 +46,19 @@ func refreshKernelForRestart(cfg RunConfig, progress func(string, ...any)) (RunC
 	return cfg, kernelSelectionChanged(original, cfg), nil
 }
 
-func kernelSelectionChanged(before, after RunConfig) bool {
+func kernelSelectionChanged(before, after config.RunConfig) bool {
 	return before.Kernel != after.Kernel || before.KernelPolicy != after.KernelPolicy
 }
 
 // refreshSavedKernelForRestart atomically publishes a migrated/refreshed
 // config before the daemon is spawned, ensuring it reads the same new kernel
 // selected by the launcher.
-func refreshSavedKernelForRestart(dir string, cfg RunConfig, progress func(string, ...any)) (RunConfig, bool, error) {
+func refreshSavedKernelForRestart(dir string, cfg config.RunConfig, progress func(string, ...any)) (config.RunConfig, bool, error) {
 	refreshed, changed, err := refreshKernelForRestart(cfg, progress)
 	if err != nil || !changed {
 		return refreshed, changed, err
 	}
-	store := &ConfigStore{path: filepath.Join(dir, "sandbox.json"), cfg: refreshed}
-	if err := store.writeLocked(); err != nil {
+	if err := config.WriteSandboxConfig(dir, refreshed); err != nil {
 		return cfg, false, fmt.Errorf("persist refreshed kernel: %w", err)
 	}
 	return refreshed, true, nil

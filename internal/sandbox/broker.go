@@ -11,7 +11,11 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
-	"github.com/ejpir/gantry/internal/packetcapture"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 
@@ -27,17 +31,17 @@ import (
 // without colliding with the protocol, and a missing event unambiguously
 // means the broker died (never exit 0).
 type broker struct {
-	cfg        RunConfig
+	cfg        config.RunConfig
 	dir        string
 	rpc        *ttrpc.Client
 	streamSock string
 	// streamDial replaces the streamSock unix dial in the split-VMM
 	// topology (streams cross the worker bridge).
 	streamDial func() (net.Conn, error)
-	store      *ConfigStore
-	shares     *ShareManager
-	ports      *PortManager
-	netPolicy  *NetworkPolicyManager
+	store      *config.ConfigStore
+	shares     *control.ShareManager
+	ports      *control.PortManager
+	netPolicy  *control.NetworkPolicyManager
 	capture    packetCaptureBackend
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 	secretMu   sync.RWMutex
@@ -45,76 +49,9 @@ type broker struct {
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
 	sessionCtl map[string]net.Conn // parked control channels, session id -> conn
-	oauth      *oauthBridge        // OAuth loopback callback bridge (nil when disabled)
+	oauth      *oauthbridge.Bridge // OAuth loopback callback bridge (nil when disabled)
 	limits     brokerLimits
 	shutdown   chan<- struct{} // authenticated daemon shutdown request
-}
-
-type brokerRequest struct {
-	Op        string                      `json:"op"` // "session" | "sessionctl" | "kill" | "share.*" | "port.*" | "resources.set"
-	ID        string                      `json:"id"`
-	V         int                         `json:"v,omitempty"` // sessionctl: sessionProtocolVersion
-	Args      []string                    `json:"args,omitempty"`
-	Cwd       string                      `json:"cwd,omitempty"`
-	Cols      uint32                      `json:"cols,omitempty"`
-	Rows      uint32                      `json:"rows,omitempty"`
-	Terminal  bool                        `json:"terminal,omitempty"`
-	Quiet     bool                        `json:"quiet,omitempty"`
-	Share     *brokerShareRequest         `json:"share,omitempty"`
-	Port      *brokerPortRequest          `json:"port,omitempty"`
-	Resources *brokerResourceRequest      `json:"resources,omitempty"`
-	NetPolicy *brokerNetworkPolicyRequest `json:"net_policy,omitempty"`
-	Secret    *brokerSecretRequest        `json:"secret,omitempty"`
-	Capture   *packetcapture.Request      `json:"capture,omitempty"`
-}
-
-type brokerResourceRequest struct {
-	MemMB            uint   `json:"mem_mb"`
-	VCPUs            int    `json:"vcpus"`
-	ProcessIsolation string `json:"process_isolation,omitempty"`
-}
-
-type brokerResourceResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
-type brokerSecretRequest struct {
-	Name  string       `json:"name"`
-	Value secret.Value `json:"value,omitempty"`
-}
-
-type brokerSecretResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
-type brokerShareRequest struct {
-	Spec       string `json:"spec,omitempty"`
-	Tag        string `json:"tag,omitempty"`
-	Persistent bool   `json:"persistent"`
-	Replace    bool   `json:"replace,omitempty"`
-	Force      bool   `json:"force,omitempty"`
-}
-
-type brokerShareResponse struct {
-	OK         bool           `json:"ok"`
-	Error      string         `json:"error,omitempty"`
-	Generation uint64         `json:"generation,omitempty"`
-	Entry      *shares.Entry  `json:"entry,omitempty"`
-	Shares     []shares.Entry `json:"shares,omitempty"`
-}
-
-type brokerPortRequest struct {
-	Spec       string `json:"spec"`
-	Persistent bool   `json:"persistent"`
-}
-
-type brokerPortResponse struct {
-	OK    bool        `json:"ok"`
-	Error string      `json:"error,omitempty"`
-	Entry *PortEntry  `json:"entry,omitempty"`
-	Ports []PortEntry `json:"ports,omitempty"`
 }
 
 func (br *broker) serve(ln net.Listener) {
@@ -129,13 +66,13 @@ func (br *broker) serve(ln net.Listener) {
 		// process could present any credential we could issue — token or
 		// TLS would be ceremony, not security). If this socket is EVER
 		// relayed over TCP, real authentication (mTLS) is mandatory.
-		if !peerSameUser(c) {
+		if !localsec.PeerSameUser(c) {
 			fmt.Fprintln(os.Stderr, "daemon: rejected ctl.sock connection from a foreign UID")
 			_ = c.Close()
 			continue
 		}
 		if !br.limits.acquireConnection() {
-			_ = c.SetWriteDeadline(time.Now().Add(controlOverloadTimeout))
+			_ = c.SetWriteDeadline(time.Now().Add(controlproto.OverloadTimeout))
 			_, _ = fmt.Fprintln(c, `{"error":"too many control connections"}`)
 			_ = c.Close()
 			continue
@@ -149,19 +86,19 @@ func (br *broker) serve(ln net.Listener) {
 
 func (br *broker) handle(c net.Conn) {
 	defer func() { _ = c.Close() }()
-	_ = c.SetReadDeadline(time.Now().Add(controlHandshakeTimeout))
+	_ = c.SetReadDeadline(time.Now().Add(controlproto.HandshakeTimeout))
 	r := bufio.NewReader(c)
-	line, err := readBoundedLine(r, controlMaxRequestBytes)
+	line, err := controlproto.ReadBoundedLine(r, controlproto.MaxRequestBytes)
 	_ = c.SetReadDeadline(time.Time{})
 	if err != nil {
-		if errors.Is(err, errControlFrameTooLarge) {
-			_ = c.SetWriteDeadline(time.Now().Add(controlOverloadTimeout))
+		if errors.Is(err, controlproto.ErrFrameTooLarge) {
+			_ = c.SetWriteDeadline(time.Now().Add(controlproto.OverloadTimeout))
 			_, _ = fmt.Fprintln(c, `{"error":"control request too large"}`)
 		}
 		return
 	}
-	_ = c.SetWriteDeadline(time.Now().Add(controlCallTimeout))
-	var req brokerRequest
+	_ = c.SetWriteDeadline(time.Now().Add(controlproto.CallTimeout))
+	var req controlproto.Request
 	if json.Unmarshal(line, &req) != nil || req.ID == "" {
 		_, _ = fmt.Fprintln(c, `{"error":"bad request"}`)
 		return
@@ -213,18 +150,18 @@ func (br *broker) handle(c net.Conn) {
 	}
 }
 
-func (br *broker) secretControl(c net.Conn, req brokerRequest) {
-	respond := func(resp brokerSecretResponse) { _ = json.NewEncoder(c).Encode(&resp) }
+func (br *broker) secretControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.SecretResponse) { _ = json.NewEncoder(c).Encode(&resp) }
 	if br.store == nil {
-		respond(brokerSecretResponse{Error: "config store unavailable"})
+		respond(controlproto.SecretResponse{Error: "config store unavailable"})
 		return
 	}
 	if req.Secret == nil {
-		respond(brokerSecretResponse{Error: "secret settings are required"})
+		respond(controlproto.SecretResponse{Error: "secret settings are required"})
 		return
 	}
 	if err := secret.ValidateName(req.Secret.Name); err != nil {
-		respond(brokerSecretResponse{Error: err.Error()})
+		respond(controlproto.SecretResponse{Error: err.Error()})
 		return
 	}
 	br.secretMu.Lock()
@@ -240,20 +177,20 @@ func (br *broker) secretControl(c net.Conn, req brokerRequest) {
 		delete(next, req.Secret.Name)
 	}
 	if _, err := secretsHandshakeJSON(next); err != nil {
-		respond(brokerSecretResponse{Error: err.Error()})
+		respond(controlproto.SecretResponse{Error: err.Error()})
 		return
 	}
 	err := br.store.SetSecretName(req.Secret.Name, present)
 	if err != nil && !atomicfile.Committed(err) {
-		respond(brokerSecretResponse{Error: err.Error()})
+		respond(controlproto.SecretResponse{Error: err.Error()})
 		return
 	}
 	br.secrets = next
 	if err != nil {
-		respond(brokerSecretResponse{Error: "secret updated but configuration durability is uncertain: " + err.Error()})
+		respond(controlproto.SecretResponse{Error: "secret updated but configuration durability is uncertain: " + err.Error()})
 		return
 	}
-	respond(brokerSecretResponse{OK: true})
+	respond(controlproto.SecretResponse{OK: true})
 }
 
 func (br *broker) secretEnv() []string {
@@ -266,38 +203,38 @@ func (br *broker) secretEnv() []string {
 	return secret.Env(copy)
 }
 
-func (br *broker) resourceControl(c net.Conn, req brokerRequest) {
-	respond := func(resp brokerResourceResponse) {
+func (br *broker) resourceControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.ResourceResponse) {
 		_ = json.NewEncoder(c).Encode(&resp)
 	}
 	if br.store == nil {
-		respond(brokerResourceResponse{Error: "config store unavailable"})
+		respond(controlproto.ResourceResponse{Error: "config store unavailable"})
 		return
 	}
 	if req.Resources == nil {
-		respond(brokerResourceResponse{Error: "resource settings are required"})
+		respond(controlproto.ResourceResponse{Error: "resource settings are required"})
 		return
 	}
 	if err := br.store.SetResources(req.Resources.MemMB, req.Resources.VCPUs, req.Resources.ProcessIsolation); err != nil {
-		respond(brokerResourceResponse{Error: err.Error()})
+		respond(controlproto.ResourceResponse{Error: err.Error()})
 		return
 	}
-	respond(brokerResourceResponse{OK: true})
+	respond(controlproto.ResourceResponse{OK: true})
 }
 
-func (br *broker) networkPolicyControl(c net.Conn, req brokerRequest) {
-	respond := func(resp brokerNetworkPolicyResponse) {
+func (br *broker) networkPolicyControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.NetworkPolicyResponse) {
 		_ = json.NewEncoder(c).Encode(&resp)
 	}
 	if br.netPolicy == nil {
-		respond(brokerNetworkPolicyResponse{Error: "network policy manager unavailable"})
+		respond(controlproto.NetworkPolicyResponse{Error: "network policy manager unavailable"})
 		return
 	}
-	var entry NetworkPolicyEntry
+	var entry control.NetworkPolicyEntry
 	var err error
 	if req.Op == "netpolicy.set" {
 		if req.NetPolicy == nil {
-			respond(brokerNetworkPolicyResponse{Error: "network policy settings are required"})
+			respond(controlproto.NetworkPolicyResponse{Error: "network policy settings are required"})
 			return
 		}
 		entry, err = br.netPolicy.Set(req.NetPolicy.Path, req.NetPolicy.AllowLocal)
@@ -305,17 +242,17 @@ func (br *broker) networkPolicyControl(c net.Conn, req brokerRequest) {
 		entry, err = br.netPolicy.Get()
 	}
 	if err != nil {
-		respond(brokerNetworkPolicyResponse{Error: err.Error()})
+		respond(controlproto.NetworkPolicyResponse{Error: err.Error()})
 		return
 	}
-	respond(brokerNetworkPolicyResponse{OK: true, Policy: &entry})
+	respond(controlproto.NetworkPolicyResponse{OK: true, Policy: &entry})
 }
 
-func (br *broker) shareControl(c net.Conn, req brokerRequest) {
-	respond := func(resp brokerShareResponse) {
+func (br *broker) shareControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.ShareResponse) {
 		_ = json.NewEncoder(c).Encode(&resp)
 	}
-	spec := brokerShareRequest{Persistent: true}
+	spec := controlproto.ShareRequest{Persistent: true}
 	if req.Share != nil {
 		spec = *req.Share
 	}
@@ -323,25 +260,25 @@ func (br *broker) shareControl(c net.Conn, req brokerRequest) {
 	var err error
 	if req.Op == "share.configure" {
 		if br.shares == nil {
-			respond(brokerShareResponse{Error: "share manager unavailable"})
+			respond(controlproto.ShareResponse{Error: "share manager unavailable"})
 			return
 		}
 		configured, configureErr := br.shares.ConfigureRestart(spec.Spec, spec.Replace)
 		if configureErr != nil {
-			respond(brokerShareResponse{Error: configureErr.Error()})
+			respond(controlproto.ShareResponse{Error: configureErr.Error()})
 			return
 		}
 		entry = shares.Entry{
 			Tag: configured.Tag, Path: configured.Path, RO: configured.RO,
 			UID: configured.UID, GID: configured.GID,
 			VMPath:  shares.HubVMPath + "/" + configured.Tag,
-			CtrPath: configuredShareTarget(configured), State: "restart",
+			CtrPath: config.ConfiguredShareTarget(configured), State: "restart",
 		}
-		respond(brokerShareResponse{OK: true, Entry: &entry})
+		respond(controlproto.ShareResponse{OK: true, Entry: &entry})
 		return
 	}
 	if br.shares == nil {
-		respond(brokerShareResponse{Error: "share manager unavailable"})
+		respond(controlproto.ShareResponse{Error: "share manager unavailable"})
 		return
 	}
 	switch req.Op {
@@ -350,29 +287,29 @@ func (br *broker) shareControl(c net.Conn, req brokerRequest) {
 	case "share.remove":
 		entry, err = br.shares.Remove(spec.Tag, spec.Persistent, spec.Force)
 	case "share.list":
-		respond(brokerShareResponse{OK: true, Generation: br.shares.Generation(), Shares: br.shares.Entries()})
+		respond(controlproto.ShareResponse{OK: true, Generation: br.shares.Generation(), Shares: br.shares.Entries()})
 		return
 	}
 	if err != nil {
-		respond(brokerShareResponse{Error: err.Error(), Generation: br.shares.Generation()})
+		respond(controlproto.ShareResponse{Error: err.Error(), Generation: br.shares.Generation()})
 		return
 	}
-	respond(brokerShareResponse{OK: true, Generation: br.shares.Generation(), Entry: &entry})
+	respond(controlproto.ShareResponse{OK: true, Generation: br.shares.Generation(), Entry: &entry})
 }
 
-func (br *broker) portControl(c net.Conn, req brokerRequest) {
-	respond := func(resp brokerPortResponse) {
+func (br *broker) portControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.PortResponse) {
 		_ = json.NewEncoder(c).Encode(&resp)
 	}
 	if br.ports == nil {
-		respond(brokerPortResponse{Error: "port manager unavailable"})
+		respond(controlproto.PortResponse{Error: "port manager unavailable"})
 		return
 	}
-	spec := brokerPortRequest{Persistent: true}
+	spec := controlproto.PortRequest{Persistent: true}
 	if req.Port != nil {
 		spec = *req.Port
 	}
-	var entry PortEntry
+	var entry control.PortEntry
 	var err error
 	switch req.Op {
 	case "port.publish":
@@ -382,15 +319,15 @@ func (br *broker) portControl(c net.Conn, req brokerRequest) {
 	case "port.list":
 		ports, lerr := br.ports.List()
 		if lerr != nil {
-			respond(brokerPortResponse{Error: lerr.Error()})
+			respond(controlproto.PortResponse{Error: lerr.Error()})
 			return
 		}
-		respond(brokerPortResponse{OK: true, Ports: ports})
+		respond(controlproto.PortResponse{OK: true, Ports: ports})
 		return
 	}
 	if err != nil {
-		respond(brokerPortResponse{Error: err.Error()})
+		respond(controlproto.PortResponse{Error: err.Error()})
 		return
 	}
-	respond(brokerPortResponse{OK: true, Entry: &entry})
+	respond(controlproto.PortResponse{OK: true, Entry: &entry})
 }

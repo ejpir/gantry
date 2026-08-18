@@ -12,7 +12,8 @@ import (
 	"time"
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
-	sandboxpkg "github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
 	"github.com/ejpir/gantry/internal/selfupdate"
 	"github.com/ejpir/gantry/internal/shares"
 
@@ -57,7 +58,7 @@ func TestSanitizeSnapshotCoversServiceData(t *testing.T) {
 }
 
 func TestSandboxTUIShareDialogActions(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiMountsPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
@@ -102,9 +103,9 @@ func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
 	if err := os.MkdirAll(sandboxDir("stopped"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_ = newTestConfigStore(t, sandboxDir("stopped"), sandboxpkg.RunConfig{RW: true})
+	_ = newTestConfigStore(t, sandboxDir("stopped"), config.RunConfig{RW: true})
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.animating = true // make submit return the configuration command directly
 	m.width, m.height = 100, 42
@@ -151,7 +152,7 @@ func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
 }
 
 func TestSandboxTUIShareDialogAppliesRunningShareLive(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.animating = true
 	m.width, m.height = 100, 42
@@ -178,9 +179,9 @@ func TestSandboxTUIRemovesShareFromStoppedSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := t.TempDir()
-	_ = newTestConfigStore(t, sandboxDir("stopped"), sandboxpkg.RunConfig{Shares: []string{"code=" + host + ",ro"}})
+	_ = newTestConfigStore(t, sandboxDir("stopped"), config.RunConfig{Shares: []string{"code=" + host + ",ro"}})
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.animating = true // make removal return the persistence command directly
 	m.sandboxes = []tuiSandbox{{Name: "stopped", State: tuiStopped}}
@@ -213,7 +214,7 @@ func TestSandboxTUIRemovesShareFromStoppedSandbox(t *testing.T) {
 }
 
 func TestSandboxTUIFormsSelectSandboxAndCustomMount(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{
@@ -268,7 +269,7 @@ func TestSandboxTUINetworkPolicyDialog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.page = tuiRulesPage
@@ -331,7 +332,7 @@ func TestSandboxTUINetworkPolicyDialog(t *testing.T) {
 
 func TestSandboxTUIShareOwner(t *testing.T) {
 	uid, gid := uint32(1000), uint32(1001)
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiMountsPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
@@ -353,7 +354,7 @@ func TestSandboxTUIShareOwner(t *testing.T) {
 }
 
 func TestSandboxTUIRendersShareHubMountsAndDialog(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 110, 32
 	m.page = tuiMountsPage
@@ -376,7 +377,7 @@ func TestSandboxTUIRendersShareHubMountsAndDialog(t *testing.T) {
 }
 
 func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.refreshing = false
 	m.width = 100
@@ -405,7 +406,7 @@ func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 
 func TestSandboxTUIRenderSizes(t *testing.T) {
 	for _, size := range [][2]int{{40, 12}, {60, 20}, {80, 24}, {100, 30}, {140, 40}} {
-		m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+		m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 		m.loading = false
 		m.refreshing = false
 		m.width, m.height = size[0], size[1]
@@ -433,7 +434,7 @@ func TestSandboxTUIRenderSizes(t *testing.T) {
 }
 
 func TestSandboxTUIResponsiveGrid(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.height = 30
 	m.sandboxes = []tuiSandbox{{Name: "dev"}}
@@ -450,7 +451,7 @@ func TestSandboxTUIResponsiveGrid(t *testing.T) {
 }
 
 func TestSandboxTUICardAndDetailsShowStorageAndOperationalMetadata(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{{
@@ -479,7 +480,7 @@ func TestSandboxTUICardAndDetailsShowStorageAndOperationalMetadata(t *testing.T)
 }
 
 func TestSandboxTUITableNavigationKeepsSelectionVisible(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 80, 16
 	m.page = tuiTrafficPage
@@ -497,7 +498,7 @@ func TestSandboxTUITableNavigationKeepsSelectionVisible(t *testing.T) {
 }
 
 func TestSandboxTUITrafficSelectionSurvivesDNSRefresh(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiTrafficPage
 	m.traffic = []tuiTrafficRow{
@@ -519,7 +520,7 @@ func TestSandboxTUITrafficSelectionSurvivesDNSRefresh(t *testing.T) {
 }
 
 func TestSandboxTUIBlockedDNSAddsQueriedDomain(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiTrafficPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
@@ -557,7 +558,7 @@ func TestSandboxTUIBlockedDNSAddsQueriedDomain(t *testing.T) {
 }
 
 func TestSandboxTUIUpdateBadgeAndConfirmation(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 30
 	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
@@ -602,7 +603,7 @@ func TestSandboxTUIUpdateBadgeAndConfirmation(t *testing.T) {
 }
 
 func TestSandboxTUIQuitsAfterSuccessfulUpdate(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
 	m.busyAction = "update"
 	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
@@ -638,7 +639,7 @@ func TestCompactCommandErrorPrefersDiagnosticOverProgress(t *testing.T) {
 }
 
 func TestSandboxTUIRuleRemovalDistinguishesEntriesFromPosture(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiRulesPage
 	m.rules = []tuiRuleRow{{Sandbox: "dev", Target: "example.com", Source: "domain"}}
@@ -659,7 +660,7 @@ func TestSandboxTUIRuleRemovalDistinguishesEntriesFromPosture(t *testing.T) {
 }
 
 func TestSandboxTUIKeepsCreateSelectionAcrossStaleRefresh(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.cursor = 0 // trailing New Sandbox card in an empty dashboard
 	m.busyAction = "create"
@@ -693,7 +694,7 @@ func TestSandboxTUIStreamsDownloadProgress(t *testing.T) {
 		t.Fatalf("captured output lost diagnostics: %q", got)
 	}
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.busyAction = "create"
 	m.busyName = "dev"
@@ -717,7 +718,7 @@ func TestSandboxTUIStreamsPersistentDiskProgress(t *testing.T) {
 }
 
 func TestSandboxTUITrafficRulesSupportEveryProtocolPosture(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiTrafficPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
@@ -753,7 +754,7 @@ func TestSandboxTUITrafficRulesSupportEveryProtocolPosture(t *testing.T) {
 }
 
 func TestSandboxTUISecretsAreListedAndWriteOnly(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiSecretsPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
@@ -782,7 +783,7 @@ func TestSandboxTUISecretsAreListedAndWriteOnly(t *testing.T) {
 }
 
 func TestSandboxTUIGridNavigationKeepsSelectionVisible(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 20 // three columns, one visible row
 	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g"} {
@@ -799,7 +800,7 @@ func TestSandboxTUIGridNavigationKeepsSelectionVisible(t *testing.T) {
 }
 
 func TestSandboxTUITrafficExplainsRestartRequirement(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiTrafficPage
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
@@ -810,7 +811,7 @@ func TestSandboxTUITrafficExplainsRestartRequirement(t *testing.T) {
 }
 
 func TestSandboxTUICompactHelpKeepsAllSections(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 60, 20
 	m.dialog = tuiHelpDialog
@@ -823,7 +824,7 @@ func TestSandboxTUICompactHelpKeepsAllSections(t *testing.T) {
 }
 
 func TestSandboxTUIDialogsAreLayered(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.refreshing = false
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped}}
@@ -837,7 +838,7 @@ func TestSandboxTUIDialogsAreLayered(t *testing.T) {
 }
 
 func TestSandboxTUICreateValidation(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.openCreateDialog()
 	m.createName.SetValue("has space")
@@ -874,7 +875,7 @@ func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.openCreateDialog()
 	m.createName.SetValue("gvisor-box")
@@ -912,7 +913,7 @@ func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {
 }
 
 func TestSandboxTUICreateResourceSliders(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.openCreateDialog()
 	m.createName.SetValue("bigger")
@@ -943,7 +944,7 @@ func TestSandboxTUICreateResourceSliders(t *testing.T) {
 }
 
 func TestSandboxTUIEditResourceSliders(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 30
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, MemMB: 2048, VCPUs: 2}}
@@ -967,7 +968,7 @@ func TestSandboxTUIEditResourceSliders(t *testing.T) {
 }
 
 func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 30
 	vcpus := 2
@@ -998,7 +999,7 @@ func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
 }
 
 func TestSandboxTUICreateButtonHitbox(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 30
 	m.openCreateDialog()
@@ -1040,7 +1041,7 @@ func TestSandboxTUIMountAndPortButtonHitboxes(t *testing.T) {
 		return m
 	}
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
@@ -1066,7 +1067,7 @@ func TestSandboxTUIMountAndPortButtonHitboxes(t *testing.T) {
 
 func TestSandboxTUIEditDialogMatchesOverlayBounds(t *testing.T) {
 	for _, size := range [][2]int{{100, 30}, {68, 22}, {60, 20}} {
-		m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+		m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 		m.loading = false
 		m.width, m.height = size[0], size[1]
 		m.sandboxes = []tuiSandbox{{
@@ -1085,7 +1086,7 @@ func TestSandboxTUIEditDialogMatchesOverlayBounds(t *testing.T) {
 }
 
 func TestSandboxTUIOversizedDialogScrollsAndFollowsFocus(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 20
 	m.openCreateDialog()
@@ -1134,7 +1135,7 @@ func TestSandboxTUIDialogFieldsCopyAndPaste(t *testing.T) {
 	}
 	t.Cleanup(func() { writeDashboardClipboard = oldWrite })
 
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.openCreateDialog()
 	model, _ := m.Update(tea.PasteMsg{Content: "pasted-name"})
@@ -1162,7 +1163,7 @@ func TestSandboxTUIDialogFieldsCopyAndPaste(t *testing.T) {
 }
 
 func TestSandboxTUIFormDialogsKeepFooterAndBorder(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
@@ -1198,7 +1199,7 @@ func TestSandboxTUIFormDialogsKeepFooterAndBorder(t *testing.T) {
 }
 
 func TestSandboxTUIConfirmationDialogsMeasureWrappedContent(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.mounts = []tuiMountRow{{Sandbox: "codex-dev", Tag: "code", Host: "/Users/eh04xk/repos", Guest: "/host/code"}}
@@ -1237,7 +1238,7 @@ func TestSandboxTUIConfirmationDialogsMeasureWrappedContent(t *testing.T) {
 }
 
 func TestSandboxTUIFormDialogsUseSpaciousSections(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
@@ -1264,7 +1265,7 @@ func TestSandboxTUIFormDialogsUseSpaciousSections(t *testing.T) {
 }
 
 func TestSandboxTUIFormFooterSeparatesActionAndHints(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.width, m.height = 100, 42
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
@@ -1315,7 +1316,7 @@ func TestResourceSliderMouseAndBounds(t *testing.T) {
 // "[::]:80" in the guest field composed into an IPv6 wildcard bind despite
 // the dialog claiming loopback defaults. Both fields are now strict ports.
 func TestPortDialogRejectsSmuggledBind(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning}}
 	m.portGuest.SetValue("[::]:80")
@@ -1328,7 +1329,7 @@ func TestPortDialogRejectsSmuggledBind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pm, err := sandboxpkg.ParsePortSpec(spec)
+	pm, err := config.ParsePortSpec(spec)
 	if err != nil || pm.HostIP != "0.0.0.0" || pm.HostPort != 8080 || pm.GuestPort != 80 {
 		t.Fatalf("spec %q → %+v (%v)", spec, pm, err)
 	}
@@ -1336,7 +1337,7 @@ func TestPortDialogRejectsSmuggledBind(t *testing.T) {
 	if spec, err = m.portSpecFromDialog(); err != nil {
 		t.Fatal(err)
 	}
-	pm, _ = sandboxpkg.ParsePortSpec(spec)
+	pm, _ = config.ParsePortSpec(spec)
 	if pm.HostIP != "127.0.0.1" || pm.HostPort != 8080 {
 		t.Fatalf("bare bind → %+v", pm)
 	}
@@ -1388,7 +1389,7 @@ func sandboxDir(name string) string {
 	return filepath.Join(os.Getenv("GANTRY_HOME"), name)
 }
 
-func newTestConfigStore(t *testing.T, dir string, cfg sandboxpkg.RunConfig) struct{} {
+func newTestConfigStore(t *testing.T, dir string, cfg config.RunConfig) struct{} {
 	t.Helper()
 	if err := writeTestSandboxConfig(dir, cfg); err != nil {
 		t.Fatal(err)
@@ -1396,8 +1397,8 @@ func newTestConfigStore(t *testing.T, dir string, cfg sandboxpkg.RunConfig) stru
 	return struct{}{}
 }
 
-func readSandboxConfig(dir string) (sandboxpkg.RunConfig, error) {
-	var cfg sandboxpkg.RunConfig
+func readSandboxConfig(dir string) (config.RunConfig, error) {
+	var cfg config.RunConfig
 	raw, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
 	if err != nil {
 		return cfg, err
@@ -1406,7 +1407,7 @@ func readSandboxConfig(dir string) (sandboxpkg.RunConfig, error) {
 	return cfg, err
 }
 
-func writeTestSandboxConfig(dir string, cfg sandboxpkg.RunConfig) error {
+func writeTestSandboxConfig(dir string, cfg config.RunConfig) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

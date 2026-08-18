@@ -10,31 +10,14 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 )
 
-// sessionProtocolVersion versions the session-control channel: the
-// "sessionctl" request carries it and every sessionExitEvent echoes it,
-// so agent integrations have a stable, checkable contract. Bump on any
-// wire change.
-const (
-	sessionProtocolVersion  = 1
-	sessionAbnormalExitCode = 255
-)
-
-// sessionExitEvent is the single message a session-control channel
-// carries after the handshake: the task's exit status, delivered out of
-// band (never inline in the stdio stream).
-type sessionExitEvent struct {
-	V     int    `json:"v"`
-	Exit  int    `json:"exit"`
-	Error string `json:"error,omitempty"`
-}
-
-func newSessionExitEvent(status int, err error) sessionExitEvent {
-	ev := sessionExitEvent{V: sessionProtocolVersion, Exit: status}
+func newSessionExitEvent(status int, err error) controlproto.SessionExitEvent {
+	ev := controlproto.SessionExitEvent{V: controlproto.SessionProtocolVersion, Exit: status}
 	if err != nil {
 		ev.Error = err.Error()
-		ev.Exit = sessionAbnormalExitCode
+		ev.Exit = controlproto.SessionAbnormalExitCode
 	}
 	return ev
 }
@@ -44,9 +27,9 @@ func newSessionExitEvent(status int, err error) sessionExitEvent {
 // parks it BEFORE starting the session so an instant command can never
 // lose its exit event. The handler blocks for the channel's lifetime
 // because handle()'s deferred Close is the conn's owner.
-func (br *broker) sessionctl(c net.Conn, input io.Reader, req brokerRequest) {
-	if req.V != sessionProtocolVersion {
-		_, _ = fmt.Fprintf(c, "{\"error\":\"unsupported session protocol version %d (want %d)\"}\n", req.V, sessionProtocolVersion)
+func (br *broker) sessionctl(c net.Conn, input io.Reader, req controlproto.Request) {
+	if req.V != controlproto.SessionProtocolVersion {
+		_, _ = fmt.Fprintf(c, "{\"error\":\"unsupported session protocol version %d (want %d)\"}\n", req.V, controlproto.SessionProtocolVersion)
 		return
 	}
 	if !br.limits.acquireParked() {
@@ -114,7 +97,7 @@ func (br *broker) beginSession(id string, killCh chan struct{}) (net.Conn, error
 	return ctl, nil
 }
 
-func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
+func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request) {
 	if !br.limits.acquireSession() {
 		_, _ = fmt.Fprintln(c, `{"error":"too many active sessions"}`)
 		return
@@ -153,7 +136,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
 	// per-sandbox and global settings can disable it.
 	stdout := io.Writer(c)
 	if br.oauth != nil {
-		stdout = br.oauth.sniffWriter(stdout)
+		stdout = br.oauth.SniffWriter(stdout)
 	}
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock:     br.streamSock,
@@ -165,7 +148,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req brokerRequest) {
 		Args:           req.Args,
 		Cwd:            req.Cwd,
 		Secrets:        br.secretEnv(),
-		Environment:    br.cfg.proxyEnvironment(),
+		Environment:    br.cfg.ProxyEnvironment(),
 		// one VM = one container workload with a well-known id, so a
 		// concurrent session can find it and Exec into it instead of
 		// fighting over the rw rootfs stack with a second Create

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -18,7 +20,7 @@ import (
 // for the command's lifetime, but using the normal supervisor path keeps
 // auto/required process isolation honest and gives one-shot sessions the same
 // broker, share, policy, and shutdown semantics as long-lived sandboxes.
-func CmdTransientExec(cfg RunConfig, secrets map[string]secret.Value, args []string, showConsole bool) (status int) {
+func CmdTransientExec(cfg config.RunConfig, secrets map[string]secret.Value, args []string, showConsole bool) (status int) {
 	name, err := transientSandboxName()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
@@ -30,7 +32,7 @@ func CmdTransientExec(cfg RunConfig, secrets map[string]secret.Value, args []str
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			followFile(ctx, filepath.Join(sandboxDir(name), "console.log"), os.Stderr)
+			followFile(ctx, filepath.Join(layout.Dir(name), "console.log"), os.Stderr)
 		}()
 		defer func() {
 			cancel()

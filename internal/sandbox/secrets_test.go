@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -75,8 +76,8 @@ func TestSecretsHandshake(t *testing.T) {
 }
 
 func TestSecretsHandshakeBounds(t *testing.T) {
-	many := make(map[string]secret.Value, secretsHandshakeMaxEntries+1)
-	for i := range secretsHandshakeMaxEntries + 1 {
+	many := make(map[string]secret.Value, controlproto.SecretsHandshakeMaxEntries+1)
+	for i := range controlproto.SecretsHandshakeMaxEntries + 1 {
 		many[fmt.Sprintf("SECRET_%d", i)] = "x"
 	}
 	if _, err := secretsHandshakeJSON(many); err == nil || !strings.Contains(err.Error(), "too many secrets") {
@@ -84,7 +85,7 @@ func TestSecretsHandshakeBounds(t *testing.T) {
 	}
 
 	oversized := map[string]secret.Value{
-		"TOKEN": secret.Value(strings.Repeat("x", secretsHandshakeMaxBytes)),
+		"TOKEN": secret.Value(strings.Repeat("x", controlproto.SecretsHandshakeMaxBytes)),
 	}
 	if _, err := secretsHandshakeJSON(oversized); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized encode error = %v, want size rejection", err)
@@ -95,7 +96,7 @@ func TestSecretsHandshakeBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(strings.Repeat("x", secretsHandshakeMaxBytes+1)); err != nil {
+	if _, err := f.WriteString(strings.Repeat("x", controlproto.SecretsHandshakeMaxBytes+1)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.Seek(0, 0); err != nil {

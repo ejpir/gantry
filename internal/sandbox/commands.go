@@ -8,19 +8,24 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
 )
 
 var errSandboxNotRunning = errors.New("sandbox is not running")
 
 func CmdLs() int {
-	ents, err := os.ReadDir(sandboxRoot())
+	ents, err := os.ReadDir(layout.Root())
 	if err != nil {
 		fmt.Println("no sandboxes (create one with: gantry start <name>)")
 		return 0
 	}
 	sandboxes := ents[:0]
 	for _, entry := range ents {
-		if entry.IsDir() && validSandboxName(entry.Name()) {
+		if entry.IsDir() && layout.ValidName(entry.Name()) {
 			sandboxes = append(sandboxes, entry)
 		}
 	}
@@ -32,12 +37,12 @@ func CmdLs() int {
 	for _, e := range sandboxes {
 		name := e.Name()
 		state, pidStr := "stopped", "-"
-		if pid, alive := sandboxPID(name); alive {
+		if pid, alive := layout.PID(name); alive {
 			state, pidStr = "running", fmt.Sprint(pid)
 		}
 		image, secrets := "-", "-"
-		if b, err := os.ReadFile(filepath.Join(sandboxDir(name), "sandbox.json")); err == nil {
-			var cfg RunConfig
+		if b, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json")); err == nil {
+			var cfg config.RunConfig
 			if json.Unmarshal(b, &cfg) == nil {
 				image = filepath.Base(cfg.Image)
 				if cfg.RW {
@@ -67,15 +72,15 @@ func CmdStop(name string) int {
 }
 
 func stopSandbox(name string) error {
-	pid, alive := sandboxPID(name)
+	pid, alive := layout.PID(name)
 	if !alive {
 		return errSandboxNotRunning
 	}
 	// ctl.sock is authenticated by the same-UID check on Unix and by the
 	// verified protected DACL on Windows. Prefer the daemon's own shutdown
 	// state transition so guest sync and device flush run on every platform.
-	if err := requestDaemonShutdown(name); err != nil && procAlive(pid) {
-		if signalErr := procTerminate(pid); signalErr != nil && procAlive(pid) {
+	if err := requestDaemonShutdown(name); err != nil && layout.ProcAlive(pid) {
+		if signalErr := layout.Terminate(pid); signalErr != nil && layout.ProcAlive(pid) {
 			return fmt.Errorf("terminate sandbox %q (control request: %v): %w", name, err, signalErr)
 		}
 	}
@@ -83,21 +88,21 @@ func stopSandbox(name string) error {
 	// flushes devices (bounded internally at ~5s) — give it room before
 	// escalating to a power cut (review finding 5).
 	for i := 0; i < 120; i++ {
-		if !procAlive(pid) {
+		if !layout.ProcAlive(pid) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if procAlive(pid) {
-		_ = procKill(pid)
+	if layout.ProcAlive(pid) {
+		_ = layout.Kill(pid)
 	}
 	// kill the sandbox's gvproxy too (defers don't run if the daemon was
 	// SIGKILLed, orphaning it)
-	dir := sandboxDir(name)
+	dir := layout.Dir(name)
 	if b, err := os.ReadFile(filepath.Join(dir, "gvproxy.pid")); err == nil {
 		var gpid int
 		if _, _ = fmt.Sscanf(string(b), "%d", &gpid); gpid > 0 {
-			_ = procKill(gpid)
+			_ = layout.Kill(gpid)
 		}
 	}
 	// Clean runtime files; sandbox.json stays so CmdResume and the dashboard
@@ -112,9 +117,9 @@ type daemonShutdownResponse struct {
 }
 
 func requestDaemonShutdown(name string) error {
-	response, err := callControl[daemonShutdownResponse](name, brokerRequest{
+	response, err := controlproto.Call[daemonShutdownResponse](name, controlproto.Request{
 		Op: "daemon.shutdown",
-		ID: newControlRequestID("shutdown"),
+		ID: controlproto.NewRequestID("shutdown"),
 	})
 	if err != nil {
 		return err
@@ -144,14 +149,14 @@ func CmdDelete(name string) int {
 }
 
 func deleteSandbox(name string) error {
-	if _, alive := sandboxPID(name); alive {
+	if _, alive := layout.PID(name); alive {
 		if err := stopSandbox(name); err != nil && !errors.Is(err, errSandboxNotRunning) {
 			return err
 		}
 	}
-	if err := os.RemoveAll(sandboxDir(name)); err != nil {
+	if err := os.RemoveAll(layout.Dir(name)); err != nil {
 		return err
 	}
-	forgetRWLayer(name)
+	rwlayer.Forget(name)
 	return nil
 }

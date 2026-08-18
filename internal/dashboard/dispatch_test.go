@@ -3,9 +3,8 @@ package dashboard
 import (
 	"testing"
 
-	sandboxpkg "github.com/ejpir/gantry/internal/sandbox"
-
 	tea "charm.land/bubbletea/v2"
+	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
 )
 
 func TestClassifyFormKey(t *testing.T) {
@@ -40,7 +39,7 @@ func TestClassifyFormKey(t *testing.T) {
 }
 
 func TestBusyKeyDispatchOnlyAllowsNavigation(t *testing.T) {
-	m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.busyAction = "start"
 
@@ -100,7 +99,7 @@ func TestConfirmationDialogMouseDispatch(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			m := newSandboxTUIModel(sandboxpkg.NewDashboardService())
+			m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 			m.loading = false
 			m.width, m.height = 100, 30
 			test.configure(&m)

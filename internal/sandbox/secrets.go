@@ -10,30 +10,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/secret"
-)
-
-const (
-	secretsHandshakeMaxBytes   = 1 << 20
-	secretsHandshakeMaxEntries = 256
 )
 
 // secretsHandshakeJSON renders the CLI-to-daemon handshake: one line of JSON
 // on the daemon's stdin. It is not placed in argv, the environment, or a file.
 func secretsHandshakeJSON(secrets map[string]secret.Value) (string, error) {
-	if len(secrets) > secretsHandshakeMaxEntries {
-		return "", fmt.Errorf("too many secrets: got %d, limit is %d", len(secrets), secretsHandshakeMaxEntries)
+	if len(secrets) > controlproto.SecretsHandshakeMaxEntries {
+		return "", fmt.Errorf("too many secrets: got %d, limit is %d", len(secrets), controlproto.SecretsHandshakeMaxEntries)
 	}
 	m := make(map[string]string, len(secrets))
 	rawBytes := 0
 	for name, v := range secrets {
 		raw := v.Raw()
-		if len(name) >= secretsHandshakeMaxBytes-rawBytes {
-			return "", fmt.Errorf("secrets handshake exceeds %d bytes", secretsHandshakeMaxBytes)
+		if len(name) >= controlproto.SecretsHandshakeMaxBytes-rawBytes {
+			return "", fmt.Errorf("secrets handshake exceeds %d bytes", controlproto.SecretsHandshakeMaxBytes)
 		}
 		rawBytes += len(name)
-		if len(raw) >= secretsHandshakeMaxBytes-rawBytes {
-			return "", fmt.Errorf("secrets handshake exceeds %d bytes", secretsHandshakeMaxBytes)
+		if len(raw) >= controlproto.SecretsHandshakeMaxBytes-rawBytes {
+			return "", fmt.Errorf("secrets handshake exceeds %d bytes", controlproto.SecretsHandshakeMaxBytes)
 		}
 		rawBytes += len(raw)
 		m[name] = raw
@@ -44,8 +40,8 @@ func secretsHandshakeJSON(secrets map[string]secret.Value) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode secrets handshake: %w", err)
 	}
-	if len(b)+1 > secretsHandshakeMaxBytes {
-		return "", fmt.Errorf("secrets handshake exceeds %d bytes", secretsHandshakeMaxBytes)
+	if len(b)+1 > controlproto.SecretsHandshakeMaxBytes {
+		return "", fmt.Errorf("secrets handshake exceeds %d bytes", controlproto.SecretsHandshakeMaxBytes)
 	}
 	return string(b) + "\n", nil
 }
@@ -79,8 +75,8 @@ func readSecretsHandshake(r *os.File) (map[string]secret.Value, error) {
 	if st.Mode()&os.ModeCharDevice != 0 {
 		return nil, nil
 	}
-	_ = r.SetReadDeadline(time.Now().Add(controlHandshakeTimeout))
-	line, err := readBoundedLine(bufio.NewReader(r), secretsHandshakeMaxBytes)
+	_ = r.SetReadDeadline(time.Now().Add(controlproto.HandshakeTimeout))
+	line, err := controlproto.ReadBoundedLine(bufio.NewReader(r), controlproto.SecretsHandshakeMaxBytes)
 	_ = r.SetReadDeadline(time.Time{})
 	if err != nil {
 		if errors.Is(err, io.EOF) && len(line) == 0 {
@@ -94,8 +90,8 @@ func readSecretsHandshake(r *os.File) (map[string]secret.Value, error) {
 	if err := json.Unmarshal(line, &hs); err != nil {
 		return nil, fmt.Errorf("decode JSON: %w", err)
 	}
-	if len(hs.Secrets) > secretsHandshakeMaxEntries {
-		return nil, fmt.Errorf("too many secrets: got %d, limit is %d", len(hs.Secrets), secretsHandshakeMaxEntries)
+	if len(hs.Secrets) > controlproto.SecretsHandshakeMaxEntries {
+		return nil, fmt.Errorf("too many secrets: got %d, limit is %d", len(hs.Secrets), controlproto.SecretsHandshakeMaxEntries)
 	}
 	out := make(map[string]secret.Value, len(hs.Secrets))
 	for name, v := range hs.Secrets {
