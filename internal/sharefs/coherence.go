@@ -24,6 +24,7 @@ const (
 
 type shareWatchEvent struct {
 	rel            string
+	relTo          string // paired rename destination (Linux); empty when unpaired
 	rename         bool
 	invalidateDirs bool
 	loss           error
@@ -39,6 +40,14 @@ type shareWatcher interface {
 	Close() error
 }
 
+// coherencePath records which inode a guest-visible path resolved to. The
+// generation separates mappings recorded before a rename pass from fresh
+// ones remembered while that pass is still in flight.
+type coherencePath struct {
+	inode *fs.Inode
+	gen   uint64
+}
+
 type exportCoherence struct {
 	export *Export
 
@@ -46,19 +55,20 @@ type exportCoherence struct {
 	closed  atomic.Bool
 	eventMu sync.Mutex
 
-	mu        sync.RWMutex
-	root      *fs.Inode
-	paths     map[string]*fs.Inode
-	reverse   map[*fs.Inode]map[string]struct{}
-	pathBytes int
-	watcher   shareWatcher
-	watchErr  error
+	mu         sync.RWMutex
+	root       *fs.Inode
+	paths      map[string]coherencePath
+	reverse    map[*fs.Inode]map[string]struct{}
+	pathBytes  int
+	generation uint64
+	watcher    shareWatcher
+	watchErr   error
 }
 
 func newExportCoherence(export *Export) *exportCoherence {
 	c := &exportCoherence{
 		export:  export,
-		paths:   make(map[string]*fs.Inode),
+		paths:   make(map[string]coherencePath),
 		reverse: make(map[*fs.Inode]map[string]struct{}),
 	}
 	watcher, err := newPlatformShareWatcher(export, c.handleWatchEvent)
@@ -88,18 +98,22 @@ func (c *exportCoherence) attachRoot(root *fs.Inode) {
 }
 
 func (c *exportCoherence) addPathLocked(rel string, inode *fs.Inode) bool {
+	return c.addPathGenLocked(rel, inode, c.generation)
+}
+
+func (c *exportCoherence) addPathGenLocked(rel string, inode *fs.Inode, gen uint64) bool {
 	if inode == nil {
 		return true
 	}
-	if existing := c.paths[rel]; existing == inode {
+	if existing := c.paths[rel]; existing.inode == inode {
 		return true
-	} else if existing != nil {
-		c.removePathLocked(rel, existing)
+	} else if existing.inode != nil {
+		c.removePathLocked(rel, existing.inode)
 	}
 	if len(c.paths) >= maxCoherencePaths || c.pathBytes+len(rel) > maxCoherencePathBytes {
 		return false
 	}
-	c.paths[rel] = inode
+	c.paths[rel] = coherencePath{inode: inode, gen: gen}
 	aliases := c.reverse[inode]
 	if aliases == nil {
 		aliases = make(map[string]struct{})
@@ -111,7 +125,8 @@ func (c *exportCoherence) addPathLocked(rel string, inode *fs.Inode) bool {
 }
 
 func (c *exportCoherence) removePathLocked(rel string, inode *fs.Inode) {
-	if c.paths[rel] != inode {
+	p, ok := c.paths[rel]
+	if !ok || p.inode != inode {
 		return
 	}
 	delete(c.paths, rel)
@@ -212,9 +227,9 @@ func (c *exportCoherence) forgetPath(parent *fs.Inode, name string) {
 		if !ok {
 			continue
 		}
-		inode := c.paths[rel]
-		if inode != nil {
-			c.removePathLocked(rel, inode)
+		p := c.paths[rel]
+		if p.inode != nil {
+			c.removePathLocked(rel, p.inode)
 		}
 	}
 	c.mu.Unlock()
@@ -241,16 +256,16 @@ func (c *exportCoherence) renamePath(oldParent *fs.Inode, oldName string, newPar
 		c.mu.Unlock()
 		return
 	}
-	updates := make(map[string]*fs.Inode)
-	for rel, inode := range c.paths {
+	updates := make(map[string]coherencePath)
+	for rel, p := range c.paths {
 		if rel == oldRel || strings.HasPrefix(rel, oldRel+"/") {
-			updates[newRel+strings.TrimPrefix(rel, oldRel)] = inode
-			c.removePathLocked(rel, inode)
+			updates[newRel+strings.TrimPrefix(rel, oldRel)] = p
+			c.removePathLocked(rel, p.inode)
 		}
 	}
 	bounded := true
-	for rel, inode := range updates {
-		bounded = c.addPathLocked(rel, inode) && bounded
+	for rel, p := range updates {
+		bounded = c.addPathGenLocked(rel, p.inode, p.gen) && bounded
 	}
 	c.mu.Unlock()
 	if !bounded {
@@ -277,11 +292,19 @@ func (c *exportCoherence) handleWatchEvent(event shareWatchEvent) {
 		c.loseLocked(fmt.Errorf("watcher returned path outside export: %q", event.rel))
 		return
 	}
+	var relTo string
+	if event.relTo != "" {
+		relTo, ok = cleanCoherenceRel(event.relTo)
+		if !ok {
+			c.loseLocked(fmt.Errorf("watcher returned rename target outside export: %q", event.relTo))
+			return
+		}
+	}
 	parentRel, name := path.Split(rel)
 	parentRel = strings.TrimSuffix(parentRel, "/")
 	c.mu.RLock()
-	child := c.paths[rel]
-	parent := c.paths[parentRel]
+	child := c.paths[rel].inode
+	parent := c.paths[parentRel].inode
 	if rel == "" {
 		parent = c.root
 	}
@@ -295,6 +318,12 @@ func (c *exportCoherence) handleWatchEvent(event shareWatchEvent) {
 			return
 		}
 		invalidateShareDirCache(c.export)
+		// Start a new mapping generation before notifications unblock guests:
+		// a lookup that races with this pass reflects post-rename reality, and
+		// the stale-mapping sweep at the end must not destroy it again.
+		c.mu.Lock()
+		c.generation++
+		c.mu.Unlock()
 		// Emit the most specific entry invalidation available before the global
 		// epoch bump. Recursive watchers do not consistently provide paired
 		// old/new paths, so the epoch remains the bounded unambiguous fallback.
@@ -302,6 +331,19 @@ func (c *exportCoherence) handleWatchEvent(event shareWatchEvent) {
 			if errno := parent.NotifyEntry(name); !benignNotifyErr(errno) {
 				c.loseLocked(fmt.Errorf("invalidate renamed entry %q: %v", rel, errno))
 				return
+			}
+		}
+		if relTo != "" {
+			toParentRel, toName := path.Split(relTo)
+			toParentRel = strings.TrimSuffix(toParentRel, "/")
+			c.mu.RLock()
+			toParent := c.paths[toParentRel].inode
+			c.mu.RUnlock()
+			if toName != "" && toParent != nil {
+				if errno := toParent.NotifyEntry(toName); !benignNotifyErr(errno) {
+					c.loseLocked(fmt.Errorf("invalidate rename target %q: %v", relTo, errno))
+					return
+				}
 			}
 		}
 		if c.watcher != nil {
@@ -344,16 +386,21 @@ func benignNotifyErr(errno syscall.Errno) bool {
 	return errno == 0 || fuse.Status(errno) == fuse.ENOENT
 }
 
+// clearDescendantPaths drops path mappings recorded before the current
+// generation: after a rename they may resolve to a different host object.
+// Mappings remembered while the rename pass was in flight belong to the new
+// generation, reflect post-rename reality, and stay valid.
 func (c *exportCoherence) clearDescendantPaths() {
 	c.mu.Lock()
-	root := c.root
-	c.paths = make(map[string]*fs.Inode)
-	c.reverse = make(map[*fs.Inode]map[string]struct{})
-	c.pathBytes = 0
-	if root != nil {
-		c.addPathLocked("", root)
+	defer c.mu.Unlock()
+	for rel, p := range c.paths {
+		if p.gen < c.generation {
+			c.removePathLocked(rel, p.inode)
+		}
 	}
-	c.mu.Unlock()
+	if c.root != nil {
+		c.addPathLocked("", c.root)
+	}
 }
 
 func (c *exportCoherence) snapshotNodes() []*fs.Inode {
