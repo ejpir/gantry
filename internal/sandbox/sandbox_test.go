@@ -11,6 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -19,8 +23,8 @@ func TestValidSandboxName(t *testing.T) {
 		"dev": true, "my-sandbox_1.2": true, "": false,
 		"has space": false, "slash/x": false, strings.Repeat("a", 65): false,
 	} {
-		if got := validSandboxName(name); got != want {
-			t.Errorf("validSandboxName(%q) = %v, want %v", name, got, want)
+		if got := layout.ValidName(name); got != want {
+			t.Errorf("layout.ValidName(%q) = %v, want %v", name, got, want)
 		}
 	}
 }
@@ -74,16 +78,16 @@ func TestDaemonReadyNotificationDisabled(t *testing.T) {
 func TestSandboxPIDLifecycle(t *testing.T) {
 	t.Setenv("GANTRY_HOME", t.TempDir())
 	name := "testbox"
-	if _, alive := sandboxPID(name); alive {
+	if _, alive := layout.PID(name); alive {
 		t.Fatal("phantom sandbox")
 	}
-	_ = os.MkdirAll(sandboxDir(name), 0o755)
-	_ = os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte("99999999"), 0o644)
-	if _, alive := sandboxPID(name); alive {
+	_ = os.MkdirAll(layout.Dir(name), 0o755)
+	_ = os.WriteFile(filepath.Join(layout.Dir(name), "vmm.pid"), []byte("99999999"), 0o644)
+	if _, alive := layout.PID(name); alive {
 		t.Fatal("stale pid treated as alive")
 	}
-	_ = os.WriteFile(filepath.Join(sandboxDir(name), "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
-	if _, alive := sandboxPID(name); !alive {
+	_ = os.WriteFile(filepath.Join(layout.Dir(name), "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	if _, alive := layout.PID(name); !alive {
 		t.Fatal("current process not detected as alive")
 	}
 }
@@ -137,7 +141,7 @@ func TestBrokerBadRequest(t *testing.T) {
 
 func TestBrokerSetResources(t *testing.T) {
 	dir := t.TempDir()
-	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1})
+	store := newTestConfigStore(t, dir, config.RunConfig{MemMB: 512, VCPUs: 1})
 	br := &broker{store: store, sessions: map[string]chan struct{}{}}
 	vcpus := 3
 	request := `{"op":"resources.set","id":"edit","resources":{"mem_mb":2048,"vcpus":3}}` + "\n"
@@ -148,7 +152,7 @@ func TestBrokerSetResources(t *testing.T) {
 	if got := brokerPipe(t, br, request); !strings.Contains(got, `"ok":true`) {
 		t.Fatalf("resp = %s", got)
 	}
-	cfg, err := readSandboxConfig(dir)
+	cfg, err := config.ReadSandboxConfig(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +163,11 @@ func TestBrokerSetResources(t *testing.T) {
 
 func TestBrokerMutatesSecretsWithoutPersistingValues(t *testing.T) {
 	dir := t.TempDir()
-	store := newTestConfigStore(t, dir, RunConfig{})
+	store := newTestConfigStore(t, dir, config.RunConfig{})
 	br := &broker{store: store, secrets: map[string]secret.Value{}, sessions: map[string]chan struct{}{}}
-	request := brokerRequest{
+	request := controlproto.Request{
 		Op: "secret.set", ID: "add-secret",
-		Secret: &brokerSecretRequest{Name: "API_TOKEN", Value: secret.Value("super-secret-value")},
+		Secret: &controlproto.SecretRequest{Name: "API_TOKEN", Value: secret.Value("super-secret-value")},
 	}
 	raw, err := json.Marshal(request)
 	if err != nil {
@@ -206,16 +210,16 @@ func TestBrokerConfiguresShareForRestart(t *testing.T) {
 	if err := os.Mkdir(host, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	store := newTestConfigStore(t, dir, RunConfig{})
-	manager, _, err := NewShareManager(dir, store)
+	store := newTestConfigStore(t, dir, config.RunConfig{})
+	manager, _, err := control.NewShareManager(dir, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = manager.Close() }()
 	br := &broker{store: store, shares: manager, sessions: map[string]chan struct{}{}}
-	req := brokerRequest{
+	req := controlproto.Request{
 		Op: "share.configure", ID: "mount",
-		Share: &brokerShareRequest{Spec: "code=" + host + "@/workspace", Persistent: true},
+		Share: &controlproto.ShareRequest{Spec: "code=" + host + "@/workspace", Persistent: true},
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -228,4 +232,45 @@ func TestBrokerConfiguresShareForRestart(t *testing.T) {
 	if saved := store.Snapshot().Shares; len(saved) != 1 || !strings.Contains(saved[0], "@/workspace") {
 		t.Fatalf("saved shares = %v", saved)
 	}
+}
+
+// newTestConfigStore writes a minimal valid sandbox.json into dir and opens a
+// store over it. The control-plane managers take a store rather than a path,
+// so their tests need one without booting a daemon.
+func newTestConfigStore(t *testing.T, dir string, cfg config.RunConfig) *config.ConfigStore {
+	t.Helper()
+	if cfg.MemMB == 0 {
+		cfg.MemMB = 512
+	}
+	if cfg.VCPUs == 0 {
+		cfg.VCPUs = 1
+	}
+	if err := config.WriteSandboxConfig(dir, cfg); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// newTestShareManager builds a share manager over a temp sandbox directory.
+// The facade's tests use it to wire a broker or a VMM worker to a real hub.
+func newTestShareManager(t *testing.T, specs ...string) (*control.ShareManager, string) {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := config.RunConfig{Kernel: "/kernel", Rootfs: "/rootfs", Image: "/image", Shares: specs, MemMB: 512, RW: true}
+	manager, warnings, err := control.NewShareManager(dir, newTestConfigStore(t, dir, cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if manager.Hub() == nil {
+		t.Fatal("share hub unavailable")
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager, dir
 }

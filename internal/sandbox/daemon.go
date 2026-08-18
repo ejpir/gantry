@@ -7,6 +7,10 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/vmm"
 
@@ -25,18 +29,18 @@ type daemonRuntime struct {
 	started    time.Time
 	bootTiming bool
 
-	cfg     RunConfig
+	cfg     config.RunConfig
 	secrets map[string]secret.Value
-	store   *ConfigStore
+	store   *config.ConfigStore
 	lock    *os.File
 	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
-	consoleLog *boundedLogPipe
+	consoleLog *boundedlog.Pipe
 	network    *Network
-	shares     *ShareManager
-	ports      *PortManager
-	runner     vmmRunner
+	shares     *control.ShareManager
+	ports      *control.PortManager
+	runner     vmmworker.Runner
 	machine    *vmm.Machine
 	rpc        *ttrpc.Client
 	control    net.Listener

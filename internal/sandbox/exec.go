@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"golang.org/x/term"
 )
 
@@ -49,7 +51,7 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 	if request.MaxOutputBytes <= 0 {
 		request.MaxOutputBytes = 1 << 20
 	}
-	if _, alive := sandboxPID(name); !alive {
+	if _, alive := layout.PID(name); !alive {
 		return capturedExecResult{}, fmt.Errorf("sandbox %q is not running", name)
 	}
 	baseContext := request.Context
@@ -59,10 +61,10 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 	ctx, cancel := context.WithTimeout(baseContext, request.Timeout)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	id := newControlRequestID("manager-exec")
-	dialer := net.Dialer{Timeout: controlHandshakeTimeout}
+	id := controlproto.NewRequestID("manager-exec")
+	dialer := net.Dialer{Timeout: controlproto.HandshakeTimeout}
 
-	ctl, err := dialer.DialContext(ctx, "unix", filepath.Join(sandboxDir(name), "ctl.sock"))
+	ctl, err := dialer.DialContext(ctx, "unix", filepath.Join(layout.Dir(name), "ctl.sock"))
 	if err != nil {
 		return capturedExecResult{}, fmt.Errorf("connect session control: %w", err)
 	}
@@ -70,11 +72,11 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 	_ = ctl.SetDeadline(deadline)
 	stopControlCancel := context.AfterFunc(ctx, func() { _ = ctl.SetDeadline(time.Now()) })
 	defer stopControlCancel()
-	if err := json.NewEncoder(ctl).Encode(&brokerRequest{Op: "sessionctl", ID: id, V: sessionProtocolVersion}); err != nil {
+	if err := json.NewEncoder(ctl).Encode(&controlproto.Request{Op: "sessionctl", ID: id, V: controlproto.SessionProtocolVersion}); err != nil {
 		return capturedExecResult{}, fmt.Errorf("send session control: %w", err)
 	}
 	ctlR := bufio.NewReader(ctl)
-	line, err := readBoundedLine(ctlR, controlMaxEventBytes)
+	line, err := controlproto.ReadBoundedLine(ctlR, controlproto.MaxEventBytes)
 	if err != nil {
 		return capturedExecResult{}, fmt.Errorf("session control handshake: %w", err)
 	}
@@ -86,7 +88,7 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 		return capturedExecResult{}, fmt.Errorf("session control rejected: %s", strings.TrimSpace(string(line)))
 	}
 
-	data, err := dialer.DialContext(ctx, "unix", filepath.Join(sandboxDir(name), "ctl.sock"))
+	data, err := dialer.DialContext(ctx, "unix", filepath.Join(layout.Dir(name), "ctl.sock"))
 	if err != nil {
 		return capturedExecResult{}, fmt.Errorf("connect session data: %w", err)
 	}
@@ -97,11 +99,11 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 		_ = killSandboxSession(name, id)
 	})
 	defer stopDataCancel()
-	if err := json.NewEncoder(data).Encode(&brokerRequest{Op: "session", ID: id, Args: request.Args, Cwd: request.Cwd, Quiet: true}); err != nil {
+	if err := json.NewEncoder(data).Encode(&controlproto.Request{Op: "session", ID: id, Args: request.Args, Cwd: request.Cwd, Quiet: true}); err != nil {
 		return capturedExecResult{}, fmt.Errorf("send session request: %w", err)
 	}
 	dataR := bufio.NewReader(data)
-	line, err = readBoundedLine(dataR, controlMaxEventBytes)
+	line, err = controlproto.ReadBoundedLine(dataR, controlproto.MaxEventBytes)
 	if err != nil {
 		return capturedExecResult{}, fmt.Errorf("session handshake: %w", err)
 	}
@@ -161,16 +163,16 @@ func execSandboxCaptured(name string, request capturedExecRequest) (capturedExec
 
 func killSandboxSession(name, id string) error {
 	const killTimeout = time.Second
-	connection, err := net.DialTimeout("unix", filepath.Join(sandboxDir(name), "ctl.sock"), killTimeout)
+	connection, err := net.DialTimeout("unix", filepath.Join(layout.Dir(name), "ctl.sock"), killTimeout)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = connection.Close() }()
 	_ = connection.SetDeadline(time.Now().Add(killTimeout))
-	if err := json.NewEncoder(connection).Encode(&brokerRequest{Op: "kill", ID: id}); err != nil {
+	if err := json.NewEncoder(connection).Encode(&controlproto.Request{Op: "kill", ID: id}); err != nil {
 		return err
 	}
-	line, err := readBoundedLine(bufio.NewReader(connection), controlMaxResponseBytes)
+	line, err := controlproto.ReadBoundedLine(bufio.NewReader(connection), controlproto.MaxResponseBytes)
 	if err != nil {
 		return err
 	}
@@ -188,8 +190,8 @@ func killSandboxSession(name, id string) error {
 }
 
 func CmdSandboxExec(name string, argv []string) int {
-	dir := sandboxDir(name)
-	if _, alive := sandboxPID(name); !alive {
+	dir := layout.Dir(name)
+	if _, alive := layout.PID(name); !alive {
 		fmt.Fprintf(os.Stderr, "gantry exec: sandbox %q is not running (start it with: gantry start %s)\n", name, name)
 		return 1
 	}
@@ -213,19 +215,19 @@ func CmdSandboxExec(name string, argv []string) int {
 	// contain any byte sequence (NULs, fake markers) without colliding
 	// with the protocol, and a missing event unambiguously means an
 	// abnormal end — never a silent exit 0.
-	ctl, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlHandshakeTimeout)
+	ctl, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlproto.HandshakeTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: broker: %v\n", err)
 		return 1
 	}
 	defer func() { _ = ctl.Close() }()
-	_ = ctl.SetDeadline(time.Now().Add(controlHandshakeTimeout))
-	if err := json.NewEncoder(ctl).Encode(&brokerRequest{Op: "sessionctl", ID: id, V: sessionProtocolVersion}); err != nil {
+	_ = ctl.SetDeadline(time.Now().Add(controlproto.HandshakeTimeout))
+	if err := json.NewEncoder(ctl).Encode(&controlproto.Request{Op: "sessionctl", ID: id, V: controlproto.SessionProtocolVersion}); err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: %v\n", err)
 		return 1
 	}
 	ctlR := bufio.NewReader(ctl)
-	ctlLine, err := readBoundedLine(ctlR, controlMaxEventBytes)
+	ctlLine, err := controlproto.ReadBoundedLine(ctlR, controlproto.MaxEventBytes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: broker control handshake: %v\n", err)
 		return 1
@@ -240,15 +242,15 @@ func CmdSandboxExec(name string, argv []string) int {
 	}
 	_ = ctl.SetDeadline(time.Time{})
 
-	c, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlHandshakeTimeout)
+	c, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlproto.HandshakeTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: broker: %v\n", err)
 		return 1
 	}
 	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(controlHandshakeTimeout))
+	_ = c.SetDeadline(time.Now().Add(controlproto.HandshakeTimeout))
 
-	req := brokerRequest{Op: "session", ID: id, Args: args}
+	req := controlproto.Request{Op: "session", ID: id, Args: args}
 	req.Terminal = term.IsTerminal(int(os.Stdin.Fd()))
 	if req.Terminal {
 		if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
@@ -260,7 +262,7 @@ func CmdSandboxExec(name string, argv []string) int {
 		return 1
 	}
 	r := bufio.NewReader(c)
-	line, err := readBoundedLine(r, controlMaxEventBytes)
+	line, err := controlproto.ReadBoundedLine(r, controlproto.MaxEventBytes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gantry exec: broker handshake: %v\n", err)
 		return 1
@@ -287,10 +289,10 @@ func CmdSandboxExec(name string, argv []string) int {
 	defer signal.Stop(sigc)
 	go func() {
 		for range sigc {
-			kc, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlHandshakeTimeout)
+			kc, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlproto.HandshakeTimeout)
 			if err == nil {
-				_ = kc.SetWriteDeadline(time.Now().Add(controlHandshakeTimeout))
-				_ = json.NewEncoder(kc).Encode(&brokerRequest{Op: "kill", ID: id})
+				_ = kc.SetWriteDeadline(time.Now().Add(controlproto.HandshakeTimeout))
+				_ = json.NewEncoder(kc).Encode(&controlproto.Request{Op: "kill", ID: id})
 				_ = kc.Close()
 			}
 		}
@@ -312,7 +314,7 @@ func CmdSandboxExec(name string, argv []string) int {
 	ev, err := readSessionExitEvent(ctlR)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\ngantry exec: session ended without an exit status (broker died?): %v\n", err)
-		return sessionAbnormalExitCode
+		return controlproto.SessionAbnormalExitCode
 	}
 	if ev.Error != "" {
 		fmt.Fprintf(os.Stderr, "\ngantry exec: session infrastructure failure: %s\n", ev.Error)
@@ -320,9 +322,9 @@ func CmdSandboxExec(name string, argv []string) int {
 	return sessionExitCode(ev)
 }
 
-func sessionExitCode(ev sessionExitEvent) int {
+func sessionExitCode(ev controlproto.SessionExitEvent) int {
 	if ev.Error != "" {
-		return sessionAbnormalExitCode
+		return controlproto.SessionAbnormalExitCode
 	}
 	return ev.Exit
 }
@@ -331,17 +333,17 @@ func sessionExitCode(ev sessionExitEvent) int {
 // sends on the session-control channel when a session ends. EOF, garbage,
 // or a version mismatch are all errors: callers must treat a missing
 // event as an abnormal end (never a silent exit 0).
-func readSessionExitEvent(r *bufio.Reader) (sessionExitEvent, error) {
-	line, err := readBoundedLine(r, controlMaxEventBytes)
+func readSessionExitEvent(r *bufio.Reader) (controlproto.SessionExitEvent, error) {
+	line, err := controlproto.ReadBoundedLine(r, controlproto.MaxEventBytes)
 	if err != nil {
-		return sessionExitEvent{}, err
+		return controlproto.SessionExitEvent{}, err
 	}
-	var ev sessionExitEvent
+	var ev controlproto.SessionExitEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
-		return sessionExitEvent{}, fmt.Errorf("bad exit event: %w", err)
+		return controlproto.SessionExitEvent{}, fmt.Errorf("bad exit event: %w", err)
 	}
-	if ev.V != sessionProtocolVersion {
-		return sessionExitEvent{}, fmt.Errorf("unsupported session protocol version %d", ev.V)
+	if ev.V != controlproto.SessionProtocolVersion {
+		return controlproto.SessionExitEvent{}, fmt.Errorf("unsupported session protocol version %d", ev.V)
 	}
 	return ev, nil
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
 
 // launchLockDirectory is deliberately not a valid sandbox name. It lives
@@ -14,17 +16,17 @@ import (
 const launchLockDirectory = "@launch-locks"
 
 func holdSandboxLaunchLock(name string) (*os.File, error) {
-	if !validSandboxName(name) {
+	if !layout.ValidName(name) {
 		return nil, fmt.Errorf("invalid sandbox name %q", name)
 	}
-	dir := filepath.Join(sandboxRoot(), launchLockDirectory)
+	dir := filepath.Join(layout.Root(), launchLockDirectory)
 	// On Windows this creates protected DACLs on both the sandbox root and the
 	// lock directory. On Unix the explicit hardening handles a pre-existing
 	// directory created under a permissive umask.
-	if err := createSandboxDirectory(dir); err != nil {
+	if err := localsec.CreateDir(dir); err != nil {
 		return nil, fmt.Errorf("create launch-lock directory: %w", err)
 	}
-	if err := secureSandboxDirectory(dir); err != nil {
+	if err := localsec.SecureDir(dir); err != nil {
 		return nil, fmt.Errorf("secure launch-lock directory: %w", err)
 	}
 
@@ -33,7 +35,7 @@ func holdSandboxLaunchLock(name string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %q is already launching or its launch lock is unavailable: %w", name, err)
 	}
-	if err := secureLocalEndpoint(path); err != nil {
+	if err := localsec.SecureEndpoint(path); err != nil {
 		_ = lock.Close()
 		return nil, fmt.Errorf("secure sandbox %q launch lock: %w", name, err)
 	}

@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
 
 type fakeSandboxDaemon struct {
@@ -51,8 +54,8 @@ func (p *fakeSandboxDaemon) Kill() error {
 func TestConcurrentLaunchesCannotClobberOrDoubleSpawn(t *testing.T) {
 	t.Setenv("GANTRY_HOME", t.TempDir())
 	name := "same-name"
-	firstConfig := RunConfig{MemMB: 111, VCPUs: 1}
-	secondConfig := RunConfig{MemMB: 222, VCPUs: 1}
+	firstConfig := config.RunConfig{MemMB: 111, VCPUs: 1}
+	secondConfig := config.RunConfig{MemMB: 222, VCPUs: 1}
 	process := &fakeSandboxDaemon{pid: os.Getpid(), wait: make(chan error, 1)}
 	spawned := make(chan struct{}, 1)
 	var spawnCount atomic.Int32
@@ -78,8 +81,8 @@ func TestConcurrentLaunchesCannotClobberOrDoubleSpawn(t *testing.T) {
 	if got := spawnCount.Load(); got != 1 {
 		t.Fatalf("daemon spawn count = %d, want 1", got)
 	}
-	var persisted RunConfig
-	configData, err := os.ReadFile(filepath.Join(sandboxDir(name), "sandbox.json"))
+	var persisted config.RunConfig
+	configData, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,11 +93,11 @@ func TestConcurrentLaunchesCannotClobberOrDoubleSpawn(t *testing.T) {
 		t.Fatalf("concurrent launch clobbered configuration: MemMB = %d, want %d", persisted.MemMB, firstConfig.MemMB)
 	}
 
-	lifetime, err := holdSandboxLock(sandboxDir(name))
+	lifetime, err := layout.HoldLock(layout.Dir(name))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sandboxDir(name), "ready"), []byte("1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(layout.Dir(name), "ready"), []byte("1\n"), 0o600); err != nil {
 		_ = lifetime.Close()
 		t.Fatal(err)
 	}
@@ -126,7 +129,7 @@ func TestLaunchOverlapsConfigDurabilityWithDaemonStartup(t *testing.T) {
 	}
 	result := make(chan int, 1)
 	go func() {
-		result <- launchSandboxModeWithSpawner(name, RunConfig{}, nil, true, false, spawn)
+		result <- launchSandboxModeWithSpawner(name, config.RunConfig{}, nil, true, false, spawn)
 	}()
 	select {
 	case <-entered:
@@ -138,12 +141,12 @@ func TestLaunchOverlapsConfigDurabilityWithDaemonStartup(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("daemon startup waited for durability")
 	}
-	lifetime, err := holdSandboxLock(sandboxDir(name))
+	lifetime, err := layout.HoldLock(layout.Dir(name))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = lifetime.Close() }()
-	if err := os.WriteFile(filepath.Join(sandboxDir(name), "ready"), []byte("1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(layout.Dir(name), "ready"), []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -178,16 +181,16 @@ func TestLaunchDurabilityFailureKillsUncommittedDaemon(t *testing.T) {
 	}
 	result := make(chan int, 1)
 	go func() {
-		result <- launchSandboxModeWithSpawner(name, RunConfig{}, nil, true, false, spawn)
+		result <- launchSandboxModeWithSpawner(name, config.RunConfig{}, nil, true, false, spawn)
 	}()
 	<-entered
 	<-spawned
-	lifetime, err := holdSandboxLock(sandboxDir(name))
+	lifetime, err := layout.HoldLock(layout.Dir(name))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = lifetime.Close() }()
-	if err := os.WriteFile(filepath.Join(sandboxDir(name), "ready"), []byte("1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(layout.Dir(name), "ready"), []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	release <- errors.New("sync failed")
@@ -216,14 +219,14 @@ func TestReadinessWithoutLifetimeLockAbortsLaunch(t *testing.T) {
 
 	result := make(chan int, 1)
 	go func() {
-		result <- launchSandboxModeWithSpawner(name, RunConfig{}, nil, true, false, spawn)
+		result <- launchSandboxModeWithSpawner(name, config.RunConfig{}, nil, true, false, spawn)
 	}()
 	select {
 	case <-spawned:
 	case <-time.After(5 * time.Second):
 		t.Fatal("launch did not reach the spawn boundary")
 	}
-	if err := os.WriteFile(filepath.Join(sandboxDir(name), "ready"), []byte("1\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(layout.Dir(name), "ready"), []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -242,11 +245,11 @@ func TestReadinessWithoutLifetimeLockAbortsLaunch(t *testing.T) {
 func TestLaunchHonorsDaemonLifetimeLockWithoutPID(t *testing.T) {
 	t.Setenv("GANTRY_HOME", t.TempDir())
 	name := "locked"
-	dir := sandboxDir(name)
-	if err := createSandboxDirectory(dir); err != nil {
+	dir := layout.Dir(name)
+	if err := localsec.CreateDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	lifetime, err := holdSandboxLock(dir)
+	lifetime, err := layout.HoldLock(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +260,7 @@ func TestLaunchHonorsDaemonLifetimeLockWithoutPID(t *testing.T) {
 		spawnCount.Add(1)
 		return nil, nil
 	}
-	if status := launchSandboxModeWithSpawner(name, RunConfig{}, nil, false, false, spawn); status == 0 {
+	if status := launchSandboxModeWithSpawner(name, config.RunConfig{}, nil, false, false, spawn); status == 0 {
 		t.Fatal("launch ignored daemon lifetime lock")
 	}
 	if got := spawnCount.Load(); got != 0 {

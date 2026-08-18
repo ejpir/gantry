@@ -4,68 +4,15 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime"
-	"strings"
 
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/vmm"
 )
-
-// imageIdentity is the stable identity used for rwlayer pairing: the
-// OCI digest when the image came through the store, else the file path.
-func (c RunConfig) imageIdentity() string {
-	if c.LayerSet != nil {
-		return "layerset:" + c.LayerSet.FSMeta
-	}
-	if c.ImageDigest != "" {
-		return c.ImageDigest
-	}
-	return c.Image
-}
-
-// vmmRunner is the split-VMM execution handle: the guest runs in a
-// _vmm-worker process and every interaction crosses a channel. The
-// platform stubs make tryStartVMMSplit always fail where unsupported.
-type vmmRunner interface {
-	// Wait parks until the guest exits (the split-mode guestErr).
-	Wait() error
-	// Close flushes devices and stops the worker (idempotent).
-	Close() error
-	// RequestHotMemory starts post-readiness virtio-mem expansion (a no-op
-	// when the machine uses an ordinary e820 memory map).
-	RequestHotMemory() error
-	// Done closes when the worker process is reaped; Err reports how.
-	Done() <-chan struct{}
-	Err() error
-	// DialStream opens a host->guest stream to a guest listening port.
-	DialStream(guestPort uint32) (net.Conn, error)
-}
 
 // guestNetMAC is the fixed MAC the embedded netstack expects the guest to
 // use (gvproxy-compatible pairing with the gateway MAC).
 var guestNetMAC = [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee}
-
-func virtioMemWorkerSetting() string {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_VIRTIO_MEM"))) {
-	case "1", "true", "yes", "on":
-		return "1"
-	case "0", "false", "no", "off":
-		return "0"
-	case "":
-		if runtime.GOOS == "windows" {
-			return "1"
-		}
-		return ""
-	default:
-		// Preserve the VMM's conservative handling of unknown values. Windows
-		// workers need an explicit zero so their platform default does not turn
-		// an invalid parent setting back on.
-		if runtime.GOOS == "windows" {
-			return "0"
-		}
-		return ""
-	}
-}
 
 // Opts assembles vmm.Opts for the run. vsockFwd is the per-run socket
 // directory. envExtra enables the GANTRY_EXTRA_CMDLINE debug knob (the
@@ -77,7 +24,7 @@ func virtioMemWorkerSetting() string {
 // swapped between staging and boot, and a confined VMM worker needs no
 // open-by-path rights at all. On success the Opts owns the files
 // (Prepare consumes them); on error Opts closes what it opened.
-func (c RunConfig) Opts(n *Network, vsockFwd string, envExtra bool) (vmm.Opts, error) {
+func vmmOpts(c config.RunConfig, n *Network, vsockFwd string, envExtra bool) (vmm.Opts, error) {
 	var o vmm.Opts
 	fail := func(err error) (vmm.Opts, error) {
 		for _, f := range append(append([]*os.File{o.Kernel, o.Initrd, o.Rootfs}, o.DisksRO...), o.Disks...) {
@@ -164,14 +111,4 @@ func (c RunConfig) Opts(n *Network, vsockFwd string, envExtra bool) (vmm.Opts, e
 	o.VsockListen = []uint32{1026}
 	o.Cmdline = cmdline
 	return o, nil
-}
-
-// isErofsFile reports whether p is an existing plain file with the
-// .erofs suffix — the one -image form that needs no resolution.
-func isErofsFile(p string) bool {
-	if !strings.HasSuffix(p, ".erofs") {
-		return false
-	}
-	st, err := os.Stat(p)
-	return err == nil && !st.IsDir()
 }

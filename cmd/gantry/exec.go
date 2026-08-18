@@ -8,6 +8,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -33,7 +34,7 @@ examples:
 flags:`)
 		fs.PrintDefaults()
 	}
-	rf := sandbox.RegisterRunFlags(fs)
+	rf := config.RegisterRunFlags(fs)
 	console := fs.Bool("console", false, "stream the guest serial console to stderr (default: log file in the work dir)")
 
 	args := []string(nil)
@@ -52,7 +53,7 @@ flags:`)
 	}
 
 	progress := gutil.NewProgressPrinter(os.Stdout, "gantry exec: ")
-	cfg, warnings, err := rf.Resolve(fs, progress.Printf)
+	cfg, warnings, err := sandbox.Resolve(rf, fs, progress.Printf)
 	progress.Finish()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry exec:", err)
@@ -70,7 +71,7 @@ flags:`)
 	return transientExec(cfg, secrets, args, *console)
 }
 
-func warnOpenSecretEgress(cfg sandbox.RunConfig, secrets map[string]secret.Value) {
+func warnOpenSecretEgress(cfg config.RunConfig, secrets map[string]secret.Value) {
 	if len(secrets) == 0 || !cfg.Net || cfg.NetPol != "" {
 		return
 	}

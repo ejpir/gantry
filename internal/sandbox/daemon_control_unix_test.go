@@ -12,16 +12,16 @@ import (
 )
 
 func TestCloseShutdownDevicesCollectsFinalNetworkTrafficBeforeVMMClose(t *testing.T) {
-	worker, data := startInProcessWorker(t, testWorkerConfig(t, `{"default":"allow"}`))
+	childConn, data := startInProcessNetWorker(t)
 	recorder := netpol.NewTrafficRecorder(filepath.Join(t.TempDir(), netpol.TrafficFileName))
-	worker.startTrafficSyncEvery(recorder, time.Hour)
+	childConn.StartTrafficSyncEvery(recorder, time.Hour)
 
 	if err := workerproto.WriteFrame(data, workerTestFrame(t, "203.0.113.7", 6, 443)); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		snapshot, err := worker.TrafficSnapshot()
+		snapshot, err := childConn.TrafficSnapshot()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -45,9 +45,9 @@ func TestCloseShutdownDevicesCollectsFinalNetworkTrafficBeforeVMMClose(t *testin
 		runner: runner,
 		network: &Network{
 			Split:   true,
-			Worker:  worker,
+			Worker:  childConn,
 			Traffic: recorder,
-			close:   worker.Close,
+			close:   childConn.Close,
 		},
 	}
 	t.Cleanup(runtime.network.Close)

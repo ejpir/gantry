@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 )
 
 func TestReadFileTailDoesNotReadSparsePrefix(t *testing.T) {
@@ -25,7 +27,7 @@ func TestReadFileTailDoesNotReadSparsePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tail, err := readFileTail(path, 4096)
+	tail, err := boundedlog.ReadTail(path, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
