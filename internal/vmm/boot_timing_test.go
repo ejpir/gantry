@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/vmm/boot"
+	"github.com/ejpir/gantry/internal/vmm/devices"
 )
 
 func TestBootTimelineFirstOccurrence(t *testing.T) {
@@ -61,10 +63,10 @@ func TestMachineBootMilestones(t *testing.T) {
 	ram := make([]byte, 1<<20)
 	m := &Machine{
 		arch:       "arm64",
-		mem:        virtio.NewRAM(ram, ramBase),
+		mem:        virtio.NewRAM(ram, boot.RAMBase),
 		bootTiming: timeline,
 	}
-	m.uart = newPL011(func(int, bool) {}, func(byte) {})
+	m.uart = devices.NewPL011(func(int, bool) {}, func(byte) {})
 	root, err := m.addVirtio(virtio.NewRNG(), "blk")
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +79,7 @@ func TestMachineBootMilestones(t *testing.T) {
 	m.vsockCore = vsock
 
 	var data [4]byte
-	m.handleMMIO(false, uartBase+0x18, data[:], 4)
+	m.handleMMIO(false, devices.PL011Base+0x18, data[:], 4)
 	m.handleMMIO(false, root.Base(), data[:], 4)
 	binary.LittleEndian.PutUint32(data[:], 0)
 	m.handleMMIO(true, root.Base()+0x50, data[:], 4)
@@ -85,7 +87,7 @@ func TestMachineBootMilestones(t *testing.T) {
 	m.handleMMIO(true, vsock.Base()+0x50, data[:], 4)
 
 	// Repeating every access must not emit duplicate first-occurrence lines.
-	m.handleMMIO(false, uartBase+0x18, data[:], 4)
+	m.handleMMIO(false, devices.PL011Base+0x18, data[:], 4)
 	m.handleMMIO(false, root.Base(), data[:], 4)
 	binary.LittleEndian.PutUint32(data[:], 0)
 	m.handleMMIO(true, root.Base()+0x50, data[:], 4)

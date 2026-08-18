@@ -1,6 +1,6 @@
 //go:build (linux && amd64) || windows
 
-package vmm
+package devices
 
 // Minimal 16550A UART for x86-64 guests: the kernel's 8250 driver probes
 // ports 0x3f8..0x3ff (COM1, IRQ 4) and console=ttyS0 talks to it. Only what
@@ -14,12 +14,12 @@ import (
 )
 
 const (
-	x86SerialPort = 0x3f8
-	x86SerialSize = 8
-	x86SerialIRQ  = 4
+	SerialPort = 0x3f8
+	SerialSize = 8
+	SerialIRQ  = 4
 )
 
-type uart16550 struct {
+type UART16550 struct {
 	mu     sync.Mutex
 	raise  func(level bool)
 	output func(b byte)
@@ -34,11 +34,11 @@ type uart16550 struct {
 	dlm byte
 }
 
-func newUART16550(raise func(level bool), output func(byte)) *uart16550 {
-	return &uart16550{raise: raise, output: output}
+func NewUART16550(raise func(level bool), output func(byte)) *UART16550 {
+	return &UART16550{raise: raise, output: output}
 }
 
-func (u *uart16550) dlab() bool { return u.lcr&0x80 != 0 }
+func (u *UART16550) dlab() bool { return u.lcr&0x80 != 0 }
 
 // irqLevel computes the IRQ4 line state. A real 16550 treats interrupts as
 // level conditions: RX-data-available (IER.0) and THR-empty (IER.1). Our
@@ -46,26 +46,26 @@ func (u *uart16550) dlab() bool { return u.lcr&0x80 != 0 }
 // exactly IER.1 — the 8250 driver's interrupt-driven TX path (used for
 // userspace /dev/console writes, unlike polling kernel printk) stalls
 // without it.
-func (u *uart16550) irqLevel() bool {
+func (u *UART16550) irqLevel() bool {
 	rx := len(u.rx) > 0 && u.ier&0x01 != 0
 	thre := u.ier&0x02 != 0
 	return rx || thre
 }
 
 // syncIRQ drives the line to the current level; callers hold mu.
-func (u *uart16550) syncIRQ() { u.raise(u.irqLevel()) }
+func (u *UART16550) syncIRQ() { u.raise(u.irqLevel()) }
 
-func (u *uart16550) feed(b []byte) {
+func (u *UART16550) feed(b []byte) {
 	u.mu.Lock()
 	u.rx = append(u.rx, b...)
 	u.syncIRQ()
 	u.mu.Unlock()
 }
 
-func (u *uart16550) ioRead(port uint16) byte {
+func (u *UART16550) IORead(port uint16) byte {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	r := byte(port - x86SerialPort)
+	r := byte(port - SerialPort)
 	switch {
 	case r == 0 && u.dlab():
 		return u.dll
@@ -110,10 +110,10 @@ func (u *uart16550) ioRead(port uint16) byte {
 	return 0xff
 }
 
-func (u *uart16550) ioWrite(port uint16, val byte) {
+func (u *UART16550) IOWrite(port uint16, val byte) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	r := byte(port - x86SerialPort)
+	r := byte(port - SerialPort)
 	switch {
 	case r == 0 && u.dlab():
 		u.dll = val
@@ -136,7 +136,7 @@ func (u *uart16550) ioWrite(port uint16, val byte) {
 }
 
 // stdinPump forwards host stdin bytes into the guest serial port.
-func (u *uart16550) stdinPump(done <-chan struct{}) {
+func (u *UART16550) StdinPump(done <-chan struct{}) {
 	buf := make([]byte, 256)
 	for {
 		select {
@@ -154,6 +154,6 @@ func (u *uart16550) stdinPump(done <-chan struct{}) {
 	}
 }
 
-func (u *uart16550) String() string {
-	return fmt.Sprintf("16550 @ %#x irq %d", x86SerialPort, x86SerialIRQ)
+func (u *UART16550) String() string {
+	return fmt.Sprintf("16550 @ %#x irq %d", SerialPort, SerialIRQ)
 }

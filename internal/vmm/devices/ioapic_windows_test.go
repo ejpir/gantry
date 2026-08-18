@@ -1,11 +1,11 @@
 //go:build windows
 
-package vmm
+package devices
 
 import "testing"
 
 func TestIOApicIDStartsAtMPSValueAndIsWritable(t *testing.T) {
-	a := newIOApic(2, nil)
+	a := NewIOAPIC(2, nil)
 	if got := a.readReg(0); got != 2<<24 {
 		t.Fatalf("initial ID register = %#x, want %#x", got, 2<<24)
 	}

@@ -1,4 +1,4 @@
-package vmm
+package boot
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/vmm/devices"
 )
 
 // This is a minimal Flattened Device Tree (DTB) writer. The VMM builds the
@@ -15,16 +16,12 @@ import (
 
 // Guest physical memory map (aligned with QEMU's "virt" machine conventions).
 const (
-	gicdBase = 0x08000000 // GICv3 distributor, 64 KiB
+	GICDBase = 0x08000000 // GICv3 distributor, 64 KiB
 	gicdSize = 0x10000
-	gicrBase = 0x080A0000 // GICv3 redistributors (2x64K frames per vCPU)
+	GICRBase = 0x080A0000 // GICv3 redistributors (2x64K frames per vCPU)
 	gicrSize = 0x20000
 
-	uartBase = 0x09000000 // PL011
-	uartSize = 0x1000
-	uartIRQ  = 33 // GIC SPI 1 -> INTID 33
-
-	ramBase = 0x40000000
+	RAMBase = 0x40000000
 )
 
 const (
@@ -157,10 +154,10 @@ func (f *fdtBuilder) build() []byte {
 	return out.Bytes()
 }
 
-// buildGuestFDT renders the device tree for our VM.
+// BuildGuestFDT renders the device tree for our VM.
 // memSize in bytes; initrdStart/End are guest-physical (0 = no initrd);
 // nVirtio virtio-mmio devices are declared at 0x0a000000+i*0x200, SPI 16+i.
-func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string, nVirtio int, nCPU ...int) []byte {
+func BuildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string, nVirtio int, nCPU ...int) []byte {
 	vcpus := 1
 	if len(nCPU) > 0 && nCPU[0] > 0 {
 		vcpus = nCPU[0]
@@ -185,9 +182,9 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.endNode()
 
 	// /memory
-	f.beginNode(fmt.Sprintf("memory@%x", ramBase))
+	f.beginNode(fmt.Sprintf("memory@%x", RAMBase))
 	f.propStr("device_type", "memory")
-	f.propU32("reg", 0, ramBase, uint32(memSize>>32), uint32(memSize))
+	f.propU32("reg", 0, RAMBase, uint32(memSize>>32), uint32(memSize))
 	f.endNode()
 
 	// /cpus — one node per vCPU. The affinity must match the MPIDR assigned
@@ -197,7 +194,7 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.propU32("#address-cells", 1)
 	f.propU32("#size-cells", 0)
 	for i := 0; i < vcpus; i++ {
-		mpidr := guestVCPUMPIDR(i)
+		mpidr := VCPUMPIDR(i)
 		f.beginNode(fmt.Sprintf("cpu@%x", mpidr))
 		f.propStr("device_type", "cpu")
 		f.propStr("compatible", "arm,armv8")
@@ -218,13 +215,13 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.endNode()
 
 	// /gic — GICv3, addresses must match KVM_CREATE_DEVICE setup
-	f.beginNode(fmt.Sprintf("intc@%x", gicdBase))
+	f.beginNode(fmt.Sprintf("intc@%x", GICDBase))
 	f.propStr("compatible", "arm,gic-v3")
 	f.propU32("#interrupt-cells", 3)
 	f.propU32("#address-cells", 2)
 	f.propU32("#size-cells", 2)
 	f.propEmpty("interrupt-controller")
-	f.propU32("reg", 0, gicdBase, 0, gicdSize, 0, gicrBase, 0, uint32(vcpus)*gicrSize)
+	f.propU32("reg", 0, GICDBase, 0, gicdSize, 0, GICRBase, 0, uint32(vcpus)*gicrSize)
 	f.propU32("#redistributor-regions", 1)
 	f.propU32("phandle", 1)
 	f.endNode()
@@ -263,9 +260,9 @@ func buildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	// The Linux amba-pl011 driver requires BOTH clocks (uartclk + apb_pclk),
 	// exactly like QEMU's node — with only uartclk the probe fails and no
 	// ttyAMA0 console ever registers (no /dev/console for init!).
-	f.beginNode(fmt.Sprintf("pl011@%x", uartBase))
+	f.beginNode(fmt.Sprintf("pl011@%x", devices.PL011Base))
 	f.propStr("compatible", "arm,pl011", "arm,primecell")
-	f.propU32("reg", 0, uartBase, 0, uartSize)
+	f.propU32("reg", 0, devices.PL011Base, 0, devices.PL011Size)
 	f.propU32("interrupts", 0, 1, 0x4) // GIC_SPI 1, level-high
 	f.propU32("clocks", 2, 2)
 	f.propStr("clock-names", "uartclk", "apb_pclk")

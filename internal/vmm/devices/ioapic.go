@@ -1,6 +1,6 @@
 //go:build windows
 
-package vmm
+package devices
 
 // Userspace I/O APIC (82093AA) for hypervisors without an in-kernel irqchip
 // (WHPX). MMIO at 0xfec00000: IOREGSEL @ 0x00, IOWIN @ 0x10. 24 pins;
@@ -13,12 +13,12 @@ package vmm
 import "sync"
 
 const (
-	ioApicMMIOBase = 0xfec00000
-	ioApicMMIOSize = 0x20
+	IOAPICMMIOBase = 0xfec00000
+	IOAPICMMIOSize = 0x20
 	ioApicPins     = 24
 )
 
-type ioApic struct {
+type IOAPIC struct {
 	mu      sync.Mutex
 	id      uint32
 	regSel  uint32
@@ -27,15 +27,15 @@ type ioApic struct {
 	deliver func(dest uint32, vector uint32, level bool)
 }
 
-func newIOApic(id uint32, deliver func(dest, vector uint32, level bool)) *ioApic {
-	a := &ioApic{id: id & 0xf, deliver: deliver}
+func NewIOAPIC(id uint32, deliver func(dest, vector uint32, level bool)) *IOAPIC {
+	a := &IOAPIC{id: id & 0xf, deliver: deliver}
 	for i := range a.rte {
 		a.rte[i] = 1 << 16 // masked
 	}
 	return a
 }
 
-func (a *ioApic) readReg(reg uint32) uint32 {
+func (a *IOAPIC) readReg(reg uint32) uint32 {
 	switch {
 	case reg == 0x00:
 		return a.id << 24
@@ -53,7 +53,7 @@ func (a *ioApic) readReg(reg uint32) uint32 {
 	return 0
 }
 
-func (a *ioApic) writeReg(reg, val uint32) {
+func (a *IOAPIC) writeReg(reg, val uint32) {
 	switch {
 	case reg == 0x00:
 		// The architectural ID field is writable. Linux repairs firmware ID
@@ -70,8 +70,8 @@ func (a *ioApic) writeReg(reg, val uint32) {
 	}
 }
 
-// mmio handles one 32-bit access at [0, ioApicMMIOSize).
-func (a *ioApic) mmio(isWrite bool, off uint64, val uint32) uint32 {
+// mmio handles one 32-bit access at [0, IOAPICMMIOSize).
+func (a *IOAPIC) MMIO(isWrite bool, off uint64, val uint32) uint32 {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch off {
@@ -94,7 +94,7 @@ func (a *ioApic) mmio(isWrite bool, off uint64, val uint32) uint32 {
 // raise drives one input line (gsi). Edge RTEs deliver on every raise(true)
 // (our devices call raise once per event and lower on ack); level RTEs
 // deliver on the low→high transition.
-func (a *ioApic) raise(gsi int, level bool) {
+func (a *IOAPIC) Raise(gsi int, level bool) {
 	a.mu.Lock()
 	rte := a.rte[gsi]
 	prev := a.lines[gsi]

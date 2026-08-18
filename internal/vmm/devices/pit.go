@@ -1,6 +1,6 @@
 //go:build (linux && amd64) || windows
 
-package vmm
+package devices
 
 // Minimal i8254 PIT for hypervisors without an in-kernel one (WHPX).
 // Ports 0x40-0x42 (channel counters), 0x43 (mode/command), plus the port
@@ -25,7 +25,7 @@ type pitChannel struct {
 	readLSB  bool
 }
 
-type pit8254 struct {
+type PIT8254 struct {
 	mu     sync.Mutex
 	ch     [3]pitChannel
 	raise  func(level bool) // IRQ 0 line
@@ -34,11 +34,11 @@ type pit8254 struct {
 	now    func() time.Time
 }
 
-func newPIT(raise func(level bool)) *pit8254 {
-	return &pit8254{raise: raise, now: time.Now}
+func NewPIT(raise func(level bool)) *PIT8254 {
+	return &PIT8254{raise: raise, now: time.Now}
 }
 
-func (p *pit8254) ticksSince(start time.Time) uint64 {
+func (p *PIT8254) ticksSince(start time.Time) uint64 {
 	elapsed := p.now().Sub(start)
 	if elapsed <= 0 {
 		return 0
@@ -46,7 +46,7 @@ func (p *pit8254) ticksSince(start time.Time) uint64 {
 	return uint64(elapsed) * pitClockHz / uint64(time.Second)
 }
 
-func (p *pit8254) count(ch int) uint16 {
+func (p *PIT8254) count(ch int) uint16 {
 	c := &p.ch[ch]
 	if !c.running || c.reload == 0 {
 		return 0
@@ -62,7 +62,7 @@ func (p *pit8254) count(ch int) uint16 {
 	return c.reload - uint16(ticks%uint64(c.reload))
 }
 
-func (p *pit8254) ioRead(port uint16) byte {
+func (p *PIT8254) IORead(port uint16) byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	idx := int(port - 0x40)
@@ -106,7 +106,7 @@ func (p *pit8254) ioRead(port uint16) byte {
 	return byte(v)
 }
 
-func (p *pit8254) ioWrite(port uint16, val byte) {
+func (p *PIT8254) IOWrite(port uint16, val byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if port == 0x43 { // mode/command
@@ -159,7 +159,7 @@ func (p *pit8254) ioWrite(port uint16, val byte) {
 
 // armTimerLocked (re)starts the IRQ 0 generator for channel 0. Periodic
 // modes pulse the line at reload ticks; one-shot fires once.
-func (p *pit8254) armTimerLocked() {
+func (p *PIT8254) armTimerLocked() {
 	if p.cancel != nil {
 		p.cancel()
 		p.cancel = nil

@@ -1,10 +1,10 @@
 //go:build windows
 
-package vmm
+package devices
 
 // setDeliver connects the userspace PIC to WHPX after the backend is ready.
 // Linux uses the kernel's PIC and therefore has no delivery callback to set.
-func (p *pic8259) setDeliver(deliver func(vector uint32)) {
+func (p *PIC8259) SetDeliver(deliver func(vector uint32)) {
 	p.mu.Lock()
 	p.deliver = deliver
 	vector, fire := p.dispatchLocked()

@@ -1,6 +1,6 @@
 //go:build (linux && amd64) || windows
 
-package vmm
+package devices
 
 // Minimal cascaded i8259 PIC. KVM has an in-kernel PIC, so Linux only needs
 // the port-visible shadow. WHPX uses the delivery callback when the guest boots
@@ -25,7 +25,7 @@ type picChip struct {
 
 // mu guards programming and delivery state: port I/O and device IRQs arrive on
 // different goroutines.
-type pic8259 struct {
+type PIC8259 struct {
 	mu          sync.Mutex
 	master      picChip
 	slave       picChip
@@ -34,15 +34,15 @@ type pic8259 struct {
 	debugEvents uint64
 }
 
-func newPIC(deliver func(vector uint32)) *pic8259 {
-	return &pic8259{
+func NewPIC(deliver func(vector uint32)) *PIC8259 {
+	return &PIC8259{
 		master:  picChip{vectorBase: 0x08},
 		slave:   picChip{vectorBase: 0x70},
 		deliver: deliver,
 	}
 }
 
-func (p *pic8259) ioRead(port uint16) byte {
+func (p *PIC8259) IORead(port uint16) byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	switch port {
@@ -64,9 +64,9 @@ func (p *pic8259) ioRead(port uint16) byte {
 	return 0xff
 }
 
-func (p *pic8259) ioWrite(port uint16, val byte) {
+func (p *PIC8259) IOWrite(port uint16, val byte) {
 	p.mu.Lock()
-	if dbgIO {
+	if DebugIO {
 		fmt.Printf("[pic] out port=%#x val=%#x\n", port, val)
 	}
 	chip := &p.master
@@ -125,7 +125,7 @@ func (p *pic8259) ioWrite(port uint16, val byte) {
 // raise latches a low-to-high edge. A real 8259 retains masked requests in
 // IRR and dispatches them when unmasked; dropping those edges is enough to
 // stall virtio during Linux's driver-probe mask transitions.
-func (p *pic8259) raise(irq int, level bool) {
+func (p *PIC8259) Raise(irq int, level bool) {
 	if irq < 0 || irq >= 16 {
 		return
 	}
@@ -144,7 +144,7 @@ func (p *pic8259) raise(irq int, level bool) {
 	// UART register programming produces many redundant deassertions before
 	// the first real device interrupt. Do not let those consume the bounded
 	// debug trace; retain assertions and actual dispatch decisions.
-	if dbgIO && (level || fire) && p.debugEvents < 200 {
+	if DebugIO && (level || fire) && p.debugEvents < 200 {
 		p.debugEvents++
 		fmt.Printf("[pic] irq=%d level=%v vector=%#x fire=%v master=%#x/%#x/%#x slave=%#x/%#x/%#x\n",
 			irq, level, vector, fire,
@@ -157,7 +157,7 @@ func (p *pic8259) raise(irq int, level bool) {
 	}
 }
 
-func (p *pic8259) cascadeRequestLocked() byte {
+func (p *PIC8259) cascadeRequestLocked() byte {
 	if pendingIRQ(p.slave.irr&^p.slave.imr, p.slave.isr) >= 0 {
 		return 1 << 2
 	}
@@ -168,7 +168,7 @@ func (p *pic8259) cascadeRequestLocked() byte {
 // interrupt-acknowledge cycle would. EOI or a later device edge drives the
 // next dispatch; this prevents an interrupt storm from outrunning Linux's
 // handler and preserves fixed 8259 priority.
-func (p *pic8259) dispatchLocked() (uint32, bool) {
+func (p *PIC8259) dispatchLocked() (uint32, bool) {
 	slaveIRQ := pendingIRQ(p.slave.irr&^p.slave.imr, p.slave.isr)
 	masterPending := p.master.irr &^ p.master.imr
 	if slaveIRQ >= 0 && p.master.imr&(1<<2) == 0 {

@@ -1,4 +1,4 @@
-package vmm
+package devices
 
 import (
 	"fmt"
@@ -27,7 +27,7 @@ import (
 var noUartIRQ = os.Getenv("GANTRY_NO_UART_IRQ") != ""
 var dbgUartIRQ = os.Getenv("GANTRY_DEBUG") != "" || os.Getenv("GANTRY_DEBUG_UART") != ""
 
-type pl011 struct {
+type PL011 struct {
 	mu       sync.Mutex
 	rxBuf    []byte // bytes typed on host stdin, waiting for the guest
 	imsc     uint32
@@ -37,11 +37,11 @@ type pl011 struct {
 	output   func(b byte)
 }
 
-func newPL011(raise func(int, bool), output func(byte)) *pl011 {
-	return &pl011{raise: raise, output: output}
+func NewPL011(raise func(int, bool), output func(byte)) *PL011 {
+	return &PL011{raise: raise, output: output}
 }
 
-func (u *pl011) dbg(format string, a ...any) {
+func (u *PL011) dbg(format string, a ...any) {
 	if dbgUartIRQ {
 		fmt.Printf("[uart] "+format+"\n", a...)
 	}
@@ -50,21 +50,21 @@ func (u *pl011) dbg(format string, a ...any) {
 // updateIRQLocked drives the IRQ line like real PL011 hardware:
 // level = (RX interrupt pending AND unmasked). Assert while the FIFO has
 // data, deassert once the guest drains it.
-func (u *pl011) updateIRQLocked() {
+func (u *PL011) updateIRQLocked() {
 	if u.raise == nil {
 		return
 	}
 	level := len(u.rxBuf) > 0 && u.imsc&0x10 != 0
 	if level != u.irqLevel {
-		u.dbg("IRQ %d -> %v (fifo=%d imsc=%#x)", uartIRQ, level, len(u.rxBuf), u.imsc)
+		u.dbg("IRQ %d -> %v (fifo=%d imsc=%#x)", PL011IRQ, level, len(u.rxBuf), u.imsc)
 		u.irqLevel = level
 		if !noUartIRQ {
-			u.raise(uartIRQ, level)
+			u.raise(PL011IRQ, level)
 		}
 	}
 }
 
-func (u *pl011) ris() uint32 {
+func (u *PL011) ris() uint32 {
 	if len(u.rxBuf) > 0 {
 		return 0x10 // RXRIS
 	}
@@ -72,7 +72,7 @@ func (u *pl011) ris() uint32 {
 }
 
 // mmio handles one guest MMIO access. Returns the value for reads.
-func (u *pl011) mmio(isWrite bool, off uint64, data []byte, length uint32) uint32 {
+func (u *PL011) MMIO(isWrite bool, off uint64, data []byte, length uint32) uint32 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -124,3 +124,12 @@ func (u *pl011) mmio(isWrite bool, off uint64, data []byte, length uint32) uint3
 
 // pl011ID: PeriphID0-3 (0xfe0..0xfec), CellID0-3 (0xff0..0xffc) — same as QEMU.
 var pl011ID = [8]byte{0x11, 0x10, 0x14, 0x00, 0x0d, 0xf0, 0x05, 0xb1}
+
+// The PL011's fixed placement on the arm64 virt layout. The device, the
+// machine's MMIO dispatch and the device tree must all agree on it, so it is
+// stated once, here, with the device it describes.
+const (
+	PL011Base = 0x09000000
+	PL011Size = 0x1000
+	PL011IRQ  = 33 // GIC SPI 1 -> INTID 33
+)

@@ -1,6 +1,6 @@
 //go:build (linux && arm64) || darwin
 
-package vmm
+package devices
 
 import "os"
 
@@ -9,7 +9,7 @@ import "os"
 // guest UART; the x86 paths keep console I/O port-local.
 
 // stdinPump copies host stdin into the UART RX buffer.
-func (u *pl011) stdinPump(done <-chan struct{}) {
+func (u *PL011) StdinPump(done <-chan struct{}) {
 	buf := make([]byte, 64)
 	for {
 		select {
@@ -28,7 +28,7 @@ func (u *pl011) stdinPump(done <-chan struct{}) {
 }
 
 // feed is called by the host stdin pump with typed bytes.
-func (u *pl011) feed(b []byte) {
+func (u *PL011) feed(b []byte) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.rxBuf = append(u.rxBuf, b...)
