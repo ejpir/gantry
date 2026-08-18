@@ -14,6 +14,8 @@ import (
 
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/vmm/boot"
+	"github.com/ejpir/gantry/internal/vmm/devices"
 )
 
 // Guest physical layout inside RAM:
@@ -22,7 +24,7 @@ import (
 //	0x40200000  kernel Image (2 MiB aligned; header text_offset is zero)
 //	0x46000000  initramfs
 const (
-	fdtAddr    = ramBase
+	fdtAddr    = boot.RAMBase
 	initrdOff  = 0x06000000
 	kernelOff  = 0x00200000 // fallback for relocatable Images with text_offset=0
 	maxFDTSize = 0x20000    // keep FDT well below kernel entry
@@ -118,7 +120,7 @@ func loadKernel(f *os.File, ram []byte) (entry uint64, arch string, err error) {
 		return 0, "", err
 	}
 	if arch == "amd64" {
-		entry, err = loadKernelX86(f, uint64(size), ram)
+		entry, err = boot.LoadKernelX86(f, uint64(size), ram)
 		return entry, arch, err
 	}
 	if binary.LittleEndian.Uint32(hdr[0x38:]) != 0x644d5241 {
@@ -133,7 +135,7 @@ func loadKernel(f *os.File, ram []byte) (entry uint64, arch string, err error) {
 	if textOffset == 0 {
 		textOffset = kernelOff
 	}
-	entry = ramBase + textOffset
+	entry = boot.RAMBase + textOffset
 	dst := textOffset
 	if dst > uint64(len(ram)) || uint64(size) > uint64(len(ram))-dst {
 		return 0, "", fmt.Errorf("kernel too big for guest RAM")
@@ -146,7 +148,7 @@ func loadKernel(f *os.File, ram []byte) (entry uint64, arch string, err error) {
 		}
 	}
 	fmt.Printf("kernel: %s (%d bytes) @ %#x, image_size=%d, entry %#x\n",
-		path, size, ramBase+dst, imageSize, entry)
+		path, size, boot.RAMBase+dst, imageSize, entry)
 	return entry, arch, nil
 }
 
@@ -160,7 +162,7 @@ func loadInitrd(f *os.File, ram []byte) (start, end uint64, err error) {
 	if size < 0 {
 		return 0, 0, fmt.Errorf("%s: negative initramfs size %d", path, size)
 	}
-	start = ramBase + initrdOff
+	start = boot.RAMBase + initrdOff
 	if initrdOff > uint64(len(ram)) || uint64(size) > uint64(len(ram))-initrdOff {
 		return 0, 0, fmt.Errorf("initramfs too big for guest RAM")
 	}
@@ -189,7 +191,7 @@ type Machine struct {
 	x86LowRAMSize  uint64
 	x86HotMemSize  uint64
 	fdt            []byte
-	uart           *pl011 // arm64 console (MMIO)
+	uart           *devices.PL011 // arm64 console (MMIO)
 	// x86 clusters the legacy PC devices (16550 console, CMOS RTC, PIT,
 	// PIC, I/O APIC): they exist only on the x86 boot paths (KVM on
 	// linux/amd64, WHPX on Windows) and the whole cluster is build-gated
@@ -326,7 +328,7 @@ var dbgMMIO = os.Getenv("GANTRY_DEBUG_UART") != ""
 
 // handleMMIO routes one guest MMIO access. Returns the read value (reads).
 func (m *Machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint32) uint32 {
-	if m.uart != nil && phys >= uartBase && phys < uartBase+uartSize {
+	if m.uart != nil && phys >= devices.PL011Base && phys < devices.PL011Base+devices.PL011Size {
 		if m.bootTiming != nil {
 			m.bootTiming.mark(bootFirstUART, "first UART access")
 		}
@@ -337,7 +339,7 @@ func (m *Machine) handleMMIO(isWrite bool, phys uint64, data []byte, length uint
 			}
 			fmt.Printf("[mmio] %s %#x len=%d data=%x\n", op, phys, length, data[:min(int(length), 4)])
 		}
-		return m.uart.mmio(isWrite, phys-uartBase, data, length)
+		return m.uart.MMIO(isWrite, phys-devices.PL011Base, data, length)
 	}
 	if vc := m.virtioAt(phys); vc != nil {
 		off := phys - vc.Base()
@@ -386,14 +388,14 @@ func (m *Machine) virtioAt(phys uint64) *virtio.Core {
 	return device
 }
 
-// x86RAMRegions is also compiled for the Windows/arm64 package-load scan:
+// ramRegions is also compiled for the Windows/arm64 package-load scan:
 // WHPX rejects that host architecture before runtime, but keeping its source
 // selected lets govulncheck analyze the Windows backend call graph.
-func (m *Machine) x86RAMRegions() []x86RAMRegion { //nolint:unused
+func (m *Machine) ramRegions() []boot.RAMRegion { //nolint:unused
 	if m.x86LowRAMSize == 0 {
-		return x86RAMRegions(uint64(len(m.ram)))
+		return boot.RAMRegions(uint64(len(m.ram)))
 	}
-	return x86RAMRegionsWithLow(uint64(len(m.ram)), m.x86LowRAMSize)
+	return boot.RAMRegionsWithLow(uint64(len(m.ram)), m.x86LowRAMSize)
 }
 
 type Opts struct {
@@ -549,7 +551,7 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	virtioMemBootSize, virtioMemEnabled := uint64(0), false
 	virtioMemDeferred := false
 	if arch == "amd64" {
-		virtioMemBootSize, virtioMemEnabled = x86VirtioMemLayout(runtime.GOOS, o.MemSize, os.Getenv("GANTRY_VIRTIO_MEM"))
+		virtioMemBootSize, virtioMemEnabled = boot.VirtioMemLayout(runtime.GOOS, o.MemSize, os.Getenv("GANTRY_VIRTIO_MEM"))
 		virtioMemDeferred = virtioMemEnabled && (o.VsockFwd != "" || o.VsockDial != nil)
 		if virtioMemDeferred {
 			initialCommit = virtioMemBootSize
@@ -579,18 +581,18 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	m.arch = arch
 	if arch == "amd64" {
 		m.x86BootMemSize = o.MemSize
-		m.x86LowRAMSize = min(o.MemSize, uint64(x86LowRAMEnd))
+		m.x86LowRAMSize = min(o.MemSize, uint64(boot.LowRAMEnd))
 		if virtioMemEnabled {
 			m.x86BootMemSize = virtioMemBootSize
 			m.x86LowRAMSize = virtioMemBootSize
 			m.x86HotMemSize = o.MemSize - virtioMemBootSize
 		}
-		m.mem = virtio.NewSplitRAM(ram, m.x86LowRAMSize, x86HighRAMStart)
+		m.mem = virtio.NewSplitRAM(ram, m.x86LowRAMSize, boot.HighRAMStart)
 		if virtioMemDeferred {
 			m.mem.DeferHighRegion()
 		}
 	} else {
-		m.mem = virtio.NewRAM(ram, ramBase)
+		m.mem = virtio.NewRAM(ram, boot.RAMBase)
 	}
 
 	var is, ie uint64
@@ -604,10 +606,10 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	if arch == "amd64" {
 		m.initX86()
 	} else {
-		m.uart = newPL011(m.raise, func(b byte) { m.stdoutWrite(b) })
+		m.uart = devices.NewPL011(m.raise, func(b byte) { m.stdoutWrite(b) })
 	}
 	if m.x86HotMemSize != 0 {
-		memory, err := virtio.NewMem(x86HighRAMStart, m.x86HotMemSize, x86VirtioMemBlockSize)
+		memory, err := virtio.NewMem(boot.HighRAMStart, m.x86HotMemSize, boot.VirtioMemBlockSize)
 		if err != nil {
 			return nil, err
 		}

@@ -1,8 +1,8 @@
 //go:build !darwin
 
-package vmm
+package boot
 
 // KVM assigns each vCPU ID directly to MPIDR Aff0.
-func guestVCPUMPIDR(id int) uint32 {
+func VCPUMPIDR(id int) uint32 {
 	return uint32(id)
 }

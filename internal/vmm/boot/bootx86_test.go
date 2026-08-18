@@ -1,4 +1,4 @@
-package vmm
+package boot
 
 import (
 	"bytes"
@@ -21,10 +21,10 @@ func (r *countingReaderAt) ReadAt(dst []byte, offset int64) (int, error) {
 func TestSetupX86BootZeroPage(t *testing.T) {
 	ram := make([]byte, 16<<20)
 	cmd := "console=ttyS0 root=/dev/vda ro nokaslr -- -vsock-cid=3"
-	if err := setupX86Boot(ram, cmd, 1024<<20, 4); err != nil {
+	if err := SetupX86(ram, cmd, 1024<<20, 4); err != nil {
 		t.Fatal(err)
 	}
-	zp := ram[x86ZeroPage:]
+	zp := ram[ZeroPage:]
 	if got := zp[0x1e8]; got != 2 {
 		t.Errorf("e820_entries = %d, want 2", got)
 	}
@@ -34,31 +34,31 @@ func TestSetupX86BootZeroPage(t *testing.T) {
 	if zp[0x210] != 0xff {
 		t.Errorf("type_of_loader = %#x", zp[0x210])
 	}
-	if got := binary.LittleEndian.Uint32(zp[0x228:]); got != x86CmdlineAddr {
+	if got := binary.LittleEndian.Uint32(zp[0x228:]); got != CmdlineAddr {
 		t.Errorf("cmd_line_ptr = %#x", got)
 	}
 	// e820 entry 0: [0, 0x9fc00) RAM
 	if a := binary.LittleEndian.Uint64(zp[0x2d0:]); a != 0 {
 		t.Errorf("e820[0].addr = %#x", a)
 	}
-	if s := binary.LittleEndian.Uint64(zp[0x2d8:]); s != x86MemHoleStart {
+	if s := binary.LittleEndian.Uint64(zp[0x2d8:]); s != MemHoleStart {
 		t.Errorf("e820[0].size = %#x", s)
 	}
 	if typ := binary.LittleEndian.Uint32(zp[0x2e0:]); typ != 1 {
 		t.Errorf("e820[0].type = %d", typ)
 	}
 	// e820 entry 1: [0x100000, 1G) RAM
-	if a := binary.LittleEndian.Uint64(zp[0x2d0+20:]); a != x86MemHoleEnd {
+	if a := binary.LittleEndian.Uint64(zp[0x2d0+20:]); a != MemHoleEnd {
 		t.Errorf("e820[1].addr = %#x", a)
 	}
-	if s := binary.LittleEndian.Uint64(zp[0x2d0+28:]); s != (1024<<20)-x86MemHoleEnd {
+	if s := binary.LittleEndian.Uint64(zp[0x2d0+28:]); s != (1024<<20)-MemHoleEnd {
 		t.Errorf("e820[1].size = %#x", s)
 	}
 	// cmdline copied + NUL-terminated
-	if string(ram[x86CmdlineAddr:x86CmdlineAddr+len(cmd)]) != cmd {
-		t.Errorf("cmdline not at %#x", x86CmdlineAddr)
+	if string(ram[CmdlineAddr:CmdlineAddr+len(cmd)]) != cmd {
+		t.Errorf("cmdline not at %#x", CmdlineAddr)
 	}
-	if ram[x86CmdlineAddr+len(cmd)] != 0 {
+	if ram[CmdlineAddr+len(cmd)] != 0 {
 		t.Error("cmdline not NUL-terminated")
 	}
 }
@@ -66,39 +66,37 @@ func TestSetupX86BootZeroPage(t *testing.T) {
 func TestSetupX86BootHighMemoryE820(t *testing.T) {
 	ram := make([]byte, 16<<20)
 	const memSize = 22 << 30
-	if err := setupX86Boot(ram, "console=ttyS0", memSize, 1); err != nil {
+	if err := SetupX86(ram, "console=ttyS0", memSize, 1); err != nil {
 		t.Fatal(err)
 	}
-	zp := ram[x86ZeroPage:]
+	zp := ram[ZeroPage:]
 	if got := zp[0x1e8]; got != 3 {
 		t.Fatalf("e820_entries = %d, want 3", got)
 	}
-	if addr := binary.LittleEndian.Uint64(zp[0x2d0+20:]); addr != x86MemHoleEnd {
-		t.Fatalf("e820[1].addr = %#x, want %#x", addr, x86MemHoleEnd)
+	if addr := binary.LittleEndian.Uint64(zp[0x2d0+20:]); addr != MemHoleEnd {
+		t.Fatalf("e820[1].addr = %#x, want %#x", addr, MemHoleEnd)
 	}
-	if size := binary.LittleEndian.Uint64(zp[0x2d0+28:]); size != x86LowRAMEnd-x86MemHoleEnd {
-		t.Fatalf("e820[1].size = %#x, want %#x", size, x86LowRAMEnd-x86MemHoleEnd)
+	if size := binary.LittleEndian.Uint64(zp[0x2d0+28:]); size != LowRAMEnd-MemHoleEnd {
+		t.Fatalf("e820[1].size = %#x, want %#x", size, LowRAMEnd-MemHoleEnd)
 	}
-	if addr := binary.LittleEndian.Uint64(zp[0x2d0+40:]); addr != x86HighRAMStart {
-		t.Fatalf("e820[2].addr = %#x, want %#x", addr, x86HighRAMStart)
+	if addr := binary.LittleEndian.Uint64(zp[0x2d0+40:]); addr != HighRAMStart {
+		t.Fatalf("e820[2].addr = %#x, want %#x", addr, HighRAMStart)
 	}
-	if size := binary.LittleEndian.Uint64(zp[0x2d0+48:]); size != memSize-x86LowRAMEnd {
-		t.Fatalf("e820[2].size = %#x, want %#x", size, memSize-x86LowRAMEnd)
+	if size := binary.LittleEndian.Uint64(zp[0x2d0+48:]); size != memSize-LowRAMEnd {
+		t.Fatalf("e820[2].size = %#x, want %#x", size, memSize-LowRAMEnd)
 	}
 }
 
 func TestX86RAMRegionsKeepHostRAMContiguousAroundGuestHole(t *testing.T) {
 	const memSize = 22 << 30
-	regions := x86RAMRegions(memSize)
+	regions := RAMRegions(memSize)
 	if len(regions) != 2 {
 		t.Fatalf("regions = %#v", regions)
 	}
-	if regions[0] != (x86RAMRegion{size: x86LowRAMEnd}) {
+	if regions[0] != (RAMRegion{Size: LowRAMEnd}) {
 		t.Fatalf("low region = %#v", regions[0])
 	}
-	wantHigh := x86RAMRegion{
-		guestBase: x86HighRAMStart, hostOffset: x86LowRAMEnd, size: memSize - x86LowRAMEnd,
-	}
+	wantHigh := RAMRegion{GuestBase: HighRAMStart, HostOffset: LowRAMEnd, Size: memSize - LowRAMEnd}
 	if regions[1] != wantHigh {
 		t.Fatalf("high region = %#v, want %#v", regions[1], wantHigh)
 	}
@@ -122,11 +120,11 @@ func TestX86VirtioMemLayout(t *testing.T) {
 		{name: "remainder", hostOS: "windows", memory: 1025 * mib, setting: "true", wantBoot: 513 * mib, wantEnable: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			boot, enabled := x86VirtioMemLayout(test.hostOS, test.memory, test.setting)
+			boot, enabled := VirtioMemLayout(test.hostOS, test.memory, test.setting)
 			if boot != test.wantBoot || enabled != test.wantEnable {
 				t.Fatalf("layout = (%d MiB, %v), want (%d MiB, %v)", boot>>20, enabled, test.wantBoot>>20, test.wantEnable)
 			}
-			if enabled && (test.memory-boot)%x86VirtioMemBlockSize != 0 {
+			if enabled && (test.memory-boot)%VirtioMemBlockSize != 0 {
 				t.Fatalf("hot-add tail %#x is not block aligned", test.memory-boot)
 			}
 		})
@@ -134,14 +132,14 @@ func TestX86VirtioMemLayout(t *testing.T) {
 }
 
 func TestX86RAMRegionsWithVirtioMemBootRegion(t *testing.T) {
-	regions := x86RAMRegionsWithLow(22<<30, 512<<20)
+	regions := RAMRegionsWithLow(22<<30, 512<<20)
 	if len(regions) != 2 {
 		t.Fatalf("region count = %d, want 2", len(regions))
 	}
-	if regions[0] != (x86RAMRegion{size: 512 << 20}) {
+	if regions[0] != (RAMRegion{Size: 512 << 20}) {
 		t.Fatalf("low region = %+v", regions[0])
 	}
-	want := x86RAMRegion{guestBase: x86HighRAMStart, hostOffset: 512 << 20, size: 22<<30 - 512<<20}
+	want := RAMRegion{GuestBase: HighRAMStart, HostOffset: 512 << 20, Size: 22<<30 - 512<<20}
 	if regions[1] != want {
 		t.Fatalf("hot-add region = %+v, want %+v", regions[1], want)
 	}
@@ -149,18 +147,18 @@ func TestX86RAMRegionsWithVirtioMemBootRegion(t *testing.T) {
 
 func TestSetupX86BootPageTables(t *testing.T) {
 	ram := make([]byte, 16<<20)
-	if err := setupX86Boot(ram, "x", 512<<20, 1); err != nil {
+	if err := SetupX86(ram, "x", 512<<20, 1); err != nil {
 		t.Fatal(err)
 	}
 	// walk: PML4[0] -> PDPT[i] -> PD[j] -> 2MiB page at phys
-	pml4e := binary.LittleEndian.Uint64(ram[x86PML4:])
-	if pml4e != x86PDPT|0x3 {
+	pml4e := binary.LittleEndian.Uint64(ram[PML4:])
+	if pml4e != PDPT|0x3 {
 		t.Fatalf("PML4[0] = %#x", pml4e)
 	}
 	for _, phys := range []uint64{0, 0x200000, 0x40000000, 0xc0000000, 0xffe00000} {
 		i := phys >> 30         // PDPT slot (1 GiB each)
 		j := (phys >> 21) & 511 // PD slot (2 MiB each)
-		pdpte := binary.LittleEndian.Uint64(ram[x86PDPT+i*8:])
+		pdpte := binary.LittleEndian.Uint64(ram[PDPT+i*8:])
 		pdAddr := pdpte &^ 0x3
 		pde := binary.LittleEndian.Uint64(ram[pdAddr+j*8:])
 		if pde != phys|0x83 {
@@ -168,10 +166,10 @@ func TestSetupX86BootPageTables(t *testing.T) {
 		}
 	}
 	// GDT: code64 @0x10, data @0x18
-	if g := binary.LittleEndian.Uint64(ram[x86GDT+0x10:]); g != 0x00AF9B000000FFFF {
+	if g := binary.LittleEndian.Uint64(ram[GDT+0x10:]); g != 0x00AF9B000000FFFF {
 		t.Errorf("GDT code64 = %#x", g)
 	}
-	if g := binary.LittleEndian.Uint64(ram[x86GDT+0x18:]); g != 0x00CF93000000FFFF {
+	if g := binary.LittleEndian.Uint64(ram[GDT+0x18:]); g != 0x00CF93000000FFFF {
 		t.Errorf("GDT data = %#x", g)
 	}
 }
@@ -182,7 +180,7 @@ func TestISAIRQGSI(t *testing.T) {
 		if irq == 0 {
 			want = 2
 		}
-		if got := isaIRQGSI(irq); got != want {
+		if got := ISAIRQGSI(irq); got != want {
 			t.Errorf("ISA IRQ%d maps to GSI%d, want GSI%d", irq, got, want)
 		}
 	}
@@ -190,14 +188,14 @@ func TestISAIRQGSI(t *testing.T) {
 
 func TestSetupX86BootMPS(t *testing.T) {
 	ram := make([]byte, 16<<20)
-	if err := setupX86Boot(ram, "x", 512<<20, 4); err != nil {
+	if err := SetupX86(ram, "x", 512<<20, 4); err != nil {
 		t.Fatal(err)
 	}
-	fp := ram[x86MPSFloatingPtr:]
+	fp := ram[MPSFloatingPtr:]
 	if string(fp[:4]) != "_MP_" {
 		t.Fatal("no _MP_ signature")
 	}
-	if addr := binary.LittleEndian.Uint32(fp[4:]); addr != x86MPSConfigTable {
+	if addr := binary.LittleEndian.Uint32(fp[4:]); addr != MPSConfigTable {
 		t.Fatalf("MP_ ptr = %#x", addr)
 	}
 	var sum byte
@@ -207,7 +205,7 @@ func TestSetupX86BootMPS(t *testing.T) {
 	if sum != 0 {
 		t.Error("floating pointer checksum != 0")
 	}
-	ct := ram[x86MPSConfigTable:]
+	ct := ram[MPSConfigTable:]
 	if string(ct[:4]) != "PCMP" {
 		t.Fatal("no PCMP signature")
 	}
@@ -298,7 +296,7 @@ func TestLoadKernelX86(t *testing.T) {
 		img[0x2000+i] = 0xab
 	}
 	reader := &countingReaderAt{reader: bytes.NewReader(img)}
-	entry, err := loadKernelX86(reader, uint64(len(img)), ram)
+	entry, err := LoadKernelX86(reader, uint64(len(img)), ram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,29 +312,5 @@ func TestLoadKernelX86(t *testing.T) {
 	const wantRead = 64 + 56 + 0x100
 	if reader.bytes != wantRead {
 		t.Fatalf("loader read %d bytes, want %d; it must not buffer the whole kernel", reader.bytes, wantRead)
-	}
-}
-
-func TestInsertKernelArgs(t *testing.T) {
-	got := insertKernelArgs("console=ttyS0 ro -- -vsock-cid=3", "virtio_mmio.device=0x1000@0xc0000000:3")
-	want := "console=ttyS0 ro virtio_mmio.device=0x1000@0xc0000000:3 -- -vsock-cid=3"
-	if got != want {
-		t.Errorf("got %q want %q", got, want)
-	}
-	if got := insertKernelArgs("console=ttyS0", "a=b"); got != "console=ttyS0 a=b" {
-		t.Errorf("no-separator case: %q", got)
-	}
-}
-
-func TestKernelArgPresent(t *testing.T) {
-	cmdline := "console=ttyS0 tsc_early_khz=2900000 -- tsc_early_khz=guest-flag"
-	if !kernelArgPresent(cmdline, "tsc_early_khz") {
-		t.Fatal("kernelArgPresent missed an assigned kernel argument")
-	}
-	if kernelArgPresent("console=ttyS0 -- tsc_early_khz=2900000", "tsc_early_khz") {
-		t.Fatal("kernelArgPresent inspected arguments after --")
-	}
-	if kernelArgPresent("console=ttyS0 notsc_early_khz=1", "tsc_early_khz") {
-		t.Fatal("kernelArgPresent accepted a suffix match")
 	}
 }

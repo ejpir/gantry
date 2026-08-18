@@ -2,6 +2,8 @@
 
 package vmm
 
+import "github.com/ejpir/gantry/internal/vmm/boot"
+
 // ---- arm64-specific KVM constants -------------------------------------------
 
 const (
@@ -58,5 +60,5 @@ func kvmArmSPIIRQ(intid int) uint32 {
 }
 
 func kvmArmRedistRegion(vcpus int) uint64 {
-	return uint64(vcpus)<<52 | gicrBase
+	return uint64(vcpus)<<52 | boot.GICRBase
 }

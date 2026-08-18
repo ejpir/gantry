@@ -1,4 +1,4 @@
-package vmm
+package devices
 
 import (
 	"errors"
@@ -9,13 +9,13 @@ import (
 )
 
 func TestSerializedIRQDeliveryDoesNotOverlapConcurrentInjections(t *testing.T) {
-	var delivery serializedIRQDelivery
+	var delivery SerializedIRQDelivery
 	firstEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var appliedMu sync.Mutex
-	var applied []irqChange
+	var applied []IRQChange
 	apply := func(irq int, level bool) error {
-		change := irqChange{irq: irq, level: level}
+		change := IRQChange{IRQ: irq, Level: level}
 		appliedMu.Lock()
 		applied = append(applied, change)
 		first := len(applied) == 1
@@ -29,7 +29,7 @@ func TestSerializedIRQDeliveryDoesNotOverlapConcurrentInjections(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- delivery.inject(irqChange{irq: 73, level: true}, apply)
+		firstDone <- delivery.Inject(IRQChange{IRQ: 73, Level: true}, apply)
 	}()
 	<-firstEntered
 
@@ -37,7 +37,7 @@ func TestSerializedIRQDeliveryDoesNotOverlapConcurrentInjections(t *testing.T) {
 	// call has returned; this also preserves the chosen mutex acquisition order.
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- delivery.inject(irqChange{irq: 73, level: false}, apply)
+		secondDone <- delivery.Inject(IRQChange{IRQ: 73, Level: false}, apply)
 	}()
 	select {
 	case err := <-secondDone:
@@ -53,16 +53,16 @@ func TestSerializedIRQDeliveryDoesNotOverlapConcurrentInjections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []irqChange{{irq: 73, level: true}, {irq: 73, level: false}}
+	want := []IRQChange{{IRQ: 73, Level: true}, {IRQ: 73, Level: false}}
 	if !reflect.DeepEqual(applied, want) {
 		t.Fatalf("applied IRQ changes = %+v, want %+v", applied, want)
 	}
 }
 
 func TestSerializedIRQDeliveryReportsSetterFailure(t *testing.T) {
-	var delivery serializedIRQDelivery
+	var delivery SerializedIRQDelivery
 	want := errors.New("set SPI failed")
-	err := delivery.inject(irqChange{irq: 73, level: true}, func(int, bool) error { return want })
+	err := delivery.Inject(IRQChange{IRQ: 73, Level: true}, func(int, bool) error { return want })
 	if !errors.Is(err, want) {
 		t.Fatalf("inject error = %v, want %v", err, want)
 	}

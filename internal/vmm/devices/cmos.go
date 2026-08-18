@@ -1,6 +1,6 @@
 //go:build (linux && amd64) || windows
 
-package vmm
+package devices
 
 // Tiny MC146818 CMOS/RTC emulation for x86-64 guests: ports 0x70 (index) /
 // 0x71 (data). The kernel reads wall-clock time from here during early boot
@@ -14,23 +14,23 @@ import (
 )
 
 const (
-	cmosIndexPort = 0x70
-	cmosDataPort  = 0x71
+	CMOSIndexPort = 0x70
+	CMOSDataPort  = 0x71
 )
 
 // mu guards the index register: ioRead/ioWrite run on every vCPU thread
 // (machine.handleIO), so -cpus 2 would race it otherwise.
-type cmosRTC struct {
+type CMOSRTC struct {
 	mu    sync.Mutex
 	index byte
 }
 
 func bcd(v int) byte { return byte((v/10)<<4 | (v % 10)) }
 
-func (c *cmosRTC) ioRead(port uint16) byte {
+func (c *CMOSRTC) IORead(port uint16) byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if port == cmosIndexPort {
+	if port == CMOSIndexPort {
 		return c.index
 	}
 	now := time.Now().UTC()
@@ -67,10 +67,10 @@ func (c *cmosRTC) ioRead(port uint16) byte {
 	return 0
 }
 
-func (c *cmosRTC) ioWrite(port uint16, val byte) {
+func (c *CMOSRTC) IOWrite(port uint16, val byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if port == cmosIndexPort {
+	if port == CMOSIndexPort {
 		c.index = val
 	}
 }

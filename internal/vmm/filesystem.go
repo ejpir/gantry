@@ -8,6 +8,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/fusewire"
 	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/vmm/boot"
 )
 
 // Filesystem is a fully prepared virtio-fs endpoint. The composition layer
@@ -36,10 +37,10 @@ func (m *Machine) attachFilesystems(o Opts, inputs *prepareInputs) error {
 			if filesystem.Handler != nil || filesystem.Owner != nil {
 				return fmt.Errorf("virtio-fs %s: vhost endpoint conflicts with handler/owner", filesystem.Tag)
 			}
-			if m.arch == "amd64" && uint64(len(m.ram)) > x86LowRAMEnd {
+			if m.arch == "amd64" && uint64(len(m.ram)) > boot.LowRAMEnd {
 				return fmt.Errorf("virtio-fs %s: vhost shared RAM does not yet support the x86 high-memory hole", filesystem.Tag)
 			}
-			guestBase := uint64(ramBase)
+			guestBase := uint64(boot.RAMBase)
 			if m.arch == "amd64" {
 				guestBase = 0
 			}

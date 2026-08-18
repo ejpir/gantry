@@ -1,4 +1,4 @@
-package vmm
+package boot
 
 // x86-64 guest boot assets: the "64-bit boot protocol" from
 // Documentation/arch/x86/boot.rst, as used by QEMU when it loads a vmlinux
@@ -26,56 +26,58 @@ import (
 )
 
 const (
-	x86ZeroPage    = 0x7000
-	x86GDT         = 0x8000
-	x86StackTop    = 0x7000 // rsp starts at 0x6ff0 (below the zero page)
-	x86PML4        = 0xa000
-	x86PDPT        = 0xb000
-	x86PD          = 0xc000 // 4 consecutive pages
-	x86CmdlineAddr = 0x20000
-	x86CmdlineMax  = 0x2000
+	ZeroPage    = 0x7000
+	GDT         = 0x8000
+	StackTop    = 0x7000 // rsp starts at 0x6ff0 (below the zero page)
+	PML4        = 0xa000
+	PDPT        = 0xb000
+	PD          = 0xc000 // 4 consecutive pages
+	CmdlineAddr = 0x20000
+	CmdlineMax  = 0x2000
 
-	x86MemHoleStart = 0x9fc00    // end of usable low memory
-	x86MemHoleEnd   = 0x100000   // kernel load base / end of ISA hole
-	x86LowRAMEnd    = 0xc0000000 // 3 GiB: start of the virtio/platform MMIO hole
-	x86HighRAMStart = 0x100000000
+	MemHoleStart = 0x9fc00    // end of usable low memory
+	MemHoleEnd   = 0x100000   // kernel load base / end of ISA hole
+	LowRAMEnd    = 0xc0000000 // 3 GiB: start of the virtio/platform MMIO hole
+	HighRAMStart = 0x100000000
 
-	x86VirtioMemBootSize  = 512 << 20
-	x86VirtioMemBlockSize = 128 << 20
+	VirtioMemBootSize  = 512 << 20
+	VirtioMemBlockSize = 128 << 20
 
-	x86MPSFloatingPtr = 0xf0000 // scanned by default_find_smp_config()
-	x86MPSConfigTable = 0xf0100
+	MPSFloatingPtr = 0xf0000 // scanned by default_find_smp_config()
+	MPSConfigTable = 0xf0100
 )
 
-// x86RAMRegion maps one contiguous part of the host RAM allocation into the
+// RAMRegion maps one contiguous part of the host RAM allocation into the
 // PC guest-physical layout. RAM above 3 GiB is relocated above the traditional
 // 3-4 GiB MMIO hole while remaining contiguous in the host allocation.
-type x86RAMRegion struct {
-	guestBase  uint64
-	hostOffset uint64
-	size       uint64
+// RAMRegion is one contiguous slice of guest RAM: where it appears in the
+// guest physical map, and where it lives in the host mapping.
+type RAMRegion struct {
+	GuestBase  uint64
+	HostOffset uint64
+	Size       uint64
 }
 
-func x86RAMRegions(memSize uint64) []x86RAMRegion {
-	return x86RAMRegionsWithLow(memSize, min(memSize, uint64(x86LowRAMEnd)))
+func RAMRegions(memSize uint64) []RAMRegion {
+	return RAMRegionsWithLow(memSize, min(memSize, uint64(LowRAMEnd)))
 }
 
-func x86RAMRegionsWithLow(memSize, lowSize uint64) []x86RAMRegion {
+func RAMRegionsWithLow(memSize, lowSize uint64) []RAMRegion {
 	lowSize = min(lowSize, memSize)
-	regions := []x86RAMRegion{{size: lowSize}}
+	regions := []RAMRegion{{Size: lowSize}}
 	if memSize > lowSize {
-		regions = append(regions, x86RAMRegion{
-			guestBase: x86HighRAMStart, hostOffset: lowSize, size: memSize - lowSize,
+		regions = append(regions, RAMRegion{
+			GuestBase: HighRAMStart, HostOffset: lowSize, Size: memSize - lowSize,
 		})
 	}
 	return regions
 }
 
-// x86VirtioMemLayout keeps enough ordinary e820 RAM for the kernel and early
+// VirtioMemLayout keeps enough ordinary e820 RAM for the kernel and early
 // userspace, while aligning the hot-added tail to x86's 128 MiB memory-block
 // granularity. Windows uses this layout by default; other hosts retain their
 // demand-paged direct mappings unless explicitly enabled for validation.
-func x86VirtioMemLayout(hostOS string, memSize uint64, setting string) (bootSize uint64, enabled bool) {
+func VirtioMemLayout(hostOS string, memSize uint64, setting string) (bootSize uint64, enabled bool) {
 	switch strings.ToLower(strings.TrimSpace(setting)) {
 	case "1", "true", "yes", "on":
 	case "0", "false", "no", "off":
@@ -87,78 +89,78 @@ func x86VirtioMemLayout(hostOS string, memSize uint64, setting string) (bootSize
 	default:
 		return memSize, false
 	}
-	if memSize <= x86VirtioMemBootSize {
+	if memSize <= VirtioMemBootSize {
 		return memSize, false
 	}
-	bootSize = x86VirtioMemBootSize + memSize%x86VirtioMemBlockSize
-	if bootSize >= memSize || bootSize > x86LowRAMEnd {
+	bootSize = VirtioMemBootSize + memSize%VirtioMemBlockSize
+	if bootSize >= memSize || bootSize > LowRAMEnd {
 		return memSize, false
 	}
 	return bootSize, true
 }
 
-// setupX86Boot writes boot_params, e820, the cmdline, identity-mapped page
+// SetupX86 writes boot_params, e820, the cmdline, identity-mapped page
 // tables (4 GiB, 2 MiB pages), the GDT and the MPS table into guest RAM.
-func setupX86Boot(ram []byte, cmdline string, memSize uint64, ncpus int) error {
-	if len(cmdline)+1 > x86CmdlineMax {
-		return fmt.Errorf("kernel cmdline too long (%d > %d)", len(cmdline), x86CmdlineMax)
+func SetupX86(ram []byte, cmdline string, memSize uint64, ncpus int) error {
+	if len(cmdline)+1 > CmdlineMax {
+		return fmt.Errorf("kernel cmdline too long (%d > %d)", len(cmdline), CmdlineMax)
 	}
 	if len(ram) < 0x100000 {
 		return fmt.Errorf("guest RAM too small for x86 boot assets")
 	}
-	zp := ram[x86ZeroPage:]
+	zp := ram[ZeroPage:]
 
 	// --- struct boot_params / setup_header fields ---
 	e820Entries := byte(2)
 	lowSize := memSize
-	if memSize > x86LowRAMEnd {
+	if memSize > LowRAMEnd {
 		e820Entries = 3
-		lowSize = x86LowRAMEnd
+		lowSize = LowRAMEnd
 	}
-	zp[0x1e8] = e820Entries                                    // e820_entries
-	binary.LittleEndian.PutUint16(zp[0x1fa:], 0xffff)          // vid_mode = normal
-	binary.LittleEndian.PutUint16(zp[0x206:], 0x020d)          // header version 2.13
-	zp[0x210] = 0xff                                           // type_of_loader = undefined bootloader
-	zp[0x211] = 0x41                                           // loadflags = LOADED_HIGH|KEEP_SEGMENTS
-	binary.LittleEndian.PutUint32(zp[0x214:], 0x100000)        // code32_start (conventional)
-	binary.LittleEndian.PutUint32(zp[0x228:], x86CmdlineAddr)  // cmd_line_ptr
-	binary.LittleEndian.PutUint32(zp[0x238:], x86CmdlineMax-1) // cmdline_size (protocol >= 2.06)
+	zp[0x1e8] = e820Entries                                 // e820_entries
+	binary.LittleEndian.PutUint16(zp[0x1fa:], 0xffff)       // vid_mode = normal
+	binary.LittleEndian.PutUint16(zp[0x206:], 0x020d)       // header version 2.13
+	zp[0x210] = 0xff                                        // type_of_loader = undefined bootloader
+	zp[0x211] = 0x41                                        // loadflags = LOADED_HIGH|KEEP_SEGMENTS
+	binary.LittleEndian.PutUint32(zp[0x214:], 0x100000)     // code32_start (conventional)
+	binary.LittleEndian.PutUint32(zp[0x228:], CmdlineAddr)  // cmd_line_ptr
+	binary.LittleEndian.PutUint32(zp[0x238:], CmdlineMax-1) // cmdline_size (protocol >= 2.06)
 	// hardware_subarch (0x23c) = 0: PC
 
 	// --- e820: low RAM around the ISA hole; optional high RAM above 4 GiB ---
-	putE820(zp[0x2d0:], 0, x86MemHoleStart, 1)
-	putE820(zp[0x2d0+20:], x86MemHoleEnd, lowSize-x86MemHoleEnd, 1)
+	putE820(zp[0x2d0:], 0, MemHoleStart, 1)
+	putE820(zp[0x2d0+20:], MemHoleEnd, lowSize-MemHoleEnd, 1)
 	if e820Entries == 3 {
-		putE820(zp[0x2d0+40:], x86HighRAMStart, memSize-x86LowRAMEnd, 1)
+		putE820(zp[0x2d0+40:], HighRAMStart, memSize-LowRAMEnd, 1)
 	}
 
 	// --- cmdline ---
-	copy(ram[x86CmdlineAddr:], cmdline)
-	ram[x86CmdlineAddr+len(cmdline)] = 0
+	copy(ram[CmdlineAddr:], cmdline)
+	ram[CmdlineAddr+len(cmdline)] = 0
 
 	// --- page tables: identity map 4 GiB with 2 MiB pages ---
 	const presentRW = 0x3
-	binary.LittleEndian.PutUint64(ram[x86PML4:], x86PDPT|presentRW)
+	binary.LittleEndian.PutUint64(ram[PML4:], PDPT|presentRW)
 	for i := 0; i < 4; i++ {
-		binary.LittleEndian.PutUint64(ram[x86PDPT+i*8:], uint64(x86PD+i*0x1000)|presentRW)
+		binary.LittleEndian.PutUint64(ram[PDPT+i*8:], uint64(PD+i*0x1000)|presentRW)
 		for j := 0; j < 512; j++ {
 			phys := uint64(i*512+j) << 21
-			binary.LittleEndian.PutUint64(ram[x86PD+i*0x1000+j*8:], phys|0x83) // PS|P|RW
+			binary.LittleEndian.PutUint64(ram[PD+i*0x1000+j*8:], phys|0x83) // PS|P|RW
 		}
 	}
 
 	// --- GDT: null, code64 (L=1) @ 0x10, data @ 0x18 ---
-	binary.LittleEndian.PutUint64(ram[x86GDT+0x10:], 0x00AF9B000000FFFF) // 64-bit code, DPL0
-	binary.LittleEndian.PutUint64(ram[x86GDT+0x18:], 0x00CF93000000FFFF) // data, DPL0
+	binary.LittleEndian.PutUint64(ram[GDT+0x10:], 0x00AF9B000000FFFF) // 64-bit code, DPL0
+	binary.LittleEndian.PutUint64(ram[GDT+0x18:], 0x00CF93000000FFFF) // data, DPL0
 
-	writeMPS(ram, ncpus)
+	WriteMPS(ram, ncpus)
 	return nil
 }
 
-// writeMPS installs an Intel MultiProcessor Specification v1.4 floating
+// WriteMPS installs an Intel MultiProcessor Specification v1.4 floating
 // pointer + config table. Without ACPI this is how the kernel enumerates
 // CPUs (SMP), the IO-APIC, and the ISA interrupt routes Gantry exposes.
-func writeMPS(ram []byte, ncpus int) {
+func WriteMPS(ram []byte, ncpus int) {
 	if ncpus < 1 {
 		ncpus = 1
 	}
@@ -173,9 +175,9 @@ func writeMPS(ram []byte, ncpus int) {
 	baseLen := 44 + ncpus*20 + 2*8 + 8 + isaRoutes*8 + 2*8
 
 	// --- floating pointer structure (16 bytes) ---
-	fp := ram[x86MPSFloatingPtr:]
+	fp := ram[MPSFloatingPtr:]
 	copy(fp[0:], "_MP_")
-	binary.LittleEndian.PutUint32(fp[4:], x86MPSConfigTable)
+	binary.LittleEndian.PutUint32(fp[4:], MPSConfigTable)
 	fp[8] = 1 // length = 16 bytes
 	fp[9] = 4 // spec rev 1.4
 	var fpsum byte
@@ -188,7 +190,7 @@ func writeMPS(ram []byte, ncpus int) {
 	// fp[11] = default config 0 (config table present); fp[12:16] reserved
 
 	// --- config table header (44 bytes) ---
-	ct := ram[x86MPSConfigTable:]
+	ct := ram[MPSConfigTable:]
 	copy(ct[0:], "PCMP")
 	binary.LittleEndian.PutUint16(ct[4:], uint16(baseLen))
 	ct[6] = 4                     // spec rev 1.4
@@ -250,7 +252,7 @@ func writeMPS(ram []byte, ncpus int) {
 		e[4] = 1 // source bus id 1 (ISA)
 		e[5] = byte(irq)
 		e[6] = ioapicID
-		e[7] = byte(isaIRQGSI(irq))
+		e[7] = byte(ISAIRQGSI(irq))
 		p += 8
 	}
 
@@ -283,12 +285,12 @@ func writeMPS(ram []byte, ncpus int) {
 	ct[7] = -sum
 }
 
-// isaIRQGSI returns the IO-APIC input advertised for an ISA interrupt.
+// ISAIRQGSI returns the IO-APIC input advertised for an ISA interrupt.
 // The PC architecture routes the PIT's ISA IRQ0 to IO-APIC input 2; input 0
 // is not the timer route once the MPS table publishes explicit assignments.
 // KVM applies this override in its in-kernel routing table. Userspace irqchips
 // (WHPX) must apply the same translation before raising their input line.
-func isaIRQGSI(irq int) int {
+func ISAIRQGSI(irq int) int {
 	if irq == 0 {
 		return 2
 	}
@@ -301,10 +303,10 @@ func putE820(b []byte, addr, size uint64, typ uint32) {
 	binary.LittleEndian.PutUint32(b[16:], typ)
 }
 
-// loadKernelX86 loads a vmlinux ELF64 (what the reference stack ships as
+// LoadKernelX86 loads a vmlinux ELF64 (what the reference stack ships as
 // nerdbox-kernel-x86_64) into guest RAM at each PT_LOAD's physical address
 // and returns the ELF entry point.
-func loadKernelX86(image io.ReaderAt, imageSize uint64, ram []byte) (entry uint64, err error) {
+func LoadKernelX86(image io.ReaderAt, imageSize uint64, ram []byte) (entry uint64, err error) {
 	if imageSize < 64 {
 		return 0, fmt.Errorf("not an ELF64 kernel")
 	}

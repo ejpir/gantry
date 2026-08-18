@@ -21,6 +21,8 @@ import (
 	"unsafe"
 
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/vmm/boot"
+	"github.com/ejpir/gantry/internal/vmm/devices"
 )
 
 // ---- x86-64 KVM ioctl numbers ----------------------------------------------
@@ -214,15 +216,15 @@ func (kvmX86Platform) run(m *Machine) error {
 	m.bootTiming.note("KVM irqchip+PIT created", phaseStart, time.Now())
 
 	phaseStart = time.Now()
-	for slot, region := range m.x86RAMRegions() {
+	for slot, region := range m.ramRegions() {
 		reg := kvmUserspaceMemoryRegion{
 			slot:          uint32(slot),
-			guestPhysAddr: region.guestBase,
-			memorySize:    region.size,
-			userspaceAddr: uint64(uintptr(unsafe.Pointer(&m.ram[region.hostOffset]))),
+			guestPhysAddr: region.GuestBase,
+			memorySize:    region.Size,
+			userspaceAddr: uint64(uintptr(unsafe.Pointer(&m.ram[region.HostOffset]))),
 		}
 		if err := ioctl(vmFD, kvmSetUserMemoryRegion, unsafe.Pointer(&reg)); err != nil {
-			return fmt.Errorf("KVM_SET_USER_MEMORY_REGION(slot %d, GPA %#x): %w", slot, region.guestBase, err)
+			return fmt.Errorf("KVM_SET_USER_MEMORY_REGION(slot %d, GPA %#x): %w", slot, region.GuestBase, err)
 		}
 	}
 	m.bootTiming.note("KVM RAM slots installed", phaseStart, time.Now())
@@ -316,7 +318,7 @@ func (b *kvmX86Backend) bootLoop() error {
 	if err := ioctl(vc.fd, kvmGetSregs, unsafe.Pointer(&sregs)); err != nil {
 		return fmt.Errorf("KVM_GET_SREGS: %w", err)
 	}
-	sregs.cr3 = x86PML4
+	sregs.cr3 = boot.PML4
 	sregs.cr4 = 0x20       // PAE
 	sregs.cr0 = 0x80010033 // PG|WP|NE|ET|MP|PE
 	sregs.efer = 0x500     // LME|LMA
@@ -325,15 +327,15 @@ func (b *kvmX86Backend) bootLoop() error {
 	data := kvmSegment{base: 0, limit: 0xffffffff, selector: 0x18,
 		typ: 0x3, present: 1, s: 1, g: 1}
 	sregs.ds, sregs.es, sregs.fs, sregs.gs, sregs.ss = data, data, data, data, data
-	sregs.gdt = kvmDTable{base: x86GDT, limit: 4*8 - 1}
+	sregs.gdt = kvmDTable{base: boot.GDT, limit: 4*8 - 1}
 	sregs.idt = kvmDTable{base: 0, limit: 0xffff}
 	if err := ioctl(vc.fd, kvmSetSregs, unsafe.Pointer(&sregs)); err != nil {
 		return fmt.Errorf("KVM_SET_SREGS: %w", err)
 	}
 	regs := kvmRegs{
 		rip:    m.entry,
-		rsi:    x86ZeroPage, // -> struct boot_params
-		rsp:    x86StackTop - 0x10,
+		rsi:    boot.ZeroPage, // -> struct boot_params
+		rsp:    boot.StackTop - 0x10,
 		rflags: 0x2,
 	}
 	if err := ioctl(vc.fd, kvmSetRegs, unsafe.Pointer(&regs)); err != nil {
@@ -345,7 +347,7 @@ func (b *kvmX86Backend) bootLoop() error {
 	fmt.Println("------------------------------------------------")
 
 	if m.consoleStdin {
-		go m.x86.uartIO.stdinPump(m.stdinDone)
+		go m.x86.uartIO.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
 	m.bootTiming.start("vCPU entered KVM")
@@ -373,7 +375,7 @@ func (b *kvmX86Backend) runVCPULoop(vc *kvmVCPU) error {
 		if errno != 0 {
 			return fmt.Errorf("KVM_RUN: %w", errno)
 		}
-		if dbgIO && exitCount < 100 {
+		if devices.DebugIO && exitCount < 100 {
 			exitCount++
 			regs := kvmRegs{}
 			_ = ioctl(vc.fd, kvmGetRegs, unsafe.Pointer(&regs))

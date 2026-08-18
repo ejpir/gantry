@@ -26,6 +26,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ejpir/gantry/internal/vmm/boot"
+	"github.com/ejpir/gantry/internal/vmm/devices"
 	"golang.org/x/sys/windows"
 )
 
@@ -143,7 +145,7 @@ type whpxBackend struct {
 	profileSummary sync.Once
 
 	partitionCreated bool
-	mappedRAM        []x86RAMRegion
+	mappedRAM        []boot.RAMRegion
 	hotMemoryMapped  bool
 	createdVPs       []bool
 }
@@ -222,7 +224,7 @@ func (b *whpxBackend) queuePICInterrupt(vector uint32) {
 		return
 	}
 	if err := whvCall("WHvCancelRunVirtualProcessor(PIC)", procCancelRunVP,
-		uintptr(b.h), 0, 0); err != nil && dbgIO {
+		uintptr(b.h), 0, 0); err != nil && devices.DebugIO {
 		fmt.Printf("[whpx] wake for PIC v=%#x: %v\n", vector, err)
 	}
 }
@@ -264,7 +266,7 @@ func (b *whpxBackend) injectPICInterrupt(vp uint32, executionState uint16, rflag
 			return b.picEpoch, fmt.Errorf("inject PIC vector %#x: %w", vector, err)
 		}
 	}
-	if dbgIO {
+	if devices.DebugIO {
 		if ready {
 			fmt.Printf("[whpx] pending interruption v=%#x published\n", vector)
 		} else {
@@ -291,8 +293,8 @@ func (b *whpxBackend) releaseNative() error {
 	for index := len(b.mappedRAM) - 1; index >= 0; index-- {
 		region := b.mappedRAM[index]
 		if err := whvCall("WHvUnmapGpaRange", procUnmapGpaRange,
-			uintptr(b.h), uintptr(region.guestBase), uintptr(region.size)); err != nil {
-			errs = append(errs, fmt.Errorf("unmap WHPX guest RAM at GPA %#x: %w", region.guestBase, err))
+			uintptr(b.h), uintptr(region.GuestBase), uintptr(region.Size)); err != nil {
+			errs = append(errs, fmt.Errorf("unmap WHPX guest RAM at GPA %#x: %w", region.GuestBase, err))
 		}
 	}
 	b.mappedRAM = nil
@@ -313,14 +315,14 @@ func (b *whpxBackend) Close() error {
 // mapRAMRegionLocked commits a reserved host range before publishing its GPA
 // mapping to WHPX. nativeMu must be held so teardown cannot delete the
 // partition between the commit and WHvMapGpaRange.
-func (b *whpxBackend) mapRAMRegionLocked(region x86RAMRegion) error {
-	if err := commitGuestRAM(b.m.ram, region.hostOffset, region.size); err != nil {
+func (b *whpxBackend) mapRAMRegionLocked(region boot.RAMRegion) error {
+	if err := commitGuestRAM(b.m.ram, region.HostOffset, region.Size); err != nil {
 		return err
 	}
 	if err := whvCall("WHvMapGpaRange", procMapGpaRange,
-		uintptr(b.h), uintptr(unsafe.Pointer(&b.m.ram[region.hostOffset])), uintptr(region.guestBase),
-		uintptr(region.size), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
-		return fmt.Errorf("WHvMapGpaRange(GPA %#x, size %d): %w", region.guestBase, region.size, err)
+		uintptr(b.h), uintptr(unsafe.Pointer(&b.m.ram[region.HostOffset])), uintptr(region.GuestBase),
+		uintptr(region.Size), whvMapRead|whvMapWrite|whvMapExecute); err != nil {
+		return fmt.Errorf("WHvMapGpaRange(GPA %#x, size %d): %w", region.GuestBase, region.Size, err)
 	}
 	b.mappedRAM = append(b.mappedRAM, region)
 	return nil
@@ -338,7 +340,7 @@ func (b *whpxBackend) mapHotMemory() error {
 	if !b.partitionCreated || b.h == 0 {
 		return fmt.Errorf("map hot memory: WHPX partition is closed")
 	}
-	regions := b.m.x86RAMRegions()
+	regions := b.m.ramRegions()
 	if len(regions) != 2 || b.m.hotMem == nil {
 		return fmt.Errorf("map hot memory: invalid x86 memory layout")
 	}
@@ -441,10 +443,10 @@ func (b *whpxBackend) deliverInterrupt(dest, vector uint32, level bool) {
 	binary.LittleEndian.PutUint32(ctrl[12:], vector)
 	if err := whvCall("WHvRequestInterrupt", procRequestInterrupt,
 		uintptr(b.h), uintptr(unsafe.Pointer(&ctrl[0])), 16); err != nil {
-		if dbgIO {
+		if devices.DebugIO {
 			fmt.Printf("[whpx] interrupt v=%#x: %v\n", vector, err)
 		}
-	} else if dbgIO {
+	} else if devices.DebugIO {
 		fmt.Printf("[whpx] interrupt v=%#x delivered\n", vector)
 	}
 }
@@ -505,7 +507,7 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 	if err := whvCall("WHvSetupPartition", procSetupPartition, uintptr(h)); err != nil {
 		return err
 	}
-	regions := m.x86RAMRegions()
+	regions := m.ramRegions()
 	if m.hotMemDeferred {
 		regions = regions[:1]
 	}
@@ -521,22 +523,22 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 	// Keep the register-visible ID identical to the one writeMPS publishes.
 	// A mismatch makes Linux repeatedly repair and re-read the IO-APIC ID,
 	// which is particularly expensive because every access exits through WHPX.
-	m.x86.ioapic = newIOApic(uint32(m.vcpus+1), b.deliverInterrupt)
+	m.x86.ioapic = devices.NewIOAPIC(uint32(m.vcpus+1), b.deliverInterrupt)
 	if os.Getenv("GANTRY_WHPX_PIC") != "" {
-		m.x86.pic.setDeliver(b.queuePICInterrupt)
+		m.x86.pic.SetDeliver(b.queuePICInterrupt)
 		m.interrupts.set(func(irq int, level bool) {
-			m.x86.ioapic.raise(isaIRQGSI(irq), level)
+			m.x86.ioapic.Raise(boot.ISAIRQGSI(irq), level)
 			// Diagnostic opt-out for the legacy PIT edge. Once Linux switches
 			// to WHPX's emulated LAPIC timer it can leave a concurrently queued
 			// PIC IRQ0 unacknowledged, which then blocks every lower-priority
 			// virtio interrupt. Automatic TSC calibration makes that PIT edge
 			// unnecessary on the tested WHPX path.
 			if irq != 0 || os.Getenv("GANTRY_WHPX_PIC_NOPIT") == "" {
-				m.x86.pic.raise(irq, level)
+				m.x86.pic.Raise(irq, level)
 			}
 		})
 	} else {
-		m.interrupts.set(func(irq int, level bool) { m.x86.ioapic.raise(isaIRQGSI(irq), level) })
+		m.interrupts.set(func(irq int, level bool) { m.x86.ioapic.Raise(boot.ISAIRQGSI(irq), level) })
 	}
 
 	for i := 0; i < m.vcpus; i++ {
@@ -563,8 +565,8 @@ func (b *whpxBackend) bootLoop() error {
 	data := segValue(0, 0xffffffff, 0x18, 0x8093) // present, S, G, rw
 	if err := b.setRegs(0, map[uint32]whvRegValue{
 		whvRegRip:    u64Value(m.entry),
-		whvRegRsi:    u64Value(x86ZeroPage),
-		whvRegRsp:    u64Value(x86StackTop - 0x10),
+		whvRegRsi:    u64Value(boot.ZeroPage),
+		whvRegRsp:    u64Value(boot.StackTop - 0x10),
 		whvRegRflags: u64Value(0x2),
 		whvRegCs:     code,
 		whvRegDs:     data,
@@ -573,10 +575,10 @@ func (b *whpxBackend) bootLoop() error {
 		whvRegFs:     data,
 		whvRegGs:     data,
 		whvRegCr0:    u64Value(0x80010033),
-		whvRegCr3:    u64Value(x86PML4),
+		whvRegCr3:    u64Value(boot.PML4),
 		whvRegCr4:    u64Value(0x20),
 		whvRegEfer:   u64Value(0x500),
-		whvRegGdtr:   tableValue(x86GDT, 4*8-1),
+		whvRegGdtr:   tableValue(boot.GDT, 4*8-1),
 		whvRegIdtr:   tableValue(0, 0xffff),
 	}); err != nil {
 		return fmt.Errorf("initial BSP state: %w", err)
@@ -586,7 +588,7 @@ func (b *whpxBackend) bootLoop() error {
 	fmt.Println("------------------------------------------------")
 
 	if m.consoleStdin {
-		go m.x86.uartIO.stdinPump(m.stdinDone)
+		go m.x86.uartIO.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
 	m.bootTiming.setRunStats(b.runStats)
@@ -709,7 +711,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 				b.m.bootTiming.traceExit(index, ran, reason, 0, detail)
 			}
 		}
-		if dbgIO {
+		if devices.DebugIO {
 			exitCount := b.exitCount.Add(1)
 			if exitCount <= 500 || exitCount%100000 == 0 {
 				reason := binary.LittleEndian.Uint32(buf[0:])
@@ -754,7 +756,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 		case whvExitInvalidVpReg:
 			return fmt.Errorf("WHvRunVpExitReasonInvalidVpRegisterValue (bad initial state?)")
 		case whvExitMsrAccess, whvExitCpuid:
-			if dbgIO {
+			if devices.DebugIO {
 				fmt.Printf("[whpx] exit %d (ignored)\n", binary.LittleEndian.Uint32(buf[0:]))
 			}
 		default:
@@ -813,7 +815,7 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	// WHPX releases have reported one byte for a two-byte `mov r/m32,r32`.
 	// The memory-access context still carries the complete 16-byte instruction
 	// window, so give the decoder the architectural 15-byte maximum and trust
-	// op.length for the RIP advance. The decoder ignores trailing bytes.
+	// op.Length for the RIP advance. The decoder ignores trailing bytes.
 	instr := buf[52 : 52+15]
 	gpa := binary.LittleEndian.Uint64(buf[72:])
 	if b.profileGPAs != nil {
@@ -822,14 +824,14 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 		b.profileMu.Unlock()
 	}
 
-	op, err := decodeX86MMIO(instr)
+	op, err := devices.DecodeMMIO(instr)
 	if err != nil {
 		return fmt.Errorf("mmio @ %#x: undecodable instruction % x: %w", gpa, instr, err)
 	}
 
 	if b.profilePorts != nil {
 		b.profileMu.Lock()
-		if op.isWrite {
+		if op.IsWrite {
 			b.profileMMIO[1]++
 		} else {
 			b.profileMMIO[0]++
@@ -844,8 +846,8 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 	// Reads need no old register value; immediate writes need no register at
 	// all. Register writes fetch exactly their source in one WHPX call.
 	var regValue uint64
-	if op.isWrite && !op.immOK {
-		values, err := b.getRegs(vp, []uint32{uint32(op.reg)})
+	if op.IsWrite && !op.ImmOK {
+		values, err := b.getRegs(vp, []uint32{uint32(op.Reg)})
 		if err != nil {
 			return err
 		}
@@ -868,16 +870,16 @@ func (b *whpxBackend) handleMMIOExit(vp uint32, buf []byte) error {
 			m.handleMMIO(true, gpa+uint64(off), tmp[off:off+4], 4)
 		}
 	}
-	applyX86MMIO(op, getReg, setReg, devRead, devWrite)
+	devices.ApplyMMIO(op, getReg, setReg, devRead, devWrite)
 
 	// Commit the MMIO read result and advanced RIP together. Writes only need
 	// RIP; combining read updates removes one WHPX host transition per access.
-	rip := binary.LittleEndian.Uint64(buf[32:]) + uint64(op.length)
-	if op.isWrite {
+	rip := binary.LittleEndian.Uint64(buf[32:]) + uint64(op.Length)
+	if op.IsWrite {
 		return b.writeGPR(vp, whvRegRip, rip)
 	}
 	return b.writeGPRs(vp,
-		[]uint32{uint32(op.reg), whvRegRip},
+		[]uint32{uint32(op.Reg), whvRegRip},
 		[]uint64{regValue, rip})
 }
 

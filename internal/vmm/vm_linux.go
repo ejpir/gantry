@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/vmm/boot"
 )
 
 // kvmBackend is the Linux/KVM implementation of the hypervisor backend.
@@ -62,7 +63,7 @@ func (kvmARM64Platform) run(m *Machine) error {
 	phaseStart = time.Now()
 	reg := kvmUserspaceMemoryRegion{
 		slot:          0,
-		guestPhysAddr: ramBase,
+		guestPhysAddr: boot.RAMBase,
 		memorySize:    uint64(len(m.ram)),
 		userspaceAddr: uint64(uintptr(unsafe.Pointer(&m.ram[0]))),
 	}
@@ -148,7 +149,7 @@ func (b *kvmBackend) createGIC() error {
 	if err := set(kvmDevArmVGICGrpNrIrqs, 0, 192); err != nil {
 		return fmt.Errorf("GIC NR_IRQS: %w", err)
 	}
-	if err := set(kvmDevArmVGICGrpAddr, kvmVGICV3AddrTypeDist, gicdBase); err != nil {
+	if err := set(kvmDevArmVGICGrpAddr, kvmVGICV3AddrTypeDist, boot.GICDBase); err != nil {
 		return fmt.Errorf("GIC dist addr: %w", err)
 	}
 	// Legacy REDIST allocates only one redistributor. REDIST_REGION packs the
@@ -203,7 +204,7 @@ func (b *kvmBackend) bootLoop() error {
 	fmt.Println("------------------------------------------------")
 
 	if m.consoleStdin {
-		go m.uart.stdinPump(m.stdinDone)
+		go m.uart.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
 	m.bootTiming.start("vCPU entered KVM")
