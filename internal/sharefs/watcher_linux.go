@@ -212,8 +212,21 @@ func (w *linuxShareWatcher) run() {
 	}
 }
 
+// linuxWatchRecord is one parsed inotify event. Records are parsed per read
+// buffer so that an IN_MOVED_FROM can be paired with the IN_MOVED_TO that
+// shares its cookie: one host rename must surface as a single watch event,
+// otherwise the second half would sweep path mappings that guests already
+// re-established after the first half was handled.
+type linuxWatchRecord struct {
+	mask   uint32
+	cookie uint32
+	wd     int32
+	name   string
+}
+
 func (w *linuxShareWatcher) process(buffer []byte) {
 	const headerSize = int(unsafe.Sizeof(unix.InotifyEvent{}))
+	var records []linuxWatchRecord
 	for len(buffer) >= headerSize {
 		event := (*unix.InotifyEvent)(unsafe.Pointer(&buffer[0]))
 		recordSize := headerSize + int(event.Len)
@@ -225,38 +238,79 @@ func (w *linuxShareWatcher) process(buffer []byte) {
 			w.reportLoss(fmt.Errorf("inotify queue overflow"))
 			return
 		}
-		w.mu.Lock()
-		rel, known := w.byWD[int(event.Wd)]
-		if event.Mask&(unix.IN_IGNORED|unix.IN_DELETE_SELF) != 0 && known && rel != "" {
-			delete(w.byWD, int(event.Wd))
-			delete(w.byPath, rel)
+		nameBytes := buffer[headerSize:recordSize]
+		if nul := strings.IndexByte(string(nameBytes), 0); nul >= 0 {
+			nameBytes = nameBytes[:nul]
 		}
-		w.mu.Unlock()
-		if known && event.Mask&unix.IN_IGNORED == 0 {
-			nameBytes := buffer[headerSize:recordSize]
-			if nul := strings.IndexByte(string(nameBytes), 0); nul >= 0 {
-				nameBytes = nameBytes[:nul]
-			}
-			name := string(nameBytes)
-			full := rel
-			if name != "" {
-				full = path.Join(rel, name)
-			}
-			rename := event.Mask&(unix.IN_MOVED_FROM|unix.IN_MOVED_TO|unix.IN_MOVE_SELF) != 0
-			invalidateDirs := event.Mask&unix.IN_ISDIR != 0 &&
-				event.Mask&(unix.IN_DELETE|unix.IN_DELETE_SELF|unix.IN_MOVED_FROM|unix.IN_MOVED_TO|unix.IN_MOVE_SELF) != 0
-			loss := event.Mask&unix.IN_UNMOUNT != 0 || event.Mask&unix.IN_DELETE_SELF != 0 && rel == ""
-			if loss {
-				w.reportLoss(fmt.Errorf("export root was removed or unmounted"))
-				return
-			}
-			w.emit(shareWatchEvent{rel: full, rename: rename, invalidateDirs: invalidateDirs})
-		}
+		records = append(records, linuxWatchRecord{
+			mask: event.Mask, cookie: event.Cookie, wd: event.Wd, name: string(nameBytes),
+		})
 		buffer = buffer[recordSize:]
 	}
 	if len(buffer) != 0 {
 		w.reportLoss(fmt.Errorf("trailing inotify bytes"))
+		return
 	}
+	consumed := make([]bool, len(records))
+	for i, rec := range records {
+		if consumed[i] {
+			continue
+		}
+		event, ok := w.classifyRecord(rec)
+		if !ok {
+			continue
+		}
+		if rec.mask&unix.IN_MOVED_FROM != 0 && rec.cookie != 0 {
+			for j := i + 1; j < len(records); j++ {
+				pair := records[j]
+				if consumed[j] || pair.mask&unix.IN_MOVED_TO == 0 || pair.cookie != rec.cookie {
+					continue
+				}
+				consumed[j] = true
+				if target, targetOK := w.classifyRecord(pair); targetOK && target.loss == nil {
+					event.relTo = target.rel
+					event.invalidateDirs = event.invalidateDirs || target.invalidateDirs
+				}
+				break
+			}
+		}
+		if event.loss != nil {
+			w.reportLoss(event.loss)
+			return
+		}
+		w.emit(event)
+	}
+}
+
+// classifyRecord resolves a record to a watch event, applying watch-lifetime
+// bookkeeping for watches the kernel dropped. ok is false for records that
+// must not be emitted (unknown watch or IN_IGNORED teardown).
+func (w *linuxShareWatcher) classifyRecord(rec linuxWatchRecord) (shareWatchEvent, bool) {
+	w.mu.Lock()
+	rel, known := w.byWD[int(rec.wd)]
+	if rec.mask&(unix.IN_IGNORED|unix.IN_DELETE_SELF) != 0 && known && rel != "" {
+		delete(w.byWD, int(rec.wd))
+		delete(w.byPath, rel)
+	}
+	w.mu.Unlock()
+	if !known || rec.mask&unix.IN_IGNORED != 0 {
+		return shareWatchEvent{}, false
+	}
+	full := rel
+	if rec.name != "" {
+		full = path.Join(rel, rec.name)
+	}
+	event := shareWatchEvent{
+		rel:    full,
+		rename: rec.mask&(unix.IN_MOVED_FROM|unix.IN_MOVED_TO|unix.IN_MOVE_SELF) != 0,
+		invalidateDirs: rec.mask&unix.IN_ISDIR != 0 &&
+			rec.mask&(unix.IN_DELETE|unix.IN_DELETE_SELF|unix.IN_MOVED_FROM|unix.IN_MOVED_TO|unix.IN_MOVE_SELF) != 0,
+	}
+	loss := rec.mask&unix.IN_UNMOUNT != 0 || rec.mask&unix.IN_DELETE_SELF != 0 && rel == ""
+	if loss {
+		event.loss = fmt.Errorf("export root was removed or unmounted")
+	}
+	return event, true
 }
 
 func (w *linuxShareWatcher) reportLoss(err error) {
