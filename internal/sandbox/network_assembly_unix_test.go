@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package sandbox
 
 // Network assembly: how startNetwork picks between the embedded netstack, a
@@ -15,8 +17,9 @@ import (
 )
 
 // TestStartNetworkSplitModes exercises StartNetwork's topology decision:
-// auto/required split on Unix, off stays monolithic, and the backend is
-// functional in both.
+// auto/required split, off stays monolithic, and the backend is functional
+// in both. Splitting needs worker confinement, which only Unix has; the
+// Windows fallback is covered by network_worker_confinement_windows_test.go.
 func TestStartNetworkSplitModes(t *testing.T) {
 	hookNetWorkerSpawnForTests(t)
 	for _, tc := range []struct {
