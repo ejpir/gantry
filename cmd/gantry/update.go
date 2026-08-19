@@ -123,8 +123,18 @@ func (c *updateCheck) wait() {
 }
 
 func maybeNotifyUpdate(argv []string, statusCode int, check *updateCheck) {
+	// The in-process refresh starts optimistically so it can overlap a valid
+	// command. Once that command fails, preserve the prompt error path: cancel
+	// the concurrent lookup instead of imposing an exit grace period on a
+	// command that cannot display an update notice anyway.
+	if statusCode != 0 {
+		if check != nil {
+			check.cancel()
+		}
+		return
+	}
 	check.wait()
-	if statusCode != 0 || !selfupdate.Enabled() || !term.IsTerminal(int(os.Stderr.Fd())) || skipUpdateNotice(argv) {
+	if !selfupdate.Enabled() || !term.IsTerminal(int(os.Stderr.Fd())) || skipUpdateNotice(argv) {
 		return
 	}
 	// A check that finished during this run has already updated the cache, so

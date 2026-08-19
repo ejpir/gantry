@@ -17,6 +17,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox"
 	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
 	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
+	"github.com/ejpir/gantry/internal/selfupdate"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
@@ -62,6 +63,7 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 }
 
 func main() {
+	selfupdate.CleanupRetired()
 	args := os.Args[1:]
 	check := startUpdateCheck(args)
 	status := runMain(args)
