@@ -41,17 +41,17 @@ func TestSetupX86BootZeroPage(t *testing.T) {
 	if a := binary.LittleEndian.Uint64(zp[0x2d0:]); a != 0 {
 		t.Errorf("e820[0].addr = %#x", a)
 	}
-	if s := binary.LittleEndian.Uint64(zp[0x2d8:]); s != MemHoleStart {
+	if s := binary.LittleEndian.Uint64(zp[0x2d8:]); s != memHoleStart {
 		t.Errorf("e820[0].size = %#x", s)
 	}
 	if typ := binary.LittleEndian.Uint32(zp[0x2e0:]); typ != 1 {
 		t.Errorf("e820[0].type = %d", typ)
 	}
 	// e820 entry 1: [0x100000, 1G) RAM
-	if a := binary.LittleEndian.Uint64(zp[0x2d0+20:]); a != MemHoleEnd {
+	if a := binary.LittleEndian.Uint64(zp[0x2d0+20:]); a != memHoleEnd {
 		t.Errorf("e820[1].addr = %#x", a)
 	}
-	if s := binary.LittleEndian.Uint64(zp[0x2d0+28:]); s != (1024<<20)-MemHoleEnd {
+	if s := binary.LittleEndian.Uint64(zp[0x2d0+28:]); s != (1024<<20)-memHoleEnd {
 		t.Errorf("e820[1].size = %#x", s)
 	}
 	// cmdline copied + NUL-terminated
@@ -73,11 +73,11 @@ func TestSetupX86BootHighMemoryE820(t *testing.T) {
 	if got := zp[0x1e8]; got != 3 {
 		t.Fatalf("e820_entries = %d, want 3", got)
 	}
-	if addr := binary.LittleEndian.Uint64(zp[0x2d0+20:]); addr != MemHoleEnd {
-		t.Fatalf("e820[1].addr = %#x, want %#x", addr, MemHoleEnd)
+	if addr := binary.LittleEndian.Uint64(zp[0x2d0+20:]); addr != memHoleEnd {
+		t.Fatalf("e820[1].addr = %#x, want %#x", addr, memHoleEnd)
 	}
-	if size := binary.LittleEndian.Uint64(zp[0x2d0+28:]); size != LowRAMEnd-MemHoleEnd {
-		t.Fatalf("e820[1].size = %#x, want %#x", size, LowRAMEnd-MemHoleEnd)
+	if size := binary.LittleEndian.Uint64(zp[0x2d0+28:]); size != LowRAMEnd-memHoleEnd {
+		t.Fatalf("e820[1].size = %#x, want %#x", size, LowRAMEnd-memHoleEnd)
 	}
 	if addr := binary.LittleEndian.Uint64(zp[0x2d0+40:]); addr != HighRAMStart {
 		t.Fatalf("e820[2].addr = %#x, want %#x", addr, HighRAMStart)
@@ -152,13 +152,13 @@ func TestSetupX86BootPageTables(t *testing.T) {
 	}
 	// walk: PML4[0] -> PDPT[i] -> PD[j] -> 2MiB page at phys
 	pml4e := binary.LittleEndian.Uint64(ram[PML4:])
-	if pml4e != PDPT|0x3 {
+	if pml4e != pdpt|0x3 {
 		t.Fatalf("PML4[0] = %#x", pml4e)
 	}
 	for _, phys := range []uint64{0, 0x200000, 0x40000000, 0xc0000000, 0xffe00000} {
 		i := phys >> 30         // PDPT slot (1 GiB each)
 		j := (phys >> 21) & 511 // PD slot (2 MiB each)
-		pdpte := binary.LittleEndian.Uint64(ram[PDPT+i*8:])
+		pdpte := binary.LittleEndian.Uint64(ram[pdpt+i*8:])
 		pdAddr := pdpte &^ 0x3
 		pde := binary.LittleEndian.Uint64(ram[pdAddr+j*8:])
 		if pde != phys|0x83 {
@@ -195,7 +195,7 @@ func TestSetupX86BootMPS(t *testing.T) {
 	if string(fp[:4]) != "_MP_" {
 		t.Fatal("no _MP_ signature")
 	}
-	if addr := binary.LittleEndian.Uint32(fp[4:]); addr != MPSConfigTable {
+	if addr := binary.LittleEndian.Uint32(fp[4:]); addr != mpsConfigTable {
 		t.Fatalf("MP_ ptr = %#x", addr)
 	}
 	var sum byte
@@ -205,7 +205,7 @@ func TestSetupX86BootMPS(t *testing.T) {
 	if sum != 0 {
 		t.Error("floating pointer checksum != 0")
 	}
-	ct := ram[MPSConfigTable:]
+	ct := ram[mpsConfigTable:]
 	if string(ct[:4]) != "PCMP" {
 		t.Fatal("no PCMP signature")
 	}
