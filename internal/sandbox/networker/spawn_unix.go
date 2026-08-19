@@ -43,11 +43,6 @@ func spawnNetWorkerProcess(stderrPath, confinement string) (control, data net.Co
 	}()
 	argv := []string{exe, "_net-worker"}
 	env := workerEnv()
-	if SpawnHook != nil {
-		// Tests re-execute the TEST binary, not gantry: the hook swaps
-		// argv/env to the helper-process entry point instead.
-		SpawnHook(&argv, &env)
-	}
 	// ExtraFiles needs *os.File handles that survive exec: dup the conns
 	// back to plain files. The child's fd numbering is 3,4 in slice order.
 	childFiles, err := worker.DupConnFiles(ctrlWrk, dataWrk)

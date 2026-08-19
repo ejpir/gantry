@@ -90,6 +90,15 @@ func NetMarker(sock string, conn net.Conn) string {
 // backend. workdir holds the gvproxy socket/log when an external gvproxy
 // is used. A nil *Network (with nil error) means -net=false.
 func startNetwork(c config.RunConfig, workdir string) (*Network, error) {
+	return startNetworkWithWorkerStart(c, workdir, networker.Start)
+}
+
+type networkWorkerStart func(networkworker.Config, string) (*networker.Worker, net.Conn, error)
+
+// startNetworkWithWorkerStart keeps process creation injectable per call for
+// topology tests. Production always passes networker.Start; avoiding a
+// package-global spawn hook keeps concurrent sandbox starts race-free.
+func startNetworkWithWorkerStart(c config.RunConfig, workdir string, startWorker networkWorkerStart) (*Network, error) {
 	if err := config.ValidateProxyConfig(c); err != nil {
 		return nil, err
 	}
@@ -154,7 +163,7 @@ func startNetwork(c config.RunConfig, workdir string) (*Network, error) {
 		}
 		n.Degraded = append(n.Degraded, "network-worker: "+err.Error())
 	} else if splitNetWorkerWanted(c) {
-		mode := config.EffectiveProcessIsolation(c.ProcessIsolation)
+		mode := config.NormalizeProcessIsolation(c.ProcessIsolation)
 		confRoot := filepath.Join(workdir, "networkroot")
 		err := os.MkdirAll(confRoot, 0o700)
 		if err == nil {
@@ -163,7 +172,7 @@ func startNetwork(c config.RunConfig, workdir string) (*Network, error) {
 		var netWorker *networker.Worker
 		var conn net.Conn
 		if err == nil {
-			netWorker, conn, err = networker.Start(networkworker.Config{
+			netWorker, conn, err = startWorker(networkworker.Config{
 				GuestMAC:    net.HardwareAddr(guestNetMAC[:]).String(),
 				Forwards:    portForwards(c.Ports),
 				Policy:      mustMarshalPolicy(policy),

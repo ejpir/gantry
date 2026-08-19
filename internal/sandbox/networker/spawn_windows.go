@@ -36,9 +36,6 @@ func spawnNetWorkerProcess(stderrPath, confinement string) (control, data net.Co
 
 	argv := []string{exe, "_net-worker"}
 	env := worker.PipeEnv(workerEnv(), childFiles, 3)
-	if SpawnHook != nil {
-		SpawnHook(&argv, &env)
-	}
 	workerLog, err := boundedlog.NewPipe(stderrPath)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("open network worker log broker: %w", err)

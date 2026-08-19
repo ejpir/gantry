@@ -20,6 +20,28 @@ import (
 // the test depend on re-exec plumbing it is not testing.
 func startInProcessNetWorker(t *testing.T) (*networker.Worker, net.Conn) {
 	t.Helper()
+	return startInProcessNetWorkerWithConfig(t, networkworker.Config{
+		GuestMAC:    "5a:94:ef:e4:0c:ee",
+		Policy:      json.RawMessage(`{"default":"allow"}`),
+		Confinement: "off",
+	})
+}
+
+func inProcessNetworkWorkerStart(t *testing.T) networkWorkerStart {
+	t.Helper()
+	return func(cfg networkworker.Config, _ string) (*networker.Worker, net.Conn, error) {
+		worker, data := startInProcessNetWorkerWithConfig(t, cfg)
+		return worker, data, nil
+	}
+}
+
+func startInProcessNetWorkerWithConfig(t *testing.T, cfg networkworker.Config) (*networker.Worker, net.Conn) {
+	t.Helper()
+	// This harness exercises the supervisor topology in-process. Confining its
+	// goroutine would confine the test process itself; process-level confinement
+	// and re-exec are covered inside the networker package.
+	cfg.Confinement = "off"
+	cfg.ConfRoot = ""
 	ctrlSup, ctrlWrk := net.Pipe()
 	dataSup, dataWrk := net.Pipe()
 	workerErr := make(chan error, 1)
@@ -28,11 +50,6 @@ func startInProcessNetWorker(t *testing.T) (*networker.Worker, net.Conn) {
 	var nonce [32]byte
 	for i := range nonce {
 		nonce[i] = byte(i)
-	}
-	cfg := networkworker.Config{
-		GuestMAC:    "5a:94:ef:e4:0c:ee",
-		Policy:      json.RawMessage(`{"default":"allow"}`),
-		Confinement: "off",
 	}
 	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleNet, nonce[:], cfg); err != nil {
 		t.Fatal(err)
