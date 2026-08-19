@@ -130,7 +130,7 @@ func TestBoundedLogPipeWriterIsNotRegularFile(t *testing.T) {
 func TestBoundedLogPipeSinkFailureRevokesReaderAndSurfacesError(t *testing.T) {
 	wantErr := errors.New("diagnostic disk failed")
 	sink := &failingLogSink{err: wantErr}
-	pipe, err := NewPipeWithSink(sink)
+	pipe, err := newPipeWithSink(sink)
 	if err != nil {
 		t.Fatal(err)
 	}

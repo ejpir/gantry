@@ -45,14 +45,14 @@ func NewPipe(path string) (*Pipe, error) {
 	if err != nil {
 		return nil, err
 	}
-	pipe, err := NewPipeWithSink(sink)
+	pipe, err := newPipeWithSink(sink)
 	if err != nil {
 		_ = sink.Close()
 	}
 	return pipe, err
 }
 
-func NewPipeWithSink(sink io.WriteCloser) (*Pipe, error) {
+func newPipeWithSink(sink io.WriteCloser) (*Pipe, error) {
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
