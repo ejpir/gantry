@@ -79,7 +79,7 @@ func writeIsolationState(dir string, cfg config.RunConfig, network *Network, spl
 		if !network.Split && cfg.Net && cfg.GVProxy == "" {
 			degraded = append(degraded, "network worker not established")
 		}
-		if !splitVMM && config.EffectiveProcessIsolation(cfg.ProcessIsolation) != "off" {
+		if !splitVMM && config.NormalizeProcessIsolation(cfg.ProcessIsolation) != "off" {
 			degraded = append(degraded, "vmm worker not established")
 		}
 	}

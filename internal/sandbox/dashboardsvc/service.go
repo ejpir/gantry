@@ -53,7 +53,7 @@ func (dashboardService) ResourceLimits() dashboardapi.ResourceLimits {
 		MinDiskSizeMiB:     config.MinRWLayerSizeMiB,
 		MaxDiskSizeMiB:     config.MaxRWLayerSizeMiB,
 		DefaultDiskSizeMiB: config.DefaultRWLayerSizeMiB,
-		MaxVCPUs:           config.MaxSandboxVCPUs,
+		MaxVCPUs:           config.MaxSandboxVCPUs(),
 	}
 }
 
