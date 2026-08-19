@@ -3,8 +3,6 @@ package vmm
 import (
 	"strings"
 	"testing"
-
-	"github.com/ejpir/gantry/internal/vmm/boot"
 )
 
 func TestWithDeferredSMP(t *testing.T) {
@@ -58,10 +56,13 @@ func TestWindowsLargeMemoryUsesEagerSMP(t *testing.T) {
 }
 
 func TestVirtioMemUsesBootRegionForDeferredSMPPolicy(t *testing.T) {
-	const total = uint64(22 << 30)
+	const (
+		total        = uint64(22 << 30)
+		wantBootSize = uint64(512 << 20)
+	)
 	policyMemory := smpPolicyMemory("windows", total, "")
-	if policyMemory != boot.VirtioMemBootSize {
-		t.Fatalf("SMP policy memory = %d MiB, want %d MiB", policyMemory>>20, boot.VirtioMemBootSize>>20)
+	if policyMemory != wantBootSize {
+		t.Fatalf("SMP policy memory = %d MiB, want %d MiB", policyMemory>>20, wantBootSize>>20)
 	}
 	if !shouldDeferSMP("windows", 4, policyMemory, "") {
 		t.Fatal("small virtio-mem boot region should retain deferred SMP")

@@ -30,28 +30,27 @@ const (
 	GDT         = 0x8000
 	StackTop    = 0x7000 // rsp starts at 0x6ff0 (below the zero page)
 	PML4        = 0xa000
-	PDPT        = 0xb000
-	PD          = 0xc000 // 4 consecutive pages
+	pdpt        = 0xb000
+	pd          = 0xc000 // 4 consecutive pages
 	CmdlineAddr = 0x20000
-	CmdlineMax  = 0x2000
+	cmdlineMax  = 0x2000
 
-	MemHoleStart = 0x9fc00    // end of usable low memory
-	MemHoleEnd   = 0x100000   // kernel load base / end of ISA hole
+	memHoleStart = 0x9fc00    // end of usable low memory
+	memHoleEnd   = 0x100000   // kernel load base / end of ISA hole
 	LowRAMEnd    = 0xc0000000 // 3 GiB: start of the virtio/platform MMIO hole
 	HighRAMStart = 0x100000000
 
-	VirtioMemBootSize  = 512 << 20
+	virtioMemBootSize  = 512 << 20
 	VirtioMemBlockSize = 128 << 20
 
 	MPSFloatingPtr = 0xf0000 // scanned by default_find_smp_config()
-	MPSConfigTable = 0xf0100
+	mpsConfigTable = 0xf0100
 )
 
-// RAMRegion maps one contiguous part of the host RAM allocation into the
-// PC guest-physical layout. RAM above 3 GiB is relocated above the traditional
-// 3-4 GiB MMIO hole while remaining contiguous in the host allocation.
-// RAMRegion is one contiguous slice of guest RAM: where it appears in the
-// guest physical map, and where it lives in the host mapping.
+// RAMRegion maps one contiguous part of the host RAM allocation into the PC
+// guest-physical layout, recording both its guest address and host offset. RAM
+// above 3 GiB is relocated above the traditional 3-4 GiB MMIO hole while
+// remaining contiguous in the host allocation.
 type RAMRegion struct {
 	GuestBase  uint64
 	HostOffset uint64
@@ -89,10 +88,10 @@ func VirtioMemLayout(hostOS string, memSize uint64, setting string) (bootSize ui
 	default:
 		return memSize, false
 	}
-	if memSize <= VirtioMemBootSize {
+	if memSize <= virtioMemBootSize {
 		return memSize, false
 	}
-	bootSize = VirtioMemBootSize + memSize%VirtioMemBlockSize
+	bootSize = virtioMemBootSize + memSize%VirtioMemBlockSize
 	if bootSize >= memSize || bootSize > LowRAMEnd {
 		return memSize, false
 	}
@@ -102,8 +101,8 @@ func VirtioMemLayout(hostOS string, memSize uint64, setting string) (bootSize ui
 // SetupX86 writes boot_params, e820, the cmdline, identity-mapped page
 // tables (4 GiB, 2 MiB pages), the GDT and the MPS table into guest RAM.
 func SetupX86(ram []byte, cmdline string, memSize uint64, ncpus int) error {
-	if len(cmdline)+1 > CmdlineMax {
-		return fmt.Errorf("kernel cmdline too long (%d > %d)", len(cmdline), CmdlineMax)
+	if len(cmdline)+1 > cmdlineMax {
+		return fmt.Errorf("kernel cmdline too long (%d > %d)", len(cmdline), cmdlineMax)
 	}
 	if len(ram) < 0x100000 {
 		return fmt.Errorf("guest RAM too small for x86 boot assets")
@@ -124,12 +123,12 @@ func SetupX86(ram []byte, cmdline string, memSize uint64, ncpus int) error {
 	zp[0x211] = 0x41                                        // loadflags = LOADED_HIGH|KEEP_SEGMENTS
 	binary.LittleEndian.PutUint32(zp[0x214:], 0x100000)     // code32_start (conventional)
 	binary.LittleEndian.PutUint32(zp[0x228:], CmdlineAddr)  // cmd_line_ptr
-	binary.LittleEndian.PutUint32(zp[0x238:], CmdlineMax-1) // cmdline_size (protocol >= 2.06)
+	binary.LittleEndian.PutUint32(zp[0x238:], cmdlineMax-1) // cmdline_size (protocol >= 2.06)
 	// hardware_subarch (0x23c) = 0: PC
 
 	// --- e820: low RAM around the ISA hole; optional high RAM above 4 GiB ---
-	putE820(zp[0x2d0:], 0, MemHoleStart, 1)
-	putE820(zp[0x2d0+20:], MemHoleEnd, lowSize-MemHoleEnd, 1)
+	putE820(zp[0x2d0:], 0, memHoleStart, 1)
+	putE820(zp[0x2d0+20:], memHoleEnd, lowSize-memHoleEnd, 1)
 	if e820Entries == 3 {
 		putE820(zp[0x2d0+40:], HighRAMStart, memSize-LowRAMEnd, 1)
 	}
@@ -140,12 +139,12 @@ func SetupX86(ram []byte, cmdline string, memSize uint64, ncpus int) error {
 
 	// --- page tables: identity map 4 GiB with 2 MiB pages ---
 	const presentRW = 0x3
-	binary.LittleEndian.PutUint64(ram[PML4:], PDPT|presentRW)
+	binary.LittleEndian.PutUint64(ram[PML4:], pdpt|presentRW)
 	for i := 0; i < 4; i++ {
-		binary.LittleEndian.PutUint64(ram[PDPT+i*8:], uint64(PD+i*0x1000)|presentRW)
+		binary.LittleEndian.PutUint64(ram[pdpt+i*8:], uint64(pd+i*0x1000)|presentRW)
 		for j := 0; j < 512; j++ {
 			phys := uint64(i*512+j) << 21
-			binary.LittleEndian.PutUint64(ram[PD+i*0x1000+j*8:], phys|0x83) // PS|P|RW
+			binary.LittleEndian.PutUint64(ram[pd+i*0x1000+j*8:], phys|0x83) // PS|P|RW
 		}
 	}
 
@@ -153,14 +152,14 @@ func SetupX86(ram []byte, cmdline string, memSize uint64, ncpus int) error {
 	binary.LittleEndian.PutUint64(ram[GDT+0x10:], 0x00AF9B000000FFFF) // 64-bit code, DPL0
 	binary.LittleEndian.PutUint64(ram[GDT+0x18:], 0x00CF93000000FFFF) // data, DPL0
 
-	WriteMPS(ram, ncpus)
+	writeMPS(ram, ncpus)
 	return nil
 }
 
-// WriteMPS installs an Intel MultiProcessor Specification v1.4 floating
+// writeMPS installs an Intel MultiProcessor Specification v1.4 floating
 // pointer + config table. Without ACPI this is how the kernel enumerates
 // CPUs (SMP), the IO-APIC, and the ISA interrupt routes Gantry exposes.
-func WriteMPS(ram []byte, ncpus int) {
+func writeMPS(ram []byte, ncpus int) {
 	if ncpus < 1 {
 		ncpus = 1
 	}
@@ -177,7 +176,7 @@ func WriteMPS(ram []byte, ncpus int) {
 	// --- floating pointer structure (16 bytes) ---
 	fp := ram[MPSFloatingPtr:]
 	copy(fp[0:], "_MP_")
-	binary.LittleEndian.PutUint32(fp[4:], MPSConfigTable)
+	binary.LittleEndian.PutUint32(fp[4:], mpsConfigTable)
 	fp[8] = 1 // length = 16 bytes
 	fp[9] = 4 // spec rev 1.4
 	var fpsum byte
@@ -190,7 +189,7 @@ func WriteMPS(ram []byte, ncpus int) {
 	// fp[11] = default config 0 (config table present); fp[12:16] reserved
 
 	// --- config table header (44 bytes) ---
-	ct := ram[MPSConfigTable:]
+	ct := ram[mpsConfigTable:]
 	copy(ct[0:], "PCMP")
 	binary.LittleEndian.PutUint16(ct[4:], uint16(baseLen))
 	ct[6] = 4                     // spec rev 1.4
