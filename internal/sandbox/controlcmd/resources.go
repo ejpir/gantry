@@ -23,9 +23,13 @@ func SetResources(name string, memMB uint, vcpus int, processIsolation string) e
 		return err
 	}
 	if _, alive := layout.PID(name); alive {
+		// Pass the mode through unchanged: ConfigStore.SetResources already
+		// normalizes and treats "" as "preserve the stored value", exactly
+		// like the stopped-sandbox path below. Normalizing here would turn
+		// "keep" into "auto" for running sandboxes only.
 		req := controlproto.Request{
 			Op: "resources.set", ID: controlproto.NewRequestID("resources"),
-			Resources: &controlproto.ResourceRequest{MemMB: memMB, VCPUs: vcpus, ProcessIsolation: config.NormalizeProcessIsolation(processIsolation)},
+			Resources: &controlproto.ResourceRequest{MemMB: memMB, VCPUs: vcpus, ProcessIsolation: processIsolation},
 		}
 		resp, err := controlproto.Call[controlproto.ResourceResponse](name, req)
 		if err != nil {

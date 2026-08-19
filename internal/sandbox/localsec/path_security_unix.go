@@ -8,11 +8,12 @@ import (
 	"syscall"
 )
 
+// CreateDir creates path with private permissions, refusing to operate
+// through a pre-planted symlink or a directory owned by another account.
+// The sandbox state directory is the local authentication boundary for the
+// control socket, which matters when layout.Root had to fall back to a
+// shared temp directory.
 func CreateDir(path string) error {
-	return os.MkdirAll(path, 0o700)
-}
-
-func CreateManagerDir(path string) error {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(path, 0o700); err != nil {
@@ -31,6 +32,10 @@ func CreateManagerDir(path string) error {
 		return fmt.Errorf("%q is not owned by the current user", path)
 	}
 	return os.Chmod(path, 0o700)
+}
+
+func CreateManagerDir(path string) error {
+	return CreateDir(path)
 }
 
 func SecureDir(path string) error {

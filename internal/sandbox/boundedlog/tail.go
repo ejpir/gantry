@@ -13,40 +13,42 @@ const diagnosticTailBytes = 16 << 10
 
 // ReadTail allocates in proportion to the requested tail, never the file.
 // Logs are attacker-influenced and may also predate the bounded log broker.
-func ReadTail(path string, limit int64) ([]byte, error) {
+// truncated reports whether the file is larger than the returned tail.
+func ReadTail(path string, limit int64) (tail []byte, truncated bool, err error) {
 	if limit <= 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = file.Close() }()
 	end, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	start := end - limit
 	if start < 0 {
 		start = 0
 	}
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return io.ReadAll(io.LimitReader(file, limit))
+	b, err := io.ReadAll(io.LimitReader(file, limit))
+	return b, start > 0, err
 }
 
 func DiagnosticTail(role, path string) error {
-	tail, err := ReadTail(path, diagnosticTailBytes)
+	tail, truncated, err := ReadTail(path, diagnosticTailBytes)
 	if err != nil {
 		return fmt.Errorf("read %s diagnostics: %w", role, err)
 	}
 	if len(tail) == 0 {
 		return nil
 	}
-	// A tail may begin in the middle of a line. Mark that explicitly rather
-	// than making the fragment look like a complete worker diagnostic.
-	if tail[0] != '\n' {
+	// A genuinely truncated tail may begin in the middle of a line. Mark
+	// exactly that case; a small log returned whole is not a fragment.
+	if truncated && tail[0] != '\n' {
 		tail = append([]byte("..."), tail...)
 	}
 	return errors.New(role + " diagnostics:\n" + string(tail))

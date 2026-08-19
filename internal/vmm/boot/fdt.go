@@ -263,7 +263,7 @@ func BuildGuestFDT(memSize uint64, initrdStart, initrdEnd uint64, cmdline string
 	f.beginNode(fmt.Sprintf("pl011@%x", devices.PL011Base))
 	f.propStr("compatible", "arm,pl011", "arm,primecell")
 	f.propU32("reg", 0, devices.PL011Base, 0, devices.PL011Size)
-	f.propU32("interrupts", 0, 1, 0x4) // GIC_SPI 1, level-high
+	f.propU32("interrupts", 0, uint32(devices.PL011IRQ-32), 0x4) // GIC_SPI, level-high
 	f.propU32("clocks", 2, 2)
 	f.propStr("clock-names", "uartclk", "apb_pclk")
 	f.endNode()

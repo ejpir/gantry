@@ -10,11 +10,11 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
-	"github.com/ejpir/gantry/internal/vmmworker"
+	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (*vmmWorker, error) {
+func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir string) (*vmmWorker, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("worker re-exec path: %w", err)
@@ -154,7 +154,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 		killProc()
 		return nil, fmt.Errorf("vmm worker share nonce: %w", err)
 	}
-	var ack vmmworker.BootAck
+	var ack vmmworkerapi.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
 		killProc()
@@ -190,7 +190,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 
 func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 	return func(req workerproto.Request) (any, error) {
-		var body vmmworker.ForwardRequest
+		var body vmmworkerapi.ForwardRequest
 		if err := workerproto.DecodeBody(req, &body); err != nil {
 			return nil, fmt.Errorf("vsock.forward: %w", err)
 		}

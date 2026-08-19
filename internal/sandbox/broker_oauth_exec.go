@@ -122,11 +122,30 @@ func (br *broker) oauthExec(args []string, timeout time.Duration) ([]byte, int, 
 	}, strings.NewReader(""), &capture)
 	_ = timer.Stop()
 	stdout, overflow := capture.snapshot()
-	if expired.Load() {
-		return nil, status, fmt.Errorf("callback replay exceeded %s", timeout)
-	}
-	if overflow {
+	return oauthReplayOutcome(stdout, status, err, overflow, expired.Load(), timeout)
+}
+
+// oauthReplayOutcome decides what a finished replay session reports. A fired
+// timer feeds killCh, and the kill forces Session's Wait to fail — so a nil
+// session error means the replay genuinely completed before the kill landed.
+// timer.Stop cannot cancel an AfterFunc callback that is already running, so
+// expired may be set on a successful session: trust the session result over
+// the flag. The session's own error is preserved on every failure path so a
+// genuine timeout stays distinguishable from a guest-side refusal.
+func oauthReplayOutcome(stdout []byte, status int, err error, overflow, expired bool, timeout time.Duration) ([]byte, int, error) {
+	switch {
+	case err == nil && !overflow:
+		return stdout, status, nil
+	case overflow:
+		if err != nil {
+			return nil, status, fmt.Errorf("callback response exceeds %d bytes: %w", oauthbridge.MaxReplayResponseSize, err)
+		}
 		return nil, status, fmt.Errorf("callback response exceeds %d bytes", oauthbridge.MaxReplayResponseSize)
+	case expired:
+		if err != nil {
+			return nil, status, fmt.Errorf("callback replay exceeded %s: %w", timeout, err)
+		}
+		return nil, status, fmt.Errorf("callback replay exceeded %s", timeout)
 	}
 	return stdout, status, err
 }

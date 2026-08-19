@@ -16,7 +16,7 @@ import (
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
-	"github.com/ejpir/gantry/internal/vmmworker"
+	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -24,7 +24,7 @@ import (
 // table and performs the handshake + nonce exchange. cfg counts must
 // match the assets (HasRoot ↔ Rootfs and NDisksRO/NDisks) — the worker
 // validates too, but failing here keeps the error local.
-func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (*vmmWorker, error) {
+func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir string) (*vmmWorker, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("worker re-exec path: %w", err)
@@ -168,7 +168,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 		}
 		assetFiles = append(assetFiles, assets.SharedRAM)
 		closeAfterAck = append(closeAfterAck, assets.SharedRAM)
-		for queue := 0; queue < vmmworker.VhostQueueCount; queue++ {
+		for queue := 0; queue < vmmworkerapi.VhostQueueCount; queue++ {
 			kickRead, kickWrite, err := os.Pipe()
 			if err != nil {
 				return nil, fmt.Errorf("vhost queue %d kick pipe: %w", queue, err)
@@ -274,7 +274,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 	// Boot ack: the worker answers after Prepare (machine built) — a
 	// missing /dev/kvm or a bad asset surfaces HERE, not as a dead VM
 	// minutes later.
-	var ack vmmworker.BootAck
+	var ack vmmworkerapi.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
 		killProc()
@@ -325,7 +325,7 @@ func spawnVMMWorker(cfg vmmworker.Config, assets vmmworker.Assets, dir string) (
 // worker pre-registers its receive — neither side can deadlock.
 func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 	return func(req workerproto.Request) (any, error) {
-		var body vmmworker.ForwardRequest
+		var body vmmworkerapi.ForwardRequest
 		if err := workerproto.DecodeBody(req, &body); err != nil {
 			return nil, fmt.Errorf("vsock.forward: %w", err)
 		}

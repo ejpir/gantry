@@ -12,7 +12,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vmm"
-	"github.com/ejpir/gantry/internal/vmmworker"
+	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 )
 
 const Supported = true
@@ -30,11 +30,11 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, ErrUnavailable
 	}
-	bootCfg := vmmworker.Config{
+	bootCfg := vmmworkerapi.Config{
 		MemSize: opts.MemSize, VCPUs: opts.VCPUs, Cmdline: opts.Cmdline,
 		NetMAC: opts.NetMAC, GuestCID: opts.GuestCID, HasRoot: opts.Rootfs != nil,
 		NDisksRO: len(opts.DisksRO), NDisks: len(opts.Disks),
-		Confinement: config.EffectiveProcessIsolation(cfg.ProcessIsolation),
+		Confinement: config.NormalizeProcessIsolation(cfg.ProcessIsolation),
 	}
 	if !opts.BootTimingStart.IsZero() {
 		bootCfg.BootTimingStartUnixNano = opts.BootTimingStart.UnixNano()
@@ -50,7 +50,7 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		}
 		bootCfg.Policy = raw
 	}
-	vw, err := spawnVMMWorker(bootCfg, vmmworker.Assets{
+	vw, err := spawnVMMWorker(bootCfg, vmmworkerapi.Assets{
 		NetConn: opts.NetConn, Console: console, Kernel: opts.Kernel,
 		Rootfs: opts.Rootfs, DisksRO: opts.DisksRO, Disks: opts.Disks,
 	}, dir)

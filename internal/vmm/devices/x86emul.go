@@ -85,6 +85,10 @@ opcode:
 		op.Width = 4
 		if b == 0xc6 {
 			op.Width = 1
+		} else if rexW == 1 {
+			// REX.W + C7 /0 stores the sign-extended imm32 to r/m64. REX.W
+			// takes precedence over a 66H prefix, so this comes first.
+			op.Width = 8
 		} else if osz16 {
 			op.Width = 2
 		}

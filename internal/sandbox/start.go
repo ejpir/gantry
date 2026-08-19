@@ -286,8 +286,9 @@ func startSandboxDaemon(cmd *exec.Cmd) (sandboxDaemonProcess, error) {
 		return nil, err
 	}
 	// Start duplicated the read end into the child. The parent retains only
-	// the write gate: if it crashes before publishing vmm.pid, EOF makes the
-	// child fail its mandatory handshake instead of becoming an untracked VM.
+	// the write gate: if it crashes before the child reads the handshake, EOF
+	// makes the child fail instead of becoming an untracked VM. The daemon
+	// itself publishes vmm.pid once it holds the lifetime lock.
 	_ = readHandshake.Close()
 	return &execSandboxDaemon{cmd: cmd, handshake: writeHandshake}, nil
 }
@@ -463,12 +464,6 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 		_ = process.Kill()
 		_ = process.Wait()
 		writeLine(errorOutput, label+": spawn daemon: invalid process id")
-		return 1
-	}
-	if err := os.WriteFile(filepath.Join(dir, "vmm.pid"), []byte(fmt.Sprint(pid)), 0o600); err != nil {
-		_ = process.Kill()
-		waitErr := process.Wait()
-		writef(errorOutput, "%s: record daemon pid: %v (wait: %v)\n", label, err, waitErr)
 		return 1
 	}
 	if err := process.SendHandshake(handshake); err != nil {

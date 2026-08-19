@@ -27,9 +27,12 @@ func TestReadFileTailDoesNotReadSparsePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tail, err := boundedlog.ReadTail(path, 4096)
+	tail, truncated, err := boundedlog.ReadTail(path, 4096)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !truncated {
+		t.Fatal("tail of an oversized log not marked truncated")
 	}
 	if len(tail) != 4096 {
 		t.Fatalf("tail length = %d, want 4096", len(tail))

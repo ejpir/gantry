@@ -87,8 +87,16 @@ func TestSandboxPIDLifecycle(t *testing.T) {
 		t.Fatal("stale pid treated as alive")
 	}
 	_ = os.WriteFile(filepath.Join(layout.Dir(name), "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o644)
+	if _, alive := layout.PID(name); alive {
+		t.Fatal("live pid without the daemon lock treated as alive")
+	}
+	lock, err := layout.HoldLock(layout.Dir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
 	if _, alive := layout.PID(name); !alive {
-		t.Fatal("current process not detected as alive")
+		t.Fatal("current process holding the daemon lock not detected as alive")
 	}
 }
 

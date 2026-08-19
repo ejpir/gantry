@@ -46,6 +46,12 @@ func (d *daemonRuntime) load() error {
 		return fmt.Errorf("another daemon holds the sandbox lock: %w", err)
 	}
 	d.lock = lock
+	// Publish the pid only with the lifetime lock held: layout.PID treats a
+	// live pid as proof of life solely while vmm.lock is held, so a pid
+	// recycled after an early daemon death is never mistaken for a daemon.
+	if err := os.WriteFile(filepath.Join(d.dir, "vmm.pid"), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+		return fmt.Errorf("record daemon pid: %w", err)
+	}
 	store, err := config.LoadConfigStore(d.dir)
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)

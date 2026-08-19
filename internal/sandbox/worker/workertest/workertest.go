@@ -22,8 +22,20 @@ func AssertStdinUnreadable() {
 		return
 	}
 	var one [1]byte
-	if n, err := syscall.Read(0, one[:]); !errors.Is(err, syscall.EBADF) {
-		_, _ = fmt.Fprintf(os.Stderr, "worker stdin is readable: read=%d err=%v\n", n, err)
+	// Probe without blocking: when a confinement regression leaves stdin as
+	// an open pipe or inherited terminal, a bare read would hang the helper
+	// forever and the parent would see a stuck worker instead of the
+	// exit-97 diagnostic.
+	switch err := syscall.SetNonblock(0, true); {
+	case err == nil:
+		if n, rerr := syscall.Read(0, one[:]); !errors.Is(rerr, syscall.EBADF) {
+			_, _ = fmt.Fprintf(os.Stderr, "worker stdin is readable: read=%d err=%v\n", n, rerr)
+			os.Exit(97)
+		}
+	case errors.Is(err, syscall.EBADF):
+		// Expected: stdin is closed.
+	default:
+		_, _ = fmt.Fprintf(os.Stderr, "worker stdin probe: set non-blocking: %v\n", err)
 		os.Exit(97)
 	}
 	for _, fd := range []int{1, 2} {
