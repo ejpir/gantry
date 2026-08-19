@@ -159,7 +159,7 @@ func importDockerSandbox(root, name, as, logPath, workspaceOwner string, dryRun 
 	defer func() { _ = sourceLock.Close() }()
 
 	progress := gutil.NewProgressPrinter(os.Stdout, "gantry import: ")
-	err = plan.prepare(root, progress.Printf)
+	err = plan.prepare(root, progress.Printf, dryRun)
 	progress.Finish()
 	if err != nil {
 		return reportImportError(err)
@@ -171,6 +171,12 @@ func importDockerSandbox(root, name, as, logPath, workspaceOwner string, dryRun 
 	}
 
 	if err := plan.cloneWritableLayer(); err != nil {
+		return reportImportError(err)
+	}
+	// Persist the egress policy only once the clone succeeded: writing it
+	// earlier leaks an orphaned imported-<name>.json for imports that never
+	// launch, and --dry-run must not write anything at all.
+	if err := plan.persistNetpol(); err != nil {
 		return reportImportError(err)
 	}
 	plan.printAdoption()
@@ -279,16 +285,24 @@ func lockImportedRWLayer(path string) (*os.File, error) {
 	return lock, nil
 }
 
-func (p *dockerImportPlan) prepare(root string, say func(string, ...any)) error {
+// prepare resolves the import configuration. It is read-only for a dry
+// run: asset paths are resolved without downloading and the netpol path is
+// computed without persisting. A real import downloads guest assets here;
+// the netpol file is written later by persistNetpol, after the clone.
+func (p *dockerImportPlan) prepare(root string, say func(string, ...any), dryRun bool) error {
 	ports, err := loadImportedPorts(root, p.sourceName)
 	if err != nil {
 		return err
 	}
-	kernel, rootfs, err := ensureImportedGuestAssets(say)
-	if err != nil {
-		return err
+	// Absolute paths are required because the daemon runs with cwd=/.
+	kernel := layout.AbsPath(guestasset.DefaultKernel())
+	rootfs := layout.AbsPath(guestasset.DefaultRootfs())
+	if !dryRun {
+		if kernel, rootfs, err = ensureImportedGuestAssets(say); err != nil {
+			return err
+		}
 	}
-	netpolPath, err := writeImportedNetpol(p.runtime, p.targetName)
+	netpolPath, err := p.netpolPath()
 	if err != nil {
 		return err
 	}
@@ -336,22 +350,31 @@ func ensureImportedGuestAssets(say func(string, ...any)) (string, string, error)
 	return layout.AbsPath(kernel), layout.AbsPath(rootfs), nil
 }
 
-func writeImportedNetpol(runtimeConfig *dockerRuntime, targetName string) (string, error) {
-	policy, _ := importedNetpol(runtimeConfig)
+// netpolPath resolves where the imported egress policy will be persisted,
+// without writing anything. Empty when the source runtime has no services.
+func (p *dockerImportPlan) netpolPath() (string, error) {
+	policy, _ := importedNetpol(p.runtime)
 	if policy == nil {
 		return "", nil
 	}
 	// Keep imported policy outside the sandbox directory: launchSandbox
 	// removes and recreates that directory on start.
 	dir := filepath.Join(filepath.Dir(layout.Root()), "netpol")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
+	return filepath.Join(dir, "imported-"+p.targetName+".json"), nil
+}
+
+// persistNetpol writes the imported egress policy to the path netpolPath
+// resolved into the configuration. It runs only after a successful clone so
+// failed or dry-run imports never leave an orphaned policy file behind.
+func (p *dockerImportPlan) persistNetpol() error {
+	policy, _ := importedNetpol(p.runtime)
+	if policy == nil || p.config.NetPol == "" {
+		return nil
 	}
-	path := filepath.Join(dir, "imported-"+targetName+".json")
-	if err := atomicfile.WriteFileDurable(path, policy, 0o600); err != nil {
-		return "", err
+	if err := os.MkdirAll(filepath.Dir(p.config.NetPol), 0o700); err != nil {
+		return err
 	}
-	return path, nil
+	return atomicfile.WriteFileDurable(p.config.NetPol, policy, 0o600)
 }
 
 func (p *dockerImportPlan) cloneWritableLayer() error {

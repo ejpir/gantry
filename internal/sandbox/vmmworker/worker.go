@@ -23,7 +23,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/sharebroker"
 	"github.com/ejpir/gantry/internal/sharefs"
-	"github.com/ejpir/gantry/internal/vmmworker"
+	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerconf"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
@@ -230,7 +230,7 @@ func (w *vmmWorker) monitorShareServe(serve func() error, label string, closeImm
 // Wait parks until the guest exits (the split-mode guestErr).
 func (w *vmmWorker) Wait() error {
 	ctx := w.waitContext()
-	var out vmmworker.WaitResponse
+	var out vmmworkerapi.WaitResponse
 	if err := w.client.CallContext(ctx, "vm.wait", nil, &out); err != nil {
 		if errors.Is(err, context.Canceled) {
 			// An unexpected share-relay failure initiates Close. Prefer its
@@ -272,7 +272,7 @@ func (w *vmmWorker) Close() error {
 		w.markStopping()
 		w.stopTrafficSync()
 		if w.client != nil {
-			var out vmmworker.CloseResponse
+			var out vmmworkerapi.CloseResponse
 			if err := w.client.CallWithTimeout("vm.close", nil, &out, 15*time.Second); err != nil {
 				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("vmm worker device shutdown: %w", err))
 			} else {
@@ -343,7 +343,7 @@ func (w *vmmWorker) SetPolicy(policy *netpol.Policy) error {
 	if err != nil {
 		return err
 	}
-	return w.client.Call("net.policy", vmmworker.PolicyRequest{Policy: raw}, nil)
+	return w.client.Call("net.policy", vmmworkerapi.PolicyRequest{Policy: raw}, nil)
 }
 
 // ConfinementReport returns the worker's confinement report as carried
@@ -396,7 +396,7 @@ func (w *vmmWorker) DialStream(guestPort uint32) (net.Conn, error) {
 		return nil, fmt.Errorf("vsock.connect: %w", err)
 	}
 	_ = wrkFile.Close()
-	err = w.client.Call("vsock.connect", vmmworker.ConnectRequest{Port: guestPort, Token: hex.EncodeToString(token[:])}, nil)
+	err = w.client.Call("vsock.connect", vmmworkerapi.ConnectRequest{Port: guestPort, Token: hex.EncodeToString(token[:])}, nil)
 	if err != nil {
 		_ = sup.Close()
 		return nil, fmt.Errorf("vsock.connect: %w", err)

@@ -10,7 +10,7 @@
 // State per sandbox under ~/.gantry/sandboxes/<name>/:
 //
 //	sandbox.json      start configuration (images, rw, shares, net)
-//	vmm.pid           daemon process id
+//	vmm.pid           daemon process id (written by the daemon once it holds vmm.lock)
 //	ready             touched once the guest RPC connection is held
 //	ctl.sock          session broker (JSON line, then raw stdio)
 //	1025.sock         vsock dial-back accept target
@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // Root is the sandbox home: every sandbox state directory lives directly
@@ -36,7 +35,10 @@ func Root() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		home = "/tmp"
+		// A fixed name under a world-writable directory would let another
+		// local user pre-plant the state tree (and gantry would follow a
+		// symlink there). Fall back to a per-account subdirectory instead.
+		home = filepath.Join(os.TempDir(), fmt.Sprintf("gantry-%d", os.Getuid()))
 	}
 	return filepath.Join(home, ".gantry", "sandboxes")
 }
@@ -90,15 +92,13 @@ func PID(name string) (int, bool) {
 	if !ProcAlive(pid) {
 		return pid, false // stale pid file
 	}
-	// A bare pid can be recycled by the OS into an unrelated process;
-	// require the daemon's flock on vmm.lock as proof of life. Grace
-	// window: between the spawner writing vmm.pid and the daemon
-	// acquiring the lock, a fresh pid file alone counts as alive.
+	// A bare pid can be recycled by the OS into an unrelated process, so a
+	// live pid alone is never accepted as proof of life: the daemon writes
+	// vmm.pid itself only after acquiring vmm.lock and holds that lock for
+	// its whole lifetime (the OS releases it when the process dies, before
+	// the pid can be reused). No lock means the recorded pid is stale.
 	if !LockHeld(Dir(name)) {
-		st, err := os.Stat(filepath.Join(Dir(name), "vmm.pid"))
-		if err != nil || time.Since(st.ModTime()) > 10*time.Second {
-			return pid, false
-		}
+		return pid, false
 	}
 	return pid, true
 }

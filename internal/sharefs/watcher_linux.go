@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -26,16 +27,28 @@ const linuxShareWatchMask = unix.IN_ATTRIB |
 	unix.IN_EXCL_UNLINK |
 	unix.IN_ONLYDIR
 
+// A rename pair is queued by one kernel operation, but a read can end between
+// its IN_MOVED_FROM and IN_MOVED_TO records. Keep the first half briefly so a
+// following read can complete the pair; moves into or out of the watched tree
+// are flushed as unpaired events once the descriptor is quiet.
+const linuxRenamePairTimeout = 10 * time.Millisecond
+
+type linuxPendingMove struct {
+	event    shareWatchEvent
+	deadline time.Time
+}
+
 type linuxShareWatcher struct {
-	mu     sync.Mutex
-	fd     int
-	wakeFD int
-	rootFD int
-	closed bool
-	byPath map[string]int
-	byWD   map[int]string
-	emit   func(shareWatchEvent)
-	done   chan struct{}
+	mu           sync.Mutex
+	fd           int
+	wakeFD       int
+	rootFD       int
+	closed       bool
+	byPath       map[string]int
+	byWD         map[int]string
+	pendingMoves map[uint32]linuxPendingMove
+	emit         func(shareWatchEvent)
+	done         chan struct{}
 }
 
 func newPlatformShareWatcher(export *Export, emit func(shareWatchEvent)) (shareWatcher, error) {
@@ -54,7 +67,8 @@ func newPlatformShareWatcher(export *Export, emit func(shareWatchEvent)) (shareW
 	watcher := &linuxShareWatcher{
 		fd: fd, wakeFD: wakeFD, rootFD: export.watchRootFD,
 		byPath: make(map[string]int), byWD: make(map[int]string),
-		emit: emit, done: make(chan struct{}),
+		pendingMoves: make(map[uint32]linuxPendingMove),
+		emit:         emit, done: make(chan struct{}),
 	}
 	if err := watcher.watchDirectoryLocked(""); err != nil {
 		_ = unix.Close(fd)
@@ -186,13 +200,18 @@ func (w *linuxShareWatcher) run() {
 			{Fd: int32(fd), Events: unix.POLLIN},
 			{Fd: int32(w.wakeFD), Events: unix.POLLIN},
 		}
-		_, err := unix.Poll(poll, -1)
+		pollTimeout := w.pendingMovePollTimeout(time.Now())
+		ready, err := unix.Poll(poll, pollTimeout)
 		if err != nil {
 			if errors.Is(err, syscall.EINTR) {
 				continue
 			}
 			w.reportLoss(fmt.Errorf("poll inotify: %w", err))
 			return
+		}
+		if ready == 0 {
+			w.flushExpiredMoves(time.Now())
+			continue
 		}
 		if poll[1].Revents&unix.POLLIN != 0 {
 			return
@@ -212,11 +231,10 @@ func (w *linuxShareWatcher) run() {
 	}
 }
 
-// linuxWatchRecord is one parsed inotify event. Records are parsed per read
-// buffer so that an IN_MOVED_FROM can be paired with the IN_MOVED_TO that
-// shares its cookie: one host rename must surface as a single watch event,
-// otherwise the second half would sweep path mappings that guests already
-// re-established after the first half was handled.
+// linuxWatchRecord is one parsed inotify event. Rename records are paired by
+// cookie across read buffers: one host rename must surface as a single watch
+// event, otherwise the second half would sweep path mappings that guests
+// already re-established after the first half was handled.
 type linuxWatchRecord struct {
 	mask   uint32
 	cookie uint32
@@ -231,10 +249,12 @@ func (w *linuxShareWatcher) process(buffer []byte) {
 		event := (*unix.InotifyEvent)(unsafe.Pointer(&buffer[0]))
 		recordSize := headerSize + int(event.Len)
 		if recordSize < headerSize || recordSize > len(buffer) {
+			clear(w.pendingMoves)
 			w.reportLoss(fmt.Errorf("malformed inotify record"))
 			return
 		}
 		if event.Mask&unix.IN_Q_OVERFLOW != 0 {
+			clear(w.pendingMoves)
 			w.reportLoss(fmt.Errorf("inotify queue overflow"))
 			return
 		}
@@ -248,37 +268,74 @@ func (w *linuxShareWatcher) process(buffer []byte) {
 		buffer = buffer[recordSize:]
 	}
 	if len(buffer) != 0 {
+		clear(w.pendingMoves)
 		w.reportLoss(fmt.Errorf("trailing inotify bytes"))
 		return
 	}
-	consumed := make([]bool, len(records))
-	for i, rec := range records {
-		if consumed[i] {
-			continue
-		}
+	for _, rec := range records {
 		event, ok := w.classifyRecord(rec)
 		if !ok {
 			continue
 		}
-		if rec.mask&unix.IN_MOVED_FROM != 0 && rec.cookie != 0 {
-			for j := i + 1; j < len(records); j++ {
-				pair := records[j]
-				if consumed[j] || pair.mask&unix.IN_MOVED_TO == 0 || pair.cookie != rec.cookie {
-					continue
-				}
-				consumed[j] = true
-				if target, targetOK := w.classifyRecord(pair); targetOK && target.loss == nil {
-					event.relTo = target.rel
-					event.invalidateDirs = event.invalidateDirs || target.invalidateDirs
-				}
-				break
-			}
-		}
 		if event.loss != nil {
+			clear(w.pendingMoves)
 			w.reportLoss(event.loss)
 			return
 		}
+		if rec.cookie != 0 && rec.mask&unix.IN_MOVED_FROM != 0 {
+			if w.pendingMoves == nil {
+				w.pendingMoves = make(map[uint32]linuxPendingMove)
+			}
+			if previous, exists := w.pendingMoves[rec.cookie]; exists {
+				w.emit(previous.event)
+			}
+			w.pendingMoves[rec.cookie] = linuxPendingMove{
+				event: event, deadline: time.Now().Add(linuxRenamePairTimeout),
+			}
+			continue
+		}
+		if rec.cookie != 0 && rec.mask&unix.IN_MOVED_TO != 0 {
+			if source, exists := w.pendingMoves[rec.cookie]; exists {
+				delete(w.pendingMoves, rec.cookie)
+				source.event.relTo = event.rel
+				source.event.invalidateDirs = source.event.invalidateDirs || event.invalidateDirs
+				w.emit(source.event)
+				continue
+			}
+		}
 		w.emit(event)
+	}
+	// Expire old move-outs even while unrelated inotify traffic keeps the
+	// descriptor continuously readable; otherwise a sustained stream could
+	// prevent Poll from timing out and retain pending cookies without bound.
+	w.flushExpiredMoves(time.Now())
+}
+
+func (w *linuxShareWatcher) pendingMovePollTimeout(now time.Time) int {
+	if len(w.pendingMoves) == 0 {
+		return -1
+	}
+	var earliest time.Time
+	for _, pending := range w.pendingMoves {
+		if earliest.IsZero() || pending.deadline.Before(earliest) {
+			earliest = pending.deadline
+		}
+	}
+	remaining := earliest.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	// Poll uses integer milliseconds; round up so a sub-millisecond remainder
+	// does not become a busy loop.
+	return int((remaining + time.Millisecond - 1) / time.Millisecond)
+}
+
+func (w *linuxShareWatcher) flushExpiredMoves(now time.Time) {
+	for cookie, pending := range w.pendingMoves {
+		if !pending.deadline.After(now) {
+			delete(w.pendingMoves, cookie)
+			w.emit(pending.event)
+		}
 	}
 }
 

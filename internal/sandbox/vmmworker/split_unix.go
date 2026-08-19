@@ -18,7 +18,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vmm"
-	"github.com/ejpir/gantry/internal/vmmworker"
+	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 )
 
 // Supported: re-exec'd VMM workers are supported on this platform.
@@ -59,7 +59,7 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, ErrUnavailable
 	}
-	bootCfg := vmmworker.Config{
+	bootCfg := vmmworkerapi.Config{
 		MemSize:  opts.MemSize,
 		VCPUs:    opts.VCPUs,
 		Cmdline:  opts.Cmdline,
@@ -78,7 +78,7 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	// the hypervisor handle in the table (confinement empties /dev).
 	// The KVM open is best-effort: without it the worker's Prepare fails
 	// exactly like the monolithic path would.
-	bootCfg.Confinement = config.EffectiveProcessIsolation(cfg.ProcessIsolation)
+	bootCfg.Confinement = config.NormalizeProcessIsolation(cfg.ProcessIsolation)
 	// Opt-in while the vhost data plane is field-validated. The fallback is
 	// the established framed share broker; no persisted sandbox format changes.
 	bootCfg.VhostShares = os.Getenv("GANTRY_VHOST_SHARES") == "1"
@@ -121,7 +121,7 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 			return nil, err
 		}
 	}
-	vw, err := spawnVMMWorker(bootCfg, vmmworker.Assets{
+	vw, err := spawnVMMWorker(bootCfg, vmmworkerapi.Assets{
 		NetConn:   opts.NetConn,
 		Console:   console,
 		Kernel:    opts.Kernel,

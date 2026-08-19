@@ -27,7 +27,7 @@ import (
 func ValidateSandboxName(name string) error { return layout.ValidateName(name) }
 
 func dumpTailTo(w io.Writer, path string) {
-	b, err := boundedlog.ReadTail(path, 4096)
+	b, _, err := boundedlog.ReadTail(path, 4096)
 	if err != nil || len(b) == 0 {
 		return
 	}

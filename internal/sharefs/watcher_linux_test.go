@@ -3,13 +3,73 @@
 package sharefs
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"golang.org/x/sys/unix"
 )
+
+func linuxInotifyRecord(wd int32, mask, cookie uint32, name string) []byte {
+	nameLen := (len(name) + 1 + 3) &^ 3
+	record := make([]byte, unix.SizeofInotifyEvent+nameLen)
+	binary.LittleEndian.PutUint32(record[0:4], uint32(wd))
+	binary.LittleEndian.PutUint32(record[4:8], mask)
+	binary.LittleEndian.PutUint32(record[8:12], cookie)
+	binary.LittleEndian.PutUint32(record[12:16], uint32(nameLen))
+	copy(record[unix.SizeofInotifyEvent:], name)
+	return record
+}
+
+func TestLinuxWatcherPairsRenameAcrossReadBuffers(t *testing.T) {
+	var events []shareWatchEvent
+	w := &linuxShareWatcher{
+		byWD:         map[int]string{1: "left", 2: "right"},
+		byPath:       map[string]int{"left": 1, "right": 2},
+		pendingMoves: make(map[uint32]linuxPendingMove),
+		emit:         func(event shareWatchEvent) { events = append(events, event) },
+	}
+
+	w.process(linuxInotifyRecord(1, unix.IN_MOVED_FROM, 42, "old"))
+	if len(events) != 0 {
+		t.Fatalf("source half emitted before its pair: %+v", events)
+	}
+	w.process(linuxInotifyRecord(2, unix.IN_MOVED_TO, 42, "new"))
+	want := []shareWatchEvent{{rel: "left/old", relTo: "right/new", rename: true}}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("rename events = %+v, want %+v", events, want)
+	}
+	if len(w.pendingMoves) != 0 {
+		t.Fatalf("paired rename left pending state: %+v", w.pendingMoves)
+	}
+}
+
+func TestLinuxWatcherFlushesUnpairedRenameDuringActiveTraffic(t *testing.T) {
+	var events []shareWatchEvent
+	w := &linuxShareWatcher{
+		byWD:         map[int]string{1: "left"},
+		byPath:       map[string]int{"left": 1},
+		pendingMoves: make(map[uint32]linuxPendingMove),
+		emit:         func(event shareWatchEvent) { events = append(events, event) },
+	}
+
+	w.process(linuxInotifyRecord(1, unix.IN_MOVED_FROM, 7, "gone"))
+	pending := w.pendingMoves[7]
+	pending.deadline = time.Now().Add(-time.Millisecond)
+	w.pendingMoves[7] = pending
+	w.process(linuxInotifyRecord(1, unix.IN_MODIFY, 0, "busy"))
+	want := []shareWatchEvent{
+		{rel: "left/busy"},
+		{rel: "left/gone", rename: true},
+	}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("unpaired rename events = %+v, want %+v", events, want)
+	}
+}
 
 func waitNotificationCode(t *testing.T, notifications <-chan []byte, status int32) {
 	t.Helper()

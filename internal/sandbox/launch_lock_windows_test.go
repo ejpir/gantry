@@ -22,7 +22,7 @@ func TestSandboxLaunchLockInstallsProtectedDACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockDir := filepath.Join(root, launchLockDirectory)
+	lockDir := filepath.Join(root, "@launch-locks")
 	if err := localsec.VerifyPrivate(root, userSID, false); err != nil {
 		t.Fatalf("sandbox root: %v", err)
 	}
