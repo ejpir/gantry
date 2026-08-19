@@ -23,25 +23,24 @@ func SetResources(name string, memMB uint, vcpus int, processIsolation string) e
 		return err
 	}
 	if _, alive := layout.PID(name); alive {
-		// Pass the mode through unchanged: ConfigStore.SetResources already
-		// normalizes and treats "" as "preserve the stored value", exactly
-		// like the stopped-sandbox path below. Normalizing here would turn
-		// "keep" into "auto" for running sandboxes only.
-		req := controlproto.Request{
-			Op: "resources.set", ID: controlproto.NewRequestID("resources"),
-			Resources: &controlproto.ResourceRequest{MemMB: memMB, VCPUs: vcpus, ProcessIsolation: processIsolation},
+		return setResourcesLive(name, memMB, vcpus, processIsolation)
+	}
+
+	// A daemon may be mid-boot between our liveness check and the store
+	// write: it reads sandbox.json while its launcher holds the launch lock,
+	// and it would never observe an allocation persisted in that window (the
+	// user is told the new resources saved while the machine boots with the
+	// old ones). Same serialization as SetNetworkPolicy's stopped path.
+	lock, err := layout.HoldLaunchLock(name)
+	if err != nil {
+		if _, alive := layout.PID(name); alive {
+			return setResourcesLive(name, memMB, vcpus, processIsolation)
 		}
-		resp, err := controlproto.Call[controlproto.ResourceResponse](name, req)
-		if err != nil {
-			return err
-		}
-		if !resp.OK {
-			if resp.Error == "" {
-				resp.Error = "resource update failed"
-			}
-			return fmt.Errorf("%s", resp.Error)
-		}
-		return nil
+		return fmt.Errorf("sandbox %q is launching; retry the resource update when it is up or fully stopped", name)
+	}
+	defer func() { _ = lock.Close() }()
+	if _, alive := layout.PID(name); alive {
+		return setResourcesLive(name, memMB, vcpus, processIsolation)
 	}
 
 	store, err := config.LoadConfigStore(layout.Dir(name))
@@ -49,4 +48,27 @@ func SetResources(name string, memMB uint, vcpus int, processIsolation string) e
 		return err
 	}
 	return store.SetResources(memMB, vcpus, processIsolation)
+}
+
+// setResourcesLive routes the update through the daemon's control socket. It
+// passes the mode through unchanged: ConfigStore.SetResources already
+// normalizes and treats "" as "preserve the stored value", exactly like the
+// stopped-sandbox path. Normalizing here would turn "keep" into "auto" for
+// running sandboxes only.
+func setResourcesLive(name string, memMB uint, vcpus int, processIsolation string) error {
+	req := controlproto.Request{
+		Op: "resources.set", ID: controlproto.NewRequestID("resources"),
+		Resources: &controlproto.ResourceRequest{MemMB: memMB, VCPUs: vcpus, ProcessIsolation: processIsolation},
+	}
+	resp, err := controlproto.Call[controlproto.ResourceResponse](name, req)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		if resp.Error == "" {
+			resp.Error = "resource update failed"
+		}
+		return fmt.Errorf("%s", resp.Error)
+	}
+	return nil
 }

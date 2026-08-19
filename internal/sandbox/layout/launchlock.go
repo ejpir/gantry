@@ -25,14 +25,13 @@ func HoldLaunchLock(name string) (*os.File, error) {
 		return nil, fmt.Errorf("invalid sandbox name %q", name)
 	}
 	dir := filepath.Join(Root(), launchLockDirectory)
-	// On Windows this creates protected DACLs on both the sandbox root and the
-	// lock directory. On Unix the explicit hardening handles a pre-existing
-	// directory created under a permissive umask.
-	if err := localsec.CreateDir(dir); err != nil {
+	// CreateManagerDir protects the lock directory itself without touching
+	// the sandbox root: start/daemon boot own the root's hardening, and a
+	// control client re-protecting an existing root on Windows replaces its
+	// DACL, breaking children that still hold ACEs inherited from it (this
+	// made a stopped sandbox's own sandbox.json unreadable mid-command).
+	if err := localsec.CreateManagerDir(dir); err != nil {
 		return nil, fmt.Errorf("create launch-lock directory: %w", err)
-	}
-	if err := localsec.SecureDir(dir); err != nil {
-		return nil, fmt.Errorf("secure launch-lock directory: %w", err)
 	}
 
 	path := filepath.Join(dir, name+".lock")

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,24 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
+
+// useShortGantryHome points GANTRY_HOME at a short directory. ctl.sock lives
+// under the sandbox directory, and AF_UNIX addresses are limited to ~104
+// bytes on macOS and ~108 on Windows; t.TempDir() paths already exceed both
+// (bind fails with EINVAL).
+func useShortGantryHome(t *testing.T) {
+	t.Helper()
+	base := "/tmp"
+	if runtime.GOOS == "windows" {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, "gt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("GANTRY_HOME", dir)
+}
 
 // writeSandboxConfig persists a minimal valid configuration for name.
 func writeSandboxConfig(t *testing.T, name string) string {
@@ -80,7 +99,7 @@ func fakeLiveSandbox(t *testing.T, name, response string) <-chan controlproto.Re
 // daemon as "" (preserve the stored value), not be pre-normalized to
 // "auto" here while the stopped path preserves.
 func TestSetResourcesLivePassesIsolationThroughUnchanged(t *testing.T) {
-	t.Setenv("GANTRY_HOME", t.TempDir())
+	useShortGantryHome(t)
 	captured := fakeLiveSandbox(t, "rsrc", `{"ok":true}`)
 	if err := SetResources("rsrc", 2048, 2, ""); err != nil {
 		t.Fatal(err)
@@ -100,7 +119,7 @@ func TestSetResourcesLivePassesIsolationThroughUnchanged(t *testing.T) {
 // TestSetNetworkPolicyStoppedSandboxWritesStore covers the offline path:
 // no daemon anywhere, the policy is validated and persisted for next boot.
 func TestSetNetworkPolicyStoppedSandboxWritesStore(t *testing.T) {
-	t.Setenv("GANTRY_HOME", t.TempDir())
+	useShortGantryHome(t)
 	writeSandboxConfig(t, "stopped")
 	entry, err := SetNetworkPolicy("stopped", "", false)
 	if err != nil {
@@ -118,11 +137,36 @@ func TestSetNetworkPolicyStoppedSandboxWritesStore(t *testing.T) {
 	}
 }
 
+// TestSetResourcesWhileLaunchLockHeld mirrors the net-policy guard: a
+// launcher mid-boot holds the launch lock, so the stopped-sandbox store
+// write must refuse rather than persist an allocation the booting daemon
+// will never observe.
+func TestSetResourcesWhileLaunchLockHeld(t *testing.T) {
+	useShortGantryHome(t)
+	writeSandboxConfig(t, "booting")
+	lock, err := layout.HoldLaunchLock("booting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	err = SetResources("booting", 2048, 2, "off")
+	if err == nil || !strings.Contains(err.Error(), "launching") {
+		t.Fatalf("SetResources = %v, want a launching conflict", err)
+	}
+	cfg, cfgErr := config.ReadSandboxConfig(layout.Dir("booting"))
+	if cfgErr != nil {
+		t.Fatal(cfgErr)
+	}
+	if cfg.MemMB != 512 || cfg.VCPUs != 1 {
+		t.Fatalf("config changed under a held launch lock: %+v", cfg)
+	}
+}
+
 // TestSetNetworkPolicyWhileLaunchLockHeld: a launcher holding the launch
 // lock means a daemon may be mid-boot reading sandbox.json. The stopped
 // path must refuse to write instead of silently losing the update.
 func TestSetNetworkPolicyWhileLaunchLockHeld(t *testing.T) {
-	t.Setenv("GANTRY_HOME", t.TempDir())
+	useShortGantryHome(t)
 	writeSandboxConfig(t, "booting")
 	lock, err := layout.HoldLaunchLock("booting")
 	if err != nil {
