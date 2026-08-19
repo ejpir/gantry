@@ -3,154 +3,188 @@
 package selfupdate
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-const protectedUpdateSDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
-
-var (
-	processElevation = currentProcessElevation
-	moveFile         = windows.MoveFileEx
+const (
+	replaceRetryTimeout  = time.Minute
+	replaceRetryInitial  = 50 * time.Millisecond
+	replaceRetryMaximum  = time.Second
+	retiredSuffixHexSize = 16
 )
 
-// installStaged replaces the running executable in process, leaving no helper
-// behind. Windows lets a running image be renamed, so the live executable is
-// moved aside and the verified payload takes the freed path immediately.
-//
-// This deliberately avoids the obvious alternative of handing the swap to a
-// detached child that waits for this process to exit. That design needed an
-// interpreter launched with a base64-encoded command and a hidden window, and
-// under an elevated caller a SYSTEM scheduled task registered under a random
-// name and unregistered right after starting. Endpoint protection cannot tell
-// that sequence apart from a dropper installing persistence, and Defender's
-// static model scores the strings alone: doing the work here removes both the
-// behavior and the strings.
-func installStaged(staged, target string) error {
-	if err := protectStagedUpdate(staged); err != nil {
-		return err
+var (
+	procReplaceFile = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+	replaceFile     = replaceFilePath
+	moveFile        = windows.MoveFileEx
+)
+
+// installStaged replaces the executable with one ReplaceFileW operation.
+// Supplying a backup name lets Windows rename a currently mapped image while
+// preserving the target's ACL, attributes, and alternate streams. Crucially,
+// user code never exposes the canonical target name between two operations.
+func installStaged(ctx context.Context, staged, target string) error {
+	if ctx == nil {
+		ctx = context.Background()
 	}
+	// A prior process can leave its old image mapped. It is safe to retry that
+	// cleanup now, but a still-running old process must not block this update.
+	_ = cleanupRetired(target)
 	retired, err := retiredPath(target)
 	if err != nil {
 		return err
 	}
-	// Renaming the image this process is executing from is safe: the open
-	// section keeps running against the renamed file, and the rename only
-	// frees the target path so the replacement can take it.
-	if err := moveFilePath(target, retired, windows.MOVEFILE_REPLACE_EXISTING); err != nil {
-		return fmt.Errorf("move running Gantry executable aside: %w", err)
-	}
-	if err := moveFilePath(staged, target,
-		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
-		// Never leave the installation with no executable at target.
-		if restore := moveFilePath(retired, target, windows.MOVEFILE_REPLACE_EXISTING); restore != nil {
-			return fmt.Errorf("install Gantry executable %s: %w (restoring %s failed: %v)",
-				target, err, retired, restore)
+
+	retryCtx, cancel := context.WithTimeout(ctx, replaceRetryTimeout)
+	defer cancel()
+	delay := replaceRetryInitial
+	for {
+		err = replaceFile(target, staged, retired)
+		if err == nil {
+			discardRetired(retired)
+			return nil
 		}
-		return fmt.Errorf("install Gantry executable %s: %w", target, err)
+		if errors.Is(err, windows.ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+			// ReplaceFileW documents this as its one partial state: the old
+			// target reached the backup name but the replacement did not reach
+			// target. Restore the verified old image over any path occupant.
+			if restoreErr := restorePartialReplacement(retired, target); restoreErr != nil {
+				return fmt.Errorf("replace Gantry executable %s: %w (restore %s: %v)",
+					target, err, retired, restoreErr)
+			}
+			return fmt.Errorf("replace Gantry executable %s: %w", target, err)
+		}
+		if !replaceRetryable(err) {
+			return fmt.Errorf("replace Gantry executable %s: %w", target, err)
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+			if delay < replaceRetryMaximum {
+				delay = min(delay*2, replaceRetryMaximum)
+			}
+		case <-retryCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return fmt.Errorf("replace Gantry executable %s after transient error %v: %w",
+				target, err, retryCtx.Err())
+		}
 	}
-	discardRetired(retired)
-	return nil
 }
 
-// retiredPath names the replaced executable. The random suffix keeps repeated
-// updates and a leftover from an earlier one from colliding, and the leading
-// dot matches how stageBinary names its own sibling temporaries.
+func replaceRetryable(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_ACCESS_DENIED)
+}
+
+func replaceFilePath(target, staged, retired string) error {
+	target16, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return fmt.Errorf("invalid target path %q: %w", target, err)
+	}
+	staged16, err := windows.UTF16PtrFromString(staged)
+	if err != nil {
+		return fmt.Errorf("invalid staged path %q: %w", staged, err)
+	}
+	retired16, err := windows.UTF16PtrFromString(retired)
+	if err != nil {
+		return fmt.Errorf("invalid backup path %q: %w", retired, err)
+	}
+	result, _, callErr := procReplaceFile.Call(
+		uintptr(unsafe.Pointer(target16)),
+		uintptr(unsafe.Pointer(staged16)),
+		uintptr(unsafe.Pointer(retired16)),
+		0, // preserve every mergeable target attribute and stream
+		0,
+		0,
+	)
+	if result != 0 {
+		return nil
+	}
+	if callErr != nil && !errors.Is(callErr, windows.ERROR_SUCCESS) {
+		return callErr
+	}
+	return syscall.EINVAL
+}
+
+func restorePartialReplacement(retired, target string) error {
+	if _, err := os.Stat(retired); err != nil {
+		return fmt.Errorf("locate replacement backup: %w", err)
+	}
+	return moveFilePath(retired, target,
+		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+// retiredPath names ReplaceFileW's backup. The random suffix keeps concurrent
+// or interrupted updates from colliding.
 func retiredPath(target string) (string, error) {
-	var suffix [8]byte
+	var suffix [retiredSuffixHexSize / 2]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
 		return "", fmt.Errorf("name replaced Gantry executable: %w", err)
 	}
-	return filepath.Join(filepath.Dir(target),
-		"."+filepath.Base(target)+".old-"+hex.EncodeToString(suffix[:])), nil
+	return filepath.Join(filepath.Dir(target), retiredPrefix(target)+hex.EncodeToString(suffix[:])), nil
 }
 
-// discardRetired removes the replaced executable. This process still has the
-// image mapped, so the unlink normally fails until exit; scheduling it for the
-// next boot is a best effort that needs privileges the caller may not hold. A
-// leftover sibling is harmless either way — it never shadows target.
+func retiredPrefix(target string) string {
+	return "." + filepath.Base(target) + ".old-"
+}
+
+// discardRetired succeeds immediately for an idle target. A mapped executable
+// remains until its process exits; cleanupRetired removes it on a later Gantry
+// invocation without relying on the privileged delayed-reboot mechanism.
 func discardRetired(retired string) {
-	if os.Remove(retired) == nil {
-		return
-	}
-	_ = moveFilePath(retired, "", windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+	_ = os.Remove(retired)
 }
 
-// moveFilePath wraps MoveFileEx in path handling. An empty destination is the
-// documented way to spell "delete" for MOVEFILE_DELAY_UNTIL_REBOOT.
+func cleanupRetired(target string) error {
+	entries, err := os.ReadDir(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	prefix := retiredPrefix(target)
+	var cleanupErr error
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		if len(suffix) != retiredSuffixHexSize {
+			continue
+		}
+		if _, err := hex.DecodeString(suffix); err != nil {
+			continue
+		}
+		path := filepath.Join(filepath.Dir(target), name)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove retired executable %s: %w", path, err))
+		}
+	}
+	return cleanupErr
+}
+
 func moveFilePath(from, to string, flags uint32) error {
 	source, err := windows.UTF16PtrFromString(from)
 	if err != nil {
 		return fmt.Errorf("invalid path %q: %w", from, err)
 	}
-	var destination *uint16
-	if to != "" {
-		if destination, err = windows.UTF16PtrFromString(to); err != nil {
-			return fmt.Errorf("invalid path %q: %w", to, err)
-		}
+	destination, err := windows.UTF16PtrFromString(to)
+	if err != nil {
+		return fmt.Errorf("invalid path %q: %w", to, err)
 	}
 	return moveFile(source, destination, flags)
-}
-
-func currentProcessElevation() (bool, error) {
-	var elevated uint32
-	var outputSize uint32
-	err := windows.GetTokenInformation(
-		windows.GetCurrentProcessToken(),
-		windows.TokenElevation,
-		(*byte)(unsafe.Pointer(&elevated)),
-		uint32(unsafe.Sizeof(elevated)),
-		&outputSize,
-	)
-	if err != nil {
-		return false, fmt.Errorf("query process elevation: %w", err)
-	}
-	if outputSize != uint32(unsafe.Sizeof(elevated)) {
-		return false, fmt.Errorf("query process elevation: unexpected result size %d", outputSize)
-	}
-	return elevated != 0, nil
-}
-
-// protectStagedUpdate closes the window between verifying the payload and
-// moving it into place. stageBinary writes the staged file next to target,
-// which can be a directory a lesser-privileged user may write to; when this
-// process is elevated, the file gets an Administrators owner and a protected
-// SYSTEM/Administrators-only DACL so nothing can swap its contents after the
-// checksum check. Unelevated installs keep their user-owned ACL so the same
-// user can still finish the update.
-func protectStagedUpdate(staged string) error {
-	elevated, err := processElevation()
-	if err != nil {
-		return err
-	}
-	if !elevated {
-		return nil
-	}
-	descriptor, err := windows.SecurityDescriptorFromString(protectedUpdateSDDL)
-	if err != nil {
-		return fmt.Errorf("build protected update permissions: %w", err)
-	}
-	owner, _, err := descriptor.Owner()
-	if err != nil {
-		return fmt.Errorf("read protected update owner: %w", err)
-	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil {
-		return fmt.Errorf("read protected update permissions: %w", err)
-	}
-	securityInformation := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION |
-		windows.DACL_SECURITY_INFORMATION |
-		windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	if err := windows.SetNamedSecurityInfo(
-		staged, windows.SE_FILE_OBJECT, securityInformation, owner, nil, dacl, nil,
-	); err != nil {
-		return fmt.Errorf("protect elevated staged update: %w", err)
-	}
-	return nil
 }

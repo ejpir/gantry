@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
+	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 )
 
 func (d *daemonRuntime) startControl() error {
@@ -26,7 +30,7 @@ func (d *daemonRuntime) startControl() error {
 	// Protect and verify the endpoint before publishing it to the broker. The
 	// Windows implementation installs a protected DACL instead of relying on
 	// os.FileMode, which does not define local-account access there.
-	if err := secureLocalEndpoint(path); err != nil {
+	if err := localsec.SecureEndpoint(path); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(path)
 		return fmt.Errorf("secure control endpoint: %w", err)
@@ -49,13 +53,13 @@ func (d *daemonRuntime) startControl() error {
 		store:      d.store,
 		shares:     d.shares,
 		ports:      d.ports,
-		netPolicy:  NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
+		netPolicy:  control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
 		capture:    packetCaptureBackendFor(d.network, d.runner),
 		sessions:   map[string]chan struct{}{},
 		sessionCtl: map[string]net.Conn{},
 		shutdown:   d.shutdown,
 	}
-	d.broker.oauth = newOAuthBridge(d.broker)
+	d.broker.oauth = oauthbridge.New(d.broker.oauthExec, d.broker.cfg.OAuthBridgeEnabled())
 	go d.broker.serve(listener)
 	return nil
 }
@@ -112,7 +116,7 @@ func closedWhenNetworkWorkerExits(network *Network) <-chan struct{} {
 	return network.Worker.Done()
 }
 
-func closedWhenVMMWorkerExits(runner vmmRunner) <-chan struct{} {
+func closedWhenVMMWorkerExits(runner vmmworker.Runner) <-chan struct{} {
 	if runner == nil {
 		return nil
 	}

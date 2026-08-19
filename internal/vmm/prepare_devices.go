@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ejpir/gantry/internal/virtio"
+	"github.com/ejpir/gantry/internal/vmm/boot"
 )
 
 // checkNilInterface reports an interface value that is non-nil but holds a
@@ -192,19 +193,19 @@ func (m *Machine) finishBoot(o Opts, ram []byte, initrdStart, initrdEnd uint64) 
 		if m.x86HotMemSize != 0 {
 			cmdline = insertKernelArgs(cmdline, "memhp_default_state=online_kernel")
 		}
-		if err := setupX86Boot(ram, cmdline, m.x86BootMemSize, m.vcpus); err != nil {
+		if err := boot.SetupX86(ram, cmdline, m.x86BootMemSize, m.vcpus); err != nil {
 			return err
 		}
 		fmt.Printf("boot params @ %#x, cmdline @ %#x (%d bytes), MPS @ %#x\n",
-			x86ZeroPage, x86CmdlineAddr, len(cmdline), x86MPSFloatingPtr)
+			boot.ZeroPage, boot.CmdlineAddr, len(cmdline), boot.MPSFloatingPtr)
 		return nil
 	}
 
-	m.fdt = buildGuestFDT(o.MemSize, initrdStart, initrdEnd, cmdline, len(m.virtios), m.vcpus)
+	m.fdt = boot.BuildGuestFDT(o.MemSize, initrdStart, initrdEnd, cmdline, len(m.virtios), m.vcpus)
 	if len(m.fdt) > maxFDTSize {
 		return fmt.Errorf("FDT too large: %d", len(m.fdt))
 	}
-	fdtOffset := uint64(fdtAddr - ramBase)
+	fdtOffset := uint64(fdtAddr - boot.RAMBase)
 	if fdtOffset > uint64(len(m.ram)) || uint64(len(m.fdt)) > uint64(len(m.ram))-fdtOffset {
 		return fmt.Errorf("guest RAM too small for FDT")
 	}

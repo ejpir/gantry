@@ -15,6 +15,8 @@ import (
 	"unsafe"
 
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/vmm/boot"
+	"github.com/ejpir/gantry/internal/vmm/devices"
 )
 
 // hvfBackend is the macOS Hypervisor.framework implementation.
@@ -41,7 +43,7 @@ type hvfBackend struct {
 	vmCreated bool
 	mapped    bool
 
-	irqs     serializedIRQDelivery
+	irqs     devices.SerializedIRQDelivery
 	shutdown *nativeThreadTeardown
 
 	vcpuMu  sync.Mutex
@@ -111,7 +113,7 @@ func (b *hvfBackend) deliverIRQ(irq int, level bool) {
 	if b.lifecycle.isStopping() {
 		return
 	}
-	err := b.irqs.inject(irqChange{irq: irq, level: level}, func(irq int, level bool) error {
+	err := b.irqs.Inject(devices.IRQChange{IRQ: irq, Level: level}, func(irq int, level bool) error {
 		if b.debug {
 			fmt.Printf("[gic] set_spi(%d, %v)\n", irq, level)
 		}
@@ -175,7 +177,7 @@ func (b *hvfBackend) stopVCPUs() error {
 func (b *hvfBackend) releaseNative() error {
 	var errs []error
 	if b.mapped {
-		if ret := hvVmUnmap(ramBase, b.ramSize); ret != hvSuccess {
+		if ret := hvVmUnmap(boot.RAMBase, b.ramSize); ret != hvSuccess {
 			errs = append(errs, fmt.Errorf("hv_vm_unmap: %s", hvReturnString(ret)))
 		}
 		b.mapped = false
@@ -244,8 +246,8 @@ func (vc *hvfVCPU) dumpState(why string) {
 	// with nokaslr, kernel text: virt kernelTextVA == phys 0x40000000
 	if pc >= kernelTextVA {
 		phys := pc - kernelTextVA
-		if phys >= ramBase && phys < ramBase+uint64(len(vc.b.m.ram)) {
-			offset := phys - ramBase
+		if phys >= boot.RAMBase && phys < boot.RAMBase+uint64(len(vc.b.m.ram)) {
+			offset := phys - boot.RAMBase
 			code := vc.b.m.ram[offset:min(offset+96, uint64(len(vc.b.m.ram)))]
 			fmt.Printf("[debug] code@pc: % x\n", code)
 		}
@@ -349,14 +351,14 @@ func kernelSymbolish(addr uint64) string {
 // nothing and simply prints without code.
 func (m *Machine) codeAtPC(pc uint64) string {
 	const words = 8
-	if pc < kernelTextVA || m.entry < ramBase {
+	if pc < kernelTextVA || m.entry < boot.RAMBase {
 		return ""
 	}
 	phys := m.entry + (pc - kernelTextVA)
-	if phys < ramBase || phys+words*4 > ramBase+uint64(len(m.ram)) {
+	if phys < boot.RAMBase || phys+words*4 > boot.RAMBase+uint64(len(m.ram)) {
 		return ""
 	}
-	code := m.ram[phys-ramBase:]
+	code := m.ram[phys-boot.RAMBase:]
 	out := fmt.Sprintf(" pa %#x code:", phys)
 	for i := range words {
 		out += fmt.Sprintf(" %08x", gutil.LE32(code[i*4:]))
@@ -489,7 +491,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	b.vmCreated = true
 
 	// guest RAM: same addresses as the KVM backend
-	if ret := hvVmMap(unsafe.Pointer(&m.ram[0]), ramBase, uint64(len(m.ram)),
+	if ret := hvVmMap(unsafe.Pointer(&m.ram[0]), boot.RAMBase, uint64(len(m.ram)),
 		hvMemoryRead|hvMemoryWrite|hvMemoryExec); ret != hvSuccess {
 		return fmt.Errorf("hv_vm_map: %s", hvReturnString(ret))
 	}
@@ -500,11 +502,11 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	if gicCfg == 0 {
 		return fmt.Errorf("hv_gic_config_create returned nil")
 	}
-	if ret := hvGicConfigSetDistributorBase(gicCfg, gicdBase); ret != hvSuccess {
+	if ret := hvGicConfigSetDistributorBase(gicCfg, boot.GICDBase); ret != hvSuccess {
 		osRelease(gicCfg)
 		return fmt.Errorf("hv_gic_config_set_distributor_base: %s", hvReturnString(ret))
 	}
-	if ret := hvGicConfigSetRedistributorBase(gicCfg, gicrBase); ret != hvSuccess {
+	if ret := hvGicConfigSetRedistributorBase(gicCfg, boot.GICRBase); ret != hvSuccess {
 		osRelease(gicCfg)
 		return fmt.Errorf("hv_gic_config_set_redistributor_base: %s", hvReturnString(ret))
 	}
@@ -626,7 +628,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	fmt.Printf("booting guest under Hypervisor.framework (%d vCPU max)\n", m.vcpus)
 	fmt.Println("------------------------------------------------")
 	if m.consoleStdin {
-		go m.uart.stdinPump(m.stdinDone)
+		go m.uart.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
 	if m.bootTiming.profiling() {
@@ -697,7 +699,7 @@ func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 	}()
 	vc.exit = exitInfo
 	// Aff1 = vcpu id so MPIDR matches the redistributor (libkrun does the same)
-	mpidr := uint64(0x80000000) | uint64(guestVCPUMPIDR(id))
+	mpidr := uint64(0x80000000) | uint64(boot.VCPUMPIDR(id))
 	if ret := hvVcpuSetSysReg(vc.vcpu, hvSysRegMpidrEl1, mpidr); ret != hvSuccess {
 		return nil, fmt.Errorf("hv_vcpu_set_sys_reg(MPIDR_EL1): %s", hvReturnString(ret))
 	}
@@ -1061,7 +1063,7 @@ func (vc *hvfVCPU) handlePSCI() error {
 		mpidr, _ := vc.getReg(hvRegX0 + 1)
 		entry, _ := vc.getReg(hvRegX0 + 2)
 		ctx, _ := vc.getReg(hvRegX0 + 3)
-		targetID := guestVCPUIndex(mpidr)
+		targetID := boot.VCPUIndex(mpidr)
 		if err := vc.b.startVCPU(targetID, entry, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[psci] CPU_ON cpu%d entry=%#x failed: %v\n", targetID, entry, err)
 			_ = vc.setReg(hvRegX0, psciInvalid)

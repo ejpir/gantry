@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
 func stageRestartKernel(t *testing.T, sandboxRuntime string) string {
@@ -39,53 +40,53 @@ func legacyReleaseKernel(t *testing.T) string {
 
 func TestRefreshKernelForRestartAdvancesReleaseKernel(t *testing.T) {
 	want := stageRestartKernel(t, "crun")
-	cfg := RunConfig{Kernel: legacyReleaseKernel(t), KernelPolicy: kernelPolicyRelease, Runtime: "crun"}
+	cfg := config.RunConfig{Kernel: legacyReleaseKernel(t), KernelPolicy: config.KernelPolicyRelease, Runtime: "crun"}
 	got, changed, err := refreshKernelForRestart(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed || got.Kernel != want || got.KernelPolicy != kernelPolicyRelease {
-		t.Fatalf("refresh = (%+v, %v), want kernel=%q policy=%q", got, changed, want, kernelPolicyRelease)
+	if !changed || got.Kernel != want || got.KernelPolicy != config.KernelPolicyRelease {
+		t.Fatalf("refresh = (%+v, %v), want kernel=%q policy=%q", got, changed, want, config.KernelPolicyRelease)
 	}
 }
 
 func TestRefreshKernelForRestartPreservesPinnedKernel(t *testing.T) {
 	_ = stageRestartKernel(t, "crun")
 	custom := filepath.Join(t.TempDir(), "custom-kernel")
-	cfg := RunConfig{Kernel: custom, KernelPolicy: kernelPolicyPinned}
+	cfg := config.RunConfig{Kernel: custom, KernelPolicy: config.KernelPolicyPinned}
 	got, changed, err := refreshKernelForRestart(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed || got.Kernel != custom || got.KernelPolicy != kernelPolicyPinned {
+	if changed || got.Kernel != custom || got.KernelPolicy != config.KernelPolicyPinned {
 		t.Fatalf("pinned kernel changed: (%+v, %v)", got, changed)
 	}
 }
 
 func TestRefreshKernelForRestartMigratesLegacyPolicies(t *testing.T) {
 	want := stageRestartKernel(t, "crun")
-	managed := RunConfig{Kernel: legacyReleaseKernel(t)}
+	managed := config.RunConfig{Kernel: legacyReleaseKernel(t)}
 	got, changed, err := refreshKernelForRestart(managed, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed || got.Kernel != want || got.KernelPolicy != kernelPolicyRelease {
+	if !changed || got.Kernel != want || got.KernelPolicy != config.KernelPolicyRelease {
 		t.Fatalf("legacy managed refresh = (%+v, %v)", got, changed)
 	}
 
 	custom := filepath.Join(t.TempDir(), "custom-kernel")
-	got, changed, err = refreshKernelForRestart(RunConfig{Kernel: custom}, nil)
+	got, changed, err = refreshKernelForRestart(config.RunConfig{Kernel: custom}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed || got.Kernel != custom || got.KernelPolicy != kernelPolicyPinned {
+	if !changed || got.Kernel != custom || got.KernelPolicy != config.KernelPolicyPinned {
 		t.Fatalf("legacy custom migration = (%+v, %v)", got, changed)
 	}
 }
 
 func TestRefreshKernelForRestartSelectsRunscVariant(t *testing.T) {
 	want := stageRestartKernel(t, "runsc")
-	cfg := RunConfig{Kernel: legacyReleaseKernel(t), KernelPolicy: kernelPolicyRelease, Runtime: "runsc"}
+	cfg := config.RunConfig{Kernel: legacyReleaseKernel(t), KernelPolicy: config.KernelPolicyRelease, Runtime: "runsc"}
 	got, _, err := refreshKernelForRestart(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +99,7 @@ func TestRefreshKernelForRestartSelectsRunscVariant(t *testing.T) {
 func TestRefreshSavedKernelForRestartPersistsBeforeBoot(t *testing.T) {
 	want := stageRestartKernel(t, "crun")
 	dir := t.TempDir()
-	cfg := RunConfig{Kernel: legacyReleaseKernel(t), KernelPolicy: kernelPolicyRelease}
+	cfg := config.RunConfig{Kernel: legacyReleaseKernel(t), KernelPolicy: config.KernelPolicyRelease}
 	refreshed, changed, err := refreshSavedKernelForRestart(dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -110,11 +111,11 @@ func TestRefreshSavedKernelForRestartPersistsBeforeBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var persisted RunConfig
+	var persisted config.RunConfig
 	if err := json.Unmarshal(raw, &persisted); err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Kernel != want || persisted.KernelPolicy != kernelPolicyRelease {
+	if persisted.Kernel != want || persisted.KernelPolicy != config.KernelPolicyRelease {
 		t.Fatalf("persisted config = %+v", persisted)
 	}
 }

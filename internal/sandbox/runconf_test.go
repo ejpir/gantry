@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
 // resolveAssets are the files Resolve requires; covers the default names
@@ -27,11 +28,11 @@ var resolveAssets = []string{
 }
 
 // touch the asset files Resolve requires, in a temp cwd
-func resolveSandbox(t *testing.T, args ...string) (RunConfig, []string, error) {
+func resolveSandbox(t *testing.T, args ...string) (config.RunConfig, []string, error) {
 	return resolveNamedSandbox(t, "", args...)
 }
 
-func resolveNamedSandbox(t *testing.T, name string, args ...string) (RunConfig, []string, error) {
+func resolveNamedSandbox(t *testing.T, name string, args ...string) (config.RunConfig, []string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -41,12 +42,12 @@ func resolveNamedSandbox(t *testing.T, name string, args ...string) (RunConfig, 
 		}
 	}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	rf := RegisterRunFlags(fs)
+	rf := config.RegisterRunFlags(fs)
 	rf.Name = name
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
-	return rf.Resolve(fs, nil)
+	return Resolve(rf, fs, nil)
 }
 
 func TestResolveRWRules(t *testing.T) {
@@ -81,13 +82,13 @@ func TestResolveRWWithLayer(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	parse := func(args ...string) (RunConfig, []string, error) {
+	parse := func(args ...string) (config.RunConfig, []string, error) {
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		rf := RegisterRunFlags(fs)
+		rf := config.RegisterRunFlags(fs)
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		return rf.Resolve(fs, nil)
+		return Resolve(rf, fs, nil)
 	}
 
 	// a rwlayer existing defaults RW on
@@ -119,7 +120,7 @@ func TestResolveRejectsInvalidResources(t *testing.T) {
 	for _, args := range [][]string{
 		{"-mem", "0"},
 		{"-cpus", "0"},
-		{"-cpus", fmt.Sprint(maxSandboxVCPUs + 1)},
+		{"-cpus", fmt.Sprint(config.MaxSandboxVCPUs() + 1)},
 	} {
 		if _, _, err := resolveSandbox(t, args...); err == nil {
 			t.Errorf("Resolve accepted invalid resources %v", args)
@@ -142,14 +143,14 @@ func TestResolveOAuthBridgeDefaultsOnAndPersistsOptOut(t *testing.T) {
 	if cfg.OAuthBridge == nil || cfg.OAuthBridgeEnabled() {
 		t.Fatal("-oauth-bridge=false did not persist the opt-out")
 	}
-	if !(RunConfig{}).OAuthBridgeEnabled() {
+	if !(config.RunConfig{}).OAuthBridgeEnabled() {
 		t.Fatal("legacy config without oauth_bridge must default on")
 	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var roundTrip RunConfig
+	var roundTrip config.RunConfig
 	if err := json.Unmarshal(raw, &roundTrip); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestResolveSharesRequireWritableRoot(t *testing.T) {
 
 // resolveSandboxNoKernel stages everything but the kernels and points the
 // release download at srv, so Resolve exercises the on-demand fetch.
-func resolveSandboxNoKernel(t *testing.T, srv string, args ...string) (RunConfig, error) {
+func resolveSandboxNoKernel(t *testing.T, srv string, args ...string) (config.RunConfig, error) {
 	t.Helper()
 	t.Setenv("GANTRY_RELEASE_BASE", srv)
 	dir := t.TempDir()
@@ -219,17 +220,17 @@ func resolveSandboxNoKernel(t *testing.T, srv string, args ...string) (RunConfig
 		}
 	}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	rf := RegisterRunFlags(fs)
+	rf := config.RegisterRunFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := rf.Resolve(fs, nil)
+	cfg, _, err := Resolve(rf, fs, nil)
 	return cfg, err
 }
 
 // resolveSandboxNoRootfs stages everything but the rootfs assets and points
 // the release download at srv, so Resolve exercises the rootfs fetch.
-func resolveSandboxNoRootfs(t *testing.T, srv string, args ...string) (RunConfig, error) {
+func resolveSandboxNoRootfs(t *testing.T, srv string, args ...string) (config.RunConfig, error) {
 	t.Helper()
 	t.Setenv("GANTRY_RELEASE_BASE", srv)
 	dir := t.TempDir()
@@ -244,11 +245,11 @@ func resolveSandboxNoRootfs(t *testing.T, srv string, args ...string) (RunConfig
 		}
 	}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	rf := RegisterRunFlags(fs)
+	rf := config.RegisterRunFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := rf.Resolve(fs, nil)
+	cfg, _, err := Resolve(rf, fs, nil)
 	return cfg, err
 }
 
@@ -294,11 +295,11 @@ func TestResolveBlankImageDownloadsReleaseDefault(t *testing.T) {
 	}
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	rf := RegisterRunFlags(fs)
+	rf := config.RegisterRunFlags(fs)
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := rf.Resolve(fs, nil)
+	cfg, _, err := Resolve(rf, fs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,8 +372,8 @@ func TestResolveDownloadsKernel(t *testing.T) {
 	if b, _ := os.ReadFile(cfg.Kernel); string(b) != "downloaded-kernel" {
 		t.Errorf("kernel content = %q, want the downloaded payload", b)
 	}
-	if cfg.KernelPolicy != kernelPolicyRelease {
-		t.Errorf("default kernel policy = %q, want %q", cfg.KernelPolicy, kernelPolicyRelease)
+	if cfg.KernelPolicy != config.KernelPolicyRelease {
+		t.Errorf("default kernel policy = %q, want %q", cfg.KernelPolicy, config.KernelPolicyRelease)
 	}
 }
 
@@ -414,8 +415,8 @@ func TestResolvePreservesExplicitCustomKernel(t *testing.T) {
 	if cfg.Kernel != want {
 		t.Fatalf("explicit kernel = %q, want unchanged path %q", cfg.Kernel, want)
 	}
-	if cfg.KernelPolicy != kernelPolicyPinned {
-		t.Fatalf("explicit kernel policy = %q, want %q", cfg.KernelPolicy, kernelPolicyPinned)
+	if cfg.KernelPolicy != config.KernelPolicyPinned {
+		t.Fatalf("explicit kernel policy = %q, want %q", cfg.KernelPolicy, config.KernelPolicyPinned)
 	}
 	if body, err := os.ReadFile(cfg.Kernel); err != nil || string(body) != "caller-owned kernel" {
 		t.Fatalf("explicit kernel changed: body=%q err=%v", body, err)
@@ -494,14 +495,14 @@ func TestResolveLayerSet(t *testing.T) {
 	manifest := filepath.Join(dir, "ls.json")
 	_ = os.WriteFile(manifest, []byte(`{"fsmeta":"fsmeta.erofs","layers":["l1.erofs","l2.erofs"]}`), 0o644)
 
-	parse := func(args ...string) (RunConfig, []string, error) {
+	parse := func(args ...string) (config.RunConfig, []string, error) {
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		rf := RegisterRunFlags(fs)
+		rf := config.RegisterRunFlags(fs)
 		rf.Name = "lsbox"
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		return rf.Resolve(fs, nil)
+		return Resolve(rf, fs, nil)
 	}
 
 	cfg, _, err := parse("-layerset", manifest, "-rwlayer", filepath.Join(dir, "rw.ext4"))
@@ -544,13 +545,13 @@ func TestResolveShareOwnerRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	parse := func(args ...string) (RunConfig, []string, error) {
+	parse := func(args ...string) (config.RunConfig, []string, error) {
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		rf := RegisterRunFlags(fs)
+		rf := config.RegisterRunFlags(fs)
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		return rf.Resolve(fs, nil)
+		return Resolve(rf, fs, nil)
 	}
 	shareDir := filepath.Join(dir, "shared")
 	if err := os.Mkdir(shareDir, 0o755); err != nil {
@@ -607,7 +608,7 @@ func TestOptsOpensBootAssets(t *testing.T) {
 	layer := mk("layer.erofs", 1<<20)
 	rwlayer := mk("rwlayer.img", 1<<20)
 
-	cfg := RunConfig{
+	cfg := config.RunConfig{
 		Kernel:  kernel,
 		Rootfs:  rootfs,
 		Image:   layer,
@@ -616,7 +617,7 @@ func TestOptsOpensBootAssets(t *testing.T) {
 		MemMB:   256,
 		VCPUs:   2,
 	}
-	o, err := cfg.Opts(nil, "", false)
+	o, err := vmmOpts(cfg, nil, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +652,21 @@ func TestOptsOpensBootAssets(t *testing.T) {
 	// A missing asset fails the whole Opts and leaks nothing the caller
 	// could misuse (the error path closes what it opened).
 	cfg.Image = filepath.Join(dir, "gone.erofs")
-	if _, err := cfg.Opts(nil, "", false); err == nil {
+	if _, err := vmmOpts(cfg, nil, "", false); err == nil {
 		t.Fatal("Opts with a missing layer succeeded")
+	}
+}
+
+func TestResolveProxyFlags(t *testing.T) {
+	cfg, _, err := resolveSandbox(t,
+		"-proxy", "HTTP://proxy.example:3128/",
+		"-no-proxy", "localhost,.corp.example",
+		"-proxy-enforce",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProxyURL != "http://proxy.example:3128/" || cfg.NoProxy != "localhost,.corp.example" || !cfg.ProxyEnforce {
+		t.Fatalf("resolved proxy config = %+v", cfg)
 	}
 }

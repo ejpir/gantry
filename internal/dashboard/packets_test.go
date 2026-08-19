@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/packetcapture"
-	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
@@ -55,7 +55,7 @@ func testTCPPacketRow(t *testing.T) tuiPacketRow {
 }
 
 func TestRenderPacketsView(t *testing.T) {
-	m := newSandboxTUIModel(sandbox.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiPacketsPage
 	m.width, m.height = 110, 28
@@ -75,7 +75,7 @@ func TestRenderPacketsView(t *testing.T) {
 }
 
 func TestPacketDetailDialog(t *testing.T) {
-	m := newSandboxTUIModel(sandbox.NewDashboardService())
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.page = tuiPacketsPage
 	m.width, m.height = 110, 32

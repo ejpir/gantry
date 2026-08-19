@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -82,7 +82,7 @@ func TestOneShotExecPreservesRequiredIsolation(t *testing.T) {
 	old := transientExec
 	t.Cleanup(func() { transientExec = old })
 	called := false
-	transientExec = func(cfg sandbox.RunConfig, _ map[string]secret.Value, args []string, console bool) int {
+	transientExec = func(cfg config.RunConfig, _ map[string]secret.Value, args []string, console bool) int {
 		called = true
 		if cfg.ProcessIsolation != "required" {
 			t.Fatalf("process isolation = %q, want required", cfg.ProcessIsolation)

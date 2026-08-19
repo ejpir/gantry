@@ -56,10 +56,13 @@ func TestWindowsLargeMemoryUsesEagerSMP(t *testing.T) {
 }
 
 func TestVirtioMemUsesBootRegionForDeferredSMPPolicy(t *testing.T) {
-	const total = uint64(22 << 30)
+	const (
+		total        = uint64(22 << 30)
+		wantBootSize = uint64(512 << 20)
+	)
 	policyMemory := smpPolicyMemory("windows", total, "")
-	if policyMemory != x86VirtioMemBootSize {
-		t.Fatalf("SMP policy memory = %d MiB, want %d MiB", policyMemory>>20, x86VirtioMemBootSize>>20)
+	if policyMemory != wantBootSize {
+		t.Fatalf("SMP policy memory = %d MiB, want %d MiB", policyMemory>>20, wantBootSize>>20)
 	}
 	if !shouldDeferSMP("windows", 4, policyMemory, "") {
 		t.Fatal("small virtio-mem boot region should retain deferred SMP")
@@ -98,5 +101,29 @@ func TestDefaultCmdlineHardening(t *testing.T) {
 	debug := DefaultCmdline("arm64", "/x/rootfs.erofs", "/x/initrd", 3, "", [6]byte{}, false)
 	if strings.Contains(debug, "sysctl.") {
 		t.Errorf("debug cmdline carries hardening sysctls:\n%s", debug)
+	}
+}
+
+func TestInsertKernelArgs(t *testing.T) {
+	got := insertKernelArgs("console=ttyS0 ro -- -vsock-cid=3", "virtio_mmio.device=0x1000@0xc0000000:3")
+	want := "console=ttyS0 ro virtio_mmio.device=0x1000@0xc0000000:3 -- -vsock-cid=3"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+	if got := insertKernelArgs("console=ttyS0", "a=b"); got != "console=ttyS0 a=b" {
+		t.Errorf("no-separator case: %q", got)
+	}
+}
+
+func TestKernelArgPresent(t *testing.T) {
+	cmdline := "console=ttyS0 tsc_early_khz=2900000 -- tsc_early_khz=guest-flag"
+	if !kernelArgPresent(cmdline, "tsc_early_khz") {
+		t.Fatal("kernelArgPresent missed an assigned kernel argument")
+	}
+	if kernelArgPresent("console=ttyS0 -- tsc_early_khz=2900000", "tsc_early_khz") {
+		t.Fatal("kernelArgPresent inspected arguments after --")
+	}
+	if kernelArgPresent("console=ttyS0 notsc_early_khz=1", "tsc_early_khz") {
+		t.Fatal("kernelArgPresent accepted a suffix match")
 	}
 }

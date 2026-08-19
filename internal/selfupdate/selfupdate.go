@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
@@ -38,6 +39,7 @@ var (
 	now                   = time.Now
 	cacheFile             = defaultCacheFile
 	executablePath        = currentExecutablePath
+	cacheMu               sync.Mutex
 )
 
 // Status describes the relationship between this binary and GitHub's latest
@@ -109,11 +111,31 @@ func Check(ctx context.Context) (Status, error) {
 
 // Refresh checks the network and records derived status for later CLI runs.
 func Refresh(ctx context.Context) (Status, error) {
+	checkedAt := now()
 	status, err := Check(ctx)
 	if !Enabled() {
 		return status, err
 	}
-	entry := cacheEntry{CheckedAt: now(), Latest: status.Latest, Failed: err != nil}
+	// A background refresh is canceled when the command exits. That is not a
+	// failed release check and must not erase a previously discovered update or
+	// suppress another attempt for failedCheckRetry.
+	if errors.Is(err, context.Canceled) {
+		return status, err
+	}
+
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	existing, _ := readCache()
+	// Concurrent refreshes may finish out of order. Never let an older attempt,
+	// or a same-time failure, replace newer successful cache state.
+	if existing.CheckedAt.After(checkedAt) ||
+		(existing.CheckedAt.Equal(checkedAt) && !existing.Failed && err != nil) {
+		return status, err
+	}
+	entry := cacheEntry{CheckedAt: checkedAt, Latest: status.Latest, Failed: err != nil}
+	if err != nil && entry.Latest == "" {
+		entry.Latest = existing.Latest
+	}
 	if cacheErr := writeCache(entry); cacheErr != nil {
 		if err != nil {
 			return status, errors.Join(err, cacheErr)
@@ -130,12 +152,8 @@ func Cached() (status Status, found, fresh bool) {
 	if !Enabled() {
 		return status, false, true
 	}
-	data, err := os.ReadFile(cacheFile())
+	entry, err := readCache()
 	if err != nil {
-		return status, false, false
-	}
-	var entry cacheEntry
-	if json.Unmarshal(data, &entry) != nil || entry.CheckedAt.IsZero() {
 		return status, false, false
 	}
 	found = true
@@ -147,6 +165,21 @@ func Cached() (status Status, found, fresh bool) {
 	}
 	fresh = now().Sub(entry.CheckedAt) >= 0 && now().Sub(entry.CheckedAt) < interval
 	return status, found, fresh
+}
+
+func readCache() (cacheEntry, error) {
+	data, err := os.ReadFile(cacheFile())
+	if err != nil {
+		return cacheEntry{}, err
+	}
+	var entry cacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return cacheEntry{}, err
+	}
+	if entry.CheckedAt.IsZero() {
+		return cacheEntry{}, fmt.Errorf("update cache has no check time")
+	}
+	return entry, nil
 }
 
 func writeCache(entry cacheEntry) error {
@@ -201,7 +234,7 @@ func Apply(ctx context.Context, progress func(string, ...any)) (Result, error) {
 			_ = os.Remove(staged)
 		}
 	}()
-	if err := installStaged(staged, target); err != nil {
+	if err := installStaged(ctx, staged, target); err != nil {
 		return Result{}, err
 	}
 	committed = true
@@ -266,7 +299,7 @@ func stageBinary(ctx context.Context, target, version string, progress func(stri
 	if mode&0o111 == 0 {
 		mode |= 0o111
 	}
-	file, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".update-*")
+	file, err := createStagedFile(target)
 	if err != nil {
 		return "", fmt.Errorf("stage update beside %s: %w", target, err)
 	}
@@ -303,19 +336,30 @@ func stageBinary(ctx context.Context, target, version string, progress func(stri
 	if err := file.Sync(); err != nil {
 		return "", fmt.Errorf("sync staged update: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("close staged update: %w", err)
-	}
 	if err := validateBinary(staged, runtime.GOOS, runtime.GOARCH); err != nil {
 		return "", fmt.Errorf("verify %s: %w", asset, err)
 	}
 	if err := validatePlatformSignature(staged); err != nil {
 		return "", fmt.Errorf("verify %s: %w", asset, err)
 	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close staged update: %w", err)
+	}
 	if progress != nil {
 		progress("verified %s (%s)", asset, want[:12])
 	}
 	return staged, nil
+}
+
+// CleanupRetired removes replaced Windows images left mapped by the process
+// that performed an earlier update. Other platforms have nothing to clean.
+// Failure is intentionally best effort: update housekeeping must never block
+// an otherwise valid Gantry invocation.
+func CleanupRetired() {
+	target, err := currentExecutablePath()
+	if err == nil {
+		_ = cleanupRetired(target)
+	}
 }
 
 func fetchChecksum(ctx context.Context, url string) (string, error) {

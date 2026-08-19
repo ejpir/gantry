@@ -8,6 +8,12 @@ import (
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
 	"github.com/ejpir/gantry/internal/workerconf"
@@ -25,22 +31,28 @@ func (d *daemonRuntime) load() error {
 	}
 	d.secrets = secrets
 
-	d.dir = sandboxDir(d.name)
+	d.dir = layout.Dir(d.name)
 	// Revalidate the local control boundary before reading configuration. On
 	// Windows this replaces inherited ACLs and fails closed if ownership or
 	// descriptor verification cannot establish a current-user-only directory.
-	if err := secureSandboxDirectory(d.dir); err != nil {
+	if err := localsec.SecureDir(d.dir); err != nil {
 		return fmt.Errorf("sandbox directory security: %w", err)
 	}
 	// Acquire the daemon's authoritative lifetime lock before reading mutable
 	// state. The launcher retains its stable, out-of-directory launch lock
 	// until readiness or process exit, so the two locks overlap during handoff.
-	lock, err := holdSandboxLock(d.dir)
+	lock, err := layout.HoldLock(d.dir)
 	if err != nil {
 		return fmt.Errorf("another daemon holds the sandbox lock: %w", err)
 	}
 	d.lock = lock
-	store, err := LoadConfigStore(d.dir)
+	// Publish the pid only with the lifetime lock held: layout.PID treats a
+	// live pid as proof of life solely while vmm.lock is held, so a pid
+	// recycled after an early daemon death is never mistaken for a daemon.
+	if err := os.WriteFile(filepath.Join(d.dir, "vmm.pid"), []byte(fmt.Sprint(os.Getpid())), 0o600); err != nil {
+		return fmt.Errorf("record daemon pid: %w", err)
+	}
+	store, err := config.LoadConfigStore(d.dir)
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)
 	}
@@ -53,13 +65,13 @@ func (d *daemonRuntime) load() error {
 }
 
 func (d *daemonRuntime) startHostServices() error {
-	consoleLog, err := newBoundedLogPipe(filepath.Join(d.dir, "console.log"))
+	consoleLog, err := boundedlog.NewPipe(filepath.Join(d.dir, "console.log"))
 	if err != nil {
 		return fmt.Errorf("console log broker: %w", err)
 	}
 	d.consoleLog = consoleLog
 	d.console = consoleLog.Writer()
-	network, err := d.cfg.StartNetwork(d.dir)
+	network, err := startNetwork(d.cfg, d.dir)
 	if err != nil {
 		return err
 	}
@@ -67,7 +79,7 @@ func (d *daemonRuntime) startHostServices() error {
 	d.bootLog("network up")
 	d.logNetworkState()
 
-	shareManager, warnings, err := NewShareManager(d.dir, d.store)
+	shareManager, warnings, err := control.NewShareManager(d.dir, d.store)
 	if err != nil {
 		return fmt.Errorf("shares: %w", err)
 	}
@@ -75,7 +87,7 @@ func (d *daemonRuntime) startHostServices() error {
 	for _, warning := range warnings {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
 	}
-	d.ports = NewPortManager(d.store, d.network.Backend)
+	d.ports = control.NewPortManager(d.store, d.network.Backend)
 	return nil
 }
 
@@ -92,7 +104,7 @@ func (d *daemonRuntime) logNetworkState() {
 }
 
 func (d *daemonRuntime) prepareGuest() error {
-	opts, err := d.cfg.Opts(d.network, d.dir, true)
+	opts, err := vmmOpts(d.cfg, d.network, d.dir, true)
 	if err != nil {
 		return err
 	}
@@ -123,7 +135,7 @@ func (d *daemonRuntime) prepareGuest() error {
 func (d *daemonRuntime) prepareVM(opts vmm.Opts) error {
 	// Split VMM (Phase 2): the guest runs in a _vmm-worker process; the
 	// supervisor keeps ctl.sock, sessions, policy, and all host sockets.
-	runner, splitErr := tryStartVMMSplit(d.cfg, opts, d.network, d.shares, d.dir, d.console)
+	runner, splitErr := vmmworker.TryStart(d.cfg, opts, d.network.vmmAttachment(), d.shares, d.dir, d.console)
 	switch {
 	case splitErr == nil:
 		d.runner = runner
@@ -134,7 +146,7 @@ func (d *daemonRuntime) prepareVM(opts vmm.Opts) error {
 		return nil
 	case d.cfg.ProcessIsolation == "required":
 		return fmt.Errorf("-process-isolation=required but the split VMM failed: %w", splitErr)
-	case !errors.Is(splitErr, errVMMSplitUnavailable):
+	case !errors.Is(splitErr, vmmworker.ErrUnavailable):
 		fmt.Fprintf(os.Stderr, "daemon: split VMM failed (%v), falling back to monolithic\n", splitErr)
 	}
 
@@ -158,11 +170,11 @@ func (d *daemonRuntime) installPolicyFanout() error {
 	if d.network == nil || d.network.Split || d.network.Backend == nil {
 		return nil
 	}
-	pusher, ok := d.runner.(vmmPolicyPusher)
+	pusher, ok := d.runner.(control.VMMPolicyPusher)
 	if !ok {
 		return nil
 	}
-	fanout, err := newVMMPolicyBackend(d.network.Backend, pusher, d.network.Policy)
+	fanout, err := control.NewVMMPolicyBackend(d.network.Backend, pusher, d.network.Policy)
 	if err != nil {
 		return fmt.Errorf("initialize VMM policy fan-out: %w", err)
 	}

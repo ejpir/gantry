@@ -15,6 +15,9 @@ import (
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/networkworker"
 	"github.com/ejpir/gantry/internal/sandbox"
+	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
+	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
+	"github.com/ejpir/gantry/internal/selfupdate"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
@@ -60,6 +63,7 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 }
 
 func main() {
+	selfupdate.CleanupRetired()
 	args := os.Args[1:]
 	check := startUpdateCheck(args)
 	status := runMain(args)
@@ -70,7 +74,7 @@ func main() {
 func runMain(args []string) int {
 	if len(args) == 0 {
 		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-			return dashboard.Run(sandbox.NewDashboardService())
+			return dashboard.Run(dashboardsvc.NewDashboardService())
 		}
 		writeMainHelp(os.Stderr)
 		return 2
@@ -137,7 +141,7 @@ func runMain(args []string) int {
 	case "ls":
 		return sandbox.CmdLs()
 	case "tui":
-		return dashboard.Run(sandbox.NewDashboardService())
+		return dashboard.Run(dashboardsvc.NewDashboardService())
 	case "stop", "delete":
 		if len(argv) != 1 {
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", command)
@@ -171,11 +175,11 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 	case "image":
 		return sandbox.CmdImage(argv), true
 	case "share":
-		return sandbox.CmdShare(argv), true
+		return controlcmd.CmdShare(argv), true
 	case "ports":
-		return sandbox.CmdPorts(argv), true
+		return controlcmd.CmdPorts(argv), true
 	case "net-policy":
-		return sandbox.CmdNetworkPolicy(argv), true
+		return controlcmd.CmdNetworkPolicy(argv), true
 	case "import":
 		return sandbox.CmdImport(argv), true
 	default:

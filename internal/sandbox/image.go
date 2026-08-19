@@ -17,6 +17,8 @@ import (
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/image/auth"
+	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 
 	"golang.org/x/term"
 )
@@ -205,7 +207,7 @@ func imageLogin(argv []string) int {
 // digestsInUse scans all sandbox.json files for referenced image digests.
 func digestsInUse() map[string]bool {
 	used := map[string]bool{}
-	ents, err := os.ReadDir(sandboxRoot())
+	ents, err := os.ReadDir(layout.Root())
 	if err != nil {
 		return used
 	}
@@ -213,11 +215,11 @@ func digestsInUse() map[string]bool {
 		if !e.IsDir() {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(sandboxDir(e.Name()), "sandbox.json"))
+		b, err := os.ReadFile(filepath.Join(layout.Dir(e.Name()), "sandbox.json"))
 		if err != nil {
 			continue
 		}
-		var cfg RunConfig
+		var cfg config.RunConfig
 		if json.Unmarshal(b, &cfg) == nil && cfg.ImageDigest != "" {
 			used[cfg.ImageDigest] = true
 		}
