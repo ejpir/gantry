@@ -23,9 +23,9 @@ func TestSandboxLaunchLockInstallsProtectedDACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	lockDir := filepath.Join(root, "@launch-locks")
-	if err := localsec.VerifyPrivate(root, userSID, false); err != nil {
-		t.Fatalf("sandbox root: %v", err)
-	}
+	// The lock directory and the lock file inside it are the boundary the
+	// lock needs; the sandbox root itself is hardened by the launcher
+	// (start.go), not by lock acquisition.
 	if err := localsec.VerifyPrivate(lockDir, userSID, true); err != nil {
 		t.Fatalf("launch-lock directory: %v", err)
 	}

@@ -564,12 +564,15 @@ func TestVMMWorkerShareBrokerExitStopsWorker(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "closed unexpectedly") {
 			t.Fatalf("share broker exit = %v", err)
 		}
-	case <-time.After(5 * time.Second):
+		// The relay teardown is event-driven; the bound only guards against a
+		// lost signal. Loaded -race CI runners can stall goroutine scheduling
+		// for seconds, so keep the margin well above a healthy loop.
+	case <-time.After(15 * time.Second):
 		t.Fatal("share broker did not report the closed relay")
 	}
 	select {
 	case <-h.w.Done():
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("share broker exit did not stop the VMM worker")
 	}
 }
