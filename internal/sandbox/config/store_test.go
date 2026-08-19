@@ -157,7 +157,7 @@ func TestConfigStoreRejectsInvalidPersistedResources(t *testing.T) {
 		"zero CPUs":   {MemMB: 512},
 		"too many CPUs": {
 			MemMB: 512,
-			VCPUs: MaxSandboxVCPUs + 1,
+			VCPUs: MaxSandboxVCPUs() + 1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -179,7 +179,7 @@ func TestConfigStoreRejectsInvalidPersistedResources(t *testing.T) {
 func TestConfigStoreSetResources(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1, Shares: []string{"code=/tmp"}, ProcessIsolation: "required"})
-	vcpus := min(4, MaxSandboxVCPUs)
+	vcpus := min(4, MaxSandboxVCPUs())
 	if err := store.SetResources(4096, vcpus, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -196,8 +196,8 @@ func TestConfigStoreSetResources(t *testing.T) {
 	if got := store.Snapshot().ProcessIsolation; got != "off" {
 		t.Fatalf("process isolation = %q, want off", got)
 	}
-	if err := store.SetResources(4096, MaxSandboxVCPUs+1, "off"); err == nil {
-		t.Fatalf("accepted more than %d CPUs", MaxSandboxVCPUs)
+	if err := store.SetResources(4096, MaxSandboxVCPUs()+1, "off"); err == nil {
+		t.Fatalf("accepted more than %d CPUs", MaxSandboxVCPUs())
 	}
 	if got := store.Snapshot(); got.MemMB != 4096 || got.VCPUs != vcpus {
 		t.Fatalf("invalid mutation changed store: %+v", got)
@@ -313,7 +313,7 @@ func TestValidateSandboxResourcesMemCap(t *testing.T) {
 	if err := ValidateSandboxResources(uint(MaxSandboxMemMB+1), 1); err == nil {
 		t.Fatal("memory above the cap must be rejected")
 	}
-	if err := ValidateSandboxResources(512, MaxSandboxVCPUs+1); err == nil {
+	if err := ValidateSandboxResources(512, MaxSandboxVCPUs()+1); err == nil {
 		t.Fatal("vcpus above the cap must be rejected")
 	}
 }

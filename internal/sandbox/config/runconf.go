@@ -128,7 +128,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
-		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs)),
+		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
 		Shares:           &gutil.StrList{},
 		Publish:          &gutil.StrList{},
 		Secrets:          &gutil.StrList{},
@@ -154,6 +154,8 @@ func (c RunConfig) OAuthBridgeEnabled() bool {
 	return c.OAuthBridge == nil || *c.OAuthBridge
 }
 
+// NormalizeProcessIsolation resolves an unset persisted value to "auto": try
+// to confine, degrading with a warning where the platform cannot.
 func NormalizeProcessIsolation(mode string) string {
 	if mode == "" {
 		return "auto"

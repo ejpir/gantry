@@ -118,7 +118,12 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 	return cfg
 }
 
-var MaxSandboxVCPUs = vmm.MaxSupportedVCPUs()
+var maxSandboxVCPUs = vmm.MaxSupportedVCPUs()
+
+// MaxSandboxVCPUs reports the host/backend limit used by validation and UI
+// metadata. Keeping the cached value private prevents callers from changing
+// validation policy process-wide.
+func MaxSandboxVCPUs() int { return maxSandboxVCPUs }
 
 const (
 	MinSandboxMemMB = (vmm.MinMemoryBytes + (1 << 20) - 1) >> 20
