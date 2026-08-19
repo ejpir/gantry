@@ -7,23 +7,17 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/networker"
 )
 
 func TestWindowsAutoSkipsUnavailableNetworkWorkerConfinement(t *testing.T) {
-	called := false
-	old := networker.SpawnHook
-	networker.SpawnHook = func(*[]string, *[]string) { called = true }
-	t.Cleanup(func() { networker.SpawnHook = old })
-
-	network, err := startNetwork(config.RunConfig{Net: true, ProcessIsolation: "auto"}, t.TempDir())
+	// A nil starter is deliberate: an attempted split-worker spawn panics and
+	// fails the test before the monolithic fallback can hide the regression.
+	network, err := startNetworkWithWorkerStart(
+		config.RunConfig{Net: true, ProcessIsolation: "auto"}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer network.Close()
-	if called {
-		t.Fatal("auto mode spawned a network worker whose confinement is unavailable")
-	}
 	if network.Split {
 		t.Fatal("auto mode reported a split network worker")
 	}
@@ -37,16 +31,9 @@ func TestWindowsAutoSkipsUnavailableNetworkWorkerConfinement(t *testing.T) {
 }
 
 func TestWindowsRequiredRejectsUnavailableNetworkWorkerConfinement(t *testing.T) {
-	called := false
-	old := networker.SpawnHook
-	networker.SpawnHook = func(*[]string, *[]string) { called = true }
-	t.Cleanup(func() { networker.SpawnHook = old })
-
-	_, err := startNetwork(config.RunConfig{Net: true, ProcessIsolation: "required"}, t.TempDir())
+	_, err := startNetworkWithWorkerStart(
+		config.RunConfig{Net: true, ProcessIsolation: "required"}, t.TempDir(), nil)
 	if err == nil || !strings.Contains(err.Error(), "confinement unavailable on windows") {
 		t.Fatalf("required mode error = %v", err)
-	}
-	if called {
-		t.Fatal("required mode spawned a network worker after detecting unavailable confinement")
 	}
 }

@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/networker"
 )
 
 // TestStartNetworkSplitModes exercises StartNetwork's topology decision:
@@ -21,7 +20,6 @@ import (
 // in both. Splitting needs worker confinement, which only Unix has; the
 // Windows fallback is covered by network_worker_confinement_windows_test.go.
 func TestStartNetworkSplitModes(t *testing.T) {
-	hookNetWorkerSpawnForTests(t)
 	for _, tc := range []struct {
 		mode string
 		want bool
@@ -33,7 +31,7 @@ func TestStartNetworkSplitModes(t *testing.T) {
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			cfg := config.RunConfig{Net: true, ProcessIsolation: tc.mode}
-			n, err := startNetwork(cfg, t.TempDir())
+			n, err := startNetworkWithWorkerStart(cfg, t.TempDir(), inProcessNetworkWorkerStart(t))
 			if err != nil {
 				if tc.mode == "required" && strings.Contains(err.Error(), "mount tier unavailable") {
 					t.Skipf("required mount tier unavailable in this test environment: %v", err)
@@ -118,16 +116,4 @@ func TestStartNetworkPacketCaptureDoesNotDelegateHostPath(t *testing.T) {
 	if _, err := startNetwork(config.RunConfig{Net: true, ProcessIsolation: "required"}, t.TempDir()); err == nil || !strings.Contains(err.Error(), "GANTRY_NET_PCAP") {
 		t.Fatalf("required packet capture error = %v", err)
 	}
-}
-
-// hookNetWorkerSpawnForTests redirects the netstack worker re-exec at the test
-// binary's helper process. The networker package keeps its own copy for the
-// tests that drive the worker directly.
-func hookNetWorkerSpawnForTests(t *testing.T) {
-	old := networker.SpawnHook
-	networker.SpawnHook = func(argv *[]string, env *[]string) {
-		*argv = []string{(*argv)[0], "-test.run", "^TestNetWorkerHelperProcess$"}
-		*env = append(*env, "GANTRY_TEST_NET_WORKER=1", "GANTRY_TEST_WORKER_STDIN_UNREADABLE=1")
-	}
-	t.Cleanup(func() { networker.SpawnHook = old })
 }
