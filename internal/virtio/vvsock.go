@@ -117,10 +117,13 @@ type Vsock struct {
 	verboseLog    bool
 	nextHostPort  uint32
 	frameStorage  []byte
-	closing       bool
-	workers       sync.WaitGroup
-	closeOnce     sync.Once
-	closeErr      error
+	// rxMissStreak counts consecutive consumed rx descriptors that could
+	// not carry the current pending head packet; bounded by rxMiss.
+	rxMissStreak int
+	closing      bool
+	workers      sync.WaitGroup
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func NewVsock(guestCID uint64, forwardDir string) *Vsock {
@@ -228,6 +231,7 @@ func (v *Vsock) reset() {
 	}
 	v.pending.Reset()
 	clear(v.pendingCredit)
+	v.rxMissStreak = 0
 }
 
 func (v *Vsock) configRead(off uint64, p []byte) {
@@ -665,9 +669,13 @@ func (v *Vsock) tryFlush() {
 		if capacity < uint64(frameLen) {
 			// Never expose a truncated stream frame whose header advertises
 			// bytes that were not written. Consume the unusable descriptor but
-			// retain the packet for the next correctly sized receive buffer.
+			// retain the packet for the next correctly sized receive buffer —
+			// bounded by rxMiss: the guest reposts every len-0 buffer with a
+			// fresh queue notify, so retaining an undeliverable packet without
+			// a bound livelocks the rx queue.
 			v.logf("tryFlush: rx descriptor too small (%d < %d)", capacity, frameLen)
 			v.core.pushUsed(q, head, 0)
+			v.rxMiss(*pkt, q)
 			continue
 		}
 		hdr := pkt.hdr
@@ -689,16 +697,58 @@ func (v *Vsock) tryFlush() {
 		if err != nil || total != uint32(frameLen) {
 			v.logf("tryFlush: write failed (%v, %d)", err, total)
 			// A partial response is not a valid vsock frame. Report no bytes
-			// and preserve the packet so a later buffer can carry it whole.
+			// and preserve the packet so a later buffer can carry it whole —
+			// bounded by rxMiss for the same reason as the size check above.
 			v.core.pushUsed(q, head, 0)
+			v.rxMiss(*pkt, q)
 			continue
 		}
 		if c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]; c != nil && total > vsockHdrLen {
 			c.txCnt += total - vsockHdrLen
 		}
 		v.core.pushUsed(q, head, total)
+		v.rxMissStreak = 0
 		v.popPending()
 	}
+}
+
+// rxMiss records one consumed rx descriptor that could not carry the
+// pending head packet. The guest receives each such buffer back with
+// length 0, then reposts it and notifies the queue again (stock Linux rx
+// refill + virtqueue_kick; this transport never sets VRING_USED_F_NO_NOTIFY),
+// so retaining an undeliverable head packet without a bound storms the rx
+// queue with notifies while core.mu is held — livelocking the whole vsock
+// device behind the mutex (observed: sandbox frozen for hours, a host core
+// pinned inside MMIOWrite -> tryFlush; found via SIGQUIT stack dump).
+//
+// Once the head packet has survived more misses than the armed ring has
+// slots, every buffer the guest can post had its chance and none fit:
+// declare the packet undeliverable, drop it from the FIFO and reset its
+// connection, so the queue, the device lock and the guest application all
+// make progress again (a silent park would hang the guest app instead of
+// failing it with ECONNRESET). Mixed-size rings keep working: any single
+// adequate buffer delivers the packet and resets the streak.
+//
+// Called with core.mu held. pkt is passed by value because popPending
+// zeroes the ring slot it came from.
+func (v *Vsock) rxMiss(pkt vsockPkt, q *virtq) {
+	v.rxMissStreak++
+	if v.rxMissStreak <= int(q.num) {
+		return
+	}
+	v.rxMissStreak = 0
+	v.popPending()
+	c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]
+	if c == nil {
+		v.logf("tryFlush: dropped undeliverable %d-byte frame for closed connection", vsockHdrLen+len(pkt.payload))
+		return
+	}
+	fmt.Printf("[vsock] guest rx buffers cannot carry a %d-byte frame after a full ring of retries; resetting connection (host port %d, guest port %d)\n",
+		vsockHdrLen+len(pkt.payload), pkt.hdr.srcPort, pkt.hdr.dstPort)
+	// closeConn queues the RST and re-enters tryFlush; the poisoned head is
+	// already popped, so the recursion is bounded by the number of pending
+	// packets and terminates.
+	v.closeConn(c, vsockHdr{srcPort: pkt.hdr.dstPort, dstPort: pkt.hdr.srcPort}, true)
 }
 
 // vsockMaxChainBytes caps one packet chain at the 44-byte header plus
