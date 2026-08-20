@@ -52,12 +52,12 @@ func prepareOverlaySnapshot(cfg config.RunConfig, staging string) (*rootfsSnapsh
 	prep := &rootfsSnapshotPrep{
 		dir:      dir,
 		lower:    filepath.Join(dir, "lower"),
-		upper:    filepath.Join(dir, "upper"),
 		snapshot: filepath.Join(dir, "snapshot"),
 	}
-	prep.writeVerifyDir = prep.upper
+	upper := filepath.Join(dir, "upper")
+	prep.writeVerifyDir = upper
 	work := filepath.Join(dir, "work")
-	for _, sub := range []string{prep.lower, prep.upper, work, prep.snapshot} {
+	for _, sub := range []string{prep.lower, upper, work, prep.snapshot} {
 		if err := os.Mkdir(sub, 0o755); err != nil {
 			prep.Cleanup()
 			return nil, err
@@ -69,11 +69,11 @@ func prepareOverlaySnapshot(cfg config.RunConfig, staging string) (*rootfsSnapsh
 		return nil, fmt.Errorf("mount erofs image: %w: %s (kernel needs CONFIG_EROFS_FS — try: modprobe erofs)", err, strings.TrimSpace(string(out)))
 	}
 	prep.mountedLower = true
-	if err := prep.populateFixtures(prep.upper); err != nil {
+	if err := prep.populateFixtures(upper); err != nil {
 		prep.Cleanup()
 		return nil, err
 	}
-	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", prep.lower, prep.upper, work)
+	options := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", prep.lower, upper, work)
 	out, err = exec.Command("mount", "-t", "overlay", "overlay", "-o", options, prep.snapshot).CombinedOutput()
 	if err != nil {
 		prep.Cleanup()

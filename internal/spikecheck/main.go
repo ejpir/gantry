@@ -218,7 +218,9 @@ func writeChecks() {
 		if err := os.WriteFile("/spike-rename-a", []byte("rename-payload"), 0o600); err != nil {
 			return err
 		}
-		syncFile("/spike-rename-a")
+		if err := syncFile("/spike-rename-a"); err != nil {
+			return err
+		}
 		if err := os.Rename("/spike-rename-a", "/spike-rename-b"); err != nil {
 			return err
 		}
@@ -301,7 +303,9 @@ func runPerf() {
 			break
 		}
 	}
-	syncFile(target)
+	if err := syncFile(target); writeErr == nil {
+		writeErr = err
+	}
 	writeElapsed := time.Since(writeStarted)
 	check("perf-write", writeErr, fmt.Sprintf("%d MiB", *perfSizeMiB))
 

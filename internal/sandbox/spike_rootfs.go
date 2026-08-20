@@ -32,7 +32,6 @@ const (
 type rootfsSnapshotPrep struct {
 	dir            string
 	lower          string
-	upper          string
 	snapshot       string
 	whiteoutPath   string
 	writeVerifyDir string
@@ -100,7 +99,7 @@ func (d *daemonRuntime) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	if runtimeName == "" {
 		runtimeName = "crun"
 	}
-	fmt.Fprintf(os.Stdout, "rootfs-spike: host snapshot %s (image %s, guest runtime %s)\n", prep.snapshot, image, runtimeName)
+	_, _ = fmt.Fprintf(os.Stdout, "rootfs-spike: host snapshot %s (image %s, guest runtime %s)\n", prep.snapshot, image, runtimeName)
 
 	hub := d.shares.Hub()
 	if hub == nil {
@@ -142,9 +141,9 @@ func (d *daemonRuntime) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	// overlay upper directory through the export.
 	if written, readErr := os.ReadFile(filepath.Join(prep.writeVerifyDir, "spike-guest-write")); readErr != nil || string(written) != "from-guest\n" {
 		spikeErr = errors.Join(spikeErr, fmt.Errorf("host-visible guest write: %v (content %q)", readErr, written))
-		fmt.Fprintln(os.Stdout, "rootfs-spike: FAIL host-visible guest write")
+		_, _ = fmt.Fprintln(os.Stdout, "rootfs-spike: FAIL host-visible guest write")
 	} else {
-		fmt.Fprintln(os.Stdout, "rootfs-spike: PASS host-visible guest write — upper dir received the fsynced file")
+		_, _ = fmt.Fprintln(os.Stdout, "rootfs-spike: PASS host-visible guest write — upper dir received the fsynced file")
 	}
 
 	stopCode := d.gracefulStop("rootfs-spike complete")
