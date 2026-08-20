@@ -8,7 +8,7 @@ them by hand.
 ## Provenance
 
 The service definition is vendored verbatim from
-[containerd/nerdbox](https://github.com/containerd/nerdbox) v0.2.1
+[containerd/nerdbox](https://github.com/containerd/nerdbox) v0.2.3
 (`api/proto/nerdbox/services/system/v1/info.proto`, Apache-2.0, copyright
 The containerd Authors), including its `go_package` option: keeping the
 upstream package path is what makes our checked-in copies byte-identical
