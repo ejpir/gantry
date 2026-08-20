@@ -12,10 +12,16 @@ import (
 // READ/CFG/CLOCK_CAP for one UTC clock backed by the host clock. This is
 // the OpenSynergy virtio-rtc protocol (virtio-spec device-types/rtc), which
 // is also what the reference VMM implements (crates/devices/virtio-rtc) and what
-// the nerdbox kernel's CONFIG_VIRTIO_RTC{_CLASS,_PTP} driver expects:
-// the kernel sets the system time from it at probe (hctosys), and vminitd's
-// clock service keeps it in sync through the /dev/ptp clock the driver
-// registers ("no virtio-rtc PTP clock present" without it).
+// the nerdbox kernel's CONFIG_VIRTIO_RTC{_CLASS,_PTP} driver expects. The
+// kernel sets the system time from it exactly once, at probe (hctosys);
+// the device is pull-only, so keeping wall time synced afterwards is the
+// guest's job: vminitd runs a clock-sync loop (patched in at rootfs build
+// by patches/nerdbox-v0.2.3-clock-sync.patch) that re-reads the driver's
+// /dev/ptp clock every 30s and steps CLOCK_REALTIME. Without that loop
+// guest wall time is one probe reading plus raw counter elapsed — it drifts
+// at the counter crystal's ppm error and, on HVF/WHPX, skips entire
+// host-suspend intervals because the host physical counter stops across
+// sleep (x86 KVM attaches no RTC at all: kvm-clock is host-referenced).
 const (
 	RTCDeviceID = 17
 
