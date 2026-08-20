@@ -683,6 +683,11 @@ func kernelArgPresent(cmdline, name string) bool {
 // returning it from platformBackend; nothing else in vmm is platform-aware.
 //
 // Lifecycle: a platform backend owns its vCPU threads and all native
+// bootTracer narrows the boot timeline to the backend-facing
+// instrumentation seam (boot_timing.go); device milestones (mark) and
+// console stamps (stampLine) are Machine-internal.
+func (m *Machine) bootTracer() bootTracer { return m.bootTiming }
+
 // hypervisor resources. Machine.Close asks it to stop, joins Run (including
 // partial backend initialization), then closes devices and guest RAM.
 type backend interface {
