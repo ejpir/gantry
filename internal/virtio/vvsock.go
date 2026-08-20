@@ -585,9 +585,24 @@ const (
 // slice allocation per packet without limit against a stalled consumer.
 const vsockOutQMaxPackets = 1024
 
+// vsockMaxRxPayload bounds ONE host->guest RW packet's payload so the frame
+// always fits a single guest-posted rx buffer: virtio-vsock has no packet
+// reassembly across buffers (each used buffer is one complete packet to the
+// Linux driver), and stock Linux posts single-descriptor rx buffers of
+// SKB_WITH_OVERHEAD(4 KiB) = 3776 bytes on 64-bit (include/linux/
+// virtio_vsock.h VIRTIO_VSOCK_DEFAULT_RX_BUF_SIZE, posted by
+// virtio_vsock_rx_fill). An oversized frame is undeliverable by
+// construction — it drains a full ring of buffers in len-0 misses until the
+// rxMiss backstop resets the connection (observed in production with a
+// 4212-byte frame). 2048 keeps a 1.7 KiB margin against kernel struct
+// drift; chunking happens naturally by capping pumpHost's read size.
+const vsockMaxRxPayload = 2048
+
 // pumpHost reads from the host unix socket and forwards to the guest.
+// Reads are capped at vsockMaxRxPayload so each Read yields one RW packet
+// whose frame fits a guest rx buffer (see the constant).
 func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, vsockMaxRxPayload)
 	for {
 		n, err := c.nc.Read(buf)
 		if n > 0 {
