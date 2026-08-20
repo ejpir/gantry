@@ -138,6 +138,14 @@ func runMain(args []string) int {
 		// Hidden worker role (Phase 2): owns the hypervisor, guest RAM,
 		// devices, and the vsock data plane.
 		return vmmworker.Main()
+	case "_mc-spike":
+		// Hidden spike role (docs/kubernetes-runtimeclass.md Phase K0):
+		// boot one VM and verify multi-container guest support.
+		return sandbox.CmdMCSpike(argv)
+	case "_rootfs-spike":
+		// Hidden spike role (docs/kubernetes-runtimeclass.md Phase K0):
+		// export a host snapshot through the share hub as a guest rootfs.
+		return sandbox.CmdRootfsSpike(argv)
 	case "ls":
 		return sandbox.CmdLs()
 	case "tui":

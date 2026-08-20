@@ -49,6 +49,12 @@ type daemonRuntime struct {
 	guestErr <-chan error
 	signals  chan os.Signal
 	shutdown chan struct{}
+
+	// postReady, when non-nil, replaces supervise() after publishReady:
+	// hidden spike commands (docs/kubernetes-runtimeclass.md, Phase K0) run
+	// their scenario against the fully booted guest instead of serving
+	// ctl.sock sessions.
+	postReady func(d *daemonRuntime) int
 }
 
 func CmdDaemon(name, readySocket string) int {
@@ -86,6 +92,9 @@ func (d *daemonRuntime) run() int {
 	// immediate `gantry exec` could race startup and produce no guest output.
 	if err := d.publishReady(); err != nil {
 		return daemonFailure(err)
+	}
+	if d.postReady != nil {
+		return d.postReady(d)
 	}
 	return d.supervise()
 }
