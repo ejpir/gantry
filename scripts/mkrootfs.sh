@@ -18,8 +18,8 @@ case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/gantry-rootfs.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 SRC="$WORK/nerdbox"
-NERDBOX_VERSION=v0.2.1
-NERDBOX_COMMIT=f683c1c4ec30533f90eab8f3bfe38145d881a170
+NERDBOX_VERSION=v0.2.3
+NERDBOX_COMMIT=cd2c23fe413cdea8176760d63375d3271aa7e611
 
 git clone --quiet --filter=blob:none --no-checkout https://github.com/containerd/nerdbox.git "$SRC"
 git -C "$SRC" fetch --quiet --depth 1 origin "$NERDBOX_COMMIT"
@@ -28,8 +28,8 @@ git -C "$SRC" checkout --quiet --detach "$NERDBOX_COMMIT"
 	echo "nerdbox $NERDBOX_VERSION resolved to an unexpected commit" >&2
 	exit 1
 }
-git -C "$SRC" apply --unidiff-zero --check "$ROOT/patches/nerdbox-v0.2.1-quiet-boot.patch"
-git -C "$SRC" apply --unidiff-zero "$ROOT/patches/nerdbox-v0.2.1-quiet-boot.patch"
+git -C "$SRC" apply --unidiff-zero --check "$ROOT/patches/nerdbox-v0.2.3-quiet-boot.patch"
+git -C "$SRC" apply --unidiff-zero "$ROOT/patches/nerdbox-v0.2.3-quiet-boot.patch"
 
 mkdir -p "$WORK/out" "$(dirname "$OUT")"
 docker buildx build --progress=plain \
