@@ -28,8 +28,11 @@ git -C "$SRC" checkout --quiet --detach "$NERDBOX_COMMIT"
 	echo "nerdbox $NERDBOX_VERSION resolved to an unexpected commit" >&2
 	exit 1
 }
-git -C "$SRC" apply --unidiff-zero --check "$ROOT/patches/nerdbox-v0.2.3-quiet-boot.patch"
-git -C "$SRC" apply --unidiff-zero "$ROOT/patches/nerdbox-v0.2.3-quiet-boot.patch"
+for p in "$ROOT/patches/nerdbox-$NERDBOX_VERSION"-*.patch; do
+	[ -e "$p" ] || continue
+	git -C "$SRC" apply --unidiff-zero --check "$p"
+	git -C "$SRC" apply --unidiff-zero "$p"
+done
 
 mkdir -p "$WORK/out" "$(dirname "$OUT")"
 docker buildx build --progress=plain \
