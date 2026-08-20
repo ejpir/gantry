@@ -35,7 +35,21 @@ for p in "$ROOT/patches/nerdbox-$NERDBOX_VERSION"-*.patch; do
 done
 
 mkdir -p "$WORK/out" "$(dirname "$OUT")"
-docker buildx build --progress=plain \
+# Exporting the rootfs needs BuildKit's local exporter (--output). Probe the
+# buildx plugin and fall back to the classic BuildKit frontend
+# (DOCKER_BUILDKIT=1 docker build) on hosts whose buildx is absent or too
+# old to parse modern flags.
+BUILD="docker buildx build"
+if ! docker buildx build --help 2>&1 | grep -q -- "--output"; then
+	export DOCKER_BUILDKIT=1
+	if docker build --help 2>&1 | grep -q -- "--output"; then
+		BUILD="docker build"
+	else
+		echo "error: need Docker with BuildKit (docker buildx) to export the rootfs" >&2
+		exit 1
+	fi
+fi
+$BUILD --progress=plain \
 	--file "$SRC/Dockerfile" \
 	--platform "linux/$DOCKER_ARCH" \
 	--target erofs \
