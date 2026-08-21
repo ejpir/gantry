@@ -4,6 +4,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/credhelper/credproto"
 )
@@ -18,3 +20,12 @@ func askBroker(string, string) (credproto.Response, error) {
 func brokerRoundTrip([]byte) (credproto.Response, error) {
 	return credproto.Response{}, fmt.Errorf("credential broker is only reachable from inside a gantry guest")
 }
+
+// dialVsockFile stub for host builds; mcp-proxy only runs inside the
+// guest VM.
+func dialVsockFile(uint32, time.Duration) (*os.File, error) {
+	return nil, fmt.Errorf("vsock is only reachable from inside a gantry guest")
+}
+
+// shutdownWrite stub for host builds.
+func shutdownWrite(*os.File) {}

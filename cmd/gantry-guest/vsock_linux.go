@@ -32,22 +32,10 @@ func askBroker(host, path string) (credproto.Response, error) {
 // brokerRoundTrip runs one request/response exchange with the host
 // broker: one JSON line out, one JSON line back.
 func brokerRoundTrip(req []byte) (credproto.Response, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	f, err := dialVsockFile(credproto.VsockPort, credproto.ConnTimeout+time.Second)
 	if err != nil {
-		return credproto.Response{}, fmt.Errorf("vsock socket: %w", err)
+		return credproto.Response{}, err
 	}
-	if err := unix.Connect(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_HOST, Port: credproto.VsockPort}); err != nil {
-		_ = unix.Close(fd)
-		return credproto.Response{}, fmt.Errorf("vsock connect (cid=host port=%d): %w", credproto.VsockPort, err)
-	}
-	tv := unix.NsecToTimeval(int64(credproto.ConnTimeout + time.Second)) // slack over the broker's own deadline
-	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
-		debugf("SO_RCVTIMEO: %v", err)
-	}
-	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv); err != nil {
-		debugf("SO_SNDTIMEO: %v", err)
-	}
-	f := os.NewFile(uintptr(fd), "vsock")
 	defer func() { _ = f.Close() }()
 
 	if _, err := f.Write(append(req, '\n')); err != nil {
@@ -64,28 +52,34 @@ func brokerRoundTrip(req []byte) (credproto.Response, error) {
 	return resp, nil
 }
 
-// readLineBounded reads one '\n'-terminated line, refusing more than max
-// bytes. Local to the guest so cmd/gantry-guest needs no controlproto
-// import (which would drag in the control plane's dependency tree).
-func readLineBounded(f *os.File, max int) ([]byte, error) {
-	var line []byte
-	buf := make([]byte, 512)
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			for i, b := range chunk {
-				if b == '\n' {
-					return append(line, chunk[:i]...), nil
-				}
-			}
-			line = append(line, chunk...)
-			if len(line) > max {
-				return nil, fmt.Errorf("response exceeds %d bytes", max)
-			}
+// dialVsockFile connects to a host service over vsock (the VMM bridges
+// the connection to the daemon's unix listener) and applies the given
+// I/O deadline. Raw-fd I/O on purpose: importing "net" (for net.FileConn)
+// would grow the guest binary by several MiB, and it streams into the VM
+// on every boot of a sandbox with bound secrets.
+func dialVsockFile(port uint32, timeout time.Duration) (*os.File, error) {
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("vsock socket: %w", err)
+	}
+	if err := unix.Connect(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_HOST, Port: port}); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("vsock connect (cid=host port=%d): %w", port, err)
+	}
+	if timeout > 0 {
+		tv := unix.NsecToTimeval(int64(timeout))
+		if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv); err != nil {
+			debugf("SO_RCVTIMEO: %v", err)
 		}
-		if err != nil {
-			return nil, err
+		if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_SNDTIMEO, &tv); err != nil {
+			debugf("SO_SNDTIMEO: %v", err)
 		}
 	}
+	return os.NewFile(uintptr(fd), "vsock"), nil
+}
+
+// shutdownWrite half-closes the vsock connection's write side so the host
+// gateway sees a clean session EOF while late responses can still arrive.
+func shutdownWrite(conn *os.File) {
+	_ = unix.Shutdown(int(conn.Fd()), unix.SHUT_WR)
 }

@@ -350,12 +350,13 @@ func (r *runResolver) resolveSecrets() error {
 	}
 	r.cfg.SecretNames = names
 	r.cfg.SecretSources = sources
-	// Host-bound secrets (NAME@host) and OAuth custody both need the
-	// multicall helper inside the guest (credhelper / oauth login modes).
+	// Host-bound secrets (NAME@host), OAuth custody, and the MCP gateway
+	// all need the multicall helper inside the guest (credhelper / oauth
+	// login / mcp-proxy / mcp-serve modes).
 	// Stage the asset here — during CLI resolution, with progress — so a
 	// first-run download never lands on the VM boot path. Failure to stage
 	// is not fatal: the daemon warns loudly at delivery time instead.
-	if hasBoundSecrets(names) || *r.flags.OAuthCustody {
+	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP {
 		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
 		if err != nil {
 			// Not fatal: the daemon warns loudly at delivery time instead.
@@ -417,6 +418,20 @@ func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.OAuthBridge = &enabled
 	custody := *r.flags.OAuthCustody
 	r.cfg.OAuthCustody = &custody
+	r.cfg.MCP = *r.flags.MCP
+	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
+	r.cfg.MCPFSUser = *r.flags.MCPFSUser
+	if r.cfg.MCP {
+		if strings.TrimSpace(r.cfg.MCPFSUser) == "" {
+			return fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
+		}
+		if r.cfg.MCPFSUser == "root" || r.cfg.MCPFSUser == "0" {
+			return fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
+		}
+		if !filepath.IsAbs(r.cfg.MCPFSRoot) {
+			return fmt.Errorf("-mcp-fs-root must be an absolute guest path, got %q", r.cfg.MCPFSRoot)
+		}
+	}
 	return nil
 }
 

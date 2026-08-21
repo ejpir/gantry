@@ -29,7 +29,7 @@ xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 echo "== environment =="
 uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
 
-for s in t1 t2 t3 t4; do $G stop "$s" >/dev/null 2>&1; done
+for s in t1 t2 t3 t4 t10 t11; do $G stop "$s" >/dev/null 2>&1; done
 rm -rf "$GANTRY_HOME"/t* "$GANTRY_IMAGES" "$RWDIR"
 # rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
 
@@ -221,6 +221,7 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 HTTPServer(("127.0.0.1", 18999), H).serve_forever()
 PYEOF
+pkill -f mock-as.py 2>/dev/null; sleep 1  # a crashed prior run may still hold the port
 rm -f /tmp/mock-as-grants.log
 python3 /tmp/mock-as.py &
 MOCKPID=$!
@@ -264,6 +265,36 @@ R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
 R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
                                             chk "custody: unknown provider refused"           "no custody login" "$R"
 kill $MOCKPID 2>/dev/null
+
+echo "===== MCP gateway (t11: fs server via mcp-proxy, containment) ====="
+# docs/mcp-gateway.md milestone 1: the agent speaks MCP (NDJSON stdio) to
+# gantry-guest mcp-proxy, the host gateway muxes to a contained fs server
+# spawned guest-side as an unprivileged user (never root).
+$G start t11 -mcp -mcp-fs-root /work -mcp-fs-user nobody -image alpine:latest >/dev/null 2>&1
+sleep 4
+xe t11 'mkdir -p /work/sub && echo hello-mcp > /work/notes.txt && ln -s /etc/passwd /work/evil && chmod 755 /work /work/sub && chmod 644 /work/notes.txt' >/dev/null 2>&1
+# The request transcript is built on the instance and heredoc'd into the
+# guest — nested JSON quoting through xe is unmaintainable otherwise.
+cat > /tmp/t11-reqs.ndjson <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"battery","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fs__read_file","arguments":{"path":"/work/notes.txt"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fs__read_file","arguments":{"path":"/work/evil"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fs__write_file","arguments":{"path":"/work/x"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fs__github-authorize","arguments":{}}}
+EOF
+{ echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t11-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t11 >/dev/null 2>&1
+R=$(printf '{ cat /tmp/reqs; sleep 4; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t11 2>&1)
+L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: tools/list exposes fs__read_file"      "fs__read_file" "$L2"
+if printf '%s' "$L2" | grep -qa 'github-authorize'; then bad "mcp: auth tool hidden from listing"; else ok "mcp: auth tool hidden from listing"; fi
+L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: read_file round trip"                 "hello-mcp" "$L3"
+L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: symlink escape is an error"           '"isError":true' "$L4"
+if printf '%s' "$L4" | grep -qa 'root:'; then bad "mcp: symlink escape leaked /etc/passwd"; else ok "mcp: symlink escape leaked nothing"; fi
+L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: unlisted tool denied"                 "unknown or disallowed" "$L5"
+L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: authorize tool denied"                "unknown or disallowed" "$L6"
+R=$($G audit t11);                          chk "mcp: calls audited host-side"              "mcp: call fs__read_file" "$R"
+                                            chk "mcp: denies audited"                      "mcp: denied call fs__write_file" "$R"
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"
