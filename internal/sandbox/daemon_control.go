@@ -63,6 +63,7 @@ func (d *daemonRuntime) startControl() error {
 		shutdown:    d.shutdown,
 		audit:       d.audit,
 	}
+	d.secretStore.SetLogger(d.broker.auditf)
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
 	d.broker.oauth = oauthbridge.New(func(args []string, timeout time.Duration) ([]byte, int, error) {
@@ -85,7 +86,11 @@ func (d *daemonRuntime) startControl() error {
 	// host-side, holds refresh tokens (0600 disk sync under the sandbox
 	// dir for restart durability), and pushes fresh access tokens into
 	// the guest. Requires the callback bridge to intercept callbacks.
-	if d.cfg.OAuthCustodyEnabled() && d.cfg.OAuthBridgeEnabled() {
+	if d.cfg.OAuthCustodyEnabled() {
+		if d.broker.oauth == nil {
+			_ = credLn.Close()
+			return fmt.Errorf("oauth custody requires an active OAuth callback bridge")
+		}
 		registry := oauthtokens.New()
 		registry.AttachFile(d.dir)
 		registry.SetLogger(func(f string, a ...any) { d.broker.auditf("oauth tokens: "+f, a...) })

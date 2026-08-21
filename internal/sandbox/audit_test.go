@@ -36,6 +36,26 @@ func TestAuditRingBoundedAndOrdered(t *testing.T) {
 // surface: a bound secret whose domain the egress allowlist does not
 // cover must produce a warning at resolve time (the credhelper would
 // refuse every guest request for it at runtime).
+func TestAuditRingBoundsBytesAndEscapesControlCharacters(t *testing.T) {
+	r := &auditRing{}
+	line := "guest\nforged\r" + strings.Repeat("x", auditLineMaxBytes*2)
+	for i := 0; i < auditRingCapacity; i++ {
+		r.append(line)
+	}
+	lines := r.tail()
+	if len(lines) == 0 || r.bytes > auditRingMaxBytes {
+		t.Fatalf("ring lines=%d bytes=%d", len(lines), r.bytes)
+	}
+	for _, got := range lines {
+		if strings.ContainsAny(got, "\r\n") {
+			t.Fatalf("audit control character was not escaped: %q", got)
+		}
+		if len(got) > auditLineMaxBytes {
+			t.Fatalf("audit line retained %d bytes", len(got))
+		}
+	}
+}
+
 func TestWarnBoundSecretsVsPolicy(t *testing.T) {
 	dir := t.TempDir()
 	pol := filepath.Join(dir, "policy.json")

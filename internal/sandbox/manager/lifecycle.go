@@ -21,9 +21,10 @@ type Lifecycle interface {
 	// fetch — and returns any warnings alongside it.
 	Resolve(flags *config.RunFlags, fs *flag.FlagSet) (config.RunConfig, []string, error)
 
-	// Launch boots name from cfg and returns a CLI-style exit status, writing
-	// progress to stdout and diagnostics to stderr. replaceConfig rewrites the
-	// saved configuration (create) rather than reusing it (start).
+	// Launch boots name and returns a CLI-style exit status, writing progress
+	// to stdout and diagnostics to stderr. replaceConfig rewrites cfg for a
+	// create; a start re-reads saved config and env secrets under the stable
+	// cross-process launch lock rather than trusting the HTTP preflight copy.
 	Launch(name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig bool, stdout, stderr io.Writer) int
 
 	// Stop reports ErrNotRunning when the sandbox is already stopped.

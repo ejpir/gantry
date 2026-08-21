@@ -2,6 +2,7 @@ package controlcmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,9 +16,27 @@ func persistedAudit(name string) ([]string, error) {
 	if !layout.ValidName(name) {
 		return nil, fmt.Errorf("invalid sandbox name %q", name)
 	}
-	b, err := os.ReadFile(filepath.Join(layout.Dir(name), "audit.log"))
+	f, err := os.Open(filepath.Join(layout.Dir(name), "audit.log"))
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	const maxPersistedAuditRead = 1 << 20
+	if st, statErr := f.Stat(); statErr == nil && st.Size() > maxPersistedAuditRead {
+		_, _ = f.Seek(st.Size()-maxPersistedAuditRead, io.SeekStart)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxPersistedAuditRead+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxPersistedAuditRead {
+		b = b[len(b)-maxPersistedAuditRead:]
+	}
+	// A tail seek can begin mid-line; discard that fragment.
+	if len(b) == maxPersistedAuditRead {
+		if newline := strings.IndexByte(string(b), '\n'); newline >= 0 {
+			b = b[newline+1:]
+		}
 	}
 	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
 	const tail = 256

@@ -4,11 +4,11 @@
 // (guest connect to vsock port Port → VMM dials <sandboxDir>/SockName).
 // The guest helper (gantry-guest credhelper, wired as git's
 // credential.helper) asks for the credential bound to a host; the broker
-// answers only when the request passes three gates, in order:
+// answers only when the request passes three gates:
 //
-//  1. binding  — a secret must be bound to that host (-secret NAME@host);
-//  2. egress   — the sandbox's network policy must allow the host, so a
-//     brokered token can never outrun the firewall;
+//  1. egress   — the sandbox's network policy must allow the host, checked
+//     before any file/exec source is resolved;
+//  2. binding  — a secret must be bound to that host (-secret NAME@host);
 //  3. presence — the value must currently be held (a revoked secret
 //     answers empty).
 //
@@ -176,6 +176,12 @@ func (b *Broker) Decide(req Request) Response {
 		b.logf("credhelper: rejected malformed host %q", req.Host)
 		return Response{}
 	}
+	// Gate egress before invoking the resolver: source-backed credentials can
+	// run a host command, and a denied guest request must not trigger it.
+	if b.allowed != nil && !b.allowed(host) {
+		b.logf("credhelper: denied credential for %s (egress policy)", host)
+		return Response{}
+	}
 	name, value, res := b.resolve(host)
 	switch res {
 	case NoBinding:
@@ -186,10 +192,6 @@ func (b *Broker) Decide(req Request) Response {
 		return Response{}
 	case SourceError:
 		b.logf("credhelper: withheld %s for %s (source resolution failed)", name, host)
-		return Response{}
-	}
-	if b.allowed != nil && !b.allowed(host) {
-		b.logf("credhelper: denied %s for %s (egress policy)", name, host)
 		return Response{}
 	}
 	b.logf("credhelper: delivered %s for %s", name, host)

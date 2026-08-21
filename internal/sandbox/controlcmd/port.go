@@ -1,11 +1,9 @@
 package controlcmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -134,14 +132,9 @@ func printPorts(name string) int {
 		}
 		entries = resp.Ports
 	} else {
-		raw, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json"))
+		cfg, err := config.ReadSandboxConfig(layout.Dir(name))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "gantry ports ls:", err)
-			return 1
-		}
-		var cfg config.RunConfig
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "gantry ports ls: corrupt sandbox.json:", err)
 			return 1
 		}
 		for _, spec := range cfg.Ports {

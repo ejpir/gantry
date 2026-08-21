@@ -30,6 +30,30 @@ func CreateManagerDir(path string) error {
 	return createPrivateWindowsDirectory(path, true)
 }
 
+// ValidateManagerDir accepts either safe inheritance shape used by existing
+// manager and sandbox roots. This avoids rewriting an already-private root's
+// DACL while children are live, but still hardens a current-user-owned path
+// that inherited broader access.
+func ValidateManagerDir(path string) error {
+	if err := validateWindowsPath(path, true); err != nil {
+		return err
+	}
+	userSID, err := CurrentUserSID()
+	if err != nil {
+		return err
+	}
+	if err := VerifyPrivate(path, userSID, true); err == nil {
+		return nil
+	}
+	if err := VerifyPrivate(path, userSID, false); err == nil {
+		return nil
+	}
+	if err := verifyWindowsOwner(path, userSID); err != nil {
+		return err
+	}
+	return secureWindowsPath(path, true, true)
+}
+
 func CreateDir(path string) error {
 	root := filepath.Dir(filepath.Clean(path))
 	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
@@ -50,6 +74,19 @@ func SecureDir(path string) error {
 }
 
 func SecureEndpoint(path string) error {
+	return secureWindowsPath(path, false, false)
+}
+
+// SecureRegularFile verifies ownership and replaces inherited write access
+// before a previously staged cache artifact is trusted.
+func SecureRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%q is not a real regular file", path)
+	}
 	return secureWindowsPath(path, false, false)
 }
 
@@ -155,18 +192,16 @@ func validateWindowsPath(path string, directory bool) error {
 	if !directory && info.IsDir() {
 		return fmt.Errorf("%q is a directory", path)
 	}
-	if directory {
-		path16, err := windows.UTF16PtrFromString(path)
-		if err != nil {
-			return err
-		}
-		attributes, err := windows.GetFileAttributes(path16)
-		if err != nil {
-			return err
-		}
-		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("refusing reparse-point sandbox directory %q", path)
-		}
+	path16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	attributes, err := windows.GetFileAttributes(path16)
+	if err != nil {
+		return err
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("refusing reparse-point path %q", path)
 	}
 	return nil
 }

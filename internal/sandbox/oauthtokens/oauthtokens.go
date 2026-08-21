@@ -21,8 +21,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
+
+	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
 
 // TokenSet is one provider's token material held in custody.
@@ -33,6 +37,10 @@ type TokenSet struct {
 	// RefreshToken stays host-side. May be empty for providers that
 	// issue non-rotating refresh material or none at all.
 	RefreshToken string `json:"refreshToken,omitempty"`
+	// IDToken and AccountID are required to render Codex's auth.json. The ID
+	// token is copied into that guest file; the refresh token remains host-only.
+	IDToken   string `json:"idToken,omitempty"`
+	AccountID string `json:"accountId,omitempty"`
 	// Expiry is the access token's expiry; zero means non-expiring.
 	Expiry time.Time `json:"expiry,omitempty"`
 	// Provider is the registry key ("claude", "codex", ...).
@@ -86,7 +94,11 @@ func (r *Registry) SetLogger(logf func(string, ...any)) {
 func (r *Registry) AttachFile(dir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.path = filepath.Join(dir, "oauth-tokens.json")
+	path := filepath.Join(dir, "oauth-tokens.json")
+	if r.path != path {
+		r.loaded = false
+	}
+	r.path = path
 }
 
 // Put stores or replaces a provider's token set and syncs to disk.
@@ -135,11 +147,7 @@ func (r *Registry) Providers() []string {
 	for p := range r.sets {
 		out = append(out, p)
 	}
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
+	sort.Strings(out)
 	return out
 }
 
@@ -149,11 +157,27 @@ func (r *Registry) loadLocked() error {
 		return nil
 	}
 	r.loaded = true
-	b, err := os.ReadFile(r.path)
+	info, err := os.Lstat(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		return fmt.Errorf("inspect oauth tokens: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return r.quarantineLocked(fmt.Errorf("token store is not a regular file"))
+	}
+	if info.Size() > maxTokenFileBytes {
+		return r.quarantineLocked(fmt.Errorf("token store exceeds %d bytes", maxTokenFileBytes))
+	}
+	if err := localsec.SecureRegularFile(r.path); err != nil {
+		return r.quarantineLocked(fmt.Errorf("insecure token store: %w", err))
+	}
+	if err := os.Chmod(r.path, 0o600); err != nil {
+		return fmt.Errorf("secure oauth tokens: %w", err)
+	}
+	b, err := os.ReadFile(r.path)
+	if err != nil {
 		return fmt.Errorf("load oauth tokens: %w", err)
 	}
 	var persisted []persistedSet
@@ -170,7 +194,8 @@ func (r *Registry) loadLocked() error {
 			migrated = true
 		}
 		set := TokenSet{AccessToken: ps.AccessToken, RefreshToken: ps.RefreshToken,
-			Expiry: exp, Provider: ps.Provider, ClientID: ps.ClientID}
+			IDToken: ps.IDToken, AccountID: ps.AccountID, Expiry: exp,
+			Provider: ps.Provider, ClientID: ps.ClientID}
 		if _, exists := r.sets[set.Provider]; !exists {
 			r.sets[set.Provider] = set
 		}
@@ -191,9 +216,13 @@ func (r *Registry) loadLocked() error {
 // persistedSet mirrors TokenSet on disk but keeps Expiry raw so legacy
 // numeric encodings (early dev builds) can be migrated instead of
 // quarantined.
+const maxTokenFileBytes = 4 << 20
+
 type persistedSet struct {
 	AccessToken  string          `json:"accessToken"`
 	RefreshToken string          `json:"refreshToken,omitempty"`
+	IDToken      string          `json:"idToken,omitempty"`
+	AccountID    string          `json:"accountId,omitempty"`
 	Expiry       json.RawMessage `json:"expiry,omitempty"`
 	Provider     string          `json:"provider"`
 	ClientID     string          `json:"clientId,omitempty"`
@@ -254,13 +283,10 @@ func (r *Registry) syncLocked() error {
 	for _, set := range r.sets {
 		sets = append(sets, set)
 	}
+	sort.Slice(sets, func(i, j int) bool { return sets[i].Provider < sets[j].Provider })
 	b, err := json.Marshal(sets)
 	if err != nil {
 		return err
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.path)
+	return atomicfile.WriteFile(r.path, b, 0o600)
 }

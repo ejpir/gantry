@@ -1,7 +1,6 @@
 package controlcmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,18 +159,19 @@ func ConfigureShare(name, spec string, replace bool) error {
 	if err != nil {
 		return err
 	}
-	if _, alive := layout.PID(name); alive {
-		_, err = shareControlRPC(name, "share.configure", controlproto.ShareRequest{
+	return mutateRunningOrStopped(name, func() error {
+		_, rpcErr := shareControlRPC(name, "share.configure", controlproto.ShareRequest{
 			Spec: normalized, Persistent: true, Replace: replace,
 		})
-		return err
-	}
-	store, err := config.LoadConfigStore(layout.Dir(name))
-	if err != nil {
-		return err
-	}
-	_, err = store.SetShareForRestart(normalized, replace)
-	return err
+		return rpcErr
+	}, func() error {
+		store, loadErr := config.LoadConfigStore(layout.Dir(name))
+		if loadErr != nil {
+			return loadErr
+		}
+		_, persistErr := store.SetShareForRestart(normalized, replace)
+		return persistErr
+	})
 }
 
 // RemoveShare removes a live share through the broker or, when the
@@ -183,18 +183,19 @@ func RemoveShare(name, tag string, force bool) error {
 	if err := shares.ValidateShareTag(tag); err != nil {
 		return err
 	}
-	if _, alive := layout.PID(name); alive {
-		_, err := shareControlRPC(name, "share.remove", controlproto.ShareRequest{
+	return mutateRunningOrStopped(name, func() error {
+		_, rpcErr := shareControlRPC(name, "share.remove", controlproto.ShareRequest{
 			Tag: tag, Persistent: true, Force: force,
 		})
-		return err
-	}
-	store, err := config.LoadConfigStore(layout.Dir(name))
-	if err != nil {
-		return err
-	}
-	_, err = store.RemoveShareForRestart(tag)
-	return err
+		return rpcErr
+	}, func() error {
+		store, loadErr := config.LoadConfigStore(layout.Dir(name))
+		if loadErr != nil {
+			return loadErr
+		}
+		_, persistErr := store.RemoveShareForRestart(tag)
+		return persistErr
+	})
 }
 
 func normalizeShareSpecForClient(spec string) (string, error) {
@@ -233,14 +234,9 @@ func printShares(name string) int {
 		}
 		entries = resp.Shares
 	} else {
-		raw, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json"))
+		cfg, err := config.ReadSandboxConfig(layout.Dir(name))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "gantry share ls:", err)
-			return 1
-		}
-		var cfg config.RunConfig
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "gantry share ls: corrupt sandbox.json:", err)
 			return 1
 		}
 		configured, err := shares.ParseSpecs(cfg.Shares)

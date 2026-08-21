@@ -135,10 +135,7 @@ diff --git a/pkg/vminit/initd/initd.go b/pkg/vminit/initd/initd.go
 index ba7e92c..5c13952 100644
 --- a/pkg/vminit/initd/initd.go
 +++ b/pkg/vminit/initd/initd.go
-@@ -218,6 +218,13 @@ func systemInit(ctx context.Context, config Config, shutdownSvc shutdown.Service
- 		}
- 	}()
- 
+@@ -220,0 +221,7 @@ func systemInit(ctx context.Context, config Config, shutdownSvc shutdown.Service
 +	// Discipline the wall clock from the virtio-rtc PHC: hctosys sets it
 +	// once at probe and nothing re-reads it, so the guest otherwise drifts
 +	// at the raw counter's crystal rate and skips host-suspend intervals
@@ -146,6 +143,3 @@ index ba7e92c..5c13952 100644
 +	// the PHC is absent, e.g. x86 KVM boots with no RTC attached.
 +	startClockSync(ctx)
 +
- 	log.G(ctx).WithField("elapsed", time.Since(t)).Info("system init completed")
- 	return nil
- }

@@ -25,22 +25,53 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
 
 // Root is the sandbox home: every sandbox state directory lives directly
 // under it. GANTRY_HOME overrides it (tests point it at a temp directory).
 func Root() string {
+	paths := rootSecurityPath()
+	return paths[len(paths)-1]
+}
+
+// EnsureRoot creates and secures each application-owned component separately.
+// MkdirAll on the final sandbox directory alone would follow a pre-planted
+// ancestor symlink in the predictable shared-temp fallback.
+func EnsureRoot() error {
+	for _, path := range rootSecurityPath() {
+		err := localsec.ValidateManagerDir(path)
+		if os.IsNotExist(err) {
+			err = localsec.CreateManagerDir(path)
+		}
+		if err != nil {
+			return fmt.Errorf("secure sandbox root %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+var (
+	userHomeDir = os.UserHomeDir
+	tempDir     = os.TempDir
+)
+
+func rootSecurityPath() []string {
 	if d := os.Getenv("GANTRY_HOME"); d != "" {
-		return d
+		return []string{d}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// A fixed name under a world-writable directory would let another
-		// local user pre-plant the state tree (and gantry would follow a
-		// symlink there). Fall back to a per-account subdirectory instead.
-		home = filepath.Join(os.TempDir(), fmt.Sprintf("gantry-%d", os.Getuid()))
+	home, err := userHomeDir()
+	if err == nil && home != "" {
+		base := filepath.Join(home, ".gantry")
+		return []string{base, filepath.Join(base, "sandboxes")}
 	}
-	return filepath.Join(home, ".gantry", "sandboxes")
+	// A fixed name under a world-writable directory would let another local
+	// user pre-plant the state tree. Secure the per-account component before
+	// creating anything below it, then secure each descendant in turn.
+	base := filepath.Join(tempDir(), fmt.Sprintf("gantry-%d", os.Getuid()))
+	app := filepath.Join(base, ".gantry")
+	return []string{base, app, filepath.Join(app, "sandboxes")}
 }
 
 // Dir is the state directory for one sandbox. Callers must have validated

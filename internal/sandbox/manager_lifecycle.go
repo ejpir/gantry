@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/manager"
 	"github.com/ejpir/gantry/internal/secret"
 )
@@ -24,7 +28,34 @@ func (managerLifecycle) Resolve(flags *config.RunFlags, fs *flag.FlagSet) (confi
 }
 
 func (managerLifecycle) Launch(name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig bool, stdout, stderr io.Writer) int {
-	return launchSandboxModeWithSpawnerTimingIO(name, cfg, secrets, replaceConfig, false, startSandboxDaemon, nil, stdout, stderr)
+	lock, err := holdSandboxLaunchLock(name)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "gantry start:", err)
+		return 1
+	}
+	defer func() { _ = lock.Close() }()
+	if replaceConfig {
+		// Manager Launch with replacement is create-only. Recheck existence
+		// under the cross-process lock so an external CLI cannot create a
+		// sandbox between the HTTP preflight and this launch.
+		if _, err := os.Stat(filepath.Join(layout.Dir(name), "sandbox.json")); err == nil {
+			_, _ = fmt.Fprintf(stderr, "gantry start: sandbox %q already exists\n", name)
+			return 1
+		} else if !errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintln(stderr, "gantry start:", err)
+			return 1
+		}
+	} else {
+		// Discard the transport's preflight snapshot and reload config plus env
+		// secrets while holding the launch lock. A concurrent share/secret
+		// removal therefore either precedes this read or waits for readiness.
+		cfg, secrets, err = config.ReadSandboxForLaunch(layout.Dir(name), os.LookupEnv)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "gantry start: sandbox %q has no valid saved configuration: %v\n", name, err)
+			return 1
+		}
+	}
+	return launchSandboxLockedTimingIO(name, cfg, secrets, replaceConfig, false, startSandboxDaemon, nil, stdout, stderr)
 }
 
 func (managerLifecycle) Stop(name string) error {

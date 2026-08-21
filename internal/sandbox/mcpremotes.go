@@ -171,7 +171,7 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpgw.Server, error) {
 			}
 			srv.Redact = append(srv.Redact, []byte(v.Raw()))
 		}
-		d.broker.auditf("mcp: remote %s configured (%s, auth %s)", spec.Name, spec.URL, authDesc)
+		d.broker.auditf("mcp: remote %s configured (%s, auth %s)", spec.Name, mcpgw.AuditRemoteOrigin(spec.URL), authDesc)
 		servers = append(servers, srv)
 	}
 	return servers, nil

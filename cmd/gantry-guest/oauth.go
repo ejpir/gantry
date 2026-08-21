@@ -33,14 +33,19 @@ import (
 type guestOAuthProvider struct {
 	authorizeURL string
 	clientID     string
+	callbackHost string
+	callbackPath string
 	callbackPort int
 	scope        string
+	extraParams  map[string]string
 }
 
 var guestOAuthProviders = map[string]guestOAuthProvider{
 	"claude": {
 		authorizeURL: "https://claude.ai/oauth/authorize",
 		clientID:     "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+		callbackHost: "127.0.0.1",
+		callbackPath: "/callback",
 		// Dynamic port, like the real CLI: the bridge's callback allowlist
 		// admits only codex's 1455, pi's 53692, and the IANA dynamic range.
 		callbackPort: 0,
@@ -49,8 +54,15 @@ var guestOAuthProviders = map[string]guestOAuthProvider{
 	"codex": {
 		authorizeURL: "https://auth.openai.com/oauth/authorize",
 		clientID:     "app_EMoamEEZ73f0CkXaXp7hrann",
+		callbackHost: "localhost",
+		callbackPath: "/auth/callback",
 		callbackPort: 1455,
-		scope:        "openid profile email offline_access",
+		scope:        "openid profile email offline_access api.connectors.read api.connectors.invoke",
+		extraParams: map[string]string{
+			"id_token_add_organizations": "true",
+			"codex_cli_simplified_flow":  "true",
+			"originator":                 "codex_cli_rs",
+		},
 	},
 }
 
@@ -101,8 +113,8 @@ func runOAuth(args []string) {
 	if err != nil {
 		fatal(err)
 	}
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", p.callbackPort)
-	authURL := p.authorizeURL + "?" + url.Values{
+	redirectURI := fmt.Sprintf("http://%s:%d%s", p.callbackHost, p.callbackPort, p.callbackPath)
+	params := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {p.clientID},
 		"redirect_uri":          {redirectURI},
@@ -110,7 +122,11 @@ func runOAuth(args []string) {
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
-	}.Encode()
+	}
+	for key, value := range p.extraParams {
+		params.Set(key, value)
+	}
+	authURL := p.authorizeURL + "?" + params.Encode()
 
 	resp, err := oauthRoundTrip(credproto.Request{
 		Op:           credproto.OpOAuthBegin,

@@ -169,7 +169,18 @@ func readSecretsHandshake(r *os.File) (map[string]secret.Value, []secret.NamedSo
 			Refresh: time.Duration(ws.RefreshNs),
 		}
 		switch src.Kind {
-		case secret.SourceEnv, secret.SourceFile, secret.SourceExec:
+		case secret.SourceEnv:
+			if src.Ref == "" {
+				return nil, nil, fmt.Errorf("handshake source %s: empty environment reference", ws.Name)
+			}
+		case secret.SourceFile:
+			if src.Ref == "" {
+				return nil, nil, fmt.Errorf("handshake source %s: empty file reference", ws.Name)
+			}
+		case secret.SourceExec:
+			if len(src.Argv) == 0 || src.Argv[0] == "" {
+				return nil, nil, fmt.Errorf("handshake source %s: empty exec command", ws.Name)
+			}
 		default:
 			return nil, nil, fmt.Errorf("handshake source %s: unknown kind %q", ws.Name, ws.Kind)
 		}

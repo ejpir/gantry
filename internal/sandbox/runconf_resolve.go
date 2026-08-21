@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
@@ -78,6 +79,11 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 	if err := r.initialize(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	// Session options are structural and side-effect free. Resolve them before
+	// secrets so -mcp-remote (which implies MCP) also stages the guest helper.
+	if err := r.resolveSessionOptions(); err != nil {
+		return r.cfg, r.warnings, err
+	}
 	// Secrets validate before any on-disk artifacts are created (the
 	// per-sandbox writable layer in particular): a bad -secret spec must
 	// fail the start without leaving a fresh 512 MiB rwlayer behind.
@@ -101,9 +107,6 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 	}
 	mark("launcher writable layer resolved")
 	if err := r.resolveNetworking(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	if err := r.resolveSessionOptions(); err != nil {
 		return r.cfg, r.warnings, err
 	}
 	if err := r.normalizeAndValidatePaths(); err != nil {
@@ -418,6 +421,9 @@ func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.OAuthBridge = &enabled
 	custody := *r.flags.OAuthCustody
 	r.cfg.OAuthCustody = &custody
+	if custody && !enabled {
+		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
+	}
 	r.cfg.MCP = *r.flags.MCP
 	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
 	r.cfg.MCPFSUser = *r.flags.MCPFSUser
@@ -437,7 +443,11 @@ func (r *runResolver) resolveSessionOptions() error {
 		if strings.TrimSpace(r.cfg.MCPFSUser) == "" {
 			return fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
 		}
-		if r.cfg.MCPFSUser == "root" || r.cfg.MCPFSUser == "0" {
+		identity := strings.TrimSpace(r.cfg.MCPFSUser)
+		r.cfg.MCPFSUser = identity
+		uidText, _, _ := strings.Cut(identity, ":")
+		uid, numericUIDErr := strconv.ParseUint(uidText, 10, 32)
+		if identity == "root" || (numericUIDErr == nil && uid == 0) {
 			return fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
 		}
 		if !filepath.IsAbs(r.cfg.MCPFSRoot) {

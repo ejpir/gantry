@@ -70,6 +70,21 @@ func TestDecideGates(t *testing.T) {
 	}
 }
 
+func TestDecideChecksEgressBeforeResolvingSource(t *testing.T) {
+	called := false
+	resolve := func(string) (string, secret.Value, Resolution) {
+		called = true
+		return "TOK", "value", OK
+	}
+	b := New(resolve, func(string) bool { return false }, func(string, ...any) {})
+	if resp := b.Decide(Request{Host: "api.github.com"}); resp != (Response{}) {
+		t.Fatalf("denied response = %+v", resp)
+	}
+	if called {
+		t.Fatal("egress-denied request invoked the value resolver")
+	}
+}
+
 func TestResolverDeterministicPrecedence(t *testing.T) {
 	// Two bindings cover the same host: the lexically first secret name wins,
 	// on every call.

@@ -77,7 +77,7 @@ func TestMCPShowConfigNeverPrintsValues(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"image":"alpine:latest","mcp":true,"mcp_fs_root":"/work","mcpfsUser":"nobody",` +
+	cfg := `{"image":"alpine:latest","memMB":512,"vcpus":1,"mcp":true,"mcp_fs_root":"/work","mcp_fs_user":"nobody",` +
 		`"mcp_remotes":["name=github,url=https://api.githubcopilot.com/mcp/,auth=bearer:GITHUB_TOKEN,allow=read*,deny=admin*"]}`
 	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -38,19 +39,44 @@ func dropToUser(name string) error {
 		if os.Geteuid() != uid {
 			return fmt.Errorf("privilege drop did not take effect (euid %d, want %d)", os.Geteuid(), uid)
 		}
-	} else if os.Geteuid() != uid {
-		// Already unprivileged (tests, direct invocation): serve as the
-		// current user rather than fail, but say so on stderr.
-		fmt.Fprintf(os.Stderr, "gantry-guest mcp-serve: not root; serving as uid %d (wanted %d)\n", os.Geteuid(), uid)
+	} else {
+		if os.Geteuid() != uid || os.Getegid() != gid {
+			return fmt.Errorf("already running as %d:%d; cannot honor requested %d:%d", os.Geteuid(), os.Getegid(), uid, gid)
+		}
+		groups, err := os.Getgroups()
+		if err != nil {
+			return fmt.Errorf("inspect supplementary groups: %w", err)
+		}
+		for _, group := range groups {
+			if group != gid {
+				return fmt.Errorf("already running with supplementary group %d; cannot guarantee the requested identity", group)
+			}
+		}
 	}
 	return nil
 }
 
 func resolveUser(name string) (uid, gid int, err error) {
-	if n, err2 := strconv.Atoi(name); err2 == nil {
-		return n, n, nil
+	if uidText, gidText, explicitGroup := strings.Cut(name, ":"); explicitGroup {
+		if strings.Contains(gidText, ":") {
+			return 0, 0, fmt.Errorf("user %q must be NAME, UID, or UID:GID", name)
+		}
+		uid64, uidErr := strconv.ParseUint(uidText, 10, 32)
+		gid64, gidErr := strconv.ParseUint(gidText, 10, 32)
+		if uidErr != nil || gidErr != nil {
+			return 0, 0, fmt.Errorf("user %q must use a numeric UID:GID pair", name)
+		}
+		return int(uid64), int(gid64), nil
 	}
-	u, err2 := user.Lookup(name)
+	var (
+		u    *user.User
+		err2 error
+	)
+	if _, numericErr := strconv.ParseUint(name, 10, 32); numericErr == nil {
+		u, err2 = user.LookupId(name)
+	} else {
+		u, err2 = user.Lookup(name)
+	}
 	if err2 != nil {
 		return 0, 0, fmt.Errorf("user %q not found in the guest: %w", name, err2)
 	}

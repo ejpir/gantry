@@ -22,6 +22,26 @@ func TestRootFallsBackToPerAccountTempDir(t *testing.T) {
 	}
 }
 
+func TestEnsureRootRejectsPlantedTempAncestor(t *testing.T) {
+	oldHome, oldTemp := userHomeDir, tempDir
+	t.Cleanup(func() { userHomeDir, tempDir = oldHome, oldTemp })
+	t.Setenv("GANTRY_HOME", "")
+	userHomeDir = func() (string, error) { return "", os.ErrNotExist }
+	tmp := t.TempDir()
+	tempDir = func() string { return tmp }
+	target := t.TempDir()
+	planted := filepath.Join(tmp, fmt.Sprintf("gantry-%d", os.Getuid()))
+	if err := os.Symlink(target, planted); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureRoot(); err == nil {
+		t.Fatal("EnsureRoot followed a pre-planted temp ancestor")
+	}
+	if _, err := os.Stat(filepath.Join(target, ".gantry")); !os.IsNotExist(err) {
+		t.Fatalf("EnsureRoot modified symlink target: %v", err)
+	}
+}
+
 // TestPIDRequiresHeldDaemonLock: a live process id in vmm.pid is never
 // enough — the daemon publishes its pid only while holding vmm.lock, and a
 // pid recycled after an early daemon death must not be accepted.

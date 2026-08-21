@@ -40,7 +40,7 @@ Common flags:
 | `-oauth-custody` | Hold OAuth refresh tokens on the host; push fresh access tokens into the guest (Codex, Claude) |
 | `-mcp` | Enable the MCP gateway with the contained read-only filesystem server ([manual](mcp-gateway.md)) |
 | `-mcp-fs-root PATH` | Confine the MCP filesystem server to PATH (default `/`) |
-| `-mcp-fs-user USER` | Run MCP local servers as this guest user (default `nobody`; `root` refused) |
+| `-mcp-fs-user USER` | Run MCP local servers as this guest user (name, numeric UID from passwd, or explicit `UID:GID`; default `nobody`; root refused) |
 | `-mcp-remote SPEC` | Add a remote streamable-HTTP MCP server: `name=ID,url=URL[,auth=bearer:SECRET\|header:NAME:SECRET\|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET]`; repeatable |
 | `-process-isolation MODE` | `auto`, `required`, or `off` |
 

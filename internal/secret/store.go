@@ -1,9 +1,10 @@
 package secret
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"sort"
 	"strings"
@@ -58,6 +59,10 @@ const (
 	// execTimeout bounds a source command; a hung credential helper must
 	// not wedge the broker's resolution path.
 	execTimeout = 10 * time.Second
+	// Source values ultimately travel through bounded environment/control
+	// protocols. Cap them at resolution so files and command stdout cannot
+	// consume unbounded host memory first.
+	maxResolvedValueBytes = 64 << 10
 )
 
 // Source describes where a secret's value comes from. It contains no
@@ -183,10 +188,12 @@ type Store struct {
 	now  func() time.Time
 	logf func(string, ...any)
 
-	mu    sync.Mutex
-	srcs  map[string]Source
-	vals  map[string]Value
-	cache map[string]cachedValue
+	mu       sync.Mutex
+	srcs     map[string]Source
+	vals     map[string]Value
+	cache    map[string]cachedValue
+	versions map[string]uint64
+	inflight map[string]*resolveCall
 }
 
 type cachedValue struct {
@@ -194,25 +201,44 @@ type cachedValue struct {
 	at time.Time
 }
 
+type resolveCall struct {
+	version uint64
+	done    chan struct{}
+	waiters int
+	v       Value
+	err     error
+}
+
 // NewStore builds a Store resolving env sources through getenv. logf
 // receives one line per failed re-resolution (named, never valued); it
 // may be nil.
 func NewStore(getenv func(string) (string, bool), logf func(string, ...any)) *Store {
 	return &Store{
-		env:   getenv,
-		now:   time.Now,
-		logf:  logf,
-		srcs:  map[string]Source{},
-		vals:  map[string]Value{},
-		cache: map[string]cachedValue{},
+		env:      getenv,
+		now:      time.Now,
+		logf:     logf,
+		srcs:     map[string]Source{},
+		vals:     map[string]Value{},
+		cache:    map[string]cachedValue{},
+		versions: map[string]uint64{},
+		inflight: map[string]*resolveCall{},
 	}
+}
+
+// SetLogger replaces the resolution-error sink. The daemon installs its
+// synchronized audit sink once the broker has been constructed.
+func (s *Store) SetLogger(logf func(string, ...any)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.logf = logf
 }
 
 // Put registers or replaces a source-backed secret.
 func (s *Store) Put(name string, src Source) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.srcs[name] = src
+	s.versions[name]++
+	s.srcs[name] = cloneSource(src)
 	delete(s.vals, name)
 	delete(s.cache, name)
 }
@@ -222,6 +248,7 @@ func (s *Store) Put(name string, src Source) {
 func (s *Store) PutValue(name string, v Value) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.versions[name]++
 	delete(s.srcs, name)
 	delete(s.cache, name)
 	s.vals[name] = v
@@ -231,6 +258,7 @@ func (s *Store) PutValue(name string, v Value) {
 func (s *Store) Remove(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.versions[name]++
 	delete(s.srcs, name)
 	delete(s.vals, name)
 	delete(s.cache, name)
@@ -252,7 +280,7 @@ func (s *Store) Sources() map[string]Source {
 	defer s.mu.Unlock()
 	out := make(map[string]Source, len(s.srcs))
 	for k, v := range s.srcs {
-		out[k] = v
+		out[k] = cloneSource(v)
 	}
 	return out
 }
@@ -284,54 +312,132 @@ func (s *Store) Resolve(name string) (Value, error) {
 		s.mu.Unlock()
 		return "", fmt.Errorf("secret %s: not configured", name)
 	}
-	if c, ok := s.cache[name]; ok && (src.Refresh > 0 && s.now().Sub(c.at) < src.Refresh) {
+	if c, ok := s.cache[name]; ok && src.Refresh > 0 && s.now().Sub(c.at) < src.Refresh {
 		s.mu.Unlock()
 		return c.v, nil
 	}
+	version := s.versions[name]
+	if call := s.inflight[name]; call != nil && call.version == version {
+		call.waiters++
+		done := call.done
+		s.mu.Unlock()
+		<-done
+		return call.v, call.err
+	}
+	call := &resolveCall{version: version, done: make(chan struct{})}
+	s.inflight[name] = call
 	s.mu.Unlock()
 
-	// Fetch outside the lock so a slow exec source doesn't stall other
-	// resolutions; the store is map-guarded, not fetch-serialized.
-	v, err := s.fetch(src)
+	// Fetch outside the lock so a slow exec source doesn't stall unrelated
+	// names. Concurrent resolves of this generation share the call above.
+	v, fetchErr := s.fetch(src)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err != nil {
+	var logf func(string, ...any)
+	switch {
+	case s.versions[name] != version:
+		call.err = fmt.Errorf("secret %s: configuration changed during source resolution", name)
+	case fetchErr != nil:
 		delete(s.cache, name) // fail closed: never serve stale
-		if s.logf != nil {
-			s.logf("secret %s: source resolution failed: %v", name, err)
-		}
-		return "", fmt.Errorf("secret %s: %w", name, err)
+		call.err = fmt.Errorf("secret %s: %w", name, fetchErr)
+		logf = s.logf
+	default:
+		call.v = v
+		s.cache[name] = cachedValue{v: v, at: s.now()}
 	}
-	s.cache[name] = cachedValue{v: v, at: s.now()}
-	return v, nil
+	if s.inflight[name] == call {
+		delete(s.inflight, name)
+	}
+	close(call.done)
+	s.mu.Unlock()
+	if logf != nil {
+		logf("secret %s: source resolution failed: %v", name, fetchErr)
+	}
+	return call.v, call.err
 }
 
 func (s *Store) fetch(src Source) (Value, error) {
 	switch src.Kind {
 	case SourceEnv:
+		if src.Ref == "" {
+			return "", fmt.Errorf("environment source has no variable name")
+		}
 		v, ok := s.env(src.Ref)
 		if !ok {
 			return "", fmt.Errorf("%s not set in the daemon's environment", src.Ref)
 		}
+		if len(v) > maxResolvedValueBytes {
+			return "", fmt.Errorf("environment value exceeds %d bytes", maxResolvedValueBytes)
+		}
 		return Value(v), nil
 	case SourceFile:
-		b, err := os.ReadFile(src.Ref)
+		if src.Ref == "" {
+			return "", fmt.Errorf("file source has no path")
+		}
+		f, err := openSecretFile(src.Ref)
 		if err != nil {
 			return "", err
 		}
+		defer func() { _ = f.Close() }()
+		b, err := io.ReadAll(io.LimitReader(f, maxResolvedValueBytes+1))
+		if err != nil {
+			return "", err
+		}
+		if len(b) > maxResolvedValueBytes {
+			return "", fmt.Errorf("file value exceeds %d bytes", maxResolvedValueBytes)
+		}
 		return Value(strings.TrimRight(string(b), "\r\n")), nil
 	case SourceExec:
+		if len(src.Argv) == 0 || src.Argv[0] == "" {
+			return "", fmt.Errorf("exec source has no command")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, src.Argv[0], src.Argv[1:]...).Output()
+		var out limitedValueBuffer
+		cmd := exec.CommandContext(ctx, src.Argv[0], src.Argv[1:]...)
+		// Do not let a descendant that inherited stdout keep Run waiting after
+		// the source process exited or was killed by the context.
+		cmd.WaitDelay = time.Second
+		cmd.Stdout = &out
+		err := cmd.Run()
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("%s: timed out after %s", src.Argv[0], execTimeout)
 		}
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", src.Argv[0], err)
 		}
-		return Value(strings.TrimRight(string(out), "\r\n")), nil
+		if out.overflow {
+			return "", fmt.Errorf("%s: output exceeds %d bytes", src.Argv[0], maxResolvedValueBytes)
+		}
+		return Value(strings.TrimRight(out.String(), "\r\n")), nil
 	}
 	return "", fmt.Errorf("unknown source kind %q", src.Kind)
+}
+
+type limitedValueBuffer struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (b *limitedValueBuffer) Write(p []byte) (int, error) {
+	original := len(p)
+	if b.Len()+len(p) > maxResolvedValueBytes {
+		b.overflow = true
+	}
+	remaining := maxResolvedValueBytes + 1 - b.Len()
+	if remaining <= 0 {
+		b.overflow = true
+		return original, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		b.overflow = true
+	}
+	_, _ = b.Buffer.Write(p)
+	return original, nil
+}
+
+func cloneSource(src Source) Source {
+	src.Argv = append([]string(nil), src.Argv...)
+	return src
 }
