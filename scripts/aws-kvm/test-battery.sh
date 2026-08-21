@@ -307,6 +307,10 @@ LOG = "/tmp/mock-mcp-auth.log"
 TOOLS = [
     {"name": "echo_auth", "description": "echoes Authorization", "inputSchema": {"type": "object"}},
     {"name": "leak", "description": "returns a token-shaped string", "inputSchema": {"type": "object"}},
+    {"name": "danger", "description": "policy-denied", "inputSchema": {"type": "object"}},
+    {"name": "big", "description": "over-cap response", "inputSchema": {"type": "object"}},
+    {"name": "leak_sse", "description": "leaks via SSE framing", "inputSchema": {"type": "object"}},
+    {"name": "err_http", "description": "401 reflecting the credential", "inputSchema": {"type": "object"}},
 ]
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -318,6 +322,11 @@ class H(BaseHTTPRequestHandler):
         if "id" not in req:
             self.send_response(202); self.end_headers(); return
         rid, m = req["id"], req.get("method")
+        if m == "tools/call" and req.get("params", {}).get("name") == "err_http":
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(json.dumps({"detail": "token %s rejected" % (self.headers.get("Authorization") or "")}).encode())
+            return
         if m == "initialize":
             result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                       "serverInfo": {"name": "mock-mcp", "version": "0"}}
@@ -329,6 +338,18 @@ class H(BaseHTTPRequestHandler):
                 result = {"content": [{"type": "text", "text": "auth=" + (self.headers.get("Authorization") or "<none>")}]}
             elif name == "leak":
                 result = {"content": [{"type": "text", "text": "the token is t12-secret-token"}]}
+            elif name == "big":
+                result = {"content": [{"type": "text", "text": "A" * (2 * 1024 * 1024)}]}
+            elif name == "leak_sse":
+                raw = json.dumps({"jsonrpc": "2.0", "id": rid, "result":
+                    {"content": [{"type": "text", "text": "sse says t12-secret-token"}]}}).decode()
+                body = ("event: message\ndata: " + raw + "\n\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             else:
                 result = {"content": [{"type": "text", "text": "unknown"}], "isError": True}
         else:
@@ -348,7 +369,7 @@ MOCKMCP=$!
 sleep 1
 export T12_MCP_TOKEN=t12-secret-token  # -secret NAME=value is refused (ps/history leak); env-source it
 $G start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN \
-  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*' -image alpine:latest >/dev/null 2>&1
+  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*,deny=dang*' -image alpine:latest >/dev/null 2>&1
 sleep 4
 xe t12 'mkdir -p /work && chmod 755 /work' >/dev/null 2>&1  # creates container "sb" the fs server spawns into
 cat > /tmp/t12-reqs.ndjson <<'EOF'
@@ -357,6 +378,10 @@ cat > /tmp/t12-reqs.ndjson <<'EOF'
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mock__echo_auth","arguments":{}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mock__leak","arguments":{}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mock__danger","arguments":{}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mock__big","arguments":{}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mock__leak_sse","arguments":{}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"mock__err_http","arguments":{}}}
 EOF
 { echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t12 >/dev/null 2>&1
 R=$(printf '{ cat /tmp/reqs; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t12 2>&1)
@@ -366,8 +391,16 @@ chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$
 L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         "REDACTED-BY-GANTRY-MCP-GATEWAY" "$L3"
 L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: response-body secret redacted"         "REDACTED-BY-GANTRY" "$L4"
 if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: no credential in guest transcript"; else ok "mcp: no credential in guest transcript"; fi
+L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: policy-hidden remote tool denied"       "unknown or disallowed tool" "$L5"
+L2b=$(printf '%s' "$R" | grep -a '"id":2'); if printf '%s' "$L2b" | grep -qa 'mock__danger'; then bad "mcp: deny-listed tool hidden from listing"; else ok "mcp: deny-listed tool hidden from listing"; fi
+L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: over-cap response refused"              "upstream call failed" "$L6"
+L7=$(printf '%s' "$R" | grep -a '"id":7');  chk "mcp: SSE-framed leak redacted"               "REDACTED-BY-GANTRY" "$L7"
+L8=$(printf '%s' "$R" | grep -a '"id":8');  chk "mcp: upstream error sanitized to guest"      "upstream call failed" "$L8"
 R=$($G audit t12);                          chk "mcp: remote config audited (no values)"     "mcp: remote mock configured" "$R"
                                             chk "mcp: remote calls audited"                 "mcp: call mock__echo_auth" "$R"
+                                            chk "mcp: remote policy deny audited"           "mcp: denied call mock__danger (policy)" "$R"
+                                            chk "mcp: upstream error audited (redacted)"    "upstream error.*REDACTED-BY-GANTRY" "$R"
+if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: audit free of credential values"; else ok "mcp: audit free of credential values"; fi
 # Loud refusals at start time (fail closed, never silent degrade):
 OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' -image alpine:latest 2>&1)
 chk "mcp: cloud metadata target refused" "non-public" "$OUT"

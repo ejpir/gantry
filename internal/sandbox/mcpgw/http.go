@@ -257,7 +257,10 @@ func (u *httpUpstream) Call(ctx context.Context, method string, params json.RawM
 		return nil, fmt.Errorf("upstream %s: bad response frame: %w", u.name, err)
 	}
 	if resp.Error != nil {
-		return nil, fmt.Errorf("upstream %s error %d: %s", u.name, resp.Error.Code, resp.Error.Message)
+		// A reflecting upstream could embed the injected credential in an
+		// error message — redact error text too, not just results.
+		msg := redactBytes([]byte(resp.Error.Message), u.redact)
+		return nil, fmt.Errorf("upstream %s error %d: %s", u.name, resp.Error.Code, msg)
 	}
 	return redactBytes(resp.Result, u.redact), nil
 }
@@ -318,8 +321,12 @@ func (u *httpUpstream) post(ctx context.Context, frame []byte, wantResp bool) (j
 		return nil, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("upstream %s HTTP %d", u.name, resp.StatusCode)
+		// Include a redacted, length-capped snippet of the error body —
+		// an upstream 401 page often says why, and must not leak the
+		// injected credential back to the guest.
+		snip, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("upstream %s HTTP %d: %s", u.name, resp.StatusCode,
+			redactBytes(snip, u.redact))
 	}
 	if u.proto == "" {
 		u.proto = protocolVersion

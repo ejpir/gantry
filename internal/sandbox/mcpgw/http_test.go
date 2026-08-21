@@ -1,6 +1,7 @@
 package mcpgw
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +35,28 @@ func (m *mockRemote) handler() http.HandlerFunc {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.ID == nil { // notification
 			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		reflectErr := func() bool {
+			name := ""
+			if req.Method == "tools/call" {
+				name, _ = req.Params["name"].(string)
+			}
+			switch name {
+			case "err_http": // reflect the credential in an HTTP error body
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = fmt.Fprintf(w, `{"detail":"token %s was rejected"}`, r.Header.Get("Authorization"))
+				return true
+			case "err_rpc": // reflect it in a JSON-RPC error message
+				w.Header().Set("Content-Type", "application/json")
+				raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(req.ID),
+					"error": map[string]any{"code": -32000, "message": "bad token " + r.Header.Get("Authorization")}})
+				_, _ = w.Write(raw)
+				return true
+			}
+			return false
+		}
+		if reflectErr() {
 			return
 		}
 		if m.session != "" {
@@ -219,5 +242,55 @@ func TestValidateRemoteURLAndDialGuard(t *testing.T) {
 	}
 	if conn != nil {
 		_ = conn.Close()
+	}
+}
+
+func TestHTTPErrorPathsAreRedacted(t *testing.T) {
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	srv := startMock(t, &mockRemote{})
+	g, err := New(logf, nil, []Server{{
+		Name:    "mock",
+		URL:     srv.URL,
+		Headers: map[string]string{"Authorization": "Bearer t12-secret-token"},
+		Tools:   ToolPolicy{Allow: []string{"err_*"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := runSession(t, g, []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mock__err_http","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mock__err_rpc","arguments":{}}}`,
+	})
+	resps := decodeResults(t, lines)
+	// Guest side: generic failure, never the upstream's error text.
+	for _, id := range []string{"2", "3"} {
+		raw, _ := json.Marshal(resps[id])
+		if bytes.Contains(raw, []byte("t12-secret-token")) {
+			t.Fatalf("id %s leaked the credential to the guest: %s", id, raw)
+		}
+		if !bytes.Contains(raw, []byte("upstream call failed")) {
+			t.Fatalf("id %s should get the generic failure: %s", id, raw)
+		}
+	}
+	// Host audit: the detailed error, with the credential redacted.
+	var errLines []string
+	for _, l := range logs {
+		if strings.Contains(l, "upstream error") {
+			errLines = append(errLines, l)
+		}
+	}
+	if len(errLines) != 2 {
+		t.Fatalf("expected 2 audited upstream errors, got %v", logs)
+	}
+	for _, l := range errLines {
+		if strings.Contains(l, "t12-secret-token") {
+			t.Fatalf("audit line leaked the credential: %s", l)
+		}
+		if !strings.Contains(l, "REDACTED-BY-GANTRY") {
+			t.Fatalf("audit line should show the redacted detail: %s", l)
+		}
 	}
 }
