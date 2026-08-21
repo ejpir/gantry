@@ -3,6 +3,7 @@ package oauthtokens
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,10 @@ func TestRegistryDiskSyncAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Unix permission assertion only: Windows reports 0666 for
+	// ACL-protected files (unix mode bits do not exist there), and the
+	// user-profile ACL is what protects the file.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("token file mode = %o, want 0600", info.Mode().Perm())
 	}
 
