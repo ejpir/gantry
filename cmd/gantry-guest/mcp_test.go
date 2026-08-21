@@ -10,11 +10,11 @@ import (
 )
 
 // serveFSOnce feeds one JSON-RPC line through the filesystem server and
-// returns the decoded response.
+// returns the decoded response. The jail root path matches testJail's.
 func serveFSOnce(t *testing.T, jail *os.Root, request string) map[string]any {
 	t.Helper()
 	var out bytes.Buffer
-	if err := serveFS(jail, strings.NewReader(request+"\n"), &out); err != nil {
+	if err := serveFS(jail, jail.Name(), strings.NewReader(request+"\n"), &out); err != nil {
 		t.Fatal(err)
 	}
 	var resp map[string]any
@@ -60,10 +60,14 @@ func TestFSReadFile(t *testing.T) {
 	if isErr || text != "hello-mcp\n" {
 		t.Fatalf("read_file = %q (isError %v)", text, isErr)
 	}
-	// Absolute-looking paths resolve inside the jail too.
-	resp = serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/notes.txt"}}}`)
+	// Absolute paths inside the jail work; absolute paths outside are refused.
+	resp = serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":`+jsonStr(jail.Name()+"/notes.txt")+`}}}`)
 	if text, isErr := toolResultText(t, resp); isErr || text != "hello-mcp\n" {
 		t.Fatalf("read_file absolute = %q (isError %v)", text, isErr)
+	}
+	resp = serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"/etc/hostname"}}}`)
+	if text, isErr := toolResultText(t, resp); !isErr || !strings.Contains(text, "outside the server root") {
+		t.Fatalf("absolute path outside the root must be refused, got %q (isError %v)", text, isErr)
 	}
 }
 
@@ -77,7 +81,7 @@ func TestFSSymlinkEscapeDenied(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "evil-link")); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"evil-link", "../" + filepath.Base(dir) + "/../", ".."} {
+	for _, p := range []string{"evil-link", filepath.Join(dir, "evil-link"), "..", filepath.Join(dir, "..", "..")} {
 		resp := serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":`+jsonStr(p)+`}}}`)
 		text, isErr := toolResultText(t, resp)
 		if !isErr {
@@ -132,7 +136,7 @@ func TestFSListDirAndHandshake(t *testing.T) {
 	}
 	// Notifications get no response.
 	var out bytes.Buffer
-	if err := serveFS(jail, strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`+"\n"), &out); err != nil {
+	if err := serveFS(jail, jail.Name(), strings.NewReader(`{"jsonrpc":"2.0","method":"notifications/initialized"}`+"\n"), &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -146,15 +150,24 @@ func jsonStr(s string) string {
 	return string(raw)
 }
 
-func TestRelPath(t *testing.T) {
-	for in, want := range map[string]string{
-		"":            ".",
-		"/etc/passwd": "etc/passwd",
-		"notes.txt":   "notes.txt",
-		"./sub/../x":  "x",
+func TestRelInRoot(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{"", "."},
+		{"/work", "."},
+		{"/work/notes.txt", "notes.txt"},
+		{"/work/./sub/../x", "x"},
+		{"notes.txt", "notes.txt"}, // relative joins the root
 	} {
-		if got := relPath(in); got != want {
-			t.Errorf("relPath(%q) = %q, want %q", in, got, want)
+		got, err := relInRoot("/work", tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("relInRoot(/work, %q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"/etc/passwd", "/work/../etc/passwd", "/workx/notwork"} {
+		if rel, err := relInRoot("/work", bad); err == nil {
+			t.Errorf("relInRoot(/work, %q) = %q; want outside-root error", bad, rel)
 		}
 	}
 }
