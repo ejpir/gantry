@@ -201,7 +201,14 @@ func validateWindowsPath(path string, directory bool) error {
 		return err
 	}
 	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return fmt.Errorf("refusing reparse-point path %q", path)
+		// Windows represents AF_UNIX socket endpoints with the dedicated
+		// IO_REPARSE_TAG_AF_UNIX tag, which os.Lstat exposes as ModeSocket.
+		// They are the endpoint SecureEndpoint is specifically intended to
+		// protect. Continue rejecting symlinks, junctions, and every other
+		// reparse point.
+		if directory || info.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("refusing reparse-point path %q", path)
+		}
 	}
 	return nil
 }

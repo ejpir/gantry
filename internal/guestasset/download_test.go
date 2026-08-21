@@ -88,6 +88,12 @@ func TestEnsureHardensExistingAssetPermissions(t *testing.T) {
 	if _, err := EnsureGuestTools(path, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Windows executes binaries by file type rather than POSIX mode bits;
+	// SecureRegularFile hardens its DACL instead (covered by localsec's
+	// Windows-specific tests).
+	if runtime.GOOS == "windows" {
+		return
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
