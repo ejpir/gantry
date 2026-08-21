@@ -149,12 +149,12 @@ func TestAuditTrailNeverLeaksSecretMaterial(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&grant)
 		w.Header().Set("Content-Type", "application/json")
 		if grant["grant_type"] == "refresh_token" {
-			fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"rt-nasty","expires_in":3600}`, markers[1])
+			_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"rt-nasty","expires_in":3600}`, markers[1])
 			return
 		}
 		// 1s lifetime with the 5-minute refresh leeway: the set is due the
 		// moment it lands (a zero expiry means "never schedule", not now).
-		fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"rt-nasty","expires_in":1}`, markers[0])
+		_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"rt-nasty","expires_in":1}`, markers[0])
 	}))
 	defer tokenSrv.Close()
 	cm, _ := newTestCustody(t, tokenSrv)

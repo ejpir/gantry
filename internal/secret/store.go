@@ -119,7 +119,7 @@ func ParseSource(spec string) (string, Source, error) {
 	} else if i := strings.Index(rest, "=!"); i > 0 {
 		argv := strings.Fields(rest[i+2:])
 		if len(argv) == 0 {
-			return "", Source{}, fmt.Errorf("secret %q: empty command after =!", spec)
+			return "", Source{}, fmt.Errorf("secret %q: exec source has no command", spec)
 		}
 		src = Source{Kind: SourceExec, Argv: argv, Refresh: execDefaultTTL}
 		rest = rest[:i]

@@ -21,7 +21,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -363,16 +362,4 @@ func (cm *custodyManager) restoreRestart() {
 		cm.br.auditf("custody: %s session restored from disk; refresh loop resumed", provider)
 		cm.startRefreshLoop(provider)
 	}
-}
-
-// sortedProviders is for tests and diagnostics.
-func (cm *custodyManager) sortedFlows() []string {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	out := make([]string, 0, len(cm.flows))
-	for state := range cm.flows {
-		out = append(out, state)
-	}
-	sort.Strings(out)
-	return out
 }
