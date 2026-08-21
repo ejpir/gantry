@@ -342,15 +342,18 @@ func (r *runResolver) resolveNetworking() error {
 }
 
 func (r *runResolver) resolveSecrets() error {
-	_, names, err := r.flags.ResolveSecrets()
+	_, sources, names, err := r.flags.ResolveSecretSources()
 	if err != nil {
 		return err
 	}
 	r.cfg.SecretNames = names
+	r.cfg.SecretSources = sources
 	// Host-bound secrets (NAME@host) need the multicall helper inside the
-	// guest. Stage the asset here — during CLI resolution, with progress —
-	// so a first-run download never lands on the VM boot path. Failure to
-	// stage is not fatal: the daemon warns loudly at delivery time instead.
+	// guest — whether their values ride the handshake (env) or resolve
+	// daemon-side (file/exec). Stage the asset here — during CLI
+	// resolution, with progress — so a first-run download never lands on
+	// the VM boot path. Failure to stage is not fatal: the daemon warns
+	// loudly at delivery time instead.
 	if hasBoundSecrets(names) {
 		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
 		if err != nil {

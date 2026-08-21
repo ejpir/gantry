@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,8 +46,10 @@ type broker struct {
 	ports      *control.PortManager
 	netPolicy  *control.NetworkPolicyManager
 	capture    packetCaptureBackend
-	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
-	secretMu   sync.RWMutex
+	// secretStore resolves values at use time (source TTL, fail-closed);
+	// memory only, VM lifetime — never serialized.
+	secretStore *secret.Store
+	secretMu    sync.Mutex // orders control-socket sets against persistence
 	// domainAllowed is the egress gate for the credential broker (nil when
 	// the sandbox has no network policy object).
 	domainAllowed func(string) bool
@@ -178,25 +181,23 @@ func (br *broker) secretControl(c net.Conn, req controlproto.Request) {
 	br.secretMu.Lock()
 	defer br.secretMu.Unlock()
 	present := req.Op == "secret.set"
-	next := make(map[string]secret.Value, len(br.secrets)+1)
-	for name, value := range br.secrets {
-		next[name] = value
-	}
 	if present {
-		next[req.Secret.Name] = req.Secret.Value
+		// Control-socket sets are literal values (the dashboard path sends
+		// the value over the local socket). Bound secrets must come from
+		// -secret at start, which carries source specs with bindings.
+		if len(req.Secret.Value.Raw()) >= controlproto.SecretsHandshakeMaxBytes {
+			respond(controlproto.SecretResponse{Error: "secret value exceeds the handshake size limit"})
+			return
+		}
+		br.secretStore.PutValue(req.Secret.Name, req.Secret.Value)
 	} else {
-		delete(next, req.Secret.Name)
-	}
-	if _, err := secretsHandshakeJSON(next); err != nil {
-		respond(controlproto.SecretResponse{Error: err.Error()})
-		return
+		br.secretStore.Remove(req.Secret.Name)
 	}
 	err := br.store.SetSecretName(req.Secret.Name, present)
 	if err != nil && !atomicfile.Committed(err) {
 		respond(controlproto.SecretResponse{Error: err.Error()})
 		return
 	}
-	br.secrets = next
 	if err != nil {
 		respond(controlproto.SecretResponse{Error: "secret updated but configuration durability is uncertain: " + err.Error()})
 		return
@@ -204,26 +205,37 @@ func (br *broker) secretControl(c net.Conn, req controlproto.Request) {
 	respond(controlproto.SecretResponse{OK: true})
 }
 
+// secretEnv renders the ambient injection set: literal values plus
+// ambient (unbound) sources, resolved ONCE at spawn — env vars are a
+// point-in-time snapshot by nature; bound secrets rotate live through the
+// broker instead. A source that fails to resolve is dropped and logged
+// (fail closed); the sandbox boots without that variable.
 func (br *broker) secretEnv() []string {
-	br.secretMu.RLock()
-	defer br.secretMu.RUnlock()
-	copy := make(map[string]secret.Value, len(br.secrets))
-	for name, value := range br.secrets {
-		copy[name] = value
-	}
-	// Bound secrets (NAME@host) are delivered through the credential broker
-	// only — injecting them into every session's environment would defeat
-	// the binding.
-	var bound int
-	if bindings := br.secretBindings(); bindings != nil {
-		for name := range copy {
-			if bindings[name] != "" {
-				delete(copy, name)
-				bound++
-			}
+	bindings := br.bindings()
+	resolved := map[string]secret.Value{}
+	bound := 0
+	inject := func(name string) {
+		if _, isBound := bindings[name]; isBound {
+			// Bound secrets (NAME@host) are delivered through the credential
+			// broker only — injecting them into every session's environment
+			// would defeat the binding.
+			bound++
+			return
 		}
+		v, err := br.secretStore.Resolve(name)
+		if err != nil {
+			fmt.Printf("daemon: secret %s withheld from session env: %v\n", name, err)
+			return
+		}
+		resolved[name] = v
 	}
-	env := secret.Env(copy)
+	for _, name := range br.secretStore.LiteralNames() {
+		inject(name)
+	}
+	for name := range br.secretStore.Sources() {
+		inject(name)
+	}
+	env := secret.Env(resolved)
 	// With a bound secret held and the helper staged, point git at the
 	// broker via ephemeral env config — no guest file is ever written.
 	if bound > 0 && br.guestToolsReady.Load() {
@@ -236,32 +248,56 @@ func (br *broker) secretEnv() []string {
 	return env
 }
 
-// secretBindings maps secret name → host binding, derived from the
-// persisted SecretNames (the same names gantry ls shows). Caller holds
-// secretMu. Returns nil when bindings are unavailable (no store or a
-// corrupt persisted entry) — callers then fail closed.
-func (br *broker) secretBindings() map[string]string {
-	if br.store == nil {
-		return nil
+// bindings maps clean secret name → host pattern. Two sources of truth,
+// merged: the live Store (file/exec sources carry their binding) and the
+// persisted display names (eager env secrets carry their binding ONLY in
+// the persisted spec — the handshake transports their values, not their
+// bindings). A corrupt persisted entry is skipped; it can only widen a
+// miss into NoBinding (fail closed).
+func (br *broker) bindings() map[string]string {
+	out := map[string]string{}
+	if br.store != nil {
+		for _, specName := range br.store.Snapshot().SecretNames {
+			clean, binding, err := secret.SplitBinding(secret.HeadOf(specName))
+			if err != nil || binding == "" {
+				continue
+			}
+			out[clean] = binding
+		}
 	}
-	bindings, err := secret.BindingsFromNames(br.store.Snapshot().SecretNames)
-	if err != nil {
-		fmt.Printf("daemon: persisted secret names unusable (%v); failing closed\n", err)
-		return nil
+	for name, src := range br.secretStore.Sources() {
+		if src.Binding != "" {
+			out[name] = src.Binding
+		}
 	}
-	return bindings
+	return out
 }
 
-// resolveCredential implements credhelper.Resolver over the live secret
-// set: binding and value resolve under one lock so they can never race.
+// resolveCredential implements credhelper.Resolver over the live store:
+// the value resolves at REQUEST time, so a rotated file/exec source is
+// picked up mid-session. A source that stops resolving yields SourceError
+// — the broker answers empty and audits the failure.
 func (br *broker) resolveCredential(host string) (string, secret.Value, credhelper.Resolution) {
-	br.secretMu.RLock()
-	defer br.secretMu.RUnlock()
-	bindings := br.secretBindings()
-	if bindings == nil {
+	if br.secretStore == nil {
 		return "", "", credhelper.NoBinding
 	}
-	return credhelper.NewResolver(br.secrets, bindings)(host)
+	bindings := br.bindings()
+	names := make([]string, 0, len(bindings))
+	for name := range bindings {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !credhelper.HostMatches(bindings[name], host) {
+			continue
+		}
+		v, err := br.secretStore.Resolve(name)
+		if err != nil {
+			return name, "", credhelper.SourceError
+		}
+		return name, v, credhelper.OK
+	}
+	return "", "", credhelper.NoBinding
 }
 
 func (br *broker) resourceControl(c net.Conn, req controlproto.Request) {

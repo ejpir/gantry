@@ -29,11 +29,11 @@ type daemonRuntime struct {
 	started    time.Time
 	bootTiming bool
 
-	cfg     config.RunConfig
-	secrets map[string]secret.Value
-	store   *config.ConfigStore
-	lock    *os.File
-	console *os.File
+	cfg         config.RunConfig
+	secretStore *secret.Store
+	store       *config.ConfigStore
+	lock        *os.File
+	console     *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
 	consoleLog *boundedlog.Pipe

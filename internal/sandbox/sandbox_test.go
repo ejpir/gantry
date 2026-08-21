@@ -172,7 +172,7 @@ func TestBrokerSetResources(t *testing.T) {
 func TestBrokerMutatesSecretsWithoutPersistingValues(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, config.RunConfig{})
-	br := &broker{store: store, secrets: map[string]secret.Value{}, sessions: map[string]chan struct{}{}}
+	br := &broker{store: store, secretStore: secret.NewStore(os.LookupEnv, nil), sessions: map[string]chan struct{}{}}
 	request := controlproto.Request{
 		Op: "secret.set", ID: "add-secret",
 		Secret: &controlproto.SecretRequest{Name: "API_TOKEN", Value: secret.Value("super-secret-value")},

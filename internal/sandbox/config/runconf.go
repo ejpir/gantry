@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/guestasset"
@@ -74,8 +75,14 @@ type RunConfig struct {
 	VCPUs       int   `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
-	// are never written anywhere (docs/secrets.md rule 1).
+	// are never written anywhere (docs/secrets.md rule 1). Source-backed
+	// secrets persist as their full spec (NAME[@host][=@path][,ttl=...])
+	// so resume can rebuild the daemon-side Store; the spec contains refs
+	// (paths, env names), never values.
 	SecretNames []string `json:"secret_names,omitempty"`
+	// SecretSources are the daemon-resolved sources for -secret specs.
+	// Literal -secret-file values are not sources and never persist.
+	SecretSources []secret.NamedSource `json:"secret_sources,omitempty"`
 	// ProcessIsolation selects the supervisor/worker topology
 	// (docs/vmm-network-isolation.md): "auto" (strongest available,
 	// currently the split network worker on Unix), "required" (fail
@@ -147,8 +154,10 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
 	fs.Var(f.Publish, "publish", "alias for -p")
-	fs.Var(f.Secrets, "secret", `inject a secret into every session: NAME (from gantry's
-environment) or NAME=@/path; repeatable. NAME=literal is refused`)
+	fs.Var(f.Secrets, "secret", `inject a secret: NAME (from gantry's environment),
+NAME=@/path (file), or NAME='!cmd args' (exec stdout); suffix NAME@host binds
+to a host for broker-only delivery, ,ttl=60s overrides the refresh interval
+(0 = on-demand). Repeatable. NAME=literal is refused`)
 	fs.Var(f.SecretFiles, "secret-file", "dotenv-style file of NAME=VALUE secrets (repeatable)")
 	return f
 }
@@ -183,6 +192,84 @@ var osLookupEnv = os.LookupEnv
 
 func (f *RunFlags) ResolveSecrets() (map[string]secret.Value, []string, error) {
 	return secret.ResolveAll(f.Secrets.List(), f.SecretFiles.List(), osLookupEnv)
+}
+
+// ResolveSecretSources is the sandbox-start resolution path. Two kinds
+// of secrets, two delivery contracts:
+//
+//   - ENV specs (NAME, NAME@host) resolve eagerly from the CLI's
+//     environment, exactly like v1: the value rides the stdin handshake
+//     and scrubbedEnv keeps it out of the daemon's /proc/environ. Env
+//     vars are static for a process's lifetime — a TTL would buy nothing.
+//   - FILE/EXEC specs (NAME=@path, NAME=!argv) become daemon-resolved
+//     SOURCES: the CLI never holds their values, and the daemon's Store
+//     re-resolves them at use time so rotation is picked up live.
+//
+// -secret-file entries stay literal values (dotenv files carry values,
+// not sources). Returns the literal values, the named file/exec sources,
+// and the ordered unique persisted specs. Later occurrences of a name win
+// across all kinds.
+func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.NamedSource, []string, error) {
+	values := map[string]secret.Value{}
+	sources := map[string]secret.NamedSource{}
+	display := map[string]string{}
+	var order []string
+	add := func(name, spec string) {
+		if _, seen := display[name]; !seen {
+			order = append(order, name)
+		}
+		display[name] = spec
+	}
+	for _, file := range f.SecretFiles.List() {
+		m, err := secret.ParseFile(file)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("-secret-file: %w", err)
+		}
+		for _, name := range sortedNames(m) {
+			values[name] = m[name]
+			delete(sources, name)
+			add(name, name)
+		}
+	}
+	for _, spec := range f.Secrets.List() {
+		ns, err := secret.ParseNamedSource(spec)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("-secret: %w", err)
+		}
+		if ns.Source.Kind == secret.SourceEnv {
+			// ParseSpec on an env spec is exactly the v1 path: eager value,
+			// unset-var error, literal refusal, binding validation.
+			s, err := secret.ParseSpec(spec, osLookupEnv)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("-secret: %w", err)
+			}
+			values[s.Name] = s.Value
+			delete(sources, s.Name)
+			add(s.Name, s.DisplayName())
+			continue
+		}
+		sources[ns.Name] = ns
+		delete(values, ns.Name)
+		add(ns.Name, ns.Spec())
+	}
+	names := make([]string, 0, len(order))
+	ordered := make([]secret.NamedSource, 0, len(sources))
+	for _, n := range order {
+		names = append(names, display[n])
+		if ns, ok := sources[n]; ok {
+			ordered = append(ordered, ns)
+		}
+	}
+	return values, ordered, names, nil
+}
+
+func sortedNames(m map[string]secret.Value) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ParsedShares validates cfg.Shares into virtio-fs share descriptors.

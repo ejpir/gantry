@@ -192,13 +192,13 @@ func (s *ConfigStore) SetSecretName(name string, present bool) error {
 		names := make([]string, 0, len(cfg.SecretNames)+1)
 		keptBound := ""
 		for _, existing := range cfg.SecretNames {
-			clean, _, err := secret.SplitBinding(existing)
+			clean, _, err := secret.SplitBinding(secret.HeadOf(existing))
 			if err != nil {
 				clean = existing // tolerate a legacy malformed entry verbatim
 			}
 			if clean != name {
 				names = append(names, existing)
-			} else if strings.ContainsRune(existing, '@') {
+			} else if strings.ContainsRune(secret.HeadOf(existing), '@') {
 				keptBound = existing
 			}
 		}
@@ -211,6 +211,27 @@ func (s *ConfigStore) SetSecretName(name string, present bool) error {
 			sort.Strings(names)
 		}
 		cfg.SecretNames = names
+		// Keep the source set in lockstep: removal drops the source so a
+		// revoked secret cannot re-resolve on restart; a set keeps an
+		// existing source (binding + file/exec ref survive an update) and
+		// otherwise records the env default, matching v1 resume-from-env.
+		srcs := make([]secret.NamedSource, 0, len(cfg.SecretSources)+1)
+		keptSource := secret.NamedSource{}
+		haveSource := false
+		for _, ns := range cfg.SecretSources {
+			if ns.Name != name {
+				srcs = append(srcs, ns)
+			} else {
+				keptSource, haveSource = ns, true
+			}
+		}
+		if present {
+			if !haveSource {
+				keptSource = secret.NamedSource{Name: name, Source: secret.Source{Kind: secret.SourceEnv, Ref: name}}
+			}
+			srcs = append(srcs, keptSource)
+		}
+		cfg.SecretSources = srcs
 		return nil
 	})
 }
