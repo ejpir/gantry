@@ -401,6 +401,16 @@ R=$($G audit t12);                          chk "mcp: remote config audited (no 
                                             chk "mcp: remote policy deny audited"           "mcp: denied call mock__danger (policy)" "$R"
                                             chk "mcp: upstream error audited (redacted)"    "upstream error.*REDACTED-BY-GANTRY" "$R"
 if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: audit free of credential values"; else ok "mcp: audit free of credential values"; fi
+
+# t13: operator CLI — config view (names, never values) + live tool probe.
+R=$($G mcp t12)
+chk "mcp cli: config view shows fs server"        "read-only filesystem: root /work"   "$R"
+chk "mcp cli: config view shows remote + auth kind" "auth bearer:T12_MCP_TOKEN"        "$R"
+if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp cli: config view free of values"; else ok "mcp cli: config view free of values"; fi
+R=$($G mcp tools t12)
+chk "mcp cli: live probe lists fs tools"          "fs: list_directory, read_file"      "$R"
+chk "mcp cli: live probe lists remote tools"      "mock: big, echo_auth, err_http, leak, leak_sse" "$R"
+if printf '%s' "$R" | grep -qa 'danger'; then bad "mcp cli: probe honors deny policy"; else ok "mcp cli: probe honors deny policy"; fi
 # Loud refusals at start time (fail closed, never silent degrade):
 OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' -image alpine:latest 2>&1)
 chk "mcp: cloud metadata target refused" "non-public" "$OUT"

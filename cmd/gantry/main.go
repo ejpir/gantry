@@ -39,6 +39,7 @@ usage:
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
   gantry audit <name>               # security-event trail (credentials, secrets, custody)
+  gantry mcp <name> [tools]         # MCP gateway: configured servers; live tool list
   gantry tui                        # interactive local sandbox dashboard
   gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
@@ -199,6 +200,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return sandbox.CmdImage(argv), true
 	case "share":
 		return controlcmd.CmdShare(argv), true
+	case "mcp":
+		return sandbox.CmdMCP(argv), true
 	case "ports":
 		return controlcmd.CmdPorts(argv), true
 	case "net-policy":
