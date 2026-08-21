@@ -173,7 +173,7 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	scanner := bufio.NewScanner(rw)
 	scanner.Buffer(make([]byte, 64*1024), mcpproto.MaxFrameBytes)
 	scanner.Split(scanLines)
-	var calls, denied int
+	var calls, denied atomic.Int64 // mutated by concurrent dispatch goroutines
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -203,7 +203,7 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			denied++
+			denied.Add(1)
 			sess.reply(req.ID, nil, &rpcError{codeServerError, "gateway busy: too many in-flight requests"})
 			continue
 		}
@@ -212,12 +212,12 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 			defer wg.Done()
 			defer func() { <-sess.sem }()
 			c, d := sess.dispatch(ctx, &req)
-			calls += c
-			denied += d
+			calls.Add(int64(c))
+			denied.Add(int64(d))
 		}()
 	}
 	wg.Wait()
-	g.auditf("mcp: session closed (%d calls, %d denied)", calls, denied)
+	g.auditf("mcp: session closed (%d calls, %d denied)", calls.Load(), denied.Load())
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		return fmt.Errorf("mcpgw: session read: %w", err)
 	}
