@@ -27,7 +27,7 @@ Common flags:
 | `-runtime MODE` | Guest OCI runtime: `crun` or `runsc` |
 | `-rw=false` | Disable the writable container overlay |
 | `-share SPEC` | Add a host-directory share; repeatable |
-| `-secret SPEC` | Inject a secret from the environment or a file; repeatable |
+| `-secret SPEC` | Inject a secret: `NAME`, `NAME=@/path`, `NAME='!cmd args'`; append `@host` to bind for broker-only delivery, `,ttl=60s` to set refresh; repeatable |
 | `-secret-file PATH` | Load dotenv-style secrets; repeatable |
 | `-net=false` | Disable guest networking |
 | `-net-policy PATH` | Load a JSON egress policy |
@@ -37,6 +37,7 @@ Common flags:
 | `-no-proxy LIST` | Override the proxy bypass list |
 | `-proxy-enforce` | Block direct TCP 80/443 and UDP 443 except to the proxy |
 | `-oauth-bridge=false` | Disable supported agent OAuth callback bridging |
+| `-oauth-custody` | Hold OAuth refresh tokens on the host; push fresh access tokens into the guest (Codex, Claude) |
 | `-process-isolation MODE` | `auto`, `required`, or `off` |
 
 Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, `-layerset`, and
