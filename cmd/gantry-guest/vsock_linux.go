@@ -22,6 +22,16 @@ import (
 // boot of a sandbox with bound secrets. SO_RCVTIMEO/SNDTIMEO give the
 // deadline semantics net.Conn would have.
 func askBroker(host, path string) (credproto.Response, error) {
+	raw, err := json.Marshal(credproto.Request{Host: host, Path: path})
+	if err != nil {
+		return credproto.Response{}, err
+	}
+	return brokerRoundTrip(raw)
+}
+
+// brokerRoundTrip runs one request/response exchange with the host
+// broker: one JSON line out, one JSON line back.
+func brokerRoundTrip(req []byte) (credproto.Response, error) {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return credproto.Response{}, fmt.Errorf("vsock socket: %w", err)
@@ -40,10 +50,6 @@ func askBroker(host, path string) (credproto.Response, error) {
 	f := os.NewFile(uintptr(fd), "vsock")
 	defer func() { _ = f.Close() }()
 
-	req, err := json.Marshal(credproto.Request{Host: host, Path: path})
-	if err != nil {
-		return credproto.Response{}, err
-	}
 	if _, err := f.Write(append(req, '\n')); err != nil {
 		return credproto.Response{}, fmt.Errorf("write request: %w", err)
 	}

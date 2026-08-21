@@ -13,3 +13,8 @@ import (
 func askBroker(string, string) (credproto.Response, error) {
 	return credproto.Response{}, fmt.Errorf("credential broker is only reachable from inside a gantry guest")
 }
+
+// brokerRoundTrip is the raw-request twin of the stub above.
+func brokerRoundTrip([]byte) (credproto.Response, error) {
+	return credproto.Response{}, fmt.Errorf("credential broker is only reachable from inside a gantry guest")
+}

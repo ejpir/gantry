@@ -122,6 +122,9 @@ type Broker struct {
 	resolve Resolver
 	allowed func(host string) bool // egress gate; nil means unrestricted
 	logf    func(format string, a ...any)
+	// oauth routes oauth.* ops to the daemon's custody manager; nil when
+	// custody mode is off (ops then answer with an error, never hang).
+	oauth func(Request) Response
 
 	mu    sync.Mutex
 	slots chan struct{}
@@ -157,9 +160,19 @@ func (b *Broker) Serve(ln net.Listener) error {
 	}
 }
 
+// SetOAuthHandler routes oauth.* protocol ops (custody login) to the
+// daemon's custody manager.
+func (b *Broker) SetOAuthHandler(h func(Request) Response) { b.oauth = h }
+
 // Decide evaluates the gates for one request and returns the response. It
 // is the whole policy of the broker, separated from I/O for tests.
 func (b *Broker) Decide(req Request) Response {
+	if req.Op != "" {
+		if b.oauth == nil {
+			return Response{Error: "oauth custody is not enabled for this sandbox (start with -oauth-custody)"}
+		}
+		return b.oauth(req)
+	}
 	host := strings.ToLower(strings.TrimSpace(req.Host))
 	if err := secret.ValidateBinding(host); err != nil {
 		b.logf("credhelper: rejected malformed host %q", req.Host)

@@ -16,6 +16,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
+	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 )
 
@@ -79,6 +80,19 @@ func (d *daemonRuntime) startControl() error {
 	}
 	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.broker.domainAllowed,
 		func(format string, a ...any) { fmt.Printf("daemon: credhelper: "+format+"\n", a...) })
+	// OAuth custody (opt-in): the daemon completes guest-initiated logins
+	// host-side, holds refresh tokens (0600 disk sync under the sandbox
+	// dir for restart durability), and pushes fresh access tokens into
+	// the guest. Requires the callback bridge to intercept callbacks.
+	if d.cfg.OAuthCustodyEnabled() && d.cfg.OAuthBridgeEnabled() {
+		registry := oauthtokens.New()
+		registry.AttachFile(d.dir)
+		cm := newCustodyManager(d.broker, registry)
+		d.broker.cred.SetOAuthHandler(cm.handleOAuthOp)
+		d.broker.oauth.SetCustodyConsumer(cm.consumeCallback)
+		cm.restoreRestart()
+		fmt.Printf("daemon: oauth custody enabled (refresh tokens held host-side)\n")
+	}
 	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)
 	return nil
