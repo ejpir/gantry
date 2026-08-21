@@ -243,6 +243,11 @@ of expiry and pushes the fresh access token into the guest automatically.
 A process exfiltrating the guest auth file gets an access token that stops
 working at expiry and a refresh token that never works.
 
+Custody state lives in the sandbox state directory. `gantry resume` preserves
+it (the refresh loop picks the session back up); `gantry start` on an existing
+name replaces the sandbox and its custody state with it — log in again after a
+fresh start.
+
 Custody is provider-specific and supports Codex and Claude only; other
 providers use the transparent callback bridge above. If the provider revokes
 the refresh token, Gantry drops the session and the agent fails loudly — log
