@@ -56,12 +56,14 @@ func hasBoundSecrets(names []string) bool {
 	return false
 }
 
-// deliverGuestTools stages and installs gantry-guest when the sandbox has
-// bound secrets. It runs concurrently with readiness publication — never
+// deliverGuestTools stages and installs gantry-guest when the sandbox
+// needs it: bound secrets (credhelper mode) or OAuth custody (oauth
+// login mode). It runs concurrently with readiness publication — never
 // on the boot path — and flips broker.guestToolsReady when the helper is
 // in place; sessions started after that point get the git wiring.
 func (d *daemonRuntime) deliverGuestTools() {
-	if d.broker == nil || !hasBoundSecrets(d.store.Snapshot().SecretNames) {
+	need := hasBoundSecrets(d.store.Snapshot().SecretNames) || d.cfg.OAuthCustodyEnabled()
+	if d.broker == nil || !need {
 		return
 	}
 	progress := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "daemon: "+format+"\n", a...) }
