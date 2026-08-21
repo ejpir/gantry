@@ -76,6 +76,12 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 	if err := r.initialize(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	// Secrets validate before any on-disk artifacts are created (the
+	// per-sandbox writable layer in particular): a bad -secret spec must
+	// fail the start without leaving a fresh 512 MiB rwlayer behind.
+	if err := r.resolveSecrets(); err != nil {
+		return r.cfg, r.warnings, err
+	}
 	if err := r.resolveRuntime(); err != nil {
 		return r.cfg, r.warnings, err
 	}
@@ -335,7 +341,7 @@ func (r *runResolver) resolveNetworking() error {
 	return nil
 }
 
-func (r *runResolver) resolveSessionOptions() error {
+func (r *runResolver) resolveSecrets() error {
 	_, names, err := r.flags.ResolveSecrets()
 	if err != nil {
 		return err
@@ -359,6 +365,10 @@ func (r *runResolver) resolveSessionOptions() error {
 			r.cfg.GuestTools = path
 		}
 	}
+	return nil
+}
+
+func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.ProcessIsolation = *r.flags.ProcessIsolation
 	if err := config.ValidateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
 		return fmt.Errorf("-process-isolation must be auto, required, or off, got %q", r.cfg.ProcessIsolation)

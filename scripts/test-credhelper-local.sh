@@ -50,7 +50,10 @@ GOOS=linux CGO_ENABLED=0 go build -ldflags "-s -w" \
 # Dev builds resolve guest assets via GANTRY_ARTIFACTS/artifacts/ lookup;
 # building into artifacts/ above is the staging step.
 
-export GANTRY_HOME=$(mktemp -d "${TMPDIR:-/tmp}/gantry-chtest.XXXXXX")
+TD=$(mktemp -d "${TMPDIR:-/tmp}/gantry-chtest.XXXXXX")
+# GANTRY_HOME is the sandboxes root itself; nesting it keeps the rwlayer
+# dir (its sibling) inside the temp tree.
+export GANTRY_HOME="$TD/sandboxes"
 SANDBOXES="$GANTRY_HOME"
 G="$BIN"
 PASS=0; FAIL=0
@@ -68,7 +71,7 @@ if ! command -v timeout >/dev/null 2>&1; then xe() { printf '%s\nexit\n' "$2" | 
 cleanup() {
 	"$BIN" stop ch1 >/dev/null 2>&1; "$BIN" stop ch2 >/dev/null 2>&1
 	"$BIN" delete ch1 >/dev/null 2>&1; "$BIN" delete ch2 >/dev/null 2>&1
-	rm -rf "$GANTRY_HOME"
+	rm -rf "$TD"
 }
 trap 'cleanup; rm -f -- "$BIN"' EXIT HUP INT TERM
 
@@ -147,6 +150,13 @@ if [ $? -ne 0 ]; then echo "start ch2 FAILED"; bad "egress: ch2 starts"; else
 sleep 3
 R=$(xe ch2 "$QB"); empty_cred "broker: egress policy denies out-of-allowlist host" "$R"
 fi
+
+echo "===== resolver ordering ====="
+# A refused -secret spec must fail BEFORE any on-disk artifacts exist:
+# no fresh 512 MiB rwlayer left behind.
+R=$("$BIN" start chbad -secret TOKEN=literal-value -image "$IMAGE" 2>&1)
+chk "resolver: literal secret refused" "refusing" "$R"
+[ ! -e "$TD/rwlayers/chbad.ext4" ] && ok "resolver: bad spec leaves no rwlayer" || bad "resolver: bad spec leaves no rwlayer"
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"

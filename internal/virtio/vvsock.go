@@ -112,11 +112,15 @@ type Vsock struct {
 	conns         map[uint64]*vsockConn
 	pending       pendingRing[vsockPkt] // bounded outbound FIFO (control + data)
 	pendingCredit map[uint64]int        // connection key -> coalescible CREDIT_UPDATE slot
-	listeners     []net.Listener        // AddListen sockets (closed at VM teardown)
-	core          *Core
-	verboseLog    bool
-	nextHostPort  uint32
-	frameStorage  []byte
+	// spaceSig is closed and replaced when popPending drops the FIFO below
+	// the data threshold, waking pumpHost goroutines parked on a full
+	// queue (broadcast-channel pattern; always touched under core.mu).
+	spaceSig     chan struct{}
+	listeners    []net.Listener // AddListen sockets (closed at VM teardown)
+	core         *Core
+	verboseLog   bool
+	nextHostPort uint32
+	frameStorage []byte
 	// rxMissStreak counts consecutive consumed rx descriptors that could
 	// not carry the current pending head packet; bounded by rxMiss.
 	rxMissStreak int
@@ -133,6 +137,7 @@ func NewVsock(guestCID uint64, forwardDir string) *Vsock {
 		forwardDir:    forwardDir,
 		conns:         map[uint64]*vsockConn{},
 		pendingCredit: map[uint64]int{},
+		spaceSig:      make(chan struct{}),
 		nextHostPort:  0x100000,
 		verboseLog:    os.Getenv("GANTRY_DEBUG_VSOCK") != "",
 		dial: func(port uint32) (net.Conn, error) {
@@ -531,6 +536,11 @@ func (v *Vsock) popPending() {
 		}
 	}
 	v.pending.Pop()
+	if v.spaceSig != nil && v.pending.Len() < vsockMaxPending-vsockControlReserve {
+		// A data slot is free: wake any pumpHost parked on the full queue.
+		close(v.spaceSig)
+		v.spaceSig = make(chan struct{})
+	}
 }
 
 func (v *Vsock) rxCntFor(trigger vsockHdr) uint32 {
@@ -600,7 +610,15 @@ const vsockMaxRxPayload = 2048
 
 // pumpHost reads from the host unix socket and forwards to the guest.
 // Reads are capped at vsockMaxRxPayload so each Read yields one RW packet
-// whose frame fits a guest rx buffer (see the constant).
+// whose frame fits a guest rx buffer (see the constant). When the outbound
+// FIFO has no data slot, pumpHost PARKS until tryFlush frees one or the
+// connection is torn down: blocking pushes back on the host producer with
+// bounded memory (this goroutine's single read buffer), so a slow guest
+// stalls a healthy stream instead of getting it RST-dropped mid-transfer
+// — silent truncation via RST was observed corrupting multi-megabyte
+// session-stdin transfers. tryFlush still bounds the queue itself, so a
+// non-draining guest costs one parked goroutine per connection, never
+// unbounded buffers.
 func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 	buf := make([]byte, vsockMaxRxPayload)
 	for {
@@ -608,13 +626,22 @@ func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
 		if n > 0 {
 			v.logf("host->guest %d bytes", n)
 			v.core.mu.Lock()
-			if v.pending.Len() >= vsockMaxPending-vsockControlReserve {
-				// queue full: drop the connection with RST rather than
-				// buffer without bound for a non-draining guest. Check the
-				// bound before copying so this drop path does not allocate.
-				v.logf("pumpHost: %d pending -> RST", v.pending.Len())
-				v.closeConn(c, vsockHdr{op: vsockOpRW, srcPort: srcPort, dstPort: dstPort}, true)
-				v.tryFlush()
+			for !c.closed && v.pending.Len() >= vsockMaxPending-vsockControlReserve {
+				// No data slot: park until popPending broadcasts freed
+				// capacity or closeConn tears the connection down.
+				if v.spaceSig == nil { // tests construct Vsock literals
+					v.spaceSig = make(chan struct{})
+				}
+				sig := v.spaceSig
+				v.core.mu.Unlock()
+				select {
+				case <-sig:
+				case <-c.done:
+				}
+				v.core.mu.Lock()
+			}
+			if c.closed {
+				// Torn down while parked; whoever closed it owns the RST.
 				v.core.mu.Unlock()
 				return
 			}

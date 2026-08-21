@@ -121,6 +121,9 @@ VPID=$(cat "$GANTRY_HOME"/t5/vmm.pid 2>/dev/null)
 
 R=$($G start t6 -secret TOKEN=literal-value -image alpine:latest 2>&1)
 chk "secrets: literal refused" "refusing" "$R"
+# Secret specs validate before any on-disk artifacts: the refused start
+# must not leave a fresh per-sandbox rwlayer behind.
+[ ! -e "$RWDIR/t6.ext4" ] && ok "resolver: bad spec leaves no rwlayer" || bad "resolver: bad spec leaves no rwlayer"
 
 echo "===== bound secrets + credential helper (t7/t8: alpine, offline) ====="
 # docs/credential-brokering.md workstream 1: a NAME@host secret is held
