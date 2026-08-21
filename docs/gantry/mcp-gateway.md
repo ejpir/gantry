@@ -87,6 +87,28 @@ Tool descriptions from a remote upstream are trusted content — connect only
 upstreams you trust. Per-tool `allow`/`deny` limits what a misbehaving
 server can offer.
 
+## List servers and tools
+
+Show what a sandbox has configured (auth kinds and secret names, never
+values):
+
+```console
+$ gantry mcp dev
+SERVER  TYPE   DETAIL
+fs      local  read-only filesystem: root /, user nobody, tools read_file,list_directory
+github  remote https://api.githubcopilot.com/mcp/, auth bearer:GITHUB_TOKEN, allow=*
+```
+
+Probe the running gateway for the effective, policy-filtered tool list —
+this exercises upstream logins and policy, so it catches a dead remote or
+an over-wide `deny=` before the agent does:
+
+```console
+$ gantry mcp tools dev
+fs: list_directory, read_file
+github: get_me, list_repos, search_code
+```
+
 ## Inspect activity
 
 Every session, call, policy denial, and upstream error is recorded in the

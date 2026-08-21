@@ -141,7 +141,7 @@ const (
 // protocolVersion is the MCP revision the gateway speaks. The fs server
 // answers the same; remote upstreams get it as the requested version and
 // echo it back via the negotiated MCP-Protocol-Version header.
-const protocolVersion = "2025-06-18"
+const protocolVersion = mcpproto.ProtocolVersion
 
 // initializeParams is the gateway's synthesized upstream handshake: the
 // client's own initialize stays between client and gateway.

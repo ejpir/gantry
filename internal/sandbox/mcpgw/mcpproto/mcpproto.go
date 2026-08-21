@@ -17,4 +17,8 @@ const (
 	// can be large; 1 MiB matches the order of magnitude used by the
 	// reference implementation for its control-plane responses.
 	MaxFrameBytes = 1 << 20
+
+	// ProtocolVersion is the MCP revision the gateway speaks and pins
+	// upstreams to ("MCP-Protocol-Version" header on HTTP upstreams).
+	ProtocolVersion = "2025-06-18"
 )
