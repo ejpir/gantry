@@ -425,6 +425,14 @@ func (r *runResolver) resolveSessionOptions() error {
 	if len(r.cfg.MCPRemotes) > 0 {
 		r.cfg.MCP = true // remotes imply the gateway
 	}
+	// Structural validation happens here (before any boot work) so a bad
+	// spec refuses the start loudly and immediately; the daemon re-parses
+	// for secret/custody resolution against its live stores.
+	for _, spec := range r.cfg.MCPRemotes {
+		if _, err := parseMCPRemote(spec); err != nil {
+			return fmt.Errorf("-mcp-remote %q: %w", spec, err)
+		}
+	}
 	if r.cfg.MCP {
 		if strings.TrimSpace(r.cfg.MCPFSUser) == "" {
 			return fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
