@@ -150,17 +150,18 @@ func lstatRel(rootFD int, rel string) (syscall.Stat_t, syscall.Errno) {
 	return statToSyscall(&st), 0
 }
 
-// openRelXattr pins a regular file or directory beneath rootFD for an
-// extended-attribute operation. Linux and Darwin do not provide the complete
-// l*xattrat family, so pathname xattr calls cannot be made safely relative to
-// a directory descriptor. Opening the target with O_NOFOLLOW and using the
-// descriptor variants gives the operation the same pinned-root confinement as
-// the rest of the loopback backend.
+// openRelMetadata pins a regular file or directory beneath rootFD for a
+// descriptor-based metadata operation. Linux and Darwin do not provide every
+// needed *at variant (including the complete l*xattrat family and, before
+// Linux 6.5, a no-follow chmod). Opening the target with O_NOFOLLOW and using
+// descriptor operations gives them the same pinned-root confinement as the
+// rest of the loopback backend.
 //
-// Symlink and special-file xattrs deliberately fail closed. Opening a device,
-// FIFO, or socket merely to address its attributes could have host-side side
-// effects; following a final symlink could escape the export.
-func openRelXattr(rootFD int, rel string) (int, error) {
+// Symlink and special-file metadata operations deliberately fail closed.
+// Opening a device, FIFO, or socket merely to address its attributes could
+// have host-side side effects; following a final symlink could escape the
+// export.
+func openRelMetadata(rootFD int, rel string) (int, error) {
 	dir, base := relSplitParent(rel)
 	dirfd, err := openRelDir(rootFD, dir)
 	if err != nil {
@@ -199,7 +200,7 @@ func openRelXattr(rootFD int, rel string) (int, error) {
 }
 
 func (n *LoopbackNode) withPinnedXattr(fn func(fd int) error) syscall.Errno {
-	fd, err := openRelXattr(n.RootData.RootFD, n.relPath())
+	fd, err := openRelMetadata(n.RootData.RootFD, n.relPath())
 	if err != nil {
 		return ToErrno(err)
 	}
@@ -428,12 +429,18 @@ func (n *LoopbackNode) setattrAt(ctx context.Context, f FileHandle, in *fuse.Set
 			if base == "" {
 				err = unix.Fchmod(dirfd, m)
 			} else {
-				// The guest may create absolute or escaping symlink targets.
-				// Following the final component here would apply host-credential
-				// chmod outside the pinned export. fchmodat2 on Linux and
-				// fchmodat on Darwin operate atomically with NOFOLLOW; older
-				// kernels that cannot honor the flag fail closed.
-				err = unix.Fchmodat(dirfd, base, m, unix.AT_SYMLINK_NOFOLLOW)
+				// Linux added fchmodat2 (the first safe way to honor
+				// AT_SYMLINK_NOFOLLOW) in 6.5. Open the regular file or directory
+				// with O_NOFOLLOW and chmod its descriptor instead, retaining the
+				// same escape protection on older supported kernels. The verified
+				// descriptor also avoids a path re-resolution between the type
+				// check and the mutation.
+				var targetFD int
+				targetFD, err = openRelMetadata(n.RootData.RootFD, rel)
+				if err == nil {
+					err = unix.Fchmod(targetFD, m)
+					unix.Close(targetFD)
+				}
 			}
 			if err != nil {
 				return ToErrno(err)

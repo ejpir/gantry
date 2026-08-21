@@ -909,6 +909,9 @@ func TestShareHubRetainedNodeMetadataCannotFollowSwappedParent(t *testing.T) {
 		return errno
 	}
 	if errno := setXattr(7, outsideFile, "user.outside", "outside"); errno != 0 {
+		if errno == -int32(syscall.ENOTSUP) {
+			t.Skip("temporary filesystem does not support user extended attributes")
+		}
 		t.Fatalf("seed outside xattr errno %d", errno)
 	}
 
@@ -1111,8 +1114,9 @@ func TestShareHubDefaultDenyOps(t *testing.T) {
 			t.Errorf("removexattr %s errno %d, want EPERM (ENOSYS on Windows)", attr, errno)
 		}
 	}
-	if errno := setxattr(30, "user.gantry", "x"); errno != allowUser {
-		t.Errorf("setxattr user.* errno %d, want allowed (ENOSYS on Windows)", errno)
+	if errno := setxattr(30, "user.gantry", "x"); errno != allowUser &&
+		(runtime.GOOS == "windows" || errno != -int32(syscall.ENOTSUP)) {
+		t.Errorf("setxattr user.* errno %d, want policy-allowed host result", errno)
 	}
 
 	// IOCTL: default-deny even though the host permits mutating ioctls
