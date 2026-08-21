@@ -59,6 +59,8 @@ type broker struct {
 	// guestToolsReady records that gantry-guest was staged into the guest
 	// this boot; secretEnv wires git's credential.helper only when set.
 	guestToolsReady atomic.Bool
+	// audit is the bounded security-event trail served by audit.tail.
+	audit *auditRing
 
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
@@ -153,6 +155,8 @@ func (br *broker) handle(c net.Conn) {
 		br.networkPolicyControl(c, req)
 	case "secret.set", "secret.remove":
 		br.secretControl(c, req)
+	case "audit.tail":
+		_ = json.NewEncoder(c).Encode(&controlproto.AuditResponse{Lines: br.audit.tail()})
 	case "capture.read":
 		br.captureControl(c, req)
 	case "session":

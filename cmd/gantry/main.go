@@ -38,6 +38,7 @@ usage:
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
+  gantry audit <name>               # security-event trail (credentials, secrets, custody)
   gantry tui                        # interactive local sandbox dashboard
   gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
@@ -148,6 +149,20 @@ func runMain(args []string) int {
 		return sandbox.CmdRootfsSpike(argv)
 	case "ls":
 		return sandbox.CmdLs()
+	case "audit":
+		if len(argv) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: gantry audit <name>")
+			return 2
+		}
+		lines, err := controlcmd.AuditTail(argv[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry audit:", err)
+			return 1
+		}
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+		return 0
 	case "tui":
 		return dashboard.Run(dashboardsvc.NewDashboardService())
 	case "stop", "delete":

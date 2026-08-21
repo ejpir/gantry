@@ -11,9 +11,11 @@ import (
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
+	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
 )
@@ -367,7 +369,41 @@ func (r *runResolver) resolveSecrets() error {
 			r.cfg.GuestTools = path
 		}
 	}
+	r.warnBoundSecretsVsPolicy(names, sources)
 	return nil
+}
+
+// warnBoundSecretsVsPolicy surfaces, at sandbox creation time, bound
+// secrets whose domains the egress policy's domain allowlist does not
+// cover: the broker would hold the value but the credhelper refuses every
+// guest request for it (a brokered token never outruns the firewall), an
+// expensive no-op the owner should hear about before boot. With no
+// allowlist the policy does not filter by name at all, so there is
+// nothing to warn about; a policy that fails to parse is reported by
+// network bring-up, not here.
+func (r *runResolver) warnBoundSecretsVsPolicy(names []string, sources []secret.NamedSource) {
+	if r.flags.NetPol == nil || *r.flags.NetPol == "" {
+		return
+	}
+	policy, err := netpol.Load(*r.flags.NetPol)
+	if err != nil {
+		return
+	}
+	warn := func(name, binding string) {
+		if binding != "" && !policy.DomainAllowed(binding) {
+			r.report("WARNING: bound secret %s (@%s) is not covered by the -net-policy domain allowlist; the credential broker will refuse guest requests for it", name, binding)
+		}
+	}
+	for _, name := range names {
+		_, binding, err := secret.SplitBinding(name)
+		if err != nil {
+			continue // malformed specs fail earlier, at secret parse
+		}
+		warn(name, binding)
+	}
+	for _, s := range sources {
+		warn(s.Name, s.Source.Binding)
+	}
 }
 
 func (r *runResolver) resolveSessionOptions() error {

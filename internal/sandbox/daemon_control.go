@@ -61,6 +61,7 @@ func (d *daemonRuntime) startControl() error {
 		sessions:    map[string]chan struct{}{},
 		sessionCtl:  map[string]net.Conn{},
 		shutdown:    d.shutdown,
+		audit:       d.audit,
 	}
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
@@ -78,8 +79,8 @@ func (d *daemonRuntime) startControl() error {
 	if err != nil {
 		return fmt.Errorf("credential broker listener: %w", err)
 	}
-	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.broker.domainAllowed,
-		func(format string, a ...any) { fmt.Printf("daemon: credhelper: "+format+"\n", a...) })
+	// credhelper decision lines self-prefix "credhelper: ".
+	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.broker.domainAllowed, d.broker.auditf)
 	// OAuth custody (opt-in): the daemon completes guest-initiated logins
 	// host-side, holds refresh tokens (0600 disk sync under the sandbox
 	// dir for restart durability), and pushes fresh access tokens into
@@ -87,7 +88,7 @@ func (d *daemonRuntime) startControl() error {
 	if d.cfg.OAuthCustodyEnabled() && d.cfg.OAuthBridgeEnabled() {
 		registry := oauthtokens.New()
 		registry.AttachFile(d.dir)
-		registry.SetLogger(func(f string, a ...any) { fmt.Printf("daemon: "+f+"\n", a...) })
+		registry.SetLogger(func(f string, a ...any) { d.broker.auditf("oauth tokens: "+f, a...) })
 		cm := newCustodyManager(d.broker, registry)
 		d.broker.cred.SetOAuthHandler(cm.handleOAuthOp)
 		d.broker.oauth.SetCustodyConsumer(cm.consumeCallback)

@@ -31,9 +31,13 @@ type daemonRuntime struct {
 
 	cfg         config.RunConfig
 	secretStore *secret.Store
-	store       *config.ConfigStore
-	lock        *os.File
-	console     *os.File
+	// audit is the daemon-wide security-event trail (secret source errors,
+	// credhelper decisions, custody events); the broker serves it over
+	// audit.tail once the control socket is up.
+	audit   *auditRing
+	store   *config.ConfigStore
+	lock    *os.File
+	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
 	consoleLog *boundedlog.Pipe
