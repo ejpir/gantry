@@ -28,6 +28,7 @@ fi
 # stale copy silently lacks new modes (mcp-serve, credhelper, ...).
 GUEST_ARCH=$(uname -m)
 [ "$GUEST_ARCH" = "x86_64" ] && GUEST_ARCH=amd64
+[ "$GUEST_ARCH" = "aarch64" ] && GUEST_ARCH=arm64  # uname name → GOARCH name
 echo "== build guest helper (linux/$GUEST_ARCH)"
 CGO_ENABLED=0 GOOS=linux GOARCH=$GUEST_ARCH go build -trimpath -ldflags='-s -w' \
   -o "$ARTIFACTS/gantry-guest-$GUEST_ARCH" ./cmd/gantry-guest
