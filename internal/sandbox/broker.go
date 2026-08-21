@@ -205,6 +205,16 @@ func (br *broker) secretControl(c net.Conn, req controlproto.Request) {
 	respond(controlproto.SecretResponse{OK: true})
 }
 
+// guestToolsPath prepends the staged helper directory to session PATHs
+// once gantry-guest is installed, so `gantry-guest` and `credhelper` are
+// callable bare.
+func (br *broker) guestToolsPath() []string {
+	if br.guestToolsReady.Load() {
+		return []string{"/run/gantry/bin"}
+	}
+	return nil
+}
+
 // secretEnv renders the ambient injection set: literal values plus
 // ambient (unbound) sources, resolved ONCE at spawn — env vars are a
 // point-in-time snapshot by nature; bound secrets rotate live through the
