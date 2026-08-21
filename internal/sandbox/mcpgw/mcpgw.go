@@ -597,7 +597,14 @@ func (u *stdioUpstream) readLoop(r io.ReadCloser) {
 			Error  *rpcError       `json:"error"`
 		}
 		if err := json.Unmarshal(line, &frame); err != nil {
-			u.auditf("mcp: upstream %s sent a non-JSON-RPC frame; killed", u.name)
+			// Preview the offending frame (capped) so `gantry audit` alone
+			// explains the kill — e.g. a stale guest binary printing its
+			// usage text instead of speaking JSON-RPC.
+			preview := line
+			if len(preview) > 80 {
+				preview = preview[:80]
+			}
+			u.auditf("mcp: upstream %s sent a non-JSON-RPC frame %.80q; killed", u.name, preview)
 			return
 		}
 		if len(frame.ID) == 0 {
