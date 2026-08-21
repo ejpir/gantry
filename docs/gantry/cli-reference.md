@@ -161,6 +161,18 @@ gantry net-policy show NAME
 `set` and `default` apply live to compatible running sandboxes and persist for
 the next boot.
 
+## Security audit trail
+
+```text
+gantry audit NAME
+```
+
+Prints the sandbox daemon's in-memory trail of security-relevant events:
+credential deliveries and withholds, secret-source failures, and OAuth
+custody events (logins, refreshes, push failures). The trail names secrets
+but never quotes values, and holds the most recent 256 events. `daemon.log`
+remains the primary record.
+
 ## Dashboard
 
 Open the dashboard by running `gantry` with no arguments in an interactive

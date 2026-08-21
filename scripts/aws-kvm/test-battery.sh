@@ -192,6 +192,77 @@ rm -f /tmp/t9-token                  # source breaks after a good resolve
 sleep 3
 R=$(xe t9 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
 
+echo "===== OAuth custody (t10: mock provider, refresh token held on host) ====="
+# docs/credential-brokering.md workstream 3: with -oauth-custody the guest
+# helper runs the PKCE flow but the DAEMON exchanges the code and holds
+# the refresh token host-side; the guest auth file carries a short-lived
+# access token plus a sentinel. A mock authorization server on the
+# instance loopback stands in for the real provider.
+cat > /tmp/mock-as.py <<'PYEOF'
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers['Content-Length']))
+        grant = json.loads(body)
+        with open('/tmp/mock-as-grants.log', 'a') as f:
+            f.write(grant.get('grant_type', '?') + '\n')
+        if grant.get('grant_type') == 'refresh_token':
+            tok = {"access_token": "at-mock-REFRESHED", "refresh_token": "rt-mock-1", "expires_in": 3600}
+        else:
+            # 1s lifetime: with the 5-minute refresh leeway the set is due
+            # the moment it lands, exercising the push loop right away.
+            tok = {"access_token": "at-mock-1", "refresh_token": "rt-mock-1", "expires_in": 1}
+        out = json.dumps(tok).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(out)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", 18999), H).serve_forever()
+PYEOF
+rm -f /tmp/mock-as-grants.log
+python3 /tmp/mock-as.py &
+MOCKPID=$!
+sleep 1
+export GANTRY_OAUTH_TOKEN_URL_CLAUDE=http://127.0.0.1:18999/token
+$G start t10 -oauth-custody -image alpine:latest >/dev/null 2>&1
+sleep 4
+# The login blocks until the callback lands: run it in the background,
+# scrape the authorize URL for its dynamic port + state, and play the
+# browser redirect with curl.
+( printf '/run/gantry/bin/gantry-guest oauth login claude\nexit\n' | timeout 60 $G exec t10 > /tmp/t10-login.log 2>&1 ) &
+sleep 4
+URL=$(grep -oa 'https://claude.ai/oauth/authorize[^ ]*' /tmp/t10-login.log | head -1)
+CPORT=$(printf '%s' "$URL" | sed -n 's/.*127\.0\.0\.1%3A\([0-9]*\)%2Fcallback.*/\1/p')
+CSTATE=$(printf '%s' "$URL" | sed -n 's/.*[?&]state=\([A-Za-z0-9_-]*\).*/\1/p')
+curl -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
+sleep 2
+R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "Login complete" "$R"
+R=$(cat /tmp/t10-login.log);                chk "custody: login completed in guest"            "tokens held on host" "$R"
+R=$(xe t10 'cat /root/.claude/.credentials.json')
+                                            chk "custody: guest holds an access token"        "at-mock-" "$R"
+                                            chk "custody: guest refresh token is a sentinel"  "gantry-custody-refresh-held-on-host" "$R"
+R=$(cat "$GANTRY_HOME/t10/oauth-tokens.json")
+                                            chk "custody: refresh token held host-side"       "rt-mock-1" "$R"
+M=$(stat -c %a "$GANTRY_HOME/t10/oauth-tokens.json")
+                                            chk "custody: host token file is 0600"            "^600$" "$M"
+sleep 3
+R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
+                                            chk "custody: refresh loop pushed a fresh token"  "access token refreshed and pushed" "$R"
+R=$(xe t10 'cat /root/.claude/.credentials.json')
+                                            chk "custody: refreshed token reached the guest"  "at-mock-REFRESHED" "$R"
+# Restart durability: the 0600 disk sync lets a resumed daemon re-attach
+# the session and its refresh loop.
+$G stop t10 >/dev/null 2>&1
+$G resume t10 >/dev/null 2>&1
+sleep 5
+R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
+                                            chk "custody: session restored after restart"     "session restored from disk" "$R"
+R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github')
+                                            chk "custody: unknown provider refused"           "unknown custody provider" "$R"
+kill $MOCKPID 2>/dev/null
+
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

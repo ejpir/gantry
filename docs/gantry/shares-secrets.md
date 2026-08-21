@@ -166,10 +166,14 @@ from memory. Wildcard bindings (`@*.githubusercontent.com`) cover subdomains.
 
 The daemon answers only for the bound host, and only when the sandbox's
 network policy allows egress to that host. Every delivery, refusal, and source
-failure is logged by name in `daemon.log` — values are structurally
-unloggable. Removing the secret on a running sandbox (the dashboard's secret
-controls) takes effect on the next git operation, with nothing to scrub
-guest-side.
+failure is logged by name in `daemon.log` and readable from a running sandbox
+with `gantry audit NAME` — values are structurally unloggable. Removing the
+secret on a running sandbox (the dashboard's secret controls) takes effect on
+the next git operation, with nothing to scrub guest-side.
+
+At start time gantry warns when a bound secret's `@host` is not covered by the
+`-net-policy` domain allowlist — the broker would hold the value but refuse
+every guest request for it, an expensive no-op best caught before boot.
 
 Bound secrets combine with refreshable sources —
 `-secret GITHUB_TOKEN@github.com=@/secure/token,ttl=60s` — so a rotated token
