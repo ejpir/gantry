@@ -144,11 +144,21 @@ func TestStoreFailClosed(t *testing.T) {
 }
 
 func TestStoreExecSource(t *testing.T) {
+	const helperEnv = "GANTRY_SECRET_EXEC_TEST_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		fmt.Print("hello-exec")
+		os.Exit(0)
+	}
+
 	st := NewStore(os.LookupEnv, nil)
-	name, src, err := ParseSource("TOK=!printf hello-exec")
+	name, src, err := ParseSource("TOK=!placeholder")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Use the test executable as the source command so this exercises the
+	// argv-based exec path without assuming Unix printf or a Windows shell.
+	src.Argv = []string{os.Args[0], "-test.run=^TestStoreExecSource$"}
+	t.Setenv(helperEnv, "1")
 	st.Put(name, src)
 	v, err := st.Resolve("TOK")
 	if err != nil || v.Raw() != "hello-exec" {
