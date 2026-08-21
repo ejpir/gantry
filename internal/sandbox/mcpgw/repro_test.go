@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRealGuestFS(t *testing.T) {
@@ -67,5 +66,4 @@ func TestRealGuestFS(t *testing.T) {
 	if strings.Contains(text, "root:") {
 		t.Fatalf("escape leaked /etc/passwd: %q", text)
 	}
-	_ = time.Now
 }
