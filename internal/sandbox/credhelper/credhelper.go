@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
@@ -126,7 +125,6 @@ type Broker struct {
 	// custody mode is off (ops then answer with an error, never hang).
 	oauth func(Request) Response
 
-	mu    sync.Mutex
 	slots chan struct{}
 }
 

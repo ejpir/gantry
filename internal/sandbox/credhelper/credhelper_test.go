@@ -94,7 +94,7 @@ func TestServeRoundTrip(t *testing.T) {
 	b := New(NewResolver(map[string]secret.Value{"GH": "wire-tok"}, map[string]string{"GH": "github.com"}), nil, nil)
 	done := make(chan error, 1)
 	go func() { done <- b.Serve(ln) }()
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	ask := func(host string) Response {
 		t.Helper()
@@ -102,7 +102,7 @@ func TestServeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		if _, err := c.Write([]byte(`{"host":"` + host + `"}` + "\n")); err != nil {
 			t.Fatal(err)
 		}
