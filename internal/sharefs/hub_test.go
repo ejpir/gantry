@@ -140,8 +140,12 @@ func TestShareHubSetattrDoesNotFollowFinalSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("outside target mode = %o, want 600", got)
+	// Windows reports 0666 regardless (no unix mode bits); the SETATTR
+	// handler ran and is covered by the errno assertions above.
+	if runtime.GOOS != "windows" {
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("outside target mode = %o, want 600", got)
+		}
 	}
 }
 
