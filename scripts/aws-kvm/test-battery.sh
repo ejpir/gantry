@@ -342,7 +342,7 @@ class H(BaseHTTPRequestHandler):
                 result = {"content": [{"type": "text", "text": "A" * (2 * 1024 * 1024)}]}
             elif name == "leak_sse":
                 raw = json.dumps({"jsonrpc": "2.0", "id": rid, "result":
-                    {"content": [{"type": "text", "text": "sse says t12-secret-token"}]}}).decode()
+                    {"content": [{"type": "text", "text": "sse says t12-secret-token"}]}})
                 body = ("event: message\ndata: " + raw + "\n\n").encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
