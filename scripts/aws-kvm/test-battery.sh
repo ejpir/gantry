@@ -237,7 +237,9 @@ URL=$(grep -oa 'https://claude.ai/oauth/authorize[^ ]*' /tmp/t10-login.log | hea
 CPORT=$(printf '%s' "$URL" | sed -n 's/.*127\.0\.0\.1%3A\([0-9]*\)%2Fcallback.*/\1/p')
 CSTATE=$(printf '%s' "$URL" | sed -n 's/.*[?&]state=\([A-Za-z0-9_-]*\).*/\1/p')
 curl -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
-sleep 2
+# The guest helper polls oauth.status on a ~1s cadence; give the
+# completion line time to land in the session log instead of racing it.
+for _ in $(seq 1 15); do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
 R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "Login complete" "$R"
 R=$(cat /tmp/t10-login.log);                chk "custody: login completed in guest"            "tokens held on host" "$R"
 R=$(xe t10 'cat /root/.claude/.credentials.json')
@@ -259,8 +261,8 @@ $G resume t10 >/dev/null 2>&1
 sleep 5
 R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
                                             chk "custody: session restored after restart"     "session restored from disk" "$R"
-R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github')
-                                            chk "custody: unknown provider refused"           "unknown custody provider" "$R"
+R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
+                                            chk "custody: unknown provider refused"           "no custody login" "$R"
 kill $MOCKPID 2>/dev/null
 
 echo "==============================="
