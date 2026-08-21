@@ -886,6 +886,23 @@ func (p *Policy) domainAllowed(name string) bool {
 	return domainMatches(p.AllowDomains, name)
 }
 
+// DomainAllowed reports whether egress to name is permitted by the domain
+// allowlist. With no allowlist configured the policy does not filter by
+// name at all (dnsFilterActive == false), so everything is allowed —
+// matching what the firewall would do with a packet. The credential broker
+// applies this before answering a guest credential request, so a brokered
+// token can never outrun the firewall. The query follows Replace, so a
+// policy swap takes effect without rewiring the broker.
+func (p *Policy) DomainAllowed(name string) bool {
+	if current := p.current(); current != nil && current != p {
+		return current.DomainAllowed(name)
+	}
+	if len(p.AllowDomains) == 0 {
+		return true
+	}
+	return p.domainAllowed(name)
+}
+
 func (p *Policy) dnsDomainAllowed(name string) bool {
 	return domainMatches(p.AllowDomains, name) || domainMatches(p.ResolveDomains, name)
 }

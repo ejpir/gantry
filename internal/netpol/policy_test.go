@@ -665,3 +665,30 @@ func TestInteractiveRulesCoverAnyAndICMPProtocols(t *testing.T) {
 		t.Fatal("port-scoped ICMP rule was accepted")
 	}
 }
+
+func TestDomainAllowedFollowsReplace(t *testing.T) {
+	p := DefaultPolicy()
+	// No allowlist configured: the policy does not filter by name, matching
+	// what the firewall does with a packet.
+	if !p.DomainAllowed("github.com") {
+		t.Fatal("default policy (no allowlist) should allow any name")
+	}
+	next, err := WithDomain(p, "*.github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !next.DomainAllowed("api.github.com") || !next.DomainAllowed("github.com") {
+		t.Fatal("wildcard should cover subdomains and the bare suffix")
+	}
+	if next.DomainAllowed("gitlab.com") {
+		t.Fatal("unrelated domain unexpectedly allowed")
+	}
+	// A policy swap must be visible through the original handle: the broker
+	// wires one Policy at boot and expects live updates.
+	if err := p.Replace(next); err != nil {
+		t.Fatal(err)
+	}
+	if !p.DomainAllowed("api.github.com") {
+		t.Fatal("DomainAllowed did not follow Replace")
+	}
+}
