@@ -123,7 +123,7 @@ func (cm *custodyManager) begin(req credproto.Request) credproto.Response {
 	}
 	cm.mu.Unlock()
 	_ = spec // validated above; used at exchange time via CustodySpecFor
-	fmt.Printf("daemon: custody: oauth.begin for %s (state %.8s…) — awaiting browser callback on host port %d\n",
+	cm.br.auditf("custody: oauth.begin for %s (state %.8s…) — awaiting browser callback on host port %d",
 		req.Provider, req.State, port)
 	return credproto.Response{Message: "custody flow registered; open the authorize URL in your host browser"}
 }
@@ -192,14 +192,14 @@ func (cm *custodyManager) exchange(flow *custodyFlow, code string) {
 		set.Expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 	}
 	if err := cm.registry.Put(set); err != nil {
-		fmt.Printf("daemon: custody: token disk sync failed (restart durability uncertain): %v\n", err)
+		cm.br.auditf("custody: token disk sync failed (restart durability uncertain): %v", err)
 	}
 	if err := cm.pushAuthFile(flow.provider, tok); err != nil {
 		cm.finish(flow, fmt.Errorf("guest auth-file push: %w", err))
 		return
 	}
 	cm.startRefreshLoop(flow.provider)
-	fmt.Printf("daemon: custody: %s login complete — refresh token held on host, access token pushed to guest\n", flow.provider)
+	cm.br.auditf("custody: %s login complete — refresh token held on host, access token pushed to guest", flow.provider)
 	cm.finish(flow, nil)
 }
 
@@ -320,7 +320,7 @@ func (cm *custodyManager) startRefreshLoop(provider string) {
 				// Transient failures retry on a short clock; an invalid
 				// grant (the provider revoked the refresh token) drops the
 				// set so the guest fails loudly and re-login is required.
-				fmt.Printf("daemon: custody: %s refresh failed: %v\n", provider, err)
+				cm.br.auditf("custody: %s refresh failed: %v", provider, err)
 				if strings.Contains(err.Error(), "400") || strings.Contains(err.Error(), "401") {
 					_ = cm.registry.Delete(provider)
 					return
@@ -345,12 +345,12 @@ func (cm *custodyManager) startRefreshLoop(provider string) {
 				next.Expiry = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 			}
 			if err := cm.registry.Put(next); err != nil {
-				fmt.Printf("daemon: custody: %s token disk sync failed: %v\n", provider, err)
+				cm.br.auditf("custody: %s token disk sync failed: %v", provider, err)
 			}
 			if err := cm.pushAuthFile(provider, tok); err != nil {
-				fmt.Printf("daemon: custody: %s auth-file push failed: %v\n", provider, err)
+				cm.br.auditf("custody: %s auth-file push failed: %v", provider, err)
 			} else {
-				fmt.Printf("daemon: custody: %s access token refreshed and pushed\n", provider)
+				cm.br.auditf("custody: %s access token refreshed and pushed", provider)
 			}
 		}
 	}()
@@ -360,7 +360,7 @@ func (cm *custodyManager) startRefreshLoop(provider string) {
 // after a daemon restart.
 func (cm *custodyManager) restoreRestart() {
 	for _, provider := range cm.registry.Providers() {
-		fmt.Printf("daemon: custody: %s session restored from disk; refresh loop resumed\n", provider)
+		cm.br.auditf("custody: %s session restored from disk; refresh loop resumed", provider)
 		cm.startRefreshLoop(provider)
 	}
 }

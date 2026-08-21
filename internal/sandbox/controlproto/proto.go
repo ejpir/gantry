@@ -53,6 +53,14 @@ type SecretResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+// AuditResponse answers audit.tail: the broker's bounded in-memory trail
+// of security-relevant events (credential deliveries/withholds, secret
+// source errors, custody events). Oldest first; at most 256 entries.
+type AuditResponse struct {
+	Lines []string `json:"lines,omitempty"`
+	Error string   `json:"error,omitempty"`
+}
+
 type ShareRequest struct {
 	Spec       string `json:"spec,omitempty"`
 	Tag        string `json:"tag,omitempty"`

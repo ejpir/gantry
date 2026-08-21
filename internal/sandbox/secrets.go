@@ -75,10 +75,8 @@ func secretsHandshakeJSON(secrets map[string]secret.Value, sources []secret.Name
 // handshake: literal values (dotenv entries, dashboard sets) plus source
 // specs the Store re-resolves at use time (rotation without restart).
 // Source failures are logged by name — values are structurally unloggable.
-func newSecretStore(values map[string]secret.Value, sources []secret.NamedSource) *secret.Store {
-	st := secret.NewStore(os.LookupEnv, func(f string, a ...any) {
-		fmt.Printf("daemon: "+f+"\n", a...)
-	})
+func newSecretStore(values map[string]secret.Value, sources []secret.NamedSource, logf func(string, ...any)) *secret.Store {
+	st := secret.NewStore(os.LookupEnv, logf)
 	for name, v := range values {
 		st.PutValue(name, v)
 	}
