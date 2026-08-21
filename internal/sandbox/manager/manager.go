@@ -700,11 +700,13 @@ func loadManagerStart(name string) (config.RunConfig, map[string]secret.Value, e
 	}
 	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
 	for _, secretName := range cfg.SecretNames {
-		name, value, err := secret.Parse(secretName, os.LookupEnv)
+		// Persisted entries may carry a host binding (NAME@host); the
+		// binding itself is re-derived daemon-side from the same names.
+		s, err := secret.ParseSpec(secretName, os.LookupEnv)
 		if err != nil {
 			return config.RunConfig{}, nil, err
 		}
-		secrets[name] = value
+		secrets[s.Name] = s.Value
 	}
 	return cfg, secrets, nil
 }

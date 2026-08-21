@@ -453,8 +453,8 @@ func TestStreamingSessionLimitRejectsPromptly(t *testing.T) {
 	if got := len(br.limits.sessions); got != 1 {
 		t.Fatalf("rejected session changed occupied slots to %d", got)
 	}
-	if _, _, err := br.oauthExec([]string{"true"}, time.Second); err == nil || !strings.Contains(err.Error(), "session limit") {
-		t.Fatalf("OAuth overload error = %v, want shared session-limit rejection", err)
+	if _, _, err := br.internalExec(nil, []string{"true"}, time.Second, 4096, "test"); err == nil || !strings.Contains(err.Error(), "session limit") {
+		t.Fatalf("internal exec overload error = %v, want shared session-limit rejection", err)
 	}
 }
 

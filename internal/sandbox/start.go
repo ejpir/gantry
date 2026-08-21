@@ -131,12 +131,14 @@ func CmdResume(name string) int {
 	}
 	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
 	for _, secretName := range cfg.SecretNames {
-		name, value, err := secret.Parse(secretName, os.LookupEnv)
+		// Persisted entries may carry a host binding (NAME@host); the
+		// binding itself is re-derived daemon-side from the same names.
+		s, err := secret.ParseSpec(secretName, os.LookupEnv)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "gantry resume:", err)
 			return 1
 		}
-		secrets[name] = value
+		secrets[s.Name] = s.Value
 	}
 	return launchSandboxLocked(name, cfg, secrets, false, false, startSandboxDaemon)
 }

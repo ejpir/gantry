@@ -34,7 +34,12 @@ type RunConfig struct {
 	// migrated conservatively at the next restart.
 	KernelPolicy string `json:"kernel_policy,omitempty"`
 	Rootfs       string `json:"rootfs"`
-	Runtime      string `json:"runtime,omitempty"`
+	// GuestTools is the resolved absolute path of the multicall guest
+	// helper binary (gantry-guest-<arch>), recorded when host-bound
+	// secrets require it. Persisted because the daemon runs with cwd "/",
+	// where the development-tree relative asset lookup cannot find it.
+	GuestTools string `json:"guest_tools,omitempty"`
+	Runtime    string `json:"runtime,omitempty"`
 	Image        string `json:"image"`
 	// ImageRef/ImageDigest/ImageCfg record an OCI image resolution
 	// (-image given a reference, OCI layout, or docker save tar instead

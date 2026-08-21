@@ -8,12 +8,14 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/secret"
@@ -45,6 +47,15 @@ type broker struct {
 	capture    packetCaptureBackend
 	secrets    map[string]secret.Value // memory only, VM lifetime — never serialized
 	secretMu   sync.RWMutex
+	// domainAllowed is the egress gate for the credential broker (nil when
+	// the sandbox has no network policy object).
+	domainAllowed func(string) bool
+	// cred serves the guest credential broker on <dir>/1027.sock (nil until
+	// the listener is up).
+	cred *credhelper.Broker
+	// guestToolsReady records that gantry-guest was staged into the guest
+	// this boot; secretEnv wires git's credential.helper only when set.
+	guestToolsReady atomic.Bool
 
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
@@ -200,7 +211,57 @@ func (br *broker) secretEnv() []string {
 	for name, value := range br.secrets {
 		copy[name] = value
 	}
-	return secret.Env(copy)
+	// Bound secrets (NAME@host) are delivered through the credential broker
+	// only — injecting them into every session's environment would defeat
+	// the binding.
+	var bound int
+	if bindings := br.secretBindings(); bindings != nil {
+		for name := range copy {
+			if bindings[name] != "" {
+				delete(copy, name)
+				bound++
+			}
+		}
+	}
+	env := secret.Env(copy)
+	// With a bound secret held and the helper staged, point git at the
+	// broker via ephemeral env config — no guest file is ever written.
+	if bound > 0 && br.guestToolsReady.Load() {
+		env = append(env,
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=credential.helper",
+			"GIT_CONFIG_VALUE_0=/run/gantry/bin/credhelper",
+		)
+	}
+	return env
+}
+
+// secretBindings maps secret name → host binding, derived from the
+// persisted SecretNames (the same names gantry ls shows). Caller holds
+// secretMu. Returns nil when bindings are unavailable (no store or a
+// corrupt persisted entry) — callers then fail closed.
+func (br *broker) secretBindings() map[string]string {
+	if br.store == nil {
+		return nil
+	}
+	bindings, err := secret.BindingsFromNames(br.store.Snapshot().SecretNames)
+	if err != nil {
+		fmt.Printf("daemon: persisted secret names unusable (%v); failing closed\n", err)
+		return nil
+	}
+	return bindings
+}
+
+// resolveCredential implements credhelper.Resolver over the live secret
+// set: binding and value resolve under one lock so they can never race.
+func (br *broker) resolveCredential(host string) (string, secret.Value, credhelper.Resolution) {
+	br.secretMu.RLock()
+	defer br.secretMu.RUnlock()
+	bindings := br.secretBindings()
+	if bindings == nil {
+		return "", "", credhelper.NoBinding
+	}
+	return credhelper.NewResolver(br.secrets, bindings)(host)
 }
 
 func (br *broker) resourceControl(c net.Conn, req controlproto.Request) {

@@ -317,3 +317,22 @@ func TestValidateSandboxResourcesMemCap(t *testing.T) {
 		t.Fatal("vcpus above the cap must be rejected")
 	}
 }
+
+func TestSetSecretNameBindingAware(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{SecretNames: []string{"TOKEN@git.test"}})
+	// Update by clean name: the binding survives (use does not imply rebind).
+	if err := store.SetSecretName("TOKEN", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().SecretNames; len(got) != 1 || got[0] != "TOKEN@git.test" {
+		t.Fatalf("after update: %v", got)
+	}
+	// Removal by clean name drops the bound entry too.
+	if err := store.SetSecretName("TOKEN", false); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().SecretNames; len(got) != 0 {
+		t.Fatalf("after remove: %v", got)
+	}
+}

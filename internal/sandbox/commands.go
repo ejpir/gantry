@@ -11,6 +11,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
 )
@@ -134,7 +135,7 @@ func requestDaemonShutdown(name string) error {
 }
 
 func cleanupSandboxRuntime(dir string) {
-	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", daemonReadySocketName, "ctl.sock", "1025.sock", "listen-1026.sock", "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
+	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", daemonReadySocketName, "ctl.sock", "1025.sock", "listen-1026.sock", credhelper.SockName, "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
 		_ = os.Remove(filepath.Join(dir, f))
 	}
 }

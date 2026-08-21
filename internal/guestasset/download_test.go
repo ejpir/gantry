@@ -297,3 +297,19 @@ func assertDoesNotExist(t *testing.T, path string) {
 func writeString(w http.ResponseWriter, value string) {
 	_, _ = w.Write([]byte(value))
 }
+
+func TestGuestToolsAssetNames(t *testing.T) {
+	for _, arch := range []string{"arm64", "x86_64"} {
+		if !downloadable("gantry-guest-"+arch, guestToolsAsset) {
+			t.Fatalf("gantry-guest-%s not downloadable", arch)
+		}
+	}
+	if downloadable("gantry-guest-riscv64", guestToolsAsset) {
+		t.Fatal("unsupported arch accepted")
+	}
+	// DefaultGuestTools must always name a downloadable asset so a missing
+	// cache can bootstrap from the release.
+	if !downloadable(filepath.Base(DefaultGuestTools()), guestToolsAsset) {
+		t.Fatalf("DefaultGuestTools() = %q not downloadable", DefaultGuestTools())
+	}
+}

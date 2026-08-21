@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
@@ -59,7 +61,25 @@ func (d *daemonRuntime) startControl() error {
 		sessionCtl: map[string]net.Conn{},
 		shutdown:   d.shutdown,
 	}
-	d.broker.oauth = oauthbridge.New(d.broker.oauthExec, d.broker.cfg.OAuthBridgeEnabled())
+	// The OAuth bridge replays callbacks through the generic internal exec,
+	// with its own response limit and op attribution bound here.
+	d.broker.oauth = oauthbridge.New(func(args []string, timeout time.Duration) ([]byte, int, error) {
+		return d.broker.internalExec(strings.NewReader(""), args, timeout,
+			oauthbridge.MaxReplayResponseSize, "oauth callback replay")
+	}, d.broker.cfg.OAuthBridgeEnabled())
+	// Credential broker: guest helpers reach it over vsock (the VMM dials
+	// <dir>/1027.sock when a guest connects to the broker port). The egress
+	// gate follows the live policy object.
+	if d.network != nil && d.network.Policy != nil {
+		d.broker.domainAllowed = d.network.Policy.DomainAllowed
+	}
+	credLn, err := net.Listen("unix", filepath.Join(d.dir, credhelper.SockName))
+	if err != nil {
+		return fmt.Errorf("credential broker listener: %w", err)
+	}
+	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.broker.domainAllowed,
+		func(format string, a ...any) { fmt.Printf("daemon: credhelper: "+format+"\n", a...) })
+	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)
 	return nil
 }
