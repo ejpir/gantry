@@ -56,3 +56,23 @@ func TestConfigJSONIncludesEnvironmentOverrides(t *testing.T) {
 		}
 	}
 }
+
+func TestPrependPath(t *testing.T) {
+	base := []string{"PATH=/usr/bin:/bin", "HOME=/root"}
+	got := prependPath(base, []string{"/run/gantry/bin"})
+	if got[0] != "PATH=/run/gantry/bin:/usr/bin:/bin" {
+		t.Fatalf("prepend = %q", got[0])
+	}
+	if got[1] != "HOME=/root" || len(got) != 2 {
+		t.Fatalf("other entries disturbed: %v", got)
+	}
+	// No PATH in the image: conventional tail so tools never stand alone.
+	got = prependPath([]string{"HOME=/root"}, []string{"/run/gantry/bin"})
+	if got[1] != "PATH=/run/gantry/bin:/usr/local/bin:/usr/bin:/bin" {
+		t.Fatalf("missing-PATH prepend = %q", got[1])
+	}
+	// Empty prepend is a no-op on the same slice contents.
+	if got := prependPath(base, nil); got[0] != "PATH=/usr/bin:/bin" {
+		t.Fatalf("nil prepend changed PATH: %v", got)
+	}
+}

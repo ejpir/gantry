@@ -60,6 +60,10 @@ type SessionOptions struct {
 	// Environment contains non-secret runtime overrides. It is applied to the
 	// long-lived container and each exec, after image variables and Secrets.
 	Environment []string
+	// PathPrepend prepends guest directories to the process PATH (after the
+	// image value, before replacements) — used to expose /run/gantry/bin
+	// when guest tools are installed, without clobbering the image PATH.
+	PathPrepend []string
 }
 
 func (options SessionOptions) workingDir() string {
