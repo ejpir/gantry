@@ -689,7 +689,13 @@ func (m *managerService) resolveCreate(request managerCreateRequest) (config.Run
 	if err != nil {
 		return config.RunConfig{}, nil, warnings, err
 	}
-	secrets, _, err := flags.ResolveSecrets()
+	// Source-backed secrets resolve daemon-side; only literal dotenv-file
+	// values ride the handshake from here. Resolve normally already
+	// populated cfg.SecretSources from the same flags; merge defensively.
+	secrets, sources, _, err := flags.ResolveSecretSources()
+	if len(cfg.SecretSources) == 0 && len(sources) > 0 {
+		cfg.SecretSources = sources
+	}
 	return cfg, secrets, warnings, err
 }
 
@@ -698,10 +704,23 @@ func loadManagerStart(name string) (config.RunConfig, map[string]secret.Value, e
 	if err != nil {
 		return config.RunConfig{}, nil, fmt.Errorf("sandbox %q has no valid saved configuration: %w", name, err)
 	}
-	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
+	// Env secrets re-resolve eagerly (handshake + scrubbed spawn env, as at
+	// start); file/exec secrets ride the persisted sources and re-resolve
+	// daemon-side. Sandboxes saved before source-backed secrets have no
+	// SecretSources: every bare name takes the eager path.
+	covered := map[string]bool{}
+	for _, ns := range cfg.SecretSources {
+		covered[ns.Name] = true
+	}
+	secrets := map[string]secret.Value{}
 	for _, secretName := range cfg.SecretNames {
-		// Persisted entries may carry a host binding (NAME@host); the
-		// binding itself is re-derived daemon-side from the same names.
+		ns, err := secret.ParseNamedSource(secretName)
+		if err != nil {
+			return config.RunConfig{}, nil, err
+		}
+		if covered[ns.Name] {
+			continue
+		}
 		s, err := secret.ParseSpec(secretName, os.LookupEnv)
 		if err != nil {
 			return config.RunConfig{}, nil, err

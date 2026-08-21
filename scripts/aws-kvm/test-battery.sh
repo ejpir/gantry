@@ -175,6 +175,23 @@ BOUND_TOKEN="$BOUNDCANARY" $G start t8 -secret BOUND_TOKEN@git.test -net-policy 
 sleep 3
 R=$(xe t8 "$QB"); empty_cred "broker: egress policy denies out-of-allowlist host" "$R"
 
+echo "===== secret sources with TTL (t9: file rotation, fail-closed) ====="
+# docs/credential-brokering.md workstream 2: a file-backed bound secret
+# resolves at REQUEST time through the daemon's TTL Store — rotating the
+# file is picked up without a sandbox restart, and a broken source fails
+# closed (empty answer, never a stale value).
+echo "file-token-v1" > /tmp/t9-token
+$G start t9 -secret 'FILE_TOKEN@git.test=@/tmp/t9-token,ttl=2s' -image alpine:latest >/dev/null 2>&1
+sleep 4
+QF='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
+R=$(xe t9 "$QF"); chk "source: file value delivered" "password=file-token-v1" "$R"
+echo "file-token-v2" > /tmp/t9-token   # rotate on the host
+sleep 3                              # past the 2s TTL
+R=$(xe t9 "$QF"); chk "source: rotation picked up live" "password=file-token-v2" "$R"
+rm -f /tmp/t9-token                  # source breaks after a good resolve
+sleep 3
+R=$(xe t9 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
+
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

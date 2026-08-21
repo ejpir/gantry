@@ -55,8 +55,18 @@ func ValidateBinding(host string) error {
 	return nil
 }
 
+// HeadOf returns the NAME[@host] head of a persisted secret spec,
+// stripping any source ref (=@path, =!argv) or ,ttl= suffix.
+func HeadOf(spec string) string {
+	if i := strings.IndexAny(spec, "=,"); i >= 0 {
+		return spec[:i]
+	}
+	return spec
+}
+
 // SplitBinding divides a NAME@host pair. A bare NAME yields an empty
 // binding (ambient secret). The binding is everything after the first '@'.
+// Persisted specs with source refs must go through HeadOf first.
 func SplitBinding(s string) (name, binding string, err error) {
 	name, binding, found := strings.Cut(s, "@")
 	if !found {

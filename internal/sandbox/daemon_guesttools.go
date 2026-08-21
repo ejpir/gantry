@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ejpir/gantry/internal/secret"
+
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/shares"
 )
@@ -42,11 +44,12 @@ const (
 	guestToolsTimeout   = 120 * time.Second
 )
 
-// hasBoundSecrets reports whether any persisted secret name carries a host
-// binding ("NAME@host").
+// hasBoundSecrets reports whether any persisted secret spec carries a
+// host binding. Persisted specs may append source refs (=@path, =!argv)
+// and ,ttl= suffixes; only the NAME@host head decides.
 func hasBoundSecrets(names []string) bool {
 	for _, name := range names {
-		if strings.ContainsRune(name, '@') {
+		if _, binding, err := secret.SplitBinding(secret.HeadOf(name)); err == nil && binding != "" {
 			return true
 		}
 	}

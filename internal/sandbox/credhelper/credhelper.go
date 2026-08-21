@@ -63,6 +63,10 @@ const (
 	// NoValue: a binding exists but the value is gone (revoked, or its
 	// source stopped resolving).
 	NoValue
+	// SourceError: a binding exists but the daemon-side source failed to
+	// resolve at request time (file deleted, exec source error). The
+	// broker fails closed: nothing is served, the failure is audited.
+	SourceError
 	// OK: a bound credential with a live value exists.
 	OK
 )
@@ -168,6 +172,9 @@ func (b *Broker) Decide(req Request) Response {
 		return Response{}
 	case NoValue:
 		b.logf("credhelper: withheld %s for %s (no value held)", name, host)
+		return Response{}
+	case SourceError:
+		b.logf("credhelper: withheld %s for %s (source resolution failed)", name, host)
 		return Response{}
 	}
 	if b.allowed != nil && !b.allowed(host) {

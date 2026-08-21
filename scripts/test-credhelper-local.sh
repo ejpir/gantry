@@ -151,6 +151,23 @@ sleep 3
 R=$(xe ch2 "$QB"); empty_cred "broker: egress policy denies out-of-allowlist host" "$R"
 fi
 
+echo "===== secret sources with TTL (ch3) ====="
+# Workstream 2: file-backed bound secret resolves at request time; host
+# rotation is picked up without a restart; a broken source fails closed.
+echo "file-canary-v1" > "$TD/ftok"
+"$BIN" start ch3 -secret "FILE_TOK@git.test=@$TD/ftok,ttl=2s" -image "$IMAGE" >/dev/null 2>&1
+if [ $? -ne 0 ]; then echo "start ch3 FAILED"; bad "source: ch3 starts"; else
+sleep 3
+QF='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
+R=$(xe ch3 "$QF"); chk "source: file value delivered" "password=file-canary-v1" "$R"
+echo "file-canary-v2" > "$TD/ftok"
+sleep 3
+R=$(xe ch3 "$QF"); chk "source: rotation picked up live" "password=file-canary-v2" "$R"
+rm -f "$TD/ftok"
+sleep 3
+R=$(xe ch3 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
+fi
+
 echo "===== resolver ordering ====="
 # A refused -secret spec must fail BEFORE any on-disk artifacts exist:
 # no fresh 512 MiB rwlayer left behind.

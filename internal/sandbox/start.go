@@ -67,17 +67,19 @@ flags:`)
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "gantry start:", w)
 	}
-	secrets, _, err := rf.ResolveSecrets()
+	// -secret specs resolve DAEMON-side at use time (rotation without
+	// restart); the CLI handshake carries only literal -secret-file values.
+	secrets, _, _, err := rf.ResolveSecretSources()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
 	timeline.mark("launcher secrets resolved")
-	if len(secrets) > 0 && cfg.Net && cfg.NetPol == "" {
+	if secretCount := len(secrets) + len(cfg.SecretSources); secretCount > 0 && cfg.Net && cfg.NetPol == "" {
 		fmt.Fprintf(os.Stderr, `gantry start: %d secret(s) injected with the default egress policy (internet
 allowed). Consider -net-policy with a domain allowlist so an injected
 agent cannot send them anywhere.
-`, len(secrets))
+`, secretCount)
 	}
 
 	return launchSandboxModeWithSpawnerTiming(name, cfg, secrets, true, false, startSandboxDaemon, timeline.mark)
@@ -129,10 +131,25 @@ func CmdResume(name string) int {
 		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has a corrupt configuration: %v\n", name, err)
 		return 1
 	}
-	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
+	// Env secrets re-resolve eagerly into the handshake (scrubbedEnv keeps
+	// them out of the daemon's /proc/environ); file/exec secrets ride the
+	// persisted sources and re-resolve daemon-side. Sandboxes saved before
+	// source-backed secrets have no SecretSources: every bare name falls
+	// into the eager path, matching their original delivery.
+	covered := map[string]bool{}
+	for _, ns := range cfg.SecretSources {
+		covered[ns.Name] = true
+	}
+	secrets := map[string]secret.Value{}
 	for _, secretName := range cfg.SecretNames {
-		// Persisted entries may carry a host binding (NAME@host); the
-		// binding itself is re-derived daemon-side from the same names.
+		ns, err := secret.ParseNamedSource(secretName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry resume:", err)
+			return 1
+		}
+		if covered[ns.Name] {
+			continue
+		}
 		s, err := secret.ParseSpec(secretName, os.LookupEnv)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "gantry resume:", err)
@@ -330,7 +347,7 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 		writef(errorOutput, "%s: sandbox %q is already running\n", label, name)
 		return 1
 	}
-	handshake, err := secretsHandshakeJSON(secrets)
+	handshake, err := secretsHandshakeJSON(secrets, cfg.SecretSources)
 	if err != nil {
 		writeLine(errorOutput, label+":", err)
 		return 1
