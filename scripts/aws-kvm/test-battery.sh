@@ -363,7 +363,7 @@ R=$(printf '{ cat /tmp/reqs; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy
 L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: remote tools listed alongside fs"         "mock__echo_auth" "$L2"
                                             chk "mcp: fs server still listed"                 "fs__read_file" "$L2"
 chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$(cat /tmp/mock-mcp-auth.log 2>/dev/null)"
-L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         "auth=Bearer [REDACTED-BY-GANTRY-MCP-GATEWAY]" "$L3"
+L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         "auth=[REDACTED-BY-GANTRY-MCP-GATEWAY]" "$L3"
 L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: response-body secret redacted"         "REDACTED" "$L4"
 if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: no credential in guest transcript"; else ok "mcp: no credential in guest transcript"; fi
 R=$($G audit t12);                          chk "mcp: remote config audited (no values)"     "mcp: remote mock configured" "$R"
