@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -40,7 +41,9 @@ var guestOAuthProviders = map[string]guestOAuthProvider{
 	"claude": {
 		authorizeURL: "https://claude.ai/oauth/authorize",
 		clientID:     "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-		callbackPort: 8485,
+		// Dynamic port, like the real CLI: the bridge's callback allowlist
+		// admits only codex's 1455, pi's 53692, and the IANA dynamic range.
+		callbackPort: 0,
 		scope:        "user:profile user:inference",
 	},
 	"codex": {
@@ -79,6 +82,14 @@ func runOAuth(args []string) {
 	}
 	p.authorizeURL = envOverride("GANTRY_OAUTH_AUTHORIZE_URL_"+upper(provider), p.authorizeURL)
 	p.clientID = envOverride("GANTRY_OAUTH_CLIENT_ID_"+upper(provider), p.clientID)
+	if p.callbackPort == 0 {
+		// Pick a port in the bridge-allowed IANA dynamic range.
+		var rnd [2]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			fatal(err)
+		}
+		p.callbackPort = 49152 + int(binary.LittleEndian.Uint16(rnd[:]))%(65535-49152+1)
+	}
 
 	verifier, err := randURLSafe(32)
 	if err != nil {

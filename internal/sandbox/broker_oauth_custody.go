@@ -62,7 +62,7 @@ type custodyManager struct {
 	pushAuthFile func(provider string, tok oauthbridge.TokenResponse) error
 	// ensurePort defaults to the bridge's callback-port listener; tests
 	// substitute a no-op so no host port is bound.
-	ensurePort func(port int)
+	ensurePort func(port int) bool
 
 	mu       sync.Mutex
 	flows    map[string]*custodyFlow
@@ -108,7 +108,9 @@ func (cm *custodyManager) begin(req credproto.Request) credproto.Response {
 	if err != nil {
 		return credproto.Response{Error: "custody: " + err.Error()}
 	}
-	cm.ensurePort(port)
+	if !cm.ensurePort(port) {
+		return credproto.Response{Error: fmt.Sprintf("custody: callback port %d is not in the bridge's allowlist (codex 1455, pi 53692, or IANA dynamic 49152-65535)", port)}
+	}
 
 	cm.mu.Lock()
 	delete(cm.finished, req.State) // a fresh begin supersedes an old result
