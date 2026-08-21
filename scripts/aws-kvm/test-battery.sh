@@ -13,6 +13,10 @@ PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 chk() { local n="$1" want="$2" got="$3"; if printf '%s' "$got" | grep -qa -- "$want"; then ok "$n"; else bad "$n"; printf '%s\n' "$got" | tail -4; fi; }
+# empty_cred asserts the helper emitted NO credential. `gantry exec`
+# prints its own client-noise lines, so the test is "no password=" (never
+# "no output").
+empty_cred() { local n="$1" got="$2"; if printf '%s' "$got" | grep -qa '^password='; then bad "$n"; printf '%s\n' "$got" | tail -3; else ok "$n"; fi; }
 xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 
 echo "== environment =="
@@ -110,6 +114,56 @@ VPID=$(cat /tmp/.gantry/sandboxes/t5/vmm.pid 2>/dev/null)
 
 R=$($G start t6 -secret TOKEN=literal-value -image alpine:latest 2>&1)
 chk "secrets: literal refused" "refusing" "$R"
+
+echo "===== bound secrets + credential helper (t7/t8: alpine, offline) ====="
+# docs/credential-brokering.md workstream 1: a NAME@host secret is held
+# host-side only, delivered per-use through the vsock broker behind three
+# gates (binding → egress → presence), and revocable without a restart.
+BOUNDCANARY="sk-bound-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
+BOUND_TOKEN="$BOUNDCANARY" $G start t7 -secret BOUND_TOKEN@git.test -image alpine:latest >/dev/null 2>&1
+sleep 3   # guest-tools delivery races readiness; give the async push a moment
+
+R=$(xe t7 'printenv BOUND_TOKEN || echo ABSENT'); chk "binding: bound secret NOT ambient" "ABSENT" "$R"
+R=$(xe t7 'printenv GIT_CONFIG_VALUE_0');         chk "binding: git wired via env config" "/run/gantry/bin/credhelper" "$R"
+R=$(xe t7 'test -x /run/gantry/bin/gantry-guest && test -L /run/gantry/bin/credhelper && echo HELPER-OK')
+                                                  chk "binding: helper staged in guest" "HELPER-OK" "$R"
+
+QB='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
+QN='printf "protocol=https\nhost=evil.test\n\n" | /run/gantry/bin/credhelper get'
+R=$(xe t7 "$QB"); chk "broker: delivers bound credential" "password=$BOUNDCANARY" "$R"
+                  chk "broker: git username convention" "username=x-access-token" "$R"
+R=$(xe t7 "$QN"); empty_cred "broker: unbound host answers empty" "$R"
+
+grep -q "BOUND_TOKEN@git.test" /tmp/.gantry/sandboxes/t7/sandbox.json 2>/dev/null \
+  && ok "binding: name+binding persisted" || bad "binding: name+binding persisted"
+grep -q "$BOUNDCANARY" /tmp/.gantry/sandboxes/t7/sandbox.json 2>/dev/null \
+  && bad "binding: value NOT in sandbox.json" || ok "binding: value NOT in sandbox.json"
+
+# Mid-session revocation through the control socket (the dashboard op):
+# the helper must immediately answer empty — no restart, nothing to scrub
+# guest-side, because nothing was ever stored guest-side.
+R=$(python3 - <<'PYEOF'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect("/tmp/.gantry/sandboxes/t7/ctl.sock")
+s.sendall(b'{"op":"secret.remove","id":"rvk","secret":{"name":"BOUND_TOKEN"}}\n')
+sys.stdout.write(s.makefile().readline())
+PYEOF
+)
+chk "revocation: control op accepted" '"ok":true' "$R"
+R=$(xe t7 "$QB"); empty_cred "revocation: broker answers empty after remove" "$R"
+grep -q "BOUND_TOKEN" /tmp/.gantry/sandboxes/t7/sandbox.json 2>/dev/null \
+  && bad "revocation: name dropped from sandbox.json" || ok "revocation: name dropped from sandbox.json"
+
+# Gate 2 (egress): the same binding under a policy whose allowlist
+# excludes the host must be denied by the broker even though the value is
+# held — a brokered token can never outrun the firewall.
+cat > /tmp/netpol-t8.json <<'EOF'
+{"default":"deny","allowLocal":true,"allowDomains":["example.com"]}
+EOF
+BOUND_TOKEN="$BOUNDCANARY" $G start t8 -secret BOUND_TOKEN@git.test -net-policy /tmp/netpol-t8.json -image alpine:latest >/dev/null 2>&1
+sleep 3
+R=$(xe t8 "$QB"); empty_cred "broker: egress policy denies out-of-allowlist host" "$R"
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"
