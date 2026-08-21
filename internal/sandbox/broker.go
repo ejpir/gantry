@@ -19,6 +19,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
+	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 
@@ -66,8 +67,11 @@ type broker struct {
 	sessions   map[string]chan struct{}
 	sessionCtl map[string]net.Conn // parked control channels, session id -> conn
 	oauth      *oauthbridge.Bridge // OAuth loopback callback bridge (nil when disabled)
-	limits     brokerLimits
-	shutdown   chan<- struct{} // authenticated daemon shutdown request
+	// custodyRegistry holds the custody token sets (nil unless
+	// -oauth-custody); MCP remotes with auth=custody: read it per session.
+	custodyRegistry *oauthtokens.Registry
+	limits          brokerLimits
+	shutdown        chan<- struct{} // authenticated daemon shutdown request
 }
 
 func (br *broker) serve(ln net.Listener) {

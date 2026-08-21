@@ -421,6 +421,10 @@ func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.MCP = *r.flags.MCP
 	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
 	r.cfg.MCPFSUser = *r.flags.MCPFSUser
+	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
+	if len(r.cfg.MCPRemotes) > 0 {
+		r.cfg.MCP = true // remotes imply the gateway
+	}
 	if r.cfg.MCP {
 		if strings.TrimSpace(r.cfg.MCPFSUser) == "" {
 			return fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")

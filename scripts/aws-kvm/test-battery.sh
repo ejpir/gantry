@@ -29,7 +29,7 @@ xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 echo "== environment =="
 uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
 
-for s in t1 t2 t3 t4 t10 t11; do $G stop "$s" >/dev/null 2>&1; done
+for s in t1 t2 t3 t4 t10 t11 t12; do $G stop "$s" >/dev/null 2>&1; done
 rm -rf "$GANTRY_HOME"/t* "$GANTRY_IMAGES" "$RWDIR"
 # rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
 
@@ -295,6 +295,84 @@ L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: unlisted tool denied"     
 L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: authorize tool denied"                "unknown or disallowed" "$L6"
 R=$($G audit t11);                          chk "mcp: calls audited host-side"              "mcp: call fs__read_file" "$R"
                                             chk "mcp: denies audited"                      "mcp: denied call fs__write_file" "$R"
+
+echo "===== MCP remote upstreams (t12: injection, redaction, SSRF) ====="
+# Milestone 2: remote streamable-HTTP upstreams with host-side credential
+# injection. The mock remote runs on the INSTANCE loopback — upstream
+# traffic exits from the host gateway process, never the guest netns.
+cat > /tmp/mock-mcp.py <<'PYEOF'
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+LOG = "/tmp/mock-mcp-auth.log"
+TOOLS = [
+    {"name": "echo_auth", "description": "echoes Authorization", "inputSchema": {"type": "object"}},
+    {"name": "leak", "description": "returns a token-shaped string", "inputSchema": {"type": "object"}},
+]
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        req = json.loads(self.rfile.read(n) or b"{}")
+        with open(LOG, "a") as f:
+            f.write((self.headers.get("Authorization") or "<none>") + "\n")
+        if "id" not in req:
+            self.send_response(202); self.end_headers(); return
+        rid, m = req["id"], req.get("method")
+        if m == "initialize":
+            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "mock-mcp", "version": "0"}}
+        elif m == "tools/list":
+            result = {"tools": TOOLS}
+        elif m == "tools/call":
+            name = req.get("params", {}).get("name")
+            if name == "echo_auth":
+                result = {"content": [{"type": "text", "text": "auth=" + (self.headers.get("Authorization") or "<none>")}]}
+            elif name == "leak":
+                result = {"content": [{"type": "text", "text": "the token is t12-secret-token"}]}
+            else:
+                result = {"content": [{"type": "text", "text": "unknown"}], "isError": True}
+        else:
+            result = {}
+        raw = json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+HTTPServer(("127.0.0.1", 18998), H).serve_forever()
+PYEOF
+pkill -f mock-mcp.py 2>/dev/null; sleep 1
+rm -f /tmp/mock-mcp-auth.log
+python3 /tmp/mock-mcp.py &
+MOCKMCP=$!
+sleep 1
+$G start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN=t12-secret-token \
+  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*' >/dev/null 2>&1
+sleep 4
+xe t12 'mkdir -p /work && chmod 755 /work' >/dev/null 2>&1  # creates container "sb" the fs server spawns into
+cat > /tmp/t12-reqs.ndjson <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"battery","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mock__echo_auth","arguments":{}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mock__leak","arguments":{}}}
+EOF
+{ echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t12 >/dev/null 2>&1
+R=$(printf '{ cat /tmp/reqs; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t12 2>&1)
+L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: remote tools listed alongside fs"         "mock__echo_auth" "$L2"
+                                            chk "mcp: fs server still listed"                 "fs__read_file" "$L2"
+chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$(cat /tmp/mock-mcp-auth.log 2>/dev/null)"
+L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         "auth=Bearer [REDACTED-BY-GANTRY-MCP-GATEWAY]" "$L3"
+L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: response-body secret redacted"         "REDACTED" "$L4"
+if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: no credential in guest transcript"; else ok "mcp: no credential in guest transcript"; fi
+R=$($G audit t12);                          chk "mcp: remote config audited (no values)"     "mcp: remote mock configured" "$R"
+                                            chk "mcp: remote calls audited"                 "mcp: call mock__echo_auth" "$R"
+# Loud refusals at start time (fail closed, never silent degrade):
+OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' 2>&1)
+chk "mcp: cloud metadata target refused" "non-public" "$OUT"
+OUT=$($G start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' 2>&1)
+chk "mcp: plain HTTP to a public host refused" "plain HTTP" "$OUT"
+kill $MOCKMCP 2>/dev/null
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"

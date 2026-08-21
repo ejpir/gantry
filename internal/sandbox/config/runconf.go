@@ -83,8 +83,13 @@ type RunConfig struct {
 	MCP       bool   `json:"mcp,omitempty"`
 	MCPFSRoot string `json:"mcp_fs_root,omitempty"`
 	MCPFSUser string `json:"mcp_fs_user,omitempty"`
-	MemMB     uint   `json:"memMB"`
-	VCPUs     int    `json:"vcpus,omitempty"`
+	// MCPRemotes are -mcp-remote specs: comma-separated k=v with keys
+	// name, url, auth (bearer:SECRET | header:NAME:SECRET |
+	// custody:PROVIDER), allow/deny (repeated globs), redact (repeated
+	// secret names). Parsed at resolve time into mcpgw.Server entries.
+	MCPRemotes []string `json:"mcp_remotes,omitempty"`
+	MemMB      uint     `json:"memMB"`
+	VCPUs      int      `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1). Source-backed
@@ -127,6 +132,7 @@ type RunFlags struct {
 	OAuthCustody                            *bool
 	MCP                                     *bool
 	MCPFSRoot, MCPFSUser                    *string
+	MCPRemotes                              *gutil.StrList
 	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
@@ -157,6 +163,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		MCP:              fs.Bool("mcp", false, "run the per-sandbox MCP gateway (docs/mcp-gateway.md): agents reach it via gantry-guest mcp-proxy"),
 		MCPFSRoot:        fs.String("mcp-fs-root", "/", "jail directory for the gateway's built-in filesystem server"),
 		MCPFSUser:        fs.String("mcp-fs-user", "nobody", "unprivileged guest user the gateway's local servers run as"),
+		MCPRemotes:       &gutil.StrList{},
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
@@ -171,6 +178,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 	}
 	f.Runtime = fs.String("runtime", runtime, "container runtime in the guest: crun | runsc (gVisor)")
 	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
+	fs.Var(f.MCPRemotes, "mcp-remote", `remote MCP upstream: name=ID,url=https://HOST/PATH[,auth=bearer:SECRET|header:NAME:SECRET|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET] (repeatable)`)
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
 	fs.Var(f.Publish, "publish", "alias for -p")
 	fs.Var(f.Secrets, "secret", `inject a secret: NAME (from gantry's environment),

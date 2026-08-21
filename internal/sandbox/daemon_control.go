@@ -89,6 +89,7 @@ func (d *daemonRuntime) startControl() error {
 		registry := oauthtokens.New()
 		registry.AttachFile(d.dir)
 		registry.SetLogger(func(f string, a ...any) { d.broker.auditf("oauth tokens: "+f, a...) })
+		d.broker.custodyRegistry = registry
 		cm := newCustodyManager(d.broker, registry)
 		d.broker.cred.SetOAuthHandler(cm.handleOAuthOp)
 		d.broker.oauth.SetCustodyConsumer(cm.consumeCallback)
