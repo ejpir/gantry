@@ -209,3 +209,21 @@ Include:
 Do not publish credential files, secret values, writable-layer contents, or
 private project data. Report suspected sandbox-boundary vulnerabilities
 privately using [SECURITY.md](../../SECURITY.md).
+
+## Guest helper changes do not appear in the sandbox
+
+`gantry-guest` (the credential helper and `oauth login` mode) is delivered
+into the guest at every sandbox start from a host-side asset. In a source
+checkout the asset resolves to `artifacts/gantry-guest-arm64` (or
+`-x86_64`) — note there is no `linux` in the file name. Rebuilding to a
+differently named file leaves the sandbox delivering the stale copy:
+
+```console
+$ GOOS=linux GOARCH=arm64 go build -o artifacts/gantry-guest-arm64 ./cmd/gantry-guest
+$ gantry start demo ...   # restarts re-deliver
+```
+
+The delivery verifies the guest copy against the host file's SHA-256, so a
+mismatch is logged loudly in `daemon.log`; compare `sha256sum` of
+`/run/gantry/bin/gantry-guest` in the guest against the host artifact when
+in doubt.
