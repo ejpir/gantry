@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -82,4 +83,32 @@ func dialVsockFile(port uint32, timeout time.Duration) (*os.File, error) {
 // gateway sees a clean session EOF while late responses can still arrive.
 func shutdownWrite(conn *os.File) {
 	_ = unix.Shutdown(int(conn.Fd()), unix.SHUT_WR)
+}
+
+// readLineBounded reads one '\n'-terminated line, refusing more than max
+// bytes. Local to the guest so cmd/gantry-guest needs no controlproto
+// import (which would drag in the control plane's dependency tree). Only
+// the one-shot broker round trip uses it; the pipelined MCP server loop
+// uses readLineBuffered (mcp.go) instead.
+func readLineBounded(r io.Reader, max int) ([]byte, error) {
+	var line []byte
+	buf := make([]byte, 512)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			for i, b := range chunk {
+				if b == '\n' {
+					return append(line, chunk[:i]...), nil
+				}
+			}
+			line = append(line, chunk...)
+			if len(line) > max {
+				return nil, fmt.Errorf("response exceeds %d bytes", max)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 }
