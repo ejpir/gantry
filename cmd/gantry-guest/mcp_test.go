@@ -5,9 +5,21 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// requirePosixFs skips fs-server tests on Windows: mcp-serve filesystem is
+// a linux-guest component and relInRoot deliberately speaks POSIX path
+// semantics ("/" separators, no drive letters) — asserting them under
+// Windows filepath rules would test nothing real.
+func requirePosixFs(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fs server path semantics are POSIX (linux-guest component)")
+	}
+}
 
 // serveFSOnce feeds one JSON-RPC line through the filesystem server and
 // returns the decoded response. The jail root path matches testJail's.
@@ -54,6 +66,7 @@ func toolResultText(t *testing.T, resp map[string]any) (text string, isErr bool)
 }
 
 func TestFSReadFile(t *testing.T) {
+	requirePosixFs(t)
 	jail, _ := testJail(t)
 	resp := serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"notes.txt"}}}`)
 	text, isErr := toolResultText(t, resp)
@@ -72,6 +85,7 @@ func TestFSReadFile(t *testing.T) {
 }
 
 func TestFSSymlinkEscapeDenied(t *testing.T) {
+	requirePosixFs(t)
 	jail, dir := testJail(t)
 	// A symlink inside the jail pointing outside it.
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -94,6 +108,7 @@ func TestFSSymlinkEscapeDenied(t *testing.T) {
 }
 
 func TestFSBinaryAndSizeCap(t *testing.T) {
+	requirePosixFs(t)
 	jail, dir := testJail(t)
 	if err := os.WriteFile(filepath.Join(dir, "bin.dat"), []byte{'A', 0, 'B'}, 0o644); err != nil {
 		t.Fatal(err)
@@ -113,6 +128,7 @@ func TestFSBinaryAndSizeCap(t *testing.T) {
 }
 
 func TestFSListDirAndHandshake(t *testing.T) {
+	requirePosixFs(t)
 	jail, _ := testJail(t)
 	resp := serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_directory","arguments":{"path":"."}}}`)
 	text, isErr := toolResultText(t, resp)
@@ -151,6 +167,7 @@ func jsonStr(s string) string {
 }
 
 func TestRelInRoot(t *testing.T) {
+	requirePosixFs(t)
 	for _, tc := range []struct {
 		in, want string
 	}{
