@@ -23,7 +23,7 @@ func newTestCustody(t *testing.T, tokenSrv *httptest.Server) (*custodyManager, *
 	var mu sync.Mutex
 	var pushes [][]byte
 	cm := newCustodyManager(&broker{}, oauthtokens.New())
-	cm.ensurePort = func(int) {}
+	cm.ensurePort = func(int) bool { return true }
 	cm.pushAuthFile = func(provider string, tok oauthbridge.TokenResponse) error {
 		set, _ := cm.registry.Get(provider)
 		content, err := oauthbridge.RenderGuestAuthFile(provider, tok, set.Expiry)

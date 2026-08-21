@@ -212,11 +212,14 @@ func (b *Bridge) SetCustodyConsumer(consume func(port int, u *url.URL) bool) {
 
 // EnsureCallbackPort opens the host loopback listener for a custody flow
 // before any authorize URL has been sniffed (the guest helper declares
-// its redirect port up front).
-func (b *Bridge) EnsureCallbackPort(port int) {
-	if allowedCallbackPort(port) {
-		b.ensureListener(port)
+// its redirect port up front). It reports whether the port is allowed;
+// the caller must fail the flow loudly rather than strand the browser.
+func (b *Bridge) EnsureCallbackPort(port int) bool {
+	if !allowedCallbackPort(port) {
+		return false
 	}
+	b.ensureListener(port)
+	return true
 }
 
 // scanning for OAuth callback URLs. Safe for terminal byte streams: the
