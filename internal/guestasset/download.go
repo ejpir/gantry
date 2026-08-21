@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
-	"github.com/ejpir/gantry/internal/gutil"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
 
 // Version is the Gantry release tag stamped by release builds. Development
@@ -56,8 +56,21 @@ const (
 )
 
 func ensure(path string, kind assetKind, progress func(string, ...any)) (string, error) {
-	if gutil.FileExists(path) {
+	if root, ok := fallbackAssetRoot(path); ok {
+		if err := localsec.CreateManagerDir(root); err != nil {
+			return "", fmt.Errorf("secure temporary asset cache %s: %w", root, err)
+		}
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if err := localsec.SecureRegularFile(path); err != nil {
+			return "", fmt.Errorf("validate existing %s %s: %w", kind, path, err)
+		}
+		if info.Size() <= 0 || info.Size() > maxAssetSize {
+			return "", fmt.Errorf("validate existing %s %s: size %d is outside 1..%d bytes", kind, path, info.Size(), maxAssetSize)
+		}
 		return path, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect %s %s: %w", kind, path, err)
 	}
 	if !downloadable(filepath.Base(path), kind) {
 		return "", fmt.Errorf("%s %s not found", kind, path)
@@ -65,7 +78,20 @@ func ensure(path string, kind assetKind, progress func(string, ...any)) (string,
 	if err := download(path, progress); err != nil {
 		return "", err
 	}
+	if err := localsec.SecureRegularFile(path); err != nil {
+		return "", fmt.Errorf("secure downloaded %s %s: %w", kind, path, err)
+	}
 	return path, nil
+}
+
+func fallbackAssetRoot(path string) (string, bool) {
+	temp := filepath.Clean(systemTempDir())
+	root := filepath.Join(temp, fallbackAssetDirName())
+	rel, err := filepath.Rel(root, filepath.Clean(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return root, true
 }
 
 func downloadable(name string, kind assetKind) bool {

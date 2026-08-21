@@ -2,6 +2,7 @@ package oauthbridge
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,56 @@ func TestRefreshTokensPostsGrant(t *testing.T) {
 	}
 }
 
+func TestCodexUsesProviderContractAndJWTExpiry(t *testing.T) {
+	idToken := testJWT(t, map[string]any{
+		"exp":                         float64(time.Now().Add(time.Hour).Unix()),
+		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "acct-42"},
+	})
+	accessToken := testJWT(t, map[string]any{"exp": float64(time.Now().Add(30 * time.Minute).Unix())})
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if requests == 1 {
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+				t.Errorf("exchange Content-Type = %q", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Error(err)
+			}
+			if r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("code_verifier") != "verifier" {
+				t.Errorf("exchange form = %v", r.Form)
+			}
+			_ = json.NewEncoder(w).Encode(TokenResponse{AccessToken: accessToken, RefreshToken: "refresh", IDToken: idToken})
+			return
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("refresh Content-Type = %q", got)
+		}
+		var grant map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&grant)
+		if grant["grant_type"] != "refresh_token" {
+			t.Errorf("refresh grant = %v", grant)
+		}
+		// Codex refresh responses may omit id_token; the caller retains the
+		// previous one from custody storage.
+		_ = json.NewEncoder(w).Encode(TokenResponse{AccessToken: accessToken, RefreshToken: "refresh-2"})
+	}))
+	t.Cleanup(srv.Close)
+	spec := custodySpecs["codex"]
+	spec.TokenURL = srv.URL
+	tok, err := ExchangeCode(context.Background(), spec, "code", "verifier", "client", "http://localhost:1455/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccountID != "acct-42" || tok.ExpiryAt(time.Now()).IsZero() {
+		t.Fatalf("normalized codex token = %+v", tok)
+	}
+	if _, err := RefreshTokens(context.Background(), spec, tok.RefreshToken, "client"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestTokenEndpointErrorCarriesStatusNotBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -90,8 +141,12 @@ func TestCustodySpecOverride(t *testing.T) {
 
 func TestRenderGuestAuthFile(t *testing.T) {
 	expiry := time.Unix(1700000000, 0)
-	tok := TokenResponse{AccessToken: "at-x"}
 	for _, provider := range []string{"claude", "codex"} {
+		tok := TokenResponse{AccessToken: "at-x"}
+		if provider == "codex" {
+			tok.IDToken = testJWT(t, map[string]any{"email": "dev@example.com"})
+			tok.AccountID = "acct-1"
+		}
 		raw, err := RenderGuestAuthFile(provider, tok, expiry)
 		if err != nil {
 			t.Fatal(err)
@@ -103,8 +158,27 @@ func TestRenderGuestAuthFile(t *testing.T) {
 		if !strings.Contains(s, SentinelRefresh) {
 			t.Fatalf("%s: sentinel refresh missing from %s", provider, s)
 		}
+		if provider == "codex" {
+			for _, want := range []string{`"auth_mode": "chatgpt"`, `"id_token"`, `"account_id": "acct-1"`, `"last_refresh"`} {
+				if !strings.Contains(s, want) {
+					t.Fatalf("codex auth file missing %s: %s", want, s)
+				}
+			}
+		}
 	}
-	if _, err := RenderGuestAuthFile("unknown", tok, expiry); err == nil {
+	if _, err := RenderGuestAuthFile("codex", TokenResponse{AccessToken: "at"}, expiry); err == nil {
+		t.Fatal("codex rendered without its required id_token")
+	}
+	if _, err := RenderGuestAuthFile("unknown", TokenResponse{}, expiry); err == nil {
 		t.Fatal("unknown provider rendered")
 	}
+}
+
+func testJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }

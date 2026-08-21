@@ -4,19 +4,31 @@
 package guestasset
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/gutil"
 )
 
 var (
-	userCacheDir  = os.UserCacheDir
-	userHomeDir   = os.UserHomeDir
-	systemTempDir = os.TempDir
+	userCacheDir        = os.UserCacheDir
+	userHomeDir         = os.UserHomeDir
+	systemTempDir       = os.TempDir
+	currentUserIdentity = func() string {
+		if current, err := user.Current(); err == nil {
+			return current.Uid + "\x00" + current.Username
+		}
+		// A process-specific fallback sacrifices cache reuse rather than
+		// sharing a predictable directory with another account.
+		return strings.Join([]string{os.Getenv("USER"), os.Getenv("USERNAME"), strconv.Itoa(os.Getpid())}, "\x00")
+	}
 )
 
 var releaseVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$`)
@@ -61,10 +73,15 @@ func releaseAssetPath(name string) string {
 	if home, err := userHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".gantry", "assets", Version, name)
 	}
-	// The OS temp directory is the final user-writable fallback. Never return
-	// to the process cwd for a tagged binary: it may live in Program Files or
-	// another administrator-owned directory on Windows.
-	return filepath.Join(systemTempDir(), "gantry", "assets", Version, name)
+	// The OS temp directory is the final user-writable fallback. Isolate its
+	// otherwise shared namespace by account; ensure() verifies and hardens this
+	// root before trusting any existing artifact beneath it.
+	return filepath.Join(systemTempDir(), fallbackAssetDirName(), "assets", Version, name)
+}
+
+func fallbackAssetDirName() string {
+	sum := sha256.Sum256([]byte(currentUserIdentity()))
+	return "gantry-" + hex.EncodeToString(sum[:6])
 }
 
 // DefaultKernel always selects Gantry's owned kernel. A stock nerdbox kernel

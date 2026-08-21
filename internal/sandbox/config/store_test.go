@@ -12,6 +12,7 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/secret"
 )
 
 // newTestConfigStore writes sandbox.json for cfg and opens its store — the
@@ -106,11 +107,17 @@ func TestConfigStoreKeepsPostCommitState(t *testing.T) {
 func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	dir := t.TempDir()
 	enabled := true
+	custody := true
 	store := newTestConfigStore(t, dir, RunConfig{
 		Shares:      []string{"code=/tmp/code"},
 		Ports:       []string{"127.0.0.1:8080:80"},
 		SecretNames: []string{"TOKEN"},
-		OAuthBridge: &enabled,
+		MCPRemotes:  []string{"name=api,url=https://example.com,allow=*"},
+		SecretSources: []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceExec, Argv: []string{"helper", "arg"}},
+		}},
+		OAuthBridge:  &enabled,
+		OAuthCustody: &custody,
 		ImageCfg: &image.Config{
 			Env:        []string{"A=1"},
 			Entrypoint: []string{"/bin/app"},
@@ -123,7 +130,11 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	snapshot.Shares[0] = "changed"
 	snapshot.Ports[0] = "changed"
 	snapshot.SecretNames[0] = "changed"
+	snapshot.MCPRemotes[0] = "changed"
+	snapshot.SecretSources[0].Name = "changed"
+	snapshot.SecretSources[0].Source.Argv[0] = "changed"
 	*snapshot.OAuthBridge = false
+	*snapshot.OAuthCustody = false
 	snapshot.ImageCfg.Env[0] = "changed"
 	snapshot.ImageCfg.Entrypoint[0] = "changed"
 	snapshot.ImageCfg.Cmd[0] = "changed"
@@ -133,8 +144,11 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	if got.Shares[0] != "code=/tmp/code" || got.Ports[0] != "127.0.0.1:8080:80" || got.SecretNames[0] != "TOKEN" {
 		t.Fatalf("snapshot mutated store slices: %+v", got)
 	}
-	if !*got.OAuthBridge || got.ImageCfg.Env[0] != "A=1" || got.ImageCfg.Entrypoint[0] != "/bin/app" || got.ImageCfg.Cmd[0] != "serve" {
+	if !*got.OAuthBridge || !*got.OAuthCustody || got.ImageCfg.Env[0] != "A=1" || got.ImageCfg.Entrypoint[0] != "/bin/app" || got.ImageCfg.Cmd[0] != "serve" {
 		t.Fatalf("snapshot mutated nested config: %+v", got)
+	}
+	if got.MCPRemotes[0] == "changed" || got.SecretSources[0].Name == "changed" || got.SecretSources[0].Source.Argv[0] == "changed" {
+		t.Fatalf("snapshot mutated MCP/secret source fields: %+v", got)
 	}
 	if got.LayerSet.Layers[0] != "layer" {
 		t.Fatalf("snapshot mutated layer set: %+v", got.LayerSet)

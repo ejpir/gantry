@@ -234,7 +234,23 @@ func fsReply(id json.RawMessage, result any, rerr *rpcErr) []byte {
 	if err != nil {
 		return nil
 	}
-	return raw
+	if len(raw) <= mcpproto.MaxFrameBytes {
+		return raw
+	}
+	// JSON escaping can expand an otherwise capped text file (for example,
+	// control bytes become six-byte \u00XX sequences). Return a bounded error
+	// instead of emitting an oversized frame that makes the gateway kill this
+	// upstream session.
+	resp = map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error":   map[string]any{"code": -32603, "message": "filesystem response exceeds the MCP frame limit"},
+	}
+	raw, err = json.Marshal(resp)
+	if err == nil && len(raw) <= mcpproto.MaxFrameBytes {
+		return raw
+	}
+	return []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"filesystem response exceeds the MCP frame limit"}}`)
 }
 
 // fsToolCall executes read_file / list_directory and wraps the outcome in

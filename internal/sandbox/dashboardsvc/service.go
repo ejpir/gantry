@@ -224,7 +224,7 @@ func (service dashboardService) AddSecret(request dashboardapi.SecretRequest) er
 	if err := service.ValidateSecret(request); err != nil {
 		return err
 	}
-	return mutateSandboxSecret(request.Sandbox, "secret.set", strings.TrimSpace(request.Name), request.Value)
+	return controlcmd.SetSecret(request.Sandbox, strings.TrimSpace(request.Name), request.Value)
 }
 
 func (dashboardService) RemoveSecret(row dashboardapi.Secret) error {
@@ -234,29 +234,7 @@ func (dashboardService) RemoveSecret(row dashboardapi.Secret) error {
 	if err := secret.ValidateName(row.Name); err != nil {
 		return err
 	}
-	if _, alive := layout.PID(row.Sandbox); alive {
-		return mutateSandboxSecret(row.Sandbox, "secret.remove", row.Name, "")
-	}
-	store, err := config.LoadConfigStore(layout.Dir(row.Sandbox))
-	if err != nil {
-		return err
-	}
-	return store.SetSecretName(row.Name, false)
-}
-
-func mutateSandboxSecret(name, op, secretName string, value secret.Value) error {
-	req := controlproto.Request{Op: op, ID: controlproto.NewRequestID("secret"), Secret: &controlproto.SecretRequest{Name: secretName, Value: value}}
-	resp, err := controlproto.Call[controlproto.SecretResponse](name, req)
-	if err != nil {
-		return err
-	}
-	if !resp.OK {
-		if resp.Error == "" {
-			resp.Error = "secret update failed"
-		}
-		return fmt.Errorf("%s", resp.Error)
-	}
-	return nil
+	return controlcmd.RemoveSecret(row.Sandbox, row.Name)
 }
 
 func dashboardRuleForTraffic(row dashboardapi.Traffic, action string) (dashboardapi.RuleRequest, error) {

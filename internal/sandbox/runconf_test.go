@@ -164,6 +164,9 @@ func TestResolveOAuthBridgeDefaultsOnAndPersistsOptOut(t *testing.T) {
 	if oneShot.OAuthBridge == nil || oneShot.OAuthBridgeEnabled() {
 		t.Fatal("one-shot OAuth bridge opt-out was not preserved")
 	}
+	if _, _, err := resolveNamedSandbox(t, "agent", "-oauth-custody", "-oauth-bridge=false"); err == nil || !strings.Contains(err.Error(), "requires -oauth-bridge=true") {
+		t.Fatalf("custody without callback bridge error = %v", err)
+	}
 }
 
 func TestResolveRunscDownloadsGvisorRootfs(t *testing.T) {

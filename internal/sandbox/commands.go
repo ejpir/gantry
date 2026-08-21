@@ -78,30 +78,44 @@ func stopSandbox(name string) error {
 	if !alive {
 		return errSandboxNotRunning
 	}
+	ownedAlive := func() bool {
+		current, currentAlive := layout.PID(name)
+		return currentAlive && current == pid
+	}
+	forcedKill := false
 	// ctl.sock is authenticated by the same-UID check on Unix and by the
 	// verified protected DACL on Windows. Prefer the daemon's own shutdown
 	// state transition so guest sync and device flush run on every platform.
-	if err := requestDaemonShutdown(name); err != nil && layout.ProcAlive(pid) {
-		if signalErr := layout.Terminate(pid); signalErr != nil && layout.ProcAlive(pid) {
+	if err := requestDaemonShutdown(name); err != nil && ownedAlive() {
+		if signalErr := layout.Terminate(pid); signalErr != nil && ownedAlive() {
 			return fmt.Errorf("terminate sandbox %q (control request: %v): %w", name, err, signalErr)
 		}
 	}
 	// Grace window: the daemon's shutdown path syncs the guest and
 	// flushes devices (bounded internally at ~5s) — give it room before
 	// escalating to a power cut (review finding 5).
-	for i := 0; i < 120; i++ {
-		if !layout.ProcAlive(pid) {
-			break
-		}
+	for i := 0; i < 120 && ownedAlive(); i++ {
 		time.Sleep(100 * time.Millisecond)
 	}
-	if layout.ProcAlive(pid) {
-		_ = layout.Kill(pid)
+	if ownedAlive() {
+		forcedKill = true
+		if err := layout.Kill(pid); err != nil && ownedAlive() {
+			return fmt.Errorf("kill sandbox %q: %w", name, err)
+		}
+		// Kill is asynchronous on Unix. Never remove runtime/configuration
+		// files until the daemon has actually released its lifetime lock. The
+		// lock check also prevents a recycled PID from being treated as ours.
+		for i := 0; i < 40 && ownedAlive(); i++ {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if ownedAlive() {
+			return fmt.Errorf("sandbox %q did not exit after forced termination", name)
+		}
 	}
 	// kill the sandbox's gvproxy too (defers don't run if the daemon was
 	// SIGKILLed, orphaning it)
 	dir := layout.Dir(name)
-	if b, err := os.ReadFile(filepath.Join(dir, "gvproxy.pid")); err == nil {
+	if b, err := os.ReadFile(filepath.Join(dir, "gvproxy.pid")); forcedKill && err == nil {
 		var gpid int
 		if _, _ = fmt.Sscanf(string(b), "%d", &gpid); gpid > 0 {
 			_ = layout.Kill(gpid)
@@ -151,6 +165,11 @@ func CmdDelete(name string) int {
 }
 
 func deleteSandbox(name string) error {
+	lock, err := layout.HoldLaunchLock(name)
+	if err != nil {
+		return fmt.Errorf("refusing to delete while the sandbox is launching: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
 	if _, alive := layout.PID(name); alive {
 		if err := stopSandbox(name); err != nil && !errors.Is(err, errSandboxNotRunning) {
 			return err

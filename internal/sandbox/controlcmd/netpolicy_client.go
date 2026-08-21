@@ -5,7 +5,6 @@ package controlcmd
 // configuration. The daemon-side manager lives in the control package.
 
 import (
-	"fmt"
 	"path/filepath"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
@@ -35,44 +34,22 @@ func SetNetworkPolicy(name, path string, allowLocal bool) (control.NetworkPolicy
 		}
 		return networkPolicyRPC(name, "netpolicy.set", &controlproto.NetworkPolicyRequest{Path: path, AllowLocal: allowLocal})
 	}
-	if _, alive := layout.PID(name); alive {
-		return liveSet()
-	}
-
-	// A daemon may be mid-boot between our liveness check and the store
-	// write: it reads sandbox.json while its launcher holds the launch lock,
-	// and it would never observe a policy persisted in that window (the
-	// running sandbox would keep enforcing the old — possibly more
-	// permissive — egress policy while the user is told the new one saved).
-	// Take the launch lock so the write is serialized against boot.
-	lock, err := layout.HoldLaunchLock(name)
-	if err != nil {
-		if _, alive := layout.PID(name); alive {
-			return liveSet()
+	return mutateRunningOrStoppedResult(name, liveSet, func() (control.NetworkPolicyEntry, error) {
+		store, err := config.LoadConfigStore(layout.Dir(name))
+		if err != nil {
+			return control.NetworkPolicyEntry{}, err
 		}
-		return control.NetworkPolicyEntry{}, fmt.Errorf("sandbox %q is launching; retry the network policy update when it is up or fully stopped", name)
-	}
-	defer func() { _ = lock.Close() }()
-	// A daemon that began booting before we took the lock holds it until
-	// readiness, so this second check cannot race its config load.
-	if _, alive := layout.PID(name); alive {
-		return liveSet()
-	}
-
-	store, err := config.LoadConfigStore(layout.Dir(name))
-	if err != nil {
-		return control.NetworkPolicyEntry{}, err
-	}
-	path, policy, err := control.ResolveNetworkPolicy(path, allowLocal)
-	if err != nil {
-		return control.NetworkPolicyEntry{}, err
-	}
-	policy, err = store.Snapshot().ApplyProxyPolicy(policy)
-	if err != nil {
-		return control.NetworkPolicyEntry{}, err
-	}
-	if err := store.SetNetworkPolicy(path, allowLocal); err != nil {
-		return control.NetworkPolicyEntry{}, err
-	}
-	return control.MakeNetworkPolicyEntry(path, allowLocal, policy, "saved"), nil
+		resolvedPath, policy, err := control.ResolveNetworkPolicy(path, allowLocal)
+		if err != nil {
+			return control.NetworkPolicyEntry{}, err
+		}
+		policy, err = store.Snapshot().ApplyProxyPolicy(policy)
+		if err != nil {
+			return control.NetworkPolicyEntry{}, err
+		}
+		if err := store.SetNetworkPolicy(resolvedPath, allowLocal); err != nil {
+			return control.NetworkPolicyEntry{}, err
+		}
+		return control.MakeNetworkPolicyEntry(resolvedPath, allowLocal, policy, "saved"), nil
+	})
 }

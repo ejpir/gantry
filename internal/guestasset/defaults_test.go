@@ -106,7 +106,7 @@ func TestReleaseAssetCacheNeverFallsBackToWorkingDirectory(t *testing.T) {
 	systemTempDir = func() string { return temp }
 
 	gantry, _ := kernelNames(runtime.GOARCH)
-	want := filepath.Join(temp, "gantry", "assets", Version, gantry)
+	want := filepath.Join(temp, fallbackAssetDirName(), "assets", Version, gantry)
 	if got := DefaultKernel(); got != want {
 		t.Fatalf("DefaultKernel = %q, want temp fallback %q", got, want)
 	}

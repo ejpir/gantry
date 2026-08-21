@@ -124,8 +124,6 @@ var (
 	reOAuthLoopbackURL = regexp.MustCompile(`http://(?:localhost|127\.0\.0\.1):(\d{1,5})/[^\s"'\)]*callback`)
 )
 
-// New creates the default-on, resource-bounded bridge. The persisted
-// sandbox setting can opt out; GANTRY_OAUTH_BRIDGE is a global override.
 // New creates the default-on, resource-bounded bridge. enabled is the
 // persisted sandbox setting; GANTRY_OAUTH_BRIDGE is a global override. It
 // returns nil when the bridge is switched off, which callers treat as "no
@@ -202,28 +200,30 @@ func callbackPorts(text string) []int {
 	return out
 }
 
-// SniffWriter returns a writer that forwards every byte unchanged while
 // SetCustodyConsumer installs the custody-mode interception hook: when
-// non-nil and returning true, a callback is consumed host-side (daemon
-// token exchange) and NOT replayed into the guest.
+// non-nil and returning true, a callback is consumed host-side (daemon token
+// exchange) and not replayed into the guest.
 func (b *Bridge) SetCustodyConsumer(consume func(port int, u *url.URL) bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.custodyConsume = consume
 }
 
 // EnsureCallbackPort opens the host loopback listener for a custody flow
 // before any authorize URL has been sniffed (the guest helper declares
-// its redirect port up front). It reports whether the port is allowed;
-// the caller must fail the flow loudly rather than strand the browser.
+// its redirect port up front). It reports whether the allowed port was
+// actually opened (or was already active); the caller fails loudly on bind
+// or listener-limit errors rather than stranding the browser.
 func (b *Bridge) EnsureCallbackPort(port int) bool {
 	if !allowedCallbackPort(port) {
 		return false
 	}
-	b.ensureListener(port)
-	return true
+	return b.ensureListener(port)
 }
 
-// scanning for OAuth callback URLs. Safe for terminal byte streams: the
-// scan is read-only over a rolling window.
+// SniffWriter returns a writer that forwards every byte unchanged while
+// scanning for OAuth callback URLs. Safe for terminal byte streams: the scan
+// is read-only over a rolling window.
 func (b *Bridge) SniffWriter(w io.Writer) io.Writer {
 	return &sniffWriter{w: w, b: b, seen: map[int]bool{}}
 }
@@ -257,19 +257,23 @@ func (s *sniffWriter) Write(p []byte) (int, error) {
 
 // ensureListener binds 127.0.0.1:port on the host once. Bind failures are
 // remembered so repeated prints of the same URL don't spam.
-func (b *Bridge) ensureListener(port int) {
+func (b *Bridge) ensureListener(port int) bool {
 	if !allowedCallbackPort(port) {
-		return
+		return false
 	}
 	b.mu.Lock()
-	if _, ok := b.listeners[port]; ok || b.failed[port] {
+	if _, ok := b.listeners[port]; ok {
 		b.mu.Unlock()
-		return
+		return true
+	}
+	if b.failed[port] {
+		b.mu.Unlock()
+		return false
 	}
 	if len(b.listeners) >= maxActiveListeners {
 		b.mu.Unlock()
 		b.logf("listener limit reached (%d); ignoring callback port %d", maxActiveListeners, port)
-		return
+		return false
 	}
 	// Keep the lock across bind so concurrent output cannot race the same
 	// port or exceed the listener limit between check and publication.
@@ -281,7 +285,7 @@ func (b *Bridge) ensureListener(port int) {
 		b.failed[port] = true
 		b.mu.Unlock()
 		b.logf("cannot bind host 127.0.0.1:%d (%v) — is something already using it?", port, err)
-		return
+		return false
 	}
 	l := &listener{port: port, ln: ln}
 	// A flow the user abandons must not hold the host port forever.
@@ -290,6 +294,7 @@ func (b *Bridge) ensureListener(port int) {
 	b.mu.Unlock()
 	b.logf("OAuth callback detected: listening on host http://127.0.0.1:%d (replaying into the sandbox)", port)
 	go b.serve(l)
+	return true
 }
 
 // serve accepts browser connections until the listener closes.
@@ -381,9 +386,16 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 		// consumed callback is never replayed into the guest — the whole
 		// point is that the authorization code (and the tokens it yields)
 		// stay on the host.
-		if b.custodyConsume != nil && b.custodyConsume(l.port, r.URL) {
+		b.mu.Lock()
+		consume := b.custodyConsume
+		b.mu.Unlock()
+		if consume != nil && consume(l.port, r.URL) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = io.WriteString(w, "<html><body><h2>Login complete</h2><p>Gantry holds this session's tokens on the host (custody mode). You can close this tab.</p></body></html>")
+			_, _ = io.WriteString(w, "<html><body><h2>OAuth callback received</h2><p>Gantry is completing token custody on the host. Return to the guest CLI for the final result.</p></body></html>")
+			// Custody callbacks are one-shot just like transparent replays. Free
+			// dynamic Claude ports promptly instead of consuming the four-listener
+			// budget for the full TTL.
+			time.AfterFunc(2*time.Second, func() { b.closeExactListener(l) })
 			return
 		}
 		if !b.acquireReplay() {

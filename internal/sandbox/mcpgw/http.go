@@ -16,8 +16,8 @@
 //     dialed — there is no check/connect TOCTOU for DNS rebinding to
 //     exploit. Non-public targets (loopback, RFC1918, link-local —
 //     which includes cloud metadata 169.254.169.254 — CGNAT, multicast)
-//     are refused unless the URL host was explicitly a loopback literal
-//     (the test escape hatch, mirroring the OAuth mock-AS pattern).
+//     are refused. An explicitly loopback URL may resolve only to another
+//     loopback address (the test escape hatch, never a general private-net bypass).
 //   - HTTPS with verified TLS; plain HTTP only to loopback literals.
 //   - Bounded: 1 MiB response cap, dial/TLS/header timeouts, and the
 //     caller's context governs the whole exchange.
@@ -34,6 +34,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -43,10 +44,20 @@ import (
 )
 
 // ValidateRemoteURL enforces the remote-upstream URL rules. It returns
-// allowPrivate=true when the host is a loopback literal — the dial guard
-// then permits non-public addresses for this server (mock servers in
-// tests; the OAuth mock-AS pattern).
-func ValidateRemoteURL(raw string) (allowPrivate bool, err error) {
+// loopbackOnly=true when the host is a loopback literal. That exception is
+// deliberately scoped to loopback addresses; it must never admit arbitrary
+// RFC1918, link-local, or metadata targets.
+// AuditRemoteOrigin returns endpoint metadata safe for the audit trail. Query
+// strings and paths may contain bearer material and are deliberately omitted.
+func AuditRemoteOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "<invalid-origin>"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+func ValidateRemoteURL(raw string) (loopbackOnly bool, err error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return false, fmt.Errorf("bad URL: %w", err)
@@ -88,21 +99,58 @@ func isLoopbackHost(host string) bool {
 // isPublicIP reports whether ip is a globally routable unicast address.
 // net.IP.IsGlobalUnicast is NOT sufficient (it returns true for private
 // and loopback space), so the dangerous ranges are rejected explicitly.
+var publicIPv6Prefix = netip.MustParsePrefix("2000::/3")
+
+var nonPublicPrefixes = []netip.Prefix{
+	// IPv4 special-use, documentation, benchmarking, and reserved space.
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+
+	// IPv6 translation/tunnelling mechanisms can reach an embedded IPv4
+	// target; special-use and documentation ranges are not public upstreams.
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
 func isPublicIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return false
 	}
-	if v4 := ip.To4(); v4 != nil {
-		if v4[0] == 100 && v4[1]&0xC0 == 64 { // 100.64.0.0/10 CGNAT
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() {
+		return false
+	}
+	for _, prefix := range nonPublicPrefixes {
+		if prefix.Contains(addr) {
 			return false
 		}
-		if v4[0] == 192 && v4[1] == 0 && v4[2] == 0 { // 192.0.0.0/24
-			return false
-		}
-		if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) { // 198.18.0.0/15 benchmarking
-			return false
-		}
+	}
+	// Currently allocated globally routable IPv6 unicast space is 2000::/3.
+	// Refusing future/reserved blocks is safer than treating them as SSRF-safe.
+	if addr.Is6() && !publicIPv6Prefix.Contains(addr) {
+		return false
 	}
 	return true
 }
@@ -111,7 +159,7 @@ func isPublicIP(ip net.IP) bool {
 // validates, and dials a pinned IP — validation and use are the same
 // address, so DNS rebinding between check and connect has no window.
 // TLS ServerName is still derived from the URL hostname by net/http.
-func pinnedTransport(allowPrivate bool) *http.Transport {
+func pinnedTransport(loopbackOnly bool) *http.Transport {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	resolver := &net.Resolver{}
 	t := &http.Transport{
@@ -134,7 +182,11 @@ func pinnedTransport(allowPrivate bool) *http.Transport {
 			return nil, fmt.Errorf("ssrf: %s resolved to no addresses", host)
 		}
 		ip := ips[0].IP // pinned: this validated address is the one dialed
-		if !isPublicIP(ip) && !allowPrivate {
+		if loopbackOnly {
+			if !ip.IsLoopback() {
+				return nil, fmt.Errorf("ssrf: loopback target %s resolved to non-loopback %s — refused", host, ip)
+			}
+		} else if !isPublicIP(ip) {
 			return nil, fmt.Errorf("ssrf: %s resolved to non-public %s — refused", host, ip)
 		}
 		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
@@ -166,7 +218,7 @@ type httpUpstream struct {
 // (TokenFunc — custody access tokens are re-read per session, so a
 // refreshed token reaches new sessions), and runs the MCP handshake.
 func startHTTPUpstream(ctx context.Context, logf LogFunc, srv Server) (*httpUpstream, error) {
-	allowPrivate, err := ValidateRemoteURL(srv.URL)
+	loopbackOnly, err := ValidateRemoteURL(srv.URL)
 	if err != nil {
 		return nil, fmt.Errorf("remote server %s: %w", srv.Name, err)
 	}
@@ -193,15 +245,12 @@ func startHTTPUpstream(ctx context.Context, logf LogFunc, srv Server) (*httpUpst
 			redact = append(redact, []byte(tok))
 		}
 	}
-	client := &http.Client{Transport: pinnedTransport(allowPrivate)}
-	if len(headers) > 0 {
-		// Credential-to-origin binding: a redirect would carry the
-		// injected headers to a different origin — hard error, never
-		// followed. (Uncredentialed upstreams keep the default policy;
-		// the dial guard still vets every hop's origin.)
-		client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-			return errors.New("redirect refused: credentialed upstreams never follow redirects")
-		}
+	client := &http.Client{Transport: pinnedTransport(loopbackOnly)}
+	// Redirects are never followed. Besides binding injected credentials to
+	// one origin, this prevents a loopback test/development endpoint from
+	// redirecting through its loopback-only transport to a private target.
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return errors.New("redirect refused: MCP upstreams never follow redirects")
 	}
 	u := &httpUpstream{
 		name:    srv.Name,
@@ -284,7 +333,7 @@ func (u *httpUpstream) Notify(method string, params json.RawMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := u.post(ctx, frame, false); err != nil && u.logf != nil {
-		u.logf("mcp: upstream %s notification %s failed: %v", u.name, method, err)
+		u.logf("mcp: upstream %s notification %s failed", u.name, method)
 	}
 }
 
@@ -321,12 +370,9 @@ func (u *httpUpstream) post(ctx context.Context, frame []byte, wantResp bool) (j
 		return nil, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Include a redacted, length-capped snippet of the error body —
-		// an upstream 401 page often says why, and must not leak the
-		// injected credential back to the guest.
-		snip, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("upstream %s HTTP %d: %s", u.name, resp.StatusCode,
-			redactBytes(snip, u.redact))
+		// Upstream bodies are tool payload, not audit metadata. Do not carry a
+		// preview into the returned error: callers audit failures host-side.
+		return nil, fmt.Errorf("upstream %s HTTP %d", u.name, resp.StatusCode)
 	}
 	if u.proto == "" {
 		u.proto = protocolVersion

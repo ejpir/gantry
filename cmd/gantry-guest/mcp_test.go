@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
 )
 
 // requirePosixFs skips fs-server tests on Windows: mcp-serve filesystem is
@@ -124,6 +126,22 @@ func TestFSBinaryAndSizeCap(t *testing.T) {
 	resp = serveFSOnce(t, jail, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"big.txt"}}}`)
 	if text, isErr := toolResultText(t, resp); !isErr || !strings.Contains(text, "exceeds") {
 		t.Fatalf("oversize file must be refused, got %.40q (isError %v)", text, isErr)
+	}
+}
+
+func TestFSReplyCapsJSONEscapeExpansion(t *testing.T) {
+	// The logical text fits the file cap, but each control byte expands to a
+	// six-byte JSON escape. The server must answer with a small error frame.
+	raw := fsReply(json.RawMessage(`1`), fsToolText(strings.Repeat("\x01", fsMaxFileBytes)), nil)
+	if len(raw) > mcpproto.MaxFrameBytes {
+		t.Fatalf("response size = %d, cap = %d", len(raw), mcpproto.MaxFrameBytes)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(raw, &response); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := response["error"]; !ok {
+		t.Fatalf("expanded response was not replaced with an error: %v", response)
 	}
 }
 

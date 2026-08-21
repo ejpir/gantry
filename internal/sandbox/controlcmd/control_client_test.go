@@ -165,6 +165,36 @@ func TestSetResourcesWhileLaunchLockHeld(t *testing.T) {
 // TestSetNetworkPolicyWhileLaunchLockHeld: a launcher holding the launch
 // lock means a daemon may be mid-boot reading sandbox.json. The stopped
 // path must refuse to write instead of silently losing the update.
+func TestShareAndSecretMutationsWhileLaunchLockHeld(t *testing.T) {
+	useShortGantryHome(t)
+	dir := writeSandboxConfig(t, "booting")
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSecretName("TOKEN", true); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := layout.HoldLaunchLock("booting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := ConfigureShare("booting", "code="+t.TempDir(), false); err == nil || !strings.Contains(err.Error(), "launching") {
+		t.Fatalf("ConfigureShare = %v, want launching conflict", err)
+	}
+	if err := RemoveSecret("booting", "TOKEN"); err == nil || !strings.Contains(err.Error(), "launching") {
+		t.Fatalf("RemoveSecret = %v, want launching conflict", err)
+	}
+	cfg, err := config.ReadSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Shares) != 0 || len(cfg.SecretNames) != 1 || cfg.SecretNames[0] != "TOKEN" {
+		t.Fatalf("config changed under launch lock: %+v", cfg)
+	}
+}
+
 func TestSetNetworkPolicyWhileLaunchLockHeld(t *testing.T) {
 	useShortGantryHome(t)
 	writeSandboxConfig(t, "booting")

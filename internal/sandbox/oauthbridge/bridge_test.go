@@ -506,6 +506,22 @@ func TestSniffWriterDedupesAndBindFailure(t *testing.T) {
 	}
 }
 
+func TestEnsureCallbackPortReportsBindFailure(t *testing.T) {
+	b := testBridge(t, nil)
+	port := freeAllowedOAuthPort(t)
+	ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	if b.EnsureCallbackPort(port) {
+		t.Fatal("EnsureCallbackPort reported success when the host port was busy")
+	}
+	if b.EnsureCallbackPort(3000) {
+		t.Fatal("EnsureCallbackPort accepted a disallowed port")
+	}
+}
+
 func TestNewDefaultsOnWithExplicitOverrides(t *testing.T) {
 	exec := func([]string, time.Duration) ([]byte, int, error) { return nil, 0, nil }
 	t.Setenv("GANTRY_OAUTH_BRIDGE", "")

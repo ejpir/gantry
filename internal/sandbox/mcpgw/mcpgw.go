@@ -20,6 +20,7 @@ package mcpgw
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,7 +34,8 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
 )
 
-// LogFunc receives audit lines (names and decisions, never values).
+// LogFunc receives audit lines (names and decisions, never values). Gateway
+// serializes every callback; callers do not need to add their own mutex.
 type LogFunc func(format string, a ...any)
 
 // ToolPolicy is the per-server allow/deny list. An empty Allow list exposes
@@ -68,11 +70,13 @@ type SpawnFunc func(ctx context.Context, argv []string) (stdin io.WriteCloser, s
 // Gateway multiplexes one guest MCP session across upstream servers.
 type Gateway struct {
 	logf    LogFunc
+	logMu   sync.Mutex // LogFunc callbacks are serialized by contract
 	spawn   SpawnFunc
 	servers map[string]Server
 	order   []string
 
 	callTimeout time.Duration
+	sessions    chan struct{}
 }
 
 // New validates the server set (glob patterns must compile) and returns
@@ -84,6 +88,7 @@ func New(logf LogFunc, spawn SpawnFunc, servers []Server) (*Gateway, error) {
 		spawn:       spawn,
 		servers:     make(map[string]Server, len(servers)),
 		callTimeout: 30 * time.Second,
+		sessions:    make(chan struct{}, maxSessions),
 	}
 	for _, srv := range servers {
 		if srv.Name == "" || strings.Contains(srv.Name, "__") {
@@ -104,9 +109,12 @@ func New(logf LogFunc, spawn SpawnFunc, servers []Server) (*Gateway, error) {
 }
 
 func (g *Gateway) auditf(format string, a ...any) {
-	if g.logf != nil {
-		g.logf(format, a...)
+	if g.logf == nil {
+		return
 	}
+	g.logMu.Lock()
+	defer g.logMu.Unlock()
+	g.logf(format, a...)
 }
 
 // --- JSON-RPC plumbing ---------------------------------------------------
@@ -149,16 +157,35 @@ func initializeParams() json.RawMessage {
 	return json.RawMessage(`{"protocolVersion":"` + protocolVersion + `","capabilities":{},"clientInfo":{"name":"gantry-mcp-gateway","version":"1.0.0"}}`)
 }
 
-// maxInFlight bounds concurrent requests per guest session; a runaway
-// agent gets an error instead of exhausting upstream sessions.
-const maxInFlight = 16
+// Resource limits are gateway-wide as well as per session. Without a global
+// session cap, a guest can hold unlimited idle connections, each with its own
+// scanner and upstream state.
+const (
+	maxInFlight        = 16
+	maxSessions        = 16
+	sessionIdleTimeout = 5 * time.Minute
+	maxToolNameBytes   = 256
+)
 
 // Serve handles one guest MCP session until EOF, a fatal frame error, or
 // ctx cancellation. All upstreams started for the session are killed when
 // it ends.
 func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	defer func() { _ = rw.Close() }()
+	select {
+	case g.sessions <- struct{}{}:
+		defer func() { <-g.sessions }()
+	default:
+		g.auditf("mcp: session rejected (gateway session limit %d)", maxSessions)
+		return fmt.Errorf("mcpgw: too many sessions")
+	}
 	g.auditf("mcp: session open")
+	stopCancel := context.AfterFunc(ctx, func() { _ = rw.Close() })
+	defer stopCancel()
+	if deadlines, ok := rw.(interface{ SetReadDeadline(time.Time) error }); ok {
+		_ = deadlines.SetReadDeadline(time.Now().Add(sessionIdleTimeout))
+		defer func() { _ = deadlines.SetReadDeadline(time.Time{}) }()
+	}
 
 	sess := &session{
 		g:         g,
@@ -175,6 +202,9 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	scanner.Split(scanLines)
 	var calls, denied atomic.Int64 // mutated by concurrent dispatch goroutines
 	for scanner.Scan() {
+		if deadlines, ok := rw.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = deadlines.SetReadDeadline(time.Now().Add(sessionIdleTimeout))
+		}
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -310,22 +340,24 @@ func (s *session) upstream(ctx context.Context, srv Server) (upstream, error) {
 		err error
 	)
 	if srv.URL != "" {
-		u, err = startHTTPUpstream(ctx, s.g.logf, srv)
+		u, err = startHTTPUpstream(ctx, s.g.auditf, srv)
 	} else {
 		if s.g.spawn == nil {
 			return nil, fmt.Errorf("no spawn hook wired")
 		}
-		u, err = startStdioUpstream(ctx, s.g.logf, s.g.spawn, srv)
+		u, err = startStdioUpstream(ctx, s.g.auditf, s.g.spawn, srv)
 	}
 	if err != nil {
-		s.g.auditf("mcp: upstream %s start failed: %v", srv.Name, err)
+		// Errors can contain upstream-controlled response text. Audit only the
+		// decision metadata; the guest receives a generic availability error.
+		s.g.auditf("mcp: upstream %s start failed", srv.Name)
 		return nil, err
 	}
 	s.upstreams[srv.Name] = u
 	if srv.URL != "" {
-		s.g.auditf("mcp: upstream %s started (remote %s, %d injected headers)", srv.Name, srv.URL, len(srv.Headers))
+		s.g.auditf("mcp: upstream %s started (remote %s, %d injected headers)", srv.Name, AuditRemoteOrigin(srv.URL), len(srv.Headers))
 	} else {
-		s.g.auditf("mcp: upstream %s started (argv head %q)", srv.Name, srv.Argv[0])
+		s.g.auditf("mcp: upstream %s started (stdio)", srv.Name)
 	}
 	return u, nil
 }
@@ -399,7 +431,7 @@ func (s *session) toolsList(ctx context.Context, req *rpcRequest) {
 		raw, err := u.Call(callCtx, "tools/list", json.RawMessage(`{}`))
 		cancel()
 		if err != nil {
-			s.g.auditf("mcp: tools/list on %s failed: %v", name, err)
+			s.g.auditf("mcp: tools/list on %s failed", name)
 			continue
 		}
 		var result struct {
@@ -432,8 +464,8 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" {
-		s.reply(req.ID, nil, &rpcError{codeInvalidParams, "tools/call needs params.name"})
+	if err := json.Unmarshal(req.Params, &p); err != nil || p.Name == "" || len(p.Name) > maxToolNameBytes {
+		s.reply(req.ID, nil, &rpcError{codeInvalidParams, fmt.Sprintf("tools/call needs params.name of at most %d bytes", maxToolNameBytes)})
 		return 0
 	}
 	server, tool, ok := splitToolName(p.Name)
@@ -441,7 +473,7 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 	// Deliberately one message for unknown and denied alike: no tool
 	// existence oracle for the agent.
 	deny := func() int {
-		s.g.auditf("mcp: denied call %s (policy)", p.Name)
+		s.g.auditf("mcp: denied call %q (policy)", p.Name)
 		s.reply(req.ID, nil, &rpcError{codeServerError, "unknown or disallowed tool"})
 		return 1
 	}
@@ -459,7 +491,7 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 	raw, err := u.Call(callCtx, "tools/call", upstreamParams)
 	cancel()
 	if err != nil {
-		s.g.auditf("mcp: call %s__%s upstream error: %v", server, tool, err)
+		s.g.auditf("mcp: call %s__%s upstream error", server, tool)
 		s.reply(req.ID, nil, &rpcError{codeServerError, "upstream call failed"})
 		return 0
 	}
@@ -486,35 +518,22 @@ func (s *session) replyRaw(id json.RawMessage, result json.RawMessage) {
 const redactionPlaceholder = "[REDACTED-BY-GANTRY-MCP-GATEWAY]"
 
 // redactBytes scrubs credential byte strings from anything returning to
-// the guest: a reflecting or compromised upstream must not be able to
-// launder its token back into the guest transcript.
+// the guest. Each secret is replaced in one non-recursive pass: rescanning an
+// inserted marker loops forever when a short secret occurs in the marker.
+// The replacement never exceeds the secret length, so redaction cannot grow a
+// bounded MCP frame into an unbounded allocation.
 func redactBytes(b []byte, redactors [][]byte) []byte {
 	for _, secret := range redactors {
-		if len(secret) == 0 {
+		if len(secret) == 0 || !bytes.Contains(b, secret) {
 			continue
 		}
-		for {
-			i := indexOf(b, secret)
-			if i < 0 {
-				break
-			}
-			out := make([]byte, 0, len(b))
-			out = append(out, b[:i]...)
-			out = append(out, redactionPlaceholder...)
-			out = append(out, b[i+len(secret):]...)
-			b = out
+		replacement := []byte(redactionPlaceholder)
+		if len(replacement) > len(secret) {
+			replacement = bytes.Repeat([]byte{'*'}, len(secret))
 		}
+		b = bytes.ReplaceAll(b, secret, replacement)
 	}
 	return b
-}
-
-func indexOf(haystack, needle []byte) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if string(haystack[i:i+len(needle)]) == string(needle) {
-			return i
-		}
-	}
-	return -1
 }
 
 // --- stdio upstream --------------------------------------------------------
@@ -597,14 +616,9 @@ func (u *stdioUpstream) readLoop(r io.ReadCloser) {
 			Error  *rpcError       `json:"error"`
 		}
 		if err := json.Unmarshal(line, &frame); err != nil {
-			// Preview the offending frame (capped) so `gantry audit` alone
-			// explains the kill — e.g. a stale guest binary printing its
-			// usage text instead of speaking JSON-RPC.
-			preview := line
-			if len(preview) > 80 {
-				preview = preview[:80]
-			}
-			u.auditf("mcp: upstream %s sent a non-JSON-RPC frame %.80q; killed", u.name, preview)
+			// Audit metadata only. Upstream stdout may contain credentials or
+			// tool payloads and must never be previewed in the custody trail.
+			u.auditf("mcp: upstream %s sent a non-JSON-RPC frame (%d bytes); killed", u.name, len(line))
 			return
 		}
 		if len(frame.ID) == 0 {
@@ -619,6 +633,11 @@ func (u *stdioUpstream) readLoop(r io.ReadCloser) {
 		ch, ok := u.pending[id]
 		u.pmu.Unlock()
 		if ok {
+			if frame.Error != nil {
+				redacted := *frame.Error
+				redacted.Message = string(redactBytes([]byte(redacted.Message), u.redact))
+				frame.Error = &redacted
+			}
 			ch <- upstreamReply{result: redactBytes(frame.Result, u.redact), err: frame.Error}
 		}
 	}

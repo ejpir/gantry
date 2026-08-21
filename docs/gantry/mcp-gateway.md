@@ -31,8 +31,10 @@ For Claude Code, for example:
 
 The filesystem server serves tools `fs__read_file` and `fs__list_directory`,
 contained to `-mcp-fs-root` (default `/`) by a path-validating jail, running
-as `-mcp-fs-user` (default `nobody`; `root` is refused). Paths are absolute
-in the guest and must stay inside the server root.
+as `-mcp-fs-user` (default `nobody`; `root` is refused). Use a guest account
+name, a numeric UID present in the guest passwd database, or an explicit
+`UID:GID` pair. Paths are absolute in the guest and must stay inside the
+server root.
 
 ## Add a remote server
 
@@ -69,19 +71,24 @@ automatically added to the server's redaction set.
 - **Origin binding:** redirects on a credentialed upstream are refused, so a
   credential cannot be steered to a different origin.
 - **SSRF guard:** the gateway resolves and validates the target inside the
-  dial itself and connects to the validated address. Loopback, private,
-  link-local (including the cloud metadata address), and CGNAT targets are
-  refused; a bad `url=` fails `gantry start` immediately.
+  dial itself and connects to the validated address. Private, link-local
+  (including the cloud metadata address), and CGNAT targets are refused. An
+  explicitly configured loopback URL may resolve only to loopback (for local
+  development); redirects are never followed. A bad `url=` fails `gantry
+  start` immediately.
 - **Default deny:** a tool that matches neither `allow` nor any configured
   server gets the same refusal as a nonexistent tool — the guest cannot
   enumerate what is configured but hidden.
 - **Redaction:** configured secret values, plus every injected credential,
-  are replaced with `[REDACTED-BY-GANTRY-MCP-GATEWAY]` in tool results and
-  in upstream error text before either reaches the guest or the audit log.
+  are replaced with `[REDACTED-BY-GANTRY-MCP-GATEWAY]` (or an equal-length
+  `*` mask for values shorter than that marker) in tool results and upstream
+  error text before either reaches the guest or the audit log.
 - **Audit:** sessions, calls, denies, and upstream errors are recorded
   host-side (`gantry audit NAME`) without credential values.
 - **Bounded:** frames and responses are capped at 1 MiB; a session has at
-  most 16 in-flight requests.
+  most 16 in-flight requests, the gateway admits at most 16 sessions, and an
+  idle session is closed after five minutes. Audit entries are capped by both
+  line count and bytes.
 
 Tool descriptions from a remote upstream are trusted content — connect only
 upstreams you trust. Per-tool `allow`/`deny` limits what a misbehaving

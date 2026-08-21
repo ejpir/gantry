@@ -22,32 +22,16 @@ func SetResources(name string, memMB uint, vcpus int, processIsolation string) e
 	if err := config.ValidateProcessIsolation(processIsolation); err != nil {
 		return err
 	}
-	if _, alive := layout.PID(name); alive {
-		return setResourcesLive(name, memMB, vcpus, processIsolation)
-	}
-
-	// A daemon may be mid-boot between our liveness check and the store
-	// write: it reads sandbox.json while its launcher holds the launch lock,
-	// and it would never observe an allocation persisted in that window (the
-	// user is told the new resources saved while the machine boots with the
-	// old ones). Same serialization as SetNetworkPolicy's stopped path.
-	lock, err := layout.HoldLaunchLock(name)
-	if err != nil {
-		if _, alive := layout.PID(name); alive {
-			return setResourcesLive(name, memMB, vcpus, processIsolation)
-		}
-		return fmt.Errorf("sandbox %q is launching; retry the resource update when it is up or fully stopped", name)
-	}
-	defer func() { _ = lock.Close() }()
-	if _, alive := layout.PID(name); alive {
-		return setResourcesLive(name, memMB, vcpus, processIsolation)
-	}
-
-	store, err := config.LoadConfigStore(layout.Dir(name))
-	if err != nil {
-		return err
-	}
-	return store.SetResources(memMB, vcpus, processIsolation)
+	return mutateRunningOrStopped(name,
+		func() error { return setResourcesLive(name, memMB, vcpus, processIsolation) },
+		func() error {
+			store, err := config.LoadConfigStore(layout.Dir(name))
+			if err != nil {
+				return err
+			}
+			return store.SetResources(memMB, vcpus, processIsolation)
+		},
+	)
 }
 
 // setResourcesLive routes the update through the daemon's control socket. It

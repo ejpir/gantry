@@ -67,7 +67,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/bundle
-          key: guest-assets-v0.2.1-${{ matrix.name }}-${{ hashFiles('scripts/mkrootfs.sh', 'patches/nerdbox-v0.2.1-quiet-boot.patch', 'scripts/mkimage.sh', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
+          key: guest-assets-v0.2.3-${{ matrix.name }}-${{ hashFiles('scripts/mkrootfs.sh', 'patches/nerdbox-v0.2.3-*.patch', 'scripts/mkimage.sh', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
       - uses: docker/setup-buildx-action@v3
         if: steps.guest-cache.outputs.cache-hit != 'true'
       - name: install EROFS tools

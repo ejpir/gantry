@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -170,6 +171,96 @@ func TestStoreLiteralAndRemove(t *testing.T) {
 	}
 	if st.Has("TOK") {
 		t.Fatal("Has after Remove = true")
+	}
+}
+
+func TestStoreRemoveDuringResolutionCannotResurrectValue(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	st := NewStore(func(string) (string, bool) {
+		close(started)
+		<-release
+		return "revoked-value", true
+	}, nil)
+	st.Put("TOK", Source{Kind: SourceEnv, Ref: "TOK"})
+	type outcome struct {
+		value Value
+		err   error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		value, err := st.Resolve("TOK")
+		result <- outcome{value: value, err: err}
+	}()
+	<-started
+	st.Remove("TOK")
+	close(release)
+	got := <-result
+	if got.err == nil || got.value.Raw() != "" {
+		t.Fatalf("revoked resolve = %q, %v", got.value.Raw(), got.err)
+	}
+	if st.Has("TOK") {
+		t.Fatal("source was resurrected after Remove")
+	}
+}
+
+func TestStoreConcurrentResolvesShareOneFetch(t *testing.T) {
+	var fetches atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	st := NewStore(func(string) (string, bool) {
+		if fetches.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return "value", true
+	}, nil)
+	st.Put("TOK", Source{Kind: SourceEnv, Ref: "TOK"})
+	results := make(chan error, 2)
+	go func() { _, err := st.Resolve("TOK"); results <- err }()
+	<-started
+	go func() { _, err := st.Resolve("TOK"); results <- err }()
+	// Wait until the second resolver has joined the registered call before
+	// allowing the source fetch to complete.
+	deadline := time.Now().Add(time.Second)
+	for {
+		st.mu.Lock()
+		call := st.inflight["TOK"]
+		joined := call != nil && call.waiters == 1
+		st.mu.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second resolver did not join the in-flight call")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("source fetches = %d, want one", got)
+	}
+}
+
+func TestStoreRejectsOversizedSourceValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "huge")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxResolvedValueBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := NewStore(os.LookupEnv, nil)
+	st.Put("TOK", Source{Kind: SourceFile, Ref: path})
+	if _, err := st.Resolve("TOK"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized file resolution error = %v", err)
+	}
+	var out limitedValueBuffer
+	_, _ = out.Write([]byte(strings.Repeat("x", maxResolvedValueBytes+1)))
+	if !out.overflow || out.Len() > maxResolvedValueBytes+1 {
+		t.Fatalf("limited exec buffer overflow=%v len=%d", out.overflow, out.Len())
 	}
 }
 

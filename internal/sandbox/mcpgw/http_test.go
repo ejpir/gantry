@@ -146,8 +146,8 @@ func TestHTTPUpstreamInjectAndRedact(t *testing.T) {
 		if strings.Contains(text, "t12-secret-token") {
 			t.Fatalf("id %s leaked the credential to the guest: %q", id, text)
 		}
-		if !strings.Contains(text, redactionPlaceholder) {
-			t.Fatalf("id %s: expected redaction placeholder, got %q", id, text)
+		if !strings.Contains(text, "*") && !strings.Contains(text, redactionPlaceholder) {
+			t.Fatalf("id %s: expected a redaction marker, got %q", id, text)
 		}
 	}
 }
@@ -193,6 +193,23 @@ func TestHTTPUpstreamRedirectRefusedWithCredentials(t *testing.T) {
 	}
 }
 
+func TestHTTPUpstreamRedirectRefusedWithoutCredentials(t *testing.T) {
+	// Loopback is a narrowly scoped development exception. A redirect must
+	// not turn it into permission to dial metadata/private addresses.
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusFound)
+	}))
+	defer redir.Close()
+	u, err := startHTTPUpstream(context.Background(), nil, Server{Name: "redir", URL: redir.URL})
+	if err == nil {
+		u.close()
+		t.Fatal("uncredentialed MCP redirect must be refused")
+	}
+	if !strings.Contains(err.Error(), "redirect refused") {
+		t.Fatalf("error = %v, want redirect refusal", err)
+	}
+}
+
 func TestValidateRemoteURLAndDialGuard(t *testing.T) {
 	for _, tc := range []struct {
 		url      string
@@ -209,6 +226,12 @@ func TestValidateRemoteURLAndDialGuard(t *testing.T) {
 		{"https://169.254.169.254/latest/meta-data", "non-public", false},
 		{"https://192.168.1.1/mcp", "non-public", false},
 		{"https://10.0.0.5/mcp", "non-public", false},
+		{"https://192.0.2.1/mcp", "non-public", false},
+		{"https://255.255.255.255/mcp", "non-public", false},
+		{"https://[2001:db8::1]/mcp", "non-public", false},
+		{"https://[64:ff9b::a9fe:a9fe]/mcp", "non-public", false},
+		{"https://8.8.8.8/mcp", "", false},
+		{"https://[2606:4700:4700::1111]/mcp", "", false},
 	} {
 		priv, err := ValidateRemoteURL(tc.url)
 		if tc.wantErr == "" {
@@ -275,7 +298,8 @@ func TestHTTPErrorPathsAreRedacted(t *testing.T) {
 			t.Fatalf("id %s should get the generic failure: %s", id, raw)
 		}
 	}
-	// Host audit: the detailed error, with the credential redacted.
+	// Host audit contains decision metadata only. Even redacted upstream
+	// payload previews do not belong in the custody trail.
 	var errLines []string
 	for _, l := range logs {
 		if strings.Contains(l, "upstream error") {
@@ -286,11 +310,15 @@ func TestHTTPErrorPathsAreRedacted(t *testing.T) {
 		t.Fatalf("expected 2 audited upstream errors, got %v", logs)
 	}
 	for _, l := range errLines {
-		if strings.Contains(l, "t12-secret-token") {
-			t.Fatalf("audit line leaked the credential: %s", l)
+		if strings.Contains(l, "t12-secret-token") || strings.Contains(l, "token ") || strings.Contains(l, "bad token") {
+			t.Fatalf("audit line carried upstream payload: %s", l)
 		}
-		if !strings.Contains(l, "REDACTED-BY-GANTRY") {
-			t.Fatalf("audit line should show the redacted detail: %s", l)
-		}
+	}
+}
+
+func TestAuditRemoteOriginOmitsPotentialCredentialMaterial(t *testing.T) {
+	got := AuditRemoteOrigin("https://api.example.test:8443/mcp/customer-secret?access_token=query-secret")
+	if got != "https://api.example.test:8443" {
+		t.Fatalf("audit origin = %q", got)
 	}
 }

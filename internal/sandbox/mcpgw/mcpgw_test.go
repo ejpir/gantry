@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -355,8 +356,58 @@ func TestGatewayRedactsUpstreamResults(t *testing.T) {
 	if strings.Contains(lines[0], "hunter2") {
 		t.Fatalf("credential material reached the guest: %s", lines[0])
 	}
-	if !strings.Contains(lines[0], redactionPlaceholder) {
-		t.Fatalf("redaction placeholder missing: %s", lines[0])
+	if !strings.Contains(lines[0], "*") && !strings.Contains(lines[0], redactionPlaceholder) {
+		t.Fatalf("redaction marker missing: %s", lines[0])
+	}
+}
+
+func TestRedactBytesDoesNotRescanOrGrow(t *testing.T) {
+	// "A" occurs in the human-readable placeholder. The old replacement
+	// loop kept finding its own output forever.
+	got := redactBytes([]byte("A-A"), [][]byte{[]byte("A")})
+	if bytes.Contains(got, []byte("A")) {
+		t.Fatalf("short secret survived redaction: %q", got)
+	}
+	if len(got) > len("A-A") {
+		t.Fatalf("redaction grew a bounded frame: %d > %d", len(got), len("A-A"))
+	}
+}
+
+func TestGatewayCapsConcurrentSessions(t *testing.T) {
+	g, err := New(nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := make([]net.Conn, 0, maxSessions)
+	done := make([]chan error, 0, maxSessions)
+	for i := 0; i < maxSessions; i++ {
+		client, server := net.Pipe()
+		clients = append(clients, client)
+		result := make(chan error, 1)
+		done = append(done, result)
+		go func() { result <- g.Serve(context.Background(), server) }()
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(g.sessions) != maxSessions && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := len(g.sessions); got != maxSessions {
+		t.Fatalf("active sessions = %d, want %d", got, maxSessions)
+	}
+	overflowClient, overflowServer := net.Pipe()
+	if err := g.Serve(context.Background(), overflowServer); err == nil || !strings.Contains(err.Error(), "too many sessions") {
+		t.Fatalf("overflow Serve error = %v", err)
+	}
+	_ = overflowClient.Close()
+	for _, client := range clients {
+		_ = client.Close()
+	}
+	for _, result := range done {
+		select {
+		case <-result:
+		case <-time.After(time.Second):
+			t.Fatal("session did not unwind")
+		}
 	}
 }
 

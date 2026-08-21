@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
 )
@@ -46,15 +47,11 @@ func mcpLoadConfig(name string) (*config.RunConfig, error) {
 	if !layout.ValidName(name) {
 		return nil, fmt.Errorf("invalid sandbox name %q", name)
 	}
-	b, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json"))
+	cfg, err := config.ReadSandboxConfig(layout.Dir(name))
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", name, err)
 	}
-	cfg := &config.RunConfig{}
-	if err := json.Unmarshal(b, cfg); err != nil {
-		return nil, fmt.Errorf("sandbox %s: %w", name, err)
-	}
-	return cfg, nil
+	return &cfg, nil
 }
 
 func mcpShowConfig(name string) int {
@@ -156,12 +153,9 @@ func mcpToolsProbe(sock string) (map[string][]string, error) {
 	r := bufio.NewReaderSize(conn, 64*1024)
 	read := func(id int) (map[string]any, error) {
 		for {
-			line, err := r.ReadBytes('\n')
+			line, err := controlproto.ReadBoundedLine(r, mcpproto.MaxFrameBytes)
 			if err != nil {
 				return nil, err
-			}
-			if len(line) > mcpproto.MaxFrameBytes {
-				return nil, fmt.Errorf("gateway frame exceeds %d bytes", mcpproto.MaxFrameBytes)
 			}
 			var resp map[string]any
 			if err := json.Unmarshal(line, &resp); err != nil {
@@ -172,6 +166,9 @@ func mcpToolsProbe(sock string) (map[string][]string, error) {
 				_ = json.Unmarshal(mustRaw(raw), &gotID)
 			}
 			if gotID == float64(id) {
+				if rpcErr, ok := resp["error"]; ok && rpcErr != nil {
+					return nil, fmt.Errorf("gateway JSON-RPC error: %v", rpcErr)
+				}
 				return resp, nil
 			}
 		}

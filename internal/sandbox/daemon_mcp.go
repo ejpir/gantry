@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
 )
@@ -55,6 +56,16 @@ func (d *daemonRuntime) startMCPGateway() error {
 	return nil
 }
 
+func mcpLauncherImageConfig(config *image.Config) *image.Config {
+	rootConfig := new(image.Config)
+	if config != nil {
+		*rootConfig = *config
+	}
+	rootConfig.User = "root"
+	rootConfig.UID, rootConfig.GID = 0, 0
+	return rootConfig
+}
+
 // spawnGuestStdio starts a long-running process in the sandbox container
 // with live stdio pipes (unlike internalExec's bounded one-shot capture).
 // Used by the MCP gateway for local servers. Same rules as internalExec:
@@ -71,6 +82,11 @@ func (br *broker) spawnGuestStdio(ctx context.Context, args []string) (io.WriteC
 	done := make(chan struct{})
 
 	manifest := client.LoadShareManifest(br.dir)
+	// Local MCP helpers must start as root so gantry-guest can perform the
+	// configured, verified setgroups/setgid/setuid drop itself. Starting them
+	// as the image user either made --user ineffective or (after fail-closed
+	// validation) made every non-matching image unusable.
+	rootImageCfg := mcpLauncherImageConfig(br.cfg.ImageCfg)
 	go func() {
 		defer close(done)
 		defer br.limits.releaseSession()
@@ -86,7 +102,7 @@ func (br *broker) spawnGuestStdio(ctx context.Context, args []string) (io.WriteC
 			Args:             args,
 			ID:               "sb",
 			ExecIntoExisting: true,
-			ImgCfg:           br.cfg.ImageCfg,
+			ImgCfg:           rootImageCfg,
 			Environment:      br.cfg.ProxyEnvironment(),
 			Quiet:            true,
 			ExitStatus:       &status,

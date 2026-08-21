@@ -60,8 +60,10 @@ type broker struct {
 	// guestToolsReady records that gantry-guest was staged into the guest
 	// this boot; secretEnv wires git's credential.helper only when set.
 	guestToolsReady atomic.Bool
-	// audit is the bounded security-event trail served by audit.tail.
-	audit *auditRing
+	// audit is the bounded security-event trail served by audit.tail. auditMu
+	// serializes all sinks, including on-disk rotation and LogFunc callbacks.
+	audit   *auditRing
+	auditMu sync.Mutex
 
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
@@ -197,14 +199,19 @@ func (br *broker) secretControl(c net.Conn, req controlproto.Request) {
 			respond(controlproto.SecretResponse{Error: "secret value exceeds the handshake size limit"})
 			return
 		}
-		br.secretStore.PutValue(req.Secret.Name, req.Secret.Value)
-	} else {
-		br.secretStore.Remove(req.Secret.Name)
 	}
+	// Persist the binding/name transition first. If it fails before commit,
+	// the live store remains unchanged; after commit, memory must follow disk
+	// even when only the durability barrier failed.
 	err := br.store.SetSecretName(req.Secret.Name, present)
 	if err != nil && !atomicfile.Committed(err) {
 		respond(controlproto.SecretResponse{Error: err.Error()})
 		return
+	}
+	if present {
+		br.secretStore.PutValue(req.Secret.Name, req.Secret.Value)
+	} else {
+		br.secretStore.Remove(req.Secret.Name)
 	}
 	if err != nil {
 		respond(controlproto.SecretResponse{Error: "secret updated but configuration durability is uncertain: " + err.Error()})

@@ -121,41 +121,10 @@ func CmdResume(name string) int {
 	defer func() { _ = launchLock.Close() }()
 
 	dir := layout.Dir(name)
-	b, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	cfg, secrets, err := config.ReadSandboxForLaunch(dir, os.LookupEnv)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has no saved configuration: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has no valid saved configuration: %v\n", name, err)
 		return 1
-	}
-	var cfg config.RunConfig
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has a corrupt configuration: %v\n", name, err)
-		return 1
-	}
-	// Env secrets re-resolve eagerly into the handshake (scrubbedEnv keeps
-	// them out of the daemon's /proc/environ); file/exec secrets ride the
-	// persisted sources and re-resolve daemon-side. Sandboxes saved before
-	// source-backed secrets have no SecretSources: every bare name falls
-	// into the eager path, matching their original delivery.
-	covered := map[string]bool{}
-	for _, ns := range cfg.SecretSources {
-		covered[ns.Name] = true
-	}
-	secrets := map[string]secret.Value{}
-	for _, secretName := range cfg.SecretNames {
-		ns, err := secret.ParseNamedSource(secretName)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "gantry resume:", err)
-			return 1
-		}
-		if covered[ns.Name] {
-			continue
-		}
-		s, err := secret.ParseSpec(secretName, os.LookupEnv)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "gantry resume:", err)
-			return 1
-		}
-		secrets[s.Name] = s.Value
 	}
 	return launchSandboxLocked(name, cfg, secrets, false, false, startSandboxDaemon)
 }

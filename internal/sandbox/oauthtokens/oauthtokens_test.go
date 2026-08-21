@@ -36,7 +36,7 @@ func TestRegistryDiskSyncAndRestart(t *testing.T) {
 	dir := t.TempDir()
 	r1 := New()
 	r1.AttachFile(dir)
-	if err := r1.Put(TokenSet{Provider: "codex", AccessToken: "a1", RefreshToken: "r1", ClientID: "cid"}); err != nil {
+	if err := r1.Put(TokenSet{Provider: "codex", AccessToken: "a1", RefreshToken: "r1", IDToken: "id1", AccountID: "acct1", ClientID: "cid"}); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(filepath.Join(dir, "oauth-tokens.json"))
@@ -55,17 +55,20 @@ func TestRegistryDiskSyncAndRestart(t *testing.T) {
 	r2 := New()
 	r2.AttachFile(dir)
 	got, ok := r2.Get("codex")
-	if !ok || got.AccessToken != "a1" || got.RefreshToken != "r1" || got.ClientID != "cid" {
+	if !ok || got.AccessToken != "a1" || got.RefreshToken != "r1" || got.IDToken != "id1" || got.AccountID != "acct1" || got.ClientID != "cid" {
 		t.Fatalf("recovered = %+v, %v", got, ok)
 	}
 
-	// Memory wins over the file for keys set before attach-load.
+	// Attaching after an in-memory operation still loads non-conflicting disk
+	// keys, while memory wins for keys already held.
 	r3 := New()
-	_ = r3.Put(TokenSet{Provider: "codex", AccessToken: "newer"})
+	_ = r3.Put(TokenSet{Provider: "claude", AccessToken: "newer"})
 	r3.AttachFile(dir)
-	got, _ = r3.Get("codex")
-	if got.AccessToken != "newer" {
-		t.Fatalf("memory did not win over disk: %+v", got)
+	if got, ok := r3.Get("codex"); !ok || got.AccessToken != "a1" {
+		t.Fatalf("late attach did not load disk set: found=%v", ok)
+	}
+	if got, ok := r3.Get("claude"); !ok || got.AccessToken != "newer" {
+		t.Fatalf("memory did not survive disk load: found=%v", ok)
 	}
 
 	// Delete syncs too: another restart sees the removal.
