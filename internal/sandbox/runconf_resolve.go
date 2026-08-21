@@ -348,13 +348,12 @@ func (r *runResolver) resolveSecrets() error {
 	}
 	r.cfg.SecretNames = names
 	r.cfg.SecretSources = sources
-	// Host-bound secrets (NAME@host) need the multicall helper inside the
-	// guest — whether their values ride the handshake (env) or resolve
-	// daemon-side (file/exec). Stage the asset here — during CLI
-	// resolution, with progress — so a first-run download never lands on
-	// the VM boot path. Failure to stage is not fatal: the daemon warns
-	// loudly at delivery time instead.
-	if hasBoundSecrets(names) {
+	// Host-bound secrets (NAME@host) and OAuth custody both need the
+	// multicall helper inside the guest (credhelper / oauth login modes).
+	// Stage the asset here — during CLI resolution, with progress — so a
+	// first-run download never lands on the VM boot path. Failure to stage
+	// is not fatal: the daemon warns loudly at delivery time instead.
+	if hasBoundSecrets(names) || *r.flags.OAuthCustody {
 		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
 		if err != nil {
 			// Not fatal: the daemon warns loudly at delivery time instead.
