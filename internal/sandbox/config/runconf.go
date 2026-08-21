@@ -40,7 +40,7 @@ type RunConfig struct {
 	// where the development-tree relative asset lookup cannot find it.
 	GuestTools string `json:"guest_tools,omitempty"`
 	Runtime    string `json:"runtime,omitempty"`
-	Image        string `json:"image"`
+	Image      string `json:"image"`
 	// ImageRef/ImageDigest/ImageCfg record an OCI image resolution
 	// (-image given a reference, OCI layout, or docker save tar instead
 	// of a plain .erofs file). The daemon uses the already-built EROFS at

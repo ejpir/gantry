@@ -83,14 +83,14 @@ func (d *daemonRuntime) deliverGuestTools() {
 
 	if err := d.deliverGuestToolsViaShare(data, sum); err == nil {
 		d.broker.guestToolsReady.Store(true)
-		d.bootLog("guest tools delivered via share (credential helper for bound secrets)")
+		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via share (credential helper for bound secrets)")
 		return
 	} else {
 		fmt.Fprintf(os.Stderr, "daemon: share delivery unavailable (%v); trying exec channel\n", err)
 	}
 	if err := d.deliverGuestToolsViaExec(data, sum); err == nil {
 		d.broker.guestToolsReady.Store(true)
-		d.bootLog("guest tools delivered via exec channel (credential helper for bound secrets)")
+		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via exec channel (credential helper for bound secrets)")
 		return
 	} else {
 		d.guestToolsFailed("exec-channel delivery: %v", err)
