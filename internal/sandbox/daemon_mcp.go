@@ -29,21 +29,11 @@ func (d *daemonRuntime) startMCPGateway() error {
 	if !d.cfg.MCP {
 		return nil
 	}
-	root, usr := d.cfg.MCPFSRoot, d.cfg.MCPFSUser
-	if root == "" {
-		root = "/"
+	servers, err := d.resolveMCPServers()
+	if err != nil {
+		return fmt.Errorf("mcp gateway: %w", err)
 	}
-	if usr == "" {
-		usr = "nobody"
-	}
-	gw, err := mcpgw.New(d.broker.auditf, d.broker.spawnGuestStdio, []mcpgw.Server{{
-		Name: "fs",
-		Argv: []string{
-			filepath.Join(guestToolsDirGuest, "gantry-guest"),
-			"mcp-serve", "filesystem", "--root", root, "--user", usr,
-		},
-		Tools: mcpgw.ToolPolicy{Allow: []string{"read_file", "list_directory"}},
-	}})
+	gw, err := mcpgw.New(d.broker.auditf, d.broker.spawnGuestStdio, servers)
 	if err != nil {
 		return fmt.Errorf("mcp gateway: %w", err)
 	}
@@ -51,7 +41,8 @@ func (d *daemonRuntime) startMCPGateway() error {
 	if err != nil {
 		return fmt.Errorf("mcp gateway listener: %w", err)
 	}
-	d.broker.auditf("mcp: gateway enabled (fs root %s, local servers run as %s)", root, usr)
+	d.broker.auditf("mcp: gateway enabled (fs root %s, local servers run as %s, %d remotes)",
+		d.cfg.MCPFSRoot, d.cfg.MCPFSUser, len(d.cfg.MCPRemotes))
 	go func() {
 		for {
 			conn, err := ln.Accept()

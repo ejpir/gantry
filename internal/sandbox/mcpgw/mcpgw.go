@@ -44,15 +44,21 @@ type ToolPolicy struct {
 	Deny  []string `json:"deny,omitempty"`
 }
 
-// Server is one upstream MCP server. Milestone 1 supports local servers
-// only: Argv runs guest-side via the daemon's exec channel, stdio piped
-// back to the gateway. Redact holds byte strings (credential material)
-// scrubbed from anything forwarded back to the guest.
+// Server is one upstream MCP server. A local server sets Argv (runs
+// guest-side via the daemon's exec channel, stdio piped back to the
+// gateway); a remote server sets URL (streamable-HTTP, reached from the
+// host). Headers are injected into every remote request; TokenFunc
+// supplies a fresh bearer token per session (custody). Redact holds byte
+// strings (credential material) scrubbed from anything forwarded back to
+// the guest — injected values are added automatically at session start.
 type Server struct {
-	Name   string     `json:"name"`
-	Argv   []string   `json:"argv,omitempty"`
-	Tools  ToolPolicy `json:"tools,omitempty"`
-	Redact [][]byte   `json:"-"` // never serialized, never logged
+	Name      string                 `json:"name"`
+	Argv      []string               `json:"argv,omitempty"`
+	URL       string                 `json:"url,omitempty"`
+	Tools     ToolPolicy             `json:"tools,omitempty"`
+	Headers   map[string]string      `json:"-"` // injected credential headers; never serialized or logged
+	TokenFunc func() (string, error) `json:"-"` // dynamic bearer (custody); never serialized or logged
+	Redact    [][]byte               `json:"-"` // never serialized, never logged
 }
 
 // SpawnFunc starts a local server's process and returns its stdio pipes
@@ -133,9 +139,15 @@ const (
 )
 
 // protocolVersion is the MCP revision the gateway speaks. The fs server
-// answers the same; when the gateway grows remote upstreams (milestone 2)
-// version negotiation moves behind the upstream client.
+// answers the same; remote upstreams get it as the requested version and
+// echo it back via the negotiated MCP-Protocol-Version header.
 const protocolVersion = "2025-06-18"
+
+// initializeParams is the gateway's synthesized upstream handshake: the
+// client's own initialize stays between client and gateway.
+func initializeParams() json.RawMessage {
+	return json.RawMessage(`{"protocolVersion":"` + protocolVersion + `","capabilities":{},"clientInfo":{"name":"gantry-mcp-gateway","version":"1.0.0"}}`)
+}
 
 // maxInFlight bounds concurrent requests per guest session; a runaway
 // agent gets an error instead of exhausting upstream sessions.
@@ -152,7 +164,7 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 		g:         g,
 		wmu:       new(sync.Mutex),
 		w:         rw,
-		upstreams: make(map[string]*stdioUpstream),
+		upstreams: make(map[string]upstream),
 		sem:       make(chan struct{}, maxInFlight),
 	}
 	defer sess.closeAll()
@@ -230,6 +242,13 @@ func scanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 	return 0, nil, nil
 }
 
+// upstream is one started upstream server (stdio or streamable-HTTP).
+type upstream interface {
+	Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error)
+	Notify(method string, params json.RawMessage)
+	close()
+}
+
 // session is one guest connection's state.
 type session struct {
 	g   *Gateway
@@ -237,7 +256,7 @@ type session struct {
 	w   io.Writer
 
 	mu        sync.Mutex
-	upstreams map[string]*stdioUpstream
+	upstreams map[string]upstream
 	sem       chan struct{}
 }
 
@@ -278,24 +297,36 @@ func (s *session) dispatch(ctx context.Context, req *rpcRequest) (int, int) {
 	}
 }
 
-// upstream returns the started upstream for srv, spawning and handshaking
-// it on first use.
-func (s *session) upstream(ctx context.Context, srv Server) (*stdioUpstream, error) {
+// upstream returns the started upstream for srv, spawning (local) or
+// connecting (remote) and handshaking it on first use.
+func (s *session) upstream(ctx context.Context, srv Server) (upstream, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if u, ok := s.upstreams[srv.Name]; ok {
 		return u, nil
 	}
-	if s.g.spawn == nil {
-		return nil, fmt.Errorf("no spawn hook wired")
+	var (
+		u   upstream
+		err error
+	)
+	if srv.URL != "" {
+		u, err = startHTTPUpstream(ctx, s.g.logf, srv)
+	} else {
+		if s.g.spawn == nil {
+			return nil, fmt.Errorf("no spawn hook wired")
+		}
+		u, err = startStdioUpstream(ctx, s.g.logf, s.g.spawn, srv)
 	}
-	u, err := startStdioUpstream(ctx, s.g.logf, s.g.spawn, srv)
 	if err != nil {
-		s.g.auditf("mcp: upstream %s spawn failed: %v", srv.Name, err)
+		s.g.auditf("mcp: upstream %s start failed: %v", srv.Name, err)
 		return nil, err
 	}
 	s.upstreams[srv.Name] = u
-	s.g.auditf("mcp: upstream %s started (argv head %q)", srv.Name, srv.Argv[0])
+	if srv.URL != "" {
+		s.g.auditf("mcp: upstream %s started (remote %s, %d injected headers)", srv.Name, srv.URL, len(srv.Headers))
+	} else {
+		s.g.auditf("mcp: upstream %s started (argv head %q)", srv.Name, srv.Argv[0])
+	}
 	return u, nil
 }
 
@@ -532,7 +563,7 @@ func startStdioUpstream(ctx context.Context, logf LogFunc, spawn SpawnFunc, srv 
 	go u.readLoop(stdout)
 	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if _, err := u.Call(initCtx, "initialize", json.RawMessage(`{"protocolVersion":"`+protocolVersion+`","capabilities":{},"clientInfo":{"name":"gantry-mcp-gateway","version":"1.0.0"}}`)); err != nil {
+	if _, err := u.Call(initCtx, "initialize", initializeParams()); err != nil {
 		u.close()
 		return nil, fmt.Errorf("upstream initialize: %w", err)
 	}
