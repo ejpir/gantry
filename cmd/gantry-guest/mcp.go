@@ -22,6 +22,8 @@ package main
 //     binary files are refused.
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -144,12 +146,14 @@ var fsTools = []map[string]any{
 // responses on out. Requests arriving after in closes end the loop.
 // rootPath is the jail's absolute path, used for the lexical prefix check
 // (os.Root is the race-free backstop).
+//
+// Reads go through a bufio.Reader: agents pipeline requests, and an
+// unbuffered readLineBounded-style read would DISCARD bytes past the
+// first newline in each chunk (eating every second request).
 func serveFS(jail *os.Root, rootPath string, in io.Reader, out io.Writer) error {
+	r := bufio.NewReaderSize(in, 64*1024)
 	for {
-		line, err := readLineBounded(in, mcpproto.MaxFrameBytes)
-		if len(line) == 0 && err != nil {
-			return nil // EOF: session over
-		}
+		line, err := readLineBuffered(r, mcpproto.MaxFrameBytes)
 		if len(line) > 0 {
 			if resp := handleFSFrame(jail, rootPath, line); resp != nil {
 				if _, werr := out.Write(append(resp, '\n')); werr != nil {
@@ -158,8 +162,32 @@ func serveFS(jail *os.Root, rootPath string, in io.Reader, out io.Writer) error 
 			}
 		}
 		if err != nil {
-			return nil
+			return nil // EOF (possibly after a final unterminated line)
 		}
+	}
+}
+
+// readLineBuffered reads one '\n'-terminated line from a buffered reader,
+// refusing more than max bytes. A trailing unterminated line is returned
+// with io.EOF so the caller can serve it before ending.
+func readLineBuffered(r *bufio.Reader, max int) ([]byte, error) {
+	var line []byte
+	for {
+		frag, err := r.ReadSlice('\n')
+		line = append(line, frag...)
+		if len(line) > max {
+			return nil, fmt.Errorf("frame exceeds %d bytes", max)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err == io.EOF && len(line) > 0 {
+			return bytes.TrimRight(line, "\r\n"), io.EOF
+		}
+		if err != nil {
+			return nil, err
+		}
+		return bytes.TrimRight(line, "\r\n"), nil
 	}
 }
 
