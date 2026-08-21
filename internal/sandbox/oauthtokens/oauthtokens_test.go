@@ -1,6 +1,8 @@
 package oauthtokens
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -113,5 +115,81 @@ func TestRegistryDoesNotStringifyTokens(t *testing.T) {
 		if strings.Contains(s, "canary") {
 			t.Fatalf("registry rendering leaked token material: %q", s)
 		}
+	}
+}
+
+func TestCorruptFileIsQuarantined(t *testing.T) {
+	dir := t.TempDir()
+	// Genuinely corrupt: expiry as a bool (numeric would migrate; bool
+	// is neither schema).
+	bad := `[{"accessToken":"a","refreshToken":"r","expiry":true,"provider":"claude","clientId":"c"}]`
+	if err := os.WriteFile(filepath.Join(dir, "oauth-tokens.json"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New()
+	r.AttachFile(dir)
+	var logs []string
+	r.SetLogger(func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	if got := r.Providers(); len(got) != 0 { // restoreRestart's path: loud
+		t.Fatalf("corrupt file must not yield providers: %v", got)
+	}
+	if _, ok := r.Get("claude"); ok {
+		t.Fatal("corrupt file must not yield a token set")
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "quarantined") {
+		t.Fatalf("expected one loud quarantine line, got %v", logs)
+	}
+	if strings.HasPrefix(logs[0], "oauth tokens:") {
+		t.Fatalf("logger message must not self-prefix (callback owns it): %q", logs[0])
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "oauth-tokens.json.corrupt-*"))
+	if len(matches) != 1 {
+		t.Fatalf("evidence file not quarantined: %v", matches)
+	}
+	// Custody recovers: a fresh Put writes a clean file.
+	if err := r.Put(TokenSet{Provider: "claude", AccessToken: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Get("claude"); !ok {
+		t.Fatal("registry should accept new tokens after quarantine")
+	}
+}
+
+func TestLegacyNumericExpiryMigrates(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `[{"accessToken":"a","refreshToken":"r","expiry":2000000000.164768,"provider":"claude","clientId":"c"}]` // float seconds, as early dev/mock runs wrote
+	if err := os.WriteFile(filepath.Join(dir, "oauth-tokens.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New()
+	r.AttachFile(dir)
+	var logs []string
+	r.SetLogger(func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) })
+	set, ok := r.Get("claude")
+	if !ok {
+		t.Fatal("legacy numeric expiry must migrate, not quarantine")
+	}
+	if set.Expiry.Unix() != 2000000000 {
+		t.Fatalf("expiry = %v", set.Expiry)
+	}
+	if ns := set.Expiry.Nanosecond(); ns < 160000000 || ns > 170000000 {
+		t.Fatalf("fractional seconds lost: %v", set.Expiry)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "migrated legacy numeric expiry") {
+		t.Fatalf("expected a migration line, got %v", logs)
+	}
+	// The file was rewritten in the current schema: RFC3339 string.
+	b, _ := os.ReadFile(filepath.Join(dir, "oauth-tokens.json"))
+	var raw []map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, isString := raw[0]["expiry"].(string); !isString {
+		t.Fatalf("rewritten expiry should be a string: %s", b)
+	}
+	// No quarantine happened.
+	matches, _ := filepath.Glob(filepath.Join(dir, "oauth-tokens.json.corrupt-*"))
+	if len(matches) != 0 {
+		t.Fatalf("unexpected quarantine: %v", matches)
 	}
 }

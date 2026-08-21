@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -50,4 +52,30 @@ func (br *broker) auditf(format string, a ...any) {
 	line := fmt.Sprintf(format, a...)
 	br.audit.append(line)
 	fmt.Printf("daemon: %s\n", line)
+	br.persistAuditLine(line)
+}
+
+// auditLogCap bounds the on-disk trail; past it the file is rewritten with
+// its trailing half (best-effort — the live ring stays authoritative).
+const auditLogCap = 1 << 20
+
+// persistAuditLine appends to <dir>/audit.log so `gantry audit` works after
+// the daemon stops. Never fails loudly: disk trouble must not break the
+// custody paths that audit.
+func (br *broker) persistAuditLine(line string) {
+	if br.dir == "" {
+		return
+	}
+	path := filepath.Join(br.dir, "audit.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > auditLogCap {
+		if b, err := os.ReadFile(path); err == nil {
+			_ = os.WriteFile(path, b[len(b)/2:], 0o600)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	_, _ = fmt.Fprintln(f, line)
 }

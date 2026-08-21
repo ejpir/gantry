@@ -129,7 +129,7 @@ func (r *Registry) Providers() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.loadLocked(); err != nil && r.logf != nil {
-		r.logf("oauth tokens: %v", err)
+		r.logf("%v", err) // the logger callback owns the "oauth tokens:" prefix
 	}
 	out := make([]string, 0, len(r.sets))
 	for p := range r.sets {
@@ -156,16 +156,87 @@ func (r *Registry) loadLocked() error {
 		}
 		return fmt.Errorf("load oauth tokens: %w", err)
 	}
-	var persisted []TokenSet
+	var persisted []persistedSet
 	if err := json.Unmarshal(b, &persisted); err != nil {
-		return fmt.Errorf("parse %s: %w", r.path, err)
+		return r.quarantineLocked(err)
 	}
-	for _, set := range persisted {
+	migrated := false
+	for _, ps := range persisted {
+		exp, legacy, err := ps.expiryTime()
+		if err != nil {
+			return r.quarantineLocked(fmt.Errorf("provider %s: %w", ps.Provider, err))
+		}
+		if legacy {
+			migrated = true
+		}
+		set := TokenSet{AccessToken: ps.AccessToken, RefreshToken: ps.RefreshToken,
+			Expiry: exp, Provider: ps.Provider, ClientID: ps.ClientID}
 		if _, exists := r.sets[set.Provider]; !exists {
 			r.sets[set.Provider] = set
 		}
 	}
+	if migrated {
+		// Dev-build artifact: expiry was serialized as a unix number.
+		// Accept it, say so, and rewrite the file in the current schema.
+		if r.logf != nil {
+			r.logf("migrated legacy numeric expiry in %s — rewriting", filepath.Base(r.path))
+		}
+		if err := r.syncLocked(); err != nil {
+			return fmt.Errorf("rewrite migrated token file: %w", err)
+		}
+	}
 	return nil
+}
+
+// persistedSet mirrors TokenSet on disk but keeps Expiry raw so legacy
+// numeric encodings (early dev builds) can be migrated instead of
+// quarantined.
+type persistedSet struct {
+	AccessToken  string          `json:"accessToken"`
+	RefreshToken string          `json:"refreshToken,omitempty"`
+	Expiry       json.RawMessage `json:"expiry,omitempty"`
+	Provider     string          `json:"provider"`
+	ClientID     string          `json:"clientId,omitempty"`
+}
+
+// expiryTime parses expiry as RFC3339 (current schema) or unix seconds
+// (legacy); the second return value reports the legacy form.
+func (ps persistedSet) expiryTime() (time.Time, bool, error) {
+	if len(ps.Expiry) == 0 || string(ps.Expiry) == "null" {
+		return time.Time{}, false, nil
+	}
+	var s string
+	if err := json.Unmarshal(ps.Expiry, &s); err == nil {
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("expiry %q is not RFC3339: %w", s, err)
+		}
+		return t, false, nil
+	}
+	var n int64
+	if err := json.Unmarshal(ps.Expiry, &n); err == nil {
+		return time.Unix(n, 0), true, nil
+	}
+	// Early dev/mock runs wrote float seconds (python time.time()).
+	var f float64
+	if err := json.Unmarshal(ps.Expiry, &f); err == nil {
+		sec := int64(f)
+		return time.Unix(sec, int64((f-float64(sec))*1e9)), true, nil
+	}
+	return time.Time{}, false, fmt.Errorf("expiry is neither an RFC3339 string nor unix seconds")
+}
+
+// quarantineLocked moves an unparseable token file aside and continues
+// with an empty registry rather than wedging custody forever. Loud by
+// contract: the caller audits the returned error, and the evidence file
+// is preserved for inspection.
+func (r *Registry) quarantineLocked(parseErr error) error {
+	quarantine := fmt.Sprintf("%s.corrupt-%d", r.path, time.Now().Unix())
+	if renErr := os.Rename(r.path, quarantine); renErr != nil {
+		return fmt.Errorf("parse %s: %w (quarantine to %s failed: %v)", r.path, parseErr, quarantine, renErr)
+	}
+	return fmt.Errorf("parse %s: %w — quarantined to %s; custody continues empty (re-login to repopulate)",
+		r.path, parseErr, filepath.Base(quarantine))
 }
 
 // syncLocked rewrites the file atomically-ish (write temp + rename) with
