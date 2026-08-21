@@ -41,36 +41,119 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// Parse one -secret spec:
+// bindingRE validates a host binding: a lowercase DNS hostname, optionally
+// wildcard-led ("*.example.com"). Lowercase-only by design so bindings
+// compare canonically; DNS names are case-insensitive anyway.
+var bindingRE = regexp.MustCompile(`^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
+// ValidateBinding validates a secret's host binding without resolving or
+// handling its value.
+func ValidateBinding(host string) error {
+	if host == "" || len(host) > 253 || !bindingRE.MatchString(host) {
+		return fmt.Errorf("bad binding host %q (want a lowercase DNS name like github.com or *.githubusercontent.com)", host)
+	}
+	return nil
+}
+
+// SplitBinding divides a NAME@host pair. A bare NAME yields an empty
+// binding (ambient secret). The binding is everything after the first '@'.
+func SplitBinding(s string) (name, binding string, err error) {
+	name, binding, found := strings.Cut(s, "@")
+	if !found {
+		return s, "", nil
+	}
+	if err := ValidateBinding(binding); err != nil {
+		return "", "", fmt.Errorf("secret %q: %w", s, err)
+	}
+	return name, binding, nil
+}
+
+// Spec is one parsed -secret argument: a name, an optional host binding,
+// and the resolved value. A bound secret (Binding != "") is delivered only
+// through the credential broker for requests to that host; it is NOT
+// injected into session environments.
+type Spec struct {
+	Name    string
+	Binding string
+	Value   Value
+}
+
+// DisplayName renders the spec the way it is persisted in SecretNames:
+// "NAME" when ambient, "NAME@host" when bound. Safe to persist and show.
+func (s Spec) DisplayName() string {
+	if s.Binding == "" {
+		return s.Name
+	}
+	return s.Name + "@" + s.Binding
+}
+
+// BindingsFromNames maps persisted display names (see Spec.DisplayName) to
+// their host bindings. Ambient entries are omitted.
+func BindingsFromNames(names []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, n := range names {
+		name, binding, err := SplitBinding(n)
+		if err != nil {
+			return nil, err
+		}
+		if binding != "" {
+			out[name] = binding
+		}
+	}
+	return out, nil
+}
+
+// ParseSpec parses one -secret spec, including an optional host binding:
 //
-//	NAME            value from gantry's own environment (getenv)
-//	NAME=@/path     value read from a file (trailing newline trimmed)
+//	NAME                    value from gantry's own environment (getenv)
+//	NAME=@/path             value read from a file (trailing newline trimmed)
+//	NAME@host               bound to host: broker-only delivery, no env injection
+//	NAME@host=@/path        file value, bound to host
 //
 // NAME=literal is REFUSED — argv is world-readable via ps and lands in
 // shell history, the same reason `gantry image login` has no --password.
-func Parse(spec string, getenv func(string) (string, bool)) (name string, v Value, err error) {
-	if i := strings.Index(spec, "=@"); i > 0 {
-		name = spec[:i]
-		if err := ValidateName(name); err != nil {
-			return "", "", err
-		}
-		b, err := os.ReadFile(spec[i+2:])
+func ParseSpec(spec string, getenv func(string) (string, bool)) (Spec, error) {
+	rest := spec
+	fileRef := ""
+	if i := strings.Index(rest, "=@"); i > 0 {
+		fileRef = rest[i+2:]
+		rest = rest[:i]
+	} else if strings.Contains(rest, "=") {
+		return Spec{}, fmt.Errorf("refusing a secret value on the command line (visible in ps + shell history); use -secret %s (environment) or -secret %[1]s=@/path", strings.SplitN(spec, "=", 2)[0])
+	}
+	name, binding, err := SplitBinding(rest)
+	if err != nil {
+		return Spec{}, err
+	}
+	if err := ValidateName(name); err != nil {
+		return Spec{}, err
+	}
+	if fileRef != "" {
+		b, err := os.ReadFile(fileRef)
 		if err != nil {
-			return "", "", fmt.Errorf("secret %s: %w", name, err)
+			return Spec{}, fmt.Errorf("secret %s: %w", name, err)
 		}
-		return name, Value(strings.TrimRight(string(b), "\r\n")), nil
+		return Spec{Name: name, Binding: binding, Value: Value(strings.TrimRight(string(b), "\r\n"))}, nil
 	}
-	if strings.Contains(spec, "=") {
-		return "", "", fmt.Errorf("refusing a secret value on the command line (visible in ps + shell history); use -secret %s (environment) or -secret %[1]s=@/path", strings.SplitN(spec, "=", 2)[0])
+	val, ok := getenv(name)
+	if !ok {
+		return Spec{}, fmt.Errorf("secret %s: not set in gantry's environment (export it first, or use -secret %[1]s=@/path)", name)
 	}
-	if err := ValidateName(spec); err != nil {
+	return Spec{Name: name, Binding: binding, Value: Value(val)}, nil
+}
+
+// Parse one -secret spec without a host binding (see ParseSpec). Bound
+// specs are rejected here: bindings change delivery semantics (broker-only,
+// no ambient env), which only the sandbox-start paths honour.
+func Parse(spec string, getenv func(string) (string, bool)) (name string, v Value, err error) {
+	s, err := ParseSpec(spec, getenv)
+	if err != nil {
 		return "", "", err
 	}
-	val, ok := getenv(spec)
-	if !ok {
-		return "", "", fmt.Errorf("secret %s: not set in gantry's environment (export it first, or use -secret %[1]s=@/path)", spec)
+	if s.Binding != "" {
+		return "", "", fmt.Errorf("secret %s: host bindings (@%s) are only supported via -secret at sandbox start", s.Name, s.Binding)
 	}
-	return spec, Value(val), nil
+	return s.Name, s.Value, nil
 }
 
 // ParseFile reads a dotenv-style file: NAME=VALUE per line, '#' comments
@@ -104,15 +187,31 @@ func ParseFile(path string) (map[string]Value, error) {
 
 // ResolveAll merges -secret specs and -secret-file files into the final
 // set. Later occurrences win. Returns the values (CLI memory only — never
-// serialized) and the ordered unique names (safe to persist).
+// serialized) and the ordered unique display names (safe to persist;
+// bound secrets persist as "NAME@host").
 func ResolveAll(specs, files []string, getenv func(string) (string, bool)) (map[string]Value, []string, error) {
 	values := map[string]Value{}
+	display := map[string]string{}
 	var names []string
-	add := func(name string, v Value) {
-		if _, seen := values[name]; !seen {
-			names = append(names, name)
+	add := func(s Spec) {
+		if _, seen := values[s.Name]; !seen {
+			names = append(names, s.DisplayName())
+			values[s.Name] = s.Value
+			display[s.Name] = s.DisplayName()
+			return
 		}
-		values[name] = v
+		values[s.Name] = s.Value
+		if d := s.DisplayName(); d != display[s.Name] {
+			// Re-occurrence with a different binding updates the persisted
+			// display name in place; order is stable.
+			for i, n := range names {
+				if n == display[s.Name] {
+					names[i] = d
+					break
+				}
+			}
+			display[s.Name] = d
+		}
 	}
 	for _, f := range files {
 		m, err := ParseFile(f)
@@ -120,15 +219,15 @@ func ResolveAll(specs, files []string, getenv func(string) (string, bool)) (map[
 			return nil, nil, fmt.Errorf("-secret-file: %w", err)
 		}
 		for _, name := range sortedKeys(m) {
-			add(name, m[name])
+			add(Spec{Name: name, Value: m[name]})
 		}
 	}
 	for _, spec := range specs {
-		name, v, err := Parse(spec, getenv)
+		s, err := ParseSpec(spec, getenv)
 		if err != nil {
 			return nil, nil, fmt.Errorf("-secret: %w", err)
 		}
-		add(name, v)
+		add(s)
 	}
 	return values, names, nil
 }
