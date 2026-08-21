@@ -76,8 +76,15 @@ type RunConfig struct {
 	// fresh access tokens into the guest auth file. Default off — the
 	// transparent bridge needs no provider-specific knowledge.
 	OAuthCustody *bool `json:"oauth_custody,omitempty"`
-	MemMB        uint  `json:"memMB"`
-	VCPUs        int   `json:"vcpus,omitempty"`
+	// MCP gates the per-sandbox MCP gateway (docs/mcp-gateway.md): a
+	// vsock-bridged session mux in the daemon with contained local
+	// servers. MCPFSRoot jails the built-in filesystem server; MCPFSUser
+	// is the unprivileged guest user local servers drop to.
+	MCP       bool   `json:"mcp,omitempty"`
+	MCPFSRoot string `json:"mcp_fs_root,omitempty"`
+	MCPFSUser string `json:"mcp_fs_user,omitempty"`
+	MemMB     uint   `json:"memMB"`
+	VCPUs     int    `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1). Source-backed
@@ -118,6 +125,8 @@ type RunFlags struct {
 	ProxyEnforce                            *bool
 	OAuthBridge                             *bool
 	OAuthCustody                            *bool
+	MCP                                     *bool
+	MCPFSRoot, MCPFSUser                    *string
 	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
@@ -145,6 +154,9 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		ProxyEnforce:     fs.Bool("proxy-enforce", false, "block direct TCP 80/443 and UDP 443 except to the configured proxy"),
 		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
 		OAuthCustody:     fs.Bool("oauth-custody", false, "hold OAuth refresh tokens on the host; push fresh access tokens into the guest (claude, codex)"),
+		MCP:              fs.Bool("mcp", false, "run the per-sandbox MCP gateway (docs/mcp-gateway.md): agents reach it via gantry-guest mcp-proxy"),
+		MCPFSRoot:        fs.String("mcp-fs-root", "/", "jail directory for the gateway's built-in filesystem server"),
+		MCPFSUser:        fs.String("mcp-fs-user", "nobody", "unprivileged guest user the gateway's local servers run as"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),

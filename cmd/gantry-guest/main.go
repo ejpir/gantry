@@ -45,6 +45,10 @@ func main() {
 		runCredHelper(args)
 	case "oauth":
 		runOAuth(args)
+	case "mcp-proxy":
+		os.Exit(runMCPProxy())
+	case "mcp-serve":
+		os.Exit(runMCPServe(args))
 	case "version":
 		fmt.Println("gantry-guest", version)
 	default:
@@ -59,6 +63,8 @@ func usage() {
 modes:
   credhelper   git credential.helper; answers "get" from the host credential broker
   oauth        custody-mode OAuth login: gantry-guest oauth login <provider>
+  mcp-proxy    bridge agent stdio MCP to the host gateway (vsock 1029)
+  mcp-serve    run a contained local MCP server: mcp-serve filesystem --root DIR --user U
   version      print the release version
 `)
 }

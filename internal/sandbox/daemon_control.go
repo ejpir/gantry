@@ -95,6 +95,11 @@ func (d *daemonRuntime) startControl() error {
 		cm.restoreRestart()
 		fmt.Printf("daemon: oauth custody enabled (refresh tokens held host-side)\n")
 	}
+	// MCP gateway (opt-in): vsock-bridged session mux with contained
+	// local servers (docs/mcp-gateway.md).
+	if err := d.startMCPGateway(); err != nil {
+		return err
+	}
 	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)
 	return nil
