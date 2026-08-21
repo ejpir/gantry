@@ -346,8 +346,9 @@ rm -f /tmp/mock-mcp-auth.log
 python3 /tmp/mock-mcp.py &
 MOCKMCP=$!
 sleep 1
-$G start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN=t12-secret-token \
-  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*' >/dev/null 2>&1
+export T12_MCP_TOKEN=t12-secret-token  # -secret NAME=value is refused (ps/history leak); env-source it
+$G start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN \
+  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*' -image alpine:latest >/dev/null 2>&1
 sleep 4
 xe t12 'mkdir -p /work && chmod 755 /work' >/dev/null 2>&1  # creates container "sb" the fs server spawns into
 cat > /tmp/t12-reqs.ndjson <<'EOF'
@@ -368,9 +369,9 @@ if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: no credential 
 R=$($G audit t12);                          chk "mcp: remote config audited (no values)"     "mcp: remote mock configured" "$R"
                                             chk "mcp: remote calls audited"                 "mcp: call mock__echo_auth" "$R"
 # Loud refusals at start time (fail closed, never silent degrade):
-OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' 2>&1)
+OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' -image alpine:latest 2>&1)
 chk "mcp: cloud metadata target refused" "non-public" "$OUT"
-OUT=$($G start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' 2>&1)
+OUT=$($G start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' -image alpine:latest 2>&1)
 chk "mcp: plain HTTP to a public host refused" "plain HTTP" "$OUT"
 kill $MOCKMCP 2>/dev/null
 
