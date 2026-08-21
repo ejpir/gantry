@@ -119,6 +119,62 @@ name win.
 Gantry refuses `-secret NAME=literal`. Literal values in argv can be exposed
 by process inspection and shell history.
 
+## Refreshable secret sources
+
+File- and command-backed secrets are not copied at start. The sandbox daemon
+re-resolves them when they are used, so rotating the source is picked up by a
+running sandbox without a restart:
+
+```console
+$ gantry start agent -image alpine:latest \
+    -secret GITHUB_TOKEN=@/secure/token,ttl=60s
+```
+
+```console
+$ gantry start agent -image alpine:latest \
+    -secret GITHUB_TOKEN='!gh auth token'
+```
+
+The `,ttl=` suffix sets how long a resolved value is cached (default: 60s for
+files, 5m for commands; `ttl=0` re-resolves on every use). A command source
+runs an argv on the host — never a shell string — and captures stdout. This
+covers `op read ...`, `pass ...`, and similar tools without per-vendor support.
+
+If a previously working source stops resolving (the file was deleted, the
+command fails), Gantry fails closed: the cached value is dropped and nothing
+stale is served. The daemon log names the failing source, never its value.
+
+Environment-sourced secrets (`-secret NAME`) are still read once at start:
+environment variables do not change for a running process, so there is nothing
+to refresh.
+
+## Bind a secret to a host
+
+Appending `@host` to the name binds the secret to that host and changes how it
+is delivered:
+
+```console
+$ export GITHUB_TOKEN=...
+$ gantry start agent -image alpine:latest -secret GITHUB_TOKEN@github.com
+```
+
+A bound secret is never placed in the guest environment or written to guest
+disk. Instead, Gantry stages a git credential helper inside the guest and
+points git at it; when git needs credentials for the bound host, the helper
+asks the sandbox daemon over the VM's vsock channel, and the daemon answers
+from memory. Wildcard bindings (`@*.githubusercontent.com`) cover subdomains.
+
+The daemon answers only for the bound host, and only when the sandbox's
+network policy allows egress to that host. Every delivery, refusal, and source
+failure is logged by name in `daemon.log` — values are structurally
+unloggable. Removing the secret on a running sandbox (the dashboard's secret
+controls) takes effect on the next git operation, with nothing to scrub
+guest-side.
+
+Bound secrets combine with refreshable sources —
+`-secret GITHUB_TOKEN@github.com=@/secure/token,ttl=60s` — so a rotated token
+file reaches in-flight sessions.
+
 ## Secret lifecycle
 
 For persistent sandboxes, `sandbox.json` stores only configured secret names.
@@ -128,7 +184,8 @@ guest process environment. Gantry scrubs those keys from the host daemon's
 environment.
 
 After `gantry stop`, values are gone. Before `gantry resume`, export every
-configured name again:
+configured environment-sourced name again (file- and command-backed sources
+re-resolve from their references and need no re-export):
 
 ```console
 $ export GITHUB_TOKEN=...
@@ -163,4 +220,32 @@ Disable it for a sandbox that does not need browser OAuth:
 ```console
 $ gantry start dev -image alpine:latest -oauth-bridge=false
 ```
+
+## OAuth custody
+
+For Codex and Claude, Gantry can additionally hold the OAuth refresh token on
+the host and keep the guest on short-lived access tokens:
+
+```console
+$ gantry start agent -image ubuntu:latest -oauth-custody
+$ gantry exec agent -- gantry-guest oauth login codex
+```
+
+`gantry-guest oauth login` prints an authorize URL; open it in your host
+browser. (Guest tools install into `/run/gantry/bin`, which is on the PATH of
+sessions and execs once installed; use the full path in older sandboxes.)
+The daemon completes the exchange itself: the refresh token is stored
+host-side (a `0600` file in the sandbox state directory, so `gantry stop` and
+`gantry resume` keep the session), and the guest's auth file receives the
+current access token plus a sentinel refresh token. The daemon refreshes ahead
+of expiry and pushes the fresh access token into the guest automatically.
+
+A process exfiltrating the guest auth file gets an access token that stops
+working at expiry and a refresh token that never works.
+
+Custody is provider-specific and supports Codex and Claude only; other
+providers use the transparent callback bridge above. If the provider revokes
+the refresh token, Gantry drops the session and the agent fails loudly — log
+in again with the same command. Custody requires the callback bridge; it is
+off by default and the transparent bridge alone remains the standard behavior.
 
