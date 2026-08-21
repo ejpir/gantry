@@ -8,6 +8,13 @@ set +e
 cd /opt/gantry || exit 1
 
 G=./gantry-linux-amd64
+# Pin the state roots: under SSM HOME is unset, and layout.Root() /
+# image.DefaultStore() fall back to DIFFERENT directories (/tmp/gantry-0
+# vs /tmp/.gantry), which would make every sandbox.json/ctl.sock check
+# below silently probe the wrong tree.
+export GANTRY_HOME="${GANTRY_HOME:-/tmp/.gantry/sandboxes}"
+export GANTRY_IMAGES="${GANTRY_IMAGES:-/tmp/.gantry/images}"
+RWDIR="$(dirname "$GANTRY_HOME")/rwlayers"
 KERNEL=${GANTRY_TEST_KERNEL:-nerdbox-kernel-x86_64}
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
@@ -23,7 +30,7 @@ echo "== environment =="
 uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
 
 for s in t1 t2 t3 t4; do $G stop "$s" >/dev/null 2>&1; done
-rm -rf /tmp/.gantry/sandboxes/t* /root/.gantry/sandboxes/t* /tmp/.gantry/images /tmp/.gantry/rwlayers
+rm -rf "$GANTRY_HOME"/t* "$GANTRY_IMAGES" "$RWDIR"
 # rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
 
 echo "===== crun (t1) ====="
@@ -76,9 +83,9 @@ R=$(xe t3 'echo x > /host/code/f2 && echo WR-OK');      chk "share: write"  "WR-
 echo "===== OCI image (t4: alpine, offline cache hit) ====="
 # the corporate network blocks registry-1.docker.io from the instance;
 # the store is pre-seeded from S3 and Resolve must hit it offline
-mkdir -p /tmp/.gantry/images
+mkdir -p "$GANTRY_IMAGES"
 for _ in 1 2 3; do curl -fSL --retry 3 -o /tmp/alpine-store.tar.gz "$GANTRY_STORE_URL" && break; sleep 3; done
-tar xzf /tmp/alpine-store.tar.gz -C /tmp/.gantry/images
+tar xzf /tmp/alpine-store.tar.gz -C "$GANTRY_IMAGES"
 $G image ls
 $G start t4 -image alpine:latest 2>&1 | tail -2
 sleep 1
@@ -98,16 +105,16 @@ sleep 2
 R=$(xe t5 'printenv CANARY');     chk "secrets: env value in guest"   "$CANARY" "$R"
 R=$(xe t5 'printenv FROM_FILE');  chk "secrets: @file value in guest" "$FILECANARY" "$R"
 
-grep -q "CANARY" /tmp/.gantry/sandboxes/t5/sandbox.json 2>/dev/null \
+grep -q "CANARY" "$GANTRY_HOME"/t5/sandbox.json 2>/dev/null \
   && ok "secrets: name recorded in sandbox.json" || bad "secrets: name recorded in sandbox.json"
-grep -q "$CANARY" /tmp/.gantry/sandboxes/t5/sandbox.json 2>/dev/null \
+grep -q "$CANARY" "$GANTRY_HOME"/t5/sandbox.json 2>/dev/null \
   && bad "secrets: value NOT in sandbox.json" || ok "secrets: value NOT in sandbox.json"
 
 leak=""
-grep -rqs "$CANARY" /tmp/.gantry/sandboxes/t5/ && leak="$leak sandbox-dir"
-grep -rqs "$CANARY" /tmp/.gantry/images/ 2>/dev/null && leak="$leak image-store"
-[ -f /tmp/.gantry/rwlayers/t5.ext4 ] && grep -qs "$CANARY" /tmp/.gantry/rwlayers/t5.ext4 && leak="$leak rwlayer"
-VPID=$(cat /tmp/.gantry/sandboxes/t5/vmm.pid 2>/dev/null)
+grep -rqs "$CANARY" "$GANTRY_HOME"/t5/ && leak="$leak sandbox-dir"
+grep -rqs "$CANARY" "$GANTRY_IMAGES"/ 2>/dev/null && leak="$leak image-store"
+[ -f "$RWDIR/t5.ext4" ] && grep -qs "$CANARY" "$RWDIR/t5.ext4" && leak="$leak rwlayer"
+VPID=$(cat "$GANTRY_HOME"/t5/vmm.pid 2>/dev/null)
 [ -n "$VPID" ] && tr '\0' '\n' < /proc/$VPID/environ 2>/dev/null | grep -qs "$CANARY" && leak="$leak environ"
 [ -n "$VPID" ] && tr '\0' ' ' < /proc/$VPID/cmdline 2>/dev/null | grep -qs "$CANARY" && leak="$leak cmdline"
 [ -z "$leak" ] && ok "secrets: canary absent from host state" || { bad "secrets: canary absent from host state"; echo "  leaked into:$leak"; }
@@ -134,25 +141,25 @@ R=$(xe t7 "$QB"); chk "broker: delivers bound credential" "password=$BOUNDCANARY
                   chk "broker: git username convention" "username=x-access-token" "$R"
 R=$(xe t7 "$QN"); empty_cred "broker: unbound host answers empty" "$R"
 
-grep -q "BOUND_TOKEN@git.test" /tmp/.gantry/sandboxes/t7/sandbox.json 2>/dev/null \
+grep -q "BOUND_TOKEN@git.test" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
   && ok "binding: name+binding persisted" || bad "binding: name+binding persisted"
-grep -q "$BOUNDCANARY" /tmp/.gantry/sandboxes/t7/sandbox.json 2>/dev/null \
+grep -q "$BOUNDCANARY" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
   && bad "binding: value NOT in sandbox.json" || ok "binding: value NOT in sandbox.json"
 
 # Mid-session revocation through the control socket (the dashboard op):
 # the helper must immediately answer empty — no restart, nothing to scrub
 # guest-side, because nothing was ever stored guest-side.
-R=$(python3 - <<'PYEOF'
+R=$(python3 - "$GANTRY_HOME/t7/ctl.sock" <<'PYEOF'
 import json, socket, sys
 s = socket.socket(socket.AF_UNIX)
-s.connect("/tmp/.gantry/sandboxes/t7/ctl.sock")
+s.connect(sys.argv[1])
 s.sendall(b'{"op":"secret.remove","id":"rvk","secret":{"name":"BOUND_TOKEN"}}\n')
 sys.stdout.write(s.makefile().readline())
 PYEOF
 )
 chk "revocation: control op accepted" '"ok":true' "$R"
 R=$(xe t7 "$QB"); empty_cred "revocation: broker answers empty after remove" "$R"
-grep -q "BOUND_TOKEN" /tmp/.gantry/sandboxes/t7/sandbox.json 2>/dev/null \
+grep -q "BOUND_TOKEN" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
   && bad "revocation: name dropped from sandbox.json" || ok "revocation: name dropped from sandbox.json"
 
 # Gate 2 (egress): the same binding under a policy whose allowlist
