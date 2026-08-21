@@ -43,6 +43,18 @@ func (q *pendingRing[T]) Front() (*T, int, bool) {
 	return &q.slots[q.head], q.head, true
 }
 
+// Back returns the most recently pushed item.
+func (q *pendingRing[T]) Back() (*T, int, bool) {
+	if q.count == 0 {
+		return nil, 0, false
+	}
+	tail := q.head + q.count - 1
+	if tail >= len(q.slots) {
+		tail -= len(q.slots)
+	}
+	return &q.slots[tail], tail, true
+}
+
 func (q *pendingRing[T]) Pop() {
 	if q.count == 0 {
 		return
