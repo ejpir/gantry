@@ -87,6 +87,7 @@ func (d *daemonRuntime) startControl() error {
 	if d.cfg.OAuthCustodyEnabled() && d.cfg.OAuthBridgeEnabled() {
 		registry := oauthtokens.New()
 		registry.AttachFile(d.dir)
+		registry.SetLogger(func(f string, a ...any) { fmt.Printf("daemon: "+f+"\n", a...) })
 		cm := newCustodyManager(d.broker, registry)
 		d.broker.cred.SetOAuthHandler(cm.handleOAuthOp)
 		d.broker.oauth.SetCustodyConsumer(cm.consumeCallback)
