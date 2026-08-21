@@ -341,6 +341,24 @@ func (r *runResolver) resolveSessionOptions() error {
 		return err
 	}
 	r.cfg.SecretNames = names
+	// Host-bound secrets (NAME@host) need the multicall helper inside the
+	// guest. Stage the asset here — during CLI resolution, with progress —
+	// so a first-run download never lands on the VM boot path. Failure to
+	// stage is not fatal: the daemon warns loudly at delivery time instead.
+	if hasBoundSecrets(names) {
+		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
+		if err != nil {
+			// Not fatal: the daemon warns loudly at delivery time instead.
+			r.report("guest tools for bound secrets not staged: %v", err)
+		} else {
+			// The daemon runs with cwd "/": persist the resolved absolute
+			// path so its asset lookup cannot diverge from the CLI's.
+			if err := makeAbsolute("guest-tools", &path); err != nil {
+				return err
+			}
+			r.cfg.GuestTools = path
+		}
+	}
 	r.cfg.ProcessIsolation = *r.flags.ProcessIsolation
 	if err := config.ValidateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
 		return fmt.Errorf("-process-isolation must be auto, required, or off, got %q", r.cfg.ProcessIsolation)

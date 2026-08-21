@@ -132,6 +132,16 @@ func kernelNames(goarch string) (gantry, nerdbox string) {
 	return "gantry-kernel-arm64", "nerdbox-kernel-arm64"
 }
 
+// DefaultGuestTools returns the release's multicall guest helper binary
+// (gantry-guest) for the host architecture. The daemon stages it into
+// guests that configure host-bound secrets.
+func DefaultGuestTools() string {
+	if runtime.GOARCH == "amd64" {
+		return releaseAssetPath("gantry-guest-x86_64")
+	}
+	return releaseAssetPath("gantry-guest-arm64")
+}
+
 // DefaultRootfs returns the release rootfs for the host architecture.
 func DefaultRootfs() string {
 	if runtime.GOARCH == "amd64" {

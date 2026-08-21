@@ -41,12 +41,18 @@ func EnsureImage(path string, progress func(string, ...any)) (string, error) {
 	return ensure(path, imageAsset, progress)
 }
 
+// EnsureGuestTools is EnsureKernel for the multicall guest helper binary.
+func EnsureGuestTools(path string, progress func(string, ...any)) (string, error) {
+	return ensure(path, guestToolsAsset, progress)
+}
+
 type assetKind string
 
 const (
-	kernelAsset assetKind = "kernel"
-	rootfsAsset assetKind = "rootfs"
-	imageAsset  assetKind = "image"
+	kernelAsset     assetKind = "kernel"
+	rootfsAsset     assetKind = "rootfs"
+	imageAsset      assetKind = "image"
+	guestToolsAsset assetKind = "guest-tools"
 )
 
 func ensure(path string, kind assetKind, progress func(string, ...any)) (string, error) {
@@ -76,6 +82,9 @@ func downloadable(name string, kind assetKind) bool {
 	case imageAsset:
 		return name == "gantry-default-image-arm64.erofs" ||
 			name == "gantry-default-image-x86_64.erofs"
+	case guestToolsAsset:
+		return name == "gantry-guest-arm64" ||
+			name == "gantry-guest-x86_64"
 	default:
 		return false
 	}

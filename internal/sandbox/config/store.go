@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
@@ -178,19 +179,35 @@ func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {
 	})
 }
 
+// SetSecretName records or drops a secret by clean name. Entries may
+// carry a host binding ("NAME@host"); matching is by clean name so a
+// dashboard/control update or removal applies to the bound form too.
+// Setting a previously bound secret keeps its binding — use does not
+// imply rebind, and an update is not a rebinding.
 func (s *ConfigStore) SetSecretName(name string, present bool) error {
 	if err := secret.ValidateName(name); err != nil {
 		return err
 	}
 	return s.Mutate(func(cfg *RunConfig) error {
 		names := make([]string, 0, len(cfg.SecretNames)+1)
+		keptBound := ""
 		for _, existing := range cfg.SecretNames {
-			if existing != name {
+			clean, _, err := secret.SplitBinding(existing)
+			if err != nil {
+				clean = existing // tolerate a legacy malformed entry verbatim
+			}
+			if clean != name {
 				names = append(names, existing)
+			} else if strings.ContainsRune(existing, '@') {
+				keptBound = existing
 			}
 		}
 		if present {
-			names = append(names, name)
+			entry := name
+			if keptBound != "" {
+				entry = keptBound
+			}
+			names = append(names, entry)
 			sort.Strings(names)
 		}
 		cfg.SecretNames = names

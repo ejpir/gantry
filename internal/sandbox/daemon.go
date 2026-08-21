@@ -86,6 +86,12 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
+	// Guest-tools delivery for bound secrets runs concurrently with
+	// readiness: it streams the (small, base64) helper through the exec channel, which must
+	// never sit on the boot path. Sessions opened before it lands simply
+	// run without the credential helper wiring; the broker gates on
+	// guestToolsReady.
+	go d.deliverGuestTools()
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in
 	// which `gantry start` returned successfully before ctl.sock existed, so an
