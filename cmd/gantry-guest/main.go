@@ -6,6 +6,9 @@
 //	credhelper            git credential.helper — asks the host broker
 //	                      (vsock, see internal/sandbox/credhelper) for
 //	                      the credential bound to the queried host
+//	oauth login <provider>  custody-mode OAuth: the daemon completes
+//	                      the exchange host-side and holds the refresh
+//	                      token (internal/sandbox/oauthtokens)
 //
 // Modes are answer-only adapters: they can request credentials from the
 // host broker but can never add, swap, or re-point them.
@@ -40,6 +43,8 @@ func main() {
 	switch mode {
 	case "credhelper":
 		runCredHelper(args)
+	case "oauth":
+		runOAuth(args)
 	case "version":
 		fmt.Println("gantry-guest", version)
 	default:
@@ -53,6 +58,7 @@ func usage() {
 
 modes:
   credhelper   git credential.helper; answers "get" from the host credential broker
+  oauth        custody-mode OAuth login: gantry-guest oauth login <provider>
   version      print the release version
 `)
 }

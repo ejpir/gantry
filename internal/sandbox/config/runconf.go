@@ -71,8 +71,13 @@ type RunConfig struct {
 	// means enabled, preserving the default for configs written before this
 	// field existed; a non-nil false value is the persisted opt-out.
 	OAuthBridge *bool `json:"oauth_bridge,omitempty"`
-	MemMB       uint  `json:"memMB"`
-	VCPUs       int   `json:"vcpus,omitempty"`
+	// OAuthCustody moves OAuth token custody host-side (workstream 3):
+	// the daemon exchanges codes itself, holds refresh tokens, and pushes
+	// fresh access tokens into the guest auth file. Default off — the
+	// transparent bridge needs no provider-specific knowledge.
+	OAuthCustody *bool `json:"oauth_custody,omitempty"`
+	MemMB        uint  `json:"memMB"`
+	VCPUs        int   `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1). Source-backed
@@ -112,6 +117,7 @@ type RunFlags struct {
 	ProxyURL, NoProxy                       *string
 	ProxyEnforce                            *bool
 	OAuthBridge                             *bool
+	OAuthCustody                            *bool
 	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
@@ -138,6 +144,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		NoProxy:          fs.String("no-proxy", "", "comma-separated proxy bypasses (default: localhost and loopback)"),
 		ProxyEnforce:     fs.Bool("proxy-enforce", false, "block direct TCP 80/443 and UDP 443 except to the configured proxy"),
 		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
+		OAuthCustody:     fs.Bool("oauth-custody", false, "hold OAuth refresh tokens on the host; push fresh access tokens into the guest (claude, codex)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
@@ -166,6 +173,11 @@ to a host for broker-only delivery, ,ttl=60s overrides the refresh interval
 // used so configs written before oauth_bridge existed also inherit the default.
 func (c RunConfig) OAuthBridgeEnabled() bool {
 	return c.OAuthBridge == nil || *c.OAuthBridge
+}
+
+// OAuthCustodyEnabled resolves the default-off custody setting.
+func (c RunConfig) OAuthCustodyEnabled() bool {
+	return c.OAuthCustody != nil && *c.OAuthCustody
 }
 
 // NormalizeProcessIsolation resolves an unset persisted value to "auto": try

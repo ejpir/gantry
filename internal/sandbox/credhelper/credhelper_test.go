@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ejpir/gantry/internal/sandbox/credhelper/credproto"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -121,5 +122,26 @@ func TestServeRoundTrip(t *testing.T) {
 	}
 	if resp := ask("example.com"); resp != (Response{}) {
 		t.Fatalf("unbound response = %+v, want empty", resp)
+	}
+}
+
+// With custody off, oauth.* ops get a clear error, never a hang; with a
+// handler installed they route to it.
+func TestOAuthOpRouting(t *testing.T) {
+	b := New(func(string) (string, secret.Value, Resolution) { return "", "", NoBinding }, nil, func(string, ...any) {})
+	resp := b.Decide(Request{Op: credproto.OpOAuthBegin, Provider: "claude"})
+	if resp.Error == "" {
+		t.Fatal("oauth op without a handler: want a custody-disabled error")
+	}
+	b.SetOAuthHandler(func(req Request) Response {
+		return Response{Message: "routed:" + req.Provider}
+	})
+	resp = b.Decide(Request{Op: credproto.OpOAuthBegin, Provider: "claude"})
+	if resp.Message != "routed:claude" {
+		t.Fatalf("oauth op not routed: %+v", resp)
+	}
+	// Credential gets are unaffected by the handler.
+	if resp := b.Decide(Request{Host: "git.test"}); resp != (Response{}) {
+		t.Fatalf("credential get with handler installed = %+v, want empty", resp)
 	}
 }

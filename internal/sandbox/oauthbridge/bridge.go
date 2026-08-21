@@ -99,6 +99,11 @@ type Bridge struct {
 	// Tests shorten these; zero selects the production defaults.
 	replayTimeout    time.Duration
 	listenerLifetime time.Duration
+
+	// custodyConsume, when set and returning true, intercepts a callback
+	// for host-side token exchange (custody mode) instead of replaying
+	// it into the guest.
+	custodyConsume func(port int, u *url.URL) bool
 }
 
 // listener is one bound host port.
@@ -198,6 +203,22 @@ func callbackPorts(text string) []int {
 }
 
 // SniffWriter returns a writer that forwards every byte unchanged while
+// SetCustodyConsumer installs the custody-mode interception hook: when
+// non-nil and returning true, a callback is consumed host-side (daemon
+// token exchange) and NOT replayed into the guest.
+func (b *Bridge) SetCustodyConsumer(consume func(port int, u *url.URL) bool) {
+	b.custodyConsume = consume
+}
+
+// EnsureCallbackPort opens the host loopback listener for a custody flow
+// before any authorize URL has been sniffed (the guest helper declares
+// its redirect port up front).
+func (b *Bridge) EnsureCallbackPort(port int) {
+	if allowedCallbackPort(port) {
+		b.ensureListener(port)
+	}
+}
+
 // scanning for OAuth callback URLs. Safe for terminal byte streams: the
 // scan is read-only over a rolling window.
 func (b *Bridge) SniffWriter(w io.Writer) io.Writer {
@@ -351,6 +372,15 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 		uri := r.URL.RequestURI()
 		if len(uri) > maxRequestURIBytes {
 			http.Error(w, "gantry oauth bridge: callback URL too long", http.StatusRequestURITooLong)
+			return
+		}
+		// Custody mode: the daemon completes the flow host-side. A
+		// consumed callback is never replayed into the guest — the whole
+		// point is that the authorization code (and the tokens it yields)
+		// stay on the host.
+		if b.custodyConsume != nil && b.custodyConsume(l.port, r.URL) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = io.WriteString(w, "<html><body><h2>Login complete</h2><p>Gantry holds this session's tokens on the host (custody mode). You can close this tab.</p></body></html>")
 			return
 		}
 		if !b.acquireReplay() {

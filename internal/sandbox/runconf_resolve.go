@@ -380,6 +380,8 @@ func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.AllowLN = *r.flags.AllowLN
 	enabled := *r.flags.OAuthBridge
 	r.cfg.OAuthBridge = &enabled
+	custody := *r.flags.OAuthCustody
+	r.cfg.OAuthCustody = &custody
 	return nil
 }
 
