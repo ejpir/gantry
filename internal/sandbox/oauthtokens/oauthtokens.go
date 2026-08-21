@@ -61,6 +61,7 @@ func (t TokenSet) RefreshDue(now time.Time, leeway time.Duration) (time.Time, bo
 type Registry struct {
 	mu     sync.Mutex
 	now    func() time.Time
+	logf   func(string, ...any)
 	sets   map[string]TokenSet
 	path   string // "" = memory only
 	loaded bool
@@ -69,6 +70,13 @@ type Registry struct {
 // New returns an in-memory registry.
 func New() *Registry {
 	return &Registry{now: time.Now, sets: map[string]TokenSet{}}
+}
+
+// SetLogger routes load-error diagnostics (corrupt token file) to logf.
+func (r *Registry) SetLogger(logf func(string, ...any)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logf = logf
 }
 
 // AttachFile points the registry at a 0600 JSON file; the next operation
@@ -115,10 +123,14 @@ func (r *Registry) Delete(provider string) error {
 }
 
 // Providers lists the providers currently held (sorted for determinism).
+// A load error is reported through logf (may be nil): silently treating a
+// corrupt token file as "no sessions" would strand refresh loops.
 func (r *Registry) Providers() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_ = r.loadLocked()
+	if err := r.loadLocked(); err != nil && r.logf != nil {
+		r.logf("oauth tokens: %v", err)
+	}
 	out := make([]string, 0, len(r.sets))
 	for p := range r.sets {
 		out = append(out, p)
