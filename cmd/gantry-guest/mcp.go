@@ -103,7 +103,7 @@ func runMCPServe(args []string) int {
 		return 1
 	}
 	defer func() { _ = jail.Close() }()
-	if err := serveFS(jail, os.Stdin, os.Stdout); err != nil {
+	if err := serveFS(jail, *root, os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "gantry-guest mcp-serve: %v\n", err)
 		return 1
 	}
@@ -125,7 +125,7 @@ var fsTools = []map[string]any{
 		"description": "Read a UTF-8 text file inside the sandbox workspace.",
 		"inputSchema": map[string]any{
 			"type":       "object",
-			"properties": map[string]any{"path": map[string]any{"type": "string", "description": "path relative to the server root"}},
+			"properties": map[string]any{"path": map[string]any{"type": "string", "description": "absolute path inside the server root"}},
 			"required":   []string{"path"},
 		},
 	},
@@ -134,7 +134,7 @@ var fsTools = []map[string]any{
 		"description": "List entries of a directory inside the sandbox workspace.",
 		"inputSchema": map[string]any{
 			"type":       "object",
-			"properties": map[string]any{"path": map[string]any{"type": "string", "description": "directory path relative to the server root"}},
+			"properties": map[string]any{"path": map[string]any{"type": "string", "description": "absolute directory path inside the server root"}},
 			"required":   []string{"path"},
 		},
 	},
@@ -142,14 +142,16 @@ var fsTools = []map[string]any{
 
 // serveFS runs the JSON-RPC loop: one NDJSON request per line on in,
 // responses on out. Requests arriving after in closes end the loop.
-func serveFS(jail *os.Root, in io.Reader, out io.Writer) error {
+// rootPath is the jail's absolute path, used for the lexical prefix check
+// (os.Root is the race-free backstop).
+func serveFS(jail *os.Root, rootPath string, in io.Reader, out io.Writer) error {
 	for {
 		line, err := readLineBounded(in, mcpproto.MaxFrameBytes)
 		if len(line) == 0 && err != nil {
 			return nil // EOF: session over
 		}
 		if len(line) > 0 {
-			if resp := handleFSFrame(jail, line); resp != nil {
+			if resp := handleFSFrame(jail, rootPath, line); resp != nil {
 				if _, werr := out.Write(append(resp, '\n')); werr != nil {
 					return werr
 				}
@@ -162,7 +164,7 @@ func serveFS(jail *os.Root, in io.Reader, out io.Writer) error {
 }
 
 // handleFSFrame answers one request; nil means "notification, no answer".
-func handleFSFrame(jail *os.Root, line []byte) []byte {
+func handleFSFrame(jail *os.Root, rootPath string, line []byte) []byte {
 	var req fsRequest
 	if err := json.Unmarshal(line, &req); err != nil {
 		return fsReply(nil, nil, &rpcErr{code: -32700, msg: "malformed JSON-RPC frame"})
@@ -182,7 +184,7 @@ func handleFSFrame(jail *os.Root, line []byte) []byte {
 	case "tools/list":
 		return fsReply(req.ID, map[string]any{"tools": fsTools}, nil)
 	case "tools/call":
-		return fsReply(req.ID, fsToolCall(jail, req.Params), nil)
+		return fsReply(req.ID, fsToolCall(jail, rootPath, req.Params), nil)
 	default:
 		return fsReply(req.ID, nil, &rpcErr{code: -32601, msg: "method not found"})
 	}
@@ -210,7 +212,7 @@ func fsReply(id json.RawMessage, result any, rerr *rpcErr) []byte {
 // fsToolCall executes read_file / list_directory and wraps the outcome in
 // an MCP tool result (errors are isError results, not JSON-RPC errors, so
 // the agent sees them as tool feedback).
-func fsToolCall(jail *os.Root, params json.RawMessage) map[string]any {
+func fsToolCall(jail *os.Root, rootPath string, params json.RawMessage) map[string]any {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -228,13 +230,13 @@ func fsToolCall(jail *os.Root, params json.RawMessage) map[string]any {
 	}
 	switch p.Name {
 	case "read_file":
-		text, err := fsReadFile(jail, args.Path)
+		text, err := fsReadFile(jail, rootPath, args.Path)
 		if err != nil {
 			return fsToolError(err.Error())
 		}
 		return fsToolText(text)
 	case "list_directory":
-		text, err := fsListDir(jail, args.Path)
+		text, err := fsListDir(jail, rootPath, args.Path)
 		if err != nil {
 			return fsToolError(err.Error())
 		}
@@ -257,22 +259,38 @@ func fsToolError(msg string) map[string]any {
 	}
 }
 
-// relPath forces a client path into root-relative form for os.Root.
-// Absolute paths become relative to the jail (an MCP convenience, not an
-// escape: os.Root still refuses anything that resolves outside).
-func relPath(p string) string {
-	if p == "" {
-		return "."
+// relInRoot maps a client path into root-relative form. Paths are
+// interpreted as absolute guest paths confined to the jail (the MCP
+// filesystem-server convention: agents think in absolute paths); a
+// relative path is joined onto the root. The lexical prefix check is the
+// policy layer — os.Root's traversal containment is the race-free
+// enforcement layer underneath it (symlink escapes, including ones
+// created between check and open, are refused there).
+func relInRoot(rootPath, p string) (string, error) {
+	root := filepath.Clean(rootPath)
+	abs := p
+	if abs == "" {
+		abs = root
+	} else if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, abs)
 	}
-	rel := strings.TrimPrefix(filepath.Clean("/"+p), "/")
+	abs = filepath.Clean(abs)
+	if abs != root && !strings.HasPrefix(abs, strings.TrimSuffix(root, "/")+"/") {
+		return "", fmt.Errorf("path %q is outside the server root %s", p, root)
+	}
+	rel := strings.TrimPrefix(strings.TrimPrefix(abs, root), "/")
 	if rel == "" {
-		return "."
+		return ".", nil
 	}
-	return rel
+	return rel, nil
 }
 
-func fsReadFile(jail *os.Root, path string) (string, error) {
-	f, err := jail.Open(relPath(path))
+func fsReadFile(jail *os.Root, rootPath, path string) (string, error) {
+	rel, err := relInRoot(rootPath, path)
+	if err != nil {
+		return "", err
+	}
+	f, err := jail.Open(rel)
 	if err != nil {
 		return "", err
 	}
@@ -290,8 +308,12 @@ func fsReadFile(jail *os.Root, path string) (string, error) {
 	return string(data), nil
 }
 
-func fsListDir(jail *os.Root, path string) (string, error) {
-	f, err := jail.Open(relPath(path))
+func fsListDir(jail *os.Root, rootPath, path string) (string, error) {
+	rel, err := relInRoot(rootPath, path)
+	if err != nil {
+		return "", err
+	}
+	f, err := jail.Open(rel)
 	if err != nil {
 		return "", err
 	}
