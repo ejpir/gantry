@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
 type closeFailureRunner struct {
@@ -64,6 +66,9 @@ func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 	runtime.control = listener
 	runtime.broker = &broker{}
+	if err := os.WriteFile(filepath.Join(dir, config.MCPRestartMarker), []byte("restart required\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runner := &closeFailureRunner{done: make(chan struct{})}
 	runtime.runner = runner
 	if err := runtime.publishReady(); err != nil {
@@ -78,5 +83,8 @@ func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ready")); err != nil {
 		t.Fatalf("ready marker after control startup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.MCPRestartMarker)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("MCP restart marker after ready: %v", err)
 	}
 }

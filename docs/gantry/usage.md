@@ -123,7 +123,7 @@ $ gantry
 
 `gantry tui` opens the same dashboard explicitly. From it you can create,
 start, stop, enter, edit, and remove sandboxes; inspect storage and isolation;
-and manage network rules, traffic, packet capture, shares, ports, and secrets.
+and manage network rules, traffic, packet capture, shares, ports, secrets, and MCP servers.
 Press `?` in the dashboard for its current key bindings.
 
 ## Inspect local state

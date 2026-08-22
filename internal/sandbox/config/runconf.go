@@ -14,7 +14,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/guestasset"
@@ -23,6 +26,10 @@ import (
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 )
+
+// MCPRestartMarker records that persisted MCP settings differ from the live,
+// immutable MCP worker. A successful daemon restart removes it.
+const MCPRestartMarker = "mcp-restart-required"
 
 // RunConfig is the fully-resolved description of one gantry VM run.
 // sandbox.json is this struct.
@@ -217,6 +224,38 @@ func ValidateProcessIsolation(mode string) error {
 	default:
 		return fmt.Errorf("process isolation must be auto, required, or off, got %q", mode)
 	}
+}
+
+// NormalizeMCPFilesystem validates and canonicalizes the built-in guest
+// filesystem server settings. Guest paths are POSIX paths on every host.
+func NormalizeMCPFilesystem(root, user string) (string, string, error) {
+	if root == "" {
+		root = "/"
+	}
+	if user == "" {
+		user = "nobody"
+	}
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return "", "", fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
+	}
+	uidText, gidText, numericPair := strings.Cut(user, ":")
+	uid, numericUIDErr := strconv.ParseUint(uidText, 10, 32)
+	if user == "root" || (numericUIDErr == nil && uid == 0) {
+		return "", "", fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
+	}
+	if numericPair {
+		if strings.Contains(gidText, ":") || numericUIDErr != nil {
+			return "", "", fmt.Errorf("-mcp-fs-user numeric identity must be UID:GID, got %q", user)
+		}
+		if _, err := strconv.ParseUint(gidText, 10, 32); err != nil {
+			return "", "", fmt.Errorf("-mcp-fs-user numeric identity must be UID:GID, got %q", user)
+		}
+	}
+	if !path.IsAbs(root) {
+		return "", "", fmt.Errorf("-mcp-fs-root must be an absolute guest path, got %q", root)
+	}
+	return path.Clean(root), user, nil
 }
 
 // ResolveSecrets parses -secret/-secret-file into the value map (CLI

@@ -15,7 +15,7 @@ import (
 )
 
 type Request struct {
-	Op        string                 `json:"op"` // "session" | "sessionctl" | "kill" | "share.*" | "port.*" | "resources.set"
+	Op        string                 `json:"op"` // sessions plus bounded share/port/resource/secret/MCP control operations
 	ID        string                 `json:"id"`
 	V         int                    `json:"v,omitempty"` // sessionctl: SessionProtocolVersion
 	Args      []string               `json:"args,omitempty"`
@@ -29,6 +29,7 @@ type Request struct {
 	Resources *ResourceRequest       `json:"resources,omitempty"`
 	NetPolicy *NetworkPolicyRequest  `json:"net_policy,omitempty"`
 	Secret    *SecretRequest         `json:"secret,omitempty"`
+	MCP       *MCPRequest            `json:"mcp,omitempty"`
 	Capture   *packetcapture.Request `json:"capture,omitempty"`
 }
 
@@ -49,6 +50,21 @@ type SecretRequest struct {
 }
 
 type SecretResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// MCPRequest mutates persisted MCP settings for the next immutable worker
+// launch. It never carries credential values, only server specs and names.
+type MCPRequest struct {
+	Spec    string `json:"spec,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Root    string `json:"root,omitempty"`
+	User    string `json:"user,omitempty"`
+	Replace bool   `json:"replace,omitempty"`
+}
+
+type MCPResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 }

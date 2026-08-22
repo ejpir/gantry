@@ -247,8 +247,13 @@ func (d *daemonRuntime) publishReady() error {
 		return fmt.Errorf("refusing to publish readiness before the control broker is listening")
 	}
 	// Keep the historical timing label, but record it only after startControl
-	// has installed ctl.sock and launched the broker accept loop.
+	// has installed ctl.sock and launched the broker accept loop. startControl
+	// also launched the effective MCP worker, so a saved restart marker is now
+	// satisfied and can be cleared before the dashboard observes readiness.
 	d.bootLog("guest RPC connected (READY)")
+	if err := os.Remove(filepath.Join(d.dir, config.MCPRestartMarker)); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintln(os.Stderr, "daemon: clear MCP restart marker:", err)
+	}
 	_ = os.WriteFile(filepath.Join(d.dir, "ready"), []byte("1\n"), 0o600)
 	if err := notifyDaemonReady(d.readySocket); err != nil {
 		// The parent may have exited or fallen back to ready-file polling;

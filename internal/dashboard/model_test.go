@@ -47,13 +47,68 @@ func TestSafeUITextStripsTerminalControls(t *testing.T) {
 
 func TestSanitizeSnapshotCoversServiceData(t *testing.T) {
 	snapshot := dashboardapi.Snapshot{
-		Sandboxes: []dashboardapi.Sandbox{{Name: "dev", Image: "\x1b[31malpine\x1b[0m\nnext"}},
-		Mounts:    []dashboardapi.Mount{{Sandbox: "dev", Error: "first\nsecond"}},
-		Secrets:   []dashboardapi.Secret{{Sandbox: "dev", Name: "TOKEN\x1b[2J", State: "loaded\nspoof"}},
+		Sandboxes:  []dashboardapi.Sandbox{{Name: "dev", Image: "\x1b[31malpine\x1b[0m\nnext"}},
+		Mounts:     []dashboardapi.Mount{{Sandbox: "dev", Error: "first\nsecond"}},
+		Secrets:    []dashboardapi.Secret{{Sandbox: "dev", Name: "TOKEN\x1b[2J", State: "loaded\nspoof"}},
+		MCPServers: []dashboardapi.MCPServer{{Sandbox: "dev", Name: "api\x1b[2J", URL: "https://example.com/mcp\nspoof", Allow: []string{"read_*\x1b[31m"}}},
 	}
 	sanitizeSnapshot(&snapshot)
-	if snapshot.Sandboxes[0].Image != "alpine next" || snapshot.Mounts[0].Error != "first second" || snapshot.Secrets[0].Name != "TOKEN" || snapshot.Secrets[0].State != "loaded spoof" {
+	if snapshot.Sandboxes[0].Image != "alpine next" || snapshot.Mounts[0].Error != "first second" || snapshot.Secrets[0].Name != "TOKEN" || snapshot.Secrets[0].State != "loaded spoof" || snapshot.MCPServers[0].Name != "api" || snapshot.MCPServers[0].URL != "https://example.com/mcp spoof" || snapshot.MCPServers[0].Allow[0] != "read_*" {
 		t.Fatalf("snapshot was not sanitized: %#v", snapshot)
+	}
+}
+
+func TestSandboxTUIMCPServerManagementDialogs(t *testing.T) {
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+	m.loading = false
+	m.page = tuiMCPPage
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped}}
+	m.mcpServers = []tuiMCPRow{
+		{Sandbox: "dev", Name: "fs", Type: "local", Root: "/work", User: "nobody", State: "saved"},
+		{Sandbox: "dev", Name: "github", Type: "remote", URL: "https://example.com/mcp", Allow: []string{"*"}, State: "saved"},
+	}
+
+	m.mcpCursor = 1
+	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'e'})
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiMCPRemoteDialog || !m.mcpEditing || m.mcpName.Value() != "github" || m.mcpURL.Value() != "https://example.com/mcp" {
+		t.Fatalf("MCP edit dialog = dialog %v editing %v name %q url %q cmd=%v", m.dialog, m.mcpEditing, m.mcpName.Value(), m.mcpURL.Value(), cmd)
+	}
+	plain := ansi.Strip(m.renderMCPRemoteDialog(tuiThemeFor(m.dark), 62))
+	if !strings.Contains(plain, "Edit Remote MCP Server") || !strings.Contains(plain, "restart") || !strings.Contains(plain, "Allow tool globs") {
+		t.Fatalf("MCP remote dialog copy:\n%s", plain)
+	}
+	m.closeDialog()
+
+	m.mcpCursor = 0
+	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'e'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiMCPFilesystemDialog || m.mcpFSRoot.Value() != "/work" || m.mcpFSUser.Value() != "nobody" {
+		t.Fatalf("MCP filesystem dialog = dialog %v root %q user %q", m.dialog, m.mcpFSRoot.Value(), m.mcpFSUser.Value())
+	}
+	m.closeDialog()
+
+	m.mcpCursor = 1
+	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'd'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiMCPRemoveDialog {
+		t.Fatalf("MCP remove dialog = %v", m.dialog)
+	}
+	m.closeDialog()
+
+	m.mcpServers = nil
+	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'f'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiMCPFilesystemDialog || m.mcpSandbox.Value() != "dev" || m.mcpFSRoot.Value() != "/" || m.mcpFSUser.Value() != "nobody" {
+		t.Fatalf("new MCP filesystem dialog = dialog %v target %q root %q user %q", m.dialog, m.mcpSandbox.Value(), m.mcpFSRoot.Value(), m.mcpFSUser.Value())
+	}
+	m.closeDialog()
+
+	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'a'})
+	m = *model.(*sandboxTUIModel)
+	if m.dialog != tuiMCPRemoteDialog || m.mcpEditing || m.mcpSandbox.Value() != "dev" {
+		t.Fatalf("MCP add dialog = dialog %v editing %v target %q", m.dialog, m.mcpEditing, m.mcpSandbox.Value())
 	}
 }
 
@@ -1177,6 +1232,8 @@ func TestSandboxTUIFormDialogsKeepFooterAndBorder(t *testing.T) {
 		{name: "create", dialog: tuiCreateDialog, open: func() { m.openCreateDialog() }},
 		{name: "mount", dialog: tuiShareAddDialog, open: func() { m.openShareAddDialog(false) }},
 		{name: "publish port", dialog: tuiPortPublishDialog, open: func() { m.openPortPublishDialog() }},
+		{name: "MCP remote", dialog: tuiMCPRemoteDialog, open: func() { m.openMCPRemoteDialog(false); m.focusMCPRemote(mcpRemoteSubmitFocus) }},
+		{name: "MCP filesystem", dialog: tuiMCPFilesystemDialog, open: func() { m.openMCPFilesystemDialog() }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.open()

@@ -402,6 +402,7 @@ The default layout is:
     ├── worker-net.log
     ├── worker-vmm.log
     ├── worker-mcp.log          # when MCP is enabled
+    ├── mcp-restart-required    # saved MCP config differs from the live worker
     └── runtime locks, sockets, and readiness files
 ```
 

@@ -63,4 +63,27 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 		row.Name = safeUILine(row.Name)
 		row.State = safeUILine(row.State)
 	}
+	for i := range snapshot.MCPServers {
+		row := &snapshot.MCPServers[i]
+		row.Sandbox = safeUILine(row.Sandbox)
+		row.Name = safeUILine(row.Name)
+		row.Type = safeUILine(row.Type)
+		row.URL = safeUILine(row.URL)
+		row.AuthKind = safeUILine(row.AuthKind)
+		row.AuthHeader = safeUILine(row.AuthHeader)
+		row.AuthRef = safeUILine(row.AuthRef)
+		row.Root = safeUILine(row.Root)
+		row.User = safeUILine(row.User)
+		row.State = safeUILine(row.State)
+		row.Error = safeUILine(row.Error)
+		for j := range row.Allow {
+			row.Allow[j] = safeUILine(row.Allow[j])
+		}
+		for j := range row.Deny {
+			row.Deny[j] = safeUILine(row.Deny[j])
+		}
+		for j := range row.Redact {
+			row.Redact[j] = safeUILine(row.Redact[j])
+		}
+	}
 }

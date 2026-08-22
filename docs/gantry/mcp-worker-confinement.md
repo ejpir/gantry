@@ -482,8 +482,9 @@ M1 and M2 must land together in a release.
 - the Linux KVM confinement battery exercises active local and remote MCP
   sessions.
 
-A dedicated MCP-detail view in the TUI remains follow-up work; the version 3
-file is currently the authoritative detailed view.
+The TUI now manages configured MCP servers and restart-required state. A
+worker-confinement evidence view remains follow-up work; the version 3
+`isolation.json` file is currently the authoritative detailed view.
 
 ### M4 — macOS and Windows enforcement (partial)
 

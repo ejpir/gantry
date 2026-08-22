@@ -27,88 +27,19 @@ import (
 	"fmt"
 	"io"
 	"path"
-	"regexp"
-	"strings"
 
+	"github.com/ejpir/gantry/internal/mcpspec"
 	mcpworkerapi "github.com/ejpir/gantry/internal/mcpworker"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
 	mcpworkersup "github.com/ejpir/gantry/internal/sandbox/mcpworker"
 )
 
-var mcpRemoteNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,30}$`)
+type mcpRemoteSpec = mcpspec.Remote
 
-var mcpHeaderNameRe = regexp.MustCompile(`^[!#$%&'*+\-.^_` + "`" + `|~0-9A-Za-z]{1,64}$`)
-
-type mcpRemoteSpec struct {
-	Name        string
-	URL         string
-	AuthKind    string // "", "bearer", "header", "custody"
-	AuthHeader  string // header name for AuthKind == "header"
-	AuthRef     string // secret name (bearer/header) or custody provider
-	Allow, Deny []string
-	RedactNames []string
-}
-
-// parseMCPRemote parses one -mcp-remote spec. Everything structural is
-// validated here (name, URL, auth shape, header name); secret VALUES are
-// resolved later by the daemon against the live Store.
-func parseMCPRemote(spec string) (mcpRemoteSpec, error) {
-	var out mcpRemoteSpec
-	for _, kv := range strings.Split(spec, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
-		if !ok || k == "" || v == "" {
-			return out, fmt.Errorf("bad field %q (want k=v)", kv)
-		}
-		switch k {
-		case "name":
-			out.Name = v
-		case "url":
-			out.URL = v
-		case "auth":
-			kind, rest, _ := strings.Cut(v, ":")
-			switch kind {
-			case "bearer", "custody":
-				if rest == "" || strings.Contains(rest, ":") {
-					return out, fmt.Errorf("auth=%s: want %s:<name>", kind, kind)
-				}
-				out.AuthKind, out.AuthRef = kind, rest
-			case "header":
-				hdr, ref, ok := strings.Cut(rest, ":")
-				if !ok || hdr == "" || ref == "" {
-					return out, fmt.Errorf("auth=header: want header:<Header-Name>:<secret-name>")
-				}
-				if !mcpHeaderNameRe.MatchString(hdr) {
-					return out, fmt.Errorf("auth=header: invalid header name %q", hdr)
-				}
-				out.AuthKind, out.AuthHeader, out.AuthRef = kind, hdr, ref
-			default:
-				return out, fmt.Errorf("auth: unknown kind %q (want bearer:, header:, or custody:)", kind)
-			}
-		case "allow":
-			out.Allow = append(out.Allow, v)
-		case "deny":
-			out.Deny = append(out.Deny, v)
-		case "redact":
-			out.RedactNames = append(out.RedactNames, v)
-		default:
-			return out, fmt.Errorf("unknown field %q (want name/url/auth/allow/deny/redact)", k)
-		}
-	}
-	if !mcpRemoteNameRe.MatchString(out.Name) || strings.Contains(out.Name, "__") {
-		return out, fmt.Errorf("name %q must match %s without '__'", out.Name, mcpRemoteNameRe)
-	}
-	if out.Name == "fs" {
-		return out, fmt.Errorf("name %q is reserved for the built-in filesystem server", out.Name)
-	}
-	if out.URL == "" {
-		return out, fmt.Errorf("missing url=")
-	}
-	if _, err := mcpgw.ValidateRemoteURL(out.URL); err != nil {
-		return out, fmt.Errorf("url: %w", err)
-	}
-	return out, nil
-}
+// parseMCPRemote retains the sandbox package's compatibility entry point while
+// the persisted grammar is shared with dashboard configuration management.
+func parseMCPRemote(spec string) (mcpRemoteSpec, error) { return mcpspec.Parse(spec) }
 
 // resolveMCPServers builds the worker's immutable public namespace and keeps
 // every authority-bearing closure in the supervisor. The worker receives no
