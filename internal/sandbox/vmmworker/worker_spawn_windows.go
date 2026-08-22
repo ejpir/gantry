@@ -8,34 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
 func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir string) (*vmmWorker, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("worker re-exec path: %w", err)
-	}
-	channels, channelFiles, err := worker.PipeChannels(4)
-	if err != nil {
-		return nil, err
-	}
-	defer worker.CloseFiles(channelFiles)
-	ctrlSup, bridgeSup, fdSup, shareSup := channels[0], channels[1], channels[2], channels[3]
-	keepSupervisor := false
-	defer func() {
-		if keepSupervisor {
-			return
-		}
-		for _, conn := range []net.Conn{ctrlSup, bridgeSup, fdSup, shareSup} {
-			if conn != nil {
-				_ = conn.Close()
-			}
-		}
-	}()
 	if assets.NetConn == nil || assets.Console == nil || assets.Kernel == nil {
 		return nil, fmt.Errorf("handle table: net conn, console and kernel are required")
 	}
@@ -67,7 +45,6 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	}
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	closeAfterAck = append(closeAfterAck, assets.DisksRO...)
-
 	for index, disk := range assets.Disks {
 		if disk == nil {
 			return nil, fmt.Errorf("handle table: writable disk %d is nil", index)
@@ -86,83 +63,64 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		return nil, fmt.Errorf("handle table: Unix vhost/KVM assets are unavailable with WHPX")
 	}
 
-	sources := append(append([]*os.File{}, channelFiles...), assetFiles...)
-	childHandles, err := worker.InheritableHandles(sources)
-	if err != nil {
-		return nil, err
+	// Logical slot 7 is reserved for the connected network socket transferred
+	// after CreateProcess. Static boot handles begin at slot 8, matching the
+	// child-side WHPX descriptor contract.
+	inherited := make([]worker.InheritedFile, 0, len(assetFiles))
+	for index, file := range assetFiles {
+		inherited = append(inherited, worker.InheritedFile{Slot: 8 + index, File: file})
 	}
-	defer worker.ClearInheritedHandles(childHandles)
-
-	argv := []string{exe, "_vmm-worker"}
-	env := worker.Env()
-	if vmmWorkerSpawnHook != nil {
-		vmmWorkerSpawnHook(&argv, &env)
-	}
-	env = worker.PipeEnv(env, channelFiles, 3)
-	env = worker.HandleEnv(env, assetFiles, 8)
 	logPath := ""
 	if dir != "" {
 		logPath = filepath.Join(dir, "worker-vmm.log")
 	}
-	workerLog, err := boundedlog.NewPipe(logPath)
+	child, err := worker.Launch(worker.LaunchSpec{
+		Role:             workerproto.RoleVMM,
+		EntryPoint:       "_vmm-worker",
+		Environment:      vmmWorkerEnv(),
+		Channels:         []string{"control", "bridge", "fd", "share"},
+		InheritedFiles:   inherited,
+		DiagnosticPath:   logPath,
+		Confinement:      cfg.Confinement,
+		ConfigureProcess: vmmWorkerSpawnHook,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("open VMM worker log broker: %w", err)
+		return nil, err
 	}
-	keepWorkerLog := false
-	defer func() {
-		if !keepWorkerLog {
-			_ = workerLog.Close()
-		}
-	}()
-	diagnostic := workerLog.Writer()
-	proc, containment, err := worker.StartWindowsProcess(exe, argv, env,
-		[]*os.File{diagnostic, diagnostic, diagnostic}, childHandles, cfg.Confinement)
-	workerLog.ReleaseWriter()
-	// CreateProcess has duplicated the child ends. Drop the supervisor copies
-	// now so worker death produces EOF on every channel instead of leaving the
-	// handshake parked until its deadline.
-	worker.CloseFiles(channelFiles)
-	if err != nil {
-		return nil, fmt.Errorf("spawn vmm worker: %w", err)
-	}
-	fdSup = workerproto.ForProcess(fdSup, uint32(proc.Pid))
+	ctrlSup := child.Channels["control"]
+	bridgeSup := child.Channels["bridge"]
+	fdSup := workerproto.ForProcess(child.Channels["fd"], uint32(child.Process.Pid))
+	shareSup := child.Channels["share"]
 
 	var waitErr error
-	killProc := func() {
-		_ = proc.Kill()
-		waitErr = worker.WaitProcess(proc, "vmm-worker")
+	killChild := func() {
+		_ = child.Terminate(5 * time.Second)
+		waitErr = child.Err()
 	}
-	nonce, err := workerproto.NewNonce()
+	bootstrap, err := child.BeginBootstrap(cfg)
 	if err != nil {
-		killProc()
-		return nil, fmt.Errorf("vmm worker nonce: %w", err)
-	}
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, cfg); err != nil {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker handshake: %w", err)
 	}
 	var netToken [workerproto.FDTokenLen]byte
 	if err := workerproto.SendFD(fdSup, netToken, netFile); err != nil {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker net socket: %w", err)
 	}
-	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
-		killProc()
-		return nil, fmt.Errorf("vmm worker socket nonce: %w", err)
+	if err := bootstrap.BindChannels("fd", "share"); err != nil {
+		killChild()
+		return nil, fmt.Errorf("vmm worker channel nonce: %w", err)
 	}
-	if err := workerproto.WriteNonce(shareSup, nonce); err != nil {
-		killProc()
-		return nil, fmt.Errorf("vmm worker share nonce: %w", err)
-	}
+
 	var ack vmmworkerapi.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker boot ack: %w (worker wait: %v)", err, waitErr)
 	}
 	_ = ctrlSup.SetReadDeadline(time.Time{})
 	if !ack.OK {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker boot: %s", ack.Error)
 	}
 	for _, file := range closeAfterAck {
@@ -171,20 +129,16 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	_ = assets.NetConn.Close()
 
 	w := &vmmWorker{
-		proc: proc, client: workerproto.NewClient(ctrlSup), fdChan: fdSup,
+		child: child, proc: child.Process, client: workerproto.NewClient(ctrlSup), fdChan: fdSup,
 		bridge: bridgeSup, bridgeE: make(chan error, 1), share: shareSup,
-		diagnostics: workerLog, diagnosticPath: logPath,
-		containment: containment, lifecycle: worker.NewLifecycle(),
-		confReport: ack.Confinement,
+		lifecycle: child.Lifecycle, confReport: ack.Confinement,
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{
 			"vsock.forward": w.vsockForward(dir),
 		})
 	}()
-	go func() { w.setDead(worker.WaitProcess(proc, "vmm-worker")) }()
-	keepWorkerLog = true
-	keepSupervisor = true
+	go w.observeChild()
 	return w, nil
 }
 
@@ -200,10 +154,10 @@ func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 		}
 		var token [workerproto.FDTokenLen]byte
 		copy(token[:], decoded)
-		sock := filepath.Join(dir, fmt.Sprintf("%d.sock", body.Port))
-		conn, err := net.DialTimeout("unix", sock, 3*time.Second)
+		socket := filepath.Join(dir, fmt.Sprintf("%d.sock", body.Port))
+		conn, err := net.DialTimeout("unix", socket, 3*time.Second)
 		if err != nil {
-			return nil, fmt.Errorf("vsock.forward %s: %w", sock, err)
+			return nil, fmt.Errorf("vsock.forward %s: %w", socket, err)
 		}
 		file, err := worker.ConnFile(conn)
 		if err != nil {

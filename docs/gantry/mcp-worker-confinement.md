@@ -270,9 +270,11 @@ not open its own log file.
 
 ## Host worker confinement contract
 
-Add a role-specific `workerconf.ProfileMCP` and `MCPSpec`. Reusing
-`ProfileNetwork` would grant too much: the MCP worker needs I/O on delegated
-connected streams, not ambient socket creation.
+The shared worker substrate now defines the fixed
+`workerconf.ProfileMCP` and `MCPSpec`. Reusing `ProfileNetwork` would grant too
+much: the MCP worker needs I/O on delegated connected streams, not ambient
+socket creation. The profile remains a compile-time audited allowlist, not a
+runtime-configurable syscall policy.
 
 The desired contract is:
 
@@ -422,6 +424,7 @@ internal/sandbox/mcpworker/   trusted supervisor handle, spawn, brokers
 internal/mcpworker/           worker runtime and bootstrap protocol
 internal/sandbox/mcpgw/       MCP engine during extraction; move only if it
                               makes the dependency direction clearer
+internal/sandbox/worker/      shared launch, channels, lifecycle, containment
 internal/workerconf/          ProfileMCP, platform policy, verifier support
 cmd/gantry                    hidden _mcp-worker role dispatch
 ```
@@ -430,6 +433,15 @@ Do not fork the MCP engine into in-process and worker copies. Tests may run the
 engine in process behind interfaces, but production has one worker-owned path.
 
 ## Implementation milestones
+
+### Foundation — generic worker launch (complete)
+
+- typed VMM, network, and MCP roles;
+- empty-by-default role environments and exact platform capability tables;
+- shared re-exec, bounded diagnostics, namespace/Job setup, lifecycle,
+  termination, reaping, containment cleanup, and nonce-bound channels; and
+- VMM and network worker migration without moving their role-specific policy,
+  asset validation, or failure semantics into the harness.
 
 ### M0 — Guest filesystem hardening
 
@@ -442,8 +454,8 @@ This reduces current risk independently of the host split.
 
 ### M1 — Worker protocol and process split
 
-- add the hidden role, nonce-bound bootstrap, lifecycle monitoring, bounded
-  diagnostics, and dynamic descriptor transfer;
+- add the hidden role and consume the shared launch, bootstrap, lifecycle,
+  diagnostics, and dynamic descriptor-transfer primitives;
 - move guest MCP parsing, session muxing, policy, local stdio parsing, and
   remote protocol handling into the worker; and
 - remove the production in-supervisor gateway path.
@@ -462,7 +474,7 @@ M1 and M2 must land together in a release.
 
 ### M3 — Linux confinement and reporting
 
-- add `ProfileMCP`, private root, seccomp, task limits, and verifier probes;
+- activate `ProfileMCP` with a private root, task limits, and verifier probes;
 - extend `isolation.json`, the TUI, and `-process-isolation=required`; and
 - field-run the Linux KVM confinement battery with active local and remote MCP
   sessions.

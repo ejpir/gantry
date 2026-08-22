@@ -1,7 +1,7 @@
 // Package worker is the substrate the split child processes are built on: a
-// process-neutral lifecycle state machine, the confinement and handle-passing
-// primitives each platform needs to spawn one, and the environment allowlist
-// they inherit.
+// process-neutral launch and lifecycle harness, the confinement and
+// handle-passing primitives each platform needs, and empty-by-default explicit
+// role environments.
 //
 // It deliberately knows nothing about what a worker does — the VMM worker and
 // the netstack worker own their own RPC, transports and process handles — so
