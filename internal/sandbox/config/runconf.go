@@ -185,7 +185,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		runtime = "crun"
 	}
 	f.Runtime = fs.String("runtime", runtime, "container runtime in the guest: crun | runsc (gVisor)")
-	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
+	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
 	fs.Var(f.MCPRemotes, "mcp-remote", `remote MCP upstream: name=ID,url=https://HOST/PATH[,auth=bearer:SECRET|header:NAME:SECRET|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET] (repeatable)`)
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
 	fs.Var(f.Publish, "publish", "alias for -p")

@@ -44,11 +44,16 @@ func Parse(raw string) (Remote, error) {
 	if len(raw) > MaxSpecBytes {
 		return out, fmt.Errorf("MCP remote spec exceeds %d bytes", MaxSpecBytes)
 	}
+	seen := make(map[string]bool)
 	for _, field := range strings.Split(raw, ",") {
 		key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
 		if !ok || key == "" || value == "" {
 			return out, fmt.Errorf("bad field %q (want k=v)", field)
 		}
+		if (key == "name" || key == "url" || key == "auth") && seen[key] {
+			return out, fmt.Errorf("duplicate field %q", key)
+		}
+		seen[key] = true
 		switch key {
 		case "name":
 			out.Name = value
@@ -84,49 +89,103 @@ func Parse(raw string) (Remote, error) {
 			return out, fmt.Errorf("unknown field %q (want name/url/auth/allow/deny/redact)", key)
 		}
 	}
-	if len(out.Allow)+len(out.Deny) > MaxToolPatterns {
-		return out, fmt.Errorf("too many allow/deny tool patterns (max %d)", MaxToolPatterns)
+	if err := Validate(out); err != nil {
+		return Remote{}, err
 	}
-	if len(out.RedactNames) > MaxRedactNames {
-		return out, fmt.Errorf("too many redact secret names (max %d)", MaxRedactNames)
+	return out, nil
+}
+
+// Validate checks a typed remote without passing its values through the
+// comma-separated command-line grammar. Values containing commas are rejected
+// because they cannot be represented without becoming new grammar fields.
+func Validate(remote Remote) error {
+	if len(remote.Allow)+len(remote.Deny) > MaxToolPatterns {
+		return fmt.Errorf("too many allow/deny tool patterns (max %d)", MaxToolPatterns)
 	}
-	if !remoteNameRE.MatchString(out.Name) || strings.Contains(out.Name, "__") {
-		return out, fmt.Errorf("name %q must match %s without '__'", out.Name, remoteNameRE)
+	if len(remote.RedactNames) > MaxRedactNames {
+		return fmt.Errorf("too many redact secret names (max %d)", MaxRedactNames)
 	}
-	if out.Name == "fs" {
-		return out, fmt.Errorf("name %q is reserved for the built-in filesystem server", out.Name)
+	if !remoteNameRE.MatchString(remote.Name) || strings.Contains(remote.Name, "__") {
+		return fmt.Errorf("name %q must match %s without '__'", remote.Name, remoteNameRE)
 	}
-	if out.URL == "" {
-		return out, fmt.Errorf("missing url=")
+	if remote.Name == "fs" {
+		return fmt.Errorf("name %q is reserved for the built-in filesystem server", remote.Name)
 	}
-	if _, err := mcpgw.ValidateRemoteURL(out.URL); err != nil {
-		return out, fmt.Errorf("url: %w", err)
+	if remote.URL == "" {
+		return fmt.Errorf("missing url=")
 	}
-	if out.AuthKind == "bearer" || out.AuthKind == "header" {
-		if err := secret.ValidateName(out.AuthRef); err != nil {
-			return out, fmt.Errorf("auth: invalid secret reference: %w", err)
+	if strings.Contains(remote.URL, ",") {
+		return fmt.Errorf("url: comma is not allowed")
+	}
+	if _, err := mcpgw.ValidateRemoteURL(remote.URL); err != nil {
+		return fmt.Errorf("url: %w", err)
+	}
+	switch remote.AuthKind {
+	case "":
+		if remote.AuthHeader != "" || remote.AuthRef != "" {
+			return fmt.Errorf("auth: credential fields require an authentication kind")
+		}
+	case "bearer", "custody":
+		if remote.AuthHeader != "" {
+			return fmt.Errorf("auth=%s: header name is not allowed", remote.AuthKind)
+		}
+		if remote.AuthRef == "" || strings.ContainsAny(remote.AuthRef, ":,") {
+			return fmt.Errorf("auth=%s: want %s:<name>", remote.AuthKind, remote.AuthKind)
+		}
+	case "header":
+		if !headerNameRE.MatchString(remote.AuthHeader) {
+			return fmt.Errorf("auth=header: invalid header name %q", remote.AuthHeader)
+		}
+		if remote.AuthRef == "" || strings.Contains(remote.AuthRef, ",") {
+			return fmt.Errorf("auth=header: want header:<Header-Name>:<secret-name>")
+		}
+	default:
+		return fmt.Errorf("auth: unknown kind %q (want bearer:, header:, or custody:)", remote.AuthKind)
+	}
+	if remote.AuthKind == "bearer" || remote.AuthKind == "header" {
+		if err := secret.ValidateName(remote.AuthRef); err != nil {
+			return fmt.Errorf("auth: invalid secret reference: %w", err)
 		}
 	}
-	for _, name := range out.RedactNames {
+	for _, name := range remote.RedactNames {
+		if strings.Contains(name, ",") {
+			return fmt.Errorf("redact: comma is not allowed")
+		}
 		if err := secret.ValidateName(name); err != nil {
-			return out, fmt.Errorf("redact: invalid secret reference: %w", err)
+			return fmt.Errorf("redact: invalid secret reference: %w", err)
 		}
 	}
 	for _, policy := range []struct {
 		name     string
 		patterns []string
-	}{{"allow", out.Allow}, {"deny", out.Deny}} {
+	}{{"allow", remote.Allow}, {"deny", remote.Deny}} {
 		for _, pattern := range policy.patterns {
+			if pattern == "" {
+				return fmt.Errorf("%s: empty tool pattern", policy.name)
+			}
+			if strings.Contains(pattern, ",") {
+				return fmt.Errorf("%s: comma is not allowed", policy.name)
+			}
 			if _, err := path.Match(pattern, ""); err != nil {
-				return out, fmt.Errorf("%s: bad tool pattern %q: %w", policy.name, pattern, err)
+				return fmt.Errorf("%s: bad tool pattern %q: %w", policy.name, pattern, err)
 			}
 		}
 	}
-	return out, nil
+	if len(encode(remote)) > MaxSpecBytes {
+		return fmt.Errorf("MCP remote spec exceeds %d bytes", MaxSpecBytes)
+	}
+	return nil
 }
 
-// String returns the canonical persisted -mcp-remote spelling.
-func (remote Remote) String() string {
+// Encode validates a typed remote and returns its canonical persisted spelling.
+func Encode(remote Remote) (string, error) {
+	if err := Validate(remote); err != nil {
+		return "", err
+	}
+	return encode(remote), nil
+}
+
+func encode(remote Remote) string {
 	fields := []string{"name=" + remote.Name, "url=" + remote.URL}
 	switch remote.AuthKind {
 	case "bearer", "custody":

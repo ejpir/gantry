@@ -341,6 +341,11 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 
 var containerInitArgs = []string{"/bin/sh", "-c", "while :; do sleep 86400; done"}
 
+func sandboxContainerConfig(options SessionOptions) (string, error) {
+	return configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW,
+		containerInitArgs, options.ImgCfg, false, "", options.Environment)
+}
+
 func ensureSandboxContainer(client *ttrpc.Client, taskClient v3.TTRPCTaskService, ctx context.Context, options SessionOptions, logf func(string, ...any)) error {
 	state, err := taskClient.State(ctx, &v3.StateRequest{ID: options.ID})
 	if err == nil && state.Status == tasktypes.Status_RUNNING {
@@ -356,7 +361,7 @@ func ensureSandboxContainer(client *ttrpc.Client, taskClient v3.TTRPCTaskService
 		return fmt.Errorf("sandbox task %q exists in state %s and did not reach running", options.ID, state.Status)
 	}
 
-	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, containerInitArgs, nil, false, "", options.Environment)
+	config, err := sandboxContainerConfig(options)
 	if err != nil {
 		return err
 	}

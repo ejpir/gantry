@@ -91,6 +91,28 @@ func samePolicy(t *testing.T, got, want *netpol.Policy) bool {
 	return string(gotRaw) == string(wantRaw)
 }
 
+func TestPolicyMirrorChangesOnlyAfterSplitBackendAcceptsPolicy(t *testing.T) {
+	old := mustTestPolicy(t, `{"default":"deny","allowDomains":["github.com"]}`)
+	next := mustTestPolicy(t, `{"default":"deny","allowDomains":["gitlab.com"]}`)
+	split := &policyBackendStub{policy: mustPolicySnapshot(old), failNext: errors.New("worker unavailable")}
+	mirror, err := NewPolicyMirrorBackend(split, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mirror.SetPolicy(next); err == nil {
+		t.Fatal("split worker failure reported success")
+	}
+	if !old.DomainAllowed("github.com") || old.DomainAllowed("gitlab.com") {
+		t.Fatal("failed split update changed the supervisor policy mirror")
+	}
+	if err := mirror.SetPolicy(next); err != nil {
+		t.Fatal(err)
+	}
+	if old.DomainAllowed("github.com") || !old.DomainAllowed("gitlab.com") {
+		t.Fatal("successful split update did not change the supervisor policy mirror")
+	}
+}
+
 func TestVMMPolicyBackendFailureLeavesPreviousPolicy(t *testing.T) {
 	old := mustTestPolicy(t, `{"default":"deny"}`)
 	next := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)

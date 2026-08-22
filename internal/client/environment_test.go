@@ -57,6 +57,25 @@ func TestConfigJSONIncludesEnvironmentOverrides(t *testing.T) {
 	}
 }
 
+func TestSandboxContainerInitUsesImageIdentity(t *testing.T) {
+	config, err := sandboxContainerConfig(SessionOptions{ImgCfg: &image.Config{
+		UID: 1001, GID: 1002, WorkingDir: "/work", Env: []string{"IMAGE_MARKER=present"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeRuntimeConfig(t, config)
+	if decoded.Process.User.UID != 1001 || decoded.Process.User.GID != 1002 {
+		t.Fatalf("sandbox init user = %d:%d, want 1001:1002", decoded.Process.User.UID, decoded.Process.User.GID)
+	}
+	if decoded.Process.Cwd != "/work" || !reflect.DeepEqual(decoded.Process.Args, containerInitArgs) {
+		t.Fatalf("sandbox init process = cwd %q args %v", decoded.Process.Cwd, decoded.Process.Args)
+	}
+	if decoded.Process.Capabilities != nil {
+		t.Fatalf("non-root sandbox init retained capabilities: %+v", decoded.Process.Capabilities)
+	}
+}
+
 func TestPrependPath(t *testing.T) {
 	base := []string{"PATH=/usr/bin:/bin", "HOME=/root"}
 	got := prependPath(base, []string{"/run/gantry/bin"})

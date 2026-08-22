@@ -16,7 +16,7 @@ $ gantry start agent \
     -image python:3.12 \
     -cpus 2 \
     -mem 2048 \
-    -share "workspace=$PWD@/workspace" \
+    -share "workspace=$PWD,mount=/workspace" \
     -secret GITHUB_TOKEN \
     -net-policy ./examples/llm-only.json
 ```
@@ -35,7 +35,7 @@ Use `,ro` for source that the agent should inspect but not change:
 
 ```console
 $ gantry start reviewer -image alpine:latest \
-    -share "source=$PWD@/workspace,ro" \
+    -share "source=$PWD,mount=/workspace,ro" \
     -net-policy ./examples/llm-only.json
 ```
 
@@ -46,7 +46,7 @@ For unattended or untrusted work, use fail-closed worker isolation:
 ```console
 $ gantry start agent -image python:3.12 \
     -process-isolation=required \
-    -share "workspace=$PWD@/workspace" \
+    -share "workspace=$PWD,mount=/workspace" \
     -net-policy ./examples/llm-only.json
 ```
 

@@ -175,7 +175,7 @@ func TestShareManagerConfigureRestartSerializesWithLiveTransactions(t *testing.T
 	manager.mu.Lock()
 	go func() {
 		close(started)
-		_, err := manager.ConfigureRestart("workspace="+host+"@/workspace", false)
+		_, err := manager.ConfigureRestart("workspace="+host+",mount=/workspace", false)
 		done <- err
 	}()
 	<-started
@@ -277,7 +277,7 @@ func TestShareManagerRemoveUpdatesConfig(t *testing.T) {
 
 func TestShareManagerForceRemovesExplicitContainerAlias(t *testing.T) {
 	dir := t.TempDir()
-	manager, sandboxDir := newTestShareManager(t, "workspace="+dir+"@/workspace")
+	manager, sandboxDir := newTestShareManager(t, "workspace="+dir+",mount=/workspace")
 	if err := manager.Publish(); err != nil {
 		t.Fatal(err)
 	}

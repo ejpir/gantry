@@ -12,7 +12,7 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 )
 
-// Spec is one TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N] host-directory export.
+// Spec is one TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N] host-directory export.
 //
 // Read-only semantics are enforced on the host by the virtio-fs backend.
 // UID/GID optionally replace host numeric ownership in guest-visible
@@ -26,10 +26,10 @@ type Spec struct {
 	CtrPath string
 }
 
-// ParseSpec parses one TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N] value. The
-// optional @CTRPATH must be an absolute container path. Splitting only on the
-// first '=' leaves Windows drive colons and additional '=' characters in PATH
-// intact.
+// ParseSpec parses one TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N] value. The
+// optional mount target must be an absolute container path. Splitting only on
+// the first '=' leaves Windows drive colons and additional '=' characters in
+// PATH intact.
 //
 // Collection-level rules such as unique tags belong to ParseSpecs. Keeping
 // this function independent of caller-owned state makes single-value parsing
@@ -37,11 +37,12 @@ type Spec struct {
 func ParseSpec(spec string) (Spec, error) {
 	tag, path, ok := strings.Cut(spec, "=")
 	if !ok {
-		return Spec{}, fmt.Errorf("want TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N]")
+		return Spec{}, fmt.Errorf("want TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N]")
 	}
 	var ro bool
 	var uid, gid *uint32
-	var encoded bool
+	var mountPath string
+	var hasMount, encoded bool
 	// Options are suffixes so commas remain valid in the host/container path
 	// unless every trailing component is a recognized option.
 
@@ -63,6 +64,15 @@ options:
 				return Spec{}, fmt.Errorf("duplicate share option encoding")
 			}
 			encoded = true
+		case strings.HasPrefix(opt, "mount="):
+			if hasMount {
+				return Spec{}, fmt.Errorf("duplicate share option mount")
+			}
+			mountPath = strings.TrimPrefix(opt, "mount=")
+			if mountPath == "" {
+				return Spec{}, fmt.Errorf("empty share mount target")
+			}
+			hasMount = true
 		case strings.HasPrefix(opt, "uid="):
 			if uid != nil {
 				return Spec{}, fmt.Errorf("duplicate share option uid")
@@ -87,7 +97,7 @@ options:
 			// A trailing segment that looks like an option but is not recognized
 			// is a typo, not part of the path. Plain commas remain valid in paths.
 			if key, _, isOption := strings.Cut(opt, "="); isOption {
-				return Spec{}, fmt.Errorf("unknown share option %q (want ro, uid=N, gid=N)", key)
+				return Spec{}, fmt.Errorf("unknown share option %q (want mount=PATH, ro, uid=N, gid=N)", key)
 			}
 			break options
 		}
@@ -96,12 +106,8 @@ options:
 	if (uid == nil) != (gid == nil) {
 		return Spec{}, fmt.Errorf("share ownership mapping requires both uid=N and gid=N")
 	}
-	var ctrPath string
-	var hasCtrPath bool
-	if i := strings.LastIndex(path, "@"); i >= 0 {
-		hasCtrPath = true
-		ctrPath = path[i+1:]
-		path = path[:i]
+	if !encoded && !hasMount && strings.Contains(path, "@/") {
+		return Spec{}, fmt.Errorf("ambiguous legacy @ mount syntax; use mount=PATH or base64url encoding")
 	}
 	if encoded {
 		decoded, err := base64.RawURLEncoding.DecodeString(path)
@@ -109,16 +115,16 @@ options:
 			return Spec{}, fmt.Errorf("decode share path: %w", err)
 		}
 		path = string(decoded)
-		if hasCtrPath {
-			decoded, err = base64.RawURLEncoding.DecodeString(ctrPath)
+		if hasMount {
+			decoded, err = base64.RawURLEncoding.DecodeString(mountPath)
 			if err != nil {
 				return Spec{}, fmt.Errorf("decode container path: %w", err)
 			}
-			ctrPath = string(decoded)
+			mountPath = string(decoded)
 		}
 	}
-	if hasCtrPath && !strings.HasPrefix(ctrPath, "/") {
-		return Spec{}, fmt.Errorf("container path after @ must be absolute (got %q)", ctrPath)
+	if hasMount && !strings.HasPrefix(mountPath, "/") {
+		return Spec{}, fmt.Errorf("container mount path must be absolute (got %q)", mountPath)
 	}
 	if err := ValidateShareTag(tag); err != nil {
 		return Spec{}, err
@@ -126,7 +132,7 @@ options:
 	if path == "" {
 		return Spec{}, fmt.Errorf("empty path")
 	}
-	return Spec{Tag: tag, Path: path, RO: ro, UID: uid, GID: gid, CtrPath: ctrPath}, nil
+	return Spec{Tag: tag, Path: path, RO: ro, UID: uid, GID: gid, CtrPath: mountPath}, nil
 }
 
 // ParseSpecs parses a collection and rejects duplicate tags.
@@ -174,7 +180,7 @@ func (s Spec) format(encoded bool) string {
 	b.WriteByte('=')
 	b.WriteString(hostPath)
 	if ctrPath != "" {
-		b.WriteByte('@')
+		b.WriteString(",mount=")
 		b.WriteString(ctrPath)
 	}
 	if s.RO {

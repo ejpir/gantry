@@ -92,10 +92,10 @@ Build one with ./scripts/mkpiimage.sh, then:
 	startArgv := []string{
 		name,
 		"-image", cfg.image,
-		// @/workspace: with two shares the default container paths
+		// mount=/workspace: with two shares the default container paths
 		// would be /host/ws + /host/piagent — pin the project mount
 		// where the exec and the docs expect it.
-		"-share", "ws=" + cwd + "@/workspace",
+		"-share", "ws=" + cwd + ",mount=/workspace",
 		"-mem", fmt.Sprint(cfg.mem),
 		"-cpus", fmt.Sprint(cfg.cpus),
 	}
@@ -115,7 +115,7 @@ Build one with ./scripts/mkpiimage.sh, then:
 		if home, err := os.UserHomeDir(); err == nil {
 			agentDir := filepath.Join(home, ".pi", "agent")
 			if st, err := os.Stat(agentDir); err == nil && st.IsDir() {
-				startArgv = append(startArgv, "-share", "piagent="+agentDir+"@/root/.pi/agent")
+				startArgv = append(startArgv, "-share", "piagent="+agentDir+",mount=/root/.pi/agent")
 				if cfg.netpol == "" {
 					fmt.Fprintln(os.Stderr, "gantry pi: sharing ~/.pi/agent with the sandbox; consider -net-policy pinned to your provider's domain")
 				}

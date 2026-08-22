@@ -243,7 +243,7 @@ func inspectDockerImport(root, name, as, logPath, workspaceOwner string) (*docke
 	var shareSpecs []string
 	if runtimeConfig.Spec.WorkspaceDir != "" {
 		workspace := runtimeConfig.Spec.WorkspaceDir
-		shareSpecs = append(shareSpecs, "workspace="+workspace+"@"+workspace+ownerSuffix)
+		shareSpecs = append(shareSpecs, "workspace="+workspace+",mount="+workspace+ownerSuffix)
 	}
 	rwLayer := rwlayer.Path(targetName)
 	return &dockerImportPlan{

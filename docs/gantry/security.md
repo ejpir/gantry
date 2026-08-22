@@ -125,7 +125,10 @@ network destination or write them to a writable share. Constrain both egress
 and filesystem access.
 
 OAuth bridging opens bounded host-loopback listeners after detecting supported
-agent callback URLs. Disable it with `-oauth-bridge=false` when unused.
+agent callback URLs. Guest callback responses may redirect only to an absolute
+path on the same bridge origin; external, scheme-relative, and host-local
+redirect targets are rejected. Disable the bridge with `-oauth-bridge=false`
+when unused.
 
 ## Local control surfaces
 

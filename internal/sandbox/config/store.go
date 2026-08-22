@@ -226,6 +226,10 @@ func (s *ConfigStore) SetMCPRemote(raw string, replace bool) (mcpspec.Remote, er
 	if err != nil {
 		return mcpspec.Remote{}, err
 	}
+	canonical, err := mcpspec.Encode(remote)
+	if err != nil {
+		return mcpspec.Remote{}, err
+	}
 	err = s.Mutate(func(cfg *RunConfig) error {
 		index := -1
 		for i, configured := range cfg.MCPRemotes {
@@ -246,7 +250,6 @@ func (s *ConfigStore) SetMCPRemote(raw string, replace bool) (mcpspec.Remote, er
 		if index < 0 && len(cfg.MCPRemotes) >= mcpspec.MaxRemotes {
 			return fmt.Errorf("too many remote MCP servers (max %d)", mcpspec.MaxRemotes)
 		}
-		canonical := remote.String()
 		if index >= 0 {
 			cfg.MCPRemotes[index] = canonical
 		} else {

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build Gantry's pinned nerdbox guest rootfs with Gantry's clock, DHCP-client
-# lifetime, and quiet-production-log patches. Warnings and errors still reach
+# lifetime, trusted system-sync, and quiet-production-log patches. Warnings and errors still reach
 # the VM console; verbose plugin/DHCP traces remain available with vminitd
 # -debug.
 set -eu

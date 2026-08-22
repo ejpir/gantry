@@ -81,6 +81,42 @@ func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
 	}
 }
 
+func TestSplitPolicyUpdateRefreshesHostCredentialGate(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, config.RunConfig{Net: true})
+	policyPath := filepath.Join(dir, "gitlab.json")
+	if err := os.WriteFile(policyPath, []byte(`{
+		"default":"deny",
+		"allowDomains":["gitlab.com"]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := mustTestPolicy(t, `{"default":"deny","allowDomains":["github.com"]}`)
+	split := &policyBackendStub{policy: mustPolicySnapshot(live)}
+	backend, err := NewPolicyMirrorBackend(split, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewNetworkPolicyManager(store, backend, live)
+	credentialEgressAllowed := live.DomainAllowed
+	if !credentialEgressAllowed("github.com") {
+		t.Fatal("boot policy did not allow the bound credential host")
+	}
+
+	if _, err := manager.Set(policyPath, false); err != nil {
+		t.Fatal(err)
+	}
+	if split.policy.DomainAllowed("github.com") {
+		t.Fatal("split enforcement backend retained the boot policy")
+	}
+	if credentialEgressAllowed("github.com") {
+		t.Fatal("host credential gate retained the boot policy")
+	}
+	if !credentialEgressAllowed("gitlab.com") {
+		t.Fatal("host credential gate did not follow the active split policy")
+	}
+}
+
 func TestNetworkPolicyManagerPreservesProxyEnforcement(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, config.RunConfig{

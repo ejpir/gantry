@@ -24,6 +24,7 @@ option go_package = "github.com/containerd/nerdbox/api/services/system/v1;system
 
 service System {
 	rpc Info(google.protobuf.Empty) returns (InfoResponse);
+	rpc Sync(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
 
 message InfoResponse {

@@ -11,13 +11,14 @@ import (
 
 // NetworkBackend is the control surface the PortManager and
 // NetworkPolicyManager mutate the live network through (Phase 0 seam of
-// docs/vmm-network-isolation.md). It has exactly two implementations:
+// docs/vmm-network-isolation.md). Its enforcement implementations are:
 //
 //   - localBackend: the monolithic in-process netstack + policy, used
 //     when process isolation is off or unavailable;
 //   - the split-mode network worker client (network_worker.go), which
 //     performs the same operations over workerproto RPC against the
-//     re-executed `gantry _net-worker` process.
+//     re-executed `gantry _net-worker` process and is decorated by
+//     policyMirrorBackend for supervisor-side policy decisions.
 //
 // The managers below never know which one they hold, so live policy
 // replacement and port publishing keep identical transactional semantics
@@ -61,6 +62,38 @@ func (b *localBackend) Unpublish(proto, local string) error {
 func (b *localBackend) Forwards() ([]vnet.Forward, error) { return b.stack.Forwards() }
 
 func (b *localBackend) SetPolicy(policy *netpol.Policy) error {
+	return b.live.Replace(policy)
+}
+
+// policyMirrorBackend keeps a supervisor-owned stable Policy holder in sync
+// with an out-of-process enforcement backend. Host-side decisions such as the
+// bound-credential egress gate follow that holder through Policy.Replace.
+type policyMirrorBackend struct {
+	NetworkBackend
+	live *netpol.Policy
+	mu   sync.Mutex
+}
+
+// NewPolicyMirrorBackend wraps a split backend so a successful live update is
+// reflected in the supervisor only after the enforcement point accepts it.
+func NewPolicyMirrorBackend(backend NetworkBackend, live *netpol.Policy) (NetworkBackend, error) {
+	if backend == nil || live == nil {
+		return nil, fmt.Errorf("network policy mirror backend is nil")
+	}
+	return &policyMirrorBackend{NetworkBackend: backend, live: live}, nil
+}
+
+func (b *policyMirrorBackend) SetPolicy(policy *netpol.Policy) error {
+	if policy == nil {
+		return fmt.Errorf("network policy replacement is nil")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.NetworkBackend.SetPolicy(policy); err != nil {
+		return err
+	}
+	// live and policy were checked above, so Replace cannot fail after the
+	// split backend has committed the policy.
 	return b.live.Replace(policy)
 }
 

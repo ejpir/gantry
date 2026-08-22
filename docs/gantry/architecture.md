@@ -329,7 +329,10 @@ in-guest filesystem hardening work.
 The callback bridge recognizes supported guest loopback authorization URLs
 and creates a short-lived listener on host loopback. It validates the expected
 path and state, accepts one callback, and replays that callback to the guest
-loopback service. It is separate from general port publishing.
+loopback service. Redirects returned by that service are restricted to
+absolute paths on the bridge origin, so the guest cannot use the host browser
+as an external or host-local request proxy. The bridge is separate from
+general port publishing.
 
 With custody enabled, the supervisor performs the provider-specific code
 exchange. It writes the refresh token to `oauth-tokens.json` in the protected

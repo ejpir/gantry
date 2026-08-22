@@ -60,7 +60,7 @@ $ curl --unix-socket "$HOME/.gantry/manager.sock" \
       "rw": true,
       "memoryMiB": 1024,
       "cpus": 2,
-      "shares": ["workspace=/absolute/project/path@/workspace,ro"],
+      "shares": ["workspace=/absolute/project/path,mount=/workspace,ro"],
       "networkPolicy": "/absolute/policy.json"
     }' \
     http://gantry.local/v1/sandboxes

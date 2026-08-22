@@ -217,8 +217,26 @@ func newSessionToken() (string, error) {
 
 // Serve handles one guest MCP session until EOF, a fatal frame error, or
 // ctx cancellation. All upstreams started for the session are killed when
-// it ends.
+// it ends. In an in-process gateway, the gateway owns its session token.
 func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
+	sessionToken, err := newSessionToken()
+	if err != nil {
+		return fmt.Errorf("mcpgw: session token: %w", err)
+	}
+	return g.serve(ctx, rw, sessionToken)
+}
+
+// ServeWithSessionCapability serves a split-worker session using the opaque,
+// live capability issued and tracked by the trusted supervisor.
+func (g *Gateway) ServeWithSessionCapability(ctx context.Context, rw io.ReadWriteCloser, sessionToken string) error {
+	decoded, err := hex.DecodeString(sessionToken)
+	if err != nil || len(decoded) != 16 {
+		return fmt.Errorf("mcpgw: invalid supervisor session capability")
+	}
+	return g.serve(ctx, rw, sessionToken)
+}
+
+func (g *Gateway) serve(ctx context.Context, rw io.ReadWriteCloser, sessionToken string) error {
 	defer func() { _ = rw.Close() }()
 	select {
 	case g.sessions <- struct{}{}:
@@ -235,10 +253,6 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 		defer func() { _ = deadlines.SetReadDeadline(time.Time{}) }()
 	}
 
-	sessionToken, err := newSessionToken()
-	if err != nil {
-		return fmt.Errorf("mcpgw: session token: %w", err)
-	}
 	sess := &session{
 		g:         g,
 		token:     sessionToken,

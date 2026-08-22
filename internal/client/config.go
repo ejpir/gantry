@@ -110,20 +110,24 @@ func configJSONWithTransportCwdEnv(entries []ShareEntry, transport *shares.Trans
 		mounts = appendMounts(baseContainerMounts, perDeviceShareMounts(entries))
 	}
 
+	var capabilities *specs.LinuxCapabilities
+	if uid == 0 {
+		capabilities = &specs.LinuxCapabilities{
+			Bounding:  containerCapabilities,
+			Effective: containerCapabilities,
+			Permitted: containerCapabilities,
+		}
+	}
 	config := runtimeConfig{
 		Version: "1.1.0",
 		Process: runtimeProcess{
-			Terminal: terminal,
-			User:     specs.User{UID: uid, GID: gid},
-			Args:     args,
-			Env:      processEnvironment(img, environment),
-			Cwd:      cwd,
-			Capabilities: &specs.LinuxCapabilities{
-				Bounding:  containerCapabilities,
-				Effective: containerCapabilities,
-				Permitted: containerCapabilities,
-			},
-			Rlimits: []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 65536}},
+			Terminal:     terminal,
+			User:         specs.User{UID: uid, GID: gid},
+			Args:         args,
+			Env:          processEnvironment(img, environment),
+			Cwd:          cwd,
+			Capabilities: capabilities,
+			Rlimits:      []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 65536}},
 		},
 		Root:     runtimeRoot{Path: "rootfs", Readonly: !rw},
 		Hostname: "nerdbox",

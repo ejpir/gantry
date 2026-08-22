@@ -5,18 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/containerd/containerd/api/runtime/task/v3"
-	tasktypes "github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/ttrpc"
 	"github.com/containerd/typeurl/v2"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 func init() {
@@ -120,40 +118,16 @@ func sessionExec(taskClient task.TTRPCTaskService, options SessionOptions, id st
 	return waitErr
 }
 
-// SyncGuest asks a running workload container to flush its filesystems.
-func SyncGuest(client *ttrpc.Client, streamSock, containerID string, timeout time.Duration) {
-	SyncGuestDial(client, nil, streamSock, containerID, timeout)
-}
+const guestSystemService = "containerd.vminitd.services.system.v1.System"
 
-// SyncGuestDial is SyncGuest with an optional split-worker stream dialer.
-func SyncGuestDial(client *ttrpc.Client, dial func() (net.Conn, error), streamSock, containerID string, timeout time.Duration) {
-	taskClient := task.NewTTRPCTaskClient(client)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	state, err := taskClient.State(ctx, &task.StateRequest{ID: containerID})
-	cancel()
-	if err != nil || state.Status != tasktypes.Status_RUNNING {
-		return
+// SyncGuest asks the trusted vminitd system service to flush every guest
+// filesystem. It never resolves or executes a path from the workload image.
+func SyncGuest(client *ttrpc.Client, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var response emptypb.Empty
+	if err := client.Call(ctx, guestSystemService, "Sync", &emptypb.Empty{}, &response); err != nil {
+		return fmt.Errorf("guest system sync: %w", err)
 	}
-
-	kill := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		_ = Session(client, SessionOptions{
-			StreamSock:       streamSock,
-			StreamDial:       dial,
-			Args:             []string{"/bin/sync"},
-			ID:               containerID,
-			ExecIntoExisting: true,
-			Quiet:            true,
-			KillCh:           kill,
-		}, strings.NewReader(""), io.Discard)
-		close(done)
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-	case <-timer.C:
-		close(kill)
-	}
+	return nil
 }
