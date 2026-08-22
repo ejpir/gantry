@@ -20,7 +20,7 @@ controls.
                  ▼
   ┌───────────────────────────────────────────────┐
   │ sandbox supervisor                            │
-  │ lifecycle • config • secrets • ctl.sock       │
+  │ lifecycle • config • secrets • OAuth • MCP    │
   │ guest RPC bridge • share roots • host ports   │
   └───────────┬───────────────────┬───────────────┘
               │ authenticated     │ authenticated
@@ -69,7 +69,7 @@ The ordinary command paths are:
 The supervisor is the trusted host control plane for one sandbox. It owns:
 
 - durable `sandbox.json` configuration and the sandbox lifetime lock;
-- the in-memory secret map;
+- the host secret store, OAuth custody registry, and MCP gateway;
 - local control listeners and session multiplexing;
 - opened boot assets and writable disks before capabilities are delegated;
 - host share roots and share admission policy;
@@ -174,6 +174,111 @@ receive host share roots; other paths use an authenticated request relay.
 There is no filesystem sync or private checkout layer: host-share changes are
 changes to the original host directory.
 
+## Host capability bridges
+
+Shares, secrets, OAuth, and MCP deliberately cross the VM boundary in narrow,
+different ways. A share delegates access to a selected host directory. An
+ordinary secret delegates a value to a guest process. A bound secret or MCP
+credential instead stays in a host service and is released only through that
+service's protocol.
+
+### Host shares
+
+The supervisor opens and validates each host root before admitting it to the
+share hub. Guest requests name an admitted tag and a path relative to that
+root; they do not carry arbitrary host paths. The backend applies read-only
+policy before mutating host files and rejects traversal outside the root.
+
+The guest mounts the multiplexed virtio-fs hub once, then bind-mounts admitted
+tags into the workload container. Live add and remove mutate the hub manifest
+rather than attaching another VM device. Persistent changes are serialized to
+`sandbox.json` and replayed on resume.
+
+### MCP and credential flow
+
+The following diagram shows where values cross the host/guest boundary. Solid
+credential arrows represent explicit release points; the remote MCP header
+never travels through the guest.
+
+```mermaid
+flowchart LR
+    subgraph H[Host]
+        SRC[Environment, file, or command source] --> STORE[Per-sandbox secret store]
+        STORE --> ENV[Process environment builder]
+        STORE --> BROKER[Bound credential broker]
+        STORE --> GW[MCP gateway]
+        OAUTH[OAuth custody registry] --> GW
+        GW -->|credentialed HTTPS| REMOTE[Remote MCP server]
+    end
+
+    subgraph V[Linux microVM]
+        WORKLOAD[Workload process]
+        GIT[Git credential helper]
+        PROXY[gantry-guest mcp-proxy]
+        LOCAL[Unprivileged filesystem MCP server]
+    end
+
+    ENV -->|ordinary secret in OCI process spec| WORKLOAD
+    GIT -->|host and path over vsock| BROKER
+    BROKER -->|bound value for an allowed host| GIT
+    PROXY -->|MCP frames over vsock| GW
+    GW -->|stdio over guest exec| LOCAL
+    LOCAL -->|contained reads| WORKLOAD
+    GW -->|filtered and redacted result| PROXY
+```
+
+The launcher passes secret source descriptions and memory-only values to the
+new supervisor through a bounded inherited-stdin handshake. The supervisor
+scrubs corresponding environment keys, and `sandbox.json` retains only names,
+bindings, and source references.
+
+Ordinary secrets are resolved into a process specification and therefore
+become visible to that guest process. File and command sources are resolved at
+use time and cached by TTL. A failed refresh invalidates the old cache entry;
+the broker never falls back to a stale value.
+
+A host-bound secret is excluded from guest environments. The git helper sends
+a host/path request over its dedicated virtio-vsock service. The supervisor
+checks the binding and current egress policy, resolves the source, and returns
+the value for that operation. Removal changes the host store immediately, so
+there is no durable guest copy to revoke.
+
+The MCP gateway is another per-sandbox host listener. The in-guest
+`mcp-proxy` carries newline-delimited MCP frames over virtio-vsock. For the
+built-in filesystem server, the gateway starts `gantry-guest mcp-serve` through
+the existing guest exec channel, launches it as root only long enough to drop
+to the configured non-root UID/GID, and connects its stdio to the MCP session.
+The server uses an `os.Root` jail, while the gateway exposes only read and list
+tools.
+
+Remote MCP servers are reached from the host with streamable HTTP. The gateway
+resolves a named secret or current custody token, injects the header after
+validating the destination, and refuses credentialed redirects. Address
+validation happens in the dial path: public HTTPS is required except for an
+explicit loopback development endpoint; private, link-local, CGNAT, and cloud
+metadata destinations are rejected.
+
+Every remote uses a default-deny tool policy. The gateway rewrites upstream
+request IDs, redacts injected and configured values from results and errors,
+and audits names and decisions rather than payloads. Frames and responses are
+limited to 1 MiB; one session permits 16 in-flight calls, one gateway permits
+16 sessions, and idle sessions expire after five minutes.
+
+### OAuth bridge and custody
+
+The callback bridge recognizes supported guest loopback authorization URLs
+and creates a short-lived listener on host loopback. It validates the expected
+path and state, accepts one callback, and replays that callback to the guest
+loopback service. It is separate from general port publishing.
+
+With custody enabled, the supervisor performs the provider-specific code
+exchange. It writes the refresh token to `oauth-tokens.json` in the protected
+sandbox state directory, while the guest provider file receives an access
+token and a sentinel in place of the refresh token. The refresh loop updates
+the host registry atomically and pushes replacement access tokens into the
+guest. On resume, the supervisor restores that registry before restarting the
+refresh loop.
+
 ## Network flow
 
 ```text
@@ -229,6 +334,7 @@ The default layout is:
 │   └── <name>.ext4.image
 └── sandboxes/<name>/
     ├── sandbox.json
+    ├── oauth-tokens.json       # only when OAuth custody is used
     ├── isolation.json
     ├── network-traffic.json
     ├── console.log
@@ -238,7 +344,12 @@ The default layout is:
     └── runtime locks, sockets, and readiness files
 ```
 
-Secret values do not appear in this layout. A stop removes transient runtime
-sockets and processes but preserves configuration and disk state. Delete also
-removes the named sandbox's Gantry-managed default writable layer; a custom
-`-rwlayer` remains caller-owned.
+Ordinary workload secret values do not appear in this layout. OAuth custody
+is the deliberate exception: its refresh tokens persist in the private
+`oauth-tokens.json` registry so stop/resume can preserve a login. Gantry uses
+mode `0600` and a protected Windows DACL for that file.
+
+A stop removes transient runtime sockets and processes but preserves
+configuration and disk state. Delete also removes the named sandbox's
+Gantry-managed default writable layer; a custom `-rwlayer` remains
+caller-owned.

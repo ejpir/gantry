@@ -1,97 +1,96 @@
 # Host shares and secrets
 
-Host shares expose selected directories through virtio-fs. Secrets add
-environment values to guest processes without putting those values in command
-arguments or persistent sandbox configuration.
+Host shares give a sandbox access to selected directories. Secrets supply
+credentials from the host without putting literal values in command arguments
+or persistent sandbox configuration.
 
 ## Share a host directory
 
-Share a project at its default container path, `/host/code`:
+Share the current project at `/host/code`:
 
 ```console
 $ gantry start dev -image alpine:latest \
     -share "code=$PWD"
 ```
 
-Choose an explicit container path after `@`:
+Choose another path inside the container with `@`:
 
 ```console
 $ gantry start dev -image alpine:latest \
     -share "code=$PWD@/workspace"
 ```
 
-The full format is:
+A share specification has this form:
 
 ```text
 TAG=HOST_PATH[@CONTAINER_PATH][,ro][,uid=N,gid=N]
 ```
 
-Tags identify shares in the live control plane. Container paths after `@`
-must be absolute.
+| Part | Meaning |
+| --- | --- |
+| `TAG` | Name used by `gantry share` commands. |
+| `HOST_PATH` | Existing directory on the host. |
+| `CONTAINER_PATH` | Absolute guest-container path; defaults to `/host/TAG`. |
+| `ro` | Make the export read-only. |
+| `uid`, `gid` | Replace the numeric owner shown in the guest. Use both together. |
 
 ## Make a share read-only
 
-Append `,ro`:
+Append `,ro` when the workload only needs to inspect files:
 
 ```console
 $ gantry start review -image alpine:latest \
     -share "source=$PWD@/workspace,ro"
 ```
 
-Read-only behavior is enforced by the host filesystem backend, not only by a
-guest mount flag.
+Read-only enforcement happens at the host export, not only at the guest mount.
 
 > [!WARNING]
-> A read-write share grants the guest the launching user's access to that
-> directory. It is an intentional path through the VM boundary. Share the
-> smallest directory the workload needs.
+> A read-write share grants the guest the launching user's access within that
+> directory. Share the smallest directory the workload needs. Do not share a
+> home directory, credential store, or container-engine socket with untrusted
+> code.
 
 ## Map guest-visible ownership
 
-Use `uid` and `gid` together to replace the numeric owner shown inside the
-guest without changing ownership on the host:
+Use `uid` and `gid` when the image runs as a non-root account:
 
 ```console
 $ gantry start dev -image node:latest \
     -share "code=$PWD@/workspace,uid=1000,gid=1000"
 ```
 
-Both options are required when either is present.
+This changes the numeric owner presented to the guest. It does not call
+`chown` on the host directory.
 
-## Add and remove shares live
+## Change shares on a running sandbox
 
-Add a share to a running sandbox:
+Add and inspect a share:
 
 ```console
 $ gantry share add dev "docs=$PWD/docs@/reference,ro"
 $ gantry share ls dev
 ```
 
-Replace an existing tag:
+Replace a tag or remove it:
 
 ```console
 $ gantry share add --replace dev "docs=$PWD/new-docs@/reference,ro"
-```
-
-Remove it:
-
-```console
 $ gantry share remove dev docs
 ```
 
-By default, live changes update `sandbox.json` and return after the share is
-visible or removed. Use `--ephemeral` to affect only the current boot. A
-normal remove waits for active handles to drain; `--force` revokes the export
-when a workload will not release them.
+Live changes are saved in `sandbox.json` and return after the export becomes
+visible or is removed. Add `--ephemeral` to affect only the current boot.
+A normal remove waits for open handles to drain; use `--force` when a workload
+will not release them.
 
-On Linux and macOS, host filesystem notifications keep guest directory and
-attribute caches coherent. The Windows backend uses conservative cache
-behavior and supports local NTFS directories; UNC, network, removable, and
-non-NTFS roots are not supported.
+Linux and macOS propagate host filesystem notifications into guest caches.
+Windows supports local NTFS directories and uses conservative cache behavior;
+UNC, network, removable, and non-NTFS roots are not supported.
 
 ## Inject secrets
 
-Export a value on the host, then name it on the Gantry command line:
+Export a value on the host and name it on the Gantry command line:
 
 ```console
 $ export GITHUB_TOKEN=...
@@ -99,31 +98,35 @@ $ gantry start agent -image alpine:latest -secret GITHUB_TOKEN
 $ gantry exec agent -- sh -lc 'test -n "$GITHUB_TOKEN"'
 ```
 
-Read a value from a file instead:
+Read from a host file instead:
 
 ```console
 $ gantry start agent -image alpine:latest \
     -secret GITHUB_TOKEN=@/secure/token
 ```
 
-Or load a dotenv-style file:
+Load several values from a dotenv-style file:
 
 ```console
 $ gantry start agent -image alpine:latest \
     -secret-file /secure/agent.env
 ```
 
-Repeat `-secret` and `-secret-file` as needed. Later definitions of the same
-name win.
+Repeat `-secret` and `-secret-file` as needed. A later definition of the same
+name wins.
 
-Gantry refuses `-secret NAME=literal`. Literal values in argv can be exposed
-by process inspection and shell history.
+Gantry refuses `-secret NAME=literal`. Values placed in argv can be exposed by
+process inspection and shell history.
+
+> [!IMPORTANT]
+> An ordinary secret becomes an environment variable for guest processes and
+> can be read by code running as that guest user. Pair sensitive secrets with
+> a default-deny [network policy](networking.md#define-an-egress-policy) and
+> narrow host shares.
 
 ## Refreshable secret sources
 
-File- and command-backed secrets are not copied at start. The sandbox daemon
-re-resolves them when they are used, so rotating the source is picked up by a
-running sandbox without a restart:
+File and command sources can rotate while a sandbox is running:
 
 ```console
 $ gantry start agent -image alpine:latest \
@@ -135,126 +138,116 @@ $ gantry start agent -image alpine:latest \
     -secret GITHUB_TOKEN='!gh auth token'
 ```
 
-The `,ttl=` suffix sets how long a resolved value is cached (default: 60s for
-files, 5m for commands; `ttl=0` re-resolves on every use). A command source
-runs an argv on the host — never a shell string — and captures stdout. This
-covers `op read ...`, `pass ...`, and similar tools without per-vendor support.
+A command source is an argv executed directly on the host, not a shell string.
+It can call tools such as `op`, `pass`, or `gh` without vendor-specific Gantry
+integration.
 
-If a previously working source stops resolving (the file was deleted, the
-command fails), Gantry fails closed: the cached value is dropped and nothing
-stale is served. The daemon log names the failing source, never its value.
+The optional `ttl` controls resolved-value caching:
 
-Environment-sourced secrets (`-secret NAME`) are still read once at start:
-environment variables do not change for a running process, so there is nothing
-to refresh.
+| Source | Default cache | Behavior |
+| --- | --- | --- |
+| Environment | Start-time snapshot | Read from the launcher once; export again before resume. |
+| File | 60 seconds | Read the file again after the TTL. |
+| Command | 5 minutes | Run the command again after the TTL. |
+| File or command with `ttl=0` | No cache | Resolve on every use. |
+
+If a file disappears or a command fails after previously working, Gantry drops
+the cached value and fails closed. It does not serve the stale credential.
 
 ## Bind a secret to a host
 
-Appending `@host` to the name binds the secret to that host and changes how it
-is delivered:
+Append `@host` when a credential should be delivered only through the host
+credential broker:
 
 ```console
 $ export GITHUB_TOKEN=...
-$ gantry start agent -image alpine:latest -secret GITHUB_TOKEN@github.com
+$ gantry start agent -image alpine:latest \
+    -secret GITHUB_TOKEN@github.com
 ```
 
-A bound secret is never placed in the guest environment or written to guest
-disk. Instead, Gantry stages a git credential helper inside the guest and
-points git at it; when git needs credentials for the bound host, the helper
-asks the sandbox daemon over the VM's vsock channel, and the daemon answers
-from memory. Wildcard bindings (`@*.githubusercontent.com`) cover subdomains.
+A bound secret is not added to the guest environment. Gantry configures its
+guest git credential helper to request the value when git connects to the
+matching host. Wildcard bindings such as `@*.githubusercontent.com` cover
+subdomains.
 
-The daemon answers only for the bound host, and only when the sandbox's
-network policy allows egress to that host. Every delivery, refusal, and source
-failure is logged by name in `daemon.log` and readable from a running sandbox
-with `gantry audit NAME` — values are structurally unloggable. Removing the
-secret on a running sandbox (the dashboard's secret controls) takes effect on
-the next git operation, with nothing to scrub guest-side.
+Combine a binding with a refreshable source:
 
-At start time gantry warns when a bound secret's `@host` is not covered by the
-`-net-policy` domain allowlist — the broker would hold the value but refuse
-every guest request for it, an expensive no-op best caught before boot.
+```console
+$ gantry start agent -image alpine:latest \
+    -secret GITHUB_TOKEN@github.com=@/secure/token,ttl=60s
+```
 
-Bound secrets combine with refreshable sources —
-`-secret GITHUB_TOKEN@github.com=@/secure/token,ttl=60s` — so a rotated token
-file reaches in-flight sessions.
+The broker answers only for the configured host and only when the network
+policy permits that destination. Gantry warns at start if a binding is not
+covered by the policy's domain allowlist. Deliveries, refusals, and resolution
+failures appear by secret name in `gantry audit NAME`; values are omitted.
+
+Bound secrets are also useful for remote MCP credentials. See
+[MCP gateway](mcp-gateway.md#choose-remote-credentials).
 
 ## Secret lifecycle
 
-For persistent sandboxes, `sandbox.json` stores only configured secret names.
-Values travel from the launcher to the sandbox daemon through a bounded stdin
-handshake, remain in daemon memory for that VM lifetime, and enter only the
-guest process environment. Gantry scrubs those keys from the host daemon's
-environment.
+For a named sandbox, `sandbox.json` stores secret names and source references,
+not values. The behavior after a stop depends on the source:
 
-After `gantry stop`, values are gone. Before `gantry resume`, export every
-configured environment-sourced name again (file- and command-backed sources
-re-resolve from their references and need no re-export):
+- Environment values are gone. Export them again before `gantry resume`.
+- File and command references remain in the saved configuration and resolve
+  again on resume.
+- Values loaded from a dotenv file or the dashboard are memory-only and must
+  be supplied again.
 
 ```console
+$ gantry stop agent
 $ export GITHUB_TOKEN=...
 $ gantry resume agent
 ```
 
-The dashboard can load or remove a memory-only secret on a running sandbox.
-It lists names and state, never values.
+Removing a secret from a running sandbox takes effect on the next use. A bound
+credential requires no guest-side cleanup because its value was never sent to
+the guest.
 
-Registry credentials are separate: the host image puller consumes them and
-does not send them into the VM. See [Images](images.md#authenticate-to-registries).
+Registry credentials follow a separate path: the host image puller consumes
+them and does not inject them into the VM. See
+[Images](images.md#authenticate-to-registries).
 
-> [!IMPORTANT]
-> A process inside the sandbox can read secrets injected into its environment.
-> Pair secrets with a default-deny [network policy](networking.md#define-an-egress-policy)
-> that allows only the services that should receive them.
+## Complete browser OAuth
 
-## OAuth callback bridge
+The OAuth callback bridge is enabled by default. When a supported Codex,
+Claude, or Pi login prints a `127.0.0.1` or `localhost` callback URL, Gantry
+opens the matching host-loopback callback temporarily so the host browser can
+complete the guest login.
 
-CLI-based agents often start a browser login on a guest loopback URL. Gantry
-enables a bounded OAuth bridge by default for supported Codex, Claude, and Pi
-callback patterns.
-
-When the agent prints a supported `127.0.0.1` or `localhost` callback URL,
-Gantry opens the corresponding host loopback listener for a limited time. The
-browser reaches the host listener, and Gantry replays the callback into the
-guest loopback service. The listener accepts only the expected callback shape
-and is not a general port forward.
-
-Disable it for a sandbox that does not need browser OAuth:
+Disable the bridge when it is not needed:
 
 ```console
 $ gantry start dev -image alpine:latest -oauth-bridge=false
 ```
 
-## OAuth custody
+The bridge accepts only supported callback paths and is not a general port
+forward.
 
-For Codex and Claude, Gantry can additionally hold the OAuth refresh token on
-the host and keep the guest on short-lived access tokens:
+## Keep OAuth refresh tokens on the host
+
+OAuth custody is available for Codex and Claude:
 
 ```console
 $ gantry start agent -image ubuntu:latest -oauth-custody
 $ gantry exec agent -- gantry-guest oauth login codex
 ```
 
-`gantry-guest oauth login` prints an authorize URL; open it in your host
-browser. (Guest tools install into `/run/gantry/bin`, which is on the PATH of
-sessions and execs once installed; use the full path in older sandboxes.)
-The daemon completes the exchange itself: the refresh token is stored
-host-side (a `0600` file in the sandbox state directory, so `gantry stop` and
-`gantry resume` keep the session), and the guest's auth file receives the
-current access token plus a sentinel refresh token. The daemon refreshes ahead
-of expiry and pushes the fresh access token into the guest automatically.
+Open the printed authorization URL in the host browser. The guest receives a
+short-lived access token and a nonfunctional refresh-token sentinel. Gantry
+keeps the real refresh token in the sandbox's protected host state, refreshes
+it ahead of expiry, and pushes updated access tokens into the guest auth file.
 
-A process exfiltrating the guest auth file gets an access token that stops
-working at expiry and a refresh token that never works.
+Custody survives `gantry stop` and `gantry resume`. A fresh `gantry start` for
+an existing name replaces that custody state, so log in again. If the provider
+revokes the refresh token, the session fails closed and must be authenticated
+again.
 
-Custody state lives in the sandbox state directory. `gantry resume` preserves
-it (the refresh loop picks the session back up); `gantry start` on an existing
-name replaces the sandbox and its custody state with it — log in again after a
-fresh start.
+OAuth custody requires the callback bridge. Providers other than Codex and
+Claude use the callback bridge without custody.
 
-Custody is provider-specific and supports Codex and Claude only; other
-providers use the transparent callback bridge above. If the provider revokes
-the refresh token, Gantry drops the session and the agent fails loudly — log
-in again with the same command. Custody requires the callback bridge; it is
-off by default and the transparent bridge alone remains the standard behavior.
-
+For diagrams of share, secret, OAuth, and MCP data flow, see
+[Architecture](architecture.md#host-capability-bridges). For boundary details,
+see [Security](security.md#credentials).
