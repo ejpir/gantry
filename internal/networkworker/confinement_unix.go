@@ -78,6 +78,7 @@ func RequiredConfinementProperties(platform string) []string {
 		required = append(required,
 			workerconf.PropFDTable,
 			workerconf.PropSyscall,
+			workerconf.PropLandlock,
 			workerconf.PropProcEnum,
 			workerconf.PropTaskLimit,
 		)

@@ -44,6 +44,8 @@ filesystem by digest.
   map ownership, and inject credentials without putting values in argv.
 - [Coding agents](coding-agents.md) — isolate an agent and run Pi in a
   project sandbox.
+- [Editor integration](../editor-integration.md) — run an agent from an editor
+  against a sandbox, and what that still needs.
 - [Manager API](manager-api.md) — automate local sandbox lifecycle over an
   authenticated Unix socket.
 - [Architecture](architecture.md) — supervisor, workers, microVM, storage,

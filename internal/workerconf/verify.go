@@ -50,6 +50,16 @@ func Verify(spec Spec, report *Report) {
 			}
 		}
 		results = append(results, syscallPolicy)
+		if spec.NoNewPaths {
+			landlock := report.Property(PropLandlock)
+			if landlock.State == StateUnavailable {
+				landlock = PropertyResult{
+					Property: PropLandlock, State: StateIndeterminate,
+					Detail: "Landlock installation outcome unavailable",
+				}
+			}
+			results = append(results, landlock)
+		}
 		results = append(results, staged("proc-enum", probeProcEnum))
 		taskLimit := report.Property(PropTaskLimit)
 		if taskLimit.State == StateUnavailable {

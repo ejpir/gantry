@@ -34,6 +34,13 @@ TAG=HOST_PATH[@CONTAINER_PATH][,ro][,uid=N,gid=N]
 | `ro` | Make the export read-only. |
 | `uid`, `gid` | Replace the numeric owner shown in the guest. Use both together. |
 
+To make a share readable through Gantry's built-in filesystem MCP server,
+set its MCP filesystem root to the share's container path—for example,
+`/workspace` for `@/workspace` or `/host/code` for the default `code` mount.
+The MCP filesystem user must also have read permission. Remote MCP servers do
+not receive direct access to guest mounts. See
+[MCP gateway: Read a mounted workspace through MCP](mcp-gateway.md#read-a-mounted-workspace-through-mcp).
+
 ## Make a share read-only
 
 Append `,ro` when the workload only needs to inspect files:

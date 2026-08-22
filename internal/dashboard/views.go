@@ -24,6 +24,8 @@ func pageTitle(page tuiPage) string {
 		return "PORTS"
 	case tuiSecretsPage:
 		return "SECRETS"
+	case tuiMCPPage:
+		return "MCP SERVERS"
 	case tuiPacketsPage:
 		return "PACKETS"
 	default:
@@ -43,6 +45,8 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 		return len(m.ports)
 	case tuiSecretsPage:
 		return len(m.secrets)
+	case tuiMCPPage:
+		return len(m.mcpServers)
 	case tuiPacketsPage:
 		return len(m.packets)
 	default:
@@ -210,6 +214,92 @@ func (m sandboxTUIModel) renderSecretDetail(theme tuiTheme, width int) []string 
 		lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Sandbox + "  •  " + row.State),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("Values are write-only, memory-only, and never shown in this table."),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("Export this name before restarting the sandbox."),
+	}
+}
+
+func (m sandboxTUIModel) renderMCPView(theme tuiTheme, layout tuiDashboardLayout) string {
+	return m.renderStandardTable(theme, layout, tuiMCPPage, "Loading MCP servers…", "No MCP servers configured", "Press f to configure the built-in filesystem server or a to add a remote server.")
+}
+
+func (m sandboxTUIModel) renderMCPHeader(theme tuiTheme, width int) string {
+	style := lipgloss.NewStyle().Bold(true).Foreground(theme.muted)
+	var line string
+	if width >= 82 {
+		endpointWidth := maxInt(18, width-54)
+		line = tableCell("STATE", 9) + " " + tableCell("SANDBOX", 13) + " " + tableCell("SERVER", 12) + " " +
+			tableCell("TYPE", 7) + " " + tableCell("ENDPOINT / ROOT", endpointWidth) + " " + tableCell("AUTH", 9)
+	} else {
+		endpointWidth := maxInt(12, width-32)
+		line = tableCell("", 2) + " " + tableCell("SANDBOX", 11) + " " + tableCell("SERVER", 10) + " " + tableCell("ENDPOINT", endpointWidth)
+	}
+	return style.Render(truncateANSI(line, width))
+}
+
+func (m sandboxTUIModel) renderMCPRow(theme tuiTheme, row tuiMCPRow, width int) string {
+	icon, stateColor := "✓", theme.success
+	switch row.State {
+	case "saved":
+		icon, stateColor = "·", theme.info
+	case "restart":
+		icon, stateColor = "↻", theme.warning
+	}
+	if row.Error != "" {
+		icon, stateColor = "!", theme.error
+	}
+	endpoint := row.URL
+	if row.Type == "local" {
+		endpoint = row.Root
+	}
+	if row.Error != "" {
+		endpoint = row.Error
+	}
+	auth := defaultText(row.AuthKind, "none")
+	state := strings.ToUpper(row.State)
+	if row.Error != "" {
+		state = "ERROR"
+	}
+	if width >= 82 {
+		endpointWidth := maxInt(18, width-54)
+		return tableCell(lipgloss.NewStyle().Foreground(stateColor).Render(icon+" "+state), 9) + " " +
+			tableCell(row.Sandbox, 13) + " " + tableCell(row.Name, 12) + " " + tableCell(strings.ToUpper(row.Type), 7) + " " +
+			tableCell(endpoint, endpointWidth) + " " + tableCell(auth, 9)
+	}
+	endpointWidth := maxInt(12, width-32)
+	return tableCell(lipgloss.NewStyle().Foreground(stateColor).Render(icon), 2) + " " + tableCell(row.Sandbox, 11) + " " +
+		tableCell(row.Name, 10) + " " + tableCell(endpoint, endpointWidth)
+}
+
+func (m sandboxTUIModel) renderMCPDetail(theme tuiTheme, width int) []string {
+	if m.mcpCursor < 0 || m.mcpCursor >= len(m.mcpServers) || m.tableDetailHeight() == 0 {
+		return nil
+	}
+	row := m.mcpServers[m.mcpCursor]
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Name)
+	if row.Error != "" {
+		return []string{m.renderTableSeparator(theme, width), title, lipgloss.NewStyle().Foreground(theme.error).Render(row.Error), "", ""}
+	}
+	if row.Type == "local" {
+		return []string{
+			m.renderTableSeparator(theme, width), title + "  " + lipgloss.NewStyle().Foreground(theme.info).Render("built-in read-only filesystem"),
+			lipgloss.NewStyle().Foreground(theme.muted).Render("root       ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Root),
+			lipgloss.NewStyle().Foreground(theme.muted).Render("guest user ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.User),
+			lipgloss.NewStyle().Foreground(theme.muted).Render("tools      read_file, list_directory  •  ") + row.State,
+		}
+	}
+	auth := "none"
+	if row.AuthKind != "" {
+		auth = row.AuthKind + ":" + row.AuthRef
+		if row.AuthKind == "header" {
+			auth = "header " + row.AuthHeader + ":" + row.AuthRef
+		}
+	}
+	policy := "allow " + defaultText(strings.Join(row.Allow, ", "), "none") + "  •  deny " + defaultText(strings.Join(row.Deny, ", "), "none")
+	redact := defaultText(strings.Join(row.Redact, ", "), "none")
+	return []string{
+		m.renderTableSeparator(theme, width), title + "  " + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.URL),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("auth       ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(auth),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("policy     ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(policy),
+		lipgloss.NewStyle().Foreground(theme.muted).Render("redact     ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(redact+"  •  "+row.State),
 	}
 }
 
@@ -472,6 +562,8 @@ func (m sandboxTUIModel) tableRenderPosition(page tuiPage) (scroll, cursor int) 
 		return m.portScroll, m.portCursor
 	case tuiSecretsPage:
 		return m.secretScroll, m.secretCursor
+	case tuiMCPPage:
+		return m.mcpScroll, m.mcpCursor
 	case tuiPacketsPage:
 		return m.packetScroll, m.packetCursor
 	default:
@@ -491,6 +583,8 @@ func (m sandboxTUIModel) renderTableHeader(theme tuiTheme, page tuiPage, width i
 		return m.renderPortsHeader(theme, width)
 	case tuiSecretsPage:
 		return m.renderSecretsHeader(theme, width)
+	case tuiMCPPage:
+		return m.renderMCPHeader(theme, width)
 	case tuiPacketsPage:
 		return m.renderPacketsHeader(theme, width)
 	default:
@@ -510,6 +604,8 @@ func (m sandboxTUIModel) renderTableRow(theme tuiTheme, page tuiPage, index, wid
 		return m.renderPortRow(theme, m.ports[index], width)
 	case tuiSecretsPage:
 		return m.renderSecretRow(theme, m.secrets[index], width)
+	case tuiMCPPage:
+		return m.renderMCPRow(theme, m.mcpServers[index], width)
 	case tuiPacketsPage:
 		return m.renderPacketRow(theme, m.packets[index], width)
 	default:
@@ -529,6 +625,8 @@ func (m sandboxTUIModel) renderTableDetail(theme tuiTheme, page tuiPage, width i
 		return m.renderPortDetail(theme, width)
 	case tuiSecretsPage:
 		return m.renderSecretDetail(theme, width)
+	case tuiMCPPage:
+		return m.renderMCPDetail(theme, width)
 	case tuiPacketsPage:
 		return m.renderPacketDetail(theme, width)
 	default:

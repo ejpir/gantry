@@ -18,7 +18,6 @@ import (
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/networkworker"
 	"github.com/ejpir/gantry/internal/packetcapture"
-	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerconf"
@@ -28,19 +27,14 @@ import (
 // Worker is the supervisor's handle on the spawned worker process and
 // implements NetworkBackend over RPC.
 type Worker struct {
-	cmd            *os.Process // nil when driven in-process (tests)
-	client         *workerproto.Client
-	data           net.Conn
-	gen            uint64
-	kill           func() error
-	policyMu       sync.Mutex // serializes each complete policy transaction
-	portMu         sync.Mutex // serializes each complete port transaction
-	conf           *workerconf.Report
-	diagnostics    *boundedlog.Pipe
-	diagnosticPath string
-	containment    worker.Containment
-	diagnosticOnce sync.Once
-	diagnosticErr  error
+	child    *worker.Child
+	client   *workerproto.Client
+	data     net.Conn
+	gen      uint64
+	kill     func() error
+	policyMu sync.Mutex // serializes each complete policy transaction
+	portMu   sync.Mutex // serializes each complete port transaction
+	conf     *workerconf.Report
 
 	trafficEpoch    *netpol.TrafficEpoch
 	trafficCancel   context.CancelFunc
@@ -60,23 +54,6 @@ func (w *Worker) Done() <-chan struct{} { return w.lifecycle.Done() }
 
 // Err reports the worker's exit state after Done closes.
 func (w *Worker) Err() error { return w.lifecycle.Err() }
-
-func (w *Worker) setDead(err error) {
-	w.diagnosticOnce.Do(func() {
-		if w.containment != nil {
-			w.diagnosticErr = errors.Join(w.diagnosticErr, w.containment.Close())
-			w.containment = nil
-		}
-		if w.diagnostics != nil {
-			w.diagnosticErr = w.diagnostics.Close()
-		}
-	})
-	err = errors.Join(err, w.diagnosticErr)
-	if err != nil && w.diagnosticPath != "" {
-		err = errors.Join(err, boundedlog.DiagnosticTail("net-worker", w.diagnosticPath))
-	}
-	w.lifecycle.Exit(err)
-}
 
 func (w *Worker) ConfinementReport() *workerconf.Report {
 	if w == nil || w.conf == nil {
@@ -152,37 +129,23 @@ func (w *Worker) mergeFinalTraffic(snapshot *netpol.TrafficSnapshot) {
 func Start(cfg networkworker.Config, workdir string) (*Worker, net.Conn, error) {
 	// The worker's stderr lands next to its traffic log: bootstrap
 	// failures leave their own postmortem (worker-net.log).
-	ctrlSup, dataSup, cmd, diagnostics, err := spawnNetWorkerProcess(
-		filepath.Join(workdir, "worker-net.log"), cfg.Confinement)
+	diagnosticPath := filepath.Join(workdir, "worker-net.log")
+	child, err := spawnNetWorkerProcess(diagnosticPath, cfg.Confinement)
 	if err != nil {
 		return nil, nil, err
 	}
-	diagnosticPath := filepath.Join(workdir, "worker-net.log")
+	ctrlSup := child.Channels["control"]
+	dataSup := child.Channels["data"]
 	w := &Worker{
-		cmd: cmd, data: dataSup, diagnostics: diagnostics,
-		diagnosticPath: diagnosticPath, lifecycle: worker.NewLifecycle(),
-	}
-	if cmd != nil {
-		w.kill = func() error { return cmd.Kill() }
-		go func() { w.setDead(worker.WaitProcess(cmd, "net-worker")) }()
+		child: child, data: dataSup,
+		lifecycle: child.Lifecycle,
 	}
 	fail := func(err error) (*Worker, net.Conn, error) {
-		_ = ctrlSup.Close()
-		_ = dataSup.Close()
-		if w.kill != nil {
-			_ = w.kill()
-		}
+		_ = child.Terminate(5 * time.Second)
 		return nil, nil, err
 	}
-	nonce, err := workerproto.NewNonce()
-	if err != nil {
-		return fail(fmt.Errorf("net-worker nonce: %w", err))
-	}
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleNet, nonce, cfg); err != nil {
-		return fail(fmt.Errorf("net-worker handshake: %w", err))
-	}
-	if err := workerproto.WriteNonce(dataSup, nonce); err != nil {
-		return fail(fmt.Errorf("net-worker nonce: %w", err))
+	if err := child.Bootstrap(cfg, "data"); err != nil {
+		return fail(fmt.Errorf("net-worker bootstrap handshake: %w", err))
 	}
 	var ack networkworker.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(15 * time.Second))
@@ -559,7 +522,10 @@ func (w *Worker) Close() error {
 		if w.data != nil {
 			_ = w.data.Close()
 		}
-		if w.kill != nil {
+		if w.child != nil {
+			w.child.BeginStop()
+			w.closeErr = errors.Join(shutdownErr, w.child.WaitExit(5*time.Second))
+		} else if w.kill != nil {
 			w.closeErr = errors.Join(shutdownErr, w.lifecycle.WaitExit(5*time.Second, w.kill))
 		} else {
 			// In-process tests have no process to reap. Preserve a published

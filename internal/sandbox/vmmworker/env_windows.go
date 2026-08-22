@@ -1,4 +1,4 @@
-package worker
+package vmmworker
 
 import (
 	"os"
@@ -6,15 +6,11 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
-// Env is the explicit child environment allowlist: no secret material. Most
-// GANTRY_* knobs travel in bootstrap config; these diagnostic-only switches
-// must be present before the worker constructs its subsystem.
-func Env() []string {
-	// Windows' Winsock provider catalog needs SystemRoot to initialize even
-	// when every network capability is an already-connected socket. Preserve
-	// only non-secret OS bootstrap paths; the daemon's general environment is
-	// still not inherited.
-	out := make([]string, 0, 11)
+// vmmWorkerEnv is the WHPX role's explicit environment allowlist. Windows'
+// runtime and Winsock initialization need a small set of OS bootstrap paths;
+// no general supervisor environment is inherited.
+func vmmWorkerEnv() []string {
+	out := make([]string, 0, 12)
 	for _, key := range []string{"SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP"} {
 		if value := os.Getenv(key); value != "" {
 			out = append(out, key+"="+value)

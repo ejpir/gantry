@@ -56,6 +56,38 @@ $ gantry start dev -image alpine:latest -mcp \
 The value can be a guest account name, a numeric UID found in the guest
 password database, or an explicit `UID:GID`. Gantry refuses root.
 
+### Read a mounted workspace through MCP
+
+The built-in filesystem server can read a host share when the share's
+container mount point is inside `-mcp-fs-root` and `-mcp-fs-user` has read
+permission. For example, mount a project at `/workspace` and expose exactly
+that directory:
+
+```console
+$ gantry start dev -image alpine:latest \
+    -share "code=$PWD@/workspace,ro,uid=1000,gid=1000" \
+    -mcp -mcp-fs-root /workspace -mcp-fs-user 1000:1000
+```
+
+A share without an explicit container path appears at `/host/TAG`. This
+configuration therefore exposes the default `code` share:
+
+```console
+$ gantry start dev -image alpine:latest \
+    -share "code=$PWD,ro,uid=1000,gid=1000" \
+    -mcp -mcp-fs-root /host/code -mcp-fs-user 1000:1000
+```
+
+Use the same paths in the dashboard's **Mounts** and **MCP → Filesystem**
+forms. Prefer a narrow filesystem root rather than `/`. The filesystem server
+is read-only at the tool layer; a read-only share also enforces that boundary
+at the host export.
+
+Remote MCP servers do **not** receive direct access to guest files or mounts.
+They receive only MCP requests that the agent sends through the gateway. An
+agent can still copy data from a filesystem-tool result into a remote tool
+call, so keep remote tool allowlists and network policy narrow.
+
 ## Add a remote server
 
 Declare each streamable-HTTP server with a repeatable `-mcp-remote` flag:
@@ -148,6 +180,20 @@ github: get_me, list_repos, search_code
 The live probe contacts configured upstreams and applies `allow` and `deny`,
 so it is useful for finding an unavailable server or an unexpected policy.
 
+## Manage servers in the terminal dashboard
+
+Open `gantry tui` and select the **MCP** view (key `7`). From that view:
+
+- press `a` to add a remote streamable-HTTP server;
+- press `f` to configure or enable the built-in filesystem server;
+- press `e` to edit the selected remote or built-in filesystem server; and
+- press `d` to remove a selected remote.
+
+The dashboard stores credential references and redaction secret names, never
+credential values. MCP workers have immutable capability tables, so changes to
+a running sandbox are marked **restart** and take effect after it is restarted.
+Stopped-sandbox changes apply on its next start.
+
 ## Inspect activity
 
 Read the host-side security audit trail:
@@ -168,3 +214,6 @@ values.
 For the host/guest request flow, credential injection, redaction, and resource
 limits, see [Architecture](architecture.md#mcp-and-credential-flow). For the
 trust boundary and operational cautions, see [Security](security.md#credentials).
+The gateway runs in a per-sandbox confined worker. Its capability protocol,
+platform enforcement, residual risks, and remaining guest-helper work are in
+the [MCP worker confinement design](mcp-worker-confinement.md).

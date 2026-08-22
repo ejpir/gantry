@@ -1,7 +1,8 @@
 #!/bin/sh
-# Build Gantry's pinned nerdbox guest rootfs with quiet production boot logs.
-# Warnings and errors still reach the VM console; verbose plugin/DHCP traces
-# remain available with the existing vminitd -debug flag.
+# Build Gantry's pinned nerdbox guest rootfs with Gantry's clock, DHCP-client
+# lifetime, and quiet-production-log patches. Warnings and errors still reach
+# the VM console; verbose plugin/DHCP traces remain available with vminitd
+# -debug.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

@@ -3,7 +3,6 @@
 package networker
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,12 +20,17 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/sandbox/worker/workertest"
 	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
+
+// setDead publishes process death for in-process test harnesses, which have no
+// generic worker.Child watcher.
+func (w *Worker) setDead(err error) { w.lifecycle.Exit(err) }
 
 // testMAC mirrors the production guest MAC (runconf guestNetMAC is
 // unexported package state; the worker only needs SOME fixed address).
@@ -246,14 +249,13 @@ func TestNetWorkerDoneConsumptionDoesNotBlockClose(t *testing.T) {
 	}
 	var kills atomic.Int32
 	w := &Worker{
-		lifecycle:      worker.NewLifecycle(),
-		diagnosticPath: diagnosticPath,
+		lifecycle: worker.NewLifecycle(),
 		kill: func() error {
 			kills.Add(1)
 			return nil
 		},
 	}
-	w.setDead(want)
+	w.setDead(errors.Join(want, boundedlog.DiagnosticTail("net-worker", diagnosticPath)))
 	if err := w.Err(); err == nil || !strings.Contains(err.Error(), "exact pump failure") {
 		t.Fatalf("worker error omitted diagnostic tail: %v", err)
 	}
@@ -1119,63 +1121,51 @@ func TestNetWorkerHelperProcess(t *testing.T) {
 	if os.Getenv("GANTRY_TEST_NET_WORKER") != "1" {
 		return
 	}
+	for _, name := range []string{"PATH", "HOME", "TMPDIR", "GANTRY_SECRET_TEST"} {
+		if os.Getenv(name) != "" {
+			os.Exit(92)
+		}
+	}
 	workertest.AssertStdinUnreadable()
 	os.Exit(networkworker.Cmd())
 }
 
-// TestNetWorkerReExec validates the real descriptor-inheritance path:
-// the worker runs as a separate OS process (this test binary) with the
-// control/data socketpairs as fds 3/4, exactly like production spawn.
+// TestNetWorkerReExec validates the generic launch harness end to end: the
+// worker runs as a separate process with private control/data channels at
+// slots 3/4, an explicit environment, a nonce-bound bootstrap, diagnostics,
+// and generic process reaping.
 func TestNetWorkerReExec(t *testing.T) {
-	exe, err := os.Executable()
+	logPath := filepath.Join(t.TempDir(), "worker-net.log")
+	child, err := worker.Launch(worker.LaunchSpec{
+		Role:           workerproto.RoleNet,
+		EntryPoint:     "_net-worker",
+		Environment:    []string{"GANTRY_TEST_NET_WORKER=1"},
+		Channels:       []string{"control", "data"},
+		DiagnosticPath: logPath,
+		Confinement:    "off",
+		ConfigureProcess: func(argv, _ *[]string) {
+			*argv = []string{(*argv)[0], "-test.run", "^TestNetWorkerHelperProcess$"}
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctrlSup, ctrlWrk, err := worker.SocketpairConns()
-	if err != nil {
-		t.Fatal(err)
-	}
-	dataSup, dataWrk, err := worker.SocketpairConns()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctrlFile, err := worker.ConnFile(ctrlWrk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dataFile, err := worker.ConnFile(dataWrk)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = child.Terminate(2 * time.Second) })
+	ctrlSup := child.Channels["control"]
+	dataSup := child.Channels["data"]
 
-	cmd := exec.Command(exe, "-test.run", "^TestNetWorkerHelperProcess$")
-	cmd.Env = append(os.Environ(), "GANTRY_TEST_NET_WORKER=1")
-	cmd.ExtraFiles = []*os.File{ctrlFile, dataFile}
-	var outBuf bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &outBuf, &outBuf
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	_ = ctrlWrk.Close()
-	_ = dataWrk.Close()
-	_ = ctrlFile.Close()
-	_ = dataFile.Close()
-
-	nonce := testWorkerNonce(t)
 	cfg := testWorkerConfig(t, `{"default":"allow"}`)
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleNet, nonce, cfg); err != nil {
-		t.Fatalf("handshake: %v\n%s", err, outBuf.String())
+	if err := child.Bootstrap(cfg, "data"); err != nil {
+		t.Fatalf("bootstrap: %v", err)
 	}
-	if err := workerproto.WriteNonce(dataSup, nonce); err != nil {
-		t.Fatal(err)
-	}
-	var ack workerproto.Response
+	var ack networkworker.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(15 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
-		t.Fatalf("ack: %v\n%s", err, outBuf.String())
+		t.Fatalf("ack: %v", err)
 	}
+	_ = ctrlSup.SetReadDeadline(time.Time{})
 	if !ack.OK {
-		t.Fatalf("worker refused bootstrap:\n%s", outBuf.String())
+		t.Fatalf("worker refused bootstrap: %s", ack.Error)
 	}
 
 	client := workerproto.NewClient(ctrlSup)
@@ -1186,18 +1176,19 @@ func TestNetWorkerReExec(t *testing.T) {
 		Local:       "127.0.0.1:18082",
 		Remote:      "192.168.127.2:8082",
 	}, &published); err != nil {
-		t.Fatalf("publish over re-exec: %v\n%s", err, outBuf.String())
+		t.Fatalf("publish over re-exec: %v", err)
 	}
 	if published.State != networkworker.PortStateApplied {
 		t.Fatalf("publish result = %+v", published)
 	}
+	child.BeginStop()
 	if err := client.Call(networkworker.OpShutdown, nil, nil); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
-	_ = ctrlSup.Close()
+	_ = client.Close()
 	_ = dataSup.Close()
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("worker exit: %v\n%s", err, outBuf.String())
+	if err := child.WaitExit(5 * time.Second); err != nil {
+		t.Fatalf("worker exit: %v", err)
 	}
 }
 
@@ -1232,9 +1223,9 @@ func TestDupConnFilesClosesSourcesAndPartialDuplicates(t *testing.T) {
 
 func TestSpawnNetWorkerRejectsUnusableDiagnosticSink(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "worker-net.log")
-	control, data, process, diagnostics, err := spawnNetWorkerProcess(path, "off")
-	if control != nil || data != nil || process != nil || diagnostics != nil {
-		t.Fatalf("failed spawn returned resources: control=%v data=%v process=%v diagnostics=%v", control, data, process, diagnostics)
+	child, err := spawnNetWorkerProcess(path, "off")
+	if child != nil {
+		t.Fatalf("failed spawn returned child: %+v", child)
 	}
 	if err == nil || !strings.Contains(err.Error(), "open network worker log") {
 		t.Fatalf("spawn error = %v, want diagnostic-sink failure", err)
@@ -1252,22 +1243,8 @@ func TestWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 	t.Setenv("GANTRY_VHOST_STATS", "1")
 	t.Setenv("GANTRY_VIRTIO_MEM", "true")
 
-	want := []string{"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1", "GANTRY_BOOT_PROFILE=1", "GANTRY_VHOST_STATS=1", "GANTRY_VIRTIO_MEM=1"}
-	if got := worker.Env(); !slices.Equal(got, want) {
-		t.Fatalf("worker environment = %v, want only the non-secret debug switches %v", got, want)
-	}
-	if got := workerEnv(); !slices.Equal(got, append(slices.Clone(want), "GODEBUG=netdns=go")) {
-		t.Fatalf("network worker environment = %v, want debug switches + pure-Go resolver", got)
-	}
-}
-
-func TestWorkerEnvironmentCarriesNothingByDefault(t *testing.T) {
-	t.Setenv("GANTRY_DEBUG_RTC", "")
-	t.Setenv("GANTRY_PREFAULT_RAM", "")
-	t.Setenv("GANTRY_BOOT_PROFILE", "")
-	t.Setenv("GANTRY_VHOST_STATS", "")
-	t.Setenv("GANTRY_VIRTIO_MEM", "")
-	if got := worker.Env(); len(got) != 0 {
-		t.Fatalf("worker environment = %v, want empty", got)
+	want := []string{"GODEBUG=netdns=go"}
+	if got := workerEnv(); !slices.Equal(got, want) {
+		t.Fatalf("network worker environment = %v, want only the pure-Go resolver switch", got)
 	}
 }

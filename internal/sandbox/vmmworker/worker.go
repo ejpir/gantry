@@ -19,7 +19,6 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/packetcapture"
-	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/sharebroker"
 	"github.com/ejpir/gantry/internal/sharefs"
@@ -34,24 +33,19 @@ import (
 // client, fd channel (send side), bridge serve loop, and lifecycle. It
 // implements Runner.
 type vmmWorker struct {
-	proc           *os.Process
-	client         *workerproto.Client // control (fd 3)
-	fdChan         net.Conn            // fd 5, send side
-	fdSend         sync.Mutex          // serialize SCM_RIGHTS sends
-	bridge         net.Conn
-	bridgeE        chan error
-	share          net.Conn // fd 6 peer: supervisor side of the FUSE relay
-	shareE         chan error
-	diagnostics    *boundedlog.Pipe
-	diagnosticPath string
-	containment    worker.Containment
-	diskLocks      []*os.File
-	revokeOnce     sync.Once
-	revokeErr      error
-	lifecycle      *worker.Lifecycle
-	waitMu         sync.Mutex // protects lazy lifecycle-context initialization
-	waitCtx        context.Context
-	waitCancel     context.CancelFunc
+	child      *worker.Child
+	proc       *os.Process
+	client     *workerproto.Client // control (fd 3)
+	fdChan     net.Conn            // fd 5, send side
+	fdSend     sync.Mutex          // serialize SCM_RIGHTS sends
+	bridge     net.Conn
+	bridgeE    chan error
+	share      net.Conn // fd 6 peer: supervisor side of the FUSE relay
+	shareE     chan error
+	lifecycle  *worker.Lifecycle
+	waitMu     sync.Mutex // protects lazy lifecycle-context initialization
+	waitCtx    context.Context
+	waitCancel context.CancelFunc
 	// Local-netstack counters live in the confined worker. Periodic pulls
 	// are cancellable; vm.wait/vm.close responses furnish the final snapshot
 	// before the control channel dies.
@@ -72,37 +66,18 @@ func (w *vmmWorker) Done() <-chan struct{} { return w.lifecycle.Done() }
 // Err reports the worker's exit state after Done closes.
 func (w *vmmWorker) Err() error { return w.lifecycle.Err() }
 
-func (w *vmmWorker) setDead(err error) {
-	err = errors.Join(err, w.revokeWorkerCapabilities())
-	if err != nil && w.diagnosticPath != "" {
-		err = errors.Join(err, boundedlog.DiagnosticTail("vmm-worker", w.diagnosticPath))
+// observeChild performs only VMM-specific post-exit wakeups. The generic
+// child watcher has already reaped the process, revoked launch capabilities,
+// drained diagnostics, and published the shared lifecycle result.
+func (w *vmmWorker) observeChild() {
+	if w == nil || w.child == nil {
+		return
 	}
-	// Publish death before closing the relay so the broker goroutine can
-	// distinguish process teardown from an independent protocol failure.
-	w.lifecycle.Exit(err)
+	<-w.child.Done()
 	if w.share != nil {
 		_ = w.share.Close()
 	}
 	w.cancelWait()
-}
-
-func (w *vmmWorker) revokeWorkerCapabilities() error {
-	w.revokeOnce.Do(func() {
-		if w.containment != nil {
-			w.revokeErr = errors.Join(w.revokeErr, w.containment.Close())
-			w.containment = nil
-		}
-		if w.diagnostics != nil {
-			w.revokeErr = errors.Join(w.revokeErr, w.diagnostics.Close())
-		}
-		for _, lock := range w.diskLocks {
-			if lock != nil {
-				w.revokeErr = errors.Join(w.revokeErr, lock.Close())
-			}
-		}
-		w.diskLocks = nil
-	})
-	return w.revokeErr
 }
 
 func (w *vmmWorker) markStopping() {
@@ -302,11 +277,15 @@ func (w *vmmWorker) Close() error {
 		if w.share != nil {
 			_ = w.share.Close()
 		}
-		var kill func() error
-		if w.proc != nil {
-			kill = w.proc.Kill
+		if w.child != nil {
+			w.closeErr = errors.Join(shutdownErr, w.child.WaitExit(5*time.Second))
+		} else {
+			var kill func() error
+			if w.proc != nil {
+				kill = w.proc.Kill
+			}
+			w.closeErr = errors.Join(shutdownErr, w.lifecycle.WaitExit(5*time.Second, kill))
 		}
-		w.closeErr = errors.Join(shutdownErr, w.lifecycle.WaitExit(5*time.Second, kill))
 	})
 	return w.closeErr
 }
