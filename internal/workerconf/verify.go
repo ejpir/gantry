@@ -50,7 +50,7 @@ func Verify(spec Spec, report *Report) {
 			}
 		}
 		results = append(results, syscallPolicy)
-		if spec.Profile == ProfileMCP {
+		if spec.NoNewPaths {
 			landlock := report.Property(PropLandlock)
 			if landlock.State == StateUnavailable {
 				landlock = PropertyResult{

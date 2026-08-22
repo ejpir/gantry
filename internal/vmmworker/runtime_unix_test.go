@@ -59,7 +59,7 @@ func TestRequiredConfinementPropertiesArePlatformSpecific(t *testing.T) {
 		return false
 	}
 	linux := requiredConfinementProperties("linux")
-	if !has(linux, workerconf.PropFDTable) || !has(linux, workerconf.PropSyscall) || !has(linux, workerconf.PropProcEnum) || !has(linux, workerconf.PropTaskLimit) || has(linux, workerconf.PropProcSignal) {
+	if !has(linux, workerconf.PropFDTable) || !has(linux, workerconf.PropSyscall) || !has(linux, workerconf.PropLandlock) || !has(linux, workerconf.PropProcEnum) || !has(linux, workerconf.PropTaskLimit) || has(linux, workerconf.PropProcSignal) {
 		t.Fatalf("Linux required properties = %v", linux)
 	}
 	darwin := requiredConfinementProperties("darwin")

@@ -158,6 +158,9 @@ func roleFilesystemBoundary(report *workerconf.Report) string {
 		// Linux therefore claims an enforced filesystem boundary only when the
 		// worker also proved its descriptor table contains justified entries.
 		states = append(states, report.Property(workerconf.PropFDTable).State)
+		if report.Property(workerconf.PropLandlock).State != workerconf.StateUnavailable {
+			states = append(states, report.Property(workerconf.PropLandlock).State)
+		}
 	}
 	return aggregateRoleBoundary(states...)
 }
@@ -170,9 +173,6 @@ func roleProcessBoundary(report *workerconf.Report) string {
 	switch report.Platform {
 	case "linux":
 		properties = append(properties, workerconf.PropSyscall, workerconf.PropProcEnum, workerconf.PropTaskLimit)
-		if report.Property(workerconf.PropLandlock).State != workerconf.StateUnavailable {
-			properties = append(properties, workerconf.PropLandlock)
-		}
 	case "darwin":
 		properties = append(properties, workerconf.PropProcEnum, workerconf.PropProcSignal)
 	}

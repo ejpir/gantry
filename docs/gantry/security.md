@@ -74,9 +74,11 @@ allowlisted descriptor table and authenticated bootstrap channels, then apply
 platform confinement:
 
 - Linux uses user, mount, and PID namespaces when available, a private root,
-  capability removal, task limits, descriptor closure, `no_new_privs`, and a
-  seccomp-BPF syscall policy. The MCP role additionally installs a deny-all
-  Landlock filesystem ruleset; no host path is allowlisted.
+  capability removal, task limits, descriptor closure, `no_new_privs`,
+  Landlock, and a seccomp-BPF syscall policy. VMM and MCP workers receive a
+  deny-all Landlock filesystem ruleset. The network worker can read only exact
+  private snapshots of `/etc/hosts`, `/etc/nsswitch.conf`, and
+  `/etc/resolv.conf`; no directory subtree is allowlisted.
 - macOS uses Seatbelt profiles with role-specific file and network access.
 - Windows uses separate workers and a Job Object, but cannot yet verify the
   required ambient filesystem and network restrictions.

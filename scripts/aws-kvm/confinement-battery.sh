@@ -19,6 +19,20 @@ PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 chk() { local n="$1" want="$2" got="$3"; if printf '%s' "$got" | grep -qa -- "$want"; then ok "$n"; else bad "$n"; printf '%s\n' "$got" | tail -4; fi; }
+role_prop() {
+  python3 - "$1" "$2" "$3" <<'PY' 2>/dev/null
+import json, sys
+path, role, prop = sys.argv[1:]
+with open(path, encoding="utf-8") as source:
+    report = json.load(source).get(role) or {}
+for result in report.get("properties", []):
+    if result.get("name") == prop:
+        print(result.get("state", "missing"))
+        break
+else:
+    print("missing")
+PY
+}
 xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 
 echo "== environment =="
@@ -43,6 +57,8 @@ chk "required: network boundary enforced"  '"networkBoundary":"enforced"'    "$I
 chk "required: process boundary enforced"  '"processBoundary":"enforced"'    "$ISO"
 # enforced is the only acceptable probe verdict under required
 if printf '%s' "$ISO" | grep -qa '"state":"unenforced"'; then bad "required: no unenforced probes"; else ok "required: no unenforced probes"; fi
+[ "$(role_prop "$SBX/c1/isolation.json" vmmConfinement landlock)" = enforced ] && ok "required: VMM Landlock enforced" || bad "required: VMM Landlock enforced"
+[ "$(role_prop "$SBX/c1/isolation.json" networkConfinement landlock)" = enforced ] && ok "required: network Landlock enforced" || bad "required: network Landlock enforced"
 
 R=$(xe c1 'uname -m; echo M1');           chk "required: boot+exec"   "x86_64"  "$R"
 R=$(xe c1 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443" && echo EGRESS-OK')
@@ -78,8 +94,9 @@ R=$(xe c2 'cat /host/boot/hot.txt');      chk "auto: boot share read" "hotconten
 R=$(xe c2 'echo x > /host/boot/evil 2>/dev/null && echo RO-BROKEN || echo RO-WALLED')
                                           chk "auto: ro share walled" "RO-WALLED" "$R"
 
-# LIVE hot-add under confinement — the linux/darwin split: linux keeps
-# it (no path filters; dirfd ops), darwin refuses (immutable profile).
+# LIVE hot-add under confinement — shares stay in the supervisor and reach the
+# VMM over the existing broker/vhost relay, so neither Linux Landlock nor the
+# immutable Darwin Seatbelt profile needs a new host-path allowance.
 # Also exercises the hub root-mtime invalidation: the tag must be
 # visible WITHOUT a remount.
 mkdir -p /tmp/hottest2 && echo liveadd > /tmp/hottest2/live.txt
@@ -107,7 +124,7 @@ ISO3=$(tr -d ' \n' < "$SBX"/c3/isolation.json 2>/dev/null)
 chk "mcp required: split topology" "split-net+split-vmm+split-mcp" "$ISO3"
 chk "mcp required: report persisted" '"mcpConfinement"' "$ISO3"
 chk "mcp required: brokers reported" '"originDialBrokered":true' "$ISO3"
-chk "mcp required: Landlock enforced" '"name":"landlock","state":"enforced"' "$ISO3"
+[ "$(role_prop "$SBX/c3/isolation.json" mcpConfinement landlock)" = enforced ] && ok "mcp required: Landlock enforced" || bad "mcp required: Landlock enforced"
 
 D3PID=$(cat "$SBX"/c3/vmm.pid 2>/dev/null)
 MCP_PID=$(pgrep -P "$D3PID" -f '_mcp-worker' 2>/dev/null | head -1)
