@@ -9,28 +9,33 @@ limitations of these boundaries, see [Security](security.md).
 One named sandbox has one trusted supervisor and one Linux microVM. In the
 default isolation mode, separate workers own the hypervisor/device model and
 the userspace network data plane where the host supports the required
-controls.
+controls. The supervisor uses one process-neutral launch harness for every
+worker role.
 
 ```text
-                         host
+                              host
 
   gantry CLI / TUI / manager API
-                 │
-                 │ same-user local control
-                 ▼
-  ┌───────────────────────────────────────────────┐
-  │ sandbox supervisor                            │
-  │ lifecycle • config • secrets • OAuth • MCP    │
-  │ guest RPC bridge • share roots • host ports   │
-  └───────────┬───────────────────┬───────────────┘
-              │ authenticated     │ authenticated
-              │ worker channels   │ frame/control channels
-              ▼                   ▼
-  ┌──────────────────────┐   ┌──────────────────────┐
-  │ VMM worker           │   │ network worker       │
-  │ hypervisor • RAM     │   │ policy • NAT • DNS   │
-  │ virtio devices       │   │ forwards • traffic   │
-  └──────────┬───────────┘   └──────────┬───────────┘
+                  │
+                  │ same-user local control
+                  ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │ sandbox supervisor                                           │
+  │ lifecycle • config • secrets • OAuth • MCP gateway (current) │
+  │ guest RPC bridge • share roots • host ports                  │
+  │                                                              │
+  │ shared worker launch/supervision                             │
+  │ exact role env + fd/handle table • nonce binding             │
+  │ namespace/Job confinement • diagnostics • reap/cleanup       │
+  └────────────┬────────────────────┬───────────────────┄┄┄┄┄┄┄┄┘
+               │ authenticated      │ authenticated       planned
+               │ capability channels│ frame/control       capability brokers
+               ▼                    ▼                     ┊
+  ┌──────────────────────┐   ┌──────────────────────┐     ▼
+  │ VMM worker           │   │ network worker       │   ┌──────────────────────┐
+  │ hypervisor • RAM     │   │ policy • NAT • DNS   │   │ MCP worker (planned) │
+  │ virtio devices       │   │ forwards • traffic   │   │ MCP parsing • policy │
+  └──────────┬───────────┘   └──────────┬───────────┘   └──────────────────────┘
              │ virtio                   │ host sockets
              ▼                          ▼
   ┌──────────────────────────────┐   public network / proxy
@@ -40,6 +45,12 @@ controls.
   │       └─ OCI workload        │
   └──────────────────────────────┘
 ```
+
+The launch harness is trusted supervisor code, not another process. VMM and
+network workers use it today. The typed MCP role and static confinement profile
+are present, but the MCP gateway still runs in the supervisor; the dashed
+branch is the planned move described in the
+[MCP worker confinement plan](mcp-worker-confinement.md).
 
 If split workers are unavailable in `auto` mode, Gantry records the degraded
 topology and may fall back. `required` fails the start instead. `off` runs a
