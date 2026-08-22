@@ -247,16 +247,14 @@ func TestRoleFiltersEnforceCapabilities(t *testing.T) {
 	}
 }
 
-func TestMCPProfileAllowsOnlyBrokeredDescriptorReceive(t *testing.T) {
+func TestMCPProfileUsesOnlyInheritedRelayDescriptors(t *testing.T) {
 	const selfTGID = uint32(1234)
 	mcp := buildFilterFor(MCPSpec(5, ""), selfTGID)
-	if got := runFilter(t, mcp, unix.SYS_RECVMSG); got != retAllow {
-		t.Fatalf("MCP SCM receive result %#x, want allow", got)
-	}
 	for name, test := range map[string]struct {
 		nr   uint32
 		args []uint64
 	}{
+		"SCM receive": {unix.SYS_RECVMSG, nil},
 		"SCM send":    {unix.SYS_SENDMSG, nil},
 		"IPv4 socket": {unix.SYS_SOCKET, []uint64{unix.AF_INET, unix.SOCK_STREAM, 0}},
 		"connect":     {unix.SYS_CONNECT, nil},

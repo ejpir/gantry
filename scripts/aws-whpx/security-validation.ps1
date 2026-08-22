@@ -376,6 +376,27 @@ try {
     Assert-Contains "mcp: Windows calls audited host-side" $audit "mcp: call fs__read_file"
     Assert-Contains "mcp: Windows denials audited host-side" $audit 'mcp: denied call "fs__write_file"'
 
+    $mcpStateDir = Join-Path $StateRoot $MCPSandbox
+    $isolation = Get-Content -Raw (Join-Path $mcpStateDir "isolation.json")
+    Assert-Contains "mcp: Windows split worker topology reported" $isolation "split-mcp"
+    Assert-Contains "mcp: Windows Job confinement applied" $isolation "worker job active"
+    Assert-Contains "mcp: Windows weak filesystem boundary is honest" $isolation '"name": "fs-read"'
+    Assert-Contains "mcp: Windows filesystem denial remains unenforced" $isolation '"state": "unenforced"'
+
+    $daemonPid = [int](Get-Content -Raw (Join-Path $mcpStateDir "vmm.pid"))
+    $mcpProcess = Get-CimInstance Win32_Process | Where-Object {
+        $_.ParentProcessId -eq $daemonPid -and $_.CommandLine -like "*_mcp-worker*"
+    } | Select-Object -First 1
+    if ($null -eq $mcpProcess) { throw "mcp: Windows _mcp-worker child was not found" }
+    "PASS mcp: Windows _mcp-worker child process running"
+    Stop-Process -Id $mcpProcess.ProcessId -Force
+    Start-Sleep -Seconds 2
+    $output = Invoke-GantryCapture @("exec", $MCPSandbox, "--", "echo", "VM-STILL-ALIVE")
+    Assert-Contains "mcp: Windows worker death does not kill VM" $output "VM-STILL-ALIVE"
+    $isolation = Get-Content -Raw (Join-Path $mcpStateDir "isolation.json")
+    Assert-NotContains "mcp: Windows dead worker withdrawn from topology" $isolation "split-mcp"
+    Assert-Contains "mcp: Windows dead worker degradation recorded" $isolation "mcp worker confinement report unavailable"
+
     "RESULT: Windows WHPX secrets/OAuth/MCP validation passed"
 }
 finally {

@@ -1,13 +1,15 @@
-# MCP Worker and Filesystem Confinement Plan
+# MCP Worker and Filesystem Confinement Design
 
-**Status:** proposed; not implemented. The current host MCP gateway runs in the
-per-sandbox supervisor. The built-in filesystem server already runs as a
-separate, unprivileged process inside the Linux guest, but its `os.Root` is
-path containment rather than a complete process sandbox.
+**Status:** the host `_mcp-worker`, capability relays, scoped credential and
+spawn brokers, Linux Landlock/seccomp profile, Seatbelt profile, Windows Job
+boundary, and effective-state reporting are implemented. The in-guest
+filesystem helper remains a separate unprivileged process, but its `os.Root`
+is path containment rather than a complete process sandbox. Apple-silicon
+field validation and a strict Windows filesystem/network boundary also remain.
 
-This plan separates those two concerns:
+This design separates those two concerns:
 
-1. move the host MCP protocol and remote-HTTP attack surface into a confined
+1. keep the host MCP protocol and remote-HTTP attack surface in a confined
    `_mcp-worker`; and
 2. harden the existing in-guest filesystem helper without moving host paths or
    share roots into a host worker.
@@ -20,8 +22,8 @@ verification reported through `isolation.json`.
 
 ## Decision
 
-Move `mcpgw` out of the trusted supervisor and into one worker per sandbox when
-MCP is enabled. Keep the secret store, OAuth refresh tokens, destination
+`mcpgw` runs outside the trusted supervisor in one worker per MCP-enabled
+sandbox. Keep the secret store, OAuth refresh tokens, destination
 validation, lifecycle state, share roots, and arbitrary guest execution out of
 that worker.
 
@@ -117,8 +119,8 @@ design. Tool descriptions and results remain prompt-injection inputs.
 ```text
                                       configured remote origin
                                                  ^
-                                                 | connected TCP fd only
-                                                 |
+                                                 | supervisor-connected stream
+                                                 | over bounded opaque relay
  trusted sandbox supervisor                     |
 +--------------------------------------+         |
 | config + immutable server map        |   +-----+----------------------+
@@ -136,10 +138,11 @@ design. Tool descriptions and results remain prompt-injection inputs.
         (separate unprivileged process)             over virtio-vsock
 ```
 
-The supervisor may accept a local MCP connection, but it does not read MCP
-bytes. It transfers the connected descriptor to the worker over the existing
-authenticated descriptor-channel pattern. This keeps the guest parser out of
-the supervisor while avoiding `accept` authority in the worker.
+The supervisor accepts the local MCP connection but does not parse MCP bytes.
+It copies bounded opaque chunks over the worker's authenticated stream
+multiplexer. The same relay carries supervisor-connected remote streams and
+fixed guest-helper stdio, avoiding `accept`, socket-creation, and dynamic
+handle-transfer authority in the worker on every host platform.
 
 ## Responsibility split
 
@@ -165,12 +168,12 @@ after worker compromise.
 
 ## Capability channels
 
-Use separate authenticated channels for control and descriptor transfer, as
-with the VMM and network workers. Data from the guest must never share framing
-with trusted capability commands. Every request and reply is length-bounded,
-deadline-aware, and concurrency-limited in the supervisor. An unknown method,
-malformed frame, nonce failure, or descriptor-token mismatch is a fatal worker
-protocol violation, not a recoverable error the worker can repeat indefinitely.
+Use separate authenticated channels for control, reverse broker requests, and
+the bounded stream multiplexer. Data from the guest never shares framing with
+trusted capability commands. Every request, reply, and stream frame is
+length-bounded, deadline-aware, and concurrency-limited in the supervisor. An
+unknown method, malformed frame, nonce failure, stream-ID parity error, or
+unknown stream is a fatal worker protocol violation.
 
 ### Bootstrap channel
 
@@ -187,16 +190,16 @@ versions, malformed policies, oversized bootstrap data, and a nonce mismatch.
 The immutable bootstrap is the worker's complete server namespace for its
 lifetime.
 
-### Guest-session descriptors
+### Guest-session streams
 
 The supervisor accepts the per-sandbox Unix socket or Windows endpoint,
-applies a global session limit, and sends the connected stream with a random
-one-use descriptor token. The worker matches that token to a bounded control
-message before consuming the stream. Unknown, duplicate, or expired tokens are
-closed.
+applies a global session limit, and opens a supervisor-owned even-numbered
+stream on the authenticated multiplexer. The worker applies its independent
+session limit before parsing bytes. Worker-opened upstream streams use odd
+IDs, so collisions and wrong-direction opens fail closed.
 
-The supervisor must not copy MCP payload bytes. Closing either side or killing
-the worker must reliably close all active guest streams.
+The supervisor copies opaque chunks but never decodes MCP payload bytes.
+Closing either side or killing the worker reliably closes all active streams.
 
 ### Origin dial broker
 
@@ -212,7 +215,7 @@ For each request the supervisor:
    otherwise non-public addresses, except for the explicit loopback
    development case;
 5. dials the validated address itself, preserving DNS pinning; and
-6. transfers only the connected stream descriptor.
+6. relays only that connected stream over the fixed multiplexer.
 
 TLS remains in the worker so remote protocol parsing does not return to the
 supervisor. The TLS server name comes from immutable bootstrap configuration,
@@ -221,9 +224,9 @@ during trusted startup, before confinement and before receiving untrusted
 bytes, then closes any path handles used for that initialization.
 
 The worker has no `socket`, `connect`, `bind`, `listen`, or `accept` authority.
-If passing a connected socket is not enforceable on a platform, use a bounded
-byte relay owned by the supervisor rather than granting ambient network access.
-Proxy support, if added, must pass a post-CONNECT tunnel; the worker must never
+The implementation always uses the bounded supervisor relay rather than
+platform-specific dynamic descriptor transfer. Proxy support, if added, must
+pass a post-CONNECT tunnel; the worker must never
 receive a general proxy socket on which it can select another destination.
 
 ### Credential broker
@@ -254,8 +257,9 @@ gantry-guest mcp-serve filesystem --root <configured-root> --user <configured-us
 The worker cannot supply or modify argv, environment, cwd, UID/GID, root, or
 share configuration. The supervisor applies the global guest-session limit,
 starts the helper without user secrets, and transfers or relays only its stdin
-and stdout. A timeout, malformed upstream frame, worker exit, or session close
-kills the helper rather than returning it to a pool.
+and stdout through the bounded relay. A timeout, malformed upstream frame,
+worker exit, or session close kills the helper rather than returning it to a
+pool.
 
 ### Audit channel
 
@@ -276,22 +280,23 @@ much: the MCP worker needs I/O on delegated connected streams, not ambient
 socket creation. The profile remains a compile-time audited allowlist, not a
 runtime-configurable syscall policy.
 
-The desired contract is:
+The enforced contract is:
 
 - `NoNetwork=true`: no new socket or connection; connected streams arrive as
   capabilities;
 - `NoExec=true`;
 - `NoNewPaths=true` after trust-store initialization;
 - `NoProcX=true`;
-- a dense, allowlisted initial descriptor table plus the authenticated dynamic
-  descriptor channel;
-- a worker-specific task and memory limit; and
+- a dense, allowlisted initial descriptor table plus fixed authenticated
+  control, reverse-broker, and stream-relay channels;
+- worker-specific task limits plus bounded frames, streams, sessions, and
+  in-flight calls; and
 - no host file allowances or writable files.
 
 Startup order is load-bearing:
 
-1. re-exec `_mcp-worker` with only bootstrap, descriptor, diagnostic, and
-   lifecycle handles;
+1. re-exec `_mcp-worker` with only bootstrap, broker, stream-relay,
+   diagnostic, and lifecycle handles;
 2. authenticate and consume the bounded bootstrap;
 3. load the system TLS roots while no guest or remote input is reachable;
 4. close all ambient descriptors and path handles;
@@ -305,28 +310,27 @@ No credential is released before the verified ready acknowledgement.
 
 ### Linux
 
-Use the existing user, mount, and PID namespace machinery with a private empty
-root. Apply `no_new_privs`, capability removal, task limits, descriptor-table
-closure, and an MCP seccomp profile.
+The existing user, mount, and PID namespace machinery creates a private empty
+root. Gantry applies `no_new_privs`, capability removal, task limits,
+descriptor-table closure, a deny-all Landlock filesystem ruleset, and the MCP
+seccomp profile.
 
 The profile permits Go runtime operations, TLS computation, and read/write on
-existing descriptors. It denies path opens after startup and omits socket
-creation, connect, bind, listen, accept, process execution, mount, ptrace, and
-cross-process signalling. Dynamic descriptors arrive only on the inherited
-SCM_RIGHTS channel.
+existing inherited relay descriptors. It denies path opens after startup and
+omits socket creation, connect, bind, listen, accept, SCM_RIGHTS, process
+execution, mount, ptrace, and cross-process signalling.
 
-The verifier must prove at least filesystem read/write denial, ambient network
-dial denial, exec denial, process isolation, task limits, syscall policy, and
+The verifier proves filesystem read/write denial, ambient network dial denial,
+exec denial, process isolation, task limits, Landlock and syscall policy, and
 the initial descriptor table. A brokered positive test separately proves that
-a delegated connected stream still works under the filter.
+a relayed connected stream still works under the filter.
 
 ### macOS
 
-Use a deny-default Seatbelt profile with no file, process-exec, or ambient
-network allowances. Field-test whether reads and writes on connected sockets
-transferred after `sandbox_init` remain usable. If Seatbelt applies destination
-policy to those descriptors, use a supervisor byte relay; do not add broad
-`network-outbound` merely to make the worker boot.
+macOS uses a deny-default Seatbelt profile with no file, process-exec, or
+ambient network allowances. Its fixed inherited pipe relay needs no
+`network-outbound` rule. Apple-silicon field validation must still verify the
+complete post-`sandbox_init` MCP path before strict support is claimed.
 
 The TLS trust store must be loaded before Seatbelt or supplied as immutable
 bootstrap material. The verifier reports actual file, network, process, and
@@ -334,10 +338,9 @@ exec results rather than assuming the profile worked.
 
 ### Windows
 
-Create a separate process in a kill-on-close, one-process Job Object from the
-first milestone. The existing Job-only tier is a process boundary, not a
-filesystem or network boundary, and must report those properties as
-unenforced.
+Windows creates a separate process in a kill-on-close, one-process Job Object.
+The Job-only tier is a process boundary, not a filesystem or network boundary,
+and reports those properties as unenforced.
 
 Strict mode requires a field-proven restricted-token/AppContainer or equivalent
 profile that can run Go TLS and inherited stream handles while denying ambient
@@ -388,7 +391,7 @@ must therefore be a narrow workspace without nested proc/device mounts.
 - If the worker cannot bootstrap, configured MCP startup fails loudly rather
   than silently starting without the requested capability.
 - If the worker exits after VM readiness, close all MCP listeners and sessions,
-  kill local helpers, revoke descriptor tokens, and audit the failure. The VM
+  kill local helpers, revoke stream capabilities, and audit the failure. The VM
   and ordinary `gantry exec` sessions remain available because MCP is not a VM
   enforcement point.
 - The first implementation does not automatically restart a failed worker.
@@ -399,9 +402,9 @@ must therefore be a narrow workspace without nested proc/device mounts.
 
 ## Effective-state reporting
 
-Bump `isolation.json` when the worker lands and add an `mcpConfinement` report.
-When MCP is enabled, filesystem and process boundary summaries include the MCP
-worker's verified properties. The report must distinguish:
+`isolation.json` version 3 includes `mcpConfinement` and `mcpBoundary`.
+When MCP is enabled, filesystem, network, and process boundary summaries include
+the MCP worker's verified properties. The report distinguishes:
 
 - process split established;
 - OS confinement applied;
@@ -452,37 +455,40 @@ engine in process behind interfaces, but production has one worker-owned path.
 
 This reduces current risk independently of the host split.
 
-### M1 — Worker protocol and process split
+### M1 — Worker protocol and process split (complete)
 
 - add the hidden role and consume the shared launch, bootstrap, lifecycle,
-  diagnostics, and dynamic descriptor-transfer primitives;
+  diagnostics, and bounded stream-relay primitives;
 - move guest MCP parsing, session muxing, policy, local stdio parsing, and
   remote protocol handling into the worker; and
 - remove the production in-supervisor gateway path.
 
 M1 is an implementation checkpoint, not a security release by itself.
 
-### M2 — Capability brokers
+### M2 — Capability brokers (complete)
 
 - add server-ID-only dial, credential, and local-spawn requests;
 - enforce immutable supervisor mappings and global limits;
-- pass connected streams instead of ambient network authority; and
+- relay connected streams instead of granting ambient network authority; and
 - ensure the worker receives no refresh token, share root, arbitrary argv, or
   unrelated secret.
 
 M1 and M2 must land together in a release.
 
-### M3 — Linux confinement and reporting
+### M3 — Linux confinement and reporting (host path complete)
 
-- activate `ProfileMCP` with a private root, task limits, and verifier probes;
-- extend `isolation.json`, the TUI, and `-process-isolation=required`; and
-- field-run the Linux KVM confinement battery with active local and remote MCP
+- `ProfileMCP` uses a private root, Landlock, task limits, and verifier probes;
+- `isolation.json` and `-process-isolation=required` include MCP; and
+- the Linux KVM confinement battery exercises active local and remote MCP
   sessions.
 
-### M4 — macOS and Windows enforcement
+A dedicated MCP-detail view in the TUI remains follow-up work; the version 3
+file is currently the authoritative detailed view.
 
-- field-test post-confinement connected-stream transfer under Seatbelt;
-- implement a relay fallback if descriptor use requires ambient network rules;
+### M4 — macOS and Windows enforcement (partial)
+
+- field-test the complete inherited-relay path under Seatbelt on Apple silicon;
+- use the cross-platform relay without adding ambient network rules;
 - keep Windows Job-only results honest while developing a strict token or
   AppContainer tier; and
 - refuse `required` wherever mandatory properties cannot be proved.
@@ -500,7 +506,8 @@ stronger threat model rather than folded casually into the initial split.
 ### Unit and fuzz tests
 
 - bootstrap version, nonce, size, duplicate-ID, and unknown-field rejection;
-- one-use descriptor tokens, wrong-channel tokens, replay, expiry, and cleanup;
+- stream-ID parity, unknown/duplicate IDs, close races, queue saturation, and
+  cleanup;
 - broker requests cannot supply an address, URL, argv, credential name, or
   sandbox ID;
 - destination validation and DNS pinning remain race-free;

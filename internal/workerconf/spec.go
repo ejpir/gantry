@@ -149,6 +149,7 @@ const (
 	PropProcSignal = "proc-signal"
 	PropTaskLimit  = "task-limit"
 	PropSyscall    = "syscall-policy"
+	PropLandlock   = "landlock"
 	PropFDTable    = "fd-table"
 )
 
@@ -204,6 +205,7 @@ func DisabledReport(platform, mode string) Report {
 		{Property: PropProcSignal, State: StateDisabled},
 		{Property: PropTaskLimit, State: StateDisabled},
 		{Property: PropSyscall, State: StateDisabled},
+		{Property: PropLandlock, State: StateDisabled},
 		{Property: PropFDTable, State: StateDisabled},
 	}
 	return Report{Platform: platform, Mode: mode, Results: results}

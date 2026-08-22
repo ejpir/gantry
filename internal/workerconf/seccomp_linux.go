@@ -88,10 +88,10 @@ var networkWhitelist = []uint32{
 	unix.SYS_NEWFSTATAT,
 }
 
-// mcpWhitelist is deliberately smaller than the VMM descriptor profile. MCP
-// receives supervisor-brokered connected streams over SCM_RIGHTS but never
-// sends descriptors, opens paths, creates sockets, or issues device ioctls.
-var mcpWhitelist = []uint32{unix.SYS_RECVMSG}
+// mcpWhitelist is empty by design. MCP byte streams are relayed over its
+// fixed inherited channels, so it needs neither socket creation nor dynamic
+// SCM_RIGHTS receive authority after confinement.
+var mcpWhitelist []uint32
 
 // safeFcntlCommands are descriptor-local operations used by the Go runtime
 // and net.FileConn. Signal ownership commands are deliberately absent.

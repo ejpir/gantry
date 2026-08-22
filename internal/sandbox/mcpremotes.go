@@ -23,12 +23,17 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"path"
 	"regexp"
 	"strings"
 
+	mcpworkerapi "github.com/ejpir/gantry/internal/mcpworker"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
+	mcpworkersup "github.com/ejpir/gantry/internal/sandbox/mcpworker"
 )
 
 var mcpRemoteNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,30}$`)
@@ -105,74 +110,101 @@ func parseMCPRemote(spec string) (mcpRemoteSpec, error) {
 	return out, nil
 }
 
-// resolveMCPServers turns the built-in fs server plus any -mcp-remote
-// specs into gateway server entries, resolving secret and custody
-// references against the broker's live stores. Failures are loud: a bad
-// spec refuses the whole start.
-func (d *daemonRuntime) resolveMCPServers() ([]mcpgw.Server, error) {
-	root, usr := d.cfg.MCPFSRoot, d.cfg.MCPFSUser
+// resolveMCPServers builds the worker's immutable public namespace and keeps
+// every authority-bearing closure in the supervisor. The worker receives no
+// argv, secret reference, source definition, refresh token, or host path.
+func mcpFilesystemArgv(cfg config.RunConfig) []string {
+	root, usr := cfg.MCPFSRoot, cfg.MCPFSUser
 	if root == "" {
 		root = "/"
 	}
 	if usr == "" {
 		usr = "nobody"
 	}
-	servers := []mcpgw.Server{{
-		Name: "fs",
-		Argv: []string{
-			path.Join(guestToolsDirGuest, "gantry-guest"), "mcp-serve", "filesystem",
-			"--root", root, "--user", usr,
+	return []string{
+		path.Join(guestToolsDirGuest, "gantry-guest"), "mcp-serve", "filesystem",
+		"--root", root, "--user", usr,
+	}
+}
+
+func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
+	fsArgv := mcpFilesystemArgv(d.cfg)
+	servers := []mcpworkersup.Server{{
+		Config: mcpworkerapi.ServerConfig{
+			Name: "fs", Local: true,
+			Tools: mcpgw.ToolPolicy{Allow: []string{"read_file", "list_directory"}},
 		},
-		Tools: mcpgw.ToolPolicy{Allow: []string{"read_file", "list_directory"}},
+		Spawn: func(ctx context.Context) (io.WriteCloser, io.ReadCloser, func(), error) {
+			return d.broker.spawnGuestStdio(ctx, fsArgv)
+		},
 	}}
 	for _, raw := range d.cfg.MCPRemotes {
 		spec, err := parseMCPRemote(raw)
 		if err != nil {
 			return nil, fmt.Errorf("-mcp-remote %q: %w", raw, err)
 		}
-		srv := mcpgw.Server{
-			Name:  spec.Name,
-			URL:   spec.URL,
-			Tools: mcpgw.ToolPolicy{Allow: spec.Allow, Deny: spec.Deny},
+		// Validate every named secret now so a bad configuration still refuses
+		// startup. Values are discarded and resolved afresh per worker session.
+		if spec.AuthKind == "bearer" || spec.AuthKind == "header" {
+			if _, err := d.broker.secretStore.Resolve(spec.AuthRef); err != nil {
+				return nil, fmt.Errorf("-mcp-remote %s: secret %s: %w", spec.Name, spec.AuthRef, err)
+			}
+		}
+		for _, name := range spec.RedactNames {
+			if _, err := d.broker.secretStore.Resolve(name); err != nil {
+				return nil, fmt.Errorf("-mcp-remote %s: redact secret %s: %w", spec.Name, name, err)
+			}
+		}
+		if spec.AuthKind == "custody" && d.broker.custodyRegistry == nil {
+			return nil, fmt.Errorf("-mcp-remote %s: auth=custody: needs -oauth-custody", spec.Name)
+		}
+
+		serverSpec := spec
+		server := mcpworkersup.Server{Config: mcpworkerapi.ServerConfig{
+			Name: spec.Name, URL: spec.URL,
+			Credential: spec.AuthKind != "" || len(spec.RedactNames) != 0,
+			Tools:      mcpgw.ToolPolicy{Allow: spec.Allow, Deny: spec.Deny},
+		}}
+		if server.Config.Credential {
+			server.Credential = func() (mcpworkerapi.CredentialResponse, error) {
+				response := mcpworkerapi.CredentialResponse{}
+				switch serverSpec.AuthKind {
+				case "bearer", "header":
+					value, err := d.broker.secretStore.Resolve(serverSpec.AuthRef)
+					if err != nil {
+						return response, err
+					}
+					header, raw := "Authorization", "Bearer "+value.Raw()
+					if serverSpec.AuthKind == "header" {
+						header, raw = serverSpec.AuthHeader, value.Raw()
+					}
+					response.Headers = map[string]string{header: raw}
+				case "custody":
+					set, ok := d.broker.custodyRegistry.Get(serverSpec.AuthRef)
+					if !ok || set.AccessToken == "" {
+						return response, fmt.Errorf("custody access token unavailable")
+					}
+					response.Headers = map[string]string{"Authorization": "Bearer " + set.AccessToken}
+				}
+				for _, name := range serverSpec.RedactNames {
+					value, err := d.broker.secretStore.Resolve(name)
+					if err != nil {
+						return mcpworkerapi.CredentialResponse{}, err
+					}
+					response.Redact = append(response.Redact, value.Raw())
+				}
+				return response, nil
+			}
 		}
 		authDesc := "none"
 		switch spec.AuthKind {
 		case "bearer", "header":
-			v, err := d.broker.secretStore.Resolve(spec.AuthRef)
-			if err != nil {
-				return nil, fmt.Errorf("-mcp-remote %s: secret %s: %w", spec.Name, spec.AuthRef, err)
-			}
-			hdr := "Authorization"
-			val := "Bearer " + v.Raw()
-			if spec.AuthKind == "header" {
-				hdr, val = spec.AuthHeader, v.Raw()
-			}
-			srv.Headers = map[string]string{hdr: val}
 			authDesc = spec.AuthKind + " (secret " + spec.AuthRef + ")"
 		case "custody":
-			if d.broker.custodyRegistry == nil {
-				return nil, fmt.Errorf("-mcp-remote %s: auth=custody: needs -oauth-custody", spec.Name)
-			}
-			provider := spec.AuthRef
-			registry := d.broker.custodyRegistry
-			srv.TokenFunc = func() (string, error) {
-				set, ok := registry.Get(provider)
-				if !ok || set.AccessToken == "" {
-					return "", fmt.Errorf("no custody login for %s", provider)
-				}
-				return set.AccessToken, nil
-			}
-			authDesc = "custody:" + provider
-		}
-		for _, name := range spec.RedactNames {
-			v, err := d.broker.secretStore.Resolve(name)
-			if err != nil {
-				return nil, fmt.Errorf("-mcp-remote %s: redact secret %s: %w", spec.Name, name, err)
-			}
-			srv.Redact = append(srv.Redact, []byte(v.Raw()))
+			authDesc = "custody:" + spec.AuthRef
 		}
 		d.broker.auditf("mcp: remote %s configured (%s, auth %s)", spec.Name, mcpgw.AuditRemoteOrigin(spec.URL), authDesc)
-		servers = append(servers, srv)
+		servers = append(servers, server)
 	}
 	return servers, nil
 }
