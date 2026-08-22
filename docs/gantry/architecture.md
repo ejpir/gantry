@@ -111,7 +111,11 @@ the per-launch nonce that correlates them, grant capabilities to the child.
 
 The VMM worker owns guest RAM, the platform hypervisor, virtual CPUs, and the
 virtio device model. The supervisor passes pre-opened files and authenticated
-channels, so a confined worker does not need general host-path access.
+channels, so a confined worker does not need general host-path access. On
+Linux its Landlock policy therefore allows no new path access. Shares remain
+in the supervisor and cross a path-neutral broker or vhost relay, so live
+share add/remove does not require changing the worker's Linux Landlock or
+macOS Seatbelt profile.
 
 The VMM uses:
 
@@ -133,7 +137,9 @@ way back so the policy can maintain bounded, TTL-limited domain allowances.
 
 The network worker necessarily retains restricted stream and datagram socket
 creation authority. It does not receive secrets, writable disks, guest RAM,
-or host share roots.
+or host share roots. Its Linux Landlock policy allows reads of only the exact
+private resolver snapshots copied into its private root; it delegates no
+filesystem subtree.
 
 An explicit `-gvproxy` selects an external backend instead. Live policy,
 traffic inspection, proxy enforcement, and built-in port publishing require

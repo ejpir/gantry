@@ -19,7 +19,9 @@ import (
 //     CLONE_NEWUSER|CLONE_NEWNS; absent on AppArmor-restricted hosts or
 //     a plain spawn, in which case the seccomp tier still applies);
 //  2. descriptor tier — every unjustified live descriptor is closed;
-//  3. no_new_privs + seccomp-bpf whitelist (TSYNC across all threads).
+//  3. Landlock tier — deny every handled filesystem operation except exact
+//     immutable files declared by the role;
+//  4. no_new_privs + seccomp-bpf whitelist (TSYNC across all threads).
 //
 // A tier that fails is recorded in the report and the next tier still
 // installs; Verify then reports the honest per-property outcome. An
@@ -106,9 +108,9 @@ func Apply(spec Spec) (*Report, error) {
 		rep.Results = append(rep.Results, probeTaskLimit(spec.MaxTasks))
 	}
 
-	if spec.Profile == ProfileMCP {
-		_, _ = fmt.Fprintln(os.Stderr, "workerconf: installing MCP Landlock path ruleset")
-		abi, err := applyMCPPathLandlock()
+	if spec.NoNewPaths {
+		_, _ = fmt.Fprintf(os.Stderr, "workerconf: installing Landlock path ruleset (read files=%d)\n", len(spec.ReadFiles))
+		abi, allowed, err := applyPathLandlock(spec.ReadFiles)
 		if err != nil {
 			rep.Notes = append(rep.Notes, "landlock tier unavailable: "+err.Error())
 			rep.Results = append(rep.Results, PropertyResult{
@@ -116,10 +118,10 @@ func Apply(spec Spec) (*Report, error) {
 			})
 		} else {
 			rep.Applied = true
-			rep.Notes = append(rep.Notes, fmt.Sprintf("landlock tier: ABI %d deny-all filesystem ruleset", abi))
+			detail := fmt.Sprintf("ABI %d deny-by-default filesystem ruleset installed; %d exact read file(s)", abi, allowed)
+			rep.Notes = append(rep.Notes, "landlock tier: "+detail)
 			rep.Results = append(rep.Results, PropertyResult{
-				Property: PropLandlock, State: StateEnforced,
-				Detail: fmt.Sprintf("ABI %d deny-all filesystem ruleset installed", abi),
+				Property: PropLandlock, State: StateEnforced, Detail: detail,
 			})
 		}
 	}

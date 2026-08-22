@@ -156,6 +156,36 @@ func TestWriteIsolationStateIncludesMCPWorker(t *testing.T) {
 	}
 }
 
+func TestWriteIsolationStateClassifiesLandlockAsFilesystemBoundary(t *testing.T) {
+	dir := t.TempDir()
+	conf := &workerconf.Report{Platform: "linux", Mode: "auto", Applied: true,
+		Results: []workerconf.PropertyResult{
+			{Property: workerconf.PropFSRead, State: workerconf.StateEnforced},
+			{Property: workerconf.PropFSWrite, State: workerconf.StateEnforced},
+			{Property: workerconf.PropNetDial, State: workerconf.StateEnforced},
+			{Property: workerconf.PropExec, State: workerconf.StateEnforced},
+			{Property: workerconf.PropFDTable, State: workerconf.StateEnforced},
+			{Property: workerconf.PropSyscall, State: workerconf.StateEnforced},
+			{Property: workerconf.PropLandlock, State: workerconf.StateUnenforced},
+			{Property: workerconf.PropProcEnum, State: workerconf.StateEnforced},
+			{Property: workerconf.PropTaskLimit, State: workerconf.StateEnforced},
+		}}
+	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, &Network{}, true, conf, nil); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state isolationState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.FilesystemBoundary != workerconf.StateUnenforced || state.ProcessBoundary != workerconf.StateEnforced {
+		t.Fatalf("Landlock boundary classification = %+v", state)
+	}
+}
+
 func TestWriteIsolationStateDarwinAggregatesSignalBoundary(t *testing.T) {
 	dir := t.TempDir()
 	conf := &workerconf.Report{

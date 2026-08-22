@@ -188,10 +188,10 @@ repair tool. Gantry does not provide snapshots or rollback.
 be established or verified. Inspect `isolation.json` and the worker logs for
 the exact property.
 
-On Linux, restricted user namespaces or seccomp policy imposed by an outer
-container can prevent the full topology. Run Gantry directly on the host or
-enable the required kernel features. Do not switch to `off` unless the weaker
-boundary is acceptable.
+On Linux, restricted user namespaces, unavailable Landlock (Linux before
+5.13), or seccomp policy imposed by an outer container can prevent the full
+topology. Run Gantry directly on the host or enable the required kernel
+features. Do not switch to `off` unless the weaker boundary is acceptable.
 
 Strict required mode is not currently supported on Windows.
 
