@@ -20,7 +20,7 @@ import (
 func CmdShare(argv []string) int {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, `usage:
-  gantry share add [--replace] [--ephemeral] <name> TAG=PATH[@CTRPATH][,ro][,uid=N,gid=N]
+  gantry share add [--replace] [--ephemeral] <name> TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N]
   gantry share remove [--force] [--ephemeral] <name> TAG
   gantry share ls <name>
 

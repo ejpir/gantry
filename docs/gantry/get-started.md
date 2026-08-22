@@ -18,7 +18,7 @@ $ gantry start dev \
     -image debian:bookworm-slim \
     -cpus 2 \
     -mem 1024 \
-    -share "workspace=$PWD@/workspace"
+    -share "workspace=$PWD,mount=/workspace"
 ```
 
 `gantry start` creates a persistent sandbox named `dev`. The project appears

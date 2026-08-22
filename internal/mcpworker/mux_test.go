@@ -139,8 +139,9 @@ func TestRunGatewayOverBrokeredStreams(t *testing.T) {
 		})
 	}()
 
+	capability := strings.Repeat("0", 32)
 	mux := NewMux(streamsSupervisor, true, func(_ context.Context, request OpenRequest, stream *Stream) error {
-		if request.Kind != StreamLocal || request.Server != "fs" || len(request.Session) != 32 {
+		if request.Kind != StreamLocal || request.Server != "fs" || request.Session != capability {
 			return net.ErrClosed
 		}
 		go fakeFilesystemServer(stream)
@@ -159,7 +160,7 @@ func TestRunGatewayOverBrokeredStreams(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	guest, err := mux.Open(ctx, OpenRequest{Kind: StreamGuest})
+	guest, err := mux.Open(ctx, OpenRequest{Kind: StreamGuest, Session: capability})
 	if err != nil {
 		t.Fatal(err)
 	}

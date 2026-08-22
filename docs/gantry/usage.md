@@ -34,8 +34,10 @@ $ gantry resume dev
 $ gantry delete dev
 ```
 
-`stop` asks the guest to sync, flushes devices, and preserves `sandbox.json`
-and the writable disk. `resume` boots the saved configuration. `delete` stops
+`stop` asks the trusted guest system service to sync filesystems, flushes
+devices, and preserves `sandbox.json` and the writable disk. It never executes
+a shutdown helper from the workload image. `resume` boots the saved
+configuration. `delete` stops
 a running sandbox, removes its saved state, and removes its Gantry-managed
 default writable layer. An explicitly supplied `-rwlayer` remains at its
 original path.

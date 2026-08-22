@@ -178,7 +178,9 @@ func (d *daemonRuntime) gracefulStop(reason string) int {
 	// Process exit is a power cut for the guest. Flush while the RPC
 	// connection is still held: guest filesystem first (bounded because it
 	// may be wedged), then host-side devices.
-	client.SyncGuestDial(d.rpc, d.broker.streamDial, d.broker.streamSock, "sb", 5*time.Second)
+	if err := client.SyncGuest(d.rpc, 5*time.Second); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: guest filesystem sync:", err)
+	}
 	shutdownErr := d.closeShutdownDevices()
 	if shutdownErr != nil {
 		fmt.Fprintln(os.Stderr, "daemon: device shutdown:", shutdownErr)

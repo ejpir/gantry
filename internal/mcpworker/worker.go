@@ -163,10 +163,10 @@ func Run(control, broker, streams net.Conn) (retErr error) {
 	}
 
 	mux = NewMux(streams, false, func(_ context.Context, request OpenRequest, stream *Stream) error {
-		if request.Kind != StreamGuest || request.Server != "" || request.Session != "" {
-			return fmt.Errorf("worker accepts only guest streams")
+		if request.Kind != StreamGuest || request.Server != "" || !ValidSessionCapability(request.Session) {
+			return fmt.Errorf("worker accepts only supervisor-capability guest streams")
 		}
-		go func() { _ = gateway.Serve(context.Background(), stream) }()
+		go func() { _ = gateway.ServeWithSessionCapability(context.Background(), stream, request.Session) }()
 		return nil
 	})
 	if err := workerproto.WriteMessage(control, BootAck{OK: true, Confinement: confinement}); err != nil {

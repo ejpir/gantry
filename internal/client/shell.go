@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -102,11 +103,9 @@ func Shell(options ShellOptions) error {
 
 	err = Session(client, session, os.Stdin, os.Stdout)
 	if options.RW {
-		id := session.ID
-		if id == "" {
-			id = "shell"
+		if syncErr := SyncGuest(client, 5*time.Second); syncErr != nil {
+			err = errors.Join(err, syncErr)
 		}
-		SyncGuest(client, options.StreamSock, id, 5*time.Second)
 	}
 	return err
 }

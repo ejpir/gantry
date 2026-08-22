@@ -96,7 +96,10 @@ The worker must use the credentials delegated to configured MCP upstreams.
 Arbitrary code execution in it can therefore steal or misuse the current
 access token or API key for those upstreams and can return that value to its
 connected guest. The worker receives no refresh token and no unrelated secret,
-so the loss is scoped but real.
+so the loss is scoped but real. Supervisor-issued capabilities limit this
+broker authority to the lifetime of an accepted guest session; they do not
+prevent a compromised worker from misusing configured upstream authority while
+such a session is active.
 
 A compromised worker can also:
 
@@ -231,9 +234,11 @@ receive a general proxy socket on which it can select another destination.
 
 ### Credential broker
 
-The worker requests a credential using only `serverID` and a session token.
-The supervisor verifies that the server has that credential reference and
-returns only its current value:
+The worker requests a credential using only `serverID` and an opaque session
+capability issued by the supervisor when it accepts the guest connection. The
+supervisor tracks live capabilities and rejects fabricated, expired, or revoked
+values before looking up the server. It then verifies that the server has that
+credential reference and returns only its current value:
 
 - custody returns an access token, never the refresh token;
 - a secret source returns only the one secret named by that server; and

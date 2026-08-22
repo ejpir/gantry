@@ -66,11 +66,11 @@ func TestParseSpecsRejectsDuplicateTags(t *testing.T) {
 }
 
 func TestSpecStringRoundTrip(t *testing.T) {
-	original, err := ParseSpec("workspace=/Users/x@/workspace,ro,uid=1000,gid=1000")
+	original, err := ParseSpec("workspace=/Users/x,mount=/workspace,ro,uid=1000,gid=1000")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := original.String(), "workspace=/Users/x@/workspace,ro,uid=1000,gid=1000"; got != want {
+	if got, want := original.String(), "workspace=/Users/x,mount=/workspace,ro,uid=1000,gid=1000"; got != want {
 		t.Fatalf("String() = %q, want %q", got, want)
 	}
 	roundTrip, err := ParseSpec(original.String())
@@ -86,9 +86,9 @@ func TestSpecStringRoundTrip(t *testing.T) {
 
 func TestSpecStringEncodesGrammarDelimiters(t *testing.T) {
 	for _, original := range []Spec{
-		{Tag: "host-at", Path: "/tmp/name@host"},
+		{Tag: "ambiguous-at-slash", Path: "/tmp/project@/subdir"},
 		{Tag: "option-suffix", Path: "/tmp/data,ro"},
-		{Tag: "target-at", Path: "/tmp/data", CtrPath: "/workspace/name@host", RO: true},
+		{Tag: "target-comma", Path: "/tmp/data", CtrPath: "/workspace/name,ro", RO: true},
 	} {
 		t.Run(original.Tag, func(t *testing.T) {
 			encoded := original.String()
@@ -106,10 +106,16 @@ func TestSpecStringEncodesGrammarDelimiters(t *testing.T) {
 	}
 }
 
+func TestParseSpecRejectsAmbiguousLegacyMountDelimiter(t *testing.T) {
+	if _, err := ParseSpec("leak=/tmp/project@/subdir,ro"); err == nil || !strings.Contains(err.Error(), "ambiguous legacy @ mount syntax") {
+		t.Fatalf("ambiguous host path error = %v", err)
+	}
+}
+
 func TestParseSpecEncodedPathValidation(t *testing.T) {
 	for _, value := range []string{
 		"bad=%%%,encoding=base64url",
-		"bad=L3RtcA@cmVsYXRpdmU,encoding=base64url",
+		"bad=L3RtcA,mount=cmVsYXRpdmU,encoding=base64url",
 		"bad=L3RtcA,encoding=base64url,encoding=base64url",
 	} {
 		if _, err := ParseSpec(value); err == nil {
@@ -150,32 +156,32 @@ func TestManifestRoundTrip(t *testing.T) {
 }
 
 func TestParseSpecContainerPath(t *testing.T) {
-	spec, err := ParseSpec("piagent=/Users/x/.pi/agent@/root/.pi/agent")
+	spec, err := ParseSpec("piagent=/Users/x/.pi/agent,mount=/root/.pi/agent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if spec.CtrPath != "/root/.pi/agent" || spec.Path != "/Users/x/.pi/agent" || spec.RO {
 		t.Fatalf("%+v", spec)
 	}
-	spec, err = ParseSpec("code=/Users/x/repos@/src,ro")
+	spec, err = ParseSpec("code=/Users/x/repos,mount=/src,ro")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if spec.CtrPath != "/src" || !spec.RO || spec.Path != "/Users/x/repos" {
 		t.Fatalf("%+v", spec)
 	}
-	spec, err = ParseSpec("code=/Users/name@host@/src")
+	spec, err = ParseSpec("code=/Users/name@host,mount=/src")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if spec.Path != "/Users/name@host" || spec.CtrPath != "/src" {
-		t.Fatalf("last @ must remain the container delimiter: %+v", spec)
+		t.Fatalf("explicit mount parsing failed: %+v", spec)
 	}
-	if got := spec.String(); got != "code=/Users/name@host@/src" {
+	if got := spec.String(); got != "code=/Users/name@host,mount=/src" {
 		t.Fatalf("representable @ path encoded unnecessarily: %q", got)
 	}
-	if _, err := ParseSpec("x=/tmp@rel"); err == nil {
-		t.Fatal("relative @CTRPATH accepted")
+	if _, err := ParseSpec("x=/tmp,mount=rel"); err == nil {
+		t.Fatal("relative mount target accepted")
 	}
 	spec, err = ParseSpec("x=/tmp")
 	if err != nil || spec.CtrPath != "" {
@@ -192,7 +198,7 @@ func TestParseSpecContainerPath(t *testing.T) {
 }
 
 func TestParseSpecGuestOwnership(t *testing.T) {
-	spec, err := ParseSpec("workspace=/Users/x@/workspace,ro,uid=1000,gid=1000")
+	spec, err := ParseSpec("workspace=/Users/x,mount=/workspace,ro,uid=1000,gid=1000")
 	if err != nil {
 		t.Fatal(err)
 	}

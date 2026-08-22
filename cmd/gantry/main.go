@@ -234,7 +234,7 @@ func cmdRun(argv []string) int {
 	var disks gutil.StrList
 	run.Var(&disks, "disk", "extra virtio-blk image (repeatable): /dev/vdb, /dev/vdc, ...")
 	var shareArgs gutil.StrList
-	run.Var(&shareArgs, "share", "host directory exported through virtio-fs as TAG=PATH[@CTRPATH][,ro] (repeatable)")
+	run.Var(&shareArgs, "share", "host directory exported through virtio-fs as TAG=PATH[,mount=CTRPATH][,ro] (repeatable)")
 	netEndpoint := run.String("net", "", "Unix datagram raw-Ethernet backend (e.g. gvproxy vfkit socket)")
 	netMACArg := run.String("net-mac", "5a:94:ef:e4:0c:ee", "virtio-net MAC address")
 	netVFKIT := run.Bool("net-vfkit", true, "send the VFKT registration datagram to the network backend")

@@ -103,7 +103,7 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 	for _, share := range configured {
 		if share.Tag == "hostshare" && share.CtrPath == "" {
 			share.CtrPath = config.DefaultHubCtrPath(share.Tag)
-			warnings = append(warnings, `share "hostshare" now appears at /host/hostshare (the hub root owns /host; use an explicit @/host alias for the legacy path)`)
+			warnings = append(warnings, `share "hostshare" now appears at /host/hostshare (the hub root owns /host; use an explicit mount=/host target for the legacy path)`)
 		}
 		if !filepath.IsAbs(share.Path) {
 			_ = m.Close()
@@ -273,7 +273,7 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 		return nil, err
 	}
 	if share.CtrPath != "" {
-		return nil, fmt.Errorf("live shares always appear at /host/<tag>; @CTRPATH requires sandbox restart")
+		return nil, fmt.Errorf("live shares always appear at /host/<tag>; mount=CTRPATH requires sandbox restart")
 	}
 	if !filepath.IsAbs(share.Path) {
 		return nil, fmt.Errorf("share path must be absolute (got %q)", share.Path)

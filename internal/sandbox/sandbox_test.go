@@ -274,7 +274,7 @@ func TestBrokerConfiguresShareForRestart(t *testing.T) {
 	br := &broker{store: store, shares: manager, sessions: map[string]chan struct{}{}}
 	req := controlproto.Request{
 		Op: "share.configure", ID: "mount",
-		Share: &controlproto.ShareRequest{Spec: "code=" + host + "@/workspace", Persistent: true},
+		Share: &controlproto.ShareRequest{Spec: "code=" + host + ",mount=/workspace", Persistent: true},
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {
@@ -284,7 +284,7 @@ func TestBrokerConfiguresShareForRestart(t *testing.T) {
 	if !strings.Contains(got, `"ok":true`) || !strings.Contains(got, `"ctrPath":"/workspace"`) {
 		t.Fatalf("resp = %s", got)
 	}
-	if saved := store.Snapshot().Shares; len(saved) != 1 || !strings.Contains(saved[0], "@/workspace") {
+	if saved := store.Snapshot().Shares; len(saved) != 1 || !strings.Contains(saved[0], ",mount=/workspace") {
 		t.Fatalf("saved shares = %v", saved)
 	}
 }

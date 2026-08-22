@@ -3,6 +3,8 @@
 package mcpworker
 
 import (
+	"encoding/hex"
+
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
 	"github.com/ejpir/gantry/internal/workerconf"
 )
@@ -66,3 +68,11 @@ const (
 	StreamRemote = "remote"
 	StreamLocal  = "local"
 )
+
+// ValidSessionCapability reports whether value has the wire representation of
+// a supervisor-issued MCP session capability. The supervisor additionally
+// checks every capability against its live-session registry.
+func ValidSessionCapability(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 16
+}
