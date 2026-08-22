@@ -264,6 +264,12 @@ and audits names and decisions rather than payloads. Frames and responses are
 limited to 1 MiB; one session permits 16 in-flight calls, one gateway permits
 16 sessions, and idle sessions expire after five minutes.
 
+The gateway currently shares the trusted supervisor's address space. The
+[MCP worker confinement plan](mcp-worker-confinement.md) proposes moving
+MCP/HTTP/SSE parsing into a capability-limited host worker while keeping the
+filesystem helper inside the guest and secrets, refresh tokens, share roots,
+and destination selection in the supervisor.
+
 ### OAuth bridge and custody
 
 The callback bridge recognizes supported guest loopback authorization URLs
