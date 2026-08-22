@@ -112,6 +112,128 @@ func TestSandboxTUIMCPServerManagementDialogs(t *testing.T) {
 	}
 }
 
+func TestDialogTextInputCentersAreClickable(t *testing.T) {
+	cases := []struct {
+		name, label string
+		want        int
+		open        func(*sandboxTUIModel)
+		focus       func(sandboxTUIModel) int
+	}{
+		{name: "create image", label: "OCI image", want: 1, open: func(m *sandboxTUIModel) { m.openCreateDialog() }, focus: func(m sandboxTUIModel) int { return m.createFocus }},
+		{name: "share tag", label: "Tag", want: 1, open: func(m *sandboxTUIModel) { m.openShareAddDialog(false) }, focus: func(m sandboxTUIModel) int { return m.shareFocus }},
+		{name: "port bind", label: "Host bind", want: 1, open: func(m *sandboxTUIModel) { m.openPortPublishDialog() }, focus: func(m sandboxTUIModel) int { return m.portFocus }},
+		{name: "policy file", label: "Policy file", want: 1, open: func(m *sandboxTUIModel) { m.openNetworkPolicyDialog() }, focus: func(m sandboxTUIModel) int { return m.policyFocus }},
+		{name: "rule destination", label: "Destination", want: 2, open: func(m *sandboxTUIModel) { m.openRuleAddDialog() }, focus: func(m sandboxTUIModel) int { return m.ruleFocus }},
+		{name: "secret name", label: "Name", want: 1, open: func(m *sandboxTUIModel) { m.openSecretAddDialog() }, focus: func(m sandboxTUIModel) int { return m.secretFocus }},
+		{name: "MCP name", label: "Name", want: 1, open: func(m *sandboxTUIModel) { m.openMCPRemoteDialog(false) }, focus: func(m sandboxTUIModel) int { return m.mcpFocus }},
+		{name: "MCP guest root", label: "Guest root", want: 1, open: func(m *sandboxTUIModel) { m.openMCPFilesystemDialog() }, focus: func(m sandboxTUIModel) int { return m.mcpFSFocus }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+			m.loading = false
+			m.width, m.height = 100, 42
+			m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, Net: true}}
+			tc.open(&m)
+			if m.dialog == tuiNoDialog {
+				t.Fatal("form did not open")
+			}
+
+			_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+			lines := strings.Split(ansi.Strip(content), "\n")
+			inputTop := -1
+			for row, line := range lines {
+				if !strings.HasPrefix(strings.TrimSpace(line), tc.label) {
+					continue
+				}
+				for candidate := row + 1; candidate < len(lines); candidate++ {
+					if strings.Contains(lines[candidate], "╭") {
+						inputTop = candidate
+						break
+					}
+				}
+				break
+			}
+			if inputTop < 0 {
+				t.Fatalf("input for %q not found:\n%s", tc.label, ansi.Strip(content))
+			}
+			bounds := m.dialogBounds(m.dialog)
+			// inputTop+1 is the middle row containing the editable value, not
+			// either rounded border row.
+			mouse := tea.Mouse{
+				X:      bounds.x + bounds.w/2,
+				Y:      bounds.y + 2 + inputTop + 1 - m.dialogScroll,
+				Button: tea.MouseLeft,
+			}
+			if !bounds.contains(mouse.X, mouse.Y) {
+				t.Fatalf("input center for %q is outside dialog: mouse=%v bounds=%v", tc.label, mouse, bounds)
+			}
+			model, _ := m.updateMouseClick(mouse)
+			m = *model.(*sandboxTUIModel)
+			if got := tc.focus(m); got != tc.want {
+				t.Fatalf("clicking the middle of %q focused %d, want %d", tc.label, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDialogSandboxPickerOptionsAreClickable(t *testing.T) {
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{
+		{Name: "dev", State: tuiStopped},
+		{Name: "other", State: tuiStopped},
+	}
+	m.mcpServers = []tuiMCPRow{
+		{Sandbox: "dev", Name: "fs", Type: "local", Root: "/dev-root", User: "nobody"},
+		{Sandbox: "other", Name: "fs", Type: "local", Root: "/other-root", User: "65534:65534"},
+	}
+	m.openMCPFilesystemDialog()
+	bounds := m.dialogBounds(m.dialog)
+
+	_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	lines := strings.Split(ansi.Strip(content), "\n")
+	sandboxRow := -1
+	for row, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "Sandbox") {
+			sandboxRow = row
+			break
+		}
+	}
+	if sandboxRow < 0 {
+		t.Fatalf("sandbox picker not rendered:\n%s", ansi.Strip(content))
+	}
+	model, _ := m.updateMouseClick(tea.Mouse{
+		X: bounds.x + bounds.w/2, Y: bounds.y + 2 + sandboxRow + 2, Button: tea.MouseLeft,
+	})
+	m = *model.(*sandboxTUIModel)
+	if !m.mcpSandbox.open {
+		t.Fatal("clicking the picker value did not open its menu")
+	}
+
+	_, _, content, _ = m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	lines = strings.Split(ansi.Strip(content), "\n")
+	optionRow := -1
+	for row, line := range lines {
+		if strings.Contains(line, "other") {
+			optionRow = row
+			break
+		}
+	}
+	if optionRow < 0 {
+		t.Fatalf("picker option not rendered:\n%s", ansi.Strip(content))
+	}
+	bounds = m.dialogBounds(m.dialog)
+	model, _ = m.updateMouseClick(tea.Mouse{
+		X: bounds.x + bounds.w/2, Y: bounds.y + 2 + optionRow - m.dialogScroll, Button: tea.MouseLeft,
+	})
+	m = *model.(*sandboxTUIModel)
+	if m.mcpSandbox.open || m.mcpSandbox.Value() != "other" || m.mcpFSRoot.Value() != "/other-root" || m.mcpFSUser.Value() != "65534:65534" {
+		t.Fatalf("picker click = open=%t sandbox=%q root=%q user=%q", m.mcpSandbox.open, m.mcpSandbox.Value(), m.mcpFSRoot.Value(), m.mcpFSUser.Value())
+	}
+}
+
 func TestSandboxTUIShareDialogActions(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false

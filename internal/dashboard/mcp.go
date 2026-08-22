@@ -7,7 +7,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 )
 
 const mcpRemoteSubmitFocus = 9
@@ -393,24 +392,28 @@ func (m *sandboxTUIModel) updateMCPRemoteDialogMouse(mouse tea.Mouse, bounds tui
 		m.mcpFocus = mcpRemoteSubmitFocus
 		return m.submitMCPRemote()
 	}
-	fields := []string{"Sandbox", "Name", "HTTPS URL", "Authentication", "Secret / provider reference", "Header name", "Allow tool globs", "Deny tool globs", "Additional redact secret names"}
-	for focus, label := range fields {
-		if m.mcpEditing && (focus == 0 || focus == 1) {
-			continue
-		}
-		if !m.mcpDialogFieldHit(mouse, bounds, label) {
-			continue
-		}
-		cmd := m.focusMCPRemote(focus)
-		if focus == 0 {
-			m.mcpSandbox.Toggle()
-		}
-		if focus == 3 {
-			m.cycleMCPAuth(1)
-		}
-		return m, cmd
+	if !m.mcpEditing && m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.mcpSandbox) {
+		return m, nil
 	}
-	return m, nil
+	controls := []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Name", focus: 1}, {label: "HTTPS URL", focus: 2},
+		{label: "Authentication", focus: 3}, {label: "Secret / provider reference", focus: 4},
+		{label: "Header name", focus: 5}, {label: "Allow tool globs", focus: 6},
+		{label: "Deny tool globs", focus: 7}, {label: "Additional redact secret names", focus: 8},
+	}
+	focus, ok := m.dialogFormControlAt(mouse, bounds, controls)
+	if !ok || (m.mcpEditing && (focus == 0 || focus == 1)) {
+		return m, nil
+	}
+	pickerWasOpen := m.mcpSandbox.open
+	cmd := m.focusMCPRemote(focus)
+	if focus == 0 && !pickerWasOpen {
+		m.mcpSandbox.Toggle()
+	}
+	if focus == 3 {
+		m.cycleMCPAuth(1)
+	}
+	return m, cmd
 }
 
 func (m *sandboxTUIModel) updateMCPFilesystemDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
@@ -418,27 +421,25 @@ func (m *sandboxTUIModel) updateMCPFilesystemDialogMouse(mouse tea.Mouse, bounds
 		m.mcpFSFocus = 3
 		return m.submitMCPFilesystem()
 	}
-	for focus, label := range []string{"Sandbox", "Guest root", "Unprivileged guest user"} {
-		if !m.mcpDialogFieldHit(mouse, bounds, label) {
-			continue
+	before := m.mcpSandbox.Value()
+	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.mcpSandbox) {
+		if before != m.mcpSandbox.Value() {
+			m.syncMCPFilesystemFields()
 		}
-		cmd := m.focusMCPFilesystem(focus)
-		if focus == 0 {
-			m.mcpSandbox.Toggle()
-		}
-		return m, cmd
+		return m, nil
 	}
-	return m, nil
-}
-
-func (m sandboxTUIModel) mcpDialogFieldHit(mouse tea.Mouse, bounds tuiRect, label string) bool {
-	lines := strings.Split(ansi.Strip(m.renderDialog(tuiThemeFor(m.dark))), "\n")
-	for row, line := range lines {
-		if strings.Contains(line, label) {
-			return mouse.X > bounds.x && mouse.X < bounds.x+bounds.w-1 && mouse.Y >= bounds.y+row && mouse.Y <= bounds.y+row+1
-		}
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Guest root", focus: 1}, {label: "Unprivileged guest user", focus: 2},
+	})
+	if !ok {
+		return m, nil
 	}
-	return false
+	pickerWasOpen := m.mcpSandbox.open
+	cmd := m.focusMCPFilesystem(focus)
+	if focus == 0 && !pickerWasOpen {
+		m.mcpSandbox.Toggle()
+	}
+	return m, cmd
 }
 
 func (m sandboxTUIModel) renderMCPRemoveDialog(theme tuiTheme, width int) string {
