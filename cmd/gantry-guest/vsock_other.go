@@ -26,6 +26,3 @@ func brokerRoundTrip([]byte) (credproto.Response, error) {
 func dialVsockFile(uint32, time.Duration) (*os.File, error) {
 	return nil, fmt.Errorf("vsock is only reachable from inside a gantry guest")
 }
-
-// shutdownWrite stub for host builds.
-func shutdownWrite(*os.File) {}

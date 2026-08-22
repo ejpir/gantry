@@ -9,7 +9,12 @@ set +e
 cd /opt/gantry || exit 1
 
 G=./gantry-linux-amd64
-SBX=${HOME:-/tmp}/.gantry/sandboxes
+# SSM does not consistently provide HOME. Pin the same state root Gantry uses
+# so evidence checks never inspect /tmp/.gantry while the daemon selected its
+# separate no-home fallback.
+export GANTRY_HOME="${GANTRY_HOME:-/tmp/.gantry/sandboxes}"
+export GANTRY_IMAGES="${GANTRY_IMAGES:-/tmp/.gantry/images}"
+SBX=$GANTRY_HOME
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -44,8 +49,9 @@ R=$(xe c1 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443" && echo EGRESS-OK')
                                           chk "required: egress"      "EGRESS-OK" "$R"
 
 echo "----- worker process evidence -----"
-WPID=$(pgrep -f '_vmm-worker' | head -1)
-if [ -z "$WPID" ]; then bad "worker: _vmm-worker running"; else
+DPID=$(cat "$SBX"/c1/vmm.pid 2>/dev/null)
+WPID=$(pgrep -P "$DPID" -f '_vmm-worker' 2>/dev/null | head -1)
+if [ -z "$WPID" ]; then bad "worker: c1 _vmm-worker running"; else
   ok "worker: _vmm-worker running (pid $WPID)"
   SC=$(awk '/^Seccomp:/{print $2}' /proc/$WPID/status 2>/dev/null)
   [ "$SC" = "2" ] && ok "worker: seccomp filter active (Seccomp: 2)" || bad "worker: seccomp filter active (Seccomp: $SC)"

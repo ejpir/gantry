@@ -25,6 +25,20 @@ The scripts default to `eu-west-1`, `c5.metal`, and bucket
 `gantry-kvm-test-<account-id>`. Override these with `REGION`, `INSTANCE_TYPE`,
 and `BUCKET`.
 
+For routine x86_64 acceptance, the repository-level orchestrator starts the
+reusable Linux KVM and Windows WHPX hosts, waits for SSM, tests real checksummed
+self-updates on disposable binaries, runs every maintained field battery, and
+stops both instances on exit:
+
+```sh
+source ~/keys
+sh scripts/aws-e2e-validation.sh
+```
+
+Set `GANTRY_KEEP_INSTANCES=1` to leave both hosts running for investigation.
+Instance IDs and the bucket can be overridden with `GANTRY_LINUX_IID`,
+`GANTRY_WINDOWS_IID`, and `GANTRY_TEST_BUCKET`.
+
 ## Quick start
 
 Run from the repository root:
@@ -62,7 +76,9 @@ before running the full battery or expect that section to fail.
 | `infra-up.sh` | Idempotently create/reuse the S3 bucket, IAM profile, VPC endpoints, security groups, and test instance. |
 | `stage-assets.sh` | Cross-build `gantry-linux-amd64` and upload the standard test assets. |
 | `run-tests.sh` | Upload a fresh binary, populate `/opt/gantry`, and run `test-battery.sh`. |
-| `test-battery.sh` | Exercise crun, runsc, DNS/egress, concurrency, shares, cached OCI images, and secrets on the instance. |
+| `test-battery.sh` | Exercise crun, runsc, DNS/egress, concurrency, shares, cached OCI images, secrets, and OAuth custody on the instance. |
+| `directory-validation.sh` | Exercise large shared-directory scans and host/guest coherence. |
+| `self-update-validation.sh` | Verify a disposable tagged binary updates in place from a checksummed GitHub release. |
 | `confinement-battery.sh` | Require split network/VMM workers and verify namespaces, private root, seccomp, shares, and egress. |
 | `ssm.py` | Submit a shell script or one command through `AWS-RunShellScript` and wait for its result. |
 | `infra-down.sh` | Stop or terminate the instance and optionally remove the SSM interface endpoints. |

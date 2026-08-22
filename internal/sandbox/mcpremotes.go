@@ -24,7 +24,7 @@ package sandbox
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 
@@ -120,7 +120,7 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpgw.Server, error) {
 	servers := []mcpgw.Server{{
 		Name: "fs",
 		Argv: []string{
-			filepath.Join(guestToolsDirGuest, "gantry-guest"), "mcp-serve", "filesystem",
+			path.Join(guestToolsDirGuest, "gantry-guest"), "mcp-serve", "filesystem",
 			"--root", root, "--user", usr,
 		},
 		Tools: mcpgw.ToolPolicy{Allow: []string{"read_file", "list_directory"}},

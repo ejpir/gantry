@@ -1,16 +1,43 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
 )
+
+func TestProxyMCPDrainsPipelinedRequestsAfterStdinEOF(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+	requests := "request-one\nrequest-two\n"
+	received := make(chan string, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		first, _ := reader.ReadString('\n')
+		second, _ := reader.ReadString('\n')
+		received <- first + second
+		_, _ = io.WriteString(server, "response-one\nresponse-two\n")
+	}()
+
+	var output bytes.Buffer
+	proxyMCP(client, strings.NewReader(requests), &output, 50*time.Millisecond)
+	if got := <-received; got != requests {
+		t.Fatalf("gateway received %q, want both pipelined requests %q", got, requests)
+	}
+	if got, want := output.String(), "response-one\nresponse-two\n"; got != want {
+		t.Fatalf("proxy output = %q, want %q", got, want)
+	}
+}
 
 // requirePosixFs skips fs-server tests on Windows: mcp-serve filesystem is
 // a linux-guest component and relInRoot deliberately speaks POSIX path
