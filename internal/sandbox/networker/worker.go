@@ -18,7 +18,6 @@ import (
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/networkworker"
 	"github.com/ejpir/gantry/internal/packetcapture"
-	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerconf"
@@ -28,15 +27,14 @@ import (
 // Worker is the supervisor's handle on the spawned worker process and
 // implements NetworkBackend over RPC.
 type Worker struct {
-	child          *worker.Child
-	client         *workerproto.Client
-	data           net.Conn
-	gen            uint64
-	kill           func() error
-	policyMu       sync.Mutex // serializes each complete policy transaction
-	portMu         sync.Mutex // serializes each complete port transaction
-	conf           *workerconf.Report
-	diagnosticPath string // in-process test harnesses; Child handles spawned logs
+	child    *worker.Child
+	client   *workerproto.Client
+	data     net.Conn
+	gen      uint64
+	kill     func() error
+	policyMu sync.Mutex // serializes each complete policy transaction
+	portMu   sync.Mutex // serializes each complete port transaction
+	conf     *workerconf.Report
 
 	trafficEpoch    *netpol.TrafficEpoch
 	trafficCancel   context.CancelFunc
@@ -56,15 +54,6 @@ func (w *Worker) Done() <-chan struct{} { return w.lifecycle.Done() }
 
 // Err reports the worker's exit state after Done closes.
 func (w *Worker) Err() error { return w.lifecycle.Err() }
-
-func (w *Worker) setDead(err error) {
-	// Attached in-process tests have no generic Child watcher. Spawned workers
-	// publish through Child, which also owns diagnostics and containment.
-	if err != nil && w.diagnosticPath != "" {
-		err = errors.Join(err, boundedlog.DiagnosticTail("net-worker", w.diagnosticPath))
-	}
-	w.lifecycle.Exit(err)
-}
 
 func (w *Worker) ConfinementReport() *workerconf.Report {
 	if w == nil || w.conf == nil {

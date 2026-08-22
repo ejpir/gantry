@@ -66,16 +66,6 @@ func (w *vmmWorker) Done() <-chan struct{} { return w.lifecycle.Done() }
 // Err reports the worker's exit state after Done closes.
 func (w *vmmWorker) Err() error { return w.lifecycle.Err() }
 
-func (w *vmmWorker) setDead(err error) {
-	// In-process tests have no generic Child watcher, so retain the same
-	// process-death publication path for attached harnesses.
-	w.lifecycle.Exit(err)
-	if w.share != nil {
-		_ = w.share.Close()
-	}
-	w.cancelWait()
-}
-
 // observeChild performs only VMM-specific post-exit wakeups. The generic
 // child watcher has already reaped the process, revoked launch capabilities,
 // drained diagnostics, and published the shared lifecycle result.
