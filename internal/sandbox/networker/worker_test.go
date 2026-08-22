@@ -20,12 +20,17 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/sandbox/worker/workertest"
 	"github.com/ejpir/gantry/internal/vnet"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
+
+// setDead publishes process death for in-process test harnesses, which have no
+// generic worker.Child watcher.
+func (w *Worker) setDead(err error) { w.lifecycle.Exit(err) }
 
 // testMAC mirrors the production guest MAC (runconf guestNetMAC is
 // unexported package state; the worker only needs SOME fixed address).
@@ -244,14 +249,13 @@ func TestNetWorkerDoneConsumptionDoesNotBlockClose(t *testing.T) {
 	}
 	var kills atomic.Int32
 	w := &Worker{
-		lifecycle:      worker.NewLifecycle(),
-		diagnosticPath: diagnosticPath,
+		lifecycle: worker.NewLifecycle(),
 		kill: func() error {
 			kills.Add(1)
 			return nil
 		},
 	}
-	w.setDead(want)
+	w.setDead(errors.Join(want, boundedlog.DiagnosticTail("net-worker", diagnosticPath)))
 	if err := w.Err(); err == nil || !strings.Contains(err.Error(), "exact pump failure") {
 		t.Fatalf("worker error omitted diagnostic tail: %v", err)
 	}

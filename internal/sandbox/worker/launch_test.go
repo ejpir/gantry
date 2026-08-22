@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,7 +76,33 @@ func TestLaunchEmptyEnvironmentHelper(t *testing.T) {
 	if len(os.Args) == 0 || os.Args[len(os.Args)-1] != "launch-empty-environment-helper" {
 		return
 	}
-	if len(os.Environ()) != 0 {
+	environment := os.Environ()
+	if runtime.GOOS == "windows" {
+		// Windows conveys each anonymous-pipe direction through an exact
+		// bootstrap handle variable. These are launcher metadata, not role
+		// environment, and are the only entries the child should receive.
+		allowed := map[string]bool{
+			"GANTRY_WORKER_READ_3":  false,
+			"GANTRY_WORKER_WRITE_3": false,
+		}
+		for _, entry := range environment {
+			name, value, ok := strings.Cut(entry, "=")
+			if !ok || value == "" {
+				os.Exit(91)
+			}
+			if _, ok := allowed[name]; !ok || allowed[name] {
+				os.Exit(91)
+			}
+			allowed[name] = true
+		}
+		for _, found := range allowed {
+			if !found {
+				os.Exit(91)
+			}
+		}
+		os.Exit(0)
+	}
+	if len(environment) != 0 {
 		os.Exit(91)
 	}
 	os.Exit(0)

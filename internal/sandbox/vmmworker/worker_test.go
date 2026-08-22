@@ -30,6 +30,16 @@ import (
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
+// setDead publishes process death and VMM-specific wakeups for in-process
+// test harnesses, which have no generic worker.Child watcher.
+func (w *vmmWorker) setDead(err error) {
+	w.lifecycle.Exit(err)
+	if w.share != nil {
+		_ = w.share.Close()
+	}
+	w.cancelWait()
+}
+
 // fakeVMM is a vmmworkerapi.Runner double: Run blocks until Close, Inject
 // records the conn, and the captured Opts expose the worker's vsock
 // dial func for bridge tests.
