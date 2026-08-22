@@ -68,19 +68,23 @@ the LAN or beyond.
 ### Worker processes
 
 In `auto` mode, Gantry attempts to separate the VMM and network data planes
-from the trusted supervisor. Workers receive an allowlisted descriptor table
-and authenticated bootstrap channels, then apply platform confinement:
+from the trusted supervisor. MCP-enabled sandboxes always run MCP parsing in a
+separate worker, even when OS confinement is set to `off`. Workers receive an
+allowlisted descriptor table and authenticated bootstrap channels, then apply
+platform confinement:
 
 - Linux uses user, mount, and PID namespaces when available, a private root,
   capability removal, task limits, descriptor closure, `no_new_privs`, and a
-  seccomp-BPF syscall policy.
+  seccomp-BPF syscall policy. The MCP role additionally installs a deny-all
+  Landlock filesystem ruleset; no host path is allowlisted.
 - macOS uses Seatbelt profiles with role-specific file and network access.
 - Windows uses separate workers and a Job Object, but cannot yet verify the
   required ambient filesystem and network restrictions.
 
 Workers probe the controls from inside the confined process. Gantry writes
-the measured properties to `isolation.json` and displays them in the TUI.
-`auto` may report degradation and continue. `required` fails startup unless
+the measured properties to `isolation.json`; the TUI currently shows the
+configured isolation mode rather than the full per-role report. `auto` may
+report degradation and continue. `required` fails startup unless
 the required split-worker properties are verified. `off` disables this
 defense-in-depth layer.
 
@@ -92,11 +96,14 @@ $ gantry start sensitive -image alpine:latest \
 `required` is supported only where the platform can establish and verify the
 full required boundary. It currently fails closed on Windows.
 
-The host MCP gateway is not yet one of these split workers: it currently runs
-inside the trusted supervisor, while its built-in filesystem helper is a
-separate unprivileged guest process. The planned host-worker boundary and
-filesystem hardening are documented in the
-[MCP worker confinement plan](mcp-worker-confinement.md).
+The host MCP gateway is a separate capability-limited worker. The supervisor
+keeps destination selection, DNS pinning, secret and OAuth stores, fixed guest
+helper argv, and audit persistence. It relays bounded opaque streams and
+releases only the credential mapped to the requested configured server ID.
+Killing this worker disables MCP without killing the VM. The built-in
+filesystem helper remains a separate unprivileged guest process; its `os.Root`
+path containment and remaining hardening work are documented in the
+[MCP worker confinement design](mcp-worker-confinement.md).
 
 ### Runtime inside the VM
 

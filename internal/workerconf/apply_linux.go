@@ -106,6 +106,24 @@ func Apply(spec Spec) (*Report, error) {
 		rep.Results = append(rep.Results, probeTaskLimit(spec.MaxTasks))
 	}
 
+	if spec.Profile == ProfileMCP {
+		_, _ = fmt.Fprintln(os.Stderr, "workerconf: installing MCP Landlock path ruleset")
+		abi, err := applyMCPPathLandlock()
+		if err != nil {
+			rep.Notes = append(rep.Notes, "landlock tier unavailable: "+err.Error())
+			rep.Results = append(rep.Results, PropertyResult{
+				Property: PropLandlock, State: StateUnenforced, Detail: err.Error(),
+			})
+		} else {
+			rep.Applied = true
+			rep.Notes = append(rep.Notes, fmt.Sprintf("landlock tier: ABI %d deny-all filesystem ruleset", abi))
+			rep.Results = append(rep.Results, PropertyResult{
+				Property: PropLandlock, State: StateEnforced,
+				Detail: fmt.Sprintf("ABI %d deny-all filesystem ruleset installed", abi),
+			})
+		}
+	}
+
 	_, _ = fmt.Fprintln(os.Stderr, "workerconf: installing seccomp filter")
 	if err := installSeccompFor(spec); err != nil {
 		rep.Notes = append(rep.Notes, "seccomp tier unavailable: "+err.Error())

@@ -123,18 +123,30 @@ func (d *daemonRuntime) prepareGuest() error {
 	}
 	d.bootLog("machine prepared (RAM+kernel)")
 
-	var confinement *workerconf.Report
-	if reporter, ok := d.runner.(interface{ ConfinementReport() workerconf.Report }); ok {
-		report := reporter.ConfinementReport()
-		confinement = &report
-	}
-	if err := writeIsolationState(d.dir, d.cfg, d.network, d.runner != nil, confinement); err != nil {
+	if err := d.writeIsolationState(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
 	}
 	if err := d.shares.Publish(); err != nil {
 		return fmt.Errorf("share manifest: %w", err)
 	}
 	return nil
+}
+
+func (d *daemonRuntime) writeIsolationState() error {
+	var confinement *workerconf.Report
+	if reporter, ok := d.runner.(interface{ ConfinementReport() workerconf.Report }); ok {
+		report := reporter.ConfinementReport()
+		confinement = &report
+	}
+	var mcpConfinement *workerconf.Report
+	if d.mcpWorker != nil {
+		select {
+		case <-d.mcpWorker.Done():
+		default:
+			mcpConfinement = d.mcpWorker.ConfinementReport()
+		}
+	}
+	return writeIsolationState(d.dir, d.cfg, d.network, d.runner != nil, confinement, mcpConfinement)
 }
 
 func (d *daemonRuntime) prepareVM(opts vmm.Opts) error {

@@ -22,9 +22,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"strings"
 	"sync"
@@ -37,6 +41,10 @@ import (
 // LogFunc receives audit lines (names and decisions, never values). Gateway
 // serializes every callback; callers do not need to add their own mutex.
 type LogFunc func(format string, a ...any)
+
+// EventFunc receives the structured audit vocabulary used across the worker
+// boundary. Unlike LogFunc it cannot carry free-form payload text.
+type EventFunc func(Event)
 
 // ToolPolicy is the per-server allow/deny list. An empty Allow list exposes
 // NO tools (default deny). Deny is checked first; authorize/revoke tools
@@ -61,6 +69,19 @@ type Server struct {
 	Headers   map[string]string      `json:"-"` // injected credential headers; never serialized or logged
 	TokenFunc func() (string, error) `json:"-"` // dynamic bearer (custody); never serialized or logged
 	Redact    [][]byte               `json:"-"` // never serialized, never logged
+
+	// Worker-owned gateways use only scoped broker callbacks. Dial cannot pick
+	// an address, Credentials cannot pick a secret, and Spawn cannot pick argv.
+	Dial        func(context.Context, string) (net.Conn, error)                              `json:"-"`
+	Credentials func(context.Context, string) (CredentialSet, error)                         `json:"-"`
+	Spawn       func(context.Context, string) (io.WriteCloser, io.ReadCloser, func(), error) `json:"-"`
+	TLSRoots    *x509.CertPool                                                               `json:"-"`
+}
+
+// CredentialSet is one server-scoped, per-session credential release.
+type CredentialSet struct {
+	Headers map[string]string
+	Redact  [][]byte
 }
 
 // SpawnFunc starts a local server's process and returns its stdio pipes
@@ -70,7 +91,8 @@ type SpawnFunc func(ctx context.Context, argv []string) (stdin io.WriteCloser, s
 // Gateway multiplexes one guest MCP session across upstream servers.
 type Gateway struct {
 	logf    LogFunc
-	logMu   sync.Mutex // LogFunc callbacks are serialized by contract
+	eventf  EventFunc
+	logMu   sync.Mutex // LogFunc/EventFunc callbacks are serialized by contract
 	spawn   SpawnFunc
 	servers map[string]Server
 	order   []string
@@ -83,8 +105,19 @@ type Gateway struct {
 // the gateway. logf may be nil (decisions discarded) — it should not be:
 // the audit trail is the point.
 func New(logf LogFunc, spawn SpawnFunc, servers []Server) (*Gateway, error) {
+	return newGateway(logf, nil, spawn, servers)
+}
+
+// NewWithEvents constructs the worker-owned gateway with structured audit
+// output. Production worker code uses this instead of a free-form LogFunc.
+func NewWithEvents(eventf EventFunc, servers []Server) (*Gateway, error) {
+	return newGateway(nil, eventf, nil, servers)
+}
+
+func newGateway(logf LogFunc, eventf EventFunc, spawn SpawnFunc, servers []Server) (*Gateway, error) {
 	g := &Gateway{
 		logf:        logf,
+		eventf:      eventf,
 		spawn:       spawn,
 		servers:     make(map[string]Server, len(servers)),
 		callTimeout: 30 * time.Second,
@@ -108,13 +141,20 @@ func New(logf LogFunc, spawn SpawnFunc, servers []Server) (*Gateway, error) {
 	return g, nil
 }
 
-func (g *Gateway) auditf(format string, a ...any) {
-	if g.logf == nil {
+func (g *Gateway) emit(event Event) {
+	// Invalid engine events are discarded rather than turning attacker-chosen
+	// payload into a free-form audit line.
+	if ValidateEvent(event, nil) != nil {
 		return
 	}
 	g.logMu.Lock()
 	defer g.logMu.Unlock()
-	g.logf(format, a...)
+	if g.eventf != nil {
+		g.eventf(event)
+	}
+	if g.logf != nil {
+		g.logf("%s", event.String())
+	}
 }
 
 // --- JSON-RPC plumbing ---------------------------------------------------
@@ -167,6 +207,14 @@ const (
 	maxToolNameBytes   = 256
 )
 
+func newSessionToken() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
 // Serve handles one guest MCP session until EOF, a fatal frame error, or
 // ctx cancellation. All upstreams started for the session are killed when
 // it ends.
@@ -176,10 +224,10 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	case g.sessions <- struct{}{}:
 		defer func() { <-g.sessions }()
 	default:
-		g.auditf("mcp: session rejected (gateway session limit %d)", maxSessions)
+		g.emit(Event{Type: EventSessionRejected, Count: maxSessions})
 		return fmt.Errorf("mcpgw: too many sessions")
 	}
-	g.auditf("mcp: session open")
+	g.emit(Event{Type: EventSessionOpen})
 	stopCancel := context.AfterFunc(ctx, func() { _ = rw.Close() })
 	defer stopCancel()
 	if deadlines, ok := rw.(interface{ SetReadDeadline(time.Time) error }); ok {
@@ -187,8 +235,13 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 		defer func() { _ = deadlines.SetReadDeadline(time.Time{}) }()
 	}
 
+	sessionToken, err := newSessionToken()
+	if err != nil {
+		return fmt.Errorf("mcpgw: session token: %w", err)
+	}
 	sess := &session{
 		g:         g,
+		token:     sessionToken,
 		wmu:       new(sync.Mutex),
 		w:         rw,
 		upstreams: make(map[string]upstream),
@@ -247,7 +300,7 @@ func (g *Gateway) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 		}()
 	}
 	wg.Wait()
-	g.auditf("mcp: session closed (%d calls, %d denied)", calls.Load(), denied.Load())
+	g.emit(Event{Type: EventSessionClosed, Count: calls.Load(), Count2: denied.Load()})
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		return fmt.Errorf("mcpgw: session read: %w", err)
 	}
@@ -281,9 +334,10 @@ type upstream interface {
 
 // session is one guest connection's state.
 type session struct {
-	g   *Gateway
-	wmu *sync.Mutex
-	w   io.Writer
+	g     *Gateway
+	token string
+	wmu   *sync.Mutex
+	w     io.Writer
 
 	mu        sync.Mutex
 	upstreams map[string]upstream
@@ -340,24 +394,35 @@ func (s *session) upstream(ctx context.Context, srv Server) (upstream, error) {
 		err error
 	)
 	if srv.URL != "" {
-		u, err = startHTTPUpstream(ctx, s.g.auditf, srv)
+		u, err = startHTTPUpstreamForSession(ctx, s.g.emit, srv, s.token)
 	} else {
-		if s.g.spawn == nil {
+		spawn := s.g.spawn
+		if srv.Spawn != nil {
+			spawn = func(ctx context.Context, _ []string) (io.WriteCloser, io.ReadCloser, func(), error) {
+				return srv.Spawn(ctx, s.token)
+			}
+		}
+		if spawn == nil {
 			return nil, fmt.Errorf("no spawn hook wired")
 		}
-		u, err = startStdioUpstream(ctx, s.g.auditf, s.g.spawn, srv)
+		u, err = startStdioUpstream(ctx, s.g.emit, spawn, srv)
 	}
 	if err != nil {
 		// Errors can contain upstream-controlled response text. Audit only the
 		// decision metadata; the guest receives a generic availability error.
-		s.g.auditf("mcp: upstream %s start failed", srv.Name)
+		s.g.emit(Event{Type: EventUpstreamFailed, Server: srv.Name})
 		return nil, err
 	}
 	s.upstreams[srv.Name] = u
 	if srv.URL != "" {
-		s.g.auditf("mcp: upstream %s started (remote %s, %d injected headers)", srv.Name, AuditRemoteOrigin(srv.URL), len(srv.Headers))
+		headerCount := len(srv.Headers)
+		if srv.Credentials != nil {
+			headerCount = 1 // only bounded metadata; actual values never enter events
+		}
+		s.g.emit(Event{Type: EventUpstreamRemote, Server: srv.Name,
+			Origin: AuditRemoteOrigin(srv.URL), Count: int64(headerCount)})
 	} else {
-		s.g.auditf("mcp: upstream %s started (stdio)", srv.Name)
+		s.g.emit(Event{Type: EventUpstreamStdio, Server: srv.Name})
 	}
 	return u, nil
 }
@@ -367,7 +432,7 @@ func (s *session) closeAll() {
 	defer s.mu.Unlock()
 	for name, u := range s.upstreams {
 		u.close()
-		s.g.auditf("mcp: upstream %s stopped", name)
+		s.g.emit(Event{Type: EventUpstreamStopped, Server: name})
 	}
 	s.upstreams = nil
 }
@@ -431,14 +496,14 @@ func (s *session) toolsList(ctx context.Context, req *rpcRequest) {
 		raw, err := u.Call(callCtx, "tools/list", json.RawMessage(`{}`))
 		cancel()
 		if err != nil {
-			s.g.auditf("mcp: tools/list on %s failed", name)
+			s.g.emit(Event{Type: EventToolsListFailed, Server: name})
 			continue
 		}
 		var result struct {
 			Tools []toolDescriptor `json:"tools"`
 		}
 		if err := json.Unmarshal(raw, &result); err != nil {
-			s.g.auditf("mcp: tools/list on %s: malformed result; skipping server", name)
+			s.g.emit(Event{Type: EventToolsMalformed, Server: name})
 			continue
 		}
 		for _, t := range result.Tools {
@@ -453,7 +518,7 @@ func (s *session) toolsList(ctx context.Context, req *rpcRequest) {
 	if out == nil {
 		out = []toolDescriptor{}
 	}
-	s.g.auditf("mcp: tools/list served %d tools across %d servers (%d policy-hidden)", len(out), len(s.g.order), hidden)
+	s.g.emit(Event{Type: EventToolsServed, Count: int64(len(out)), Count2: int64(len(s.g.order)), Count3: int64(hidden)})
 	s.reply(req.ID, map[string]any{"tools": out}, nil)
 }
 
@@ -473,7 +538,7 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 	// Deliberately one message for unknown and denied alike: no tool
 	// existence oracle for the agent.
 	deny := func() int {
-		s.g.auditf("mcp: denied call %q (policy)", p.Name)
+		s.g.emit(Event{Type: EventCallDenied, Name: p.Name})
 		s.reply(req.ID, nil, &rpcError{codeServerError, "unknown or disallowed tool"})
 		return 1
 	}
@@ -485,13 +550,13 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 		s.reply(req.ID, nil, &rpcError{codeServerError, "upstream unavailable"})
 		return 0
 	}
-	s.g.auditf("mcp: call %s__%s", server, tool)
+	s.g.emit(Event{Type: EventCall, Server: server, Tool: tool})
 	upstreamParams, _ := json.Marshal(map[string]any{"name": tool, "arguments": p.Arguments})
 	callCtx, cancel := context.WithTimeout(ctx, s.g.callTimeout)
 	raw, err := u.Call(callCtx, "tools/call", upstreamParams)
 	cancel()
 	if err != nil {
-		s.g.auditf("mcp: call %s__%s upstream error", server, tool)
+		s.g.emit(Event{Type: EventCallError, Server: server, Tool: tool})
 		s.reply(req.ID, nil, &rpcError{codeServerError, "upstream call failed"})
 		return 0
 	}
@@ -549,7 +614,7 @@ type upstreamReply struct {
 // responses cannot cross servers or sessions.
 type stdioUpstream struct {
 	name    string
-	logf    LogFunc
+	emit    func(Event)
 	stdin   io.WriteCloser
 	kill    func()
 	redact  [][]byte
@@ -562,7 +627,7 @@ type stdioUpstream struct {
 	nextID  atomic.Uint64
 }
 
-func startStdioUpstream(ctx context.Context, logf LogFunc, spawn SpawnFunc, srv Server) (*stdioUpstream, error) {
+func startStdioUpstream(ctx context.Context, emit func(Event), spawn SpawnFunc, srv Server) (*stdioUpstream, error) {
 	if len(srv.Argv) == 0 {
 		return nil, fmt.Errorf("server %s: empty argv", srv.Name)
 	}
@@ -572,7 +637,7 @@ func startStdioUpstream(ctx context.Context, logf LogFunc, spawn SpawnFunc, srv 
 	}
 	u := &stdioUpstream{
 		name:    srv.Name,
-		logf:    logf,
+		emit:    emit,
 		stdin:   stdin,
 		kill:    kill,
 		redact:  srv.Redact,
@@ -590,9 +655,9 @@ func startStdioUpstream(ctx context.Context, logf LogFunc, spawn SpawnFunc, srv 
 	return u, nil
 }
 
-func (u *stdioUpstream) auditf(format string, a ...any) {
-	if u.logf != nil {
-		u.logf(format, a...)
+func (u *stdioUpstream) audit(event Event) {
+	if u.emit != nil {
+		u.emit(event)
 	}
 }
 
@@ -618,7 +683,7 @@ func (u *stdioUpstream) readLoop(r io.ReadCloser) {
 		if err := json.Unmarshal(line, &frame); err != nil {
 			// Audit metadata only. Upstream stdout may contain credentials or
 			// tool payloads and must never be previewed in the custody trail.
-			u.auditf("mcp: upstream %s sent a non-JSON-RPC frame (%d bytes); killed", u.name, len(line))
+			u.audit(Event{Type: EventUpstreamBadFrame, Server: u.name, Count: int64(len(line))})
 			return
 		}
 		if len(frame.ID) == 0 {
@@ -626,7 +691,7 @@ func (u *stdioUpstream) readLoop(r io.ReadCloser) {
 		}
 		var id uint64
 		if err := json.Unmarshal(frame.ID, &id); err != nil {
-			u.auditf("mcp: upstream %s echoed a non-numeric id; killed", u.name)
+			u.audit(Event{Type: EventUpstreamBadID, Server: u.name})
 			return
 		}
 		u.pmu.Lock()

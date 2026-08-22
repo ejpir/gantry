@@ -104,6 +104,7 @@ func (d *daemonRuntime) startControl() error {
 	// MCP gateway (opt-in): vsock-bridged session mux with contained
 	// local servers (docs/mcp-gateway.md).
 	if err := d.startMCPGateway(); err != nil {
+		_ = credLn.Close()
 		return err
 	}
 	go func() { _ = d.broker.cred.Serve(credLn) }()

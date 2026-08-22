@@ -21,19 +21,19 @@ worker role.
                   ▼
   ┌──────────────────────────────────────────────────────────────┐
   │ sandbox supervisor                                           │
-  │ lifecycle • config • secrets • OAuth • MCP gateway (current) │
+  │ lifecycle • config • secrets • OAuth • MCP capability brokers│
   │ guest RPC bridge • share roots • host ports                  │
   │                                                              │
   │ shared worker launch/supervision                             │
   │ exact role env + fd/handle table • nonce binding             │
   │ namespace/Job confinement • diagnostics • reap/cleanup       │
-  └────────────┬────────────────────┬───────────────────┄┄┄┄┄┄┄┄┘
-               │ authenticated      │ authenticated       planned
-               │ capability channels│ frame/control       capability brokers
-               ▼                    ▼                     ┊
+  └────────────┬────────────────────┬────────────────────────────┘
+               │ authenticated      │ authenticated       authenticated
+               │ capability channels│ frame/control       capability relays
+               ▼                    ▼                     │
   ┌──────────────────────┐   ┌──────────────────────┐     ▼
   │ VMM worker           │   │ network worker       │   ┌──────────────────────┐
-  │ hypervisor • RAM     │   │ policy • NAT • DNS   │   │ MCP worker (planned) │
+  │ hypervisor • RAM     │   │ policy • NAT • DNS   │   │ MCP worker (enabled) │
   │ virtio devices       │   │ forwards • traffic   │   │ MCP parsing • policy │
   └──────────┬───────────┘   └──────────┬───────────┘   └──────────────────────┘
              │ virtio                   │ host sockets
@@ -47,15 +47,15 @@ worker role.
 ```
 
 The launch harness is trusted supervisor code, not another process. VMM and
-network workers use it today. The typed MCP role and static confinement profile
-are present, but the MCP gateway still runs in the supervisor; the dashed
-branch is the planned move described in the
-[MCP worker confinement plan](mcp-worker-confinement.md).
+network workers use it for every sandbox where their split topology is
+available. MCP-enabled sandboxes always use the same harness for a separate
+MCP worker; there is no production in-supervisor MCP parsing fallback.
 
-If split workers are unavailable in `auto` mode, Gantry records the degraded
-topology and may fall back. `required` fails the start instead. `off` runs a
-monolithic process. Effective, verified state is written to `isolation.json`;
-the configured mode alone is not treated as proof.
+VMM and network roles may fall back when their split is unavailable in `auto`;
+`required` fails instead. MCP remains a separate process whenever MCP is
+enabled, including in `off`, where its OS-confinement report is explicitly
+disabled. Effective, verified state is written to `isolation.json`; configured
+mode alone is not treated as proof.
 
 ## Host components
 
@@ -80,7 +80,7 @@ The ordinary command paths are:
 The supervisor is the trusted host control plane for one sandbox. It owns:
 
 - durable `sandbox.json` configuration and the sandbox lifetime lock;
-- the host secret store, OAuth custody registry, and MCP gateway;
+- the host secret store, OAuth custody registry, and MCP capability brokers;
 - local control listeners and session multiplexing;
 - opened boot assets and writable disks before capabilities are delegated;
 - host share roots and share admission policy;
@@ -101,7 +101,8 @@ log, applies the
 requested namespace or Job boundary, and owns process reaping and containment
 cleanup. Each role retains its own bootstrap schema, inherited-capability
 validation, RPC protocol, syscall profile, readiness checks, and decision
-about whether worker failure terminates the sandbox.
+about whether worker failure terminates the sandbox. VMM or network worker
+failure is fatal; MCP worker failure withdraws MCP while the VM remains usable.
 
 The role argument is not authority. Only inherited channels and files, plus
 the per-launch nonce that correlates them, grant capabilities to the child.
@@ -137,6 +138,27 @@ or host share roots.
 An explicit `-gvproxy` selects an external backend instead. Live policy,
 traffic inspection, proxy enforcement, and built-in port publishing require
 the embedded stack.
+
+### MCP worker
+
+An MCP-enabled sandbox has one `_mcp-worker`. It owns guest MCP parsing,
+JSON-RPC routing, tool policy, local stdio framing, and remote HTTP/TLS/SSE.
+The supervisor relays opaque guest and upstream bytes over a bounded
+multiplexer; it does not parse MCP payloads.
+
+The worker can request only a configured server ID. The supervisor maps that
+ID to a fixed guest helper, a validated and DNS-pinned remote dial, and the one
+credential configured for that server. It never accepts a URL, address, argv,
+path, secret name, or sandbox ID from the worker. Refresh tokens, complete
+secret sources, share roots, and arbitrary guest execution remain outside the
+worker.
+
+On Linux the MCP profile adds a deny-all Landlock filesystem ruleset to the
+private mount root, descriptor closure, namespace/task controls, and its
+no-socket/no-exec seccomp allowlist. macOS applies a deny-default Seatbelt
+profile. Windows `auto` establishes a one-process, kill-on-close Job boundary
+but reports ambient filesystem and network access as unenforced; `required`
+therefore fails closed.
 
 ## Guest components
 
@@ -270,9 +292,10 @@ checks the binding and current egress policy, resolves the source, and returns
 the value for that operation. Removal changes the host store immediately, so
 there is no durable guest copy to revoke.
 
-The MCP gateway is another per-sandbox host listener. The in-guest
-`mcp-proxy` carries newline-delimited MCP frames over virtio-vsock. For the
-built-in filesystem server, the gateway starts `gantry-guest mcp-serve` through
+The MCP endpoint is another per-sandbox host listener. The in-guest
+`mcp-proxy` carries newline-delimited MCP frames over virtio-vsock to the
+confined MCP worker through an opaque supervisor relay. For the built-in
+filesystem server, the supervisor starts `gantry-guest mcp-serve` through
 the existing guest exec channel, launches it as root only long enough to drop
 to the configured non-root UID/GID, and connects its stdio to the MCP session.
 The server uses an `os.Root` jail, while the gateway exposes only read and list
@@ -291,11 +314,9 @@ and audits names and decisions rather than payloads. Frames and responses are
 limited to 1 MiB; one session permits 16 in-flight calls, one gateway permits
 16 sessions, and idle sessions expire after five minutes.
 
-The gateway currently shares the trusted supervisor's address space. The
-[MCP worker confinement plan](mcp-worker-confinement.md) proposes moving
-MCP/HTTP/SSE parsing into a capability-limited host worker while keeping the
-filesystem helper inside the guest and secrets, refresh tokens, share roots,
-and destination selection in the supervisor.
+The [MCP worker confinement design](mcp-worker-confinement.md) documents the
+capability protocol, residual risks, platform enforcement, and remaining
+in-guest filesystem hardening work.
 
 ### OAuth bridge and custody
 
@@ -374,6 +395,7 @@ The default layout is:
     ├── daemon.log
     ├── worker-net.log
     ├── worker-vmm.log
+    ├── worker-mcp.log          # when MCP is enabled
     └── runtime locks, sockets, and readiness files
 ```
 

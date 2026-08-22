@@ -24,8 +24,8 @@ xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 echo "== environment =="
 uname -a
 ls -la /dev/kvm || echo "NO /dev/kvm!"
-$G stop c1 >/dev/null 2>&1; $G stop c2 >/dev/null 2>&1
-rm -rf "$SBX"/c1 "$SBX"/c2
+$G stop c1 >/dev/null 2>&1; $G stop c2 >/dev/null 2>&1; $G stop c3 >/dev/null 2>&1
+rm -rf "$SBX"/c1 "$SBX"/c2 "$SBX"/c3
 
 echo "===== c1: -process-isolation=required under real KVM ====="
 $G start c1 -process-isolation=required -kernel nerdbox-kernel-x86_64 \
@@ -95,6 +95,47 @@ chk "auto: hot-added rw write"            "WR-OK"  "$R"
 
 echo "----- worker-vmm.log postmortem captured -----"
 [ -s "$SBX"/c1/worker-vmm.log ] && ok "postmortem: worker-vmm.log nonempty" || { bad "postmortem: worker-vmm.log nonempty"; ls -la "$SBX"/c1/; }
+
+echo "===== c3: required MCP worker + Landlock + nonfatal worker death ====="
+$G start c3 -process-isolation=required -mcp -mcp-fs-root /work -mcp-fs-user nobody \
+  -kernel nerdbox-kernel-x86_64 -rootfs nerdbox-rootfs-x86_64.erofs \
+  -image debian-bookworm-amd64.erofs >/tmp/c3-start.log 2>&1
+C3START=$?
+[ "$C3START" = 0 ] && ok "mcp required: sandbox started" || { bad "mcp required: sandbox started"; tail -20 /tmp/c3-start.log; }
+sleep 2
+ISO3=$(tr -d ' \n' < "$SBX"/c3/isolation.json 2>/dev/null)
+chk "mcp required: split topology" "split-net+split-vmm+split-mcp" "$ISO3"
+chk "mcp required: report persisted" '"mcpConfinement"' "$ISO3"
+chk "mcp required: brokers reported" '"originDialBrokered":true' "$ISO3"
+chk "mcp required: Landlock enforced" '"name":"landlock","state":"enforced"' "$ISO3"
+
+D3PID=$(cat "$SBX"/c3/vmm.pid 2>/dev/null)
+MCP_PID=$(pgrep -P "$D3PID" -f '_mcp-worker' 2>/dev/null | head -1)
+if [ -z "$MCP_PID" ]; then bad "mcp worker: child process running"; else
+  ok "mcp worker: child process running (pid $MCP_PID)"
+  SC=$(awk '/^Seccomp:/{print $2}' /proc/$MCP_PID/status 2>/dev/null)
+  [ "$SC" = "2" ] && ok "mcp worker: seccomp active" || bad "mcp worker: seccomp active (Seccomp: $SC)"
+  WETC=$(ls /proc/$MCP_PID/root/etc 2>/dev/null | wc -l)
+  [ "$WETC" = "0" ] && ok "mcp worker: private root" || bad "mcp worker: private root (/etc has $WETC entries)"
+fi
+
+# The guest helper arrives asynchronously. A bounded probe proves MCP still
+# works through the opaque supervisor relay after all in-worker controls land.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  R=$(xe c3 'test -x /run/gantry/bin/gantry-guest && echo READY')
+  printf '%s' "$R" | grep -qa READY && break
+  sleep 1
+done
+R=$(xe c3 'mkdir -p /work; chmod 755 /work; printf "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\\n" | timeout 20 /run/gantry/bin/gantry-guest mcp-proxy')
+chk "mcp required: confined relay functional" "fs__read_file" "$R"
+
+if [ -n "$MCP_PID" ]; then kill -9 "$MCP_PID" 2>/dev/null; fi
+sleep 2
+R=$(xe c3 'echo VM-STILL-ALIVE')
+chk "mcp death: ordinary exec survives" "VM-STILL-ALIVE" "$R"
+ISO3DEAD=$(tr -d ' \n' < "$SBX"/c3/isolation.json 2>/dev/null)
+if printf '%s' "$ISO3DEAD" | grep -qa 'split-mcp'; then bad "mcp death: effective topology withdrawn"; else ok "mcp death: effective topology withdrawn"; fi
+chk "mcp death: degradation recorded" "mcpworkerconfinementreportunavailable" "$(printf '%s' "$ISO3DEAD" | tr -d ' -')"
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"

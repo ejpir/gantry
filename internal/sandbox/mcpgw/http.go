@@ -28,6 +28,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -194,6 +195,30 @@ func pinnedTransport(loopbackOnly bool) *http.Transport {
 	return t
 }
 
+// DialRemote is the trusted supervisor dial broker. Validation, DNS
+// resolution, address classification, and the actual connect use one pinned
+// path; callers receive only the connected stream. TLS remains in the MCP
+// worker and therefore is not parsed in the supervisor.
+func DialRemote(ctx context.Context, rawURL string) (net.Conn, error) {
+	loopbackOnly, err := ValidateRemoteURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return pinnedTransport(loopbackOnly).DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
+}
+
 // httpUpstream speaks MCP streamable-HTTP to one remote server: each
 // request is a POST accepting either a single JSON response or an SSE
 // stream; notifications expect 202. One exchange at a time — the session
@@ -203,7 +228,7 @@ type httpUpstream struct {
 	url     string
 	headers map[string]string // injected, pre-resolved; values never logged
 	redact  [][]byte
-	logf    LogFunc
+	emit    func(Event)
 	client  *http.Client
 
 	mu     sync.Mutex
@@ -218,6 +243,14 @@ type httpUpstream struct {
 // (TokenFunc — custody access tokens are re-read per session, so a
 // refreshed token reaches new sessions), and runs the MCP handshake.
 func startHTTPUpstream(ctx context.Context, logf LogFunc, srv Server) (*httpUpstream, error) {
+	var emit func(Event)
+	if logf != nil {
+		emit = func(event Event) { logf("%s", event.String()) }
+	}
+	return startHTTPUpstreamForSession(ctx, emit, srv, "")
+}
+
+func startHTTPUpstreamForSession(ctx context.Context, emit func(Event), srv Server, sessionToken string) (*httpUpstream, error) {
 	loopbackOnly, err := ValidateRemoteURL(srv.URL)
 	if err != nil {
 		return nil, fmt.Errorf("remote server %s: %w", srv.Name, err)
@@ -245,7 +278,30 @@ func startHTTPUpstream(ctx context.Context, logf LogFunc, srv Server) (*httpUpst
 			redact = append(redact, []byte(tok))
 		}
 	}
-	client := &http.Client{Transport: pinnedTransport(loopbackOnly)}
+	if srv.Credentials != nil {
+		credential, err := srv.Credentials(ctx, sessionToken)
+		if err != nil {
+			return nil, fmt.Errorf("remote server %s: credential unavailable", srv.Name)
+		}
+		for key, value := range credential.Headers {
+			headers[key] = value
+			if value != "" {
+				redact = append(redact, []byte(value))
+				if token, ok := strings.CutPrefix(value, "Bearer "); ok && token != "" {
+					redact = append(redact, []byte(token))
+				}
+			}
+		}
+		redact = append(redact, credential.Redact...)
+	}
+	transport := pinnedTransport(loopbackOnly)
+	if srv.Dial != nil {
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return srv.Dial(ctx, sessionToken)
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: srv.TLSRoots, MinVersion: tls.VersionTLS12}
+	}
+	client := &http.Client{Transport: transport}
 	// Redirects are never followed. Besides binding injected credentials to
 	// one origin, this prevents a loopback test/development endpoint from
 	// redirecting through its loopback-only transport to a private target.
@@ -257,7 +313,7 @@ func startHTTPUpstream(ctx context.Context, logf LogFunc, srv Server) (*httpUpst
 		url:     srv.URL,
 		headers: headers,
 		redact:  redact,
-		logf:    logf,
+		emit:    emit,
 		client:  client,
 	}
 	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -332,8 +388,8 @@ func (u *httpUpstream) Notify(method string, params json.RawMessage) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := u.post(ctx, frame, false); err != nil && u.logf != nil {
-		u.logf("mcp: upstream %s notification %s failed", u.name, method)
+	if _, err := u.post(ctx, frame, false); err != nil && u.emit != nil {
+		u.emit(Event{Type: EventNotificationFail, Server: u.name, Method: method})
 	}
 }
 

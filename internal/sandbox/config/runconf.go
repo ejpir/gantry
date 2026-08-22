@@ -76,9 +76,9 @@ type RunConfig struct {
 	// fresh access tokens into the guest auth file. Default off — the
 	// transparent bridge needs no provider-specific knowledge.
 	OAuthCustody *bool `json:"oauth_custody,omitempty"`
-	// MCP gates the per-sandbox MCP gateway (docs/mcp-gateway.md): a
-	// vsock-bridged session mux in the daemon with contained local
-	// servers. MCPFSRoot jails the built-in filesystem server; MCPFSUser
+	// MCP gates the per-sandbox split MCP gateway (docs/mcp-gateway.md): a
+	// capability-limited host worker reached through a vsock/opaque-relay
+	// mux, with contained local servers. MCPFSRoot jails the built-in filesystem server; MCPFSUser
 	// is the unprivileged guest user local servers drop to.
 	MCP       bool   `json:"mcp,omitempty"`
 	MCPFSRoot string `json:"mcp_fs_root,omitempty"`
@@ -86,7 +86,8 @@ type RunConfig struct {
 	// MCPRemotes are -mcp-remote specs: comma-separated k=v with keys
 	// name, url, auth (bearer:SECRET | header:NAME:SECRET |
 	// custody:PROVIDER), allow/deny (repeated globs), redact (repeated
-	// secret names). Parsed at resolve time into mcpgw.Server entries.
+	// secret names). Parsed at resolve time into immutable worker metadata
+	// plus supervisor-owned capability mappings.
 	MCPRemotes []string `json:"mcp_remotes,omitempty"`
 	MemMB      uint     `json:"memMB"`
 	VCPUs      int      `json:"vcpus,omitempty"`
