@@ -47,14 +47,27 @@ type imageManifest struct {
 	MediaType string       `json:"mediaType"`
 	Config    descriptor   `json:"config"`
 	Layers    []descriptor `json:"layers"`
-	Manifests []struct {
-		Digest   string `json:"digest"`
-		Platform struct {
-			Architecture string `json:"architecture"`
-			OS           string `json:"os"`
-		} `json:"platform"`
-		Size int64 `json:"size"`
-	} `json:"manifests"`
+	Manifests []descriptor `json:"manifests"`
+}
+
+func validateManifestDescriptors(manifest *imageManifest) error {
+	if len(manifest.Manifests) > 0 {
+		for i, desc := range manifest.Manifests {
+			if err := validateDescriptor(desc); err != nil {
+				return fmt.Errorf("platform manifest %d: %w", i+1, err)
+			}
+		}
+		return nil
+	}
+	if err := validateDescriptor(manifest.Config); err != nil {
+		return fmt.Errorf("config descriptor: %w", err)
+	}
+	for i, desc := range manifest.Layers {
+		if err := validateDescriptor(desc); err != nil {
+			return fmt.Errorf("layer %d descriptor: %w", i+1, err)
+		}
+	}
+	return nil
 }
 
 // media types we accept for manifests (OCI + docker schema 2).
@@ -348,6 +361,9 @@ func (c *registryClient) headManifest(ctx context.Context, repo, reference strin
 
 // fetchBlob streams a blob to dst, verifying its sha256.
 func (c *registryClient) fetchBlob(ctx context.Context, repo string, desc descriptor, dst string) (int64, error) {
+	if err := validateDescriptor(desc); err != nil {
+		return 0, fmt.Errorf("invalid blob descriptor: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // huge layers, slow links
 	defer cancel()
 	u := fmt.Sprintf("%s://%s/v2/%s/blobs/%s", c.scheme(), c.reg, repo, desc.Digest)
@@ -417,13 +433,17 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 	if err := json.Unmarshal(manb, &head); err != nil {
 		return nil, fmt.Errorf("bad manifest: %w", err)
 	}
+	if err := validateManifestDescriptors(&head); err != nil {
+		return nil, fmt.Errorf("bad manifest: %w", err)
+	}
 
 	// index/manifest-list: descend to the platform manifest
 	if len(head.Manifests) > 0 {
 		want := archToOCI(arch)
 		var pick string
 		for _, m := range head.Manifests {
-			if m.Platform.Architecture == want && (m.Platform.OS == "" || m.Platform.OS == "linux") {
+			if m.Platform != nil && m.Platform.Architecture == want &&
+				(m.Platform.OS == "" || m.Platform.OS == "linux") {
 				pick = m.Digest
 				break
 			}
@@ -440,6 +460,9 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		}
 		head = imageManifest{}
 		if err := json.Unmarshal(manb, &head); err != nil {
+			return nil, fmt.Errorf("bad platform manifest: %w", err)
+		}
+		if err := validateManifestDescriptors(&head); err != nil {
 			return nil, fmt.Errorf("bad platform manifest: %w", err)
 		}
 	}
@@ -476,7 +499,7 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 	}
 	for i, l := range head.Layers {
 		if logf != nil {
-			logf("layer %d/%d: %s (%s)", i+1, len(head.Layers), gutil.HumanSize(l.Size), l.Digest[:19])
+			logf("layer %d/%d: %s (%s)", i+1, len(head.Layers), gutil.HumanSize(l.Size), shortDigest(l.Digest))
 		}
 		blobPath := filepath.Join(tmp, strconv.Itoa(i)+".blob")
 		if _, err := c.fetchBlob(ctx, ref.Repo, l, blobPath); err != nil {

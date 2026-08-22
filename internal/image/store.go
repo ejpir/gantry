@@ -178,7 +178,7 @@ func (s *Store) ensure(digest string, build func(outPath string) (*Meta, error))
 	}
 	lock, err := gutil.LockFile(s.lockPath(digest))
 	if err != nil {
-		return nil, fmt.Errorf("another gantry process is building %s", digest[:19])
+		return nil, fmt.Errorf("another gantry process is building %s", shortDigest(digest))
 	}
 	defer func() { _ = lock.Close() }()
 	// re-check under the lock
