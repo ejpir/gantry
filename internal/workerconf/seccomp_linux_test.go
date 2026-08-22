@@ -247,6 +247,40 @@ func TestRoleFiltersEnforceCapabilities(t *testing.T) {
 	}
 }
 
+func TestMCPProfileAllowsOnlyBrokeredDescriptorReceive(t *testing.T) {
+	const selfTGID = uint32(1234)
+	mcp := buildFilterFor(MCPSpec(5, ""), selfTGID)
+	if got := runFilter(t, mcp, unix.SYS_RECVMSG); got != retAllow {
+		t.Fatalf("MCP SCM receive result %#x, want allow", got)
+	}
+	for name, test := range map[string]struct {
+		nr   uint32
+		args []uint64
+	}{
+		"SCM send":    {unix.SYS_SENDMSG, nil},
+		"IPv4 socket": {unix.SYS_SOCKET, []uint64{unix.AF_INET, unix.SOCK_STREAM, 0}},
+		"connect":     {unix.SYS_CONNECT, nil},
+		"path open":   {unix.SYS_OPENAT, []uint64{0, 0, unix.O_RDONLY}},
+		"KVM ioctl":   {unix.SYS_IOCTL, []uint64{9, 0xAE01}},
+		"exec":        {unix.SYS_EXECVE, nil},
+	} {
+		t.Run("denies "+name, func(t *testing.T) {
+			if got := runFilter(t, mcp, test.nr, test.args...); got != retErrno|sysEPERM {
+				t.Fatalf("result %#x, want EPERM", got)
+			}
+		})
+	}
+}
+
+func TestUnknownSyscallProfilePanicsClosed(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("unknown syscall profile did not panic")
+		}
+	}()
+	_ = buildFilterFor(Spec{Profile: SyscallProfile(255)}, 1234)
+}
+
 func TestVMMWhitelistHasNoPathAuthority(t *testing.T) {
 	allowed := make(map[uint32]bool, len(whitelist)+len(archWhitelist()))
 	for _, nr := range append(append([]uint32(nil), whitelist...), archWhitelist()...) {

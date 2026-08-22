@@ -25,6 +25,9 @@ import (
 // installs; Verify then reports the honest per-property outcome. An
 // error is returned only when NO tier could be installed.
 func Apply(spec Spec) (*Report, error) {
+	if !validProfile(spec.Profile) {
+		return nil, fmt.Errorf("workerconf: invalid syscall profile %d", spec.Profile)
+	}
 	rep := &Report{Platform: "linux"}
 
 	// The close tier's keep set is computed FIRST: /proc/self/fd (the

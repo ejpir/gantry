@@ -88,6 +88,11 @@ var networkWhitelist = []uint32{
 	unix.SYS_NEWFSTATAT,
 }
 
+// mcpWhitelist is deliberately smaller than the VMM descriptor profile. MCP
+// receives supervisor-brokered connected streams over SCM_RIGHTS but never
+// sends descriptors, opens paths, creates sockets, or issues device ioctls.
+var mcpWhitelist = []uint32{unix.SYS_RECVMSG}
+
 // safeFcntlCommands are descriptor-local operations used by the Go runtime
 // and net.FileConn. Signal ownership commands are deliberately absent.
 var safeFcntlCommands = []uint32{
@@ -199,11 +204,17 @@ func buildFilter(selfTGID uint32) []unix.SockFilter {
 }
 
 func buildFilterFor(spec Spec, selfTGID uint32) []unix.SockFilter {
+	if !validProfile(spec.Profile) {
+		panic(fmt.Sprintf("workerconf: invalid syscall profile %d", spec.Profile))
+	}
 	allowNrs := append([]uint32{}, runtimeWhitelist...)
-	if spec.Profile == ProfileNetwork {
-		allowNrs = append(allowNrs, networkWhitelist...)
-	} else {
+	switch spec.Profile {
+	case ProfileVMM:
 		allowNrs = append(allowNrs, whitelist[len(runtimeWhitelist):]...)
+	case ProfileNetwork:
+		allowNrs = append(allowNrs, networkWhitelist...)
+	case ProfileMCP:
+		allowNrs = append(allowNrs, mcpWhitelist...)
 	}
 	allowNrs = append(allowNrs, archWhitelist()...)
 
@@ -223,11 +234,15 @@ func buildFilterFor(spec Spec, selfTGID uint32) []unix.SockFilter {
 	// are visible below. EPERM makes glibc fail instead of falling back.
 	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_CLONE3, labelENOSYS, "")
 	b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_CLONE, labelClone, "")
-	if spec.Profile == ProfileNetwork {
+	switch spec.Profile {
+	case ProfileVMM:
+		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_IOCTL, labelIOCTL, "")
+	case ProfileNetwork:
 		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_SOCKET, labelSocket, "")
 		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_OPENAT, labelOpen, "")
-	} else {
-		b.branch(bpfJMP|bpfJEQ|bpfK, unix.SYS_IOCTL, labelIOCTL, "")
+	case ProfileMCP:
+		// No argument-filtered ambient syscall families beyond the shared
+		// runtime substrate and descriptor receive allowlist.
 	}
 	b.jumpTo(labelDeny)
 
@@ -271,7 +286,8 @@ func buildFilterFor(spec Spec, selfTGID uint32) []unix.SockFilter {
 	b.emit(bpfALU|bpfAND|bpfK, uint32(unix.CLONE_THREAD))
 	b.branch(bpfJMP|bpfJEQ|bpfK, uint32(unix.CLONE_THREAD), labelAllow, labelDeny)
 
-	if spec.Profile == ProfileNetwork {
+	switch spec.Profile {
+	case ProfileNetwork:
 		b.mark(labelSocket)
 		b.emit(bpfLD|bpfW|bpfABS, offArg0)
 		b.branch(bpfJMP|bpfJEQ|bpfK, unix.AF_INET, labelSocketType, "")
@@ -294,12 +310,13 @@ func buildFilterFor(spec Spec, selfTGID uint32) []unix.SockFilter {
 		const readFlags = unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_LARGEFILE
 		b.emit(bpfALU|bpfAND|bpfK, ^uint32(readFlags))
 		b.branch(bpfJMP|bpfJEQ|bpfK, 0, labelAllow, labelDeny)
-	} else {
+	case ProfileVMM:
 		b.mark(labelIOCTL)
 		b.emit(bpfLD|bpfW|bpfABS, offArg1)
 		b.emit(bpfALU|bpfAND|bpfK, 0xFFFF)
 		b.branch(bpfJMP|bpfJGE|bpfK, 0xAE00, "", labelDeny)
 		b.branch(bpfJMP|bpfJGT|bpfK, 0xAEFF, labelDeny, labelAllow)
+	case ProfileMCP:
 	}
 
 	b.mark(labelDeny)

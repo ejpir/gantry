@@ -14,6 +14,9 @@ type SyscallProfile uint8
 const (
 	ProfileVMM SyscallProfile = iota
 	ProfileNetwork
+	// ProfileMCP permits descriptor I/O and receiving supervisor-brokered
+	// connected streams, but no socket creation, path opens, exec, or ioctls.
+	ProfileMCP
 )
 
 // Spec is the worker's declared ambient-authority requirement. One
@@ -91,6 +94,32 @@ func NetworkSpec(keepFDs int, confRoot string) Spec {
 			"/etc/nsswitch.conf",
 			"/etc/resolv.conf",
 		},
+	}
+}
+
+// MCPSpec is the fixed MCP parsing-worker contract. Host destinations,
+// credentials, local upstream processes, and connected streams are brokered
+// by the supervisor, so the worker needs no ambient network, filesystem,
+// execution, device-ioctl, or cross-process authority.
+func MCPSpec(keepFDs int, confRoot string) Spec {
+	return Spec{
+		Profile:    ProfileMCP,
+		NoNetwork:  true,
+		NoExec:     true,
+		NoNewPaths: true,
+		NoProcX:    true,
+		KeepFDs:    keepFDs,
+		MaxTasks:   DefaultWorkerTaskLimit,
+		ConfRoot:   confRoot,
+	}
+}
+
+func validProfile(profile SyscallProfile) bool {
+	switch profile {
+	case ProfileVMM, ProfileNetwork, ProfileMCP:
+		return true
+	default:
+		return false
 	}
 }
 

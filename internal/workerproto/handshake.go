@@ -11,23 +11,41 @@ import (
 	"time"
 )
 
+// Role identifies one compile-time worker implementation. A role is protocol
+// metadata, not authority: the inherited capability channels and launch nonce
+// are what authorize a child process.
+type Role string
+
 const (
 	// Magic identifies protocol version 1 of the control handshake.
 	Magic = "GANTRY-WORKER/1"
 	// RoleVMM owns the hypervisor and guest-facing device frontends.
-	RoleVMM = "vmm"
+	RoleVMM Role = "vmm"
 	// RoleNet owns the netstack, policy, telemetry, and port listeners.
-	RoleNet = "net"
+	RoleNet Role = "net"
+	// RoleMCP parses guest and upstream MCP traffic while host authority stays
+	// behind supervisor-owned capability brokers.
+	RoleMCP Role = "mcp"
 
 	nonceLen         = 32
 	handshakeTimeout = 15 * time.Second
 )
 
+// Valid reports whether the role names a compiled worker implementation.
+func (r Role) Valid() bool {
+	switch r {
+	case RoleVMM, RoleNet, RoleMCP:
+		return true
+	default:
+		return false
+	}
+}
+
 // Handshake is the first and only supervisor-to-worker control message that
 // is not a Request. Config is already parsed and normalized by the supervisor.
 type Handshake struct {
 	Magic  string          `json:"magic"`
-	Role   string          `json:"role"`
+	Role   Role            `json:"role"`
 	Nonce  string          `json:"nonce"`
 	Config json.RawMessage `json:"config"`
 }
@@ -69,7 +87,10 @@ func ReadNonce(r io.Reader, want []byte) error {
 
 // ServeHandshake reads and validates the worker side of a handshake. The
 // bootstrap deadline is cleared before returning.
-func ServeHandshake(conn net.Conn, wantRole string, config any) ([]byte, error) {
+func ServeHandshake(conn net.Conn, wantRole Role, config any) ([]byte, error) {
+	if !wantRole.Valid() {
+		return nil, fmt.Errorf("workerproto: invalid expected role %q", wantRole)
+	}
 	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 
@@ -101,7 +122,10 @@ func ServeHandshake(conn net.Conn, wantRole string, config any) ([]byte, error) 
 
 // SendHandshake writes the supervisor side of ServeHandshake. The caller
 // separately sends the same nonce on each correlated data channel.
-func SendHandshake(conn net.Conn, role string, nonce []byte, config any) error {
+func SendHandshake(conn net.Conn, role Role, nonce []byte, config any) error {
+	if !role.Valid() {
+		return fmt.Errorf("workerproto: invalid role %q", role)
+	}
 	if len(nonce) != nonceLen {
 		return fmt.Errorf("workerproto: nonce length %d", len(nonce))
 	}

@@ -8,124 +8,60 @@ package vmmworker
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/ejpir/gantry/internal/gutil"
-	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-// spawnVMMWorker re-execs the binary as _vmm-worker with the descriptor
-// table and performs the handshake + nonce exchange. cfg counts must
-// match the assets (HasRoot ↔ Rootfs and NDisksRO/NDisks) — the worker
-// validates too, but failing here keeps the error local.
+// spawnVMMWorker validates and prepares the role-specific VMM assets, then
+// delegates re-exec, channels, diagnostics, confinement, and process watching
+// to the generic worker launch harness.
 func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir string) (*vmmWorker, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("worker re-exec path: %w", err)
-	}
-	ctrlSup, ctrlWrk, err := worker.SocketpairConns()
-	if err != nil {
-		return nil, err
-	}
-	bridgeSup, bridgeWrk, err := worker.SocketpairConns()
-	if err != nil {
-		_ = ctrlSup.Close()
-		_ = ctrlWrk.Close()
-		return nil, err
-	}
-	fdSup, fdWrk, err := worker.SocketpairConns()
-	if err != nil {
-		_ = ctrlSup.Close()
-		_ = ctrlWrk.Close()
-		_ = bridgeSup.Close()
-		_ = bridgeWrk.Close()
-		return nil, err
-	}
-	shareSup, shareWrk, err := worker.SocketpairConns()
-	if err != nil {
-		_ = ctrlSup.Close()
-		_ = ctrlWrk.Close()
-		_ = bridgeSup.Close()
-		_ = bridgeWrk.Close()
-		_ = fdSup.Close()
-		_ = fdWrk.Close()
-		return nil, err
-	}
-	keepSup := false
-	defer func() {
-		if keepSup {
-			return
-		}
-		_ = ctrlSup.Close()
-		_ = bridgeSup.Close()
-		_ = fdSup.Close()
-		_ = shareSup.Close()
-	}()
-	workerEnds := []net.Conn{ctrlWrk, bridgeWrk, fdWrk, shareWrk}
-	// The child duplicates each end into its table slot; the originals
-	// close after spawn. dupFiles are supervisor-side duplicates (always
-	// closed here). Boot assets stay supervisor-owned until a successful
-	// acknowledgement so a failed spawn can degrade to monolithic — the
-	// writable-disk locks included, since the monolithic fallback has to be
-	// able to take them itself.
-	var dupFiles []*os.File
-	closeDups := func() {
-		worker.CloseFiles(dupFiles)
-		dupFiles = nil
-	}
-	defer closeDups()
-	dupFiles, err = worker.DupConnFiles(workerEnds...)
-	if err != nil {
-		return nil, fmt.Errorf("worker descriptor table: %w", err)
-	}
 	if assets.NetConn == nil || assets.Console == nil || assets.Kernel == nil {
-		closeDups()
 		return nil, fmt.Errorf("descriptor table: net conn, console and kernel are required")
 	}
 	consoleInfo, err := assets.Console.Stat()
 	if err != nil {
-		closeDups()
 		return nil, fmt.Errorf("descriptor table: inspect console sink: %w", err)
 	}
 	if consoleInfo.Mode()&os.ModeNamedPipe == 0 {
-		closeDups()
 		return nil, fmt.Errorf("descriptor table: console must be a supervisor-brokered pipe, got mode %s", consoleInfo.Mode())
 	}
-	// The net data end is dup'd into the child's slot. Keep the caller's
-	// original open until the boot ack: auto mode must be able to reuse it
-	// for the monolithic fallback after any spawn/handshake failure.
+
+	// Keep the caller's original endpoint open until the boot ack so auto mode
+	// can reuse it for the monolithic fallback. Launch inherits only this dup.
 	netFile, err := worker.ConnFile(assets.NetConn)
 	if err != nil {
-		closeDups()
 		return nil, err
 	}
-	dupFiles = append(dupFiles, netFile)
+	defer func() { _ = netFile.Close() }()
+
 	assetFiles := []*os.File{assets.Console, assets.Kernel}
 	closeAfterAck := append([]*os.File(nil), assetFiles...)
 	if cfg.HasRoot {
 		if assets.Rootfs == nil {
-			closeDups()
 			return nil, fmt.Errorf("descriptor table: rootfs required")
 		}
 		assetFiles = append(assetFiles, assets.Rootfs)
 		closeAfterAck = append(closeAfterAck, assets.Rootfs)
 	}
 	if len(assets.DisksRO) != cfg.NDisksRO || len(assets.Disks) != cfg.NDisks {
-		closeDups()
 		return nil, fmt.Errorf("descriptor table: counts mismatch (disksRO %d/%d, disks %d/%d)",
 			len(assets.DisksRO), cfg.NDisksRO, len(assets.Disks), cfg.NDisks)
 	}
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	closeAfterAck = append(closeAfterAck, assets.DisksRO...)
+
 	// Each writable disk is locked on a private description the child never
-	// receives: flock ownership follows the open file description, so the
-	// worker's inherited descriptor cannot unlock what the supervisor holds.
+	// receives. These role capabilities transfer to Child only after Launch
+	// succeeds and are revoked by its process watcher.
 	var diskLocks []*os.File
 	keepDiskLocks := false
 	defer func() {
@@ -160,6 +96,7 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	}
 	assetFiles = append(assetFiles, assets.Disks...)
 	closeAfterAck = append(closeAfterAck, assets.Disks...)
+
 	var vhostPipes []*os.File
 	defer worker.CloseFiles(vhostPipes)
 	if cfg.VhostShares {
@@ -188,141 +125,98 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		assetFiles = append(assetFiles, assets.KVM) // LAST slot (cfg.HasKVM)
 		closeAfterAck = append(closeAfterAck, assets.KVM)
 	}
-	childFiles := append(append([]*os.File{}, dupFiles...), assetFiles...)
 
-	argv := []string{exe, "_vmm-worker"}
-	env := worker.Env()
-	if vmmWorkerSpawnHook != nil {
-		vmmWorkerSpawnHook(&argv, &env)
+	// Four generic channels occupy fds 3..6. VMM capabilities remain a dense,
+	// role-validated table beginning with the network endpoint at fd 7.
+	childFiles := append([]*os.File{netFile}, assetFiles...)
+	inherited := make([]worker.InheritedFile, 0, len(childFiles))
+	for index, file := range childFiles {
+		inherited = append(inherited, worker.InheritedFile{Slot: 7 + index, File: file})
 	}
-	// All three standard descriptors point at a one-way pipe. The trusted
-	// supervisor owns and bounds the regular log file; a compromised worker can
-	// neither seek/truncate it nor reuse daemon stdout to grow daemon.log. The
-	// write-only end at fd 0 also prevents inheritance of the secrets handshake.
+	exitClosers := make([]io.Closer, len(diskLocks))
+	for index, lock := range diskLocks {
+		exitClosers[index] = lock
+	}
 	logPath := ""
 	if dir != "" {
 		logPath = filepath.Join(dir, "worker-vmm.log")
 	}
-	workerLog, err := boundedlog.NewPipe(logPath)
+	child, err := worker.Launch(worker.LaunchSpec{
+		Role:             workerproto.RoleVMM,
+		EntryPoint:       "_vmm-worker",
+		Environment:      vmmWorkerEnv(),
+		Channels:         []string{"control", "bridge", "fd", "share"},
+		InheritedFiles:   inherited,
+		DiagnosticPath:   logPath,
+		Confinement:      cfg.Confinement,
+		ExitClosers:      exitClosers,
+		ConfigureProcess: vmmWorkerSpawnHook,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("open VMM worker log broker: %w", err)
+		return nil, err
 	}
-	keepWorkerLog := false
-	defer func() {
-		if !keepWorkerLog {
-			_ = workerLog.Close()
-		}
-	}()
-	diagnostic := workerLog.Writer()
-	procFiles := append([]*os.File{diagnostic, diagnostic, diagnostic}, childFiles...)
-	startProc := func(confine bool) (*os.Process, error) {
-		sys := worker.SysProcAttr()
-		if confine {
-			worker.ConfineProcAttr(sys)
-		}
-		return os.StartProcess(exe, argv, &os.ProcAttr{
-			Env:   env,
-			Files: procFiles,
-			Sys:   sys,
-		})
-	}
-	confine := cfg.Confinement != "" && cfg.Confinement != "off"
-	proc, err := startProc(confine)
-	if err != nil && confine && cfg.Confinement == "auto" && worker.IsNamespaceUnavailable(err) {
-		// Ubuntu 24.04+ AppArmor blocks unprivileged user namespaces for
-		// unconfined binaries: degrade to a namespace-less spawn (the
-		// worker still self-confines via seccomp; isolation.json reports
-		// the honest tier) instead of failing the boot.
-		fmt.Fprintf(os.Stderr, "vmm worker: confined spawn denied (%v); retrying without namespaces\n", err)
-		proc, err = startProc(false)
-	}
-	// StartProcess has duplicated the stream into the child (or failed without
-	// doing so). Drop the supervisor write end so process death produces EOF.
-	workerLog.ReleaseWriter()
-	closeDups() // the child has its own table entries now
-	if err != nil {
-		_ = ctrlSup.Close()
-		_ = bridgeSup.Close()
-		_ = fdSup.Close()
-		return nil, fmt.Errorf("spawn vmm worker: %w", err)
-	}
+	keepDiskLocks = true // Child now revokes them after every exit path.
 
-	// waitErr captures the authoritative death cause (signal vs exit
-	// code) the first time the child is reaped.
+	ctrlSup := child.Channels["control"]
+	bridgeSup := child.Channels["bridge"]
+	fdSup := child.Channels["fd"]
+	shareSup := child.Channels["share"]
 	var waitErr error
-	killProc := func() {
-		_ = proc.Kill()
-		waitErr = worker.WaitProcess(proc, "vmm-worker")
+	killChild := func() {
+		_ = child.Terminate(5 * time.Second)
+		waitErr = child.Err()
 	}
-	nonce, err := workerproto.NewNonce()
+	bootstrap, err := child.BeginBootstrap(cfg)
 	if err != nil {
-		killProc()
-		return nil, fmt.Errorf("vmm worker nonce: %w", err)
-	}
-	if err := workerproto.SendHandshake(ctrlSup, workerproto.RoleVMM, nonce, cfg); err != nil {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker handshake: %w", err)
 	}
-	if err := workerproto.WriteNonce(fdSup, nonce); err != nil {
-		killProc()
-		return nil, fmt.Errorf("vmm worker fd nonce: %w", err)
+	if err := bootstrap.BindChannels("fd", "share"); err != nil {
+		killChild()
+		return nil, fmt.Errorf("vmm worker channel nonce: %w", err)
 	}
-	if err := workerproto.WriteNonce(shareSup, nonce); err != nil {
-		killProc()
-		return nil, fmt.Errorf("vmm worker share nonce: %w", err)
-	}
-	// Boot ack: the worker answers after Prepare (machine built) — a
-	// missing /dev/kvm or a bad asset surfaces HERE, not as a dead VM
-	// minutes later.
+
+	// Boot ack commits asset ownership only after VMM preparation and
+	// confinement verification complete.
 	var ack vmmworkerapi.BootAck
 	_ = ctrlSup.SetReadDeadline(time.Now().Add(60 * time.Second))
 	if err := workerproto.ReadMessage(ctrlSup, &ack); err != nil {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker boot ack: %w (worker wait: %v)", err, waitErr)
 	}
 	_ = ctrlSup.SetReadDeadline(time.Time{})
 	if !ack.OK {
-		killProc()
+		killChild()
 		return nil, fmt.Errorf("vmm worker boot: %s", ack.Error)
 	}
-	// Handshake complete: the worker owns the boot assets now; close the
-	// supervisor's copies (the descriptor table carried them across).
-	for _, f := range closeAfterAck {
-		_ = f.Close()
+	for _, file := range closeAfterAck {
+		_ = file.Close()
 	}
 	_ = assets.NetConn.Close()
 
 	w := &vmmWorker{
-		proc:           proc,
-		client:         workerproto.NewClient(ctrlSup),
-		fdChan:         fdSup,
-		bridge:         bridgeSup,
-		bridgeE:        make(chan error, 1),
-		share:          shareSup,
-		diagnostics:    workerLog,
-		diagnosticPath: logPath,
-		diskLocks:      diskLocks,
-		lifecycle:      worker.NewLifecycle(),
-		confReport:     ack.Confinement,
+		child:      child,
+		proc:       child.Process,
+		client:     workerproto.NewClient(ctrlSup),
+		fdChan:     fdSup,
+		bridge:     bridgeSup,
+		bridgeE:    make(chan error, 1),
+		share:      shareSup,
+		lifecycle:  child.Lifecycle,
+		confReport: ack.Confinement,
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{
 			"vsock.forward": w.vsockForward(dir),
 		})
 	}()
-	go func() { w.setDead(worker.WaitProcess(proc, "vmm-worker")) }()
-	// The drain goroutine now self-owns the broker until worker EOF.
-	keepWorkerLog = true
-	keepSup = true
-	keepDiskLocks = true // released by revokeWorkerCapabilities
+	go w.observeChild()
 	return w, nil
 }
 
 // vsockForward answers the worker's dial-back bridge: the guest connected
-// to a vsock port; the supervisor (owner of all host sockets) dials the
-// port's listener in the sandbox dir and transfers the connected
-// descriptor. The transfer completes before the OK response, and the
-// worker pre-registers its receive — neither side can deadlock.
+// to a vsock port; the supervisor validates and dials the sandbox endpoint,
+// then transfers only the connected descriptor.
 func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 	return func(req workerproto.Request) (any, error) {
 		var body vmmworkerapi.ForwardRequest
@@ -340,13 +234,13 @@ func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 		if err != nil {
 			return nil, fmt.Errorf("vsock.forward %s: %w", sock, err)
 		}
-		f, err := worker.ConnFile(conn)
+		file, err := worker.ConnFile(conn)
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
 		}
-		err = w.sendFD(tok, f)
-		_ = f.Close()
+		err = w.sendFD(tok, file)
+		_ = file.Close()
 		_ = conn.Close()
 		if err != nil {
 			return nil, fmt.Errorf("vsock.forward: %w", err)

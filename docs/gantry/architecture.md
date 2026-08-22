@@ -79,6 +79,22 @@ The supervisor is the trusted host control plane for one sandbox. It owns:
 The supervisor runs with the privileges of the user who launched Gantry. It
 does not run as a system daemon.
 
+### Worker launch substrate
+
+Split roles use one process-neutral launch harness in
+`internal/sandbox/worker`. It re-executes the current binary with an explicit
+role and empty-by-default environment, builds the exact Unix descriptor or
+Windows handle table, supports nonce-binding independent data channels to the
+launch handshake, routes standard streams through a supervisor-owned bounded
+log, applies the
+requested namespace or Job boundary, and owns process reaping and containment
+cleanup. Each role retains its own bootstrap schema, inherited-capability
+validation, RPC protocol, syscall profile, readiness checks, and decision
+about whether worker failure terminates the sandbox.
+
+The role argument is not authority. Only inherited channels and files, plus
+the per-launch nonce that correlates them, grant capabilities to the child.
+
 ### VMM worker
 
 The VMM worker owns guest RAM, the platform hypervisor, virtual CPUs, and the

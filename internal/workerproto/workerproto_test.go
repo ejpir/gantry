@@ -28,6 +28,17 @@ func testNonce(t *testing.T) []byte {
 	return nonce
 }
 
+func TestWorkerRolesAreClosedSet(t *testing.T) {
+	for _, role := range []Role{RoleVMM, RoleNet, RoleMCP} {
+		if !role.Valid() {
+			t.Errorf("role %q is not valid", role)
+		}
+	}
+	if Role("other").Valid() {
+		t.Fatal("unknown role is valid")
+	}
+}
+
 func TestMessageRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	in := Handshake{Magic: Magic, Role: RoleNet, Nonce: "ab", Config: json.RawMessage(`{"x":1}`)}

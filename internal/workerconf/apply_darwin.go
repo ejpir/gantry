@@ -34,6 +34,9 @@ func init() {
 // the profile on real hardware, so confinement installs before VMM setup
 // exercises the hypervisor.
 func Apply(spec Spec) (*Report, error) {
+	if !validProfile(spec.Profile) {
+		return nil, fmt.Errorf("workerconf: invalid syscall profile %d", spec.Profile)
+	}
 	if sandboxInitWithParameters == nil {
 		rep := DisabledReport("darwin", "")
 		rep.Notes = append(rep.Notes, "sandbox_init_with_parameters unavailable")

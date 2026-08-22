@@ -121,14 +121,3 @@ func WindowsSysProcAttr(token windows.Token, handles []syscall.Handle) *syscall.
 		CreationFlags:              windows.CREATE_NO_WINDOW,
 	}
 }
-
-// HandleEnv publishes raw inheritable handle values to the child under
-// GANTRY_WORKER_HANDLE_<slot>, the Windows counterpart to inherited fds.
-func HandleEnv(base []string, files []*os.File, firstSlot int) []string {
-	env := append([]string(nil), base...)
-	for index, file := range files {
-		env = append(env, "GANTRY_WORKER_HANDLE_"+strconv.Itoa(firstSlot+index)+"="+
-			strconv.FormatUint(uint64(file.Fd()), 10))
-	}
-	return env
-}
