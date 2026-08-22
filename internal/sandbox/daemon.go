@@ -29,8 +29,12 @@ type daemonRuntime struct {
 	started    time.Time
 	bootTiming bool
 
-	cfg     config.RunConfig
-	secrets map[string]secret.Value
+	cfg         config.RunConfig
+	secretStore *secret.Store
+	// audit is the daemon-wide security-event trail (secret source errors,
+	// credhelper decisions, custody events); the broker serves it over
+	// audit.tail once the control socket is up.
+	audit   *auditRing
 	store   *config.ConfigStore
 	lock    *os.File
 	console *os.File
@@ -49,6 +53,12 @@ type daemonRuntime struct {
 	guestErr <-chan error
 	signals  chan os.Signal
 	shutdown chan struct{}
+
+	// postReady, when non-nil, replaces supervise() after publishReady:
+	// hidden spike commands (docs/kubernetes-runtimeclass.md, Phase K0) run
+	// their scenario against the fully booted guest instead of serving
+	// ctl.sock sessions.
+	postReady func(d *daemonRuntime) int
 }
 
 func CmdDaemon(name, readySocket string) int {
@@ -80,12 +90,21 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
+	// Guest-tools delivery for bound secrets runs concurrently with
+	// readiness: it streams the (small, base64) helper through the exec channel, which must
+	// never sit on the boot path. Sessions opened before it lands simply
+	// run without the credential helper wiring; the broker gates on
+	// guestToolsReady.
+	go d.deliverGuestTools()
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in
 	// which `gantry start` returned successfully before ctl.sock existed, so an
 	// immediate `gantry exec` could race startup and produce no guest output.
 	if err := d.publishReady(); err != nil {
 		return daemonFailure(err)
+	}
+	if d.postReady != nil {
+		return d.postReady(d)
 	}
 	return d.supervise()
 }

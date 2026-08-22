@@ -689,22 +689,20 @@ func (m *managerService) resolveCreate(request managerCreateRequest) (config.Run
 	if err != nil {
 		return config.RunConfig{}, nil, warnings, err
 	}
-	secrets, _, err := flags.ResolveSecrets()
+	// Source-backed secrets resolve daemon-side; only literal dotenv-file
+	// values ride the handshake from here. Resolve normally already
+	// populated cfg.SecretSources from the same flags; merge defensively.
+	secrets, sources, _, err := flags.ResolveSecretSources()
+	if len(cfg.SecretSources) == 0 && len(sources) > 0 {
+		cfg.SecretSources = sources
+	}
 	return cfg, secrets, warnings, err
 }
 
 func loadManagerStart(name string) (config.RunConfig, map[string]secret.Value, error) {
-	cfg, err := config.ReadSandboxConfig(layout.Dir(name))
+	cfg, secrets, err := config.ReadSandboxForLaunch(layout.Dir(name), os.LookupEnv)
 	if err != nil {
 		return config.RunConfig{}, nil, fmt.Errorf("sandbox %q has no valid saved configuration: %w", name, err)
-	}
-	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
-	for _, secretName := range cfg.SecretNames {
-		name, value, err := secret.Parse(secretName, os.LookupEnv)
-		if err != nil {
-			return config.RunConfig{}, nil, err
-		}
-		secrets[name] = value
 	}
 	return cfg, secrets, nil
 }
@@ -914,6 +912,13 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 }
 
 func serveManager(socketPath string, lifecycle Lifecycle) error {
+	// The default manager endpoint shares Gantry's application root. Secure
+	// each predictable fallback component before MkdirAll can traverse it.
+	if os.Getenv("GANTRY_MANAGER_SOCKET") == "" && filepath.Clean(socketPath) == filepath.Clean(SocketPath()) {
+		if err := layout.EnsureRoot(); err != nil {
+			return err
+		}
+	}
 	base := filepath.Dir(socketPath)
 	if err := localsec.CreateManagerDir(base); err != nil {
 		return fmt.Errorf("secure manager directory: %w", err)

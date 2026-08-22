@@ -29,3 +29,22 @@ func processEnvironment(img *image.Config, groups ...[]string) []string {
 	}
 	return environment
 }
+
+// prependPath returns environment with dirs prepended to the PATH entry
+// (image PATH preserved). A missing PATH gains the conventional default
+// tail so the prepend never yields a bare tools-only PATH.
+func prependPath(environment []string, dirs []string) []string {
+	if len(dirs) == 0 {
+		return environment
+	}
+	prefix := strings.Join(dirs, ":")
+	for i, entry := range environment {
+		if name, _, ok := strings.Cut(entry, "="); ok && name == "PATH" {
+			out := make([]string, len(environment))
+			copy(out, environment)
+			out[i] = "PATH=" + prefix + ":" + strings.TrimPrefix(entry, "PATH=")
+			return out
+		}
+	}
+	return append(environment, "PATH="+prefix+":/usr/local/bin:/usr/bin:/bin")
+}

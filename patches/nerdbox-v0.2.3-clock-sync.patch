@@ -1,0 +1,145 @@
+diff --git a/pkg/vminit/initd/clocksync.go b/pkg/vminit/initd/clocksync.go
+new file mode 100644
+index 0000000..0a66bd5
+--- /dev/null
++++ b/pkg/vminit/initd/clocksync.go
+@@ -0,0 +1,127 @@
++//go:build linux
++
++/*
++   Copyright The containerd Authors.
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
++*/
++
++package initd
++
++import (
++	"context"
++	"os"
++	"time"
++
++	"github.com/containerd/log"
++	"golang.org/x/sys/unix"
++)
++
++const (
++	// clockSyncPHC is the PTP hardware clock registered by the virtio-rtc
++	// driver (CONFIG_VIRTIO_RTC_PTP): every clock_gettime on it issues a
++	// REQ_READ to the host, so it always yields fresh host UTC.
++	clockSyncPHC = "/dev/ptp0"
++	// clockSyncInterval bounds uncorrected drift: at a typical arch-counter
++	// crystal error of tens of ppm, 30s accumulates well under a
++	// millisecond.
++	clockSyncInterval = 30 * time.Second
++	// clockSyncMinDelta is the noise floor for corrections, comfortably
++	// above the MMIO round-trip cost of one PHC read.
++	clockSyncMinDelta = 100 * time.Microsecond
++	// clockSyncJumpDelta marks corrections worth a warning: with the loop
++	// running, only host suspend/resume (the physical counter stops across
++	// sleep) or a badly skewed initial reading can produce a step this
++	// large.
++	clockSyncJumpDelta = 50 * time.Millisecond
++)
++
++// startClockSync keeps the guest's realtime clock disciplined from the
++// virtio-rtc PHC. The kernel sets the clock once at probe (hctosys) and
++// never re-reads it, so without this loop guest wall time drifts at the raw
++// counter's crystal rate (tens of ppm; a second or two per day) and, on
++// HVF/WHPX, silently skips entire host-suspend intervals because the host
++// physical counter stops while the machine sleeps.
++//
++// Correction is an unconditional step: between polls the offset is
++// sub-millisecond, and suspend gaps are minutes to hours, which slewing
++// would take days to amortize while leaving timestamps wrong throughout.
++// CLOCK_MONOTONIC is untouched, so container timers never observe the
++// steps.
++//
++// The loop disables itself where there is nothing to do: on x86 KVM the
++// VMM attaches no RTC (kvm-clock is host-referenced) and kernels without
++// CONFIG_VIRTIO_RTC_PTP register no PHC, both of which leave no /dev/ptp0.
++func startClockSync(ctx context.Context) {
++	f, err := os.Open(clockSyncPHC)
++	if err != nil {
++		log.G(ctx).WithError(err).Debug("clock sync disabled: no virtio-rtc PHC")
++		return
++	}
++
++	// FD clocks use the dynamic clockid encoding (same as phc2sys): the
++	// kernel resolves it to the PHC, so each ClockGettime below is a fresh
++	// host read, not a cached kernel value.
++	clockid := ^int32(f.Fd())<<3 | 3
++
++	if err := stepClock(clockid); err != nil {
++		f.Close()
++		log.G(ctx).WithError(err).Error("clock sync disabled: virtio-rtc PHC unusable")
++		return
++	}
++	go func() {
++		defer f.Close()
++		t := time.NewTicker(clockSyncInterval)
++		defer t.Stop()
++		for {
++			select {
++			case <-ctx.Done():
++				return
++			case <-t.C:
++				if err := stepClock(clockid); err != nil {
++					log.G(ctx).WithError(err).Error("clock sync stopped: virtio-rtc PHC read failed")
++					return
++				}
++			}
++		}
++	}()
++	log.G(ctx).Info("clock sync: disciplining system clock from virtio-rtc PHC")
++}
++
++// stepClock steps CLOCK_REALTIME to the PHC reading when the offset exceeds
++// the noise floor.
++func stepClock(clockid int32) error {
++	var phc, sys unix.Timespec
++	if err := unix.ClockGettime(clockid, &phc); err != nil {
++		return err
++	}
++	if err := unix.ClockGettime(unix.CLOCK_REALTIME, &sys); err != nil {
++		return err
++	}
++	delta := time.Duration(phc.Nano() - sys.Nano())
++	if delta < 0 {
++		delta = -delta
++	}
++	if delta < clockSyncMinDelta {
++		return nil
++	}
++	if err := unix.ClockSettime(unix.CLOCK_REALTIME, &phc); err != nil {
++		return err
++	}
++	if delta >= clockSyncJumpDelta {
++		log.G(context.TODO()).WithField("step", delta.String()).Warn("clock sync: stepped system clock")
++	} else {
++		log.G(context.TODO()).WithField("step", delta.String()).Debug("clock sync: stepped system clock")
++	}
++	return nil
++}
+diff --git a/pkg/vminit/initd/initd.go b/pkg/vminit/initd/initd.go
+index ba7e92c..5c13952 100644
+--- a/pkg/vminit/initd/initd.go
++++ b/pkg/vminit/initd/initd.go
+@@ -220,0 +221,7 @@ func systemInit(ctx context.Context, config Config, shutdownSvc shutdown.Service
++	// Discipline the wall clock from the virtio-rtc PHC: hctosys sets it
++	// once at probe and nothing re-reads it, so the guest otherwise drifts
++	// at the raw counter's crystal rate and skips host-suspend intervals
++	// (the physical counter stops across sleep on HVF/WHPX). No-op where
++	// the PHC is absent, e.g. x86 KVM boots with no RTC attached.
++	startClockSync(ctx)
++

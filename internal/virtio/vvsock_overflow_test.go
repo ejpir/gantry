@@ -462,3 +462,77 @@ func TestVsockTooSmallRXBufferNeverExposesTruncatedFrame(t *testing.T) {
 		t.Fatalf("payload = %q, want %q", got, payload)
 	}
 }
+
+// Host->guest data must PARK on a full outbound FIFO, not RST the
+// connection: a slow guest stalls the host producer (bounded memory: the
+// pump's single read buffer) and draining the queue resumes delivery with
+// no loss. RST-under-flood silently truncated multi-megabyte session-stdin
+// transfers (observed delivering the guest-tools binary).
+func TestVsockPumpHostBackpressureOnFullQueue(t *testing.T) {
+	rig := newVsockNoRXRig(t)
+	device := rig.device
+	threshold := vsockMaxPending - vsockControlReserve
+	// Fill the FIFO up to the data threshold with control packets.
+	ctrl := vsockPkt{hdr: vsockHdr{op: vsockOpRST}}
+	for device.pending.Len() < threshold {
+		if !device.queuePending(ctrl) {
+			t.Fatal("control queue filled before its fixed capacity")
+		}
+	}
+
+	host, peer := net.Pipe()
+	t.Cleanup(func() { _ = host.Close() })
+	t.Cleanup(func() { _ = peer.Close() })
+	key := connKey(1111, 1025)
+	conn := &vsockConn{
+		key: key, nc: host, established: true,
+		outSig: make(chan struct{}, 1), done: make(chan struct{}),
+	}
+	device.conns[key] = conn
+	go device.pumpHost(conn, 1111, 1025)
+
+	if _, err := peer.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	// Parked: no queue growth, no RST, connection still open.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		device.core.mu.Lock()
+		n := device.pending.Len()
+		closed := conn.closed
+		device.core.mu.Unlock()
+		if n != threshold {
+			t.Fatalf("pending grew to %d past the data threshold while full", n)
+		}
+		if closed {
+			t.Fatal("full queue RST-dropped a healthy connection")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Free one slot: the parked pump wakes and queues the RW payload.
+	device.core.mu.Lock()
+	device.popPending()
+	device.core.mu.Unlock()
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		device.core.mu.Lock()
+		pkt, _, ok := device.pending.Back()
+		grown := device.pending.Len() == threshold
+		closed := conn.closed
+		device.core.mu.Unlock()
+		if grown {
+			if !ok || pkt.hdr.op != vsockOpRW || string(pkt.payload) != "hello" {
+				t.Fatalf("resumed pump queued %+v, want RW hello", pkt.hdr)
+			}
+			if closed {
+				t.Fatal("connection closed despite successful backpressure delivery")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("parked pumpHost never resumed after the queue drained")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

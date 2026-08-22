@@ -8,18 +8,29 @@ set +e
 cd /opt/gantry || exit 1
 
 G=./gantry-linux-amd64
+# Pin the state roots: under SSM HOME is unset, and layout.Root() /
+# image.DefaultStore() fall back to DIFFERENT directories (/tmp/gantry-0
+# vs /tmp/.gantry), which would make every sandbox.json/ctl.sock check
+# below silently probe the wrong tree.
+export GANTRY_HOME="${GANTRY_HOME:-/tmp/.gantry/sandboxes}"
+export GANTRY_IMAGES="${GANTRY_IMAGES:-/tmp/.gantry/images}"
+RWDIR="$(dirname "$GANTRY_HOME")/rwlayers"
 KERNEL=${GANTRY_TEST_KERNEL:-nerdbox-kernel-x86_64}
 PASS=0; FAIL=0
 ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 chk() { local n="$1" want="$2" got="$3"; if printf '%s' "$got" | grep -qa -- "$want"; then ok "$n"; else bad "$n"; printf '%s\n' "$got" | tail -4; fi; }
+# empty_cred asserts the helper emitted NO credential. `gantry exec`
+# prints its own client-noise lines, so the test is "no password=" (never
+# "no output").
+empty_cred() { local n="$1" got="$2"; if printf '%s' "$got" | grep -qa '^password='; then bad "$n"; printf '%s\n' "$got" | tail -3; else ok "$n"; fi; }
 xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 
 echo "== environment =="
 uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
 
-for s in t1 t2 t3 t4; do $G stop "$s" >/dev/null 2>&1; done
-rm -rf /tmp/.gantry/sandboxes/t* /root/.gantry/sandboxes/t* /tmp/.gantry/images /tmp/.gantry/rwlayers
+for s in $(seq 1 12 | sed 's/^/t/') t10bad; do $G stop "$s" >/dev/null 2>&1; done
+rm -rf "$GANTRY_HOME"/t* "$GANTRY_IMAGES" "$RWDIR"
 # rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
 
 echo "===== crun (t1) ====="
@@ -72,9 +83,9 @@ R=$(xe t3 'echo x > /host/code/f2 && echo WR-OK');      chk "share: write"  "WR-
 echo "===== OCI image (t4: alpine, offline cache hit) ====="
 # the corporate network blocks registry-1.docker.io from the instance;
 # the store is pre-seeded from S3 and Resolve must hit it offline
-mkdir -p /tmp/.gantry/images
+mkdir -p "$GANTRY_IMAGES"
 for _ in 1 2 3; do curl -fSL --retry 3 -o /tmp/alpine-store.tar.gz "$GANTRY_STORE_URL" && break; sleep 3; done
-tar xzf /tmp/alpine-store.tar.gz -C /tmp/.gantry/images
+tar xzf /tmp/alpine-store.tar.gz -C "$GANTRY_IMAGES"
 $G image ls
 $G start t4 -image alpine:latest 2>&1 | tail -2
 sleep 1
@@ -94,22 +105,323 @@ sleep 2
 R=$(xe t5 'printenv CANARY');     chk "secrets: env value in guest"   "$CANARY" "$R"
 R=$(xe t5 'printenv FROM_FILE');  chk "secrets: @file value in guest" "$FILECANARY" "$R"
 
-grep -q "CANARY" /tmp/.gantry/sandboxes/t5/sandbox.json 2>/dev/null \
+grep -q "CANARY" "$GANTRY_HOME"/t5/sandbox.json 2>/dev/null \
   && ok "secrets: name recorded in sandbox.json" || bad "secrets: name recorded in sandbox.json"
-grep -q "$CANARY" /tmp/.gantry/sandboxes/t5/sandbox.json 2>/dev/null \
+grep -q "$CANARY" "$GANTRY_HOME"/t5/sandbox.json 2>/dev/null \
   && bad "secrets: value NOT in sandbox.json" || ok "secrets: value NOT in sandbox.json"
 
 leak=""
-grep -rqs "$CANARY" /tmp/.gantry/sandboxes/t5/ && leak="$leak sandbox-dir"
-grep -rqs "$CANARY" /tmp/.gantry/images/ 2>/dev/null && leak="$leak image-store"
-[ -f /tmp/.gantry/rwlayers/t5.ext4 ] && grep -qs "$CANARY" /tmp/.gantry/rwlayers/t5.ext4 && leak="$leak rwlayer"
-VPID=$(cat /tmp/.gantry/sandboxes/t5/vmm.pid 2>/dev/null)
+grep -rqs "$CANARY" "$GANTRY_HOME"/t5/ && leak="$leak sandbox-dir"
+grep -rqs "$CANARY" "$GANTRY_IMAGES"/ 2>/dev/null && leak="$leak image-store"
+[ -f "$RWDIR/t5.ext4" ] && grep -qs "$CANARY" "$RWDIR/t5.ext4" && leak="$leak rwlayer"
+VPID=$(cat "$GANTRY_HOME"/t5/vmm.pid 2>/dev/null)
 [ -n "$VPID" ] && tr '\0' '\n' < /proc/$VPID/environ 2>/dev/null | grep -qs "$CANARY" && leak="$leak environ"
 [ -n "$VPID" ] && tr '\0' ' ' < /proc/$VPID/cmdline 2>/dev/null | grep -qs "$CANARY" && leak="$leak cmdline"
 [ -z "$leak" ] && ok "secrets: canary absent from host state" || { bad "secrets: canary absent from host state"; echo "  leaked into:$leak"; }
 
 R=$($G start t6 -secret TOKEN=literal-value -image alpine:latest 2>&1)
 chk "secrets: literal refused" "refusing" "$R"
+# Secret specs validate before any on-disk artifacts: the refused start
+# must not leave a fresh per-sandbox rwlayer behind.
+[ ! -e "$RWDIR/t6.ext4" ] && ok "resolver: bad spec leaves no rwlayer" || bad "resolver: bad spec leaves no rwlayer"
+
+echo "===== bound secrets + credential helper (t7/t8: alpine, offline) ====="
+# docs/credential-brokering.md workstream 1: a NAME@host secret is held
+# host-side only, delivered per-use through the vsock broker behind three
+# gates (binding → egress → presence), and revocable without a restart.
+BOUNDCANARY="sk-bound-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
+BOUND_TOKEN="$BOUNDCANARY" $G start t7 -secret BOUND_TOKEN@git.test -image alpine:latest >/dev/null 2>&1
+sleep 3   # guest-tools delivery races readiness; give the async push a moment
+
+R=$(xe t7 'printenv BOUND_TOKEN || echo ABSENT'); chk "binding: bound secret NOT ambient" "ABSENT" "$R"
+R=$(xe t7 'printenv GIT_CONFIG_VALUE_0');         chk "binding: git wired via env config" "/run/gantry/bin/credhelper" "$R"
+R=$(xe t7 'test -x /run/gantry/bin/gantry-guest && test -L /run/gantry/bin/credhelper && echo HELPER-OK')
+                                                  chk "binding: helper staged in guest" "HELPER-OK" "$R"
+
+QB='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
+QN='printf "protocol=https\nhost=evil.test\n\n" | /run/gantry/bin/credhelper get'
+R=$(xe t7 "$QB"); chk "broker: delivers bound credential" "password=$BOUNDCANARY" "$R"
+                  chk "broker: git username convention" "username=x-access-token" "$R"
+R=$(xe t7 "$QN"); empty_cred "broker: unbound host answers empty" "$R"
+
+grep -q "BOUND_TOKEN@git.test" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
+  && ok "binding: name+binding persisted" || bad "binding: name+binding persisted"
+grep -q "$BOUNDCANARY" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
+  && bad "binding: value NOT in sandbox.json" || ok "binding: value NOT in sandbox.json"
+
+# Mid-session revocation through the control socket (the dashboard op):
+# the helper must immediately answer empty — no restart, nothing to scrub
+# guest-side, because nothing was ever stored guest-side.
+R=$(python3 - "$GANTRY_HOME/t7/ctl.sock" <<'PYEOF'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b'{"op":"secret.remove","id":"rvk","secret":{"name":"BOUND_TOKEN"}}\n')
+sys.stdout.write(s.makefile().readline())
+PYEOF
+)
+chk "revocation: control op accepted" '"ok":true' "$R"
+R=$(xe t7 "$QB"); empty_cred "revocation: broker answers empty after remove" "$R"
+grep -q "BOUND_TOKEN" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
+  && bad "revocation: name dropped from sandbox.json" || ok "revocation: name dropped from sandbox.json"
+
+# Gate 2 (egress): the same binding under a policy whose allowlist
+# excludes the host must be denied by the broker even though the value is
+# held — a brokered token can never outrun the firewall.
+cat > /tmp/netpol-t8.json <<'EOF'
+{"default":"deny","allowLocal":true,"allowDomains":["example.com"]}
+EOF
+BOUND_TOKEN="$BOUNDCANARY" $G start t8 -secret BOUND_TOKEN@git.test -net-policy /tmp/netpol-t8.json -image alpine:latest >/dev/null 2>&1
+sleep 3
+R=$(xe t8 "$QB"); empty_cred "broker: egress policy denies out-of-allowlist host" "$R"
+
+echo "===== secret sources with TTL (t9: file rotation, fail-closed) ====="
+# docs/credential-brokering.md workstream 2: a file-backed bound secret
+# resolves at REQUEST time through the daemon's TTL Store — rotating the
+# file is picked up without a sandbox restart, and a broken source fails
+# closed (empty answer, never a stale value).
+echo "file-token-v1" > /tmp/t9-token
+$G start t9 -secret 'FILE_TOKEN@git.test=@/tmp/t9-token,ttl=2s' -image alpine:latest >/dev/null 2>&1
+sleep 4
+QF='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
+R=$(xe t9 "$QF"); chk "source: file value delivered" "password=file-token-v1" "$R"
+echo "file-token-v2" > /tmp/t9-token   # rotate on the host
+sleep 3                              # past the 2s TTL
+R=$(xe t9 "$QF"); chk "source: rotation picked up live" "password=file-token-v2" "$R"
+rm -f /tmp/t9-token                  # source breaks after a good resolve
+sleep 3
+R=$(xe t9 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
+
+echo "===== OAuth custody (t10: mock provider, refresh token held on host) ====="
+# Custody depends on the callback bridge and must fail during resolution,
+# before creating any sandbox state, when an operator disables that bridge.
+R=$($G start t10bad -oauth-custody -oauth-bridge=false -image alpine:latest 2>&1)
+chk "custody: disabled callback bridge refused" "requires -oauth-bridge=true" "$R"
+[ ! -e "$GANTRY_HOME/t10bad" ] && ok "custody: refused config leaves no sandbox state" || bad "custody: refused config leaves no sandbox state"
+# docs/credential-brokering.md workstream 3: with -oauth-custody the guest
+# helper runs the PKCE flow but the DAEMON exchanges the code and holds
+# the refresh token host-side; the guest auth file carries a short-lived
+# access token plus a sentinel. A mock authorization server on the
+# instance loopback stands in for the real provider.
+cat > /tmp/mock-as.py <<'PYEOF'
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers['Content-Length']))
+        grant = json.loads(body)
+        with open('/tmp/mock-as-grants.log', 'a') as f:
+            f.write(grant.get('grant_type', '?') + '\n')
+        if grant.get('grant_type') == 'refresh_token':
+            tok = {"access_token": "at-mock-REFRESHED", "refresh_token": "rt-mock-1", "expires_in": 3600}
+        else:
+            # 1s lifetime: with the 5-minute refresh leeway the set is due
+            # the moment it lands, exercising the push loop right away.
+            tok = {"access_token": "at-mock-1", "refresh_token": "rt-mock-1", "expires_in": 1}
+        out = json.dumps(tok).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(out)
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", 18999), H).serve_forever()
+PYEOF
+pkill -f mock-as.py 2>/dev/null; sleep 1  # a crashed prior run may still hold the port
+rm -f /tmp/mock-as-grants.log
+python3 /tmp/mock-as.py &
+MOCKPID=$!
+sleep 1
+export GANTRY_OAUTH_TOKEN_URL_CLAUDE=http://127.0.0.1:18999/token
+$G start t10 -oauth-custody -image alpine:latest >/dev/null 2>&1
+sleep 4
+# The login blocks until the callback lands: run it in the background,
+# scrape the authorize URL for its dynamic port + state, and play the
+# browser redirect with curl.
+( printf '/run/gantry/bin/gantry-guest oauth login claude\nexit\n' | timeout 60 $G exec t10 > /tmp/t10-login.log 2>&1 ) &
+sleep 4
+URL=$(grep -oa 'https://claude.ai/oauth/authorize[^ ]*' /tmp/t10-login.log | head -1)
+CPORT=$(printf '%s' "$URL" | sed -n 's/.*127\.0\.0\.1%3A\([0-9]*\)%2Fcallback.*/\1/p')
+CSTATE=$(printf '%s' "$URL" | sed -n 's/.*[?&]state=\([A-Za-z0-9_-]*\).*/\1/p')
+curl -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
+# The guest helper polls oauth.status on a ~1s cadence; give the
+# completion line time to land in the session log instead of racing it.
+for _ in $(seq 1 15); do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
+R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "OAuth callback received" "$R"
+R=$(cat /tmp/t10-login.log);                chk "custody: login completed in guest"            "tokens held on host" "$R"
+R=$(xe t10 'cat /root/.claude/.credentials.json')
+                                            chk "custody: guest holds an access token"        "at-mock-" "$R"
+                                            chk "custody: guest refresh token is a sentinel"  "gantry-custody-refresh-held-on-host" "$R"
+R=$(cat "$GANTRY_HOME/t10/oauth-tokens.json")
+                                            chk "custody: refresh token held host-side"       "rt-mock-1" "$R"
+M=$(stat -c %a "$GANTRY_HOME/t10/oauth-tokens.json")
+                                            chk "custody: host token file is 0600"            "^600$" "$M"
+sleep 3
+R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
+                                            chk "custody: refresh loop pushed a fresh token"  "access token refreshed and pushed" "$R"
+R=$(xe t10 'cat /root/.claude/.credentials.json')
+                                            chk "custody: refreshed token reached the guest"  "at-mock-REFRESHED" "$R"
+# Restart durability: the 0600 disk sync lets a resumed daemon re-attach
+# the session and its refresh loop.
+$G stop t10 >/dev/null 2>&1
+$G resume t10 >/dev/null 2>&1
+sleep 5
+R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
+                                            chk "custody: session restored after restart"     "session restored and access token pushed" "$R"
+R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
+                                            chk "custody: unknown provider refused"           "no custody login" "$R"
+kill $MOCKPID 2>/dev/null
+
+echo "===== MCP gateway (t11: fs server via mcp-proxy, containment) ====="
+# docs/mcp-gateway.md milestone 1: the agent speaks MCP (NDJSON stdio) to
+# gantry-guest mcp-proxy, the host gateway muxes to a contained fs server
+# spawned guest-side as an unprivileged user (never root).
+$G start t11 -mcp -mcp-fs-root /work -mcp-fs-user nobody -image alpine:latest >/dev/null 2>&1
+sleep 4
+xe t11 'mkdir -p /work/sub && echo hello-mcp > /work/notes.txt && ln -s /etc/passwd /work/evil && chmod 755 /work /work/sub && chmod 644 /work/notes.txt' >/dev/null 2>&1
+# The request transcript is built on the instance and heredoc'd into the
+# guest — nested JSON quoting through xe is unmaintainable otherwise.
+cat > /tmp/t11-reqs.ndjson <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"battery","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fs__read_file","arguments":{"path":"/work/notes.txt"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fs__read_file","arguments":{"path":"/work/evil"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fs__write_file","arguments":{"path":"/work/x"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fs__github-authorize","arguments":{}}}
+EOF
+{ echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t11-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t11 >/dev/null 2>&1
+R=$(printf '{ cat /tmp/reqs; sleep 4; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t11 2>&1)
+L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: tools/list exposes fs__read_file"      "fs__read_file" "$L2"
+if printf '%s' "$L2" | grep -qa 'github-authorize'; then bad "mcp: auth tool hidden from listing"; else ok "mcp: auth tool hidden from listing"; fi
+L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: read_file round trip"                 "hello-mcp" "$L3"
+L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: symlink escape is an error"           '"isError":true' "$L4"
+if printf '%s' "$L4" | grep -qa 'root:'; then bad "mcp: symlink escape leaked /etc/passwd"; else ok "mcp: symlink escape leaked nothing"; fi
+L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: unlisted tool denied"                 "unknown or disallowed" "$L5"
+L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: authorize tool denied"                "unknown or disallowed" "$L6"
+R=$($G audit t11);                          chk "mcp: calls audited host-side"              "mcp: call fs__read_file" "$R"
+                                            chk "mcp: denies audited"                      'mcp: denied call "fs__write_file"' "$R"
+
+echo "===== MCP remote upstreams (t12: injection, redaction, SSRF) ====="
+# Milestone 2: remote streamable-HTTP upstreams with host-side credential
+# injection. The mock remote runs on the INSTANCE loopback — upstream
+# traffic exits from the host gateway process, never the guest netns.
+cat > /tmp/mock-mcp.py <<'PYEOF'
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+LOG = "/tmp/mock-mcp-auth.log"
+TOOLS = [
+    {"name": "echo_auth", "description": "echoes Authorization", "inputSchema": {"type": "object"}},
+    {"name": "leak", "description": "returns a token-shaped string", "inputSchema": {"type": "object"}},
+    {"name": "danger", "description": "policy-denied", "inputSchema": {"type": "object"}},
+    {"name": "big", "description": "over-cap response", "inputSchema": {"type": "object"}},
+    {"name": "leak_sse", "description": "leaks via SSE framing", "inputSchema": {"type": "object"}},
+    {"name": "err_http", "description": "401 reflecting the credential", "inputSchema": {"type": "object"}},
+]
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        req = json.loads(self.rfile.read(n) or b"{}")
+        with open(LOG, "a") as f:
+            f.write((self.headers.get("Authorization") or "<none>") + "\n")
+        if "id" not in req:
+            self.send_response(202); self.end_headers(); return
+        rid, m = req["id"], req.get("method")
+        if m == "tools/call" and req.get("params", {}).get("name") == "err_http":
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(json.dumps({"detail": "token %s rejected" % (self.headers.get("Authorization") or "")}).encode())
+            return
+        if m == "initialize":
+            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "mock-mcp", "version": "0"}}
+        elif m == "tools/list":
+            result = {"tools": TOOLS}
+        elif m == "tools/call":
+            name = req.get("params", {}).get("name")
+            if name == "echo_auth":
+                result = {"content": [{"type": "text", "text": "auth=" + (self.headers.get("Authorization") or "<none>")}]}
+            elif name == "leak":
+                result = {"content": [{"type": "text", "text": "the token is t12-secret-token"}]}
+            elif name == "big":
+                result = {"content": [{"type": "text", "text": "A" * (2 * 1024 * 1024)}]}
+            elif name == "leak_sse":
+                raw = json.dumps({"jsonrpc": "2.0", "id": rid, "result":
+                    {"content": [{"type": "text", "text": "sse says t12-secret-token"}]}})
+                body = ("event: message\ndata: " + raw + "\n\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            else:
+                result = {"content": [{"type": "text", "text": "unknown"}], "isError": True}
+        else:
+            result = {}
+        raw = json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+HTTPServer(("127.0.0.1", 18998), H).serve_forever()
+PYEOF
+pkill -f mock-mcp.py 2>/dev/null; sleep 1
+rm -f /tmp/mock-mcp-auth.log
+python3 /tmp/mock-mcp.py &
+MOCKMCP=$!
+sleep 1
+export T12_MCP_TOKEN=t12-secret-token  # -secret NAME=value is refused (ps/history leak); env-source it
+$G start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN \
+  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*,deny=dang*' -image alpine:latest >/dev/null 2>&1
+sleep 4
+xe t12 'mkdir -p /work && chmod 755 /work' >/dev/null 2>&1  # creates container "sb" the fs server spawns into
+cat > /tmp/t12-reqs.ndjson <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"battery","version":"0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mock__echo_auth","arguments":{}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"mock__leak","arguments":{}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"mock__danger","arguments":{}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"mock__big","arguments":{}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mock__leak_sse","arguments":{}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"mock__err_http","arguments":{}}}
+EOF
+{ echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t12 >/dev/null 2>&1
+R=$(printf '{ cat /tmp/reqs; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t12 2>&1)
+L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: remote tools listed alongside fs"         "mock__echo_auth" "$L2"
+                                            chk "mcp: fs server still listed"                 "fs__read_file" "$L2"
+chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$(cat /tmp/mock-mcp-auth.log 2>/dev/null)"
+L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         'auth=\*\+' "$L3"
+L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: response-body secret redacted"         'token is \*\+' "$L4"
+if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: no credential in guest transcript"; else ok "mcp: no credential in guest transcript"; fi
+L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: policy-hidden remote tool denied"       "unknown or disallowed tool" "$L5"
+L2b=$(printf '%s' "$R" | grep -a '"id":2'); if printf '%s' "$L2b" | grep -qa 'mock__danger'; then bad "mcp: deny-listed tool hidden from listing"; else ok "mcp: deny-listed tool hidden from listing"; fi
+L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: over-cap response refused"              "upstream call failed" "$L6"
+L7=$(printf '%s' "$R" | grep -a '"id":7');  chk "mcp: SSE-framed leak redacted"               'sse says \*\+' "$L7"
+L8=$(printf '%s' "$R" | grep -a '"id":8');  chk "mcp: upstream error sanitized to guest"      "upstream call failed" "$L8"
+R=$($G audit t12);                          chk "mcp: remote config audited (no values)"     "mcp: remote mock configured" "$R"
+                                            chk "mcp: remote calls audited"                 "mcp: call mock__echo_auth" "$R"
+                                            chk "mcp: remote policy deny audited"           'mcp: denied call "mock__danger" (policy)' "$R"
+                                            chk "mcp: upstream error audited (sanitized)"   "mcp: call mock__err_http upstream error" "$R"
+if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: audit free of credential values"; else ok "mcp: audit free of credential values"; fi
+
+# t13: operator CLI — config view (names, never values) + live tool probe.
+R=$($G mcp t12)
+chk "mcp cli: config view shows fs server"        "read-only filesystem: root /work"   "$R"
+chk "mcp cli: config view shows remote + auth kind" "auth bearer:T12_MCP_TOKEN"        "$R"
+if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp cli: config view free of values"; else ok "mcp cli: config view free of values"; fi
+R=$($G mcp tools t12)
+chk "mcp cli: live probe lists fs tools"          "fs: list_directory, read_file"      "$R"
+chk "mcp cli: live probe lists remote tools"      "mock: big, echo_auth, err_http, leak, leak_sse" "$R"
+if printf '%s' "$R" | grep -qa 'danger'; then bad "mcp cli: probe honors deny policy"; else ok "mcp cli: probe honors deny policy"; fi
+# Loud refusals at start time (fail closed, never silent degrade):
+OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' -image alpine:latest 2>&1)
+chk "mcp: cloud metadata target refused" "non-public" "$OUT"
+OUT=$($G start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' -image alpine:latest 2>&1)
+chk "mcp: plain HTTP to a public host refused" "plain HTTP" "$OUT"
+kill $MOCKMCP 2>/dev/null
 
 echo "==============================="
 echo "RESULT: $PASS passed, $FAIL failed"

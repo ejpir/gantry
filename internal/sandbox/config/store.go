@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
@@ -54,6 +55,37 @@ func ReadSandboxConfig(dir string) (RunConfig, error) {
 	return cfg, nil
 }
 
+// ReadSandboxForLaunch reads one validated configuration and eagerly resolves
+// only legacy/env secrets. File and exec sources remain in cfg for daemon-side
+// use-time resolution. Callers must hold the sandbox launch lock across this
+// read and daemon spawn so a concurrent revocation cannot be lost.
+func ReadSandboxForLaunch(dir string, getenv func(string) (string, bool)) (RunConfig, map[string]secret.Value, error) {
+	cfg, err := ReadSandboxConfig(dir)
+	if err != nil {
+		return RunConfig{}, nil, err
+	}
+	covered := make(map[string]bool, len(cfg.SecretSources))
+	for _, ns := range cfg.SecretSources {
+		covered[ns.Name] = true
+	}
+	values := map[string]secret.Value{}
+	for _, persisted := range cfg.SecretNames {
+		ns, err := secret.ParseNamedSource(persisted)
+		if err != nil {
+			return RunConfig{}, nil, err
+		}
+		if covered[ns.Name] {
+			continue
+		}
+		resolved, err := secret.ParseSpec(persisted, getenv)
+		if err != nil {
+			return RunConfig{}, nil, err
+		}
+		values[resolved.Name] = resolved.Value
+	}
+	return cfg, values, nil
+}
+
 // LoadConfigStore reads the sandbox's current configuration. The store
 // starts from the on-disk truth; boot-time consumers should read the same
 // snapshot the managers mutate.
@@ -75,9 +107,8 @@ func (s *ConfigStore) Snapshot() RunConfig {
 
 // Mutate applies fn to the live configuration and atomically persists the
 // result. fn must be pure with respect to the configuration (compute the
-// new field values; no I/O). The Shares and Ports slices are cloned before
-// fn runs so rollback cannot be defeated by aliasing; mutations to other
-// fields are still rolled back by value.
+// new field values; no I/O). All mutable slices and pointers are cloned before
+// fn runs so aliases cannot defeat rollback or escape through Snapshot.
 func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,6 +130,11 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 	cfg.Shares = append([]string(nil), cfg.Shares...)
 	cfg.Ports = append([]string(nil), cfg.Ports...)
 	cfg.SecretNames = append([]string(nil), cfg.SecretNames...)
+	cfg.MCPRemotes = append([]string(nil), cfg.MCPRemotes...)
+	cfg.SecretSources = append([]secret.NamedSource(nil), cfg.SecretSources...)
+	for i := range cfg.SecretSources {
+		cfg.SecretSources[i].Source.Argv = append([]string(nil), cfg.SecretSources[i].Source.Argv...)
+	}
 	if cfg.ImageCfg != nil {
 		imageCfg := *cfg.ImageCfg
 		imageCfg.Env = append([]string(nil), imageCfg.Env...)
@@ -114,6 +150,10 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 	if cfg.OAuthBridge != nil {
 		enabled := *cfg.OAuthBridge
 		cfg.OAuthBridge = &enabled
+	}
+	if cfg.OAuthCustody != nil {
+		enabled := *cfg.OAuthCustody
+		cfg.OAuthCustody = &enabled
 	}
 	return cfg
 }
@@ -178,22 +218,59 @@ func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {
 	})
 }
 
+// SetSecretName records or drops a secret by clean name. Entries may
+// carry a host binding ("NAME@host"); matching is by clean name so a
+// dashboard/control update or removal applies to the bound form too.
+// Setting a previously bound secret keeps its binding — use does not
+// imply rebind, and an update is not a rebinding.
 func (s *ConfigStore) SetSecretName(name string, present bool) error {
 	if err := secret.ValidateName(name); err != nil {
 		return err
 	}
 	return s.Mutate(func(cfg *RunConfig) error {
 		names := make([]string, 0, len(cfg.SecretNames)+1)
+		keptBound := ""
 		for _, existing := range cfg.SecretNames {
-			if existing != name {
+			clean, _, err := secret.SplitBinding(secret.HeadOf(existing))
+			if err != nil {
+				clean = existing // tolerate a legacy malformed entry verbatim
+			}
+			if clean != name {
 				names = append(names, existing)
+			} else if strings.ContainsRune(secret.HeadOf(existing), '@') {
+				keptBound = existing
 			}
 		}
 		if present {
-			names = append(names, name)
+			entry := name
+			if keptBound != "" {
+				entry = keptBound
+			}
+			names = append(names, entry)
 			sort.Strings(names)
 		}
 		cfg.SecretNames = names
+		// Keep the source set in lockstep: removal drops the source so a
+		// revoked secret cannot re-resolve on restart; a set keeps an
+		// existing source (binding + file/exec ref survive an update) and
+		// otherwise records the env default, matching v1 resume-from-env.
+		srcs := make([]secret.NamedSource, 0, len(cfg.SecretSources)+1)
+		keptSource := secret.NamedSource{}
+		haveSource := false
+		for _, ns := range cfg.SecretSources {
+			if ns.Name != name {
+				srcs = append(srcs, ns)
+			} else {
+				keptSource, haveSource = ns, true
+			}
+		}
+		if present {
+			if !haveSource {
+				keptSource = secret.NamedSource{Name: name, Source: secret.Source{Kind: secret.SourceEnv, Ref: name}}
+			}
+			srcs = append(srcs, keptSource)
+		}
+		cfg.SecretSources = srcs
 		return nil
 	})
 }

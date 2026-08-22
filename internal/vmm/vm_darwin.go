@@ -289,7 +289,7 @@ const (
 // the question it answers is only about boot, and an idle guest should not
 // be woken for diagnostics.
 func (b *hvfBackend) bootProfiler(stop <-chan struct{}) error {
-	if !b.m.bootTiming.profiling() {
+	if !b.m.bootTracer().profiling() {
 		return nil
 	}
 	ticker := time.NewTicker(bootProfileInterval)
@@ -299,7 +299,7 @@ func (b *hvfBackend) bootProfiler(stop <-chan struct{}) error {
 		case <-stop:
 			return nil
 		case <-ticker.C:
-			if b.m.bootTiming.bootComplete() {
+			if b.m.bootTracer().bootComplete() {
 				return nil
 			}
 			if err := b.kickVCPUs(); err != nil && !b.lifecycle.isStopping() {
@@ -312,7 +312,7 @@ func (b *hvfBackend) bootProfiler(stop <-chan struct{}) error {
 // sampleGuestPC runs on the owning thread after a cancellation (Apple requires
 // vCPU register access there), so the PC is the guest's own.
 func (vc *hvfVCPU) sampleGuestPC() {
-	timeline := vc.b.m.bootTiming
+	timeline := vc.b.m.bootTracer()
 	if !timeline.profiling() || vc.profiled >= maxBootProfileSamples || timeline.bootComplete() {
 		return
 	}
@@ -438,7 +438,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	if debug {
 		workerCount += 2 // SIGINFO dumper and periodic kicker
 	}
-	if m.bootTiming.profiling() {
+	if m.bootTracer().profiling() {
 		workerCount++ // perturbing boot PC sampler
 	}
 	b := &hvfBackend{
@@ -449,7 +449,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		running:     map[int]bool{},
 		secondaries: map[int]chan psciStart{},
 	}
-	m.bootTiming.setRunStats(b.runStats)
+	m.bootTracer().setRunStats(b.runStats)
 	var vc0 *hvfVCPU
 	mainClaimed := false
 	defer func() {
@@ -631,7 +631,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		go m.uart.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	if m.bootTiming.profiling() {
+	if m.bootTracer().profiling() {
 		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
 			b.lifecycle.recordError(b.bootProfiler(stop))
 		})
@@ -677,7 +677,7 @@ func (b *hvfBackend) newVCPU(id int) (_ *hvfVCPU, resultErr error) {
 		id:             id,
 		b:              b,
 		debug:          b.debug,
-		bootAccounting: b.m.bootTiming.profiling(),
+		bootAccounting: b.m.bootTracer().profiling(),
 		wake:           make(chan struct{}, 1),
 		exits:          map[uint64]uint64{},
 		mmioHit:        map[uint64]uint64{},
@@ -787,11 +787,11 @@ func (vc *hvfVCPU) runLoop() error {
 		if firstRun {
 			if vc.id == 0 {
 				// Capture immediately before the boot vCPU's first hv_vcpu_run.
-				vc.b.m.bootTiming.start("vCPU entered HVF")
+				vc.b.m.bootTracer().start("vCPU entered HVF")
 			}
 			firstRun = false
 		}
-		timing := vc.b.m.bootTiming.profiling() && printed < maxTracedExits && !vc.b.m.bootTiming.bootComplete()
+		timing := vc.b.m.bootTracer().profiling() && printed < maxTracedExits && !vc.b.m.bootTracer().bootComplete()
 		var entered time.Time
 		if timing {
 			entered = time.Now()
@@ -811,7 +811,7 @@ func (vc *hvfVCPU) runLoop() error {
 			if ran := time.Since(entered); traced <= alwaysTracedExits || ran >= longExitThreshold {
 				printed++
 				ec := (vc.exit.syndrome >> 26) & 0x3f
-				vc.b.m.bootTiming.traceExit(traced, ran,
+				vc.b.m.bootTracer().traceExit(traced, ran,
 					vc.exit.reason, ec, vc.traceDetail(ec))
 			}
 		}

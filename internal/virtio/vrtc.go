@@ -12,10 +12,16 @@ import (
 // READ/CFG/CLOCK_CAP for one UTC clock backed by the host clock. This is
 // the OpenSynergy virtio-rtc protocol (virtio-spec device-types/rtc), which
 // is also what the reference VMM implements (crates/devices/virtio-rtc) and what
-// the nerdbox kernel's CONFIG_VIRTIO_RTC{_CLASS,_PTP} driver expects:
-// the kernel sets the system time from it at probe (hctosys), and vminitd's
-// clock service keeps it in sync through the /dev/ptp clock the driver
-// registers ("no virtio-rtc PTP clock present" without it).
+// the nerdbox kernel's CONFIG_VIRTIO_RTC{_CLASS,_PTP} driver expects. The
+// kernel sets the system time from it exactly once, at probe (hctosys);
+// the device is pull-only, so keeping wall time synced afterwards is the
+// guest's job: vminitd runs a clock-sync loop (patched in at rootfs build
+// by patches/nerdbox-v0.2.3-clock-sync.patch) that re-reads the driver's
+// /dev/ptp clock every 30s and steps CLOCK_REALTIME. Without that loop
+// guest wall time is one probe reading plus raw counter elapsed — it drifts
+// at the counter crystal's ppm error and, on HVF/WHPX, skips entire
+// host-suspend intervals because the host physical counter stops across
+// sleep (x86 KVM attaches no RTC at all: kvm-clock is host-referenced).
 const (
 	RTCDeviceID = 17
 
@@ -45,9 +51,11 @@ const (
 type RTC struct {
 	core *Core
 	now  func() time.Time // test hook
-	// probes records the first queue activity for postmortems: when the
-	// guest clock stays at epoch, "rtc: first request" in the daemon log
-	// proves the kernel driver reached us (vs. never probing the node).
+	// probes counts requests for the postmortem/heartbeat log: the first
+	// few prove the kernel driver reached us (vs. never probing the node),
+	// and every 120th afterwards keeps the guest's 30s clock-sync polls
+	// visible as an hourly liveness mark (a drought in field logs means the
+	// guest stopped asking).
 	probes atomic.Int32
 }
 
@@ -80,8 +88,8 @@ func (v *RTC) handleQueue(qn int) {
 		case err != nil || len(req) < 8:
 			resp[0] = RTCSEINVAL
 		default:
-			if rtcDebug && v.probes.Add(1) <= 4 {
-				fmt.Fprintf(os.Stderr, "virtio-rtc: request msg_type=%#x len=%d\n", binary.LittleEndian.Uint16(req[0:2]), len(req))
+			if n := v.probes.Add(1); rtcDebug && (n <= 4 || n%120 == 0) {
+				fmt.Fprintf(os.Stderr, "virtio-rtc: request #%d msg_type=%#x len=%d\n", n, binary.LittleEndian.Uint16(req[0:2]), len(req))
 			}
 			v.dispatch(binary.LittleEndian.Uint16(req[0:2]), req, &resp)
 		}

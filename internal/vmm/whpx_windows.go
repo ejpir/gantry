@@ -349,7 +349,7 @@ func (b *whpxBackend) mapHotMemory() error {
 		return fmt.Errorf("map virtio-mem tail: %w", err)
 	}
 	b.hotMemoryMapped = true
-	b.m.bootTiming.note("virtio-mem tail committed+mapped", start, time.Now())
+	b.m.bootTracer().note("virtio-mem tail committed+mapped", start, time.Now())
 	return nil
 }
 
@@ -474,7 +474,7 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 		createdVPs:       make([]bool, m.vcpus),
 		runningVP:        make([]bool, m.vcpus),
 	}
-	if m.bootTiming.profiling() {
+	if m.bootTracer().profiling() {
 		b.profilePorts = make([]uint64, 1<<16)
 		b.profileGPAs = make(map[uint64]uint64)
 	}
@@ -591,8 +591,8 @@ func (b *whpxBackend) bootLoop() error {
 		go m.x86.uartIO.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	m.bootTiming.setRunStats(b.runStats)
-	m.bootTiming.start("vCPU entered WHPX")
+	m.bootTracer().setRunStats(b.runStats)
+	m.bootTracer().start("vCPU entered WHPX")
 	if err := b.startSecondaryVCPUs(); err != nil {
 		return err
 	}
@@ -670,7 +670,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 			continue
 		}
 		var started time.Time
-		if b.m.bootTiming.profiling() {
+		if b.m.bootTracer().profiling() {
 			started = time.Now()
 		}
 		err = whvCall("WHvRunVirtualProcessor", procRunVP,
@@ -692,7 +692,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 		executionState = binary.LittleEndian.Uint16(buf[8:])
 		rflags = binary.LittleEndian.Uint64(buf[40:])
 		reason := binary.LittleEndian.Uint32(buf[0:])
-		if b.m.bootTiming.profiling() {
+		if b.m.bootTracer().profiling() {
 			index := int(b.stats.exits.Add(1))
 			detail := ""
 			switch reason {
@@ -708,7 +708,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 				}
 			}
 			if index <= 64 {
-				b.m.bootTiming.traceExit(index, ran, reason, 0, detail)
+				b.m.bootTracer().traceExit(index, ran, reason, 0, detail)
 			}
 		}
 		if devices.DebugIO {
@@ -762,7 +762,7 @@ func (b *whpxBackend) runVPLoop(vp uint32) error {
 		default:
 			// interrupt window, eoi, hypercall, rdtsc: nothing to do
 		}
-		if b.m.bootTiming.bootComplete() {
+		if b.m.bootTracer().bootComplete() {
 			b.profileSummary.Do(b.printBootProfileSummary)
 		}
 	}

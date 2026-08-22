@@ -38,6 +38,8 @@ usage:
   gantry start <name> [flags]       # create a long-lived sandbox VM
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
+  gantry audit <name>               # security-event trail (credentials, secrets, custody)
+  gantry mcp <name> [tools]         # MCP gateway: configured servers; live tool list
   gantry tui                        # interactive local sandbox dashboard
   gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
@@ -138,8 +140,30 @@ func runMain(args []string) int {
 		// Hidden worker role (Phase 2): owns the hypervisor, guest RAM,
 		// devices, and the vsock data plane.
 		return vmmworker.Main()
+	case "_mc-spike":
+		// Hidden spike role (docs/kubernetes-runtimeclass.md Phase K0):
+		// boot one VM and verify multi-container guest support.
+		return sandbox.CmdMCSpike(argv)
+	case "_rootfs-spike":
+		// Hidden spike role (docs/kubernetes-runtimeclass.md Phase K0):
+		// export a host snapshot through the share hub as a guest rootfs.
+		return sandbox.CmdRootfsSpike(argv)
 	case "ls":
 		return sandbox.CmdLs()
+	case "audit":
+		if len(argv) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: gantry audit <name>")
+			return 2
+		}
+		lines, err := controlcmd.AuditTail(argv[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry audit:", err)
+			return 1
+		}
+		for _, line := range lines {
+			fmt.Println(line)
+		}
+		return 0
 	case "tui":
 		return dashboard.Run(dashboardsvc.NewDashboardService())
 	case "stop", "delete":
@@ -176,6 +200,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return sandbox.CmdImage(argv), true
 	case "share":
 		return controlcmd.CmdShare(argv), true
+	case "mcp":
+		return sandbox.CmdMCP(argv), true
 	case "ports":
 		return controlcmd.CmdPorts(argv), true
 	case "net-policy":

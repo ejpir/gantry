@@ -67,17 +67,19 @@ flags:`)
 	for _, w := range warnings {
 		fmt.Fprintln(os.Stderr, "gantry start:", w)
 	}
-	secrets, _, err := rf.ResolveSecrets()
+	// -secret specs resolve DAEMON-side at use time (rotation without
+	// restart); the CLI handshake carries only literal -secret-file values.
+	secrets, _, _, err := rf.ResolveSecretSources()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
 	timeline.mark("launcher secrets resolved")
-	if len(secrets) > 0 && cfg.Net && cfg.NetPol == "" {
+	if secretCount := len(secrets) + len(cfg.SecretSources); secretCount > 0 && cfg.Net && cfg.NetPol == "" {
 		fmt.Fprintf(os.Stderr, `gantry start: %d secret(s) injected with the default egress policy (internet
 allowed). Consider -net-policy with a domain allowlist so an injected
 agent cannot send them anywhere.
-`, len(secrets))
+`, secretCount)
 	}
 
 	return launchSandboxModeWithSpawnerTiming(name, cfg, secrets, true, false, startSandboxDaemon, timeline.mark)
@@ -119,24 +121,10 @@ func CmdResume(name string) int {
 	defer func() { _ = launchLock.Close() }()
 
 	dir := layout.Dir(name)
-	b, err := os.ReadFile(filepath.Join(dir, "sandbox.json"))
+	cfg, secrets, err := config.ReadSandboxForLaunch(dir, os.LookupEnv)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has no saved configuration: %v\n", name, err)
+		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has no valid saved configuration: %v\n", name, err)
 		return 1
-	}
-	var cfg config.RunConfig
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has a corrupt configuration: %v\n", name, err)
-		return 1
-	}
-	secrets := make(map[string]secret.Value, len(cfg.SecretNames))
-	for _, secretName := range cfg.SecretNames {
-		name, value, err := secret.Parse(secretName, os.LookupEnv)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "gantry resume:", err)
-			return 1
-		}
-		secrets[name] = value
 	}
 	return launchSandboxLocked(name, cfg, secrets, false, false, startSandboxDaemon)
 }
@@ -328,7 +316,7 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 		writef(errorOutput, "%s: sandbox %q is already running\n", label, name)
 		return 1
 	}
-	handshake, err := secretsHandshakeJSON(secrets)
+	handshake, err := secretsHandshakeJSON(secrets, cfg.SecretSources)
 	if err != nil {
 		writeLine(errorOutput, label+":", err)
 		return 1

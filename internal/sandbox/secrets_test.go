@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/secret"
@@ -50,23 +51,30 @@ func TestSecretsHandshake(t *testing.T) {
 	handshake, err := secretsHandshakeJSON(map[string]secret.Value{
 		"GITHUB_TOKEN": "ghp_canary",
 		"NPM":          "npm_canary",
+	}, []secret.NamedSource{
+		{Name: "FILE_TOK", Source: secret.Source{Kind: secret.SourceFile, Ref: "/run/secrets/tok", Binding: "git.test", Refresh: 2 * time.Second}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = w.WriteString(handshake)
 	_ = w.Close()
-	got, err := readSecretsHandshake(r)
+	got, gotSources, err := readSecretsHandshake(r)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || got["GITHUB_TOKEN"].Raw() != "ghp_canary" || got["NPM"].Raw() != "npm_canary" {
 		t.Errorf("round-trip = %v", got)
 	}
+	if len(gotSources) != 1 || gotSources[0].Name != "FILE_TOK" ||
+		gotSources[0].Source.Kind != secret.SourceFile || gotSources[0].Source.Ref != "/run/secrets/tok" ||
+		gotSources[0].Source.Binding != "git.test" || gotSources[0].Source.Refresh != 2*time.Second {
+		t.Errorf("source round-trip = %+v", gotSources)
+	}
 
 	r2, w2, _ := os.Pipe()
 	_ = w2.Close() // EOF, no handshake
-	got, err = readSecretsHandshake(r2)
+	got, _, err = readSecretsHandshake(r2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,14 +88,14 @@ func TestSecretsHandshakeBounds(t *testing.T) {
 	for i := range controlproto.SecretsHandshakeMaxEntries + 1 {
 		many[fmt.Sprintf("SECRET_%d", i)] = "x"
 	}
-	if _, err := secretsHandshakeJSON(many); err == nil || !strings.Contains(err.Error(), "too many secrets") {
+	if _, err := secretsHandshakeJSON(many, nil); err == nil || !strings.Contains(err.Error(), "too many secrets") {
 		t.Fatalf("entry-limit error = %v, want count rejection", err)
 	}
 
 	oversized := map[string]secret.Value{
 		"TOKEN": secret.Value(strings.Repeat("x", controlproto.SecretsHandshakeMaxBytes)),
 	}
-	if _, err := secretsHandshakeJSON(oversized); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := secretsHandshakeJSON(oversized, nil); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversized encode error = %v, want size rejection", err)
 	}
 
@@ -102,7 +110,7 @@ func TestSecretsHandshakeBounds(t *testing.T) {
 	if _, err := f.Seek(0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readSecretsHandshake(f); err == nil || !strings.Contains(err.Error(), "too large") {
+	if _, _, err := readSecretsHandshake(f); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("oversized read error = %v, want size rejection", err)
 	}
 }

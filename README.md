@@ -98,6 +98,10 @@ architecture, and the security model.
   stored in sandbox state or command-line arguments.
 - **Agent sign-in:** localhost OAuth callbacks for Codex, Claude, and Pi can be
   bridged into a sandbox automatically.
+- **MCP gateway:** agents can use MCP tools without holding server
+  credentials — the host-side gateway injects them into outbound requests,
+  binds them to their origin, and redacts them from results
+  ([manual](docs/gantry/mcp-gateway.md)).
 - **Dashboard:** create, start, stop, and enter sandboxes; manage traffic,
   rules, mounts, ports, and secrets.
 

@@ -91,6 +91,32 @@ func (t *bootTimeline) statsSuffix() string {
 		s.IdleWaits, durationMillis(s.IdleBlocked), s.IdleCapped)
 }
 
+// bootTracer is the backend-facing slice of the boot timeline. Hypervisor
+// backends feed instrumentation exclusively through this seam (see
+// Machine.bootTracer), so their coupling is these methods rather than the
+// concrete *bootTimeline: device-milestone marking (mark) and console
+// stamping (stampLine) stay Machine-owned. Every method is nil-tolerant, so
+// a disabled timeline needs no nil checks at the call site.
+type bootTracer interface {
+	// start records the boot vCPU's first entry into the hypervisor.
+	start(phase string)
+	// note records a host-side phase with its own duration.
+	note(phase string, start, end time.Time)
+	// profiling reports whether the perturbing diagnostics are enabled.
+	profiling() bool
+	// bootComplete reports the last milestone having passed, so boot-only
+	// diagnostics can retire themselves.
+	bootComplete() bool
+	// setRunStats installs the backend's vCPU counters between milestones.
+	setRunStats(report runStatsFunc)
+	// traceExit records one early hypervisor round trip.
+	traceExit(index int, ran time.Duration, reason uint32, ec uint64, detail string)
+	// sample records where the guest was when it was interrupted.
+	sample(cpu int, pc, textBase uint64, detail string)
+}
+
+var _ bootTracer = (*bootTimeline)(nil)
+
 func newBootTimeline(origin time.Time, out io.Writer) *bootTimeline {
 	if origin.IsZero() {
 		return nil

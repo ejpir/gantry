@@ -18,8 +18,8 @@ case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/gantry-rootfs.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 SRC="$WORK/nerdbox"
-NERDBOX_VERSION=v0.2.1
-NERDBOX_COMMIT=f683c1c4ec30533f90eab8f3bfe38145d881a170
+NERDBOX_VERSION=v0.2.3
+NERDBOX_COMMIT=cd2c23fe413cdea8176760d63375d3271aa7e611
 
 git clone --quiet --filter=blob:none --no-checkout https://github.com/containerd/nerdbox.git "$SRC"
 git -C "$SRC" fetch --quiet --depth 1 origin "$NERDBOX_COMMIT"
@@ -28,11 +28,28 @@ git -C "$SRC" checkout --quiet --detach "$NERDBOX_COMMIT"
 	echo "nerdbox $NERDBOX_VERSION resolved to an unexpected commit" >&2
 	exit 1
 }
-git -C "$SRC" apply --unidiff-zero --check "$ROOT/patches/nerdbox-v0.2.1-quiet-boot.patch"
-git -C "$SRC" apply --unidiff-zero "$ROOT/patches/nerdbox-v0.2.1-quiet-boot.patch"
+for p in "$ROOT/patches/nerdbox-$NERDBOX_VERSION"-*.patch; do
+	[ -e "$p" ] || continue
+	git -C "$SRC" apply --unidiff-zero --check "$p"
+	git -C "$SRC" apply --unidiff-zero "$p"
+done
 
 mkdir -p "$WORK/out" "$(dirname "$OUT")"
-docker buildx build --progress=plain \
+# Exporting the rootfs needs BuildKit's local exporter (--output). Probe the
+# buildx plugin and fall back to the classic BuildKit frontend
+# (DOCKER_BUILDKIT=1 docker build) on hosts whose buildx is absent or too
+# old to parse modern flags.
+BUILD="docker buildx build"
+if ! docker buildx build --help 2>&1 | grep -q -- "--output"; then
+	export DOCKER_BUILDKIT=1
+	if docker build --help 2>&1 | grep -q -- "--output"; then
+		BUILD="docker build"
+	else
+		echo "error: need Docker with BuildKit (docker buildx) to export the rootfs" >&2
+		exit 1
+	fi
+fi
+$BUILD --progress=plain \
 	--file "$SRC/Dockerfile" \
 	--platform "linux/$DOCKER_ARCH" \
 	--target erofs \

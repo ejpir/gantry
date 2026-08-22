@@ -23,6 +23,20 @@ if [ "$(uname)" = "Darwin" ]; then
   codesign --sign - --entitlements "$ROOT/config/entitlements.plist" -f "$OUT" 2>&1 | grep -v 'replacing existing signature' || true
 fi
 
+# Guest helper: cross-compiled for the VM's linux userland. Always rebuild
+# it — the daemon delivers this exact file into guests at start, so a
+# stale copy silently lacks new modes (mcp-serve, credhelper, ...).
+GUEST_MACHINE=$(uname -m)
+GUEST_GOARCH=$GUEST_MACHINE
+GUEST_ASSET_ARCH=$GUEST_MACHINE
+[ "$GUEST_MACHINE" = "x86_64" ] && GUEST_GOARCH=amd64
+[ "$GUEST_MACHINE" = "aarch64" ] && GUEST_GOARCH=arm64
+[ "$GUEST_GOARCH" = "amd64" ] && GUEST_ASSET_ARCH=x86_64
+[ "$GUEST_GOARCH" = "arm64" ] && GUEST_ASSET_ARCH=arm64
+echo "== build guest helper (linux/$GUEST_GOARCH)"
+CGO_ENABLED=0 GOOS=linux GOARCH=$GUEST_GOARCH go build -trimpath -ldflags='-s -w' \
+  -o "$ARTIFACTS/gantry-guest-$GUEST_ASSET_ARCH" ./cmd/gantry-guest
+
 BUSYBOX=${BUSYBOX:-/bin/busybox}
 if [ ! -x "$BUSYBOX" ] || ! file "$BUSYBOX" 2>/dev/null | grep -q "ELF.*aarch64.*statically"; then
   echo "== skip guest initramfs (no static Linux arm64 busybox at $BUSYBOX;"

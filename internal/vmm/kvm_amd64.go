@@ -176,7 +176,7 @@ func (kvmX86Platform) run(m *Machine) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	phaseStart := time.Now()
-	m.bootTiming.note("KVM runner scheduled", phaseStart, phaseStart)
+	m.bootTracer().note("KVM runner scheduled", phaseStart, phaseStart)
 
 	kvmFD, err := m.takeKVM()
 	if err != nil {
@@ -194,14 +194,14 @@ func (kvmX86Platform) run(m *Machine) error {
 			_ = b.Close()
 		}
 	}()
-	m.bootTiming.note("KVM device opened", phaseStart, time.Now())
+	m.bootTracer().note("KVM device opened", phaseStart, time.Now())
 
 	phaseStart = time.Now()
 	vmFD, err := k.createVM()
 	if err != nil {
 		return fmt.Errorf("KVM_CREATE_VM: %w", err)
 	}
-	m.bootTiming.note("KVM VM created", phaseStart, time.Now())
+	m.bootTracer().note("KVM VM created", phaseStart, time.Now())
 	b.vmFD = vmFD
 	b.vmOpen = true
 
@@ -213,7 +213,7 @@ func (kvmX86Platform) run(m *Machine) error {
 	if err := ioctl(vmFD, kvmCreatePit2, unsafe.Pointer(&pit)); err != nil {
 		return fmt.Errorf("KVM_CREATE_PIT2: %w", err)
 	}
-	m.bootTiming.note("KVM irqchip+PIT created", phaseStart, time.Now())
+	m.bootTracer().note("KVM irqchip+PIT created", phaseStart, time.Now())
 
 	phaseStart = time.Now()
 	for slot, region := range m.ramRegions() {
@@ -227,7 +227,7 @@ func (kvmX86Platform) run(m *Machine) error {
 			return fmt.Errorf("KVM_SET_USER_MEMORY_REGION(slot %d, GPA %#x): %w", slot, region.GuestBase, err)
 		}
 	}
-	m.bootTiming.note("KVM RAM slots installed", phaseStart, time.Now())
+	m.bootTracer().note("KVM RAM slots installed", phaseStart, time.Now())
 
 	// Host CPUID (incl. KVM paravirt leaves: kvm-clock, ...) for all vCPUs.
 	phaseStart = time.Now()
@@ -247,7 +247,7 @@ func (kvmX86Platform) run(m *Machine) error {
 	if err != nil {
 		return fmt.Errorf("KVM_CHECK_EXTENSION(TSC_DEADLINE_TIMER): %w", err)
 	}
-	m.bootTiming.note("KVM capabilities queried", phaseStart, time.Now())
+	m.bootTracer().note("KVM capabilities queried", phaseStart, time.Now())
 	phaseStart = time.Now()
 	for i := 0; i < m.vcpus; i++ {
 		r, _, errno := syscall.Syscall(syscall.SYS_IOCTL, vmFD, kvmCreateVcpu, uintptr(i))
@@ -272,7 +272,7 @@ func (kvmX86Platform) run(m *Machine) error {
 		}
 		vc.run = kvmRunStruct{data: runBuf}
 	}
-	m.bootTiming.note("KVM vCPUs created", phaseStart, time.Now())
+	m.bootTracer().note("KVM vCPUs created", phaseStart, time.Now())
 
 	b.prepareVCPURuns()
 	defer b.abandonVCPURuns()
@@ -341,7 +341,7 @@ func (b *kvmX86Backend) bootLoop() error {
 	if err := ioctl(vc.fd, kvmSetRegs, unsafe.Pointer(&regs)); err != nil {
 		return fmt.Errorf("KVM_SET_REGS: %w", err)
 	}
-	m.bootTiming.note("KVM BSP registers set", phaseStart, time.Now())
+	m.bootTracer().note("KVM BSP registers set", phaseStart, time.Now())
 
 	fmt.Printf("booting guest under KVM/x86-64 (%d vCPU max)\n", m.vcpus)
 	fmt.Println("------------------------------------------------")
@@ -350,7 +350,7 @@ func (b *kvmX86Backend) bootLoop() error {
 		go m.x86.uartIO.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	m.bootTiming.start("vCPU entered KVM")
+	m.bootTracer().start("vCPU entered KVM")
 	return b.runVCPU(vc, b.runVCPULoop)
 }
 

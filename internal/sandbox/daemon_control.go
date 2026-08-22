@@ -7,13 +7,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
+	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 )
 
@@ -44,22 +47,66 @@ func (d *daemonRuntime) startControl() error {
 		streamDial = func() (net.Conn, error) { return d.runner.DialStream(1026) }
 	}
 	d.broker = &broker{
-		cfg:        d.cfg,
-		dir:        d.dir,
-		rpc:        d.rpc,
-		streamSock: filepath.Join(d.dir, "listen-1026.sock"),
-		streamDial: streamDial,
-		secrets:    d.secrets,
-		store:      d.store,
-		shares:     d.shares,
-		ports:      d.ports,
-		netPolicy:  control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
-		capture:    packetCaptureBackendFor(d.network, d.runner),
-		sessions:   map[string]chan struct{}{},
-		sessionCtl: map[string]net.Conn{},
-		shutdown:   d.shutdown,
+		cfg:         d.cfg,
+		dir:         d.dir,
+		rpc:         d.rpc,
+		streamSock:  filepath.Join(d.dir, "listen-1026.sock"),
+		streamDial:  streamDial,
+		secretStore: d.secretStore,
+		store:       d.store,
+		shares:      d.shares,
+		ports:       d.ports,
+		netPolicy:   control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
+		capture:     packetCaptureBackendFor(d.network, d.runner),
+		sessions:    map[string]chan struct{}{},
+		sessionCtl:  map[string]net.Conn{},
+		shutdown:    d.shutdown,
+		audit:       d.audit,
 	}
-	d.broker.oauth = oauthbridge.New(d.broker.oauthExec, d.broker.cfg.OAuthBridgeEnabled())
+	d.secretStore.SetLogger(d.broker.auditf)
+	// The OAuth bridge replays callbacks through the generic internal exec,
+	// with its own response limit and op attribution bound here.
+	d.broker.oauth = oauthbridge.New(func(args []string, timeout time.Duration) ([]byte, int, error) {
+		return d.broker.internalExec(strings.NewReader(""), args, timeout,
+			oauthbridge.MaxReplayResponseSize, "oauth callback replay")
+	}, d.broker.cfg.OAuthBridgeEnabled())
+	// Credential broker: guest helpers reach it over vsock (the VMM dials
+	// <dir>/1027.sock when a guest connects to the broker port). The egress
+	// gate follows the live policy object.
+	if d.network != nil && d.network.Policy != nil {
+		d.broker.domainAllowed = d.network.Policy.DomainAllowed
+	}
+	credLn, err := net.Listen("unix", filepath.Join(d.dir, credhelper.SockName))
+	if err != nil {
+		return fmt.Errorf("credential broker listener: %w", err)
+	}
+	// credhelper decision lines self-prefix "credhelper: ".
+	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.broker.domainAllowed, d.broker.auditf)
+	// OAuth custody (opt-in): the daemon completes guest-initiated logins
+	// host-side, holds refresh tokens (0600 disk sync under the sandbox
+	// dir for restart durability), and pushes fresh access tokens into
+	// the guest. Requires the callback bridge to intercept callbacks.
+	if d.cfg.OAuthCustodyEnabled() {
+		if d.broker.oauth == nil {
+			_ = credLn.Close()
+			return fmt.Errorf("oauth custody requires an active OAuth callback bridge")
+		}
+		registry := oauthtokens.New()
+		registry.AttachFile(d.dir)
+		registry.SetLogger(func(f string, a ...any) { d.broker.auditf("oauth tokens: "+f, a...) })
+		d.broker.custodyRegistry = registry
+		cm := newCustodyManager(d.broker, registry)
+		d.broker.cred.SetOAuthHandler(cm.handleOAuthOp)
+		d.broker.oauth.SetCustodyConsumer(cm.consumeCallback)
+		cm.restoreRestart()
+		fmt.Printf("daemon: oauth custody enabled (refresh tokens held host-side)\n")
+	}
+	// MCP gateway (opt-in): vsock-bridged session mux with contained
+	// local servers (docs/mcp-gateway.md).
+	if err := d.startMCPGateway(); err != nil {
+		return err
+	}
+	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)
 	return nil
 }

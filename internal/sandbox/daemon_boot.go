@@ -25,11 +25,16 @@ func (d *daemonRuntime) load() error {
 	// The secrets handshake arrives on stdin before anything else. Refuse a
 	// malformed or oversized launcher handshake rather than silently starting
 	// a sandbox without the secrets the caller expected to inject.
-	secrets, err := readSecretsHandshake(os.Stdin)
+	secrets, sources, err := readSecretsHandshake(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("secrets handshake: %w", err)
 	}
-	d.secrets = secrets
+	d.audit = &auditRing{}
+	d.secretStore = newSecretStore(secrets, sources, func(f string, a ...any) {
+		line := fmt.Sprintf(f, a...)
+		d.audit.append(line)
+		fmt.Printf("daemon: %s\n", line)
+	})
 
 	d.dir = layout.Dir(d.name)
 	// Revalidate the local control boundary before reading configuration. On

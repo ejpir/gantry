@@ -29,6 +29,29 @@ func TestValidSandboxName(t *testing.T) {
 	}
 }
 
+func TestDeleteRefusesWhileLaunchLockHeld(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	dir := layout.Dir("booting")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "sandbox.json")
+	if err := os.WriteFile(marker, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := layout.HoldLaunchLock("booting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := deleteSandbox("booting"); err == nil || !strings.Contains(err.Error(), "launching") {
+		t.Fatalf("deleteSandbox = %v, want launching conflict", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("delete removed state while launch lock was held: %v", err)
+	}
+}
+
 func TestCleanupSandboxRuntimePreservesConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	for _, name := range []string{"sandbox.json", "network-traffic.json", "vmm.pid", "ready", daemonReadySocketName, "ctl.sock", "shares.json"} {
@@ -172,7 +195,7 @@ func TestBrokerSetResources(t *testing.T) {
 func TestBrokerMutatesSecretsWithoutPersistingValues(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, config.RunConfig{})
-	br := &broker{store: store, secrets: map[string]secret.Value{}, sessions: map[string]chan struct{}{}}
+	br := &broker{store: store, secretStore: secret.NewStore(os.LookupEnv, nil), sessions: map[string]chan struct{}{}}
 	request := controlproto.Request{
 		Op: "secret.set", ID: "add-secret",
 		Secret: &controlproto.SecretRequest{Name: "API_TOKEN", Value: secret.Value("super-secret-value")},

@@ -4,16 +4,20 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
+	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
 )
@@ -76,6 +80,17 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 	if err := r.initialize(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	// Session options are structural and side-effect free. Resolve them before
+	// secrets so -mcp-remote (which implies MCP) also stages the guest helper.
+	if err := r.resolveSessionOptions(); err != nil {
+		return r.cfg, r.warnings, err
+	}
+	// Secrets validate before any on-disk artifacts are created (the
+	// per-sandbox writable layer in particular): a bad -secret spec must
+	// fail the start without leaving a fresh 512 MiB rwlayer behind.
+	if err := r.resolveSecrets(); err != nil {
+		return r.cfg, r.warnings, err
+	}
 	if err := r.resolveRuntime(); err != nil {
 		return r.cfg, r.warnings, err
 	}
@@ -93,9 +108,6 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 	}
 	mark("launcher writable layer resolved")
 	if err := r.resolveNetworking(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	if err := r.resolveSessionOptions(); err != nil {
 		return r.cfg, r.warnings, err
 	}
 	if err := r.normalizeAndValidatePaths(); err != nil {
@@ -335,12 +347,71 @@ func (r *runResolver) resolveNetworking() error {
 	return nil
 }
 
-func (r *runResolver) resolveSessionOptions() error {
-	_, names, err := r.flags.ResolveSecrets()
+func (r *runResolver) resolveSecrets() error {
+	_, sources, names, err := r.flags.ResolveSecretSources()
 	if err != nil {
 		return err
 	}
 	r.cfg.SecretNames = names
+	r.cfg.SecretSources = sources
+	// Host-bound secrets (NAME@host), OAuth custody, and the MCP gateway
+	// all need the multicall helper inside the guest (credhelper / oauth
+	// login / mcp-proxy / mcp-serve modes).
+	// Stage the asset here — during CLI resolution, with progress — so a
+	// first-run download never lands on the VM boot path. Failure to stage
+	// is not fatal: the daemon warns loudly at delivery time instead.
+	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP {
+		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
+		if err != nil {
+			// Not fatal: the daemon warns loudly at delivery time instead.
+			r.report("guest tools for bound secrets not staged: %v", err)
+		} else {
+			// The daemon runs with cwd "/": persist the resolved absolute
+			// path so its asset lookup cannot diverge from the CLI's.
+			if err := makeAbsolute("guest-tools", &path); err != nil {
+				return err
+			}
+			r.cfg.GuestTools = path
+		}
+	}
+	r.warnBoundSecretsVsPolicy(names, sources)
+	return nil
+}
+
+// warnBoundSecretsVsPolicy surfaces, at sandbox creation time, bound
+// secrets whose domains the egress policy's domain allowlist does not
+// cover: the broker would hold the value but the credhelper refuses every
+// guest request for it (a brokered token never outruns the firewall), an
+// expensive no-op the owner should hear about before boot. With no
+// allowlist the policy does not filter by name at all, so there is
+// nothing to warn about; a policy that fails to parse is reported by
+// network bring-up, not here.
+func (r *runResolver) warnBoundSecretsVsPolicy(names []string, sources []secret.NamedSource) {
+	if r.flags.NetPol == nil || *r.flags.NetPol == "" {
+		return
+	}
+	policy, err := netpol.Load(*r.flags.NetPol)
+	if err != nil {
+		return
+	}
+	warn := func(name, binding string) {
+		if binding != "" && !policy.DomainAllowed(binding) {
+			r.report("WARNING: bound secret %s (@%s) is not covered by the -net-policy domain allowlist; the credential broker will refuse guest requests for it", name, binding)
+		}
+	}
+	for _, name := range names {
+		_, binding, err := secret.SplitBinding(name)
+		if err != nil {
+			continue // malformed specs fail earlier, at secret parse
+		}
+		warn(name, binding)
+	}
+	for _, s := range sources {
+		warn(s.Name, s.Source.Binding)
+	}
+}
+
+func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.ProcessIsolation = *r.flags.ProcessIsolation
 	if err := config.ValidateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
 		return fmt.Errorf("-process-isolation must be auto, required, or off, got %q", r.cfg.ProcessIsolation)
@@ -349,6 +420,43 @@ func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.AllowLN = *r.flags.AllowLN
 	enabled := *r.flags.OAuthBridge
 	r.cfg.OAuthBridge = &enabled
+	custody := *r.flags.OAuthCustody
+	r.cfg.OAuthCustody = &custody
+	if custody && !enabled {
+		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
+	}
+	r.cfg.MCP = *r.flags.MCP
+	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
+	r.cfg.MCPFSUser = *r.flags.MCPFSUser
+	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
+	if len(r.cfg.MCPRemotes) > 0 {
+		r.cfg.MCP = true // remotes imply the gateway
+	}
+	// Structural validation happens here (before any boot work) so a bad
+	// spec refuses the start loudly and immediately; the daemon re-parses
+	// for secret/custody resolution against its live stores.
+	for _, spec := range r.cfg.MCPRemotes {
+		if _, err := parseMCPRemote(spec); err != nil {
+			return fmt.Errorf("-mcp-remote %q: %w", spec, err)
+		}
+	}
+	if r.cfg.MCP {
+		if strings.TrimSpace(r.cfg.MCPFSUser) == "" {
+			return fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
+		}
+		identity := strings.TrimSpace(r.cfg.MCPFSUser)
+		r.cfg.MCPFSUser = identity
+		uidText, _, _ := strings.Cut(identity, ":")
+		uid, numericUIDErr := strconv.ParseUint(uidText, 10, 32)
+		if identity == "root" || (numericUIDErr == nil && uid == 0) {
+			return fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
+		}
+		// This path is interpreted inside the Linux guest, independent of the
+		// host OS. filepath.IsAbs would reject "/work" on Windows.
+		if !path.IsAbs(r.cfg.MCPFSRoot) {
+			return fmt.Errorf("-mcp-fs-root must be an absolute guest path, got %q", r.cfg.MCPFSRoot)
+		}
+	}
 	return nil
 }
 

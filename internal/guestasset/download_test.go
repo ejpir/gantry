@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,78 @@ func TestEnsureExisting(t *testing.T) {
 	}
 	if body, err := os.ReadFile(dest); err != nil || string(body) != "staged" {
 		t.Fatalf("existing artifact changed: body=%q err=%v", body, err)
+	}
+}
+
+func TestEnsureRejectsPreplantedTemporaryCacheRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not generally available to unprivileged Windows tests")
+	}
+	oldVersion, oldCache, oldHome, oldTemp, oldIdentity := Version, userCacheDir, userHomeDir, systemTempDir, currentUserIdentity
+	t.Cleanup(func() {
+		Version, userCacheDir, userHomeDir, systemTempDir, currentUserIdentity = oldVersion, oldCache, oldHome, oldTemp, oldIdentity
+	})
+	Version = "v1.2.3"
+	userCacheDir = func() (string, error) { return "", os.ErrNotExist }
+	userHomeDir = func() (string, error) { return "", os.ErrNotExist }
+	temp := t.TempDir()
+	systemTempDir = func() string { return temp }
+	currentUserIdentity = func() string { return "victim" }
+	attacker := t.TempDir()
+	root := filepath.Join(temp, fallbackAssetDirName())
+	if err := os.Symlink(attacker, root); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	dest := releaseAssetPath("gantry-kernel-arm64")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(attacker, "assets", Version, "gantry-kernel-arm64")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(attacker, "assets", Version, "gantry-kernel-arm64"), []byte("preplanted"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureKernel(dest, nil); err == nil || !strings.Contains(err.Error(), "secure temporary asset cache") {
+		t.Fatalf("preplanted fallback result = %v", err)
+	}
+}
+
+func TestEnsureRejectsPreplantedAssetSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not generally available to unprivileged Windows tests")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "attacker-file")
+	if err := os.WriteFile(target, []byte("not a release artifact"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "gantry-kernel-arm64")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureKernel(link, nil); err == nil || !strings.Contains(err.Error(), "real regular file") {
+		t.Fatalf("EnsureKernel symlink error = %v", err)
+	}
+}
+
+func TestEnsureHardensExistingAssetPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gantry-guest-arm64")
+	if err := os.WriteFile(path, []byte("guest helper"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureGuestTools(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Windows executes binaries by file type rather than POSIX mode bits;
+	// SecureRegularFile hardens its DACL instead (covered by localsec's
+	// Windows-specific tests).
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("existing helper mode = %o, want executable without group/other write", info.Mode().Perm())
 	}
 }
 
@@ -296,4 +369,20 @@ func assertDoesNotExist(t *testing.T, path string) {
 
 func writeString(w http.ResponseWriter, value string) {
 	_, _ = w.Write([]byte(value))
+}
+
+func TestGuestToolsAssetNames(t *testing.T) {
+	for _, arch := range []string{"arm64", "x86_64"} {
+		if !downloadable("gantry-guest-"+arch, guestToolsAsset) {
+			t.Fatalf("gantry-guest-%s not downloadable", arch)
+		}
+	}
+	if downloadable("gantry-guest-riscv64", guestToolsAsset) {
+		t.Fatal("unsupported arch accepted")
+	}
+	// DefaultGuestTools must always name a downloadable asset so a missing
+	// cache can bootstrap from the release.
+	if !downloadable(filepath.Base(DefaultGuestTools()), guestToolsAsset) {
+		t.Fatalf("DefaultGuestTools() = %q not downloadable", DefaultGuestTools())
+	}
 }

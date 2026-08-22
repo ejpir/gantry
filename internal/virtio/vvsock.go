@@ -112,15 +112,22 @@ type Vsock struct {
 	conns         map[uint64]*vsockConn
 	pending       pendingRing[vsockPkt] // bounded outbound FIFO (control + data)
 	pendingCredit map[uint64]int        // connection key -> coalescible CREDIT_UPDATE slot
-	listeners     []net.Listener        // AddListen sockets (closed at VM teardown)
-	core          *Core
-	verboseLog    bool
-	nextHostPort  uint32
-	frameStorage  []byte
-	closing       bool
-	workers       sync.WaitGroup
-	closeOnce     sync.Once
-	closeErr      error
+	// spaceSig is closed and replaced when popPending drops the FIFO below
+	// the data threshold, waking pumpHost goroutines parked on a full
+	// queue (broadcast-channel pattern; always touched under core.mu).
+	spaceSig     chan struct{}
+	listeners    []net.Listener // AddListen sockets (closed at VM teardown)
+	core         *Core
+	verboseLog   bool
+	nextHostPort uint32
+	frameStorage []byte
+	// rxMissStreak counts consecutive consumed rx descriptors that could
+	// not carry the current pending head packet; bounded by rxMiss.
+	rxMissStreak int
+	closing      bool
+	workers      sync.WaitGroup
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func NewVsock(guestCID uint64, forwardDir string) *Vsock {
@@ -130,6 +137,7 @@ func NewVsock(guestCID uint64, forwardDir string) *Vsock {
 		forwardDir:    forwardDir,
 		conns:         map[uint64]*vsockConn{},
 		pendingCredit: map[uint64]int{},
+		spaceSig:      make(chan struct{}),
 		nextHostPort:  0x100000,
 		verboseLog:    os.Getenv("GANTRY_DEBUG_VSOCK") != "",
 		dial: func(port uint32) (net.Conn, error) {
@@ -228,6 +236,7 @@ func (v *Vsock) reset() {
 	}
 	v.pending.Reset()
 	clear(v.pendingCredit)
+	v.rxMissStreak = 0
 }
 
 func (v *Vsock) configRead(off uint64, p []byte) {
@@ -527,6 +536,11 @@ func (v *Vsock) popPending() {
 		}
 	}
 	v.pending.Pop()
+	if v.spaceSig != nil && v.pending.Len() < vsockMaxPending-vsockControlReserve {
+		// A data slot is free: wake any pumpHost parked on the full queue.
+		close(v.spaceSig)
+		v.spaceSig = make(chan struct{})
+	}
 }
 
 func (v *Vsock) rxCntFor(trigger vsockHdr) uint32 {
@@ -581,21 +595,53 @@ const (
 // slice allocation per packet without limit against a stalled consumer.
 const vsockOutQMaxPackets = 1024
 
+// vsockMaxRxPayload bounds ONE host->guest RW packet's payload so the frame
+// always fits a single guest-posted rx buffer: virtio-vsock has no packet
+// reassembly across buffers (each used buffer is one complete packet to the
+// Linux driver), and stock Linux posts single-descriptor rx buffers of
+// SKB_WITH_OVERHEAD(4 KiB) = 3776 bytes on 64-bit (include/linux/
+// virtio_vsock.h VIRTIO_VSOCK_DEFAULT_RX_BUF_SIZE, posted by
+// virtio_vsock_rx_fill). An oversized frame is undeliverable by
+// construction — it drains a full ring of buffers in len-0 misses until the
+// rxMiss backstop resets the connection (observed in production with a
+// 4212-byte frame). 2048 keeps a 1.7 KiB margin against kernel struct
+// drift; chunking happens naturally by capping pumpHost's read size.
+const vsockMaxRxPayload = 2048
+
 // pumpHost reads from the host unix socket and forwards to the guest.
+// Reads are capped at vsockMaxRxPayload so each Read yields one RW packet
+// whose frame fits a guest rx buffer (see the constant). When the outbound
+// FIFO has no data slot, pumpHost PARKS until tryFlush frees one or the
+// connection is torn down: blocking pushes back on the host producer with
+// bounded memory (this goroutine's single read buffer), so a slow guest
+// stalls a healthy stream instead of getting it RST-dropped mid-transfer
+// — silent truncation via RST was observed corrupting multi-megabyte
+// session-stdin transfers. tryFlush still bounds the queue itself, so a
+// non-draining guest costs one parked goroutine per connection, never
+// unbounded buffers.
 func (v *Vsock) pumpHost(c *vsockConn, srcPort, dstPort uint32) {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, vsockMaxRxPayload)
 	for {
 		n, err := c.nc.Read(buf)
 		if n > 0 {
 			v.logf("host->guest %d bytes", n)
 			v.core.mu.Lock()
-			if v.pending.Len() >= vsockMaxPending-vsockControlReserve {
-				// queue full: drop the connection with RST rather than
-				// buffer without bound for a non-draining guest. Check the
-				// bound before copying so this drop path does not allocate.
-				v.logf("pumpHost: %d pending -> RST", v.pending.Len())
-				v.closeConn(c, vsockHdr{op: vsockOpRW, srcPort: srcPort, dstPort: dstPort}, true)
-				v.tryFlush()
+			for !c.closed && v.pending.Len() >= vsockMaxPending-vsockControlReserve {
+				// No data slot: park until popPending broadcasts freed
+				// capacity or closeConn tears the connection down.
+				if v.spaceSig == nil { // tests construct Vsock literals
+					v.spaceSig = make(chan struct{})
+				}
+				sig := v.spaceSig
+				v.core.mu.Unlock()
+				select {
+				case <-sig:
+				case <-c.done:
+				}
+				v.core.mu.Lock()
+			}
+			if c.closed {
+				// Torn down while parked; whoever closed it owns the RST.
 				v.core.mu.Unlock()
 				return
 			}
@@ -665,9 +711,13 @@ func (v *Vsock) tryFlush() {
 		if capacity < uint64(frameLen) {
 			// Never expose a truncated stream frame whose header advertises
 			// bytes that were not written. Consume the unusable descriptor but
-			// retain the packet for the next correctly sized receive buffer.
+			// retain the packet for the next correctly sized receive buffer —
+			// bounded by rxMiss: the guest reposts every len-0 buffer with a
+			// fresh queue notify, so retaining an undeliverable packet without
+			// a bound livelocks the rx queue.
 			v.logf("tryFlush: rx descriptor too small (%d < %d)", capacity, frameLen)
 			v.core.pushUsed(q, head, 0)
+			v.rxMiss(*pkt, q)
 			continue
 		}
 		hdr := pkt.hdr
@@ -689,16 +739,58 @@ func (v *Vsock) tryFlush() {
 		if err != nil || total != uint32(frameLen) {
 			v.logf("tryFlush: write failed (%v, %d)", err, total)
 			// A partial response is not a valid vsock frame. Report no bytes
-			// and preserve the packet so a later buffer can carry it whole.
+			// and preserve the packet so a later buffer can carry it whole —
+			// bounded by rxMiss for the same reason as the size check above.
 			v.core.pushUsed(q, head, 0)
+			v.rxMiss(*pkt, q)
 			continue
 		}
 		if c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]; c != nil && total > vsockHdrLen {
 			c.txCnt += total - vsockHdrLen
 		}
 		v.core.pushUsed(q, head, total)
+		v.rxMissStreak = 0
 		v.popPending()
 	}
+}
+
+// rxMiss records one consumed rx descriptor that could not carry the
+// pending head packet. The guest receives each such buffer back with
+// length 0, then reposts it and notifies the queue again (stock Linux rx
+// refill + virtqueue_kick; this transport never sets VRING_USED_F_NO_NOTIFY),
+// so retaining an undeliverable head packet without a bound storms the rx
+// queue with notifies while core.mu is held — livelocking the whole vsock
+// device behind the mutex (observed: sandbox frozen for hours, a host core
+// pinned inside MMIOWrite -> tryFlush; found via SIGQUIT stack dump).
+//
+// Once the head packet has survived more misses than the armed ring has
+// slots, every buffer the guest can post had its chance and none fit:
+// declare the packet undeliverable, drop it from the FIFO and reset its
+// connection, so the queue, the device lock and the guest application all
+// make progress again (a silent park would hang the guest app instead of
+// failing it with ECONNRESET). Mixed-size rings keep working: any single
+// adequate buffer delivers the packet and resets the streak.
+//
+// Called with core.mu held. pkt is passed by value because popPending
+// zeroes the ring slot it came from.
+func (v *Vsock) rxMiss(pkt vsockPkt, q *virtq) {
+	v.rxMissStreak++
+	if v.rxMissStreak <= int(q.num) {
+		return
+	}
+	v.rxMissStreak = 0
+	v.popPending()
+	c := v.conns[connKey(pkt.hdr.dstPort, pkt.hdr.srcPort)]
+	if c == nil {
+		v.logf("tryFlush: dropped undeliverable %d-byte frame for closed connection", vsockHdrLen+len(pkt.payload))
+		return
+	}
+	fmt.Printf("[vsock] guest rx buffers cannot carry a %d-byte frame after a full ring of retries; resetting connection (host port %d, guest port %d)\n",
+		vsockHdrLen+len(pkt.payload), pkt.hdr.srcPort, pkt.hdr.dstPort)
+	// closeConn queues the RST and re-enters tryFlush; the poisoned head is
+	// already popped, so the recursion is bounded by the number of pending
+	// packets and terminates.
+	v.closeConn(c, vsockHdr{srcPort: pkt.hdr.dstPort, dstPort: pkt.hdr.srcPort}, true)
 }
 
 // vsockMaxChainBytes caps one packet chain at the 44-byte header plus

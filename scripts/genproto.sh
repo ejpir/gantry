@@ -6,7 +6,7 @@
 #   scripts/genproto.sh --check   regenerate into a scratch dir and verify
 #                                 the checked-in files are byte-identical
 #
-# Toolchain pins reproduce the exact upstream (containerd/nerdbox@v0.2.1)
+# Toolchain pins reproduce the exact upstream (containerd/nerdbox@v0.2.3)
 # generated files:
 #
 #   protoc-gen-go       v1.28.1   (stamped in info.pb.go)
