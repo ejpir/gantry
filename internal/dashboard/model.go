@@ -353,11 +353,11 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	mcpURL.CharLimit = 4096
 	mcpURL.Prompt = ""
 	mcpAuthHeader := textinput.New()
-	mcpAuthHeader.Placeholder = "X-Api-Key (header auth only)"
+	mcpAuthHeader.Placeholder = "X-Api-Key"
 	mcpAuthHeader.CharLimit = 64
 	mcpAuthHeader.Prompt = ""
 	mcpAuthRef := textinput.New()
-	mcpAuthRef.Placeholder = "secret name or custody provider"
+	mcpAuthRef.Placeholder = "secret name"
 	mcpAuthRef.CharLimit = 128
 	mcpAuthRef.Prompt = ""
 	mcpAllow := textinput.New()

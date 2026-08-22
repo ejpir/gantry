@@ -112,6 +112,55 @@ func TestSandboxTUIMCPServerManagementDialogs(t *testing.T) {
 	}
 }
 
+func TestMCPRemoteDialogShowsOnlyRelevantAuthFields(t *testing.T) {
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped}}
+	m.openMCPRemoteDialog(false)
+	theme := tuiThemeFor(m.dark)
+
+	assertFields := func(kind string, wants, rejects []string) {
+		t.Helper()
+		m.mcpAuthKind = kind
+		m.syncMCPAuthPresentation()
+		plain := ansi.Strip(m.renderMCPRemoteDialog(theme, 62))
+		for _, want := range wants {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("auth %q missing %q:\n%s", kind, want, plain)
+			}
+		}
+		for _, reject := range rejects {
+			if strings.Contains(plain, reject) {
+				t.Fatalf("auth %q unexpectedly shows %q:\n%s", kind, reject, plain)
+			}
+		}
+	}
+	assertFields("", nil, []string{"Secret name", "Custody provider", "Header name", "X-Api-Key", "Secret / provider reference"})
+	assertFields("bearer", []string{"Secret name"}, []string{"Custody provider", "Header name", "X-Api-Key"})
+	assertFields("custody", []string{"Custody provider", "provider name"}, []string{"Secret name", "Header name", "X-Api-Key"})
+	assertFields("header", []string{"Secret name", "Header name", "X-Api-Key"}, []string{"Custody provider"})
+
+	for _, tc := range []struct {
+		kind string
+		want []int
+	}{
+		{kind: "", want: []int{6}},
+		{kind: "bearer", want: []int{4, 6}},
+		{kind: "custody", want: []int{4, 6}},
+		{kind: "header", want: []int{4, 5, 6}},
+	} {
+		m.mcpAuthKind = tc.kind
+		m.focusMCPRemote(3)
+		for _, want := range tc.want {
+			m.moveMCPRemoteFocus(1)
+			if m.mcpFocus != want {
+				t.Fatalf("auth %q next focus = %d, want %d", tc.kind, m.mcpFocus, want)
+			}
+		}
+	}
+}
+
 func TestDialogTextInputCentersAreClickable(t *testing.T) {
 	cases := []struct {
 		name, label string
