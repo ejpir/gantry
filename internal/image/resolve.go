@@ -133,7 +133,7 @@ cached digest:
 
     -image %s`, err, pinned)
 		}
-		say("registry unreachable (%v); using cached %s", err, cached[:19])
+		say("registry unreachable (%v); using cached %s", err, shortDigest(cached))
 		return hit(cached), nil
 	}
 	if current == refDigest(m) {
@@ -269,7 +269,7 @@ func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 	built := false
 	m, err := st.ensure(p.digest, func(outPath string) (*Meta, error) {
 		built = true
-		say("building %s → %s (linux/%s)", ref, p.digest[:19], arch)
+		say("building %s → %s (linux/%s)", ref, shortDigest(p.digest), arch)
 		if _, err := Build(outPath, p.layers, p.config, logf); err != nil {
 			return nil, err
 		}

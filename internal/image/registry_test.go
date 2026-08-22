@@ -114,6 +114,40 @@ func TestRegistryTokenDanceBasic(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsShortLayerDigestWithProgress(t *testing.T) {
+	reg := newFakeRegistry(t, "")
+	config := []byte(`{"architecture":"amd64","os":"linux","config":{}}`)
+	configDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(config))
+	reg.blobs[configDigest] = config
+	reg.manifest = []byte(fmt.Sprintf(`{"schemaVersion":2,"config":{"digest":%q,"size":%d},"layers":[{"digest":"sha256:x","size":1}]}`,
+		configDigest, len(config)))
+	reg.manDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(reg.manifest))
+
+	progressCalled := false
+	_, err := loadRegistry(context.Background(), hostOf(reg.srv.URL)+"/library/app:latest", "amd64", auth.Resolve(),
+		func(string, ...any) { progressCalled = true })
+	if err == nil || !strings.Contains(err.Error(), "layer 1 descriptor: invalid SHA-256 digest length") {
+		t.Fatalf("short layer digest error = %v", err)
+	}
+	if progressCalled {
+		t.Fatal("progress callback ran before manifest descriptors were validated")
+	}
+}
+
+func TestFetchBlobRejectsMalformedDescriptorBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer server.Close()
+	client := newRegistryClient(hostOf(server.URL), nil, nil)
+	_, err := client.fetchBlob(context.Background(), "library/app", descriptor{Digest: "sha256:../../manifests/latest", Size: 1}, filepath.Join(t.TempDir(), "blob"))
+	if err == nil || !strings.Contains(err.Error(), "invalid blob descriptor") {
+		t.Fatalf("malformed descriptor error = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("malformed descriptor made %d registry requests", requests)
+	}
+}
+
 func TestRegistryStripsAuthOnCrossHostRedirect(t *testing.T) {
 	reg := newFakeRegistry(t, "")
 	// blob content lives on a DIFFERENT host (the CDN role)
@@ -197,7 +231,11 @@ func TestParseRef(t *testing.T) {
 			t.Errorf("%s → %+v, want %s/%s:%s@%s", c.in, r, c.reg, c.repo, c.tag, c.digest)
 		}
 	}
-	for _, bad := range []string{"", "@sha256:xyz", "reg.io//app", "a/../b"} {
+	for _, bad := range []string{
+		"", "@sha256:xyz", "reg.io//app", "a/../b",
+		"reg.io/app@sha256:" + strings.Repeat("g", 64),
+		"reg.io/app@sha256:" + strings.Repeat("a", 31) + "/" + strings.Repeat("a", 32),
+	} {
 		if _, err := ParseRef(bad); err == nil {
 			t.Errorf("%q should fail", bad)
 		}
