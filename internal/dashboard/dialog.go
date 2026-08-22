@@ -1695,13 +1695,9 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	m.spinner.Style = lipgloss.NewStyle().Foreground(theme.accent)
 }
 
-type tuiFormRowSpan struct {
-	first int
-	last  int
-}
-
-func (span tuiFormRowSpan) contains(row int) bool {
-	return row >= span.first && row <= span.last
+type tuiFormControl struct {
+	label string
+	focus int
 }
 
 func dashboardErrorField(err error) string {
@@ -1712,51 +1708,95 @@ func dashboardErrorField(err error) string {
 	return ""
 }
 
-type tuiFormRowLayout struct {
-	compact  []tuiFormRowSpan
-	spacious []tuiFormRowSpan
+// dialogFormControlAt maps a click to controls using the dialog body that was
+// actually rendered. It deliberately has no hand-maintained row coordinates:
+// wrapping, compact mode, errors, scrolling, and open picker menus can all move
+// controls. A new form only has to list its labels in render order.
+func (m sandboxTUIModel) dialogFormControlAt(mouse tea.Mouse, bounds tuiRect, controls []tuiFormControl) (int, bool) {
+	if mouse.X <= bounds.x || mouse.X >= bounds.x+bounds.w-1 {
+		return 0, false
+	}
+	rows, ok := m.dialogFormControlRows(controls)
+	if !ok {
+		return 0, false
+	}
+	// Dialog borders and top padding consume two visual rows. The viewport's
+	// scroll offset maps the click back into the complete, untrimmed body.
+	clickedRow := mouse.Y - bounds.y - 2 + m.dialogScroll
+	for index, control := range controls {
+		last := rows[index]
+		if index+1 < len(rows) {
+			last = rows[index+1] - 1
+		} else {
+			// The form footer starts after the first blank line following the
+			// last control. Buttons are resolved before controls by every caller.
+			_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+			lines := strings.Split(ansi.Strip(content), "\n")
+			for row := rows[index] + 1; row < len(lines); row++ {
+				if strings.TrimSpace(lines[row]) == "" {
+					last = row - 1
+					break
+				}
+				last = row
+			}
+		}
+		if clickedRow >= rows[index] && clickedRow <= last {
+			return control.focus, true
+		}
+	}
+	return 0, false
 }
 
-var (
-	createDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 7}, {9, 11}, {13, 14}, {15, 16}, {17, 19}, {20, 22}, {23, 25}, {26, 27}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 17}, {19, 20}, {22, 23}, {25, 26}, {28, 29}, {31, 32}},
+func (m sandboxTUIModel) dialogFormControlRows(controls []tuiFormControl) ([]int, bool) {
+	_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	lines := strings.Split(ansi.Strip(content), "\n")
+	rows := make([]int, 0, len(controls))
+	searchFrom := 0
+	for _, control := range controls {
+		found := -1
+		for row := searchFrom; row < len(lines); row++ {
+			if strings.HasPrefix(strings.TrimSpace(lines[row]), control.label) {
+				found = row
+				break
+			}
+		}
+		if found < 0 {
+			return nil, false
+		}
+		rows = append(rows, found)
+		searchFrom = found + 1
 	}
-	shareDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 16}, {17, 20}, {21, 24}, {25, 26}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 19}, {21, 24}, {26, 29}, {31, 32}},
-	}
-	portDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 16}, {17, 19}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 19}, {21, 23}},
-	}
-	policyDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 13}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 16}},
-	}
-	ruleDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 8}, {9, 10}, {11, 14}, {15, 16}, {17, 20}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 12}, {14, 17}, {19, 20}, {22, 25}},
-	}
-	secretDialogRows = tuiFormRowLayout{
-		compact:  []tuiFormRowSpan{{5, 8}, {9, 12}, {13, 16}},
-		spacious: []tuiFormRowSpan{{6, 9}, {11, 14}, {16, 19}},
-	}
-)
+	return rows, true
+}
 
-func (m sandboxTUIModel) formControlRows(layout tuiFormRowLayout, afterFirstOffset int) []tuiFormRowSpan {
-	var source []tuiFormRowSpan
-	if m.formDialogsSpacious() {
-		source = layout.spacious
-	} else {
-		source = layout.compact
+// chooseDialogSandbox maps an open sandbox picker's rendered menu rows back
+// to its visible options. All form dialogs share the same picker rendering.
+func (m sandboxTUIModel) chooseDialogSandbox(mouse tea.Mouse, bounds tuiRect, label string, picker *sandboxPicker) bool {
+	if picker == nil || !picker.open {
+		return false
 	}
-	rows := append([]tuiFormRowSpan(nil), source...)
-	for i := 1; i < len(rows); i++ {
-		rows[i].first += afterFirstOffset
-		rows[i].last += afterFirstOffset
+	rows, ok := m.dialogFormControlRows([]tuiFormControl{{label: label}})
+	if !ok {
+		return false
 	}
-	return rows
+	_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	lines := strings.Split(ansi.Strip(content), "\n")
+	menuTop := -1
+	borderCount := 0
+	for row := rows[0] + 1; row < len(lines); row++ {
+		if strings.Contains(lines[row], "╭") {
+			borderCount++
+			if borderCount == 2 {
+				menuTop = row
+				break
+			}
+		}
+	}
+	if menuTop < 0 {
+		return false
+	}
+	clickedRow := mouse.Y - bounds.y - 2 + m.dialogScroll
+	return picker.chooseVisible(clickedRow - menuTop - 1)
 }
 
 // dialogButtonHit resolves the button from the rendered dialog instead of
@@ -1874,210 +1914,224 @@ func (m sandboxTUIModel) confirmationActionLabel() string {
 }
 
 func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	// Resolve the footer from the rendered dialog before consulting the
-	// approximate field-row ranges. In compact terminals the Create button can
-	// share a row covered by the memory slider's generous mouse target.
 	if m.dialogButtonHit(mouse, bounds, "Create") {
 		m.createFocus = 8
 		return m.submitCreate()
 	}
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	rows := m.formControlRows(createDialogRows, 0)
-	switch {
-	case rows[0].contains(relY):
-		return m, m.focusCreate(0)
-	case rows[1].contains(relY):
-		return m, m.focusCreate(1)
-	case rows[2].contains(relY):
-		m.createFocus = 2
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Name", focus: 0}, {label: "OCI image", focus: 1},
+		{label: "Runtime", focus: 2}, {label: "Kernel", focus: 3},
+		{label: "CPUs", focus: 4}, {label: "Memory", focus: 5},
+		{label: "Persistent disk", focus: 6}, {label: "Process isolation", focus: 7},
+	})
+	if !ok {
+		return m, nil
+	}
+	switch focus {
+	case 0, 1:
+		return m, m.focusCreate(focus)
+	case 2:
+		m.createFocus = focus
 		m.adjustCreateChoice(1)
-	case rows[3].contains(relY):
-		m.createFocus = 3
+	case 3:
+		m.createFocus = focus
 		m.cycleCreateKernel(1)
-	case rows[4].contains(relY):
+	case 4:
 		m.setSliderFromMouse(&m.createCPUs, bounds, mouse.X, "CPU")
-		return m, m.focusCreate(4)
-	case rows[5].contains(relY):
+		return m, m.focusCreate(focus)
+	case 5:
 		m.setSliderFromMouse(&m.createMemory, bounds, mouse.X, "MiB")
-		return m, m.focusCreate(5)
-	case rows[6].contains(relY):
+		return m, m.focusCreate(focus)
+	case 6:
 		m.setSliderFromMouse(&m.createDisk, bounds, mouse.X, "MiB")
-		return m, m.focusCreate(6)
-	case rows[7].contains(relY):
-		m.createFocus = 7
+		return m, m.focusCreate(focus)
+	case 7:
+		m.createFocus = focus
 		m.createIsolation = cycleIsolation(m.createIsolation, 1)
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateEditDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	// Find the rendered footer first: at compact heights its hitbox can share
-	// rows with the deliberately generous field targets below.
 	if m.dialogButtonHit(mouse, bounds, "Save") {
 		m.editFocus = 3
 		return m.submitEdit()
 	}
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	switch {
-	case relY >= 6 && relY <= 8:
-		m.setSliderFromMouse(&m.editCPUs, bounds, mouse.X, "CPU")
-		return m, m.focusEdit(0)
-	case relY >= 10 && relY <= 12:
-		m.setSliderFromMouse(&m.editMemory, bounds, mouse.X, "MiB")
-		return m, m.focusEdit(1)
-	case relY >= 14 && relY <= 16:
-		m.editFocus = 2
-		m.editIsolation = cycleIsolation(m.editIsolation, 1)
-	default:
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "CPUs", focus: 0}, {label: "Memory", focus: 1}, {label: "Process isolation", focus: 2},
+	})
+	if !ok {
 		return m, nil
+	}
+	switch focus {
+	case 0:
+		m.setSliderFromMouse(&m.editCPUs, bounds, mouse.X, "CPU")
+		return m, m.focusEdit(focus)
+	case 1:
+		m.setSliderFromMouse(&m.editMemory, bounds, mouse.X, "MiB")
+		return m, m.focusEdit(focus)
+	case 2:
+		m.editFocus = focus
+		m.editIsolation = cycleIsolation(m.editIsolation, 1)
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateShareDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	rows := m.formControlRows(shareDialogRows, m.shareSandbox.menuHeight())
-	if m.shareSandbox.open && m.shareSandbox.chooseVisible(relY-rows[0].last-2) {
-		return m, nil
-	}
 	_, _, buttonLabel := m.shareDialogCopy()
-	switch {
-	case rows[0].contains(relY):
-		m.shareSandbox.Toggle()
-		return m, m.focusShare(0)
-	case rows[1].contains(relY):
-		return m, m.focusShare(1)
-	case rows[2].contains(relY):
-		return m, m.focusShare(2)
-	case rows[3].contains(relY):
-		return m, m.focusShare(3)
-	case rows[4].contains(relY):
-		return m, m.focusShare(4)
-	case rows[5].contains(relY):
-		m.shareFocus = 5
-		m.shareRO = !m.shareRO
-	case m.dialogButtonHit(mouse, bounds, buttonLabel):
+	if m.dialogButtonHit(mouse, bounds, buttonLabel) {
 		m.shareFocus = 6
 		return m.submitShare()
 	}
+	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.shareSandbox) {
+		return m, nil
+	}
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Tag", focus: 1}, {label: "Host path", focus: 2},
+		{label: "Mount point", focus: 3}, {label: "Guest owner", focus: 4}, {label: "Mode", focus: 5},
+	})
+	if !ok {
+		return m, nil
+	}
+	if focus == 0 {
+		m.shareSandbox.Toggle()
+		return m, m.focusShare(focus)
+	}
+	if focus >= 1 && focus <= 4 {
+		return m, m.focusShare(focus)
+	}
+	m.shareFocus = focus
+	m.shareRO = !m.shareRO
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updatePortDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	rows := m.formControlRows(portDialogRows, m.portSandbox.menuHeight())
-	if m.portSandbox.open && m.portSandbox.chooseVisible(relY-rows[0].last-2) {
-		return m, nil
-	}
-	switch {
-	case rows[0].contains(relY):
-		m.portSandbox.Toggle()
-		return m, m.focusPort(0)
-	case rows[1].contains(relY):
-		return m, m.focusPort(1)
-	case rows[2].contains(relY):
-		return m, m.focusPort(2)
-	case rows[3].contains(relY):
-		m.portFocus = 3
-		m.portUDP = !m.portUDP
-	case m.dialogButtonHit(mouse, bounds, "Publish"):
+	if m.dialogButtonHit(mouse, bounds, "Publish") {
 		m.portFocus = 4
 		return m.submitPort()
+	}
+	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.portSandbox) {
+		return m, nil
+	}
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Host bind", focus: 1},
+		{label: "Guest port", focus: 2}, {label: "Protocol", focus: 3},
+	})
+	if !ok {
+		return m, nil
+	}
+	switch focus {
+	case 0:
+		m.portSandbox.Toggle()
+		return m, m.focusPort(focus)
+	case 1, 2:
+		return m, m.focusPort(focus)
+	case 3:
+		m.portFocus = focus
+		m.portUDP = !m.portUDP
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateNetworkPolicyDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	rows := m.formControlRows(policyDialogRows, m.policySandbox.menuHeight())
+	if m.dialogButtonHit(mouse, bounds, "Apply") {
+		m.policyFocus = 3
+		return m.submitNetworkPolicy()
+	}
 	before := m.policySandbox.Value()
-	if m.policySandbox.open && m.policySandbox.chooseVisible(relY-rows[0].last-2) {
+	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.policySandbox) {
 		if m.policySandbox.Value() != before {
 			m.syncNetworkPolicyFields()
 		}
 		return m, nil
 	}
-	switch {
-	case rows[0].contains(relY):
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Policy file", focus: 1}, {label: "Local network override", focus: 2},
+	})
+	if !ok {
+		return m, nil
+	}
+	switch focus {
+	case 0:
 		m.policySandbox.Toggle()
-		return m, m.focusNetworkPolicy(0)
-	case rows[1].contains(relY):
-		return m, m.focusNetworkPolicy(1)
-	case rows[2].contains(relY):
-		m.policyFocus = 2
+		return m, m.focusNetworkPolicy(focus)
+	case 1:
+		return m, m.focusNetworkPolicy(focus)
+	case 2:
+		m.policyFocus = focus
 		m.policyLocal = !m.policyLocal
-	case m.dialogButtonHit(mouse, bounds, "Apply"):
-		m.policyFocus = 3
-		return m.submitNetworkPolicy()
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	rows := m.formControlRows(ruleDialogRows, m.ruleSandbox.menuHeight())
-	if m.ruleSandbox.open && m.ruleSandbox.chooseVisible(relY-rows[0].last-2) {
-		return m, nil
-	}
-	// DNS's compact ports explanation occupies the same approximate rows as
-	// the footer. Resolve the real rendered button before broad field hitboxes.
 	if m.dialogButtonHit(mouse, bounds, m.ruleAddButtonLabel()) {
 		m.ruleFocus = 5
 		return m.submitRuleAdd()
 	}
-	switch {
-	case rows[0].contains(relY):
+	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.ruleSandbox) {
+		return m, nil
+	}
+	targetLabel := "Destination"
+	if m.ruleProtocol == "dns" {
+		targetLabel = "Domain"
+	}
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Decision", focus: 1}, {label: targetLabel, focus: 2},
+		{label: "Protocol", focus: 3}, {label: "Destination ports", focus: 4},
+	})
+	if !ok {
+		return m, nil
+	}
+	switch focus {
+	case 0:
 		m.ruleSandbox.Toggle()
-		return m, m.focusRule(0)
-	case rows[1].contains(relY):
-		if m.ruleProtocol == "dns" {
-			return m, nil
+		return m, m.focusRule(focus)
+	case 1:
+		if m.ruleProtocol != "dns" {
+			m.ruleFocus = focus
+			if m.ruleAction == "deny" {
+				m.ruleAction = "allow"
+			} else {
+				m.ruleAction = "deny"
+			}
 		}
-		m.ruleFocus = 1
-		if m.ruleAction == "deny" {
-			m.ruleAction = "allow"
-		} else {
-			m.ruleAction = "deny"
+	case 2:
+		return m, m.focusRule(focus)
+	case 3:
+		if m.ruleProtocol != "dns" {
+			m.ruleFocus = focus
+			m.cycleRuleProtocol(1)
+			if m.ruleProtocol != "tcp" && m.ruleProtocol != "udp" {
+				m.rulePorts.Reset()
+			}
 		}
-	case rows[2].contains(relY):
-		return m, m.focusRule(2)
-	case rows[3].contains(relY):
-		if m.ruleProtocol == "dns" {
-			return m, nil
+	case 4:
+		if m.ruleProtocol != "dns" {
+			return m, m.focusRule(focus)
 		}
-		m.ruleFocus = 3
-		m.cycleRuleProtocol(1)
-		if m.ruleProtocol != "tcp" && m.ruleProtocol != "udp" {
-			m.rulePorts.Reset()
-		}
-	case rows[4].contains(relY):
-		if m.ruleProtocol == "dns" {
-			return m, nil
-		}
-		return m, m.focusRule(4)
 	}
 	return m, nil
 }
 
 func (m *sandboxTUIModel) updateSecretAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	relY := mouse.Y - bounds.y + m.dialogScroll
-	rows := m.formControlRows(secretDialogRows, m.secretSandbox.menuHeight())
-	if m.secretSandbox.open && m.secretSandbox.chooseVisible(relY-rows[0].last-2) {
-		return m, nil
-	}
-	switch {
-	case rows[0].contains(relY):
-		m.secretSandbox.Toggle()
-		return m, m.focusSecret(0)
-	case rows[1].contains(relY):
-		return m, m.focusSecret(1)
-	case rows[2].contains(relY):
-		return m, m.focusSecret(2)
-	case m.dialogButtonHit(mouse, bounds, "Add secret"):
+	if m.dialogButtonHit(mouse, bounds, "Add secret") {
 		m.secretFocus = 3
 		return m.submitSecretAdd()
 	}
-	return m, nil
+	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.secretSandbox) {
+		return m, nil
+	}
+	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
+		{label: "Sandbox", focus: 0}, {label: "Name", focus: 1}, {label: "Value", focus: 2},
+	})
+	if !ok {
+		return m, nil
+	}
+	if focus == 0 {
+		m.secretSandbox.Toggle()
+	}
+	return m, m.focusSecret(focus)
 }
 
 func (m *sandboxTUIModel) updateDashboardMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
