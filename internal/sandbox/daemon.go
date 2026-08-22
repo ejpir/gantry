@@ -10,6 +10,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
+	mcpworkersup "github.com/ejpir/gantry/internal/sandbox/mcpworker"
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/vmm"
@@ -40,15 +41,17 @@ type daemonRuntime struct {
 	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
-	consoleLog *boundedlog.Pipe
-	network    *Network
-	shares     *control.ShareManager
-	ports      *control.PortManager
-	runner     vmmworker.Runner
-	machine    *vmm.Machine
-	rpc        *ttrpc.Client
-	control    net.Listener
-	broker     *broker
+	consoleLog  *boundedlog.Pipe
+	network     *Network
+	shares      *control.ShareManager
+	ports       *control.PortManager
+	runner      vmmworker.Runner
+	machine     *vmm.Machine
+	rpc         *ttrpc.Client
+	control     net.Listener
+	broker      *broker
+	mcpListener net.Listener
+	mcpWorker   *mcpworkersup.Worker
 
 	guestErr <-chan error
 	signals  chan os.Signal
@@ -122,6 +125,14 @@ func (d *daemonRuntime) bootLog(phase string) {
 }
 
 func (d *daemonRuntime) close() {
+	if d.mcpListener != nil {
+		_ = d.mcpListener.Close()
+	}
+	if d.mcpWorker != nil {
+		if err := d.mcpWorker.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon: MCP worker:", err)
+		}
+	}
 	if d.control != nil {
 		_ = d.control.Close()
 	}

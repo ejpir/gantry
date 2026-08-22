@@ -24,13 +24,26 @@ type isolationState struct {
 	Degraded           []string           `json:"degraded"`
 	NetworkConfinement *workerconf.Report `json:"networkConfinement,omitempty"`
 	VMMConfinement     *workerconf.Report `json:"vmmConfinement,omitempty"`
+	MCPConfinement     *workerconf.Report `json:"mcpConfinement,omitempty"`
+	MCPBoundary        *mcpBoundaryState  `json:"mcpBoundary,omitempty"`
+}
+
+// mcpBoundaryState records supervisor-established topology properties. These
+// are protocol facts, not inferred from an in-worker negative probe.
+type mcpBoundaryState struct {
+	ProcessSplit       bool `json:"processSplit"`
+	OpaqueStreamRelay  bool `json:"opaqueStreamRelay"`
+	OriginDialBrokered bool `json:"originDialBrokered"`
+	LocalExecBrokered  bool `json:"localExecBrokered"`
+	CredentialScoped   bool `json:"credentialScoped"`
 }
 
 // writeIsolationState persists the effective runtime topology and the VMM
 // worker's verified confinement report for CLI and dashboard consumers.
-func writeIsolationState(dir string, cfg config.RunConfig, network *Network, splitVMM bool, confinement *workerconf.Report) error {
+func writeIsolationState(dir string, cfg config.RunConfig, network *Network, splitVMM bool,
+	confinement, mcpConfinement *workerconf.Report) error {
 	state := isolationState{
-		Version:            2,
+		Version:            3,
 		Topology:           "monolithic",
 		Platform:           runtime.GOOS,
 		NetworkBoundary:    workerconf.StateUnavailable,
@@ -43,38 +56,55 @@ func writeIsolationState(dir string, cfg config.RunConfig, network *Network, spl
 	}
 	if splitVMM {
 		state.VMMConfinement = confinement
-		if confinement != nil {
-			// This field answers whether a compromised VMM can create ambient
-			// host connections. The network worker intentionally can, and has its
-			// own role report instead of weakening this VMM boundary.
-			state.NetworkBoundary = confinement.Property(workerconf.PropNetDial).State
+	}
+	if cfg.MCP && mcpConfinement != nil {
+		state.MCPConfinement = mcpConfinement
+		state.MCPBoundary = &mcpBoundaryState{
+			ProcessSplit: true, OpaqueStreamRelay: true, OriginDialBrokered: true,
+			LocalExecBrokered: true, CredentialScoped: true,
 		}
 	}
+	// The network worker intentionally owns socket authority. This boundary
+	// aggregates roles that must not be able to create ambient connections.
+	state.NetworkBoundary = aggregateRoleBoundary(
+		propertyState(state.VMMConfinement, workerconf.PropNetDial),
+		propertyState(state.MCPConfinement, workerconf.PropNetDial),
+	)
 	state.FilesystemBoundary = aggregateRoleBoundary(
 		roleFilesystemBoundary(state.NetworkConfinement),
 		roleFilesystemBoundary(state.VMMConfinement),
+		roleFilesystemBoundary(state.MCPConfinement),
 	)
 	state.ProcessBoundary = aggregateRoleBoundary(
 		roleProcessBoundary(state.NetworkConfinement),
 		roleProcessBoundary(state.VMMConfinement),
+		roleProcessBoundary(state.MCPConfinement),
 	)
 
 	if cfg.ProcessIsolation == "off" {
 		degraded = append(degraded, "process isolation disabled by configuration")
 	} else {
-		switch {
-		case network.Split && splitVMM:
-			state.Topology = "split-net+split-vmm"
-		case network.Split:
-			state.Topology = "split-net"
-		case splitVMM:
-			state.Topology = "split-vmm"
+		var splitRoles []string
+		if network.Split {
+			splitRoles = append(splitRoles, "split-net")
+		}
+		if splitVMM {
+			splitRoles = append(splitRoles, "split-vmm")
+		}
+		if cfg.MCP && mcpConfinement != nil {
+			splitRoles = append(splitRoles, "split-mcp")
+		}
+		if len(splitRoles) != 0 {
+			state.Topology = strings.Join(splitRoles, "+")
 		}
 		if network.Split {
 			degraded = appendConfinementDegradations(degraded, "network", network.Confinement)
 		}
 		if splitVMM {
 			degraded = appendConfinementDegradations(degraded, "vmm", confinement)
+		}
+		if cfg.MCP {
+			degraded = appendConfinementDegradations(degraded, "mcp", mcpConfinement)
 		}
 		if !network.Split && cfg.Net && cfg.GVProxy == "" {
 			degraded = append(degraded, "network worker not established")
@@ -108,6 +138,13 @@ func appendConfinementDegradations(degraded []string, role string, confinement *
 	}
 }
 
+func propertyState(report *workerconf.Report, property string) string {
+	if report == nil {
+		return ""
+	}
+	return report.Property(property).State
+}
+
 func roleFilesystemBoundary(report *workerconf.Report) string {
 	if report == nil {
 		return ""
@@ -121,6 +158,9 @@ func roleFilesystemBoundary(report *workerconf.Report) string {
 		// Linux therefore claims an enforced filesystem boundary only when the
 		// worker also proved its descriptor table contains justified entries.
 		states = append(states, report.Property(workerconf.PropFDTable).State)
+		if report.Property(workerconf.PropLandlock).State != workerconf.StateUnavailable {
+			states = append(states, report.Property(workerconf.PropLandlock).State)
+		}
 	}
 	return aggregateRoleBoundary(states...)
 }

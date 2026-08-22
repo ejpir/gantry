@@ -210,6 +210,8 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 		body = m.renderPortsView(theme, layout)
 	case tuiSecretsPage:
 		body = m.renderSecretsView(theme, layout)
+	case tuiMCPPage:
+		body = m.renderMCPView(theme, layout)
 	case tuiPacketsPage:
 		body = m.renderPacketsView(theme, layout)
 	default:
@@ -341,7 +343,11 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 		fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 		fmt.Sprintf("5 PORTS %d", len(m.ports)),
 		fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
-		fmt.Sprintf("7 PACKETS %d", len(m.packets)),
+		fmt.Sprintf("7 MCP %d", len(m.mcpServers)),
+		fmt.Sprintf("8 PACKETS %d", len(m.packets)),
+	}
+	if width < 120 {
+		labels = []string{"1 SANDBOXES", "2 TRAFFIC", "3 RULES", "4 MOUNTS", "5 PORTS", "6 SECRETS", "7 MCP", "8 PACKETS"}
 	}
 	if width < 82 {
 		labels = []string{
@@ -351,7 +357,8 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 			fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 			fmt.Sprintf("5 PORTS %d", len(m.ports)),
 			fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
-			fmt.Sprintf("7 PKTS %d", len(m.packets)),
+			fmt.Sprintf("7 MCP %d", len(m.mcpServers)),
+			fmt.Sprintf("8 PKTS %d", len(m.packets)),
 		}
 	}
 	if width < 50 {
@@ -468,6 +475,21 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 			}
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d names  •  %d loaded", len(m.secrets), loaded))
+	case tuiMCPPage:
+		remotes, restart := 0, 0
+		for _, server := range m.mcpServers {
+			if server.Type == "remote" {
+				remotes++
+			}
+			if server.State == "restart" {
+				restart++
+			}
+		}
+		summary := fmt.Sprintf("%d servers  •  %d remote", len(m.mcpServers), remotes)
+		if restart > 0 {
+			summary += fmt.Sprintf("  •  %d restart", restart)
+		}
+		return lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
 	case tuiPacketsPage:
 		state := "live"
 		if m.packetPaused {
@@ -732,6 +754,8 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 		return [][2]string{{"p", "publish"}, {"d", "unpublish"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	case tuiSecretsPage:
 		return [][2]string{{"a", "add secret"}, {"d", "delete"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
+	case tuiMCPPage:
+		return [][2]string{{"a", "add remote"}, {"f", "filesystem"}, {"e", "edit"}, {"d", "remove"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiPacketsPage:
 		return [][2]string{{"↑/↓", "select"}, {"d", "details"}, {"space", "pause"}, {"c", "clear"}, {"tab", "next view"}, {"?", "help"}}
 	}
@@ -828,7 +852,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 68
 	case tuiPacketDetailDialog:
 		idealWidth = 96
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog:
 		idealWidth = 54
 	case tuiCreateDialog:
 		idealWidth = 64
@@ -838,7 +862,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 68
 	case tuiShareAddDialog:
 		idealWidth = 68
-	case tuiNetworkPolicyDialog, tuiRuleAddDialog, tuiSecretAddDialog:
+	case tuiNetworkPolicyDialog, tuiRuleAddDialog, tuiSecretAddDialog, tuiMCPRemoteDialog, tuiMCPFilesystemDialog:
 		idealWidth = 68
 	}
 	width = minInt(idealWidth, maxInt(24, m.width-4))
@@ -861,10 +885,13 @@ func (m sandboxTUIModel) dialogSize(kind tuiDialog) (int, int) {
 // control is more important in a short terminal. Compact layouts keep the same
 // fields and keyboard order with the blank separator rows removed.
 func (m sandboxTUIModel) formDialogsSpacious() bool {
-	return m.height >= 35 && !m.shareSandbox.open && !m.portSandbox.open && !m.policySandbox.open && !m.ruleSandbox.open && !m.secretSandbox.open
+	return m.height >= 35 && !m.shareSandbox.open && !m.portSandbox.open && !m.policySandbox.open && !m.ruleSandbox.open && !m.secretSandbox.open && !m.mcpSandbox.open
 }
 
 func (m sandboxTUIModel) formSectionGap() string {
+	if m.dialog == tuiMCPRemoteDialog {
+		return "\n"
+	}
 	if m.formDialogsSpacious() {
 		return "\n\n"
 	}
@@ -969,6 +996,13 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 	case tuiSecretRemoveDialog:
 		content = m.renderSecretRemoveDialog(theme, innerWidth)
 		border = theme.error
+	case tuiMCPRemoteDialog:
+		content = m.renderMCPRemoteDialog(theme, innerWidth)
+	case tuiMCPFilesystemDialog:
+		content = m.renderMCPFilesystemDialog(theme, innerWidth)
+	case tuiMCPRemoveDialog:
+		content = m.renderMCPRemoveDialog(theme, innerWidth)
+		border = theme.error
 	case tuiUpdateDialog:
 		content = m.renderUpdateDialog(theme, innerWidth)
 		border = theme.warning
@@ -1000,7 +1034,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"g / G", "first / last row"},
 		{"mouse wheel", "scroll the view"},
 		{"tab / S-tab", "switch views"},
-		{"1 … 7", "jump to a view"},
+		{"1 … 8", "jump to a view"},
 	})
 	actions := column("SANDBOX ACTIONS", [][2]string{
 		{"enter", "open or start"},
@@ -1019,6 +1053,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"space (Pkts)", "pause packet display"},
 		{"c (Packets)", "clear packet capture"},
 		{"d (Packets)", "inspect packet contents"},
+		{"a/f/e/d MCP", "remote add, filesystem, edit, remove"},
 	})
 	applicationRows := [][2]string{
 		{"?", "toggle this help"},
@@ -1042,7 +1077,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		}
 		navigation = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("NAVIGATION"),
-			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…7", "jump"),
+			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…8", "jump"),
 			binding("g / G", "first / last") + "  ·  " + binding("wheel", "scroll"),
 		}, "\n")
 		actions = strings.Join([]string{
@@ -1050,7 +1085,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 			binding("enter", "open / start") + "  ·  " + binding("s", "start / stop"),
 			binding("n", "create") + "  ·  " + binding("i", "details") + "  ·  " + binding("d", "remove"),
 			binding("r", "refresh") + "  ·  " + binding("e", "policy") + "  ·  " + binding("a/d/r", "mounts"),
-			binding("d", "packet details") + "  ·  " + binding("space/c", "pause/clear packets"),
+			binding("d/space/c", "packets") + "  ·  " + binding("a/f/e/d", "MCP"),
 		}, "\n")
 		application = strings.Join([]string{
 			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("APPLICATION"),

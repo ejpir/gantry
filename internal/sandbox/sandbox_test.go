@@ -192,6 +192,30 @@ func TestBrokerSetResources(t *testing.T) {
 	}
 }
 
+func TestBrokerPersistsMCPChangeAndMarksRestart(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, config.RunConfig{})
+	br := &broker{dir: dir, store: store, sessions: map[string]chan struct{}{}}
+	request := controlproto.Request{
+		Op: "mcp.remote.set", ID: "mcp-add",
+		MCP: &controlproto.MCPRequest{Spec: "name=github,url=https://example.com/mcp,allow=*"},
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := brokerPipe(t, br, string(raw)+"\n"); !strings.Contains(got, `"ok":true`) {
+		t.Fatalf("MCP response = %s", got)
+	}
+	cfg := store.Snapshot()
+	if !cfg.MCP || len(cfg.MCPRemotes) != 1 {
+		t.Fatalf("MCP config = %+v", cfg)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.MCPRestartMarker)); err != nil {
+		t.Fatalf("MCP restart marker: %v", err)
+	}
+}
+
 func TestBrokerMutatesSecretsWithoutPersistingValues(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, config.RunConfig{})

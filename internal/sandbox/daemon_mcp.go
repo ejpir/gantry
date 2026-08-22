@@ -1,13 +1,11 @@
 package sandbox
 
-// daemon_mcp.go — the per-sandbox MCP gateway (docs/mcp-gateway.md).
+// daemon_mcp.go — trusted MCP capability brokers (docs/mcp-gateway.md).
 //
-// Milestone 1: one built-in local server ("fs", the guest helper's
-// contained filesystem server) behind a vsock-bridged session mux. The
-// guest connects to vsock port 1029, the VMM bridges to
-// <dir>/1029.sock, and mcpgw.Serve handles the session. Local servers are
-// spawned guest-side through the exec channel (as the configured
-// unprivileged user — never root) with stdio piped back to the gateway.
+// The guest connects to vsock port 1029 and the VMM bridges to
+// <dir>/1029.sock. The supervisor relays opaque bounded streams into the
+// confined _mcp-worker. Local helpers still run guest-side through the fixed
+// exec mapping and drop to the configured unprivileged identity.
 
 import (
 	"context"
@@ -20,12 +18,12 @@ import (
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
+	mcpworkersup "github.com/ejpir/gantry/internal/sandbox/mcpworker"
 )
 
-// startMCPGateway wires and launches the gateway when -mcp is set. The
-// built-in fs server's policy is read-only by construction: the gateway
-// allows exactly read_file and list_directory through, and the server
-// binary exposes nothing else.
+// startMCPGateway launches the mandatory split MCP worker when -mcp is set.
+// The supervisor accepts the local endpoint and relays opaque bytes; parsing,
+// policy, HTTP/SSE, and local stdio framing live only in _mcp-worker.
 func (d *daemonRuntime) startMCPGateway() error {
 	if !d.cfg.MCP {
 		return nil
@@ -34,24 +32,47 @@ func (d *daemonRuntime) startMCPGateway() error {
 	if err != nil {
 		return fmt.Errorf("mcp gateway: %w", err)
 	}
-	gw, err := mcpgw.New(d.broker.auditf, d.broker.spawnGuestStdio, servers)
+	mcpWorker, err := mcpworkersup.Start(servers, d.dir, d.cfg.ProcessIsolation, func(event mcpgw.Event) {
+		d.broker.auditf("%s", event.String())
+	})
 	if err != nil {
 		return fmt.Errorf("mcp gateway: %w", err)
 	}
 	ln, err := net.Listen("unix", filepath.Join(d.dir, mcpproto.SockName))
 	if err != nil {
+		_ = mcpWorker.Close()
 		return fmt.Errorf("mcp gateway listener: %w", err)
 	}
-	d.broker.auditf("mcp: gateway enabled (fs root %s, local servers run as %s, %d remotes)",
+	d.mcpWorker, d.mcpListener = mcpWorker, ln
+	if err := d.writeIsolationState(); err != nil {
+		fmt.Printf("daemon: isolation state after MCP worker start: %v\n", err)
+	}
+	d.broker.auditf("mcp: gateway enabled in split worker (fs root %s, local servers run as %s, %d remotes)",
 		d.cfg.MCPFSRoot, d.cfg.MCPFSUser, len(d.cfg.MCPRemotes))
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
-				return // listener closed on shutdown
+				return
 			}
-			go func() { _ = gw.Serve(context.Background(), conn) }()
+			go func() {
+				if err := mcpWorker.Serve(context.Background(), conn); err != nil {
+					select {
+					case <-mcpWorker.Done():
+					default:
+						d.broker.auditf("mcp: guest session relay failed")
+					}
+				}
+			}()
 		}
+	}()
+	go func() {
+		<-mcpWorker.Done()
+		_ = ln.Close()
+		if err := d.writeIsolationState(); err != nil {
+			fmt.Printf("daemon: isolation state after MCP worker exit: %v\n", err)
+		}
+		d.broker.auditf("mcp: worker exited; MCP disabled for this sandbox")
 	}()
 	return nil
 }

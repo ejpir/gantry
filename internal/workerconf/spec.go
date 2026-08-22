@@ -14,6 +14,9 @@ type SyscallProfile uint8
 const (
 	ProfileVMM SyscallProfile = iota
 	ProfileNetwork
+	// ProfileMCP permits descriptor I/O and receiving supervisor-brokered
+	// connected streams, but no socket creation, path opens, exec, or ioctls.
+	ProfileMCP
 )
 
 // Spec is the worker's declared ambient-authority requirement. One
@@ -94,6 +97,32 @@ func NetworkSpec(keepFDs int, confRoot string) Spec {
 	}
 }
 
+// MCPSpec is the fixed MCP parsing-worker contract. Host destinations,
+// credentials, local upstream processes, and connected streams are brokered
+// by the supervisor, so the worker needs no ambient network, filesystem,
+// execution, device-ioctl, or cross-process authority.
+func MCPSpec(keepFDs int, confRoot string) Spec {
+	return Spec{
+		Profile:    ProfileMCP,
+		NoNetwork:  true,
+		NoExec:     true,
+		NoNewPaths: true,
+		NoProcX:    true,
+		KeepFDs:    keepFDs,
+		MaxTasks:   DefaultWorkerTaskLimit,
+		ConfRoot:   confRoot,
+	}
+}
+
+func validProfile(profile SyscallProfile) bool {
+	switch profile {
+	case ProfileVMM, ProfileNetwork, ProfileMCP:
+		return true
+	default:
+		return false
+	}
+}
+
 // DefaultWorkerTaskLimit leaves ample room for Go runtime, cgo, vCPU, and
 // packet-processing threads while bounding a compromised worker's host task
 // consumption. Each split worker gets an independent user namespace and cap.
@@ -120,6 +149,7 @@ const (
 	PropProcSignal = "proc-signal"
 	PropTaskLimit  = "task-limit"
 	PropSyscall    = "syscall-policy"
+	PropLandlock   = "landlock"
 	PropFDTable    = "fd-table"
 )
 
@@ -175,6 +205,7 @@ func DisabledReport(platform, mode string) Report {
 		{Property: PropProcSignal, State: StateDisabled},
 		{Property: PropTaskLimit, State: StateDisabled},
 		{Property: PropSyscall, State: StateDisabled},
+		{Property: PropLandlock, State: StateDisabled},
 		{Property: PropFDTable, State: StateDisabled},
 	}
 	return Report{Platform: platform, Mode: mode, Results: results}

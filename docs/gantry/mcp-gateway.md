@@ -148,6 +148,20 @@ github: get_me, list_repos, search_code
 The live probe contacts configured upstreams and applies `allow` and `deny`,
 so it is useful for finding an unavailable server or an unexpected policy.
 
+## Manage servers in the terminal dashboard
+
+Open `gantry tui` and select the **MCP** view (key `7`). From that view:
+
+- press `a` to add a remote streamable-HTTP server;
+- press `f` to configure or enable the built-in filesystem server;
+- press `e` to edit the selected remote or built-in filesystem server; and
+- press `d` to remove a selected remote.
+
+The dashboard stores credential references and redaction secret names, never
+credential values. MCP workers have immutable capability tables, so changes to
+a running sandbox are marked **restart** and take effect after it is restarted.
+Stopped-sandbox changes apply on its next start.
+
 ## Inspect activity
 
 Read the host-side security audit trail:
@@ -168,3 +182,6 @@ values.
 For the host/guest request flow, credential injection, redaction, and resource
 limits, see [Architecture](architecture.md#mcp-and-credential-flow). For the
 trust boundary and operational cautions, see [Security](security.md#credentials).
+The gateway runs in a per-sandbox confined worker. Its capability protocol,
+platform enforcement, residual risks, and remaining guest-helper work are in
+the [MCP worker confinement design](mcp-worker-confinement.md).

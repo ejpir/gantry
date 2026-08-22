@@ -14,7 +14,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/guestasset"
@@ -23,6 +26,10 @@ import (
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 )
+
+// MCPRestartMarker records that persisted MCP settings differ from the live,
+// immutable MCP worker. A successful daemon restart removes it.
+const MCPRestartMarker = "mcp-restart-required"
 
 // RunConfig is the fully-resolved description of one gantry VM run.
 // sandbox.json is this struct.
@@ -76,9 +83,9 @@ type RunConfig struct {
 	// fresh access tokens into the guest auth file. Default off — the
 	// transparent bridge needs no provider-specific knowledge.
 	OAuthCustody *bool `json:"oauth_custody,omitempty"`
-	// MCP gates the per-sandbox MCP gateway (docs/mcp-gateway.md): a
-	// vsock-bridged session mux in the daemon with contained local
-	// servers. MCPFSRoot jails the built-in filesystem server; MCPFSUser
+	// MCP gates the per-sandbox split MCP gateway (docs/mcp-gateway.md): a
+	// capability-limited host worker reached through a vsock/opaque-relay
+	// mux, with contained local servers. MCPFSRoot jails the built-in filesystem server; MCPFSUser
 	// is the unprivileged guest user local servers drop to.
 	MCP       bool   `json:"mcp,omitempty"`
 	MCPFSRoot string `json:"mcp_fs_root,omitempty"`
@@ -86,7 +93,8 @@ type RunConfig struct {
 	// MCPRemotes are -mcp-remote specs: comma-separated k=v with keys
 	// name, url, auth (bearer:SECRET | header:NAME:SECRET |
 	// custody:PROVIDER), allow/deny (repeated globs), redact (repeated
-	// secret names). Parsed at resolve time into mcpgw.Server entries.
+	// secret names). Parsed at resolve time into immutable worker metadata
+	// plus supervisor-owned capability mappings.
 	MCPRemotes []string `json:"mcp_remotes,omitempty"`
 	MemMB      uint     `json:"memMB"`
 	VCPUs      int      `json:"vcpus,omitempty"`
@@ -216,6 +224,38 @@ func ValidateProcessIsolation(mode string) error {
 	default:
 		return fmt.Errorf("process isolation must be auto, required, or off, got %q", mode)
 	}
+}
+
+// NormalizeMCPFilesystem validates and canonicalizes the built-in guest
+// filesystem server settings. Guest paths are POSIX paths on every host.
+func NormalizeMCPFilesystem(root, user string) (string, string, error) {
+	if root == "" {
+		root = "/"
+	}
+	if user == "" {
+		user = "nobody"
+	}
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return "", "", fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
+	}
+	uidText, gidText, numericPair := strings.Cut(user, ":")
+	uid, numericUIDErr := strconv.ParseUint(uidText, 10, 32)
+	if user == "root" || (numericUIDErr == nil && uid == 0) {
+		return "", "", fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
+	}
+	if numericPair {
+		if strings.Contains(gidText, ":") || numericUIDErr != nil {
+			return "", "", fmt.Errorf("-mcp-fs-user numeric identity must be UID:GID, got %q", user)
+		}
+		if _, err := strconv.ParseUint(gidText, 10, 32); err != nil {
+			return "", "", fmt.Errorf("-mcp-fs-user numeric identity must be UID:GID, got %q", user)
+		}
+	}
+	if !path.IsAbs(root) {
+		return "", "", fmt.Errorf("-mcp-fs-root must be an absolute guest path, got %q", root)
+	}
+	return path.Clean(root), user, nil
 }
 
 // ResolveSecrets parses -secret/-secret-file into the value map (CLI

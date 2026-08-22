@@ -156,6 +156,35 @@ func TestNetworkSpecIsRoleSpecific(t *testing.T) {
 	}
 }
 
+func TestMCPSpecHasNoAmbientAuthority(t *testing.T) {
+	s := MCPSpec(5, "/mcproot")
+	if s.Profile != ProfileMCP || !s.NoNetwork || !s.NoExec || !s.NoNewPaths || !s.NoProcX {
+		t.Fatalf("MCPSpec: %+v", s)
+	}
+	if s.KeepFDs != 5 || s.ConfRoot != "/mcproot" || len(s.ReadFiles) != 0 || len(s.FileAllow) != 0 {
+		t.Fatalf("MCPSpec resources: %+v", s)
+	}
+	profile := buildSeatbeltProfile(s)
+	for _, forbidden := range []string{
+		"(allow network-bind", "(allow network-inbound", "(allow network-outbound",
+		"kern.hv_support", "process-exec", "process-fork",
+	} {
+		if strings.Contains(profile, forbidden) {
+			t.Fatalf("MCP Seatbelt profile contains forbidden authority %q:\n%s", forbidden, profile)
+		}
+	}
+}
+
+func TestApplyRejectsUnknownProfileBeforeConfinement(t *testing.T) {
+	report, err := Apply(Spec{Profile: SyscallProfile(255)})
+	if err == nil || !strings.Contains(err.Error(), "invalid syscall profile") {
+		t.Fatalf("Apply error = %v, want invalid-profile refusal", err)
+	}
+	if report != nil {
+		t.Fatalf("invalid profile returned report: %+v", report)
+	}
+}
+
 func TestBuildSeatbeltProfile(t *testing.T) {
 	spec := DefaultSpec(12, "")
 	spec.FileAllow = []FileAllowance{

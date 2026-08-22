@@ -8,15 +8,8 @@ import (
 )
 
 func TestMCPServerUsesLinuxGuestExecutablePath(t *testing.T) {
-	d := daemonRuntime{cfg: config.RunConfig{MCPFSRoot: "/work", MCPFSUser: "65534:65534"}}
-	servers, err := d.resolveMCPServers()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(servers) != 1 || len(servers[0].Argv) == 0 {
-		t.Fatalf("MCP servers = %+v", servers)
-	}
-	if got, want := servers[0].Argv[0], "/run/gantry/bin/gantry-guest"; got != want {
+	argv := mcpFilesystemArgv(config.RunConfig{MCPFSRoot: "/work", MCPFSUser: "65534:65534"})
+	if got, want := argv[0], "/run/gantry/bin/gantry-guest"; got != want {
 		t.Fatalf("MCP guest executable = %q, want %q", got, want)
 	}
 }

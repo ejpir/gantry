@@ -9,28 +9,33 @@ limitations of these boundaries, see [Security](security.md).
 One named sandbox has one trusted supervisor and one Linux microVM. In the
 default isolation mode, separate workers own the hypervisor/device model and
 the userspace network data plane where the host supports the required
-controls.
+controls. The supervisor uses one process-neutral launch harness for every
+worker role.
 
 ```text
-                         host
+                              host
 
   gantry CLI / TUI / manager API
-                 │
-                 │ same-user local control
-                 ▼
-  ┌───────────────────────────────────────────────┐
-  │ sandbox supervisor                            │
-  │ lifecycle • config • secrets • OAuth • MCP    │
-  │ guest RPC bridge • share roots • host ports   │
-  └───────────┬───────────────────┬───────────────┘
-              │ authenticated     │ authenticated
-              │ worker channels   │ frame/control channels
-              ▼                   ▼
-  ┌──────────────────────┐   ┌──────────────────────┐
-  │ VMM worker           │   │ network worker       │
-  │ hypervisor • RAM     │   │ policy • NAT • DNS   │
-  │ virtio devices       │   │ forwards • traffic   │
-  └──────────┬───────────┘   └──────────┬───────────┘
+                  │
+                  │ same-user local control
+                  ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │ sandbox supervisor                                           │
+  │ lifecycle • config • secrets • OAuth • MCP capability brokers│
+  │ guest RPC bridge • share roots • host ports                  │
+  │                                                              │
+  │ shared worker launch/supervision                             │
+  │ exact role env + fd/handle table • nonce binding             │
+  │ namespace/Job confinement • diagnostics • reap/cleanup       │
+  └────────────┬────────────────────┬────────────────────────────┘
+               │ authenticated      │ authenticated       authenticated
+               │ capability channels│ frame/control       capability relays
+               ▼                    ▼                     │
+  ┌──────────────────────┐   ┌──────────────────────┐     ▼
+  │ VMM worker           │   │ network worker       │   ┌──────────────────────┐
+  │ hypervisor • RAM     │   │ policy • NAT • DNS   │   │ MCP worker (enabled) │
+  │ virtio devices       │   │ forwards • traffic   │   │ MCP parsing • policy │
+  └──────────┬───────────┘   └──────────┬───────────┘   └──────────────────────┘
              │ virtio                   │ host sockets
              ▼                          ▼
   ┌──────────────────────────────┐   public network / proxy
@@ -41,10 +46,16 @@ controls.
   └──────────────────────────────┘
 ```
 
-If split workers are unavailable in `auto` mode, Gantry records the degraded
-topology and may fall back. `required` fails the start instead. `off` runs a
-monolithic process. Effective, verified state is written to `isolation.json`;
-the configured mode alone is not treated as proof.
+The launch harness is trusted supervisor code, not another process. VMM and
+network workers use it for every sandbox where their split topology is
+available. MCP-enabled sandboxes always use the same harness for a separate
+MCP worker; there is no production in-supervisor MCP parsing fallback.
+
+VMM and network roles may fall back when their split is unavailable in `auto`;
+`required` fails instead. MCP remains a separate process whenever MCP is
+enabled, including in `off`, where its OS-confinement report is explicitly
+disabled. Effective, verified state is written to `isolation.json`; configured
+mode alone is not treated as proof.
 
 ## Host components
 
@@ -69,7 +80,7 @@ The ordinary command paths are:
 The supervisor is the trusted host control plane for one sandbox. It owns:
 
 - durable `sandbox.json` configuration and the sandbox lifetime lock;
-- the host secret store, OAuth custody registry, and MCP gateway;
+- the host secret store, OAuth custody registry, and MCP capability brokers;
 - local control listeners and session multiplexing;
 - opened boot assets and writable disks before capabilities are delegated;
 - host share roots and share admission policy;
@@ -79,11 +90,32 @@ The supervisor is the trusted host control plane for one sandbox. It owns:
 The supervisor runs with the privileges of the user who launched Gantry. It
 does not run as a system daemon.
 
+### Worker launch substrate
+
+Split roles use one process-neutral launch harness in
+`internal/sandbox/worker`. It re-executes the current binary with an explicit
+role and empty-by-default environment, builds the exact Unix descriptor or
+Windows handle table, supports nonce-binding independent data channels to the
+launch handshake, routes standard streams through a supervisor-owned bounded
+log, applies the
+requested namespace or Job boundary, and owns process reaping and containment
+cleanup. Each role retains its own bootstrap schema, inherited-capability
+validation, RPC protocol, syscall profile, readiness checks, and decision
+about whether worker failure terminates the sandbox. VMM or network worker
+failure is fatal; MCP worker failure withdraws MCP while the VM remains usable.
+
+The role argument is not authority. Only inherited channels and files, plus
+the per-launch nonce that correlates them, grant capabilities to the child.
+
 ### VMM worker
 
 The VMM worker owns guest RAM, the platform hypervisor, virtual CPUs, and the
 virtio device model. The supervisor passes pre-opened files and authenticated
-channels, so a confined worker does not need general host-path access.
+channels, so a confined worker does not need general host-path access. On
+Linux its Landlock policy therefore allows no new path access. Shares remain
+in the supervisor and cross a path-neutral broker or vhost relay, so live
+share add/remove does not require changing the worker's Linux Landlock or
+macOS Seatbelt profile.
 
 The VMM uses:
 
@@ -105,11 +137,34 @@ way back so the policy can maintain bounded, TTL-limited domain allowances.
 
 The network worker necessarily retains restricted stream and datagram socket
 creation authority. It does not receive secrets, writable disks, guest RAM,
-or host share roots.
+or host share roots. Its Linux Landlock policy allows reads of only the exact
+private resolver snapshots copied into its private root; it delegates no
+filesystem subtree.
 
 An explicit `-gvproxy` selects an external backend instead. Live policy,
 traffic inspection, proxy enforcement, and built-in port publishing require
 the embedded stack.
+
+### MCP worker
+
+An MCP-enabled sandbox has one `_mcp-worker`. It owns guest MCP parsing,
+JSON-RPC routing, tool policy, local stdio framing, and remote HTTP/TLS/SSE.
+The supervisor relays opaque guest and upstream bytes over a bounded
+multiplexer; it does not parse MCP payloads.
+
+The worker can request only a configured server ID. The supervisor maps that
+ID to a fixed guest helper, a validated and DNS-pinned remote dial, and the one
+credential configured for that server. It never accepts a URL, address, argv,
+path, secret name, or sandbox ID from the worker. Refresh tokens, complete
+secret sources, share roots, and arbitrary guest execution remain outside the
+worker.
+
+On Linux the MCP profile adds a deny-all Landlock filesystem ruleset to the
+private mount root, descriptor closure, namespace/task controls, and its
+no-socket/no-exec seccomp allowlist. macOS applies a deny-default Seatbelt
+profile. Windows `auto` establishes a one-process, kill-on-close Job boundary
+but reports ambient filesystem and network access as unenforced; `required`
+therefore fails closed.
 
 ## Guest components
 
@@ -243,9 +298,10 @@ checks the binding and current egress policy, resolves the source, and returns
 the value for that operation. Removal changes the host store immediately, so
 there is no durable guest copy to revoke.
 
-The MCP gateway is another per-sandbox host listener. The in-guest
-`mcp-proxy` carries newline-delimited MCP frames over virtio-vsock. For the
-built-in filesystem server, the gateway starts `gantry-guest mcp-serve` through
+The MCP endpoint is another per-sandbox host listener. The in-guest
+`mcp-proxy` carries newline-delimited MCP frames over virtio-vsock to the
+confined MCP worker through an opaque supervisor relay. For the built-in
+filesystem server, the supervisor starts `gantry-guest mcp-serve` through
 the existing guest exec channel, launches it as root only long enough to drop
 to the configured non-root UID/GID, and connects its stdio to the MCP session.
 The server uses an `os.Root` jail, while the gateway exposes only read and list
@@ -263,6 +319,10 @@ request IDs, redacts injected and configured values from results and errors,
 and audits names and decisions rather than payloads. Frames and responses are
 limited to 1 MiB; one session permits 16 in-flight calls, one gateway permits
 16 sessions, and idle sessions expire after five minutes.
+
+The [MCP worker confinement design](mcp-worker-confinement.md) documents the
+capability protocol, residual risks, platform enforcement, and remaining
+in-guest filesystem hardening work.
 
 ### OAuth bridge and custody
 
@@ -341,6 +401,8 @@ The default layout is:
     ├── daemon.log
     ├── worker-net.log
     ├── worker-vmm.log
+    ├── worker-mcp.log          # when MCP is enabled
+    ├── mcp-restart-required    # saved MCP config differs from the live worker
     └── runtime locks, sockets, and readiness files
 ```
 

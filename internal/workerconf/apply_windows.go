@@ -13,7 +13,10 @@ var isProcessInJobProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsPro
 // tokens and job membership must be established by CreateProcess/AssignProcess
 // in the trusted supervisor; a child cannot safely retrofit either boundary
 // onto every thread in its own process.
-func Apply(Spec) (*Report, error) {
+func Apply(spec Spec) (*Report, error) {
+	if !validProfile(spec.Profile) {
+		return nil, fmt.Errorf("workerconf: invalid syscall profile %d", spec.Profile)
+	}
 	rep := DisabledReport("windows", "")
 	restricted, tokenErr := windows.GetCurrentProcessToken().IsRestricted()
 	inJob, jobErr := currentProcessInJob()

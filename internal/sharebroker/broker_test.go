@@ -135,16 +135,34 @@ func TestAcceptsNoReplyRequest(t *testing.T) {
 }
 
 type brokerSpyRWC struct {
+	mu     sync.Mutex
 	writes int
 	closed bool
 }
 
 func (s *brokerSpyRWC) Read([]byte) (int, error) { return 0, io.EOF }
 func (s *brokerSpyRWC) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.writes += len(p)
 	return len(p), nil
 }
-func (s *brokerSpyRWC) Close() error { s.closed = true; return nil }
+func (s *brokerSpyRWC) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	return nil
+}
+func (s *brokerSpyRWC) writeCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writes
+}
+func (s *brokerSpyRWC) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
 
 type brokerOwnedSpyRWC struct {
 	closed chan struct{}
@@ -189,10 +207,10 @@ func TestClientRejectsOversizedRequestBeforeWrite(t *testing.T) {
 	if n != 0 || status != fuse.EIO {
 		t.Fatalf("oversized request = n %d status %v, want 0/EIO", n, status)
 	}
-	if stream.writes != 0 {
-		t.Fatalf("oversized request wrote %d transport bytes", stream.writes)
+	if writes := stream.writeCount(); writes != 0 {
+		t.Fatalf("oversized request wrote %d transport bytes", writes)
 	}
-	if !stream.closed {
+	if !stream.isClosed() {
 		t.Fatal("oversized request did not terminate transport")
 	}
 }
@@ -207,10 +225,10 @@ func TestClientRejectsMalformedFUSEShapeBeforeWrite(t *testing.T) {
 	if n != 0 || status != fuse.EIO {
 		t.Fatalf("malformed request = n %d status %v, want 0/EIO", n, status)
 	}
-	if stream.writes != 0 {
-		t.Fatalf("malformed request wrote %d transport bytes", stream.writes)
+	if writes := stream.writeCount(); writes != 0 {
+		t.Fatalf("malformed request wrote %d transport bytes", writes)
 	}
-	if !stream.closed {
+	if !stream.isClosed() {
 		t.Fatal("malformed request did not terminate transport")
 	}
 }

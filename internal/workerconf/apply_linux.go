@@ -19,12 +19,17 @@ import (
 //     CLONE_NEWUSER|CLONE_NEWNS; absent on AppArmor-restricted hosts or
 //     a plain spawn, in which case the seccomp tier still applies);
 //  2. descriptor tier — every unjustified live descriptor is closed;
-//  3. no_new_privs + seccomp-bpf whitelist (TSYNC across all threads).
+//  3. Landlock tier — deny every handled filesystem operation except exact
+//     immutable files declared by the role;
+//  4. no_new_privs + seccomp-bpf whitelist (TSYNC across all threads).
 //
 // A tier that fails is recorded in the report and the next tier still
 // installs; Verify then reports the honest per-property outcome. An
 // error is returned only when NO tier could be installed.
 func Apply(spec Spec) (*Report, error) {
+	if !validProfile(spec.Profile) {
+		return nil, fmt.Errorf("workerconf: invalid syscall profile %d", spec.Profile)
+	}
 	rep := &Report{Platform: "linux"}
 
 	// The close tier's keep set is computed FIRST: /proc/self/fd (the
@@ -101,6 +106,24 @@ func Apply(spec Spec) (*Report, error) {
 		// seccomp. Capture the verified result now, after capset and rlimit but
 		// before installing the filter; Verify preserves it below.
 		rep.Results = append(rep.Results, probeTaskLimit(spec.MaxTasks))
+	}
+
+	if spec.NoNewPaths {
+		_, _ = fmt.Fprintf(os.Stderr, "workerconf: installing Landlock path ruleset (read files=%d)\n", len(spec.ReadFiles))
+		abi, allowed, err := applyPathLandlock(spec.ReadFiles)
+		if err != nil {
+			rep.Notes = append(rep.Notes, "landlock tier unavailable: "+err.Error())
+			rep.Results = append(rep.Results, PropertyResult{
+				Property: PropLandlock, State: StateUnenforced, Detail: err.Error(),
+			})
+		} else {
+			rep.Applied = true
+			detail := fmt.Sprintf("ABI %d deny-by-default filesystem ruleset installed; %d exact read file(s)", abi, allowed)
+			rep.Notes = append(rep.Notes, "landlock tier: "+detail)
+			rep.Results = append(rep.Results, PropertyResult{
+				Property: PropLandlock, State: StateEnforced, Detail: detail,
+			})
+		}
 	}
 
 	_, _ = fmt.Fprintln(os.Stderr, "workerconf: installing seccomp filter")

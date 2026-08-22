@@ -116,6 +116,19 @@ func TestSetResourcesLivePassesIsolationThroughUnchanged(t *testing.T) {
 	}
 }
 
+func TestConfigureMCPRemoteExplainsLegacyDaemon(t *testing.T) {
+	useShortGantryHome(t)
+	captured := fakeLiveSandbox(t, "legacy-mcp", `{"error":"unknown op"}`)
+	err := ConfigureMCPRemote("legacy-mcp", "name=api,url=https://example.com/mcp,allow=*", false)
+	if err == nil || !strings.Contains(err.Error(), `restart sandbox "legacy-mcp"`) || !strings.Contains(err.Error(), "upgrade its daemon") {
+		t.Fatalf("ConfigureMCPRemote = %v, want an actionable daemon-upgrade error", err)
+	}
+	req := <-captured
+	if req.Op != "mcp.remote.set" || req.MCP == nil {
+		t.Fatalf("legacy daemon request = %#v", req)
+	}
+}
+
 // TestSetNetworkPolicyStoppedSandboxWritesStore covers the offline path:
 // no daemon anywhere, the policy is validated and persisted for next boot.
 func TestSetNetworkPolicyStoppedSandboxWritesStore(t *testing.T) {
