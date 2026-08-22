@@ -56,6 +56,38 @@ $ gantry start dev -image alpine:latest -mcp \
 The value can be a guest account name, a numeric UID found in the guest
 password database, or an explicit `UID:GID`. Gantry refuses root.
 
+### Read a mounted workspace through MCP
+
+The built-in filesystem server can read a host share when the share's
+container mount point is inside `-mcp-fs-root` and `-mcp-fs-user` has read
+permission. For example, mount a project at `/workspace` and expose exactly
+that directory:
+
+```console
+$ gantry start dev -image alpine:latest \
+    -share "code=$PWD@/workspace,ro,uid=1000,gid=1000" \
+    -mcp -mcp-fs-root /workspace -mcp-fs-user 1000:1000
+```
+
+A share without an explicit container path appears at `/host/TAG`. This
+configuration therefore exposes the default `code` share:
+
+```console
+$ gantry start dev -image alpine:latest \
+    -share "code=$PWD,ro,uid=1000,gid=1000" \
+    -mcp -mcp-fs-root /host/code -mcp-fs-user 1000:1000
+```
+
+Use the same paths in the dashboard's **Mounts** and **MCP → Filesystem**
+forms. Prefer a narrow filesystem root rather than `/`. The filesystem server
+is read-only at the tool layer; a read-only share also enforces that boundary
+at the host export.
+
+Remote MCP servers do **not** receive direct access to guest files or mounts.
+They receive only MCP requests that the agent sends through the gateway. An
+agent can still copy data from a filesystem-tool result into a remote tool
+call, so keep remote tool allowlists and network policy narrow.
+
 ## Add a remote server
 
 Declare each streamable-HTTP server with a repeatable `-mcp-remote` flag:
