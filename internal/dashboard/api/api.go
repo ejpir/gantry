@@ -121,13 +121,52 @@ type SecretRequest struct {
 	Value   secret.Value
 }
 
+// MCPServer contains configuration references only. AuthRef and Redact are
+// secret/custody names; credential values never cross the dashboard boundary.
+type MCPServer struct {
+	Sandbox    string
+	Name       string
+	Type       string // local or remote
+	URL        string
+	AuthKind   string
+	AuthHeader string
+	AuthRef    string
+	Allow      []string
+	Deny       []string
+	Redact     []string
+	Root       string
+	User       string
+	State      string // active, saved, or restart
+	Error      string
+}
+
+type MCPRemoteRequest struct {
+	Sandbox    string
+	Name       string
+	URL        string
+	AuthKind   string
+	AuthHeader string
+	AuthRef    string
+	Allow      []string
+	Deny       []string
+	Redact     []string
+	Replace    bool
+}
+
+type MCPFilesystemRequest struct {
+	Sandbox string
+	Root    string
+	User    string
+}
+
 type Snapshot struct {
-	Sandboxes []Sandbox
-	Traffic   []Traffic
-	Rules     []Rule
-	Mounts    []Mount
-	Ports     []Port
-	Secrets   []Secret
+	Sandboxes  []Sandbox
+	Traffic    []Traffic
+	Rules      []Rule
+	Mounts     []Mount
+	Ports      []Port
+	Secrets    []Secret
+	MCPServers []MCPServer
 }
 
 type ResourceLimits struct {
@@ -209,6 +248,11 @@ type Service interface {
 	ValidateSecret(SecretRequest) error
 	AddSecret(SecretRequest) error
 	RemoveSecret(Secret) error
+	ValidateMCPRemote(MCPRemoteRequest) error
+	ConfigureMCPRemote(MCPRemoteRequest) error
+	ValidateMCPFilesystem(MCPFilesystemRequest) error
+	ConfigureMCPFilesystem(MCPFilesystemRequest) error
+	RemoveMCPRemote(MCPServer) error
 	PlanShare(ShareRequest) (SharePlan, error)
 	ConfigureShare(SharePlan) error
 	RemoveShare(Mount) error

@@ -190,6 +190,38 @@ func TestConfigStoreRejectsInvalidPersistedResources(t *testing.T) {
 	}
 }
 
+func TestConfigStoreManagesMCPServersForRestart(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{MemMB: 512, VCPUs: 1})
+	remote, err := store.SetMCPRemote("name=github,url=https://example.com/mcp,allow=*", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Name != "github" || !store.Snapshot().MCP || len(store.Snapshot().MCPRemotes) != 1 {
+		t.Fatalf("MCP config after add = %+v", store.Snapshot())
+	}
+	if _, err := store.SetMCPRemote("name=github,url=https://other.example/mcp,allow=read_*", false); err == nil {
+		t.Fatal("duplicate MCP server was accepted without replace")
+	}
+	if _, err := store.SetMCPRemote("name=github,url=https://other.example/mcp,allow=read_*", true); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().MCPRemotes[0]; !strings.Contains(got, "other.example") || strings.Contains(got, "url=https://example.com") {
+		t.Fatalf("replaced MCP remote = %q", got)
+	}
+	if err := store.SetMCPFilesystem("/workspace/../work", "1000:1000"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot(); got.MCPFSRoot != "/work" || got.MCPFSUser != "1000:1000" {
+		t.Fatalf("filesystem MCP config = %+v", got)
+	}
+	if err := store.RemoveMCPRemote("github"); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot(); len(got.MCPRemotes) != 0 || !got.MCP {
+		t.Fatalf("MCP config after remote removal = %+v", got)
+	}
+}
+
 func TestConfigStoreSetResources(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{MemMB: 512, VCPUs: 1, Shares: []string{"code=/tmp"}, ProcessIsolation: "required"})

@@ -16,6 +16,7 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
@@ -235,6 +236,108 @@ func (dashboardService) RemoveSecret(row dashboardapi.Secret) error {
 		return err
 	}
 	return controlcmd.RemoveSecret(row.Sandbox, row.Name)
+}
+
+func (dashboardService) ValidateMCPRemote(request dashboardapi.MCPRemoteRequest) error {
+	_, err := normalizedDashboardMCPRemote(request)
+	return err
+}
+
+func (dashboardService) ConfigureMCPRemote(request dashboardapi.MCPRemoteRequest) error {
+	raw, err := normalizedDashboardMCPRemote(request)
+	if err != nil {
+		return err
+	}
+	return controlcmd.ConfigureMCPRemote(request.Sandbox, raw, request.Replace)
+}
+
+func normalizedDashboardMCPRemote(request dashboardapi.MCPRemoteRequest) (string, error) {
+	if err := layout.ValidateName(request.Sandbox); err != nil {
+		return "", dashboardapi.Invalid("sandbox", err)
+	}
+	remote := mcpspec.Remote{
+		Name: strings.TrimSpace(request.Name), URL: strings.TrimSpace(request.URL),
+		AuthKind:   strings.ToLower(strings.TrimSpace(request.AuthKind)),
+		AuthHeader: strings.TrimSpace(request.AuthHeader), AuthRef: strings.TrimSpace(request.AuthRef),
+		Allow: cleanDashboardList(request.Allow), Deny: cleanDashboardList(request.Deny),
+		RedactNames: cleanDashboardList(request.Redact),
+	}
+	switch remote.AuthKind {
+	case "":
+		if remote.AuthHeader != "" || remote.AuthRef != "" {
+			return "", dashboardapi.Invalid("auth", fmt.Errorf("choose an authentication kind before entering a credential reference"))
+		}
+	case "bearer", "custody":
+		if remote.AuthRef == "" {
+			return "", dashboardapi.Invalid("auth_ref", fmt.Errorf("%s authentication requires a secret or provider name", remote.AuthKind))
+		}
+	case "header":
+		if remote.AuthHeader == "" {
+			return "", dashboardapi.Invalid("auth_header", fmt.Errorf("header authentication requires a header name"))
+		}
+		if remote.AuthRef == "" {
+			return "", dashboardapi.Invalid("auth_ref", fmt.Errorf("header authentication requires a secret name"))
+		}
+	default:
+		return "", dashboardapi.Invalid("auth", fmt.Errorf("authentication must be none, bearer, header, or custody"))
+	}
+	parsed, err := mcpspec.Parse(remote.String())
+	if err != nil {
+		field := "url"
+		switch {
+		case strings.Contains(err.Error(), "name ") || strings.Contains(err.Error(), "reserved"):
+			field = "name"
+		case strings.Contains(err.Error(), "auth=") || strings.Contains(err.Error(), "auth:"):
+			field = "auth"
+		case strings.Contains(err.Error(), "allow"):
+			field = "allow"
+		case strings.Contains(err.Error(), "deny"):
+			field = "deny"
+		case strings.Contains(err.Error(), "redact"):
+			field = "redact"
+		}
+		return "", dashboardapi.Invalid(field, err)
+	}
+	return parsed.String(), nil
+}
+
+func cleanDashboardList(values []string) []string {
+	clean := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			clean = append(clean, value)
+		}
+	}
+	return clean
+}
+
+func (dashboardService) ValidateMCPFilesystem(request dashboardapi.MCPFilesystemRequest) error {
+	if err := layout.ValidateName(request.Sandbox); err != nil {
+		return dashboardapi.Invalid("sandbox", err)
+	}
+	_, _, err := config.NormalizeMCPFilesystem(strings.TrimSpace(request.Root), strings.TrimSpace(request.User))
+	if err != nil {
+		field := "root"
+		if strings.Contains(err.Error(), "user") {
+			field = "user"
+		}
+		return dashboardapi.Invalid(field, err)
+	}
+	return nil
+}
+
+func (service dashboardService) ConfigureMCPFilesystem(request dashboardapi.MCPFilesystemRequest) error {
+	if err := service.ValidateMCPFilesystem(request); err != nil {
+		return err
+	}
+	return controlcmd.ConfigureMCPFilesystem(request.Sandbox, strings.TrimSpace(request.Root), strings.TrimSpace(request.User))
+}
+
+func (dashboardService) RemoveMCPRemote(row dashboardapi.MCPServer) error {
+	if row.Type != "remote" || row.Error != "" {
+		return fmt.Errorf("MCP server %q is not a removable remote", row.Name)
+	}
+	return controlcmd.RemoveMCPRemote(row.Sandbox, row.Name)
 }
 
 func dashboardRuleForTraffic(row dashboardapi.Traffic, action string) (dashboardapi.RuleRequest, error) {
@@ -564,6 +667,7 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 				sandbox.Shares = len(mounts)
 			}
 			data.Ports = append(data.Ports, loadDashboardPorts(name, cfg, sandbox.State == dashboardapi.Running)...)
+			data.MCPServers = append(data.MCPServers, loadDashboardMCPServers(name, cfg, sandbox.State == dashboardapi.Running)...)
 		}
 		data.Sandboxes = append(data.Sandboxes, sandbox)
 	}
@@ -595,7 +699,52 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 		}
 		return data.Secrets[i].Sandbox < data.Secrets[j].Sandbox
 	})
+	sort.SliceStable(data.MCPServers, func(i, j int) bool {
+		if data.MCPServers[i].Sandbox != data.MCPServers[j].Sandbox {
+			return data.MCPServers[i].Sandbox < data.MCPServers[j].Sandbox
+		}
+		if data.MCPServers[i].Type != data.MCPServers[j].Type {
+			return data.MCPServers[i].Type == "local"
+		}
+		return data.MCPServers[i].Name < data.MCPServers[j].Name
+	})
 	return data, nil
+}
+
+func loadDashboardMCPServers(sandbox string, cfg config.RunConfig, running bool) []dashboardapi.MCPServer {
+	state := "saved"
+	if running {
+		state = "active"
+		if dashboardFileExists(filepath.Join(layout.Dir(sandbox), config.MCPRestartMarker)) {
+			state = "restart"
+		}
+	}
+	rows := make([]dashboardapi.MCPServer, 0, len(cfg.MCPRemotes)+1)
+	if cfg.MCP {
+		root, user, err := config.NormalizeMCPFilesystem(cfg.MCPFSRoot, cfg.MCPFSUser)
+		row := dashboardapi.MCPServer{Sandbox: sandbox, Name: "fs", Type: "local", Root: root, User: user, State: state}
+		if err != nil {
+			row.Error = err.Error()
+		}
+		rows = append(rows, row)
+	}
+	for index, raw := range cfg.MCPRemotes {
+		remote, err := mcpspec.Parse(raw)
+		if err != nil {
+			rows = append(rows, dashboardapi.MCPServer{
+				Sandbox: sandbox, Name: fmt.Sprintf("invalid-%d", index+1), Type: "remote",
+				State: state, Error: err.Error(),
+			})
+			continue
+		}
+		rows = append(rows, dashboardapi.MCPServer{
+			Sandbox: sandbox, Name: remote.Name, Type: "remote", URL: remote.URL,
+			AuthKind: remote.AuthKind, AuthHeader: remote.AuthHeader, AuthRef: remote.AuthRef,
+			Allow: append([]string(nil), remote.Allow...), Deny: append([]string(nil), remote.Deny...),
+			Redact: append([]string(nil), remote.RedactNames...), State: state,
+		})
+	}
+	return rows
 }
 
 func dashboardDiskSizeMiB(cfg config.RunConfig) uint {

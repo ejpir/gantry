@@ -157,6 +157,88 @@ func TestDashboardMountsPreserveLiveErrorDuringDrift(t *testing.T) {
 	}
 }
 
+func TestDashboardManagesMCPServersForStoppedSandbox(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	name := "dev"
+	if err := os.MkdirAll(layout.Dir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, name, config.RunConfig{MemMB: 512, VCPUs: 1})
+	service := dashboardService{}
+	request := dashboardapi.MCPRemoteRequest{
+		Sandbox: name, Name: "github", URL: "https://example.com/mcp",
+		AuthKind: "bearer", AuthRef: "GITHUB_TOKEN", Allow: []string{"read_*", "list_*"},
+		Deny: []string{"admin_*"}, Redact: []string{"OTHER_TOKEN"},
+	}
+	if err := service.ValidateMCPRemote(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConfigureMCPRemote(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConfigureMCPFilesystem(dashboardapi.MCPFilesystemRequest{
+		Sandbox: name, Root: "/workspace", User: "1000:1000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.MCPServers) != 2 || snapshot.MCPServers[0].Name != "fs" || snapshot.MCPServers[1].Name != "github" {
+		t.Fatalf("MCP rows = %#v", snapshot.MCPServers)
+	}
+	remote := snapshot.MCPServers[1]
+	if remote.State != "saved" || remote.AuthRef != "GITHUB_TOKEN" || len(remote.Allow) != 2 || remote.URL != request.URL {
+		t.Fatalf("remote MCP row = %#v", remote)
+	}
+	if err := service.RemoveMCPRemote(remote); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.ReadSandboxConfig(layout.Dir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCP || len(cfg.MCPRemotes) != 0 || cfg.MCPFSRoot != "/workspace" {
+		t.Fatalf("MCP config after removal = %+v", cfg)
+	}
+}
+
+func TestDashboardMCPValidationAndRestartState(t *testing.T) {
+	service := dashboardService{}
+	if err := service.ValidateMCPRemote(dashboardapi.MCPRemoteRequest{
+		Sandbox: "dev", Name: "metadata", URL: "https://169.254.169.254/latest", Allow: []string{"*"},
+	}); err == nil {
+		t.Fatal("metadata MCP endpoint was accepted")
+	}
+	if err := service.ValidateMCPRemote(dashboardapi.MCPRemoteRequest{
+		Sandbox: "dev", Name: "bad", URL: "https://example.com/mcp", Allow: []string{"["},
+	}); err == nil {
+		t.Fatal("invalid MCP tool pattern was accepted")
+	}
+	if err := service.ValidateMCPFilesystem(dashboardapi.MCPFilesystemRequest{Sandbox: "dev", Root: "relative", User: "nobody"}); err == nil {
+		t.Fatal("relative guest MCP root was accepted")
+	}
+	if err := service.ValidateMCPFilesystem(dashboardapi.MCPFilesystemRequest{Sandbox: "dev", Root: "/", User: "root"}); err == nil {
+		t.Fatal("root MCP user was accepted")
+	}
+	if err := service.ValidateMCPFilesystem(dashboardapi.MCPFilesystemRequest{Sandbox: "dev", Root: "/", User: "1000:staff"}); err == nil {
+		t.Fatal("malformed numeric MCP user was accepted")
+	}
+
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	if err := os.MkdirAll(layout.Dir("dev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.Dir("dev"), config.MCPRestartMarker), []byte("restart required\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := loadDashboardMCPServers("dev", config.RunConfig{MCP: true, MCPFSRoot: "/work", MCPFSUser: "nobody"}, true)
+	if len(rows) != 1 || rows[0].State != "restart" {
+		t.Fatalf("restart MCP rows = %#v", rows)
+	}
+}
+
 func TestDashboardPlansShareAndPortInputs(t *testing.T) {
 	service := dashboardService{}
 	share, err := service.PlanShare(dashboardapi.ShareRequest{

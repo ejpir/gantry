@@ -53,7 +53,11 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateRuleAddDialogKey(msg)
 	case tuiSecretAddDialog:
 		return m.updateSecretAddDialogKey(msg)
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
+	case tuiMCPRemoteDialog:
+		return m.updateMCPRemoteDialogKey(msg)
+	case tuiMCPFilesystemDialog:
+		return m.updateMCPFilesystemDialogKey(msg)
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog:
 		return m.updateConfirmationDialogKey(msg.String())
 	case tuiHelpDialog, tuiInfoDialog, tuiPacketDetailDialog:
 		switch msg.String() {
@@ -123,6 +127,30 @@ func (m *sandboxTUIModel) updateFocusedDialogInput(msg tea.Msg) (tea.Model, tea.
 			m.secretName, cmd = m.secretName.Update(msg)
 		case 2:
 			m.secretValue, cmd = m.secretValue.Update(msg)
+		}
+	case tuiMCPRemoteDialog:
+		switch m.mcpFocus {
+		case 1:
+			m.mcpName, cmd = m.mcpName.Update(msg)
+		case 2:
+			m.mcpURL, cmd = m.mcpURL.Update(msg)
+		case 4:
+			m.mcpAuthRef, cmd = m.mcpAuthRef.Update(msg)
+		case 5:
+			m.mcpAuthHeader, cmd = m.mcpAuthHeader.Update(msg)
+		case 6:
+			m.mcpAllow, cmd = m.mcpAllow.Update(msg)
+		case 7:
+			m.mcpDeny, cmd = m.mcpDeny.Update(msg)
+		case 8:
+			m.mcpRedact, cmd = m.mcpRedact.Update(msg)
+		}
+	case tuiMCPFilesystemDialog:
+		switch m.mcpFSFocus {
+		case 1:
+			m.mcpFSRoot, cmd = m.mcpFSRoot.Update(msg)
+		case 2:
+			m.mcpFSUser, cmd = m.mcpFSUser.Update(msg)
 		}
 	}
 	return m, cmd
@@ -238,6 +266,27 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		case 2:
 			return m.secretValue.Value(), "secret value"
 		}
+	case tuiMCPRemoteDialog:
+		values := []struct{ value, label string }{
+			{m.mcpSandbox.Value(), "sandbox"}, {m.mcpName.Value(), "MCP server name"},
+			{m.mcpURL.Value(), "MCP server URL"}, {defaultText(m.mcpAuthKind, "none"), "MCP authentication"},
+			{m.mcpAuthRef.Value(), "MCP credential reference"}, {m.mcpAuthHeader.Value(), "MCP header name"},
+			{m.mcpAllow.Value(), "MCP allow patterns"}, {m.mcpDeny.Value(), "MCP deny patterns"},
+			{m.mcpRedact.Value(), "MCP redact names"},
+		}
+		if m.mcpFocus >= 0 && m.mcpFocus < len(values) {
+			return values[m.mcpFocus].value, values[m.mcpFocus].label
+		}
+	case tuiMCPFilesystemDialog:
+		if m.mcpFSFocus == 0 {
+			return m.mcpSandbox.Value(), "sandbox"
+		}
+		if m.mcpFSFocus == 1 {
+			return m.mcpFSRoot.Value(), "MCP filesystem root"
+		}
+		if m.mcpFSFocus == 2 {
+			return m.mcpFSUser.Value(), "MCP filesystem user"
+		}
 	case tuiInfoDialog:
 		return wholeDialog("sandbox details")
 	case tuiPacketDetailDialog:
@@ -280,6 +329,8 @@ func (m *sandboxTUIModel) submitConfirmationDialog() (tea.Model, tea.Cmd) {
 		return m.removeSelectedRule()
 	case tuiSecretRemoveDialog:
 		return m.removeSelectedSecret()
+	case tuiMCPRemoveDialog:
+		return m.removeSelectedMCPRemote()
 	case tuiUpdateDialog:
 		return m.beginUpdate()
 	default:
@@ -1425,6 +1476,17 @@ func (m *sandboxTUIModel) closeDialog() {
 	m.secretValue.Blur()
 	m.secretValue.Reset()
 	m.secretSandbox.open = false
+	m.mcpName.Blur()
+	m.mcpURL.Blur()
+	m.mcpAuthHeader.Blur()
+	m.mcpAuthRef.Blur()
+	m.mcpAllow.Blur()
+	m.mcpDeny.Blur()
+	m.mcpRedact.Blur()
+	m.mcpFSRoot.Blur()
+	m.mcpFSUser.Blur()
+	m.mcpSandbox.open = false
+	m.mcpEditing = false
 	m.shareReplace = false
 }
 
@@ -1514,6 +1576,10 @@ func (m sandboxTUIModel) dialogFocusAtStart() bool {
 		return m.ruleFocus == 0
 	case tuiSecretAddDialog:
 		return m.secretFocus == 0
+	case tuiMCPRemoteDialog:
+		return m.mcpFocus == 0
+	case tuiMCPFilesystemDialog:
+		return m.mcpFSFocus == 0
 	default:
 		return false
 	}
@@ -1545,6 +1611,14 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 		return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Destination", "Protocol", "Destination ports", "Add rule"}), m.ruleFocus == 5
 	case tuiSecretAddDialog:
 		return choose(m.secretFocus, []string{"Sandbox", "Name", "Value", "Add secret"}), m.secretFocus == 3
+	case tuiMCPRemoteDialog:
+		button := "Add server"
+		if m.mcpEditing {
+			button = "Save server"
+		}
+		return choose(m.mcpFocus, []string{"Sandbox", "Name", "HTTPS URL", "Authentication", "Secret / provider reference", "Header name", "Allow tool globs", "Deny tool globs", "Additional redact secret names", button}), m.mcpFocus == mcpRemoteSubmitFocus
+	case tuiMCPFilesystemDialog:
+		return choose(m.mcpFSFocus, []string{"Sandbox", "Guest root", "Unprivileged guest user", "Save"}), m.mcpFSFocus == 3
 	default:
 		return "", false
 	}
@@ -1573,6 +1647,17 @@ func (m *sandboxTUIModel) resizeInputs() {
 	secretWidth, _ := m.dialogSize(tuiSecretAddDialog)
 	m.secretName.SetWidth(maxInt(12, secretWidth-10))
 	m.secretValue.SetWidth(maxInt(12, secretWidth-10))
+	mcpWidth, _ := m.dialogSize(tuiMCPRemoteDialog)
+	mcpFieldWidth := maxInt(12, mcpWidth-10)
+	m.mcpName.SetWidth(mcpFieldWidth)
+	m.mcpURL.SetWidth(mcpFieldWidth)
+	m.mcpAuthHeader.SetWidth(mcpFieldWidth)
+	m.mcpAuthRef.SetWidth(mcpFieldWidth)
+	m.mcpAllow.SetWidth(mcpFieldWidth)
+	m.mcpDeny.SetWidth(mcpFieldWidth)
+	m.mcpRedact.SetWidth(mcpFieldWidth)
+	m.mcpFSRoot.SetWidth(mcpFieldWidth)
+	m.mcpFSUser.SetWidth(mcpFieldWidth)
 }
 
 func (m *sandboxTUIModel) applyInputTheme() {
@@ -1598,6 +1683,15 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	m.rulePorts.SetStyles(styles)
 	m.secretName.SetStyles(styles)
 	m.secretValue.SetStyles(styles)
+	m.mcpName.SetStyles(styles)
+	m.mcpURL.SetStyles(styles)
+	m.mcpAuthHeader.SetStyles(styles)
+	m.mcpAuthRef.SetStyles(styles)
+	m.mcpAllow.SetStyles(styles)
+	m.mcpDeny.SetStyles(styles)
+	m.mcpRedact.SetStyles(styles)
+	m.mcpFSRoot.SetStyles(styles)
+	m.mcpFSUser.SetStyles(styles)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(theme.accent)
 }
 
@@ -1724,7 +1818,7 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m, nil
 	}
 	switch m.dialog {
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiUpdateDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog:
 		return m.updateConfirmationDialogMouse(mouse, bounds)
 	case tuiCreateDialog:
 		return m.updateCreateDialogMouse(mouse, bounds)
@@ -1740,6 +1834,10 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m.updateRuleAddDialogMouse(mouse, bounds)
 	case tuiSecretAddDialog:
 		return m.updateSecretAddDialogMouse(mouse, bounds)
+	case tuiMCPRemoteDialog:
+		return m.updateMCPRemoteDialogMouse(mouse, bounds)
+	case tuiMCPFilesystemDialog:
+		return m.updateMCPFilesystemDialogMouse(mouse, bounds)
 	default:
 		return m, nil
 	}
@@ -1766,6 +1864,8 @@ func (m sandboxTUIModel) confirmationActionLabel() string {
 		return "Unpublish"
 	case tuiSecretRemoveDialog:
 		return "Delete"
+	case tuiMCPRemoveDialog:
+		return "Remove"
 	case tuiUpdateDialog:
 		return "Update"
 	default:

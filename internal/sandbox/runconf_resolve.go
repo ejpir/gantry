@@ -4,15 +4,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
@@ -429,33 +428,32 @@ func (r *runResolver) resolveSessionOptions() error {
 	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
 	r.cfg.MCPFSUser = *r.flags.MCPFSUser
 	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
+	if len(r.cfg.MCPRemotes) > mcpspec.MaxRemotes {
+		return fmt.Errorf("too many -mcp-remote values (max %d)", mcpspec.MaxRemotes)
+	}
 	if len(r.cfg.MCPRemotes) > 0 {
 		r.cfg.MCP = true // remotes imply the gateway
 	}
 	// Structural validation happens here (before any boot work) so a bad
 	// spec refuses the start loudly and immediately; the daemon re-parses
 	// for secret/custody resolution against its live stores.
+	seenMCPNames := make(map[string]bool, len(r.cfg.MCPRemotes))
 	for _, spec := range r.cfg.MCPRemotes {
-		if _, err := parseMCPRemote(spec); err != nil {
+		remote, err := parseMCPRemote(spec)
+		if err != nil {
 			return fmt.Errorf("-mcp-remote %q: %w", spec, err)
 		}
+		if seenMCPNames[remote.Name] {
+			return fmt.Errorf("-mcp-remote %q: duplicate server name %q", spec, remote.Name)
+		}
+		seenMCPNames[remote.Name] = true
 	}
 	if r.cfg.MCP {
-		if strings.TrimSpace(r.cfg.MCPFSUser) == "" {
-			return fmt.Errorf("-mcp-fs-user must not be empty (local MCP servers never run as root)")
+		root, user, err := config.NormalizeMCPFilesystem(r.cfg.MCPFSRoot, r.cfg.MCPFSUser)
+		if err != nil {
+			return err
 		}
-		identity := strings.TrimSpace(r.cfg.MCPFSUser)
-		r.cfg.MCPFSUser = identity
-		uidText, _, _ := strings.Cut(identity, ":")
-		uid, numericUIDErr := strconv.ParseUint(uidText, 10, 32)
-		if identity == "root" || (numericUIDErr == nil && uid == 0) {
-			return fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
-		}
-		// This path is interpreted inside the Linux guest, independent of the
-		// host OS. filepath.IsAbs would reject "/work" on Windows.
-		if !path.IsAbs(r.cfg.MCPFSRoot) {
-			return fmt.Errorf("-mcp-fs-root must be an absolute guest path, got %q", r.cfg.MCPFSRoot)
-		}
+		r.cfg.MCPFSRoot, r.cfg.MCPFSUser = root, user
 	}
 	return nil
 }

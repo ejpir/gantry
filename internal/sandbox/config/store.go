@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
@@ -214,6 +215,89 @@ func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {
 	return s.Mutate(func(cfg *RunConfig) error {
 		cfg.NetPol = path
 		cfg.AllowLN = allowLocal
+		return nil
+	})
+}
+
+// SetMCPRemote adds or replaces one remote server for the next MCP-worker
+// launch. The live worker intentionally remains immutable.
+func (s *ConfigStore) SetMCPRemote(raw string, replace bool) (mcpspec.Remote, error) {
+	remote, err := mcpspec.Parse(raw)
+	if err != nil {
+		return mcpspec.Remote{}, err
+	}
+	err = s.Mutate(func(cfg *RunConfig) error {
+		index := -1
+		for i, configured := range cfg.MCPRemotes {
+			parsed, parseErr := mcpspec.Parse(configured)
+			if parseErr != nil {
+				return fmt.Errorf("bad configured MCP remote %d: %w", i+1, parseErr)
+			}
+			if parsed.Name == remote.Name {
+				if index >= 0 {
+					return fmt.Errorf("duplicate configured MCP server %q", remote.Name)
+				}
+				index = i
+			}
+		}
+		if index >= 0 && !replace {
+			return fmt.Errorf("MCP server %q already exists (use replace)", remote.Name)
+		}
+		if index < 0 && len(cfg.MCPRemotes) >= mcpspec.MaxRemotes {
+			return fmt.Errorf("too many remote MCP servers (max %d)", mcpspec.MaxRemotes)
+		}
+		canonical := remote.String()
+		if index >= 0 {
+			cfg.MCPRemotes[index] = canonical
+		} else {
+			cfg.MCPRemotes = append(cfg.MCPRemotes, canonical)
+		}
+		cfg.MCP = true
+		return nil
+	})
+	return remote, err
+}
+
+// RemoveMCPRemote drops one remote server from the next MCP-worker launch.
+// MCP remains enabled because the built-in filesystem server is still
+// configured independently.
+func (s *ConfigStore) RemoveMCPRemote(name string) error {
+	if name == "" || name == "fs" {
+		return fmt.Errorf("invalid removable MCP server %q", name)
+	}
+	return s.Mutate(func(cfg *RunConfig) error {
+		remotes := make([]string, 0, len(cfg.MCPRemotes))
+		found := false
+		for i, configured := range cfg.MCPRemotes {
+			parsed, err := mcpspec.Parse(configured)
+			if err != nil {
+				return fmt.Errorf("bad configured MCP remote %d: %w", i+1, err)
+			}
+			if parsed.Name == name {
+				found = true
+				continue
+			}
+			remotes = append(remotes, configured)
+		}
+		if !found {
+			return fmt.Errorf("MCP server %q is not configured", name)
+		}
+		cfg.MCPRemotes = remotes
+		return nil
+	})
+}
+
+// SetMCPFilesystem updates the built-in read-only filesystem server for the
+// next MCP-worker launch and enables the gateway if necessary.
+func (s *ConfigStore) SetMCPFilesystem(root, user string) error {
+	root, user, err := NormalizeMCPFilesystem(root, user)
+	if err != nil {
+		return err
+	}
+	return s.Mutate(func(cfg *RunConfig) error {
+		cfg.MCP = true
+		cfg.MCPFSRoot = root
+		cfg.MCPFSUser = user
 		return nil
 	})
 }

@@ -11,8 +11,9 @@
 //
 //	sandbox.json      start configuration (images, rw, shares, net)
 //	vmm.pid           daemon process id (written by the daemon once it holds vmm.lock)
-//	ready             touched once the guest RPC connection is held
-//	ctl.sock          session broker (JSON line, then raw stdio)
+//	ready                touched once the guest RPC connection is held
+//	mcp-restart-required persisted MCP settings differ from the live worker
+//	ctl.sock             session broker (JSON line, then raw stdio)
 //	1025.sock         vsock dial-back accept target
 //	listen-1026.sock  vsock stream listener
 //	console.log       guest serial console

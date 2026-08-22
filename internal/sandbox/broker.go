@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -161,6 +162,8 @@ func (br *broker) handle(c net.Conn) {
 		br.networkPolicyControl(c, req)
 	case "secret.set", "secret.remove":
 		br.secretControl(c, req)
+	case "mcp.remote.set", "mcp.remote.remove", "mcp.filesystem.set":
+		br.mcpControl(c, req)
 	case "audit.tail":
 		_ = json.NewEncoder(c).Encode(&controlproto.AuditResponse{Lines: br.audit.tail()})
 	case "capture.read":
@@ -323,6 +326,42 @@ func (br *broker) resolveCredential(host string) (string, secret.Value, credhelp
 		return name, v, credhelper.OK
 	}
 	return "", "", credhelper.NoBinding
+}
+
+func (br *broker) mcpControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.MCPResponse) { _ = json.NewEncoder(c).Encode(&resp) }
+	if br.store == nil {
+		respond(controlproto.MCPResponse{Error: "config store unavailable"})
+		return
+	}
+	if req.MCP == nil {
+		respond(controlproto.MCPResponse{Error: "MCP settings are required"})
+		return
+	}
+	var err error
+	switch req.Op {
+	case "mcp.remote.set":
+		_, err = br.store.SetMCPRemote(req.MCP.Spec, req.MCP.Replace)
+	case "mcp.remote.remove":
+		err = br.store.RemoveMCPRemote(req.MCP.Name)
+	case "mcp.filesystem.set":
+		err = br.store.SetMCPFilesystem(req.MCP.Root, req.MCP.User)
+	}
+	if err != nil && !atomicfile.Committed(err) {
+		respond(controlproto.MCPResponse{Error: err.Error()})
+		return
+	}
+	mutationErr := err
+	marker := filepath.Join(br.dir, config.MCPRestartMarker)
+	if err := atomicfile.WriteFileDurable(marker, []byte("restart required\n"), 0o600); err != nil {
+		respond(controlproto.MCPResponse{Error: "MCP configuration updated but restart marker failed: " + err.Error()})
+		return
+	}
+	if mutationErr != nil {
+		respond(controlproto.MCPResponse{Error: "MCP configuration updated but durability is uncertain: " + mutationErr.Error()})
+		return
+	}
+	respond(controlproto.MCPResponse{OK: true})
 }
 
 func (br *broker) resourceControl(c net.Conn, req controlproto.Request) {

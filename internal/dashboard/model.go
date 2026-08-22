@@ -59,6 +59,7 @@ const (
 	tuiMountsPage
 	tuiPortsPage
 	tuiSecretsPage
+	tuiMCPPage
 	tuiPacketsPage
 	tuiPageCount
 )
@@ -69,6 +70,7 @@ type tuiRuleRow = dashboardapi.Rule
 type tuiMountRow = dashboardapi.Mount
 type tuiPortRow = dashboardapi.Port
 type tuiSecretRow = dashboardapi.Secret
+type tuiMCPRow = dashboardapi.MCPServer
 
 type tuiDialog uint8
 
@@ -88,6 +90,9 @@ const (
 	tuiRuleRemoveDialog
 	tuiSecretAddDialog
 	tuiSecretRemoveDialog
+	tuiMCPRemoteDialog
+	tuiMCPFilesystemDialog
+	tuiMCPRemoveDialog
 	tuiUpdateDialog
 	tuiPacketDetailDialog
 )
@@ -115,6 +120,7 @@ type tuiRefreshMsg struct {
 	mounts    []tuiMountRow
 	ports     []tuiPortRow
 	secrets   []tuiSecretRow
+	mcp       []tuiMCPRow
 	err       error
 	at        time.Time
 }
@@ -177,6 +183,9 @@ type sandboxTUIModel struct {
 	secrets       []tuiSecretRow
 	secretCursor  int
 	secretScroll  int
+	mcpServers    []tuiMCPRow
+	mcpCursor     int
+	mcpScroll     int
 	packets       []tuiPacketRow
 	packetCursor  int
 	packetScroll  int
@@ -254,6 +263,20 @@ type sandboxTUIModel struct {
 	secretSandbox   sandboxPicker
 	secretName      textinput.Model
 	secretValue     textinput.Model
+	mcpFocus        int
+	mcpSandbox      sandboxPicker
+	mcpName         textinput.Model
+	mcpURL          textinput.Model
+	mcpAuthKind     string
+	mcpAuthHeader   textinput.Model
+	mcpAuthRef      textinput.Model
+	mcpAllow        textinput.Model
+	mcpDeny         textinput.Model
+	mcpRedact       textinput.Model
+	mcpEditing      bool
+	mcpFSFocus      int
+	mcpFSRoot       textinput.Model
+	mcpFSUser       textinput.Model
 	formError       string
 
 	lastClickIndex int
@@ -321,6 +344,42 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	secretValue.Prompt = ""
 	secretValue.EchoMode = textinput.EchoPassword
 	secretValue.EchoCharacter = '•'
+	mcpName := textinput.New()
+	mcpName.Placeholder = "github"
+	mcpName.CharLimit = 31
+	mcpName.Prompt = ""
+	mcpURL := textinput.New()
+	mcpURL.Placeholder = "https://example.com/mcp"
+	mcpURL.CharLimit = 4096
+	mcpURL.Prompt = ""
+	mcpAuthHeader := textinput.New()
+	mcpAuthHeader.Placeholder = "X-Api-Key (header auth only)"
+	mcpAuthHeader.CharLimit = 64
+	mcpAuthHeader.Prompt = ""
+	mcpAuthRef := textinput.New()
+	mcpAuthRef.Placeholder = "secret name or custody provider"
+	mcpAuthRef.CharLimit = 128
+	mcpAuthRef.Prompt = ""
+	mcpAllow := textinput.New()
+	mcpAllow.Placeholder = "* (comma-separated globs; blank denies all)"
+	mcpAllow.CharLimit = 4096
+	mcpAllow.Prompt = ""
+	mcpDeny := textinput.New()
+	mcpDeny.Placeholder = "delete_*,admin_*"
+	mcpDeny.CharLimit = 4096
+	mcpDeny.Prompt = ""
+	mcpRedact := textinput.New()
+	mcpRedact.Placeholder = "OTHER_SECRET,SECOND_SECRET"
+	mcpRedact.CharLimit = 4096
+	mcpRedact.Prompt = ""
+	mcpFSRoot := textinput.New()
+	mcpFSRoot.Placeholder = "/workspace"
+	mcpFSRoot.CharLimit = 4096
+	mcpFSRoot.Prompt = ""
+	mcpFSUser := textinput.New()
+	mcpFSUser.Placeholder = "nobody or 1000:1000"
+	mcpFSUser.CharLimit = 128
+	mcpFSUser.Prompt = ""
 
 	m := sandboxTUIModel{
 		service:         service,
@@ -356,6 +415,15 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		ruleProtocol:    "tcp",
 		secretName:      secretName,
 		secretValue:     secretValue,
+		mcpName:         mcpName,
+		mcpURL:          mcpURL,
+		mcpAuthHeader:   mcpAuthHeader,
+		mcpAuthRef:      mcpAuthRef,
+		mcpAllow:        mcpAllow,
+		mcpDeny:         mcpDeny,
+		mcpRedact:       mcpRedact,
+		mcpFSRoot:       mcpFSRoot,
+		mcpFSUser:       mcpFSUser,
 		lastClickIndex:  -1,
 		packetAfter:     make(map[string]uint64),
 	}
@@ -472,13 +540,14 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	if selected := m.selected(); selected != nil {
 		selectedName = selected.Name
 	}
-	trafficKey, ruleKey, mountKey, portKey, secretKey := m.selectedTableKeys()
+	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey := m.selectedTableKeys()
 	m.sandboxes = msg.sandboxes
 	m.traffic = msg.traffic
 	m.rules = msg.rules
 	m.mounts = msg.mounts
 	m.ports = msg.ports
 	m.secrets = msg.secrets
+	m.mcpServers = msg.mcp
 
 	target := m.selectNext
 	if target == "" {
@@ -505,7 +574,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	} else if !found && m.cursor > len(m.sandboxes) {
 		m.cursor = len(m.sandboxes)
 	}
-	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey, secretKey)
+	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey)
 	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 	return m, m.ensureAnimation()
@@ -534,7 +603,7 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 		title = actionTitle(msg.action) + " failed"
 		body = compactCommandError(msg.output, msg.err)
 		m.selectNext = ""
-	} else if (msg.action == "edit" || msg.action == "share configure" || msg.action == "netpolicy set") && msg.output != "" {
+	} else if (msg.action == "edit" || msg.action == "share configure" || msg.action == "netpolicy set" || strings.HasPrefix(msg.action, "mcp ")) && msg.output != "" {
 		body = strings.TrimSpace(msg.output)
 	} else if msg.action == "open" {
 		// An interactive command that exits non-zero is useful information, but
@@ -674,6 +743,37 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			}
 			return nil, true
 		}
+	case tuiMCPPage:
+		switch key {
+		case "a":
+			return m.openMCPRemoteDialog(false), true
+		case "f":
+			return m.openMCPFilesystemDialog(), true
+		case "e":
+			row := m.selectedMCPServer()
+			if row == nil {
+				return nil, true
+			}
+			if row.Error != "" {
+				return m.showToast(tuiToastInfo, "Invalid MCP configuration", row.Error), true
+			}
+			if row.Type == "local" {
+				return m.openMCPFilesystemDialog(), true
+			}
+			return m.openMCPRemoteDialog(true), true
+		case "d", "delete", "x":
+			row := m.selectedMCPServer()
+			if row == nil {
+				return nil, true
+			}
+			if row.Type != "remote" || row.Error != "" {
+				return m.showToast(tuiToastInfo, "Built-in MCP server", "The filesystem server can be edited but not removed."), true
+			}
+			m.dialog = tuiMCPRemoveDialog
+			m.dialogScroll = 0
+			m.confirmRemove = false
+			return nil, true
+		}
 	case tuiPacketsPage:
 		return m.updatePacketActionKey(key)
 	}
@@ -745,6 +845,8 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 	case "6":
 		m.setPage(tuiSecretsPage)
 	case "7":
+		m.setPage(tuiMCPPage)
+	case "8":
 		m.setPage(tuiPacketsPage)
 	case "tab", "]":
 		m.cyclePage(1)
@@ -1047,6 +1149,39 @@ func removeSecretCmd(service dashboardapi.Service, row tuiSecretRow) tea.Cmd {
 	}
 }
 
+func configureMCPRemoteCmd(service dashboardapi.Service, request dashboardapi.MCPRemoteRequest, running bool) tea.Cmd {
+	return func() tea.Msg {
+		err := service.ConfigureMCPRemote(request)
+		apply := "applies on next start"
+		if running {
+			apply = "restart to apply"
+		}
+		return tuiProcessDoneMsg{action: "mcp configure", name: request.Sandbox + "/" + request.Name, output: apply, err: err}
+	}
+}
+
+func configureMCPFilesystemCmd(service dashboardapi.Service, request dashboardapi.MCPFilesystemRequest, running bool) tea.Cmd {
+	return func() tea.Msg {
+		err := service.ConfigureMCPFilesystem(request)
+		apply := "applies on next start"
+		if running {
+			apply = "restart to apply"
+		}
+		return tuiProcessDoneMsg{action: "mcp filesystem", name: request.Sandbox + "/fs", output: apply, err: err}
+	}
+}
+
+func removeMCPRemoteCmd(service dashboardapi.Service, row tuiMCPRow, running bool) tea.Cmd {
+	return func() tea.Msg {
+		err := service.RemoveMCPRemote(row)
+		apply := "removed for next start"
+		if running {
+			apply = "restart to withdraw the live server"
+		}
+		return tuiProcessDoneMsg{action: "mcp remove", name: row.Sandbox + "/" + row.Name, output: apply, err: err}
+	}
+}
+
 func setSandboxNetworkPolicyCmd(service dashboardapi.Service, name, path string, allowLocal bool) tea.Cmd {
 	return func() tea.Msg {
 		entry, err := service.SetNetworkPolicy(name, path, allowLocal)
@@ -1146,6 +1281,13 @@ func (m *sandboxTUIModel) selectedSecret() *tuiSecretRow {
 		return nil
 	}
 	return &m.secrets[m.secretCursor]
+}
+
+func (m *sandboxTUIModel) selectedMCPServer() *tuiMCPRow {
+	if m.mcpCursor < 0 || m.mcpCursor >= len(m.mcpServers) {
+		return nil
+	}
+	return &m.mcpServers[m.mcpCursor]
 }
 
 func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
@@ -1258,6 +1400,8 @@ func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
 		return &m.portCursor, &m.portScroll, len(m.ports)
 	case tuiSecretsPage:
 		return &m.secretCursor, &m.secretScroll, len(m.secrets)
+	case tuiMCPPage:
+		return &m.mcpCursor, &m.mcpScroll, len(m.mcpServers)
 	case tuiPacketsPage:
 		return &m.packetCursor, &m.packetScroll, len(m.packets)
 	default:
@@ -1294,7 +1438,7 @@ func (m *sandboxTUIModel) ensureTableCursorVisible() {
 	*scroll = clampInt(*scroll, 0, maxInt(0, count-visible))
 }
 
-func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret string) {
+func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret, mcp string) {
 	if m.trafficCursor >= 0 && m.trafficCursor < len(m.traffic) {
 		traffic = trafficRowKey(m.traffic[m.trafficCursor])
 	}
@@ -1310,10 +1454,13 @@ func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret
 	if m.secretCursor >= 0 && m.secretCursor < len(m.secrets) {
 		secret = secretRowKey(m.secrets[m.secretCursor])
 	}
+	if m.mcpCursor >= 0 && m.mcpCursor < len(m.mcpServers) {
+		mcp = mcpRowKey(m.mcpServers[m.mcpCursor])
+	}
 	return
 }
 
-func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, secret string) {
+func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, secret, mcp string) {
 	for i := range m.traffic {
 		if traffic != "" && trafficRowKey(m.traffic[i]) == traffic {
 			m.trafficCursor = i
@@ -1344,11 +1491,18 @@ func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, sec
 			break
 		}
 	}
+	for i := range m.mcpServers {
+		if mcp != "" && mcpRowKey(m.mcpServers[i]) == mcp {
+			m.mcpCursor = i
+			break
+		}
+	}
 	m.trafficCursor = clampTableCursor(m.trafficCursor, len(m.traffic))
 	m.rulesCursor = clampTableCursor(m.rulesCursor, len(m.rules))
 	m.mountCursor = clampTableCursor(m.mountCursor, len(m.mounts))
 	m.portCursor = clampTableCursor(m.portCursor, len(m.ports))
 	m.secretCursor = clampTableCursor(m.secretCursor, len(m.secrets))
+	m.mcpCursor = clampTableCursor(m.mcpCursor, len(m.mcpServers))
 }
 
 func trafficRowKey(row tuiTrafficRow) string {
@@ -1376,6 +1530,8 @@ func portRowKey(row tuiPortRow) string {
 
 func secretRowKey(row tuiSecretRow) string { return row.Sandbox + "\x00" + row.Name }
 
+func mcpRowKey(row tuiMCPRow) string { return row.Sandbox + "\x00" + row.Name + "\x00" + row.Type }
+
 func clampTableCursor(cursor, count int) int {
 	if count == 0 {
 		return 0
@@ -1389,7 +1545,8 @@ func refreshSandboxesCmd(service dashboardapi.Service) tea.Cmd {
 		sanitizeSnapshot(&data)
 		return tuiRefreshMsg{
 			sandboxes: data.Sandboxes, traffic: data.Traffic,
-			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, secrets: data.Secrets, err: err, at: time.Now(),
+			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, secrets: data.Secrets,
+			mcp: data.MCPServers, err: err, at: time.Now(),
 		}
 	}
 }
@@ -1466,6 +1623,12 @@ func actionTitle(action string) string {
 		return "Add secret"
 	case "secret remove":
 		return "Delete secret"
+	case "mcp configure":
+		return "Save MCP server"
+	case "mcp filesystem":
+		return "Save MCP filesystem server"
+	case "mcp remove":
+		return "Remove MCP server"
 	case "update":
 		return "Update Gantry"
 	default:
@@ -1509,6 +1672,12 @@ func actionPastTense(action string) string {
 		return "Secret added"
 	case "secret remove":
 		return "Secret deleted"
+	case "mcp configure":
+		return "MCP server saved"
+	case "mcp filesystem":
+		return "MCP filesystem server saved"
+	case "mcp remove":
+		return "MCP server removed"
 	case "update":
 		return "Gantry updated"
 	default:
