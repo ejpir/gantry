@@ -48,6 +48,7 @@ func (m *sandboxTUIModel) openMCPRemoteDialog(edit bool) tea.Cmd {
 		m.mcpDeny.SetValue(strings.Join(row.Deny, ","))
 		m.mcpRedact.SetValue(strings.Join(row.Redact, ","))
 	}
+	m.syncMCPAuthPresentation()
 	m.resizeInputs()
 	if edit {
 		return m.focusMCPRemote(2)
@@ -110,9 +111,23 @@ func (m *sandboxTUIModel) moveMCPRemoteFocus(delta int) tea.Cmd {
 	focus := m.mcpFocus
 	for {
 		focus = (focus + delta + mcpRemoteSubmitFocus + 1) % (mcpRemoteSubmitFocus + 1)
-		if !m.mcpEditing || (focus != 0 && focus != 1) {
+		if m.mcpRemoteFocusVisible(focus) {
 			return m.focusMCPRemote(focus)
 		}
+	}
+}
+
+func (m sandboxTUIModel) mcpRemoteFocusVisible(focus int) bool {
+	if m.mcpEditing && (focus == 0 || focus == 1) {
+		return false
+	}
+	switch focus {
+	case 4:
+		return m.mcpAuthKind != ""
+	case 5:
+		return m.mcpAuthKind == "header"
+	default:
+		return true
 	}
 }
 
@@ -166,7 +181,18 @@ func (m *sandboxTUIModel) cycleMCPAuth(delta int) {
 	} else if m.mcpAuthKind != "header" {
 		m.mcpAuthHeader.Reset()
 	}
+	m.syncMCPAuthPresentation()
 	m.formError = ""
+}
+
+func (m *sandboxTUIModel) syncMCPAuthPresentation() {
+	m.mcpAuthHeader.Placeholder = "X-Api-Key"
+	switch m.mcpAuthKind {
+	case "custody":
+		m.mcpAuthRef.Placeholder = "provider name"
+	default:
+		m.mcpAuthRef.Placeholder = "secret name"
+	}
 }
 
 func splitMCPDialogList(raw string) []string {
@@ -349,12 +375,24 @@ func (m sandboxTUIModel) renderMCPRemoteDialog(theme tuiTheme, width int) string
 		formLabel(theme, "Name", m.mcpFocus == 1 && !m.mcpEditing) + "\n" + nameField,
 		formLabel(theme, "HTTPS URL", m.mcpFocus == 2) + "\n" + renderInputField(theme, m.mcpURL.View(), width, m.mcpFocus == 2),
 		authLine,
-		formLabel(theme, "Secret / provider reference", m.mcpFocus == 4) + "\n" + renderInputField(theme, m.mcpAuthRef.View(), width, m.mcpFocus == 4),
-		formLabel(theme, "Header name", m.mcpFocus == 5) + locked.Render("  header auth only") + "\n" + renderInputField(theme, m.mcpAuthHeader.View(), width, m.mcpFocus == 5),
-		formLabel(theme, "Allow tool globs", m.mcpFocus == 6) + "\n" + renderInputField(theme, m.mcpAllow.View(), width, m.mcpFocus == 6),
-		formLabel(theme, "Deny tool globs", m.mcpFocus == 7) + "\n" + renderInputField(theme, m.mcpDeny.View(), width, m.mcpFocus == 7),
-		formLabel(theme, "Additional redact secret names", m.mcpFocus == 8) + "\n" + renderInputField(theme, m.mcpRedact.View(), width, m.mcpFocus == 8),
 	}
+	if m.mcpAuthKind != "" {
+		referenceLabel := "Secret name"
+		if m.mcpAuthKind == "custody" {
+			referenceLabel = "Custody provider"
+		}
+		fields = append(fields, formLabel(theme, referenceLabel, m.mcpFocus == 4)+"\n"+
+			renderInputField(theme, m.mcpAuthRef.View(), width, m.mcpFocus == 4))
+	}
+	if m.mcpAuthKind == "header" {
+		fields = append(fields, formLabel(theme, "Header name", m.mcpFocus == 5)+"\n"+
+			renderInputField(theme, m.mcpAuthHeader.View(), width, m.mcpFocus == 5))
+	}
+	fields = append(fields,
+		formLabel(theme, "Allow tool globs", m.mcpFocus == 6)+"\n"+renderInputField(theme, m.mcpAllow.View(), width, m.mcpFocus == 6),
+		formLabel(theme, "Deny tool globs", m.mcpFocus == 7)+"\n"+renderInputField(theme, m.mcpDeny.View(), width, m.mcpFocus == 7),
+		formLabel(theme, "Additional redact secret names", m.mcpFocus == 8)+"\n"+renderInputField(theme, m.mcpRedact.View(), width, m.mcpFocus == 8),
+	)
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
@@ -396,11 +434,24 @@ func (m *sandboxTUIModel) updateMCPRemoteDialogMouse(mouse tea.Mouse, bounds tui
 		return m, nil
 	}
 	controls := []tuiFormControl{
-		{label: "Sandbox", focus: 0}, {label: "Name", focus: 1}, {label: "HTTPS URL", focus: 2},
-		{label: "Authentication", focus: 3}, {label: "Secret / provider reference", focus: 4},
-		{label: "Header name", focus: 5}, {label: "Allow tool globs", focus: 6},
-		{label: "Deny tool globs", focus: 7}, {label: "Additional redact secret names", focus: 8},
+		{label: "Sandbox", focus: 0}, {label: "Name", focus: 1},
+		{label: "HTTPS URL", focus: 2}, {label: "Authentication", focus: 3},
 	}
+	if m.mcpAuthKind != "" {
+		referenceLabel := "Secret name"
+		if m.mcpAuthKind == "custody" {
+			referenceLabel = "Custody provider"
+		}
+		controls = append(controls, tuiFormControl{label: referenceLabel, focus: 4})
+	}
+	if m.mcpAuthKind == "header" {
+		controls = append(controls, tuiFormControl{label: "Header name", focus: 5})
+	}
+	controls = append(controls,
+		tuiFormControl{label: "Allow tool globs", focus: 6},
+		tuiFormControl{label: "Deny tool globs", focus: 7},
+		tuiFormControl{label: "Additional redact secret names", focus: 8},
+	)
 	focus, ok := m.dialogFormControlAt(mouse, bounds, controls)
 	if !ok || (m.mcpEditing && (focus == 0 || focus == 1)) {
 		return m, nil
