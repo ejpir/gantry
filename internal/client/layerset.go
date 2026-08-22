@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/containerd/containerd/api/types"
@@ -101,6 +102,17 @@ func (ls LayerSet) LayerDevs() []string {
 // RWLayerDev is the guest device the writable ext4 layer lands on: right
 // after the rootfs + fsmeta + layer blobs.
 func (ls LayerSet) RWLayerDev() string { return BlkDevName(2 + len(ls.Layers)) }
+
+// sandboxSessionRootfs bind-mounts the persistent sandbox's assembled
+// rootfs into an isolated per-session container. Guest paths stay POSIX on
+// every host platform.
+func sandboxSessionRootfs(baseID string) []*types.Mount {
+	return []*types.Mount{{
+		Type:    "bind",
+		Source:  path.Join("/run/bundles", baseID, "rootfs"),
+		Options: []string{"rbind"},
+	}}
+}
 
 // RootfsMounts renders the guest rootfs mount chain for the flattened
 // single-device image (/dev/vdb, optional rwlayer /dev/vdc).

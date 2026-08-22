@@ -40,13 +40,14 @@ type runtimeConfig struct {
 }
 
 type runtimeProcess struct {
-	Terminal     bool                     `json:"terminal"`
-	User         specs.User               `json:"user"`
-	Args         []string                 `json:"args"`
-	Env          []string                 `json:"env"`
-	Cwd          string                   `json:"cwd"`
-	Capabilities *specs.LinuxCapabilities `json:"capabilities"`
-	Rlimits      []specs.POSIXRlimit      `json:"rlimits"`
+	Terminal        bool                     `json:"terminal"`
+	User            specs.User               `json:"user"`
+	NoNewPrivileges bool                     `json:"noNewPrivileges,omitempty"`
+	Args            []string                 `json:"args"`
+	Env             []string                 `json:"env"`
+	Cwd             string                   `json:"cwd"`
+	Capabilities    *specs.LinuxCapabilities `json:"capabilities"`
+	Rlimits         []specs.POSIXRlimit      `json:"rlimits"`
 }
 
 type runtimeRoot struct {

@@ -50,6 +50,9 @@ sleep 2
 R=$(xe t1 'echo CC2-WORKS');                chk "crun: concurrent (s2)" "CC2-WORKS" "$R"
 wait
 chk "crun: concurrent (s1)" "CC1-ALIVE" "$(cat /tmp/cc1.log)"
+xe t1 'rm -f /session-survivor; (while :; do echo x >> /session-survivor; sleep 0.1; done) &' >/dev/null
+R=$(xe t1 'n=$(wc -c < /session-survivor); sleep 2; test "$(wc -c < /session-survivor)" = "$n" && echo TREE-GONE')
+                                            chk "crun: session descendants reaped" "TREE-GONE" "$R"
 
 echo "===== runsc (t2) ====="
 $G start t2 -runtime runsc -kernel "$KERNEL" \
@@ -68,6 +71,9 @@ sleep 2
 R=$(xe t2 'echo S2-WORKS');                 chk "runsc: concurrent (s2)" "S2-WORKS" "$R"
 wait
 chk "runsc: concurrent (s1)" "S1-ALIVE" "$(cat /tmp/s1.log)"
+xe t2 'rm -f /session-survivor; (while :; do echo x >> /session-survivor; sleep 0.1; done) &' >/dev/null
+R=$(xe t2 'n=$(wc -c < /session-survivor); sleep 2; test "$(wc -c < /session-survivor)" = "$n" && echo TREE-GONE')
+                                            chk "runsc: session descendants reaped" "TREE-GONE" "$R"
 
 echo "===== shares (runsc, t3) ====="
 rm -rf /tmp/sharetest && mkdir -p /tmp/sharetest && echo hostfile > /tmp/sharetest/existing.txt
