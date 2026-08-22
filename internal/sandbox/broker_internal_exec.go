@@ -89,20 +89,20 @@ func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Dura
 	})
 	manifest := client.LoadShareManifest(br.dir)
 	err := client.Session(br.rpc, client.SessionOptions{
-		StreamSock:       br.streamSock,
-		StreamDial:       br.streamDial,
-		Shares:           manifest.Shares,
-		ShareTransport:   manifest.Transport,
-		RW:               br.cfg.RW,
-		LayerSet:         br.cfg.LayerSet,
-		Args:             args,
-		ID:               "sb",
-		ExecIntoExisting: true,
-		ImgCfg:           br.cfg.ImageCfg,
-		Environment:      br.cfg.ProxyEnvironment(),
-		Quiet:            true,
-		ExitStatus:       &status,
-		KillCh:           killCh,
+		StreamSock:     br.streamSock,
+		StreamDial:     br.streamDial,
+		Shares:         manifest.Shares,
+		ShareTransport: manifest.Transport,
+		RW:             br.cfg.RW,
+		LayerSet:       br.cfg.LayerSet,
+		Args:           args,
+		ID:             "sb",
+		SandboxSession: true,
+		ImgCfg:         br.cfg.ImageCfg,
+		Environment:    br.cfg.ProxyEnvironment(),
+		Quiet:          true,
+		ExitStatus:     &status,
+		KillCh:         killCh,
 	}, stdin, &capture)
 	_ = timer.Stop()
 	stdout, overflow := capture.snapshot()

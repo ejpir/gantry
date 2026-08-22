@@ -419,7 +419,7 @@ func TestMultiContainerSpikeHappyPath(t *testing.T) {
 		"PASS create+start long-lived container with arbitrary ID",
 		"PASS concurrent second container",
 		"PASS deleting one container",
-		"PASS concurrent execs",
+		"PASS isolated session tasks",
 		"PASS killing one container",
 	} {
 		if !strings.Contains(transcript, want) {
@@ -432,6 +432,12 @@ func TestMultiContainerSpikeHappyPath(t *testing.T) {
 	}
 	if len(guest.spike.owned) != 0 {
 		t.Errorf("spike still owns tasks after cleanup: %v", guest.spike.owned)
+	}
+	for _, id := range []string{"exec-one", "exec-two"} {
+		mounts := guest.tasks.rootfs[id]
+		if len(mounts) != 1 || mounts[0].Type != "bind" || mounts[0].Source != "/run/bundles/mc-a/rootfs" {
+			t.Errorf("%s rootfs = %+v, want bind of mc-a rootfs", id, mounts)
+		}
 	}
 }
 

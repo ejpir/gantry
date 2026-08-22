@@ -34,17 +34,17 @@ type ShellOptions struct {
 
 func (options ShellOptions) sessionOptions(entries []ShareEntry) SessionOptions {
 	return SessionOptions{
-		StreamSock:       options.StreamSock,
-		Shares:           entries,
-		RW:               options.RW,
-		LayerSet:         options.LayerSet,
-		Args:             options.Args,
-		ID:               options.ID,
-		ImgCfg:           options.ImgCfg,
-		Secrets:          options.Secrets,
-		Environment:      options.Environment,
-		ExitStatus:       options.ExitStatus,
-		ExecIntoExisting: true,
+		StreamSock:     options.StreamSock,
+		Shares:         entries,
+		RW:             options.RW,
+		LayerSet:       options.LayerSet,
+		Args:           options.Args,
+		ID:             options.ID,
+		ImgCfg:         options.ImgCfg,
+		Secrets:        options.Secrets,
+		Environment:    options.Environment,
+		ExitStatus:     options.ExitStatus,
+		SandboxSession: true,
 	}
 }
 

@@ -383,8 +383,8 @@ func TestShellSessionOptions(t *testing.T) {
 	if len(sess.Args) != 0 {
 		t.Errorf("Args pre-defaulted to %v — image entrypoint would never apply", sess.Args)
 	}
-	if !sess.ExecIntoExisting {
-		t.Error("one-shot sessions must use the Exec path (no secrets in the bundle)")
+	if !sess.SandboxSession {
+		t.Error("one-shot sessions must use an isolated task over the persistent root")
 	}
 	if sess.ExitStatus != &status {
 		t.Error("ExitStatus sink dropped — `gantry exec -- false` would report success")

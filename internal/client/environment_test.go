@@ -2,6 +2,7 @@ package client
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/ejpir/gantry/internal/image"
@@ -57,7 +58,7 @@ func TestConfigJSONIncludesEnvironmentOverrides(t *testing.T) {
 	}
 }
 
-func TestSandboxContainerInitUsesImageIdentity(t *testing.T) {
+func TestSandboxContainerUsesTrustedUnprivilegedAnchor(t *testing.T) {
 	config, err := sandboxContainerConfig(SessionOptions{ImgCfg: &image.Config{
 		UID: 1001, GID: 1002, WorkingDir: "/work", Env: []string{"IMAGE_MARKER=present"},
 	}})
@@ -65,14 +66,47 @@ func TestSandboxContainerInitUsesImageIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoded := decodeRuntimeConfig(t, config)
-	if decoded.Process.User.UID != 1001 || decoded.Process.User.GID != 1002 {
-		t.Fatalf("sandbox init user = %d:%d, want 1001:1002", decoded.Process.User.UID, decoded.Process.User.GID)
+	if decoded.Process.User.UID != 65534 || decoded.Process.User.GID != 65534 {
+		t.Fatalf("sandbox anchor user = %d:%d, want 65534:65534", decoded.Process.User.UID, decoded.Process.User.GID)
 	}
-	if decoded.Process.Cwd != "/work" || !reflect.DeepEqual(decoded.Process.Args, containerInitArgs) {
-		t.Fatalf("sandbox init process = cwd %q args %v", decoded.Process.Cwd, decoded.Process.Args)
+	if decoded.Process.Cwd != "/" || !decoded.Process.NoNewPrivileges ||
+		!reflect.DeepEqual(decoded.Process.Args, containerInitArgs) {
+		t.Fatalf("sandbox init process = cwd %q args %v noNewPrivileges=%v",
+			decoded.Process.Cwd, decoded.Process.Args, decoded.Process.NoNewPrivileges)
 	}
-	if decoded.Process.Capabilities != nil {
-		t.Fatalf("non-root sandbox init retained capabilities: %+v", decoded.Process.Capabilities)
+	if capabilities := decoded.Process.Capabilities; capabilities != nil &&
+		(len(capabilities.Bounding)+len(capabilities.Effective)+len(capabilities.Inheritable)+
+			len(capabilities.Permitted)+len(capabilities.Ambient) != 0) {
+		t.Fatalf("sandbox anchor retained capabilities: %+v", capabilities)
+	}
+	anchor := decoded.Mounts[len(decoded.Mounts)-1]
+	if anchor.Destination != sandboxAnchorPath || anchor.Source != "/sbin/vminitd" || anchor.Type != "bind" {
+		t.Fatalf("sandbox anchor mount = %+v", anchor)
+	}
+}
+
+func TestIsolatedSessionConfigCarriesEphemeralSecretsAndToolsPath(t *testing.T) {
+	base, err := configJSONWithTransportCwdEnv(nil, nil, true, []string{"true"},
+		&image.Config{Env: []string{"PATH=/image/bin"}}, true, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := isolatedSessionConfig(base, SessionOptions{
+		ImgCfg:      &image.Config{Env: []string{"PATH=/image/bin"}},
+		Secrets:     []string{"TOKEN=secret"},
+		Environment: []string{"HTTP_PROXY=http://proxy.invalid"},
+		PathPrepend: []string{"/run/gantry/bin"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := decodeRuntimeConfig(t, encoded).Process
+	for _, want := range []string{
+		"TOKEN=secret", "HTTP_PROXY=http://proxy.invalid", "PATH=/run/gantry/bin:/image/bin",
+	} {
+		if !slices.Contains(process.Env, want) {
+			t.Errorf("session environment %v does not contain %q", process.Env, want)
+		}
 	}
 }
 

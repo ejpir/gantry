@@ -533,11 +533,11 @@ func (b *Bridge) replayViaDevTCP(port int, requestURI string) (replayResult, err
 	if status != 0 {
 		return replayResult{}, fmt.Errorf("in-sandbox replay exited %d: %s", status, strings.TrimSpace(string(tailBytes(stdout, 512))))
 	}
-	// sessionExec appends a "client: exec exited, status N" trailer to
-	// stdout (it is not Quiet-gated); strip it so it can never corrupt
-	// close-delimited response bodies.
+	// The isolated session task appends a "client: task exited, status N"
+	// trailer to stdout (it is not Quiet-gated); strip it so it can never
+	// corrupt close-delimited response bodies.
 	stdout = bytes.TrimRight(stdout, "\n")
-	if i := bytes.LastIndex(stdout, []byte("\nclient: exec exited, status ")); i >= 0 {
+	if i := bytes.LastIndex(stdout, []byte("\nclient: task exited, status ")); i >= 0 {
 		stdout = stdout[:i+1]
 	}
 	return parseRawHTTPResponse(stdout)

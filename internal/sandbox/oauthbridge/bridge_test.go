@@ -451,7 +451,7 @@ func (closedTestListener) Close() error              { return nil }
 func (closedTestListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
 func TestParseRawHTTPResponse(t *testing.T) {
-	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: exec exited, status 0\n"
+	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: task exited, status 0\n"
 	res, err := parseRawHTTPResponse([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
