@@ -128,6 +128,20 @@ func TestResolveRejectsInvalidResources(t *testing.T) {
 	}
 }
 
+func TestResolveMCPFilesystemRootUsesGuestPathSemantics(t *testing.T) {
+	cfg, _, err := resolveSandbox(t, "-mcp", "-mcp-fs-root", "/work")
+	if err != nil {
+		t.Fatalf("absolute Linux guest path: %v", err)
+	}
+	if cfg.MCPFSRoot != "/work" {
+		t.Fatalf("MCPFSRoot = %q, want /work", cfg.MCPFSRoot)
+	}
+	if _, _, err := resolveSandbox(t, "-mcp", "-mcp-fs-root", "work"); err == nil ||
+		!strings.Contains(err.Error(), "absolute guest path") {
+		t.Fatalf("relative MCP filesystem root error = %v", err)
+	}
+}
+
 func TestResolveOAuthBridgeDefaultsOnAndPersistsOptOut(t *testing.T) {
 	cfg, _, err := resolveNamedSandbox(t, "agent")
 	if err != nil {

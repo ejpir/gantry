@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -450,7 +451,9 @@ func (r *runResolver) resolveSessionOptions() error {
 		if identity == "root" || (numericUIDErr == nil && uid == 0) {
 			return fmt.Errorf("-mcp-fs-user must not be root: local MCP servers run unprivileged (docs/mcp-gateway.md)")
 		}
-		if !filepath.IsAbs(r.cfg.MCPFSRoot) {
+		// This path is interpreted inside the Linux guest, independent of the
+		// host OS. filepath.IsAbs would reject "/work" on Windows.
+		if !path.IsAbs(r.cfg.MCPFSRoot) {
 			return fmt.Errorf("-mcp-fs-root must be an absolute guest path, got %q", r.cfg.MCPFSRoot)
 		}
 	}

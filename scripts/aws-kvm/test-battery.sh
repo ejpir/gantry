@@ -29,7 +29,7 @@ xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
 echo "== environment =="
 uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
 
-for s in t1 t2 t3 t4 t10 t11 t12; do $G stop "$s" >/dev/null 2>&1; done
+for s in $(seq 1 12 | sed 's/^/t/') t10bad; do $G stop "$s" >/dev/null 2>&1; done
 rm -rf "$GANTRY_HOME"/t* "$GANTRY_IMAGES" "$RWDIR"
 # rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
 
@@ -193,6 +193,11 @@ sleep 3
 R=$(xe t9 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
 
 echo "===== OAuth custody (t10: mock provider, refresh token held on host) ====="
+# Custody depends on the callback bridge and must fail during resolution,
+# before creating any sandbox state, when an operator disables that bridge.
+R=$($G start t10bad -oauth-custody -oauth-bridge=false -image alpine:latest 2>&1)
+chk "custody: disabled callback bridge refused" "requires -oauth-bridge=true" "$R"
+[ ! -e "$GANTRY_HOME/t10bad" ] && ok "custody: refused config leaves no sandbox state" || bad "custody: refused config leaves no sandbox state"
 # docs/credential-brokering.md workstream 3: with -oauth-custody the guest
 # helper runs the PKCE flow but the DAEMON exchanges the code and holds
 # the refresh token host-side; the guest auth file carries a short-lived
@@ -241,7 +246,7 @@ curl -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t
 # The guest helper polls oauth.status on a ~1s cadence; give the
 # completion line time to land in the session log instead of racing it.
 for _ in $(seq 1 15); do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
-R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "Login complete" "$R"
+R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "OAuth callback received" "$R"
 R=$(cat /tmp/t10-login.log);                chk "custody: login completed in guest"            "tokens held on host" "$R"
 R=$(xe t10 'cat /root/.claude/.credentials.json')
                                             chk "custody: guest holds an access token"        "at-mock-" "$R"
@@ -261,7 +266,7 @@ $G stop t10 >/dev/null 2>&1
 $G resume t10 >/dev/null 2>&1
 sleep 5
 R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
-                                            chk "custody: session restored after restart"     "session restored from disk" "$R"
+                                            chk "custody: session restored after restart"     "session restored and access token pushed" "$R"
 R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
                                             chk "custody: unknown provider refused"           "no custody login" "$R"
 kill $MOCKPID 2>/dev/null
@@ -294,7 +299,7 @@ if printf '%s' "$L4" | grep -qa 'root:'; then bad "mcp: symlink escape leaked /e
 L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: unlisted tool denied"                 "unknown or disallowed" "$L5"
 L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: authorize tool denied"                "unknown or disallowed" "$L6"
 R=$($G audit t11);                          chk "mcp: calls audited host-side"              "mcp: call fs__read_file" "$R"
-                                            chk "mcp: denies audited"                      "mcp: denied call fs__write_file" "$R"
+                                            chk "mcp: denies audited"                      'mcp: denied call "fs__write_file"' "$R"
 
 echo "===== MCP remote upstreams (t12: injection, redaction, SSRF) ====="
 # Milestone 2: remote streamable-HTTP upstreams with host-side credential
@@ -388,18 +393,18 @@ R=$(printf '{ cat /tmp/reqs; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy
 L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: remote tools listed alongside fs"         "mock__echo_auth" "$L2"
                                             chk "mcp: fs server still listed"                 "fs__read_file" "$L2"
 chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$(cat /tmp/mock-mcp-auth.log 2>/dev/null)"
-L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         "REDACTED-BY-GANTRY-MCP-GATEWAY" "$L3"
-L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: response-body secret redacted"         "REDACTED-BY-GANTRY" "$L4"
+L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: reflected credential redacted"         'auth=\*\+' "$L3"
+L4=$(printf '%s' "$R" | grep -a '"id":4');  chk "mcp: response-body secret redacted"         'token is \*\+' "$L4"
 if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: no credential in guest transcript"; else ok "mcp: no credential in guest transcript"; fi
 L5=$(printf '%s' "$R" | grep -a '"id":5');  chk "mcp: policy-hidden remote tool denied"       "unknown or disallowed tool" "$L5"
 L2b=$(printf '%s' "$R" | grep -a '"id":2'); if printf '%s' "$L2b" | grep -qa 'mock__danger'; then bad "mcp: deny-listed tool hidden from listing"; else ok "mcp: deny-listed tool hidden from listing"; fi
 L6=$(printf '%s' "$R" | grep -a '"id":6');  chk "mcp: over-cap response refused"              "upstream call failed" "$L6"
-L7=$(printf '%s' "$R" | grep -a '"id":7');  chk "mcp: SSE-framed leak redacted"               "REDACTED-BY-GANTRY" "$L7"
+L7=$(printf '%s' "$R" | grep -a '"id":7');  chk "mcp: SSE-framed leak redacted"               'sse says \*\+' "$L7"
 L8=$(printf '%s' "$R" | grep -a '"id":8');  chk "mcp: upstream error sanitized to guest"      "upstream call failed" "$L8"
 R=$($G audit t12);                          chk "mcp: remote config audited (no values)"     "mcp: remote mock configured" "$R"
                                             chk "mcp: remote calls audited"                 "mcp: call mock__echo_auth" "$R"
-                                            chk "mcp: remote policy deny audited"           "mcp: denied call mock__danger (policy)" "$R"
-                                            chk "mcp: upstream error audited (redacted)"    "upstream error.*REDACTED-BY-GANTRY" "$R"
+                                            chk "mcp: remote policy deny audited"           'mcp: denied call "mock__danger" (policy)' "$R"
+                                            chk "mcp: upstream error audited (sanitized)"   "mcp: call mock__err_http upstream error" "$R"
 if printf '%s' "$R" | grep -qa 't12-secret-token'; then bad "mcp: audit free of credential values"; else ok "mcp: audit free of credential values"; fi
 
 # t13: operator CLI — config view (names, never values) + live tool probe.

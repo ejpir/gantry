@@ -48,24 +48,26 @@ func runMCPProxy() int {
 		fmt.Fprintf(os.Stderr, "gantry-guest mcp-proxy: %v\n", err)
 		return 1
 	}
-	defer func() { _ = conn.Close() }()
+	proxyMCP(conn, os.Stdin, os.Stdout, proxyGraceAfterStdinEOF)
+	return 0
+}
 
-	// Agent → gateway. On stdin EOF, half-close the vsock write side so
-	// the gateway sees a clean session end, then keep draining responses
-	// briefly (the gateway may still have calls in flight).
+func proxyMCP(conn io.ReadWriteCloser, stdin io.Reader, stdout io.Writer, grace time.Duration) {
+	defer func() { _ = conn.Close() }()
+	// Agent → gateway. Keep the connection open briefly after stdin EOF so
+	// pipelined requests can finish and late responses can drain. Do not
+	// half-close AF_VSOCK here: the VMM's stream bridge can observe the FIN
+	// before forwarding data already queued behind the first frame, dropping
+	// the rest of a short pipelined session.
 	go func() {
-		_, _ = io.Copy(conn, os.Stdin)
-		shutdownWrite(conn)
-		// The gateway may still have calls in flight; give late responses a
-		// grace window, then force the read side closed.
-		time.Sleep(proxyGraceAfterStdinEOF)
+		_, _ = io.Copy(conn, stdin)
+		time.Sleep(grace)
 		_ = conn.Close()
 	}()
 
 	// Gateway → agent: until the gateway ends the session or the grace
 	// timer above closes the connection.
-	_, _ = io.Copy(os.Stdout, conn)
-	return 0
+	_, _ = io.Copy(stdout, conn)
 }
 
 // --- mcp-serve filesystem ------------------------------------------------

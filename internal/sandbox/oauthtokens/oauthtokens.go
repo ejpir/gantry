@@ -288,5 +288,16 @@ func (r *Registry) syncLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.WriteFile(r.path, b, 0o600)
+	if err := atomicfile.WriteFile(r.path, b, 0o600); err != nil {
+		return err
+	}
+	// Atomic replacement creates a new filesystem object. On Windows that
+	// object may inherit its parent DACL even when the previous token file was
+	// protected, so validate and harden the replacement before reporting a
+	// durable sync. The sandbox directory is already private, preventing an
+	// exposure window between rename and this check.
+	if err := localsec.SecureRegularFile(r.path); err != nil {
+		return fmt.Errorf("secure oauth tokens: %w", err)
+	}
+	return os.Chmod(r.path, 0o600)
 }

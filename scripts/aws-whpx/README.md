@@ -2,8 +2,9 @@
 
 These files preserve the EC2 Windows Server 2022 acceptance run for the WHPX
 backend. The replay validates the split VMM process, Job Object boundary,
-guest exec and writable layer, live and persistent NTFS shares, and DNS → TCP
-→ TLS → HTTP using the staged `netprobe` image.
+guest exec and writable layer, live and persistent NTFS shares, DNS → TCP →
+TLS → HTTP using the staged `netprobe` image, host-bound secrets, OAuth token
+custody, MCP policy, audit behavior, and large shared directories.
 
 From the repository root:
 
@@ -22,8 +23,20 @@ read at the top of `field-validation.ps1`, notably `GANTRY_TEST_ROOT`,
 
 The instance needs SSM connectivity, WHPX enabled, outbound security-group
 access, and the kernel/rootfs/netprobe assets already staged. No credential is
-embedded in the scripts. The host helper builds a fresh Windows binary, uploads
-it to S3, and gives the instance a one-hour presigned download URL.
+embedded in the scripts. The host helper builds fresh Windows host and Linux
+guest-helper binaries, uploads them to S3, and gives the instance one-hour
+presigned download URLs.
+
+To start both reusable field hosts, run the Linux and Windows batteries, test a
+real checksummed self-update on disposable binaries, and stop the instances on
+exit, use the repository-level orchestrator:
+
+```sh
+source ~/keys
+sh scripts/aws-e2e-validation.sh
+```
+
+Set `GANTRY_KEEP_INSTANCES=1` to leave both hosts running after a replay.
 
 `boot-comparison.ps1` runs both implementations on that same Windows host. Its
 QEMU side is deliberately and verifiably the `microvm` machine—
