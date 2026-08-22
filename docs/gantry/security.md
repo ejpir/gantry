@@ -92,6 +92,12 @@ $ gantry start sensitive -image alpine:latest \
 `required` is supported only where the platform can establish and verify the
 full required boundary. It currently fails closed on Windows.
 
+The host MCP gateway is not yet one of these split workers: it currently runs
+inside the trusted supervisor, while its built-in filesystem helper is a
+separate unprivileged guest process. The planned host-worker boundary and
+filesystem hardening are documented in the
+[MCP worker confinement plan](mcp-worker-confinement.md).
+
 ### Runtime inside the VM
 
 `-runtime runsc` adds a gVisor boundary between the workload and the guest

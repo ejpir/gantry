@@ -168,3 +168,5 @@ values.
 For the host/guest request flow, credential injection, redaction, and resource
 limits, see [Architecture](architecture.md#mcp-and-credential-flow). For the
 trust boundary and operational cautions, see [Security](security.md#credentials).
+The proposed extraction of the host gateway into a confined process is tracked
+in the [MCP worker confinement plan](mcp-worker-confinement.md).
