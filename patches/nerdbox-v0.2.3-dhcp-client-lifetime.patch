@@ -1,0 +1,34 @@
+diff --git a/internal/vminit/vmnetworking/dhcp.go b/internal/vminit/vmnetworking/dhcp.go
+index 6135229..2e53e72 100644
+--- a/internal/vminit/vmnetworking/dhcp.go
++++ b/internal/vminit/vmnetworking/dhcp.go
+@@ -55 +55,8 @@ func configureDHCP(ctx context.Context, iface netlink.Link, nw Network, debug bo
+-	defer c.Close()
++	// DHCPLease retains the client's raw socket and receive loop for later
++	// renewals. Close it here only when setup fails before ownership transfers.
++	ownedByLease := false
++	defer func() {
++		if !ownedByLease {
++			_ = c.Close()
++		}
++	}()
+@@ -93,0 +101 @@ func configureDHCP(ctx context.Context, iface netlink.Link, nw Network, debug bo
++	ownedByLease = true
+@@ -155,3 +163 @@ func (l *DHCPLease) RenewLoop(ctx context.Context) error {
+-// Release releases the DHCP lease.
+-//
+-// TODO(aker): Release is never called.
++// Release releases the DHCP lease and closes the retained client.
+@@ -159,3 +165,9 @@ func (l *DHCPLease) Release(ctx context.Context) error {
+-	if err := l.client.Release(l.lease); err != nil {
+-		log.G(ctx).WithError(err).Error("failed to release DHCP lease")
+-		return err
++	releaseErr := l.client.Release(l.lease)
++	closeErr := l.client.Close()
++	if releaseErr != nil {
++		log.G(ctx).WithError(releaseErr).Error("failed to release DHCP lease")
++		return releaseErr
++	}
++	if closeErr != nil {
++		log.G(ctx).WithError(closeErr).Error("failed to close DHCP client")
++		return closeErr
