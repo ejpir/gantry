@@ -2,6 +2,7 @@ package controlcmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/sandbox/config"
@@ -90,6 +91,12 @@ func mcpControlRPC(name, op string, settings controlproto.MCPRequest) error {
 		return err
 	}
 	if !resp.OK {
+		if strings.TrimSpace(resp.Error) == "unknown op" {
+			// A daemon keeps running the binary that launched it. After Gantry is
+			// updated, an existing sandbox can therefore predate these control
+			// operations even though the dashboard already exposes them.
+			return fmt.Errorf("restart sandbox %q to upgrade its daemon, then retry MCP configuration", name)
+		}
 		if resp.Error == "" {
 			resp.Error = "MCP configuration update failed"
 		}
