@@ -458,6 +458,9 @@ func (whpxPlatform) run(m *Machine) (resultErr error) {
 	if m.arch != "amd64" {
 		return fmt.Errorf("the WHPX backend boots x86-64 guests only (got %s)", m.arch)
 	}
+	if m.whpxBroker != nil {
+		return runBrokeredWHPX(m)
+	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 

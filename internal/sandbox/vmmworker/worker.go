@@ -33,19 +33,20 @@ import (
 // client, fd channel (send side), bridge serve loop, and lifecycle. It
 // implements Runner.
 type vmmWorker struct {
-	child      *worker.Child
-	proc       *os.Process
-	client     *workerproto.Client // control (fd 3)
-	fdChan     net.Conn            // fd 5, send side
-	fdSend     sync.Mutex          // serialize SCM_RIGHTS sends
-	bridge     net.Conn
-	bridgeE    chan error
-	share      net.Conn // fd 6 peer: supervisor side of the FUSE relay
-	shareE     chan error
-	lifecycle  *worker.Lifecycle
-	waitMu     sync.Mutex // protects lazy lifecycle-context initialization
-	waitCtx    context.Context
-	waitCancel context.CancelFunc
+	child       *worker.Child
+	brokerChild *worker.Child // Windows brokered-WHPX topology; nil elsewhere
+	proc        *os.Process
+	client      *workerproto.Client // control (fd 3)
+	fdChan      net.Conn            // fd 5, send side
+	fdSend      sync.Mutex          // serialize SCM_RIGHTS sends
+	bridge      net.Conn
+	bridgeE     chan error
+	share       net.Conn // fd 6 peer: supervisor side of the FUSE relay
+	shareE      chan error
+	lifecycle   *worker.Lifecycle
+	waitMu      sync.Mutex // protects lazy lifecycle-context initialization
+	waitCtx     context.Context
+	waitCancel  context.CancelFunc
 	// Local-netstack counters live in the confined worker. Periodic pulls
 	// are cancellable; vm.wait/vm.close responses furnish the final snapshot
 	// before the control channel dies.
@@ -279,6 +280,16 @@ func (w *vmmWorker) Close() error {
 		}
 		if w.child != nil {
 			w.closeErr = errors.Join(shutdownErr, w.child.WaitExit(5*time.Second))
+			if w.brokerChild != nil {
+				// The device worker's peer closure normally stops the broker. If
+				// it does not, revoke its Job and process explicitly.
+				select {
+				case <-w.brokerChild.Done():
+					w.closeErr = errors.Join(w.closeErr, w.brokerChild.Err())
+				case <-time.After(5 * time.Second):
+					w.closeErr = errors.Join(w.closeErr, w.brokerChild.Terminate(5*time.Second))
+				}
+			}
 		} else {
 			var kill func() error
 			if w.proc != nil {

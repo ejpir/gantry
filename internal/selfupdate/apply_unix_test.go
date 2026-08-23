@@ -79,6 +79,47 @@ func TestApplyVerifiesAndReplacesExecutable(t *testing.T) {
 	}
 }
 
+func TestApplyForceReinstallsSameVersion(t *testing.T) {
+	preserveTestGlobals(t)
+	guestasset.Version = "v1.0.0"
+	cacheFile = func() string { return filepath.Join(t.TempDir(), "update.json") }
+	target := filepath.Join(t.TempDir(), "gantry")
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executablePath = func() (string, error) { return target, nil }
+	payload := minimalNativeBinary(t)
+	sum := sha256.Sum256(payload)
+	asset, _ := platformAsset(runtime.GOOS, runtime.GOARCH)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/latest":
+			_, _ = writer.Write([]byte(`{"tag_name":"v1.0.0"}`))
+		case "/download/v1.0.0/" + asset + ".sha256":
+			_, _ = fmt.Fprintf(writer, "%s  %s\n", hex.EncodeToString(sum[:]), asset)
+		case "/download/v1.0.0/" + asset:
+			_, _ = writer.Write(payload)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	latestReleaseEndpoint = server.URL + "/latest"
+	releaseDownloadBase = server.URL + "/download"
+	httpClient = server.Client()
+
+	result, err := ApplyForce(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Previous != "v1.0.0" || result.Installed != "v1.0.0" || result.Executable != target {
+		t.Fatalf("result = %+v", result)
+	}
+	if got, _ := os.ReadFile(target); string(got) != string(payload) {
+		t.Fatal("forced update did not replace the executable")
+	}
+}
+
 func TestApplyRejectsChecksumMismatch(t *testing.T) {
 	preserveTestGlobals(t)
 	guestasset.Version = "v1.0.0"

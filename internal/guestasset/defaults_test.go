@@ -75,6 +75,29 @@ func TestReleaseAssetsUseVersionedUserCache(t *testing.T) {
 	}
 }
 
+func TestRetaggedReleaseUsesBuildScopedAssetCache(t *testing.T) {
+	oldVersion, oldBuildID, oldCache := Version, BuildID, userCacheDir
+	t.Cleanup(func() { Version, BuildID, userCacheDir = oldVersion, oldBuildID, oldCache })
+	t.Setenv("GANTRY_ARTIFACTS", "")
+	Version = "v1.2.3"
+	BuildID = "0123456789abcdef0123456789abcdef01234567"
+	cache := t.TempDir()
+	userCacheDir = func() (string, error) { return cache, nil }
+
+	gantry, _ := kernelNames(runtime.GOARCH)
+	want := filepath.Join(cache, "gantry", "assets", "v1.2.3-0123456789abcdef0123456789abcdef01234567", gantry)
+	if got := DefaultKernel(); got != want {
+		t.Fatalf("DefaultKernel = %q, want build-scoped path %q", got, want)
+	}
+	if !IsManagedReleaseKernel(want) {
+		t.Fatalf("build-scoped release kernel was not recognized: %s", want)
+	}
+	BuildID = "../unsafe"
+	if got := DefaultKernel(); got != filepath.Join(cache, "gantry", "assets", Version, gantry) {
+		t.Fatalf("invalid build ID affected cache path: %s", got)
+	}
+}
+
 func TestReleaseAssetCacheFallsBackToUserHome(t *testing.T) {
 	oldVersion, oldCache, oldHome, oldTemp := Version, userCacheDir, userHomeDir, systemTempDir
 	t.Cleanup(func() {

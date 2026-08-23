@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/worker"
+	"github.com/ejpir/gantry/internal/vmm"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
@@ -59,16 +60,57 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	}
 	assetFiles = append(assetFiles, assets.Disks...)
 	closeAfterAck = append(closeAfterAck, assets.Disks...)
-	if cfg.VhostShares || cfg.HasSharedRAM || assets.SharedRAM != nil || assets.KVM != nil {
+	if cfg.VhostShares || assets.KVM != nil {
 		return nil, fmt.Errorf("handle table: Unix vhost/KVM assets are unavailable with WHPX")
 	}
+	if cfg.WHPXBroker != cfg.HasSharedRAM || cfg.WHPXBroker != (assets.SharedRAM != nil) {
+		return nil, fmt.Errorf("handle table: brokered WHPX requires exactly one shared RAM section")
+	}
 
-	// Logical slot 7 is reserved for the connected network socket transferred
-	// after CreateProcess. Static boot handles begin at slot 8, matching the
-	// child-side WHPX descriptor contract.
-	inherited := make([]worker.InheritedFile, 0, len(assetFiles))
+	var (
+		brokerChild *worker.Child
+		targetPeer  [2]*os.File
+		mailboxes   vmm.WHPXMailboxFiles
+	)
+	if cfg.WHPXBroker {
+		mailboxes, err = vmm.NewWHPXMailboxFiles(cfg.VCPUs)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = mailboxes.Close() }()
+		var frequency uint64
+		brokerChild, targetPeer, frequency, err = spawnWHPXBroker(cfg, assets.SharedRAM, mailboxes, dir)
+		if err != nil {
+			return nil, err
+		}
+		cfg.WHPXProcessorClockFrequency = frequency
+		defer worker.CloseFiles(targetPeer[:])
+		closeAfterAck = append(closeAfterAck, assets.SharedRAM)
+	}
+
+	// Direct mode keeps the established slot table. Brokered mode inserts the
+	// peer pipe, shared RAM, and mailbox capabilities before the network socket.
+	inherited := make([]worker.InheritedFile, 0, len(assetFiles)+cfg.VCPUs+7)
+	netSlot, assetSlot := 7, 8
+	environment := vmmWorkerEnv()
+	if cfg.WHPXBroker {
+		inherited = append(inherited,
+			worker.InheritedFile{Slot: 7, File: targetPeer[0]},
+			worker.InheritedFile{Slot: 8, File: targetPeer[1]},
+			worker.InheritedFile{Slot: 9, File: assets.SharedRAM},
+			worker.InheritedFile{Slot: 10, File: mailboxes.Mapping},
+			worker.InheritedFile{Slot: 11, File: mailboxes.RequestEvent},
+		)
+		for index, event := range mailboxes.ReplyEvents {
+			inherited = append(inherited, worker.InheritedFile{Slot: 12 + index, File: event})
+		}
+		netSlot = 12 + cfg.VCPUs
+		assetSlot = netSlot + 1
+		environment = append(environment, "GANTRY_WINDOWS_WHPX_BROKER_ACTIVE=1")
+	}
+	inherited = append(inherited, worker.InheritedFile{Slot: netSlot, File: netFile})
 	for index, file := range assetFiles {
-		inherited = append(inherited, worker.InheritedFile{Slot: 8 + index, File: file})
+		inherited = append(inherited, worker.InheritedFile{Slot: assetSlot + index, File: file})
 	}
 	logPath := ""
 	if dir != "" {
@@ -77,7 +119,7 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	child, err := worker.Launch(worker.LaunchSpec{
 		Role:             workerproto.RoleVMM,
 		EntryPoint:       "_vmm-worker",
-		Environment:      vmmWorkerEnv(),
+		Environment:      environment,
 		Channels:         []string{"control", "bridge", "fd", "share"},
 		InheritedFiles:   inherited,
 		DiagnosticPath:   logPath,
@@ -85,6 +127,9 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		ConfigureProcess: vmmWorkerSpawnHook,
 	})
 	if err != nil {
+		if brokerChild != nil {
+			_ = brokerChild.Terminate(5 * time.Second)
+		}
 		return nil, err
 	}
 	ctrlSup := child.Channels["control"]
@@ -95,17 +140,15 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	var waitErr error
 	killChild := func() {
 		_ = child.Terminate(5 * time.Second)
+		if brokerChild != nil {
+			_ = brokerChild.Terminate(5 * time.Second)
+		}
 		waitErr = child.Err()
 	}
 	bootstrap, err := child.BeginBootstrap(cfg)
 	if err != nil {
 		killChild()
 		return nil, fmt.Errorf("vmm worker handshake: %w", err)
-	}
-	var netToken [workerproto.FDTokenLen]byte
-	if err := workerproto.SendFD(fdSup, netToken, netFile); err != nil {
-		killChild()
-		return nil, fmt.Errorf("vmm worker net socket: %w", err)
 	}
 	if err := bootstrap.BindChannels("fd", "share"); err != nil {
 		killChild()
@@ -129,7 +172,8 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	_ = assets.NetConn.Close()
 
 	w := &vmmWorker{
-		child: child, proc: child.Process, client: workerproto.NewClient(ctrlSup), fdChan: fdSup,
+		child: child, brokerChild: brokerChild, proc: child.Process,
+		client: workerproto.NewClient(ctrlSup), fdChan: fdSup,
 		bridge: bridgeSup, bridgeE: make(chan error, 1), share: shareSup,
 		lifecycle: child.Lifecycle, confReport: ack.Confinement,
 	}
@@ -140,6 +184,66 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	}()
 	go w.observeChild()
 	return w, nil
+}
+
+func spawnWHPXBroker(cfg vmmworkerapi.Config, sharedRAM *os.File, mailboxes vmm.WHPXMailboxFiles, dir string) (*worker.Child, [2]*os.File, uint64, error) {
+	var empty [2]*os.File
+	targetPeer, brokerPeer, err := worker.PipePairFiles()
+	if err != nil {
+		return nil, empty, 0, err
+	}
+	logPath := ""
+	if dir != "" {
+		logPath = filepath.Join(dir, "worker-whpx.log")
+	}
+	inherited := []worker.InheritedFile{
+		{Slot: 4, File: sharedRAM},
+		{Slot: 5, File: brokerPeer[0]},
+		{Slot: 6, File: brokerPeer[1]},
+		{Slot: 7, File: mailboxes.Mapping},
+		{Slot: 8, File: mailboxes.RequestEvent},
+	}
+	for index, event := range mailboxes.ReplyEvents {
+		inherited = append(inherited, worker.InheritedFile{Slot: 9 + index, File: event})
+	}
+	child, err := worker.Launch(worker.LaunchSpec{
+		Role:             workerproto.RoleWHPX,
+		EntryPoint:       "_whpx-worker",
+		Environment:      vmmWorkerEnv(),
+		Channels:         []string{"control"},
+		InheritedFiles:   inherited,
+		DiagnosticPath:   logPath,
+		Confinement:      cfg.Confinement,
+		ConfigureProcess: vmmWorkerSpawnHook,
+	})
+	worker.CloseFiles(brokerPeer[:])
+	if err != nil {
+		worker.CloseFiles(targetPeer[:])
+		return nil, empty, 0, err
+	}
+	_, err = child.BeginBootstrap(vmm.WHPXBrokerConfig{
+		MemSize: cfg.MemSize, VCPUs: cfg.VCPUs, PeerToken: cfg.WHPXToken,
+	})
+	if err != nil {
+		_ = child.Terminate(5 * time.Second)
+		worker.CloseFiles(targetPeer[:])
+		return nil, empty, 0, fmt.Errorf("WHPX broker handshake: %w", err)
+	}
+	var ack vmm.WHPXBrokerBootAck
+	control := child.Channels["control"]
+	_ = control.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if err := workerproto.ReadMessage(control, &ack); err != nil {
+		_ = child.Terminate(5 * time.Second)
+		worker.CloseFiles(targetPeer[:])
+		return nil, empty, 0, fmt.Errorf("WHPX broker boot ack: %w", err)
+	}
+	_ = control.SetReadDeadline(time.Time{})
+	if !ack.OK {
+		_ = child.Terminate(5 * time.Second)
+		worker.CloseFiles(targetPeer[:])
+		return nil, empty, 0, fmt.Errorf("WHPX broker boot: %s", ack.Error)
+	}
+	return child, targetPeer, ack.ProcessorClockFrequency, nil
 }
 
 func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {

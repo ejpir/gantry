@@ -57,7 +57,21 @@ function Assert-Isolation {
     if (-not $report.vmmConfinement.applied) {
         throw "VMM worker confinement was not applied"
     }
-    "PASS isolation: topology=split-vmm processBoundary=enforced"
+    $exec = $report.vmmConfinement.properties | Where-Object { $_.name -eq "exec" }
+    if ($null -eq $exec -or $exec.state -ne "enforced") {
+        throw "VMM Job did not enforce exec denial: $($exec | ConvertTo-Json -Compress)"
+    }
+    foreach ($propertyName in @("fs-read", "fs-write", "net-dial")) {
+        $property = $report.vmmConfinement.properties | Where-Object { $_.name -eq $propertyName }
+        if ($null -eq $property -or $property.state -ne "enforced") {
+            throw "AppContainer VMM property $propertyName was not enforced: $($property | ConvertTo-Json -Compress)"
+        }
+    }
+    $brokerNote = $report.vmmConfinement.notes | Where-Object { $_ -match "WHPX partition.*trusted broker" }
+    if ($null -eq $brokerNote) {
+        throw "VMM confinement report did not disclose the WHPX broker trust boundary"
+    }
+    "PASS isolation: AppContainer device VMM plus Job-confined WHPX broker; fs/net/exec enforced"
 }
 
 foreach ($path in @($Gantry, $Kernel, $Rootfs, $NetprobeImage)) {
@@ -138,9 +152,9 @@ try {
         "-process-isolation", "required"
     )
     if ($requiredResult -eq 0) {
-        throw "strict Windows isolation unexpectedly booted without enforced fs/net properties"
+        throw "strict Windows isolation unexpectedly booted despite the unavailable network-worker tier"
     }
-    "PASS process-isolation=required fails closed on the partial Windows tier"
+    "PASS process-isolation=required fails closed while the Windows network-worker tier is unavailable"
 
     "--- primary isolation.json"
     Get-Content $IsolationPath

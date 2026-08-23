@@ -22,7 +22,7 @@ func allocGuestRAM(size, initialCommit uint64, backing *os.File) ([]byte, error)
 		syscall.PROT_READ|syscall.PROT_WRITE, flags)
 }
 
-func freeGuestRAM(ram []byte) error {
+func freeGuestRAM(ram []byte, _ bool) error {
 	if len(ram) == 0 {
 		return nil
 	}

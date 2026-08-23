@@ -164,25 +164,37 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		// Prepare consumes every descriptor-bearing option on entry.
 		assets.SharedRAM = nil
 	}
+	whpxMailbox := assets.WHPXMailbox
+	whpxRequestEvent := assets.WHPXRequestEvent
+	whpxReplyEvents := assets.WHPXReplyEvents
+	assets.WHPXMailbox = nil
+	assets.WHPXRequestEvent = nil
+	assets.WHPXReplyEvents = nil
 	runner, err := rt.Boot(vmm.Opts{
-		MemSize:         config.MemSize,
-		Kernel:          assets.Kernel,
-		Rootfs:          assets.Rootfs,
-		DisksRO:         assets.DisksRO,
-		Disks:           assets.Disks,
-		DisksPrelocked:  config.DisksPrelocked,
-		SharedRAM:       sharedRAM,
-		Filesystems:     []vmm.Filesystem{filesystem},
-		NetConn:         assets.NetConn,
-		NetMAC:          config.NetMAC,
-		NetPolicy:       netPolicy,
-		NetTraffic:      netTraffic,
-		KVM:             assets.KVM,
-		GuestCID:        config.GuestCID,
-		VCPUs:           config.VCPUs,
-		Cmdline:         config.Cmdline,
-		Console:         assets.Console,
-		BootTimingStart: bootStart,
+		MemSize:                     config.MemSize,
+		Kernel:                      assets.Kernel,
+		Rootfs:                      assets.Rootfs,
+		DisksRO:                     assets.DisksRO,
+		Disks:                       assets.Disks,
+		DisksPrelocked:              config.DisksPrelocked,
+		SharedRAM:                   sharedRAM,
+		WHPXBroker:                  assets.WHPXConn,
+		WHPXToken:                   config.WHPXToken,
+		WHPXProcessorClockFrequency: config.WHPXProcessorClockFrequency,
+		WHPXMailbox:                 whpxMailbox,
+		WHPXRequestEvent:            whpxRequestEvent,
+		WHPXReplyEvents:             whpxReplyEvents,
+		Filesystems:                 []vmm.Filesystem{filesystem},
+		NetConn:                     assets.NetConn,
+		NetMAC:                      config.NetMAC,
+		NetPolicy:                   netPolicy,
+		NetTraffic:                  netTraffic,
+		KVM:                         assets.KVM,
+		GuestCID:                    config.GuestCID,
+		VCPUs:                       config.VCPUs,
+		Cmdline:                     config.Cmdline,
+		Console:                     assets.Console,
+		BootTimingStart:             bootStart,
 		VsockDial: func(port uint32) (net.Conn, error) {
 			return forwardVsock(bridgeClient, fds, port)
 		},

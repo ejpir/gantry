@@ -43,7 +43,8 @@ func cmdVersion(argv []string) int {
 func cmdUpdate(argv []string) int {
 	flags := flag.NewFlagSet("update", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	flags.Usage = func() { _, _ = fmt.Fprintln(flags.Output(), "usage: gantry update") }
+	force := flags.Bool("force", false, "reinstall the latest release even when its version matches")
+	flags.Usage = func() { _, _ = fmt.Fprintln(flags.Output(), "usage: gantry update [--force]") }
 	if err := flags.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -54,7 +55,11 @@ func cmdUpdate(argv []string) int {
 		flags.Usage()
 		return 2
 	}
-	result, err := selfupdate.Apply(context.Background(), func(format string, values ...any) {
+	apply := selfupdate.Apply
+	if *force {
+		apply = selfupdate.ApplyForce
+	}
+	result, err := apply(context.Background(), func(format string, values ...any) {
 		fmt.Fprintf(os.Stderr, format+"\n", values...)
 	})
 	if err != nil {
@@ -62,7 +67,11 @@ func cmdUpdate(argv []string) int {
 		return 1
 	}
 	if result.Installed == result.Previous {
-		_, _ = fmt.Fprintf(os.Stdout, "gantry %s is already up to date\n", result.Installed)
+		if *force && result.Executable != "" {
+			_, _ = fmt.Fprintf(os.Stdout, "reinstalled Gantry %s in %s\n", result.Installed, result.Executable)
+		} else {
+			_, _ = fmt.Fprintf(os.Stdout, "gantry %s is already up to date\n", result.Installed)
+		}
 		return 0
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "updated Gantry %s → %s in %s\n", result.Previous, result.Installed, result.Executable)

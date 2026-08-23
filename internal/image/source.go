@@ -106,7 +106,7 @@ func shortDigest(digest string) string {
 
 // loadOCILayout reads an OCI image layout directory (oci-layout +
 // index.json + blobs/), selecting the manifest for the guest arch.
-func loadOCILayout(dir, ref, arch string) (*pulled, error) {
+func loadOCILayout(dir, ref, arch string, newTempDir func() (string, error)) (*pulled, error) {
 	idxb, err := os.ReadFile(filepath.Join(dir, "index.json"))
 	if err != nil {
 		return nil, err
@@ -183,7 +183,7 @@ func loadOCILayout(dir, ref, arch string) (*pulled, error) {
 	}
 
 	p := &pulled{digest: man.Digest, ref: ref, tmpDir: ""}
-	tmp, err := os.MkdirTemp("", "gantry-image-")
+	tmp, err := newTempDir()
 	if err != nil {
 		return nil, err
 	}
@@ -216,14 +216,14 @@ func loadOCILayout(dir, ref, arch string) (*pulled, error) {
 // loadDockerSave reads a `docker save` tar: manifest.json naming a
 // config blob and layer tars. The cache key is derived (docker save
 // carries no manifest digest): sha256 over config + ordered layer ids.
-func loadDockerSave(tarPath, ref, arch string) (*pulled, error) {
+func loadDockerSave(tarPath, ref, arch string, newTempDir func() (string, error)) (*pulled, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 
-	tmp, err := os.MkdirTemp("", "gantry-image-")
+	tmp, err := newTempDir()
 	if err != nil {
 		return nil, err
 	}

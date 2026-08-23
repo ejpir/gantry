@@ -406,7 +406,7 @@ func (c *registryClient) fetchBlob(ctx context.Context, repo string, desc descri
 // loadRegistry pulls ref from its registry: manifest (platform-matched
 // through an index when needed), config, and layers decompressed to temp
 // files. Every digest on the way is verified.
-func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, logf func(string, ...any)) (*pulled, error) {
+func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, logf func(string, ...any), newTempDir func() (string, error)) (*pulled, error) {
 	ref, err := ParseRef(refStr)
 	if err != nil {
 		return nil, err
@@ -467,7 +467,7 @@ func loadRegistry(ctx context.Context, refStr, arch string, res *auth.Resolver, 
 		}
 	}
 
-	tmp, err := os.MkdirTemp("", "gantry-image-")
+	tmp, err := newTempDir()
 	if err != nil {
 		return nil, err
 	}

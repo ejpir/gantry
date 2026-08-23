@@ -11,11 +11,17 @@ import (
 
 func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, assets Assets) (workerconf.Report, error) {
 	report := workerconf.DisabledReport(runtime.GOOS, config.Confinement)
+	var roleNotes []string
 	if config.NDisks != 0 {
-		report.Notes = append(report.Notes,
+		roleNotes = append(roleNotes,
 			"Windows mandatory byte-range lock is worker-owned; sandbox lifetime lock remains supervisor-owned")
 	}
+	if config.WHPXBroker {
+		roleNotes = append(roleNotes,
+			"WHPX partition is owned by a separate Job-confined trusted broker; device emulation is AppContainer-confined")
+	}
 	if config.Confinement == "" || config.Confinement == "off" {
+		report.Notes = append(report.Notes, roleNotes...)
 		return report, nil
 	}
 
@@ -25,6 +31,7 @@ func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, as
 		report = *applied
 		report.Mode = config.Confinement
 	}
+	report.Notes = append(report.Notes, roleNotes...)
 	if applyErr != nil {
 		report.Notes = append(report.Notes, "apply: "+applyErr.Error())
 	}

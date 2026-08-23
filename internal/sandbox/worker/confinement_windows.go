@@ -1,39 +1,51 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-const (
-	createRestrictedTokenDisableMaxPrivilege = 0x1
-)
-
-var createRestrictedTokenProc = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+const windowsWorkerProbePathEnv = "GANTRY_WORKER_PROBE_READ_PATH"
+const windowsWorkerProbeNetEnv = "GANTRY_WORKER_PROBE_NET_ADDR"
 
 type windowsJob struct {
-	handle windows.Handle
+	handle        windows.Handle
+	probePath     string
+	probeListener net.Listener
 }
 
 func (job *windowsJob) Close() error {
-	if job == nil || job.handle == 0 {
+	if job == nil {
 		return nil
 	}
-	err := windows.CloseHandle(job.handle)
-	job.handle = 0
-	return err
+	var result error
+	if job.handle != 0 {
+		result = windows.CloseHandle(job.handle)
+		job.handle = 0
+	}
+	if job.probePath != "" {
+		if err := os.Remove(job.probePath); err != nil && !os.IsNotExist(err) {
+			result = errors.Join(result, err)
+		}
+		job.probePath = ""
+	}
+	if job.probeListener != nil {
+		result = errors.Join(result, job.probeListener.Close())
+		job.probeListener = nil
+	}
+	return result
 }
 
-type windowsWorkerLaunch struct {
-	token windows.Token
-	job   *windowsJob
-}
-
-func prepareWindowsLaunch(restrictToken bool) (*windowsWorkerLaunch, error) {
+func prepareWindowsJob() (*windowsJob, error) {
 	jobHandle, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create worker job: %w", err)
@@ -49,119 +61,183 @@ func prepareWindowsLaunch(restrictToken bool) (*windowsWorkerLaunch, error) {
 		_ = job.Close()
 		return nil, fmt.Errorf("set worker job limits: %w", err)
 	}
-	launch := &windowsWorkerLaunch{job: job}
-	if !restrictToken {
-		return launch, nil
-	}
-
-	var current windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(),
-		windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_ADJUST_DEFAULT,
-		&current); err != nil {
-		launch.close()
-		return nil, fmt.Errorf("open supervisor token: %w", err)
-	}
-	defer func() { _ = current.Close() }()
-
-	restrictedSID, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
-	if err != nil {
-		launch.close()
-		return nil, fmt.Errorf("restricted-code SID: %w", err)
-	}
-	restricting := windows.SIDAndAttributes{Sid: restrictedSID}
-	r1, _, callErr := createRestrictedTokenProc.Call(
-		uintptr(current), createRestrictedTokenDisableMaxPrivilege,
-		0, 0, 0, 0,
-		1, uintptr(unsafe.Pointer(&restricting)),
-		uintptr(unsafe.Pointer(&launch.token)),
-	)
-	if r1 == 0 {
-		launch.close()
-		return nil, fmt.Errorf("CreateRestrictedToken: %w", callErr)
-	}
-	return launch, nil
+	return job, nil
 }
 
-func (launch *windowsWorkerLaunch) close() {
-	if launch == nil {
-		return
-	}
-	if launch.token != 0 {
-		_ = launch.token.Close()
-		launch.token = 0
-	}
-	_ = launch.job.Close()
-}
-
-func (launch *windowsWorkerLaunch) assign(proc *os.Process) error {
-	if launch == nil || launch.job == nil {
+func (job *windowsJob) assignHandle(process windows.Handle, pid int) error {
+	if job == nil || job.handle == 0 {
 		return nil
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
-		false, uint32(proc.Pid))
-	if err != nil {
-		return fmt.Errorf("open worker PID %d for job: %w", proc.Pid, err)
-	}
-	defer func() { _ = windows.CloseHandle(handle) }()
-	if err := windows.AssignProcessToJobObject(launch.job.handle, handle); err != nil {
-		return fmt.Errorf("assign worker PID %d to job: %w", proc.Pid, err)
+	if err := windows.AssignProcessToJobObject(job.handle, process); err != nil {
+		return fmt.Errorf("assign worker PID %d to job: %w", pid, err)
 	}
 	return nil
 }
 
 func StartWindowsProcess(exe string, argv, env []string, files []*os.File,
-	handles []syscall.Handle, confinement string) (*os.Process, Containment, error) {
-	start := func(token windows.Token) (*os.Process, error) {
+	handles []syscall.Handle, role workerproto.Role, confinement string) (*os.Process, Containment, error) {
+	unconfinedEnv := append([]string(nil), env...)
+	startUnconfined := func() (*os.Process, error) {
 		return os.StartProcess(exe, argv, &os.ProcAttr{
-			Env: env, Files: files,
-			Sys: WindowsSysProcAttr(token, handles),
+			Env: unconfinedEnv, Files: files,
+			Sys: WindowsSysProcAttr(0, handles),
 		})
 	}
 	if confinement == "" || confinement == "off" {
-		proc, err := start(0)
-		return proc, nil, err
+		process, err := startUnconfined()
+		return process, nil, err
 	}
 
-	// A Job Object is compatible with WHPX and gives auto mode a useful,
-	// verified process boundary. The stronger restricting-SID token remains
-	// fail-closed for required mode (and opt-in field experiments): on current
-	// Windows Server images it terminates the Go worker loader with
-	// STATUS_ACCESS_DENIED before the worker can report its probes.
-	restrictToken := confinement == "required" || os.Getenv("GANTRY_WINDOWS_RESTRICTED_TOKEN") == "1"
-	launch, err := prepareWindowsLaunch(restrictToken)
+	// AppContainer creation needs the user-profile environment roots even
+	// though the zero-capability token cannot open those host paths.
+	env = appendMissingWindowsEnvironment(env,
+		"USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData")
+
+	probe, err := os.CreateTemp("", "gantry-workerconf-read-*")
 	if err != nil {
+		if confinement == "required" {
+			return nil, nil, fmt.Errorf("create Windows confinement probe: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Windows worker filesystem probe unavailable: %v; retrying unconfined\n", err)
+		process, startErr := startUnconfined()
+		return process, nil, startErr
+	}
+	probePath := probe.Name()
+	if _, err := probe.WriteString("supervisor-private confinement sentinel\n"); err != nil {
+		_ = probe.Close()
+		_ = os.Remove(probePath)
+		return nil, nil, fmt.Errorf("write Windows confinement probe: %w", err)
+	}
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(probePath)
+		return nil, nil, fmt.Errorf("close Windows confinement probe: %w", err)
+	}
+	probeListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		_ = os.Remove(probePath)
+		if confinement == "required" {
+			return nil, nil, fmt.Errorf("create Windows confinement network probe: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Windows worker network probe unavailable: %v; retrying unconfined\n", err)
+		process, startErr := startUnconfined()
+		return process, nil, startErr
+	}
+	env = append(append([]string(nil), env...),
+		windowsWorkerProbePathEnv+"="+probePath,
+		windowsWorkerProbeNetEnv+"="+probeListener.Addr().String())
+
+	job, err := prepareWindowsJob()
+	if err != nil {
+		_ = probeListener.Close()
+		_ = os.Remove(probePath)
 		if confinement == "required" {
 			return nil, nil, err
 		}
-		fmt.Fprintf(os.Stderr, "Windows worker job confinement unavailable: %v; retrying without job\n", err)
-		proc, startErr := start(0)
-		return proc, nil, startErr
+		fmt.Fprintf(os.Stderr, "Windows worker job confinement unavailable: %v; retrying unconfined\n", err)
+		process, startErr := startUnconfined()
+		return process, nil, startErr
 	}
-	proc, err := start(launch.token)
-	_ = launch.token.Close()
-	launch.token = 0
-	if err != nil {
-		launch.close()
-		if confinement == "required" {
-			return nil, nil, err
+	job.probePath = probePath
+	job.probeListener = probeListener
+
+	// WHPX rejects AppContainer tokens at WHvCreatePartition, so only the
+	// brokered topology may place the VMM's device half in AppContainer. The
+	// narrow RoleWHPX child retains the partition under a Job-only boundary.
+	brokeredVMM := role == workerproto.RoleVMM && environmentContains(env, "GANTRY_WINDOWS_WHPX_BROKER_ACTIVE=1")
+	appContainerEligible := role == workerproto.RoleMCP || brokeredVMM
+	appContainerRequired := appContainerEligible && confinement == "required"
+	useAppContainer := appContainerEligible && os.Getenv("GANTRY_WINDOWS_APPCONTAINER") != "0"
+	var profile *windowsAppContainerProfile
+	if useAppContainer {
+		profile, err = openWindowsWorkerAppContainer()
+		if err != nil {
+			if appContainerRequired {
+				_ = job.Close()
+				return nil, nil, err
+			}
+			fmt.Fprintf(os.Stderr, "Windows worker AppContainer unavailable: %v; using Job-only confinement\n", err)
 		}
-		fmt.Fprintf(os.Stderr, "Windows worker launch failed: %v; retrying without token/job\n", err)
-		proc, retryErr := start(0)
-		return proc, nil, retryErr
 	}
-	if err := launch.assign(proc); err != nil {
+	if profile != nil {
+		defer func() { _ = profile.Close() }()
+	}
+
+	startSuspended := func(sid *windows.SID) (*windowsCreatedProcess, error) {
+		return createWindowsProcessSuspended(exe, argv, env, files, handles, sid)
+	}
+	var appContainerSID *windows.SID
+	if profile != nil {
+		appContainerSID = profile.sid
+	}
+	created, err := startSuspended(appContainerSID)
+	if err != nil && appContainerSID != nil && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		// Unpackaged binaries outside Windows/Program Files do not necessarily
+		// carry an ALL APPLICATION PACKAGES execute ACE. Grant this one private
+		// AppContainer identity read/execute access to the current binary only.
+		if aclErr := grantAppContainerExecutableAccess(exe, appContainerSID); aclErr == nil {
+			created, err = startSuspended(appContainerSID)
+		} else {
+			err = errors.Join(err, aclErr)
+		}
+	}
+	if err != nil && appContainerSID != nil && !appContainerRequired {
+		fmt.Fprintf(os.Stderr, "Windows worker AppContainer launch failed: %v; using Job-only confinement\n", err)
+		created, err = startSuspended(nil)
+	}
+	if err != nil {
+		_ = job.Close()
+		if appContainerRequired {
+			return nil, nil, fmt.Errorf("launch required AppContainer worker: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "Windows worker confined launch failed: %v; retrying unconfined\n", err)
+		process, startErr := startUnconfined()
+		return process, nil, startErr
+	}
+
+	if err := job.assignHandle(created.processHandle, created.process.Pid); err != nil {
 		if confinement == "required" {
-			_ = proc.Kill()
-			_, _ = proc.Wait()
-			launch.close()
+			created.abort()
+			_ = job.Close()
 			return nil, nil, err
 		}
 		fmt.Fprintf(os.Stderr, "Windows worker job assignment failed: %v; continuing without job containment\n", err)
-		// An opt-in restricted token may still apply. Auto mode honestly reports
-		// the missing job and any other unenforced properties through its probes.
-		_ = launch.job.Close()
-		launch.job = nil
-		return proc, nil, nil
+		_ = windows.CloseHandle(job.handle)
+		job.handle = 0
 	}
-	return proc, launch.job, nil
+	if err := created.resume(); err != nil {
+		created.abort()
+		_ = job.Close()
+		return nil, nil, err
+	}
+	created.closeCreationHandles()
+	return created.process, job, nil
+}
+
+func environmentContains(environment []string, entry string) bool {
+	for _, candidate := range environment {
+		if candidate == entry {
+			return true
+		}
+	}
+	return false
+}
+
+func appendMissingWindowsEnvironment(environment []string, names ...string) []string {
+	result := append([]string(nil), environment...)
+	present := make(map[string]struct{}, len(result))
+	for _, entry := range result {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok {
+			present[strings.ToUpper(name)] = struct{}{}
+		}
+	}
+	for _, name := range names {
+		if _, exists := present[strings.ToUpper(name)]; exists {
+			continue
+		}
+		if value := os.Getenv(name); value != "" {
+			result = append(result, name+"="+value)
+		}
+	}
+	return result
 }

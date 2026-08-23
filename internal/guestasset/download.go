@@ -17,8 +17,13 @@ import (
 
 // Version is the Gantry release tag stamped by release builds. Development
 // builds use the latest release so locally built supervisors can bootstrap
-// without a matching tag.
-var Version = "dev"
+// without a matching tag. BuildID is the source revision of the host binary;
+// it prevents a rebuilt or deliberately retagged release from reusing guest
+// assets produced by an older build under the same semantic version.
+var (
+	Version = "dev"
+	BuildID = "dev"
+)
 
 const (
 	maxAssetSize    = int64(256 << 20)

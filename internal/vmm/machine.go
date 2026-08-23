@@ -180,10 +180,16 @@ func loadInitrd(f *os.File, ram []byte) (start, end uint64, err error) {
 // native backend lifecycle. Platform backends own their hypervisor resources
 // and vCPU threads; Machine.Close joins them before releasing devices or RAM.
 type Machine struct {
-	ram   []byte
-	mem   *virtio.RAM
-	entry uint64
-	arch  string // "arm64" | "amd64"
+	ram              []byte
+	ramShared        bool
+	whpxBroker       net.Conn // Windows split-WHPX transport; nil uses in-process WHPX
+	whpxToken        string
+	whpxMailbox      *os.File
+	whpxRequestEvent *os.File
+	whpxReplyEvents  []*os.File
+	mem              *virtio.RAM
+	entry            uint64
+	arch             string // "arm64" | "amd64"
 	// x86BootMemSize is the ordinary e820/low mapping. With the Windows
 	// virtio-mem path, the rest of ram is mapped above 4 GiB and hot-added by
 	// Linux instead of delaying early boot page initialization.
@@ -250,6 +256,16 @@ func (m *Machine) Close() error {
 		if waitForRun && runDone != nil {
 			<-runDone
 		}
+		for _, file := range append([]*os.File{m.whpxMailbox, m.whpxRequestEvent}, m.whpxReplyEvents...) {
+			if file != nil {
+				if err := file.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("close WHPX mailbox capability: %w", err))
+				}
+			}
+		}
+		m.whpxMailbox = nil
+		m.whpxRequestEvent = nil
+		m.whpxReplyEvents = nil
 		for _, vc := range m.virtios {
 			if err := vc.Close(); err != nil {
 				errs = append(errs, err)
@@ -420,8 +436,18 @@ type Opts struct {
 	// Split VMM/vhost mode maps it MAP_SHARED and transfers the same object to
 	// the filesystem backend; monolithic VMs leave it nil.
 	SharedRAM *os.File
-	DisksRO   []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
-	Disks     []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
+	// WHPXBroker is a preconnected private transport to the Windows WHPX
+	// broker. When set, guest RAM must be backed by SharedRAM.
+	WHPXBroker                  net.Conn
+	WHPXToken                   string
+	WHPXProcessorClockFrequency uint64
+	// WHPXMailbox and its events are anonymous inherited synchronization
+	// capabilities for the brokered vCPU-exit fast path.
+	WHPXMailbox      *os.File
+	WHPXRequestEvent *os.File
+	WHPXReplyEvents  []*os.File
+	DisksRO          []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
+	Disks            []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
 	// DisksPrelocked means a trusted supervisor process owns the exclusive
 	// locks for Disks. Split workers use this so compromised children cannot
 	// unlock an rwlayer through their inherited disk descriptors.
@@ -531,6 +557,14 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	if err := ValidateResources(o.MemSize, o.VCPUs); err != nil {
 		return nil, err
 	}
+	mailboxConfigured := o.WHPXMailbox != nil || o.WHPXRequestEvent != nil || len(o.WHPXReplyEvents) != 0
+	if o.WHPXBroker != nil {
+		if o.WHPXMailbox == nil || o.WHPXRequestEvent == nil || len(o.WHPXReplyEvents) != o.VCPUs {
+			return nil, fmt.Errorf("brokered WHPX requires one mailbox section, one request event, and one reply event per vCPU")
+		}
+	} else if mailboxConfigured {
+		return nil, fmt.Errorf("WHPX mailbox capabilities require a broker transport")
+	}
 
 	bootTimingStart := o.BootTimingStart
 	if bootTimingStart.IsZero() && os.Getenv("GANTRY_BOOT_TIMING") != "" {
@@ -539,7 +573,13 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 	}
 	m = &Machine{stdinDone: make(chan struct{}), consoleStdin: o.Interactive,
 		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096), kvmFD: inputs.takeFile(o.KVM),
-		bootTiming: newBootTimeline(bootTimingStart, nil)}
+		whpxBroker: o.WHPXBroker, whpxToken: o.WHPXToken,
+		whpxMailbox: inputs.takeFile(o.WHPXMailbox), whpxRequestEvent: inputs.takeFile(o.WHPXRequestEvent),
+		whpxReplyEvents: make([]*os.File, len(o.WHPXReplyEvents)),
+		bootTiming:      newBootTimeline(bootTimingStart, nil)}
+	for index, event := range o.WHPXReplyEvents {
+		m.whpxReplyEvents[index] = inputs.takeFile(event)
+	}
 	if m.consoleW == nil {
 		m.consoleW = os.Stdout
 	}
@@ -565,6 +605,7 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 		return nil, err
 	}
 	m.ram = ram
+	m.ramShared = o.SharedRAM != nil
 	// The Windows virtio-mem tail is still reserved/no-access here. Prefault
 	// only memory that belongs to the boot phase; the tail is committed by the
 	// WHPX backend immediately before it becomes visible to Linux.

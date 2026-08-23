@@ -1,10 +1,11 @@
 # Windows WHPX field replay
 
 These files preserve the EC2 Windows Server 2022 acceptance run for the WHPX
-backend. The replay validates the split VMM process, Job Object boundary,
-guest exec and writable layer, live and persistent NTFS shares, DNS → TCP →
-TLS → HTTP using the staged `netprobe` image, host-bound secrets, OAuth token
-custody, MCP policy, audit behavior, and large shared directories.
+backend. The replay validates the AppContainer device VMM plus narrow WHPX
+broker, shared-memory exit mailboxes, Job boundaries, guest exec and writable
+layer, live and persistent NTFS shares, DNS → TCP → TLS → HTTP using the staged
+`netprobe` image, host-bound secrets, OAuth token custody, MCP policy, audit
+behavior, and large shared directories.
 
 From the repository root:
 
@@ -53,7 +54,9 @@ high-memory validation polls `MemTotal` before running its memory-touch test.
 Set `GANTRY_VIRTIO_MEM=0` when deliberately booting a custom kernel that lacks
 built-in `CONFIG_VIRTIO_MEM` support.
 
-The replay intentionally treats Windows `auto` isolation as partial: it
-requires `split-vmm` and an enforced process boundary, while the JSON report is
-expected to describe filesystem and ambient-network confinement honestly.
-`required` must continue to fail closed until those properties are enforced.
+Windows `auto` now expects the VMM report to verify fs-read, fs-write,
+net-dial, and exec denial and to disclose the separate Job-confined trusted
+WHPX broker. `required` must still fail closed while the Windows network-worker
+confinement tier is unavailable. Set `GANTRY_WINDOWS_WHPX_BROKER=0` to exercise
+the older Job-only compatibility fallback; that fallback must report fs/net
+as unenforced rather than silently claiming the AppContainer tier.

@@ -179,7 +179,7 @@ func (m *Machine) finishBoot(o Opts, ram []byte, initrdStart, initrdEnd uint64) 
 	cmdline := o.Cmdline
 	if m.arch == "amd64" {
 		var err error
-		if cmdline, err = platformKernelArgs(cmdline, m.arch); err != nil {
+		if cmdline, err = platformKernelArgs(cmdline, m.arch, o.WHPXProcessorClockFrequency); err != nil {
 			// A missing/older capability is a performance degradation, not a
 			// correctness failure: retain Linux's normal calibration fallback.
 			fmt.Printf("WHPX: automatic early kernel arguments unavailable: %v\n", err)

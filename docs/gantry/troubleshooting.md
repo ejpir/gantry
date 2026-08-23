@@ -55,8 +55,14 @@ The first start downloads the matching kernel, system root, and default image.
 Gantry refuses an asset when its SHA-256 sidecar is missing, malformed, or does
 not match.
 
-Check access to GitHub Releases, then retry. For an air-gapped or managed
-installation, stage all matching assets and point Gantry at the directory:
+Check access to GitHub Releases, then retry. Release tags should be immutable.
+For an intentionally rebuilt tag, run `gantry update --force`; build-scoped
+asset paths then download a matching set. On older Windows releases, manually
+remove `%LOCALAPPDATA%\gantry\assets\<version>`—deleting
+`%USERPROFILE%\.gantry` does not remove that separate OS cache.
+
+For an air-gapped or managed installation, stage all matching assets and point
+Gantry at the directory:
 
 ```console
 $ export GANTRY_ARTIFACTS=/opt/gantry/assets
@@ -80,6 +86,11 @@ $ gantry image ls
 ```
 
 Use a digest-pinned reference when reproducibility matters.
+
+Current builds stage pulled layers under the private
+`~/.gantry/images/tmp` directory. If an older Windows build reports access
+denied below `%LOCALAPPDATA%\Temp\gantry-image-*`, update Gantry and retry;
+`GANTRY_IMAGES` can also select an explicitly user-owned cache root.
 
 ## A stopped sandbox says its image is missing
 
