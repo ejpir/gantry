@@ -1518,6 +1518,15 @@ func (b *rawBridge) FsyncDir(cancel <-chan struct{}, input *fuse.FsyncIn) fuse.S
 	return fuse.ENOTSUP
 }
 
+func (b *rawBridge) SyncFs(cancel <-chan struct{}, input *fuse.InHeader) fuse.Status {
+	syncer, ok := b.root.Operations().(NodeSyncfser)
+	if !ok {
+		return fuse.ENOSYS
+	}
+	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
+	return errnoToStatus(syncer.Syncfs(ctx))
+}
+
 func (b *rawBridge) StatFs(cancel <-chan struct{}, input *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
 	n, status := b.inode(input.NodeId)
 	if status != fuse.OK {

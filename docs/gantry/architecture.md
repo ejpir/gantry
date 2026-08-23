@@ -166,7 +166,10 @@ the embedded stack.
 An MCP-enabled sandbox has one `_mcp-worker`. It owns guest MCP parsing,
 JSON-RPC routing, tool policy, local stdio framing, and remote HTTP/TLS/SSE.
 The supervisor relays opaque guest and upstream bytes over a bounded
-multiplexer; it does not parse MCP payloads.
+multiplexer; it does not parse MCP payloads. On Windows, the supervisor keeps
+the path-addressed AF_UNIX endpoint and relays it through a connected Winsock
+pair transferred to the VMM worker. This avoids unreliable cross-process
+AF_UNIX duplication without granting the VMM worker path or dial authority.
 
 The worker can request only a configured server ID. The supervisor maps that
 ID to a fixed guest helper, a validated and DNS-pinned remote dial, and the one
@@ -250,8 +253,10 @@ read-only and path-confinement policy. On supported Unix hosts, the split VMM
 uses shared guest RAM and vhost-style doorbells so the VMM worker does not
 receive host share roots; other paths use an authenticated request relay.
 
-There is no filesystem sync or private checkout layer: host-share changes are
-changes to the original host directory.
+There is no private checkout layer: host-share changes are changes to the
+original host directory. Guest `syncfs` requests are handled by the share hub:
+Unix syncs each pinned backing filesystem, while Windows flushes every live
+writable share handle (closed handles are flushed by FUSE `FLUSH`).
 
 ## Host capability bridges
 

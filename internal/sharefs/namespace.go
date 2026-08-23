@@ -78,6 +78,15 @@ func (n *shareHubRoot) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 	return 0
 }
 
+var _ fs.NodeSyncfser = (*shareHubRoot)(nil)
+
+func (n *shareHubRoot) Syncfs(context.Context) syscall.Errno {
+	if n.hub == nil {
+		return syscall.EIO
+	}
+	return n.hub.syncExports()
+}
+
 // bumpRootVer stamps a namespace mutation so the next guest GETATTR of
 // the mount root sees a new mtime and drops its cached listing.
 func (h *Hub) bumpRootVer() { h.rootVer.Store(time.Now().UnixNano()) }

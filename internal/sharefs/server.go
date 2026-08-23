@@ -167,6 +167,7 @@ func readOnlyOperation(op uint32) bool {
 		fuse.OpBatchForget,
 		fuse.OpReaddirplus,
 		fuse.OpLseek,
+		fuse.OpSyncfs,
 		fuse.OpStatx:
 		return true
 	default:

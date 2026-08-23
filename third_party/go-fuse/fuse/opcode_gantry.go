@@ -58,6 +58,7 @@ const (
 	OpRename2       = _OP_RENAME2
 	OpLseek         = _OP_LSEEK
 	OpCopyFileRange = _OP_COPY_FILE_RANGE
+	OpSyncfs        = _OP_SYNCFS
 	OpTmpfile       = _OP_TMPFILE
 	OpStatx         = _OP_STATX
 )

@@ -89,7 +89,7 @@ func (b *winExportFS) open(rel string, flags uint32) (*winOpenFile, winFileInfo,
 			return nil, info, errno
 		}
 	}
-	return wf, info, 0
+	return b.trackOpen(wf), info, 0
 }
 
 func (b *winExportFS) create(parentRel, name string, flags, mode uint32) (*winOpenFile, winFileInfo, syscall.Errno) {
@@ -142,7 +142,8 @@ func (b *winExportFS) create(parentRel, name string, flags, mode uint32) (*winOp
 	if createInfo == winFileCreated && mode&0o222 == 0 {
 		_ = b.setReadOnly(h, true)
 	}
-	return &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0, writable: true}, info, 0
+	wf := &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0, writable: true}
+	return b.trackOpen(wf), info, 0
 }
 
 func (b *winExportFS) mkdir(parentRel, name string) (winFileInfo, syscall.Errno) {

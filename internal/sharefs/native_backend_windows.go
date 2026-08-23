@@ -39,8 +39,9 @@ type winExportFS struct {
 	volume   uint32
 	salt     uint64
 
-	mu       sync.RWMutex
-	renameMu sync.Mutex
+	mu        sync.RWMutex
+	renameMu  sync.Mutex
+	openFiles map[*winOpenFile]struct{}
 }
 
 const (
@@ -87,7 +88,10 @@ func newWinExportFS(rootPath string, salt uint64) (*winExportFS, error) {
 		return nil, fmt.Errorf("resolve pinned share root: %w", err)
 	}
 	identity := newIdentity(finalPath, uint64(info.id.volume), info.id.index, true)
-	return &winExportFS{root: root, identity: identity, volume: info.id.volume, salt: salt}, nil
+	return &winExportFS{
+		root: root, identity: identity, volume: info.id.volume, salt: salt,
+		openFiles: make(map[*winOpenFile]struct{}),
+	}, nil
 }
 
 func (b *winExportFS) Close() error {

@@ -399,6 +399,14 @@ type NodeFlusher interface {
 	Flush(ctx context.Context, f FileHandle) syscall.Errno
 }
 
+// NodeSyncfser flushes all pending data and metadata for the filesystem
+// containing the node. The kernel issues FUSE_SYNCFS against the mount root;
+// implementations should not return success unless the backing storage has
+// received an equivalent whole-filesystem sync.
+type NodeSyncfser interface {
+	Syncfs(ctx context.Context) syscall.Errno
+}
+
 // This is called to before a FileHandle is forgotten. The
 // kernel ignores the return value of this method,
 // so any cleanup that requires specific synchronization or
