@@ -65,6 +65,9 @@ $ gantry start agent-gvisor -image python:3.12 -runtime runsc
 See [Security](security.md) before treating a sandbox as a boundary for
 hostile multi-tenant workloads.
 
+To drive one of these sandboxes from an editor rather than a terminal, see
+[Editor integration](../editor-integration.md).
+
 ## Run Pi
 
 `gantry pi` maintains one persistent sandbox per project directory, mounts the
