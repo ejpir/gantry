@@ -60,6 +60,40 @@ func TestWinNodeRejectsSiblingFileHandle(t *testing.T) {
 	}
 }
 
+func TestWinExportRootGetattrAcceptsDirectoryHandle(t *testing.T) {
+	root := t.TempDir()
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	prepared, _, err := hub.Prepare("root", root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	export, err := hub.Publish(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, ok := export.node.(*winShareNode)
+	if !ok {
+		t.Fatalf("export node = %T, want *winShareNode", export.node)
+	}
+	stream, errno := node.Readdir(context.Background())
+	if errno != 0 {
+		t.Fatalf("readdir: %v", fuse.ToStatus(errno))
+	}
+	defer stream.Close()
+
+	var out fuse.AttrOut
+	if errno := node.Getattr(context.Background(), stream, &out); errno != 0 {
+		t.Fatalf("getattr with directory handle: %v", fuse.ToStatus(errno))
+	}
+	if out.Mode&fuse.S_IFMT != fuse.S_IFDIR {
+		t.Fatalf("getattr mode = %#o, want directory", out.Mode)
+	}
+}
+
 func TestWinDirEntryDecoderRejectsOverlappingRecord(t *testing.T) {
 	export := &Export{}
 	stream := &winShareDirStream{
