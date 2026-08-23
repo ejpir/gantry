@@ -24,7 +24,8 @@ const (
 
 type processConn struct {
 	net.Conn
-	pid uint32
+	pid    uint32
+	sendMu sync.Mutex
 }
 
 // ForProcess binds a descriptor channel to its only valid socket-transfer
@@ -42,19 +43,33 @@ func SendFD(conn net.Conn, token [FDTokenLen]byte, file *os.File) error {
 	if file == nil {
 		return fmt.Errorf("workerproto: cannot send a nil socket")
 	}
+	// WSADuplicateSocket requires the source socket to remain open until the
+	// destination has reconstructed and materialized a process-local duplicate.
+	// Serialize complete payload+ack transactions so concurrent forwards cannot
+	// interleave.
+	pc.sendMu.Lock()
+	defer pc.sendMu.Unlock()
 	var info windows.WSAProtocolInfo
 	if err := windows.WSADuplicateSocket(windows.Handle(file.Fd()), pc.pid, &info); err != nil {
 		return fmt.Errorf("workerproto: duplicate socket for PID %d: %w", pc.pid, err)
 	}
-	if err := pc.SetWriteDeadline(time.Now().Add(fdSendTimeout)); err != nil && !isWindowsPipeConn(pc.Conn) {
+	deadline := time.Now().Add(fdSendTimeout)
+	if err := pc.SetDeadline(deadline); err != nil && !isWindowsPipeConn(pc.Conn) {
 		return fmt.Errorf("workerproto: bound socket send: %w", err)
 	}
-	defer func() { _ = pc.SetWriteDeadline(time.Time{}) }()
+	defer func() { _ = pc.SetDeadline(time.Time{}) }()
 	payload := make([]byte, FDTokenLen+int(unsafe.Sizeof(info)))
 	copy(payload, token[:])
 	copy(payload[FDTokenLen:], unsafe.Slice((*byte)(unsafe.Pointer(&info)), int(unsafe.Sizeof(info))))
 	if err := writeAll(pc, payload); err != nil {
 		return fmt.Errorf("workerproto: send socket: %w", err)
+	}
+	var ack [FDTokenLen]byte
+	if _, err := io.ReadFull(pc, ack[:]); err != nil {
+		return fmt.Errorf("workerproto: socket reconstruction ack: %w", err)
+	}
+	if ack != token {
+		return fmt.Errorf("workerproto: socket reconstruction ack token mismatch")
 	}
 	return nil
 }
@@ -89,7 +104,44 @@ func recvFDMsg(conn net.Conn) ([FDTokenLen]byte, *os.File, error) {
 		_ = windows.Closesocket(handle)
 		return token, nil, fmt.Errorf("workerproto: reconstructed invalid socket")
 	}
+	// A cross-process WSADuplicateSocket result is not safe to acknowledge
+	// merely because WSASocket returned. In particular, an AppContainer may
+	// not finish Go's getsockname-based net.FileConn import before the sender
+	// closes its last source handle. Import the socket and materialize a fresh
+	// process-local duplicate first; callers can then import the returned file
+	// after the acknowledgement without depending on the source lifetime.
+	file, err = materializeSocketFile(file)
+	if err != nil {
+		return token, nil, err
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(fdRecvTimeout)); err != nil && !isWindowsPipeConn(conn) {
+		_ = file.Close()
+		return token, nil, fmt.Errorf("workerproto: socket ack deadline: %w", err)
+	}
+	if err := writeAll(conn, token[:]); err != nil {
+		_ = file.Close()
+		return token, nil, fmt.Errorf("workerproto: socket reconstruction ack: %w", err)
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
 	return token, file, nil
+}
+
+func materializeSocketFile(file *os.File) (*os.File, error) {
+	socket, err := net.FileConn(file)
+	_ = file.Close()
+	if err != nil {
+		return nil, fmt.Errorf("workerproto: import reconstructed socket: %w", err)
+	}
+	defer func() { _ = socket.Close() }()
+	fileSocket, ok := socket.(interface{ File() (*os.File, error) })
+	if !ok {
+		return nil, fmt.Errorf("workerproto: reconstructed socket type %T cannot be materialized", socket)
+	}
+	materialized, err := fileSocket.File()
+	if err != nil {
+		return nil, fmt.Errorf("workerproto: materialize reconstructed socket: %w", err)
+	}
+	return materialized, nil
 }
 
 func writeAll(conn net.Conn, data []byte) error {

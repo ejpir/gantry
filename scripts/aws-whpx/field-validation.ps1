@@ -18,6 +18,7 @@ $TargetHost = ([Uri]$TargetURL).Host
 $TestRoot = Join-Path $Root "field-replay"
 $NetSandbox = "$Sandbox-netprobe"
 $RequiredSandbox = "$Sandbox-required"
+$OfflineSandbox = "$Sandbox-required-offline"
 $IsolationPath = Join-Path (Join-Path $StateRoot $Sandbox) "isolation.json"
 
 $env:GANTRY_HOME = $StateRoot
@@ -43,19 +44,38 @@ function Invoke-GantryBestEffort([string[]]$CommandArgs) {
     }
 }
 
-function Assert-Isolation {
-    if (-not (Test-Path $script:IsolationPath)) {
-        throw "isolation report missing: $script:IsolationPath"
+function Assert-Isolation([string]$Path = $script:IsolationPath, [string]$Mode = "auto") {
+    if (-not (Test-Path $Path)) {
+        throw "isolation report missing: $Path"
     }
-    $report = Get-Content -Raw $script:IsolationPath | ConvertFrom-Json
-    if ($report.topology -ne "split-vmm") {
-        throw "expected split-vmm topology, got $($report.topology)"
+    $report = Get-Content -Raw $Path | ConvertFrom-Json
+    if ($report.topology -ne "split-net+split-vmm") {
+        throw "expected split-net+split-vmm topology, got $($report.topology)"
     }
     if ($report.processBoundary -ne "enforced") {
         throw "expected enforced process boundary, got $($report.processBoundary)"
     }
+    if (-not $report.networkConfinement.applied) {
+        throw "network worker confinement was not applied"
+    }
+    if ($report.networkConfinement.mode -ne $Mode) {
+        throw "network confinement mode $($report.networkConfinement.mode), want $Mode"
+    }
+    foreach ($propertyName in @("fs-read", "fs-write", "exec")) {
+        $property = $report.networkConfinement.properties | Where-Object { $_.name -eq $propertyName }
+        if ($null -eq $property -or $property.state -ne "enforced") {
+            throw "network worker property $propertyName was not enforced: $($property | ConvertTo-Json -Compress)"
+        }
+    }
+    $networkNote = $report.networkConfinement.notes | Where-Object { $_ -match "network-capable AppContainer token active" }
+    if ($null -eq $networkNote) {
+        throw "network confinement report did not verify the capability-bearing AppContainer"
+    }
     if (-not $report.vmmConfinement.applied) {
         throw "VMM worker confinement was not applied"
+    }
+    if ($report.vmmConfinement.mode -ne $Mode) {
+        throw "VMM confinement mode $($report.vmmConfinement.mode), want $Mode"
     }
     $exec = $report.vmmConfinement.properties | Where-Object { $_.name -eq "exec" }
     if ($null -eq $exec -or $exec.state -ne "enforced") {
@@ -71,7 +91,19 @@ function Assert-Isolation {
     if ($null -eq $brokerNote) {
         throw "VMM confinement report did not disclose the WHPX broker trust boundary"
     }
-    "PASS isolation: AppContainer device VMM plus Job-confined WHPX broker; fs/net/exec enforced"
+    "PASS isolation: AppContainer network/device workers plus Job-confined WHPX broker; required properties enforced"
+}
+
+function Assert-OfflineIsolation([string]$Path) {
+    if (-not (Test-Path $Path)) { throw "offline isolation report missing: $Path" }
+    $report = Get-Content -Raw $Path | ConvertFrom-Json
+    if ($report.topology -ne "split-vmm") {
+        throw "expected offline split-vmm topology, got $($report.topology)"
+    }
+    if ($report.processBoundary -ne "enforced" -or -not $report.vmmConfinement.applied) {
+        throw "offline split VMM confinement was not enforced"
+    }
+    "PASS process-isolation=required: offline split VMM confinement enforced"
 }
 
 foreach ($path in @($Gantry, $Kernel, $Rootfs, $NetprobeImage)) {
@@ -141,20 +173,42 @@ try {
     "PASS DNS, TCP/443, TLS, and HTTP for $TargetURL"
 
     $null = Invoke-GantryBestEffort @("delete", $RequiredSandbox)
-    $requiredResult = Invoke-GantryBestEffort @(
+    Invoke-Gantry @(
         "start", $RequiredSandbox,
         "-kernel", $Kernel,
         "-rootfs", $Rootfs,
         "-image", $NetprobeImage,
-        "-rw=false",
         "-mem", "128",
         "-cpus", "1",
         "-process-isolation", "required"
     )
-    if ($requiredResult -eq 0) {
-        throw "strict Windows isolation unexpectedly booted despite the unavailable network-worker tier"
+    $requiredIsolation = Join-Path (Join-Path $StateRoot $RequiredSandbox) "isolation.json"
+    Assert-Isolation $requiredIsolation "required"
+    Invoke-Gantry @("exec", $RequiredSandbox, "--", "getent", "ahostsv4", $TargetHost)
+    Invoke-Gantry @("exec", $RequiredSandbox, "--", "/usr/local/bin/netprobe", $TargetURL)
+    "PASS process-isolation=required: split network/VMM workers, DNS, TCP/443, TLS, and HTTP"
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    Invoke-Gantry @("stop", $RequiredSandbox)
+    $stopwatch.Stop()
+    if ($stopwatch.Elapsed.TotalSeconds -gt 5) {
+        throw "Windows split-worker stop took $($stopwatch.Elapsed.TotalSeconds) seconds"
     }
-    "PASS process-isolation=required fails closed while the Windows network-worker tier is unavailable"
+    "PASS Windows split-worker stop completed in $([math]::Round($stopwatch.Elapsed.TotalMilliseconds)) ms"
+
+    $null = Invoke-GantryBestEffort @("delete", $OfflineSandbox)
+    Invoke-Gantry @(
+        "start", $OfflineSandbox,
+        "-kernel", $Kernel,
+        "-rootfs", $Rootfs,
+        "-image", $NetprobeImage,
+        "-mem", "128",
+        "-cpus", "1",
+        "-net=false",
+        "-process-isolation", "required"
+    )
+    $offlineIsolation = Join-Path (Join-Path $StateRoot $OfflineSandbox) "isolation.json"
+    Assert-OfflineIsolation $offlineIsolation
+    Invoke-Gantry @("exec", $OfflineSandbox, "--", "sh", "-c", "echo offline-split-ok; test ! -e /sys/class/net/eth0")
 
     "--- primary isolation.json"
     Get-Content $IsolationPath
@@ -168,6 +222,8 @@ finally {
     $null = Invoke-GantryBestEffort @("delete", $NetSandbox)
     $null = Invoke-GantryBestEffort @("stop", $RequiredSandbox)
     $null = Invoke-GantryBestEffort @("delete", $RequiredSandbox)
+    $null = Invoke-GantryBestEffort @("stop", $OfflineSandbox)
+    $null = Invoke-GantryBestEffort @("delete", $OfflineSandbox)
     $null = Invoke-GantryBestEffort @("stop", $Sandbox)
     if (Test-Path $TestRoot) { Remove-Item -Recurse -Force $TestRoot }
 }

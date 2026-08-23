@@ -10,11 +10,12 @@ import (
 // environment, platform confinement, and process lifecycle.
 func spawnNetWorkerProcess(stderrPath, confinement string) (*worker.Child, error) {
 	return worker.Launch(worker.LaunchSpec{
-		Role:           workerproto.RoleNet,
-		EntryPoint:     "_net-worker",
-		Environment:    workerEnv(),
-		Channels:       []string{"control", "data"},
-		DiagnosticPath: stderrPath,
-		Confinement:    confinement,
+		Role:                 workerproto.RoleNet,
+		EntryPoint:           "_net-worker",
+		Environment:          workerEnv(),
+		Channels:             []string{"control", "data"},
+		TransferableChannels: []string{"data"},
+		DiagnosticPath:       stderrPath,
+		Confinement:          confinement,
 	})
 }

@@ -165,6 +165,27 @@ func TestPolicyTransactionsOrderingReplayAndAbort(t *testing.T) {
 	}
 }
 
+func TestHostLoopbackUnavailableRejectsPolicyAndPublish(t *testing.T) {
+	live, err := netpol.Parse([]byte(`{"default":"deny"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &state{policy: live, hostLoopbackUnavailable: true}
+	_, err = s.preparePolicy(testRequest(t, PolicyPrepareRequest{
+		Generation: 1, Transaction: "loopback", Policy: json.RawMessage(
+			`{"default":"deny","rules":[{"action":"allow","cidr":"127.0.0.1/32"}]}`),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("loopback policy error = %v", err)
+	}
+	_, err = s.publishPort(testRequest(t, PortPublishRequest{
+		Transaction: "publish", Proto: "tcp", Local: "127.0.0.1:8080", Remote: "192.168.127.2:80",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "port publishing") {
+		t.Fatalf("publish error = %v", err)
+	}
+}
+
 func TestPolicyTransactionIDValidation(t *testing.T) {
 	s, _ := testPolicyState(t)
 	for _, txn := range []string{"", string(make([]byte, 129))} {

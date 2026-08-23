@@ -18,6 +18,7 @@ import (
 
 const appContainerTestChild = "GANTRY_TEST_APPCONTAINER_CHILD"
 const appContainerTestDeniedPath = "GANTRY_TEST_APPCONTAINER_DENIED_PATH"
+const appContainerTestNetwork = "GANTRY_TEST_APPCONTAINER_NETWORK"
 const suspendedTestChild = "GANTRY_TEST_SUSPENDED_CHILD"
 
 func TestWindowsWorkersDoNotAllocateConsoleWindows(t *testing.T) {
@@ -77,6 +78,11 @@ func TestWindowsRequiredBrokeredVMMAppContainerLaunch(t *testing.T) {
 		"GANTRY_WINDOWS_WHPX_BROKER_ACTIVE=1")
 }
 
+func TestWindowsRequiredNetworkAppContainerLaunch(t *testing.T) {
+	testWindowsRequiredAppContainerLaunch(t, workerproto.RoleNet,
+		appContainerTestNetwork+"=1")
+}
+
 func testWindowsRequiredAppContainerLaunch(t *testing.T, role workerproto.Role, extra ...string) {
 	if os.Getenv(appContainerTestChild) == "1" {
 		assertAppContainerChild(t)
@@ -132,7 +138,12 @@ func assertAppContainerChild(t *testing.T) {
 		(*byte)(unsafe.Pointer(&enabled)), uint32(unsafe.Sizeof(enabled)), &returned); err != nil {
 		t.Fatalf("query TokenIsAppContainer: %v", err)
 	}
-	if enabled == 0 {
+	networkWorker := os.Getenv(appContainerTestNetwork) == "1"
+	if networkWorker {
+		if enabled == 0 {
+			t.Fatal("network worker did not receive an AppContainer token")
+		}
+	} else if enabled == 0 {
 		t.Fatal("worker did not receive an AppContainer token")
 	}
 
@@ -146,19 +157,23 @@ func assertAppContainerChild(t *testing.T) {
 		t.Fatalf("AppContainer wrote supervisor path %s", writePath)
 	}
 
-	probeAddress := os.Getenv(windowsWorkerProbeNetEnv)
-	connection, err := net.DialTimeout("tcp4", probeAddress, time.Second)
-	if err == nil {
-		_ = connection.Close()
-		t.Fatal("zero-capability AppContainer opened a loopback connection")
-	}
-	if errors.Is(err, windows.WSAECONNREFUSED) {
-		t.Fatalf("zero-capability AppContainer retained socket authority: %v", err)
-	}
-	networkError, timedOut := err.(net.Error)
-	policyTimeout := errors.Is(err, windows.WSAETIMEDOUT) || (timedOut && networkError.Timeout())
-	if !errors.Is(err, windows.WSAEACCES) && !policyTimeout {
-		t.Fatalf("AppContainer network denial = %v, want WSAEACCES or policy-drop timeout", err)
+	if networkWorker {
+		assertNetworkAppContainerCapabilities(t)
+	} else {
+		probeAddress := os.Getenv(windowsWorkerProbeNetEnv)
+		connection, err := net.DialTimeout("tcp4", probeAddress, time.Second)
+		if err == nil {
+			_ = connection.Close()
+			t.Fatal("zero-capability AppContainer opened a loopback connection")
+		}
+		if errors.Is(err, windows.WSAECONNREFUSED) {
+			t.Fatalf("zero-capability AppContainer retained socket authority: %v", err)
+		}
+		networkError, timedOut := err.(net.Error)
+		policyTimeout := errors.Is(err, windows.WSAETIMEDOUT) || (timedOut && networkError.Timeout())
+		if !errors.Is(err, windows.WSAEACCES) && !policyTimeout {
+			t.Fatalf("AppContainer network denial = %v, want WSAEACCES or policy-drop timeout", err)
+		}
 	}
 
 	command := exec.Command(os.Args[0], "-test.run=^$")
@@ -167,4 +182,40 @@ func assertAppContainerChild(t *testing.T) {
 		_ = command.Wait()
 		t.Fatal("one-process worker Job allowed a child process")
 	}
+}
+
+func assertNetworkAppContainerCapabilities(t *testing.T) {
+	t.Helper()
+	var size uint32
+	err := windows.GetTokenInformation(windows.GetCurrentProcessToken(), 30, nil, 0, &size)
+	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || size == 0 {
+		t.Fatalf("query TokenCapabilities size = %d, %v", size, err)
+	}
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(windows.GetCurrentProcessToken(), 30,
+		&buffer[0], size, &size); err != nil {
+		t.Fatalf("query TokenCapabilities: %v", err)
+	}
+	groups := (*windows.Tokengroups)(unsafe.Pointer(&buffer[0]))
+	got := make(map[string]bool, groups.GroupCount)
+	for _, group := range groups.AllGroups() {
+		got[group.Sid.String()] = true
+	}
+	if len(got) != len(windowsNetworkCapabilitySIDs) {
+		t.Fatalf("network AppContainer capabilities = %v", got)
+	}
+	for _, sid := range windowsNetworkCapabilitySIDs {
+		if !got[sid] {
+			t.Fatalf("network AppContainer missing capability %s: %v", sid, got)
+		}
+	}
+
+	// A listener creation is a deterministic positive control for the server
+	// capability. Public outbound connectivity is covered by the WHPX field
+	// battery; Windows intentionally isolates AppContainers from host loopback.
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("network AppContainer listen: %v", err)
+	}
+	_ = listener.Close()
 }

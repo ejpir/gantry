@@ -96,10 +96,15 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		return fmt.Errorf("descriptor table: %w", err)
 	}
 	if assets.ShareConn == nil {
-		return fmt.Errorf("descriptor table: share relay is required")
+		return fmt.Errorf("descriptor table: share channel is required")
+	}
+	if config.NoNetwork != (assets.NetConn == nil) {
+		return fmt.Errorf("descriptor table: network presence does not match boot config")
 	}
 	// Authenticate the independent data channels before processing an RPC or
-	// guest frame. This catches cross-wired descriptor tables at launch.
+	// guest frame. This catches cross-wired descriptor tables at launch. The
+	// share channel is authenticated even when no share device is configured;
+	// in that topology it is closed before boot and carries no authority.
 	if err := workerproto.ReadNonce(fdChannel, nonce); err != nil {
 		return fmt.Errorf("fd channel nonce: %w", err)
 	}
@@ -117,33 +122,40 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 	bridgeClient := workerproto.NewClient(bridge)
 	defer func() { _ = bridgeClient.Close() }()
 
-	filesystem := vmm.Filesystem{Tag: shares.HubTag}
-	if config.VhostShares {
-		confinement.Notes = append(confinement.Notes, "virtio-fs data plane uses shared guest RAM and doorbell pipes; VMM retains no host share roots")
-		queues := make([]virtio.VhostQueueFiles, len(assets.VhostQueue))
-		for index, queue := range assets.VhostQueue {
-			queues[index] = virtio.VhostQueueFiles{
-				KickRead: queue.KickRead, KickWrite: queue.KickWrite,
-				CallRead: queue.CallRead, CallWrite: queue.CallWrite,
-			}
-		}
-		endpoint, endpointErr := virtio.NewVhostEndpoint(assets.ShareConn, queues)
-		if endpointErr != nil {
-			return endpointErr
-		}
-		defer func() { _ = endpoint.Close() }()
+	var filesystems []vmm.Filesystem
+	if config.NoShares {
+		_ = assets.ShareConn.Close()
 		assets.ShareConn = nil
-		assets.VhostQueue = nil
-		filesystem.Vhost = endpoint
-		filesystem.Description = "vhost shared-memory share backend"
 	} else {
-		shareClient, clientErr := sharebroker.NewClient(assets.ShareConn)
-		if clientErr != nil {
-			return fmt.Errorf("share proxy: %w", clientErr)
+		filesystem := vmm.Filesystem{Tag: shares.HubTag}
+		if config.VhostShares {
+			confinement.Notes = append(confinement.Notes, "virtio-fs data plane uses shared guest RAM and doorbell pipes; VMM retains no host share roots")
+			queues := make([]virtio.VhostQueueFiles, len(assets.VhostQueue))
+			for index, queue := range assets.VhostQueue {
+				queues[index] = virtio.VhostQueueFiles{
+					KickRead: queue.KickRead, KickWrite: queue.KickWrite,
+					CallRead: queue.CallRead, CallWrite: queue.CallWrite,
+				}
+			}
+			endpoint, endpointErr := virtio.NewVhostEndpoint(assets.ShareConn, queues)
+			if endpointErr != nil {
+				return endpointErr
+			}
+			defer func() { _ = endpoint.Close() }()
+			assets.ShareConn = nil
+			assets.VhostQueue = nil
+			filesystem.Vhost = endpoint
+			filesystem.Description = "vhost shared-memory share backend"
+		} else {
+			shareClient, clientErr := sharebroker.NewClient(assets.ShareConn)
+			if clientErr != nil {
+				return fmt.Errorf("share proxy: %w", clientErr)
+			}
+			defer func() { _ = shareClient.Close() }()
+			filesystem.Handler = shareClient
+			filesystem.Description = "supervisor share broker (hot-add enabled)"
 		}
-		defer func() { _ = shareClient.Close() }()
-		filesystem.Handler = shareClient
-		filesystem.Description = "supervisor share broker (hot-add enabled)"
+		filesystems = []vmm.Filesystem{filesystem}
 	}
 
 	policy, traffic, err := workerNetworkState(config.Policy)
@@ -184,7 +196,7 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		WHPXMailbox:                 whpxMailbox,
 		WHPXRequestEvent:            whpxRequestEvent,
 		WHPXReplyEvents:             whpxReplyEvents,
-		Filesystems:                 []vmm.Filesystem{filesystem},
+		Filesystems:                 filesystems,
 		NetConn:                     assets.NetConn,
 		NetMAC:                      config.NetMAC,
 		NetPolicy:                   netPolicy,

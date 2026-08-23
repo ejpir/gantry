@@ -51,9 +51,11 @@ $ gantry start agent -image python:3.12 \
 ```
 
 `required` refuses startup if Gantry cannot establish and verify its split
-worker topology. This mode is not currently available on Windows because the
-experimental Windows worker cannot verify all required filesystem and network
-restrictions.
+worker topology. Windows support requires brokered WHPX and, when networking
+is enabled, the embedded network worker. Strict mode also supports an
+intentionally offline `-net=false` sandbox. It rejects published ports and
+policies that permit host loopback because Gantry will not install a privileged
+machine-wide AppContainer loopback exemption.
 
 Add `-runtime runsc` to place gVisor inside the microVM when the guest workload
 needs another boundary:

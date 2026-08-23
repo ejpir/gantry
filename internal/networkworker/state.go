@@ -30,9 +30,10 @@ type state struct {
 	portTxnNext   int
 	// shutdownRequested distinguishes a supervisor's graceful stop from
 	// a torn data link when both race the serve loop below.
-	shutdownRequested atomic.Bool
-	policyMu          sync.Mutex
-	portMu            sync.Mutex
+	shutdownRequested       atomic.Bool
+	hostLoopbackUnavailable bool
+	policyMu                sync.Mutex
+	portMu                  sync.Mutex
 }
 
 const (
@@ -87,6 +88,9 @@ func (s *state) preparePolicy(req workerproto.Request) (any, error) {
 	next, err := netpol.Parse(body.Policy)
 	if err != nil {
 		return nil, err
+	}
+	if s.hostLoopbackUnavailable && next.MayAllowLoopback() {
+		return nil, fmt.Errorf("policy permits host loopback, which is unavailable to the confined Windows network worker")
 	}
 	s.pending = next
 	s.pendGen = body.Generation
@@ -177,6 +181,9 @@ func (s *state) statusLocked(transaction string) PolicyStatusResponse {
 }
 
 func (s *state) publishPort(req workerproto.Request) (any, error) {
+	if s.hostLoopbackUnavailable {
+		return nil, fmt.Errorf("port publishing is unavailable to the confined Windows network worker")
+	}
 	var body PortPublishRequest
 	if err := workerproto.DecodeBody(req, &body); err != nil {
 		return nil, err

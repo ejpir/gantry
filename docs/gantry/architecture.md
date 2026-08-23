@@ -146,7 +146,16 @@ The network worker necessarily retains restricted stream and datagram socket
 creation authority. It does not receive secrets, writable disks, guest RAM,
 or host share roots. Its Linux Landlock policy allows reads of only the exact
 private resolver snapshots copied into its private root; it delegates no
-filesystem subtree.
+filesystem subtree. Windows gives the role a fixed network-capability set in
+an AppContainer inside a one-process Job, then verifies denial of undelegated
+filesystem access and child execution before constructing the stack.
+
+Windows AppContainer network isolation does not permit host loopback without a
+privileged machine-wide exemption, which Gantry deliberately does not install.
+`auto` therefore falls back to the in-supervisor stack when startup includes a
+published port or a loopback-allowing policy; `required` rejects those options.
+A live port publish or loopback-enabling policy mutation against an already
+split Windows network worker is rejected explicitly.
 
 An explicit `-gvproxy` selects an external backend instead. Live policy,
 traffic inspection, proxy enforcement, and built-in port publishing require
@@ -171,8 +180,10 @@ private mount root, descriptor closure, namespace/task controls, and its
 no-socket/no-exec seccomp allowlist. macOS applies a deny-default Seatbelt
 profile. Windows uses a zero-capability AppContainer plus one-process,
 kill-on-close Job and verifies fs-read, fs-write, net-dial, and exec denial.
-Windows `required` still fails closed because the separate network-worker tier
-is unavailable.
+Windows `required` uses the brokered WHPX VMM and, when networking is enabled,
+the AppContainer network worker after their required properties are verified.
+An intentionally offline `-net=false` topology omits virtio-net and still runs
+the split VMM rather than falling back to the supervisor.
 
 ## Guest components
 

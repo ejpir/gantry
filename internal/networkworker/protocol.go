@@ -35,12 +35,13 @@ const (
 // Config is the normalized bootstrap payload sent by the supervisor. ConfRoot
 // is the supervisor-created private-root mountpoint.
 type Config struct {
-	GuestMAC    string            `json:"guest_mac"`
-	Forwards    map[string]string `json:"forwards,omitempty"`
-	Policy      json.RawMessage   `json:"policy"`
-	Debug       bool              `json:"debug"`
-	Confinement string            `json:"confinement"`
-	ConfRoot    string            `json:"conf_root,omitempty"`
+	GuestMAC                string            `json:"guest_mac"`
+	Forwards                map[string]string `json:"forwards,omitempty"`
+	Policy                  json.RawMessage   `json:"policy"`
+	Debug                   bool              `json:"debug"`
+	Confinement             string            `json:"confinement"`
+	ConfRoot                string            `json:"conf_root,omitempty"`
+	HostLoopbackUnavailable bool              `json:"host_loopback_unavailable,omitempty"`
 }
 
 type BootAck struct {

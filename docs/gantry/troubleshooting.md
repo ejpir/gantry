@@ -204,7 +204,13 @@ On Linux, restricted user namespaces, unavailable Landlock (Linux before
 topology. Run Gantry directly on the host or enable the required kernel
 features. Do not switch to `off` unless the weaker boundary is acceptable.
 
-Strict required mode is not currently supported on Windows.
+On Windows, strict mode requires brokered WHPX and, when networking is enabled,
+the embedded split network worker. `-net=false` remains compatible with the
+split VMM. AppContainer network isolation cannot use host loopback without a
+privileged machine-wide exemption, which Gantry does not install. Remove
+published ports and loopback-allowing policy rules, or use `auto` and inspect
+the reported fallback. `-gvproxy` and host-path packet capture are also
+incompatible with strict mode.
 
 ## Collect a useful report
 

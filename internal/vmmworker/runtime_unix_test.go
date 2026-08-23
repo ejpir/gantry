@@ -39,6 +39,8 @@ func TestConfigRejectsUnboundedDescriptorTables(t *testing.T) {
 		{NDisks: -1},
 		{NDisksRO: maxInheritedDisks, NDisks: 1},
 		{NDisks: 2, DisksPrelocked: true, MaxWritableFileSize: 1},
+		{NoNetwork: true, Policy: []byte(`{}`)},
+		{NoShares: true, VhostShares: true, HasSharedRAM: true},
 	} {
 		if err := config.validate(); err == nil {
 			t.Fatalf("validate(%+v) succeeded", config)

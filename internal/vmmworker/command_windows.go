@@ -68,7 +68,10 @@ func commandError(channel string, err error) int {
 func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error) {
 	assets := Assets{ShareConn: share}
 	netSlot := uintptr(winNet)
-	assetSlot := uintptr(winConsole)
+	assetSlot := netSlot
+	if !config.NoNetwork {
+		assetSlot++
+	}
 	if config.WHPXBroker {
 		brokerRead, err := workerproto.InheritedFile(winBrokerRead, "WHPX broker read pipe")
 		if err != nil {
@@ -100,7 +103,10 @@ func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error)
 			assets.WHPXReplyEvents = append(assets.WHPXReplyEvents, event)
 		}
 		netSlot = uintptr(winBrokerFirstReplySlot + config.VCPUs)
-		assetSlot = netSlot + 1
+		assetSlot = netSlot
+		if !config.NoNetwork {
+			assetSlot++
+		}
 	}
 	slot := assetSlot
 	next := func(name string) *os.File {
@@ -112,16 +118,18 @@ func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error)
 		return file
 	}
 
-	netFile, err := workerproto.InheritedFile(netSlot, "net")
-	if err != nil {
-		return assets, fmt.Errorf("net: %w", err)
+	if !config.NoNetwork {
+		netFile, err := workerproto.InheritedFile(netSlot, "net")
+		if err != nil {
+			return assets, fmt.Errorf("net: %w", err)
+		}
+		netConn, err := net.FileConn(netFile)
+		_ = netFile.Close()
+		if err != nil {
+			return assets, fmt.Errorf("net: %w", err)
+		}
+		assets.NetConn = netConn
 	}
-	netConn, err := net.FileConn(netFile)
-	_ = netFile.Close()
-	if err != nil {
-		return assets, fmt.Errorf("net: %w", err)
-	}
-	assets.NetConn = netConn
 
 	assets.Console = next("console")
 	assets.Kernel = next("kernel")

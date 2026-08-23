@@ -148,6 +148,30 @@ func IsLocalIP(ip net.IP) bool {
 	return isLocal([4]byte(v4))
 }
 
+// MayAllowLoopback conservatively reports whether a policy can admit any
+// 127/8 destination. Windows capability-bearing AppContainers cannot use host
+// loopback without a privileged machine-wide exemption, so the confined
+// network worker uses this to reject an unsupported policy rather than
+// silently dropping traffic that the policy says is allowed.
+func (p *Policy) MayAllowLoopback() bool {
+	if p == nil {
+		return false
+	}
+	if current := p.current(); current != p {
+		return current.MayAllowLoopback()
+	}
+	if p.AllowLocal {
+		return true
+	}
+	loopback := net.ParseIP("127.0.0.1")
+	for _, rule := range p.Rules {
+		if !rule.Deny && (rule.CIDR == nil || rule.CIDR.Contains(loopback)) {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultPolicy is the posture when no policy file is supplied: the
 // internet is reachable, the local network (LAN, link-local, the host's
 // NAT alias) is not. Equivalent to {"default": "allow"} with AllowLocal

@@ -82,9 +82,9 @@ platform confinement:
 - macOS uses Seatbelt profiles with role-specific file and network access.
 - Windows runs MCP and VMM device emulation in zero-capability AppContainers
   inside one-process Jobs. Because WHPX rejects that token, a separate narrow
-  Job-confined broker owns only the partition/vCPUs and shared RAM. The VMM
-  worker's filesystem, ambient-network, and exec denials are actively verified;
-  the independent Windows network-worker tier remains unavailable.
+  Job-confined broker owns only the partition/vCPUs and shared RAM. The network
+  worker uses a separate AppContainer with an exact network-capability set;
+  filesystem and exec denials are actively verified before its stack starts.
 
 Workers probe the controls from inside the confined process. Gantry writes
 the measured properties to `isolation.json`; the TUI currently shows the
@@ -99,7 +99,13 @@ $ gantry start sensitive -image alpine:latest \
 ```
 
 `required` is supported only where the platform can establish and verify the
-full required boundary. It currently fails closed on Windows.
+full required boundary. On Windows it requires brokered WHPX and, when
+networking is enabled, the embedded network worker with a policy that does not
+permit host loopback. An intentionally offline `-net=false` sandbox still uses
+the split VMM. Windows AppContainer network isolation cannot support
+host-loopback access or published ports without a privileged machine-wide
+exemption, so strict mode rejects those options rather than weakening the
+worker token.
 
 The host MCP gateway is a separate capability-limited worker. The supervisor
 keeps destination selection, DNS pinning, secret and OAuth stores, fixed guest
@@ -166,8 +172,8 @@ multiple running VMs.
 
 - Gantry is experimental and has not established a stable security boundary
   for hostile public multi-tenancy.
-- Windows support is experimental; strict required worker confinement is not
-  available.
+- Windows support is experimental; strict mode does not support host-loopback
+  access, published ports, `-gvproxy`, or host-path packet capture.
 - Snapshots are not supported.
 - The embedded guest network is IPv4-only.
 - A default policy permits the public internet.
