@@ -48,7 +48,7 @@ func TestSandboxSessionRootfsUsesGuestPOSIXBasePath(t *testing.T) {
 	if len(mounts) != 1 || mounts[0].Type != "bind" || mounts[0].Source != "/run/bundles/sb/rootfs" {
 		t.Fatalf("session rootfs = %+v", mounts)
 	}
-	if len(mounts[0].Options) != 1 || mounts[0].Options[0] != "rbind" {
+	if len(mounts[0].Options) != 2 || mounts[0].Options[0] != "rbind" || mounts[0].Options[1] != "rprivate" {
 		t.Fatalf("session rootfs options = %v", mounts[0].Options)
 	}
 }

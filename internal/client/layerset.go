@@ -110,7 +110,7 @@ func sandboxSessionRootfs(baseID string) []*types.Mount {
 	return []*types.Mount{{
 		Type:    "bind",
 		Source:  path.Join("/run/bundles", baseID, "rootfs"),
-		Options: []string{"rbind"},
+		Options: []string{"rbind", "rprivate"},
 	}}
 }
 

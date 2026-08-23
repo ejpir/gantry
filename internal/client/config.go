@@ -31,12 +31,13 @@ var baseContainerMounts = []specs.Mount{
 }
 
 type runtimeConfig struct {
-	Version  string         `json:"ociVersion"`
-	Process  runtimeProcess `json:"process"`
-	Root     runtimeRoot    `json:"root"`
-	Hostname string         `json:"hostname"`
-	Mounts   []specs.Mount  `json:"mounts"`
-	Linux    runtimeLinux   `json:"linux"`
+	Version     string            `json:"ociVersion"`
+	Process     runtimeProcess    `json:"process"`
+	Root        runtimeRoot       `json:"root"`
+	Hostname    string            `json:"hostname"`
+	Mounts      []specs.Mount     `json:"mounts"`
+	Linux       runtimeLinux      `json:"linux"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type runtimeProcess struct {

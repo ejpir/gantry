@@ -16,6 +16,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,8 @@ import (
 
 // realRuntime is a var so tests can point supervise at a helper process.
 var realRuntime = "/sbin/crun.runsc"
+
+const runtimeStdioPassthroughMarker = "io.gantry.runtime-stdio-passthrough"
 
 // debugMode reports whether verbose runsc logging is requested via the
 // kernel cmdline: the host sets GANTRY_EXTRA_CMDLINE="crunshim.debug=1"
@@ -49,7 +52,56 @@ func main() {
 	}
 	fixDev(debug)
 	sweepFilestores(os.Args)
-	os.Exit(supervise(insertFlags(os.Args, debug), debug))
+	passthrough := runtimeStdioPassthrough(os.Args)
+	os.Exit(supervise(insertFlags(os.Args, debug), debug, passthrough))
+}
+
+func createTarget(args []string) (bundle, id string, ok bool) {
+	isCreate := false
+	for i, arg := range args {
+		if arg == "create" {
+			isCreate = true
+		}
+		if arg == "--bundle" && i+1 < len(args) {
+			bundle = args[i+1]
+		}
+		if strings.HasPrefix(arg, "--bundle=") {
+			bundle = strings.TrimPrefix(arg, "--bundle=")
+		}
+	}
+	if !isCreate || bundle == "" || len(args) == 0 {
+		return "", "", false
+	}
+	id = args[len(args)-1]
+	if id == "" || len(id) > 128 {
+		return "", "", false
+	}
+	for _, char := range id {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '.' && char != '_' && char != '-' {
+			return "", "", false
+		}
+	}
+	return bundle, id, true
+}
+
+// runtimeStdioPassthrough identifies workload task creates whose non-terminal
+// process IO is carried on the runtime's descriptors. The bundle is still
+// present while runsc create executes; Gantry scrubs it before task Start.
+func runtimeStdioPassthrough(args []string) bool {
+	bundle, _, ok := createTarget(args)
+	if !ok {
+		return false
+	}
+	encoded, err := os.ReadFile(filepath.Join(bundle, "config.json"))
+	if err != nil {
+		return false
+	}
+	var config struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	return json.Unmarshal(encoded, &config) == nil &&
+		config.Annotations[runtimeStdioPassthroughMarker] == "true"
 }
 
 // sweepFilestores removes stale gVisor filestore files before a create.
@@ -64,33 +116,25 @@ func main() {
 // stale — so sweep only after proving the runtime tracks no state for
 // the container id.
 func sweepFilestores(args []string) {
-	bundle, isCreate, createIdx := "", false, -1
-	for i, a := range args {
-		if a == "create" && createIdx < 0 {
-			isCreate, createIdx = true, i
-		}
-		if a == "--bundle" && i+1 < len(args) {
-			bundle = args[i+1]
-		}
-		if strings.HasPrefix(a, "--bundle=") {
-			bundle = strings.TrimPrefix(a, "--bundle=")
-		}
-	}
-	if !isCreate || bundle == "" {
+	bundle, id, ok := createTarget(args)
+	if !ok {
 		return
 	}
-	id := ""
-	if last := args[len(args)-1]; !strings.HasPrefix(last, "-") {
-		id = last
+	createIdx := -1
+	for i, arg := range args {
+		if arg == "create" {
+			createIdx = i
+			break
+		}
 	}
-	if id == "" || probeRuntimeState(args[1:createIdx], id) != runtimeStateAbsent {
+	if createIdx < 0 || probeRuntimeState(args[1:createIdx], id) != runtimeStateAbsent {
 		return
 	}
-	stale, _ := filepath.Glob(filepath.Join(bundle, "rootfs", ".gvisor.filestore.*"))
-	for _, f := range stale {
-		if err := os.Remove(f); err == nil {
-			fmt.Fprintf(os.Stderr, "crunshim: swept stale filestore %s\n", f)
-		}
+	// Never glob every filestore in the root. Isolated Gantry tasks can share
+	// one root mount, and another container's filestore may still be live.
+	stale := filepath.Join(bundle, "rootfs", ".gvisor.filestore."+id)
+	if err := os.Remove(stale); err == nil {
+		fmt.Fprintf(os.Stderr, "crunshim: swept stale filestore %s\n", stale)
 	}
 }
 
@@ -171,7 +215,12 @@ func insertFlags(args []string, debug bool) []string {
 	// shares owned by a non-root host uid -> container writes fail with
 	// EPERM. The gofer keeps CAP_DAC_OVERRIDE/FOWNER, so route all fs
 	// access through it.
-	inject := []string{"--network=host", "--directfs=false"}
+	// Gantry has already assembled the durable image+rwlayer overlay in the
+	// guest. A second runsc self-overlay both hides writes from later sessions
+	// and creates one .gvisor.filestore per sentry in their shared root, which
+	// runsc explicitly rejects as repeated submounts. Keep filesystem syscalls
+	// behind the gofer, but write them directly to Gantry's mounted root.
+	inject := []string{"--network=host", "--directfs=false", "--overlay2=none"}
 	if p := platformChoice(); p != "" {
 		inject = append(inject, "--platform="+p)
 	}
@@ -225,19 +274,17 @@ func insertFlags(args []string, debug bool) []string {
 // after Wait, preserving containerd's runtime-error UX, and its tail is
 // dumped to /dev/console on failure (a dying sentry surfaces only as
 // "waiting for sandbox to start: EOF" otherwise).
-func supervise(args []string, debug bool) int {
+func supervise(args []string, debug bool, runtimeStdio bool) int {
 	cmd := exec.Command(realRuntime, args[1:]...)
 	cmd.Args[0] = args[0]
 	cmd.Stdin = os.Stdin
-	// `exec` is the session-stdio path: the exec'd process inherits OUR
-	// stdio (the vminitd session pipes) so its output reaches the user
-	// live. Inherited fds are *os.File, so os/exec spawns no copy
-	// goroutines and Wait returns the instant runsc-exec exits even
-	// though the parked gofer/sandbox grandchildren hold the same fds —
-	// the very property the temp file buys for create, without
-	// black-holing the session (the temp file swallowed exec output and
-	// the post-Wait replay went to the runtime-error chain, not the
-	// session).
+	// `exec` and marked workload `create` calls carry process IO on OUR
+	// descriptors (the vminitd session pipes), so their output must reach the
+	// user live. Inherited fds are *os.File, so os/exec spawns no copy
+	// goroutines and Wait returns when the direct runsc command exits even if
+	// parked gofer/sandbox grandchildren still hold those descriptors. The
+	// client deletes the stopped task before waiting for stream EOF, which
+	// closes those final inherited writers.
 	isExec := false
 	for _, a := range args[1:] {
 		if a == "exec" {
@@ -246,7 +293,7 @@ func supervise(args []string, debug bool) int {
 		}
 	}
 	var stdio *os.File
-	if isExec {
+	if isExec || runtimeStdio {
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	} else {
 		var err error
