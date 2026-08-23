@@ -14,8 +14,8 @@ const (
 
 	// MaxFrameBytes bounds one newline-delimited JSON-RPC frame in both
 	// directions (guest↔gateway and gateway↔upstream). MCP tool results
-	// can be large; 1 MiB matches the order of magnitude sbx uses for its
-	// own control-plane responses.
+	// can be large; 1 MiB matches the order of magnitude used by the
+	// reference implementation for its control-plane responses.
 	MaxFrameBytes = 1 << 20
 
 	// ProtocolVersion is the MCP revision the gateway speaks and pins

@@ -5,7 +5,7 @@
 // token plus a sentinel refresh token, and a daemon-side loop refreshes
 // ahead of expiry and pushes the fresh access token into the guest.
 //
-// Storage mirrors sbx's SyncWithDisk semantics: memory is the fast path
+// Storage mirrors the reference implementation's SyncWithDisk semantics: memory is the fast path
 // and the source of truth while the daemon runs; an optional 0600 file
 // under the sandbox directory is the recovery path for daemon restarts,
 // never the other way around.

@@ -461,7 +461,7 @@ func toolExposed(srv Server, tool string) bool {
 	return false
 }
 
-// isAuthTool mirrors sbx's rule that the agent cannot rebind a server's
+// isAuthTool mirrors the reference rule that the agent cannot rebind a server's
 // authorization: tools named <something>-authorize or -revoke-auth are
 // denied regardless of policy.
 func isAuthTool(name string) bool {
