@@ -100,13 +100,29 @@ func TestIsolatedSessionConfigCarriesEphemeralSecretsAndToolsPath(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	process := decodeRuntimeConfig(t, encoded).Process
+	encoded, err = runtimeStdioPassthroughConfig(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := decodeRuntimeConfig(t, encoded)
+	process := decoded.Process
 	for _, want := range []string{
 		"TOKEN=secret", "HTTP_PROXY=http://proxy.invalid", "PATH=/run/gantry/bin:/image/bin",
 	} {
 		if !slices.Contains(process.Env, want) {
 			t.Errorf("session environment %v does not contain %q", process.Env, want)
 		}
+	}
+	for _, mount := range decoded.Mounts {
+		if mount.Destination == "/tmp" {
+			t.Fatalf("isolated session replaces persistent sandbox /tmp: %+v", mount)
+		}
+	}
+	if findMount(decoded.Mounts, "/proc") == nil {
+		t.Fatal("isolated session lost namespace-specific /proc mount")
+	}
+	if decoded.Annotations[runtimeStdioPassthroughMarker] != "true" {
+		t.Fatalf("runtime stdio marker = %q, want true", decoded.Annotations[runtimeStdioPassthroughMarker])
 	}
 }
 

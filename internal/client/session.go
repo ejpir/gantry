@@ -201,7 +201,10 @@ func cleanupContainer(ctx context.Context, taskClient v3.TTRPCTaskService, mount
 	return nil
 }
 
-const guestBundleService = "containerd.vminitd.services.bundle.v1.Bundle"
+const (
+	guestBundleService            = "containerd.vminitd.services.bundle.v1.Bundle"
+	runtimeStdioPassthroughMarker = "io.gantry.runtime-stdio-passthrough"
+)
 
 func callGuestBundle(ctx context.Context, client *ttrpc.Client, method, id string) error {
 	var response emptypb.Empty
@@ -250,6 +253,26 @@ func sessionKillRequest(id string) *v3.KillRequest {
 	return &v3.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true}
 }
 
+func runtimeStdioPassthroughConfig(encoded string) (string, error) {
+	var config runtimeConfig
+	if err := json.Unmarshal([]byte(encoded), &config); err != nil {
+		return "", fmt.Errorf("decode runtime stdio config: %w", err)
+	}
+	if config.Annotations == nil {
+		config.Annotations = make(map[string]string)
+	}
+	// crunshim normally captures runtime diagnostics so runsc's parked
+	// infrastructure processes cannot retain a pipe and wedge Create. A
+	// non-terminal workload task uses those same descriptors for process IO,
+	// however, and therefore needs explicit passthrough.
+	config.Annotations[runtimeStdioPassthroughMarker] = "true"
+	result, err := json.Marshal(config)
+	if err != nil {
+		return "", fmt.Errorf("encode runtime stdio config: %w", err)
+	}
+	return string(result), nil
+}
+
 func isolatedSessionConfig(encoded string, options SessionOptions) (string, error) {
 	var config runtimeConfig
 	if err := json.Unmarshal([]byte(encoded), &config); err != nil {
@@ -259,6 +282,17 @@ func isolatedSessionConfig(encoded string, options SessionOptions) (string, erro
 		processEnvironment(options.ImgCfg, options.Secrets, options.Environment),
 		options.PathPrepend,
 	)
+	// The recursively bind-mounted sandbox rootfs already includes the base
+	// container's /tmp mount. Mounting a new tmpfs here would give every exec
+	// a private, empty /tmp and break persistent-sandbox semantics across
+	// sessions. Namespace-specific mounts such as /proc and /dev remain fresh.
+	mounts := config.Mounts[:0]
+	for _, mount := range config.Mounts {
+		if mount.Destination != "/tmp" {
+			mounts = append(mounts, mount)
+		}
+	}
+	config.Mounts = mounts
 	result, err := json.Marshal(config)
 	if err != nil {
 		return "", fmt.Errorf("encode isolated session config: %w", err)
@@ -301,12 +335,18 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 		isolatedSession = true
 	}
 
-	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, true, options.Cwd, options.Environment)
+	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, options.Terminal, options.Cwd, options.Environment)
 	if err != nil {
 		return err
 	}
 	if isolatedSession {
 		config, err = isolatedSessionConfig(config, options)
+		if err != nil {
+			return err
+		}
+	}
+	if !options.Terminal {
+		config, err = runtimeStdioPassthroughConfig(config)
 		if err != nil {
 			return err
 		}
@@ -352,6 +392,15 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 		return err
 	}
 	defer streams.close()
+	if removeSessionBundle {
+		// NewContainer mounts the rootfs before invoking the OCI runtime. A
+		// rejected Create can therefore leave a live mount beneath the bundle.
+		// Older guests deleted bundles recursively, which traversed that mount
+		// and whiteouted the shared writable rootfs before failing with EBUSY.
+		// After Create is attempted, only a successful task cleanup proves the
+		// bundle safe to delete; failures are scrubbed and reclaimed at VM exit.
+		bundleCleanupSafe = false
+	}
 	_, err = taskClient.Create(ctx, &v3.CreateTaskRequest{
 		ID:       options.ID,
 		Bundle:   bundlePath,
@@ -415,7 +464,6 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	defer stopKill()
 
 	response, waitErr := taskClient.Wait(context.Background(), &v3.WaitRequest{ID: options.ID})
-	awaitOutput(stdoutDone)
 	if waitErr != nil {
 		_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
 	} else {
@@ -433,6 +481,10 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	if cleanupErr == nil {
 		bundleCleanupSafe = removeSessionBundle
 	}
+	// runsc's create path leaves its sandbox/gofer processes holding the task
+	// stream descriptors. Delete stops that infrastructure and closes the last
+	// writers; only then can the relay observe EOF and finish draining output.
+	awaitOutput(stdoutDone)
 	logf("done")
 	return errors.Join(waitErr, cleanupErr)
 }

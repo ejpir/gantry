@@ -1,0 +1,55 @@
+diff --git a/internal/vminit/runc/container.go b/internal/vminit/runc/container.go
+index 78fe7ef..026aafe 100644
+--- a/internal/vminit/runc/container.go
++++ b/internal/vminit/runc/container.go
+@@ -34,0 +35 @@ import (
++	"github.com/containerd/containerd/v2/core/mount"
+@@ -101,0 +103,8 @@ func NewContainer(ctx context.Context, platform stdio.Platform, r *task.CreateTa
++		defer func() {
++			if retErr == nil {
++				return
++			}
++			if err := mount.UnmountRecursive(rootfs, 0); err != nil {
++				log.G(ctx).WithError(err).WithField("rootfs", rootfs).Warn("failed to clean up rejected task rootfs")
++			}
++		}()
+diff --git a/plugins/services/bundle/service.go b/plugins/services/bundle/service.go
+index 07f1375..7137c13 100644
+--- a/plugins/services/bundle/service.go
++++ b/plugins/services/bundle/service.go
+@@ -139,0 +140,7 @@ func (s *service) Delete(ctx context.Context, r *api.CreateRequest) (*emptypb.Em
++	// Remove the rootfs mountpoint without traversing it. If task Create left
++	// the rootfs mounted, Remove returns EBUSY and preserves the workload
++	// filesystem; RemoveAll would descend through the mount and whiteout every
++	// file in a shared writable overlay before failing at the mountpoint.
++	if err := os.Remove(filepath.Join(d, "rootfs")); err != nil && !os.IsNotExist(err) {
++		return nil, errgrpc.ToGRPC(err)
++	}
+diff --git a/plugins/services/bundle/service_test.go b/plugins/services/bundle/service_test.go
+index 2871efa..96365f1 100644
+--- a/plugins/services/bundle/service_test.go
++++ b/plugins/services/bundle/service_test.go
+@@ -55,0 +56,23 @@ func TestDeleteRemovesBundle(t *testing.T) {
++
++func TestDeleteRefusesNonEmptyRootfs(t *testing.T) {
++	root := t.TempDir()
++	service := &service{bundleRoot: root}
++	if _, err := service.Create(context.Background(), &api.CreateRequest{
++		ID: "session-1", Files: map[string][]byte{"config.json": []byte("{}")},
++	}); err != nil {
++		t.Fatal(err)
++	}
++	marker := filepath.Join(root, "session-1", "rootfs", "workload-file")
++	if err := os.WriteFile(marker, []byte("preserve me"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := service.Delete(context.Background(), &api.CreateRequest{ID: "session-1"}); err == nil {
++		t.Fatal("Delete traversed a non-empty rootfs")
++	}
++	if got, err := os.ReadFile(marker); err != nil || string(got) != "preserve me" {
++		t.Fatalf("rootfs content changed: %q, %v", got, err)
++	}
++	if _, err := os.Stat(filepath.Join(root, "session-1", "config.json")); err != nil {
++		t.Fatalf("bundle was partially removed: %v", err)
++	}
++}
