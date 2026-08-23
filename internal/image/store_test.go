@@ -11,6 +11,26 @@ import (
 	"testing"
 )
 
+func TestStoreTempDirIsPrivateAndLocal(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "images")
+	store := NewStore(root)
+	tmp, err := store.newTempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if got, want := filepath.Dir(tmp), filepath.Join(root, "tmp"); got != want {
+		t.Fatalf("staging parent = %q, want %q", got, want)
+	}
+	if info, err := os.Stat(filepath.Join(root, "tmp")); err != nil {
+		t.Fatal(err)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		// Windows reports synthesized Unix mode bits; the user-profile DACL is
+		// the authority there.
+		t.Fatalf("staging directory mode = %o, want private", info.Mode().Perm())
+	}
+}
+
 func TestRemovePersistsIndexBeforeDeletingContent(t *testing.T) {
 	s := NewStore(t.TempDir())
 	if err := os.MkdirAll(s.root, 0o700); err != nil {

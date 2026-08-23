@@ -222,9 +222,9 @@ func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		if !gutil.FileExists(filepath.Join(ref, "oci-layout")) {
 			return nil, fmt.Errorf("%s is a directory but has no oci-layout marker", ref)
 		}
-		load = func() (*pulled, error) { return loadOCILayout(ref, ref, arch) }
+		load = func() (*pulled, error) { return loadOCILayout(ref, ref, arch, st.newTempDir) }
 	} else if gutil.FileExists(ref) {
-		load = func() (*pulled, error) { return loadDockerSave(ref, ref, arch) }
+		load = func() (*pulled, error) { return loadDockerSave(ref, ref, arch, st.newTempDir) }
 	} else if looksLikeMissingPath(ref) {
 		// An explicit path that doesn't exist must not fall through to
 		// the registry branch: ParseRef would mangle "./pi-agent.tar"
@@ -255,7 +255,9 @@ func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		if r != nil {
 			return r, nil
 		}
-		load = func() (*pulled, error) { return loadRegistry(context.Background(), ref, arch, res, logf) }
+		load = func() (*pulled, error) {
+			return loadRegistry(context.Background(), ref, arch, res, logf, st.newTempDir)
+		}
 	}
 
 	p, err := load()

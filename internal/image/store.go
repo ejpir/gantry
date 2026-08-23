@@ -59,6 +59,28 @@ func DefaultStore() *Store {
 // NewStore is an explicit-root store (tests).
 func NewStore(root string) *Store { return &Store{root: root} }
 
+// newTempDir keeps image-pull intermediates under the private image store
+// instead of the process-wide OS temp directory. Besides matching the
+// documented store layout, this avoids Windows profile Temp ACL and endpoint
+// scanner races on large decompressed layers.
+func (s *Store) newTempDir() (string, error) {
+	tmpRoot := filepath.Join(s.root, "tmp")
+	if err := os.MkdirAll(tmpRoot, 0o700); err != nil {
+		return "", fmt.Errorf("create image staging directory: %w", err)
+	}
+	if err := os.Chmod(s.root, 0o700); err != nil {
+		return "", fmt.Errorf("secure image store: %w", err)
+	}
+	if err := os.Chmod(tmpRoot, 0o700); err != nil {
+		return "", fmt.Errorf("secure image staging directory: %w", err)
+	}
+	tmp, err := os.MkdirTemp(tmpRoot, "pull-")
+	if err != nil {
+		return "", fmt.Errorf("create image staging directory: %w", err)
+	}
+	return tmp, nil
+}
+
 // digestFile sanitizes "sha256:abc..." into a filename-safe prefix.
 func digestFile(digest string) string {
 	return strings.NewReplacer(":", "-", "/", "-").Replace(digest)

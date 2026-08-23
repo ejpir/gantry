@@ -125,7 +125,7 @@ func TestRegistryRejectsShortLayerDigestWithProgress(t *testing.T) {
 
 	progressCalled := false
 	_, err := loadRegistry(context.Background(), hostOf(reg.srv.URL)+"/library/app:latest", "amd64", auth.Resolve(),
-		func(string, ...any) { progressCalled = true })
+		func(string, ...any) { progressCalled = true }, func() (string, error) { return t.TempDir(), nil })
 	if err == nil || !strings.Contains(err.Error(), "layer 1 descriptor: invalid SHA-256 digest length") {
 		t.Fatalf("short layer digest error = %v", err)
 	}
