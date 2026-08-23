@@ -18,7 +18,14 @@ esac
 case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/gantry-rootfs.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+BUILDER=
+cleanup() {
+	if [ -n "$BUILDER" ]; then
+		docker buildx rm --force "$BUILDER" >/dev/null 2>&1 || :
+	fi
+	rm -rf "$WORK"
+}
+trap cleanup EXIT HUP INT TERM
 SRC="$WORK/nerdbox"
 NERDBOX_VERSION=v0.2.3
 NERDBOX_COMMIT=cd2c23fe413cdea8176760d63375d3271aa7e611
@@ -41,7 +48,14 @@ mkdir -p "$WORK/out" "$(dirname "$OUT")"
 # buildx plugin and fall back to the classic BuildKit frontend
 # (DOCKER_BUILDKIT=1 docker build) on hosts whose buildx is absent or too
 # old to parse modern flags.
+HTTPS_PROXY_VALUE=${HTTPS_PROXY:-${https_proxy:-}}
+# A single HTTP proxy URL is commonly published as HTTPS_PROXY even though it
+# handles both schemes. The Dockerfile also uses plain HTTP package mirrors.
+HTTP_PROXY_VALUE=${HTTP_PROXY:-${http_proxy:-$HTTPS_PROXY_VALUE}}
+NO_PROXY_VALUE=${NO_PROXY:-${no_proxy:-}}
+ALL_PROXY_VALUE=${ALL_PROXY:-${all_proxy:-}}
 BUILD="docker buildx build"
+BUILDER_ARG=
 if ! docker buildx build --help 2>&1 | grep -q -- "--output"; then
 	export DOCKER_BUILDKIT=1
 	if docker build --help 2>&1 | grep -q -- "--output"; then
@@ -50,12 +64,31 @@ if ! docker buildx build --help 2>&1 | grep -q -- "--output"; then
 		echo "error: need Docker with BuildKit (docker buildx) to export the rootfs" >&2
 		exit 1
 	fi
+elif [ -z "${BUILDX_BUILDER:-}" ]; then
+	# A docker-container builder does not inherit the client's proxy settings.
+	# Its registry requests then bypass HTTPS_PROXY and commonly fail behind a
+	# corporate proxy with an unknown-CA error. Use a short-lived builder with
+	# normalized proxy variables; leave an explicitly selected builder alone.
+	if [ -n "$HTTP_PROXY_VALUE$HTTPS_PROXY_VALUE$ALL_PROXY_VALUE" ]; then
+		BUILDER="gantry-rootfs-$$"
+		set -- docker buildx create --name "$BUILDER" --driver docker-container
+		[ -z "$HTTP_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.HTTP_PROXY=$HTTP_PROXY_VALUE"
+		[ -z "$HTTPS_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.HTTPS_PROXY=$HTTPS_PROXY_VALUE"
+		[ -z "$NO_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.NO_PROXY=$NO_PROXY_VALUE"
+		[ -z "$ALL_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.ALL_PROXY=$ALL_PROXY_VALUE"
+		"$@" --bootstrap >/dev/null
+		BUILDER_ARG="--builder $BUILDER"
+	fi
 fi
-$BUILD --progress=plain \
+$BUILD $BUILDER_ARG --progress=plain \
 	--file "$SRC/Dockerfile" \
 	--platform "linux/$DOCKER_ARCH" \
 	--target erofs \
 	--build-arg KERNEL_ARCH="$KERNEL_ARCH" \
+	--build-arg "HTTP_PROXY=$HTTP_PROXY_VALUE" \
+	--build-arg "HTTPS_PROXY=$HTTPS_PROXY_VALUE" \
+	--build-arg "NO_PROXY=$NO_PROXY_VALUE" \
+	--build-arg "ALL_PROXY=$ALL_PROXY_VALUE" \
 	--output "type=local,dest=$WORK/out" \
 	"$SRC"
 cp "$WORK/out/nerdbox-rootfs.erofs" "$OUT"
