@@ -114,20 +114,20 @@ func (br *broker) spawnGuestStdio(ctx context.Context, args []string) (io.WriteC
 		defer func() { _ = stdoutW.Close() }() // gateway's reader sees EOF
 		var status int
 		_ = client.Session(br.rpc, client.SessionOptions{
-			StreamSock:       br.streamSock,
-			StreamDial:       br.streamDial,
-			Shares:           manifest.Shares,
-			ShareTransport:   manifest.Transport,
-			RW:               br.cfg.RW,
-			LayerSet:         br.cfg.LayerSet,
-			Args:             args,
-			ID:               "sb",
-			ExecIntoExisting: true,
-			ImgCfg:           rootImageCfg,
-			Environment:      br.cfg.ProxyEnvironment(),
-			Quiet:            true,
-			ExitStatus:       &status,
-			KillCh:           killCh,
+			StreamSock:     br.streamSock,
+			StreamDial:     br.streamDial,
+			Shares:         manifest.Shares,
+			ShareTransport: manifest.Transport,
+			RW:             br.cfg.RW,
+			LayerSet:       br.cfg.LayerSet,
+			Args:           args,
+			ID:             "sb",
+			SandboxSession: true,
+			ImgCfg:         rootImageCfg,
+			Environment:    br.cfg.ProxyEnvironment(),
+			Quiet:          true,
+			ExitStatus:     &status,
+			KillCh:         killCh,
 		}, stdinR, stdoutW)
 	}()
 

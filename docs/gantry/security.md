@@ -125,7 +125,10 @@ network destination or write them to a writable share. Constrain both egress
 and filesystem access.
 
 OAuth bridging opens bounded host-loopback listeners after detecting supported
-agent callback URLs. Disable it with `-oauth-bridge=false` when unused.
+agent callback URLs. Guest callback responses may redirect only to an absolute
+path on the same bridge origin; external, scheme-relative, and host-local
+redirect targets are rejected. Disable the bridge with `-oauth-bridge=false`
+when unused.
 
 ## Local control surfaces
 
@@ -138,6 +141,12 @@ The manager API accepts secret names but never values, and bounds request
 bodies, execution time, and captured output. Interactive CLI sessions use a
 separate out-of-band exit-status channel so guest bytes cannot imitate control
 messages.
+
+Each interactive or internal command has its own guest container/PID namespace
+while bind-mounting the sandbox's persistent root. Ending or killing a session
+therefore removes its full process tree instead of leaving daemonized children
+inside the base container. Concurrent sessions retain independent task and I/O
+lifecycles.
 
 ## Integrity and persistence
 

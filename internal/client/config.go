@@ -31,22 +31,24 @@ var baseContainerMounts = []specs.Mount{
 }
 
 type runtimeConfig struct {
-	Version  string         `json:"ociVersion"`
-	Process  runtimeProcess `json:"process"`
-	Root     runtimeRoot    `json:"root"`
-	Hostname string         `json:"hostname"`
-	Mounts   []specs.Mount  `json:"mounts"`
-	Linux    runtimeLinux   `json:"linux"`
+	Version     string            `json:"ociVersion"`
+	Process     runtimeProcess    `json:"process"`
+	Root        runtimeRoot       `json:"root"`
+	Hostname    string            `json:"hostname"`
+	Mounts      []specs.Mount     `json:"mounts"`
+	Linux       runtimeLinux      `json:"linux"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type runtimeProcess struct {
-	Terminal     bool                     `json:"terminal"`
-	User         specs.User               `json:"user"`
-	Args         []string                 `json:"args"`
-	Env          []string                 `json:"env"`
-	Cwd          string                   `json:"cwd"`
-	Capabilities *specs.LinuxCapabilities `json:"capabilities"`
-	Rlimits      []specs.POSIXRlimit      `json:"rlimits"`
+	Terminal        bool                     `json:"terminal"`
+	User            specs.User               `json:"user"`
+	NoNewPrivileges bool                     `json:"noNewPrivileges,omitempty"`
+	Args            []string                 `json:"args"`
+	Env             []string                 `json:"env"`
+	Cwd             string                   `json:"cwd"`
+	Capabilities    *specs.LinuxCapabilities `json:"capabilities"`
+	Rlimits         []specs.POSIXRlimit      `json:"rlimits"`
 }
 
 type runtimeRoot struct {
@@ -110,20 +112,24 @@ func configJSONWithTransportCwdEnv(entries []ShareEntry, transport *shares.Trans
 		mounts = appendMounts(baseContainerMounts, perDeviceShareMounts(entries))
 	}
 
+	var capabilities *specs.LinuxCapabilities
+	if uid == 0 {
+		capabilities = &specs.LinuxCapabilities{
+			Bounding:  containerCapabilities,
+			Effective: containerCapabilities,
+			Permitted: containerCapabilities,
+		}
+	}
 	config := runtimeConfig{
 		Version: "1.1.0",
 		Process: runtimeProcess{
-			Terminal: terminal,
-			User:     specs.User{UID: uid, GID: gid},
-			Args:     args,
-			Env:      processEnvironment(img, environment),
-			Cwd:      cwd,
-			Capabilities: &specs.LinuxCapabilities{
-				Bounding:  containerCapabilities,
-				Effective: containerCapabilities,
-				Permitted: containerCapabilities,
-			},
-			Rlimits: []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 65536}},
+			Terminal:     terminal,
+			User:         specs.User{UID: uid, GID: gid},
+			Args:         args,
+			Env:          processEnvironment(img, environment),
+			Cwd:          cwd,
+			Capabilities: capabilities,
+			Rlimits:      []specs.POSIXRlimit{{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 65536}},
 		},
 		Root:     runtimeRoot{Path: "rootfs", Readonly: !rw},
 		Hostname: "nerdbox",

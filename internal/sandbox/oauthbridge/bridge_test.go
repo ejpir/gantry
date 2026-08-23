@@ -249,6 +249,31 @@ func TestBridgeForwardsGuestRedirect(t *testing.T) {
 	}
 }
 
+func TestBridgeRejectsGuestRedirectOffBridgeOrigin(t *testing.T) {
+	for _, location := range []string{
+		"https://attacker.example/exfil?oauth_code=abc123",
+		"//attacker.example/from-guest",
+		`/\attacker.example/from-guest`,
+		"/%2f%2fattacker.example/from-guest",
+		"/%5c%5cattacker.example/from-guest",
+	} {
+		t.Run(location, func(t *testing.T) {
+			b := testBridge(t, func(int, string) (replayResult, error) {
+				return replayResult{status: http.StatusFound, location: location}, nil
+			})
+			rec := httptest.NewRecorder()
+			b.handleCallback(&listener{port: 1})(rec,
+				httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc", nil))
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", rec.Code)
+			}
+			if got := rec.Header().Get("Location"); got != "" {
+				t.Fatalf("unsafe Location forwarded as %q", got)
+			}
+		})
+	}
+}
+
 func TestBridgeReplayFailureReturnsBadGateway(t *testing.T) {
 	b := testBridge(t, func(port int, uri string) (replayResult, error) {
 		return replayResult{}, fmt.Errorf("in-sandbox replay exited 97: cannot connect")
@@ -426,7 +451,7 @@ func (closedTestListener) Close() error              { return nil }
 func (closedTestListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
 func TestParseRawHTTPResponse(t *testing.T) {
-	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: exec exited, status 0\n"
+	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: task exited, status 0\n"
 	res, err := parseRawHTTPResponse([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -449,6 +474,16 @@ func TestParseRawHTTPResponse(t *testing.T) {
 	}
 	if res.location != "/auth/success" {
 		t.Fatalf("location = %q (redirect target lost)", res.location)
+	}
+	for _, location := range []string{
+		"https://attacker.example/exfil",
+		"//attacker.example/from-guest",
+		"/%2f%2fattacker.example/from-guest",
+	} {
+		raw := "HTTP/1.0 302 Found\r\nLocation: " + location + "\r\n\r\n"
+		if _, err := parseRawHTTPResponse([]byte(raw)); err == nil || !strings.Contains(err.Error(), "unsafe HTTP Location") {
+			t.Errorf("Location %q error = %v", location, err)
+		}
 	}
 
 	// Node-style chunked response (claude/pi listeners).

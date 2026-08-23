@@ -281,7 +281,7 @@ func normalizedDashboardMCPRemote(request dashboardapi.MCPRemoteRequest) (string
 	default:
 		return "", dashboardapi.Invalid("auth", fmt.Errorf("authentication must be none, bearer, header, or custody"))
 	}
-	parsed, err := mcpspec.Parse(remote.String())
+	canonical, err := mcpspec.Encode(remote)
 	if err != nil {
 		field := "url"
 		switch {
@@ -298,7 +298,7 @@ func normalizedDashboardMCPRemote(request dashboardapi.MCPRemoteRequest) (string
 		}
 		return "", dashboardapi.Invalid(field, err)
 	}
-	return parsed.String(), nil
+	return canonical, nil
 }
 
 func cleanDashboardList(values []string) []string {

@@ -90,7 +90,7 @@ try {
     Invoke-Gantry @("share", "add", $Sandbox, "$roTag=$roRoot,ro")
     Invoke-Gantry @("share", "add", $Sandbox, "$rwTag=$rwRoot")
     Invoke-Gantry @("share", "ls", $Sandbox)
-    Invoke-Gantry @("exec", $Sandbox, "--", "sh", "-c", "grep -qx host-ro-replay /host/$roTag/host-ro.txt && grep -qx host-rw-replay /host/$rwTag/host-rw.txt")
+    Invoke-Gantry @("exec", $Sandbox, "--", "sh", "-c", "ls -la /host/$roTag >/dev/null && ls -la /host/$rwTag >/dev/null && grep -qx host-ro-replay /host/$roTag/host-ro.txt && grep -qx host-rw-replay /host/$rwTag/host-rw.txt")
 
     $readOnlyWrite = Invoke-GantryBestEffort @("exec", $Sandbox, "--", "touch", "/host/$roTag/denied.txt")
     if ($readOnlyWrite -eq 0) { throw "read-only share unexpectedly accepted a write" }

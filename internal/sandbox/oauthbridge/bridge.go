@@ -468,9 +468,14 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 		}
 		w.Header().Set("Content-Type", ct)
 		if res.location != "" {
-			// Codex answers /auth/callback with a 302 to its result page;
-			// the browser follows it back through this listener, which
-			// replays the target into the guest like any other GET.
+			// Codex answers /auth/callback with a 302 to its result page.
+			// Keep that navigation on this loopback bridge: the guest must
+			// not turn the host browser into an egress or localhost proxy.
+			if err := validateReplayLocation(res.location); err != nil {
+				b.logf("replay response from sandbox port %d used unsafe Location: %v", l.port, err)
+				http.Error(w, "gantry oauth bridge: unsafe callback redirect", http.StatusBadGateway)
+				return
+			}
 			w.Header().Set("Location", res.location)
 		}
 		w.WriteHeader(res.status)
@@ -490,7 +495,7 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 type replayResult struct {
 	status      int
 	contentType string // guest Content-Type; the handler default applies when empty
-	location    string // guest Location redirect target, forwarded verbatim
+	location    string // validated origin-relative guest redirect target
 	body        []byte
 }
 
@@ -528,11 +533,11 @@ func (b *Bridge) replayViaDevTCP(port int, requestURI string) (replayResult, err
 	if status != 0 {
 		return replayResult{}, fmt.Errorf("in-sandbox replay exited %d: %s", status, strings.TrimSpace(string(tailBytes(stdout, 512))))
 	}
-	// sessionExec appends a "client: exec exited, status N" trailer to
-	// stdout (it is not Quiet-gated); strip it so it can never corrupt
-	// close-delimited response bodies.
+	// The isolated session task appends a "client: task exited, status N"
+	// trailer to stdout (it is not Quiet-gated); strip it so it can never
+	// corrupt close-delimited response bodies.
 	stdout = bytes.TrimRight(stdout, "\n")
-	if i := bytes.LastIndex(stdout, []byte("\nclient: exec exited, status ")); i >= 0 {
+	if i := bytes.LastIndex(stdout, []byte("\nclient: task exited, status ")); i >= 0 {
 		stdout = stdout[:i+1]
 	}
 	return parseRawHTTPResponse(stdout)
@@ -586,7 +591,11 @@ func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Type")):
 			res.contentType = string(v)
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Location")):
-			res.location = string(v)
+			location := string(v)
+			if err := validateReplayLocation(location); err != nil {
+				return replayResult{}, fmt.Errorf("unsafe HTTP Location: %w", err)
+			}
+			res.location = location
 		}
 	}
 	if chunked {
@@ -597,6 +606,33 @@ func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 		res.body = decoded
 	}
 	return res, nil
+}
+
+// validateReplayLocation permits only absolute-path references on the bridge
+// origin. Absolute, scheme-relative, backslash, and encoded authority-like
+// paths could otherwise make the host browser leave the sandbox's egress
+// boundary or contact another host-local service.
+func validateReplayLocation(location string) error {
+	if len(location) == 0 || len(location) > maxRequestURIBytes {
+		return fmt.Errorf("redirect length is outside 1..%d bytes", maxRequestURIBytes)
+	}
+	for _, char := range location {
+		if char < 0x20 || char == 0x7f {
+			return fmt.Errorf("redirect contains a control character")
+		}
+	}
+	if location[0] != '/' || strings.HasPrefix(location, "//") || strings.Contains(location, `\`) {
+		return fmt.Errorf("redirect must be an origin-relative absolute path")
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return fmt.Errorf("parse redirect: %w", err)
+	}
+	if parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" ||
+		!strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(parsed.Path, `\`) {
+		return fmt.Errorf("redirect must stay on the bridge origin")
+	}
+	return nil
 }
 
 // decodeChunkedBody unfolds a Transfer-Encoding: chunked body. CLI OAuth

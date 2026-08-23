@@ -17,6 +17,7 @@ import (
 
 	workerapi "github.com/ejpir/gantry/internal/mcpworker"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
+	"github.com/ejpir/gantry/internal/workerproto"
 )
 
 func TestMCPWorkerProcessSplitAndRelay(t *testing.T) {
@@ -144,6 +145,49 @@ func TestMCPWorkerProcessSplitAndRelay(t *testing.T) {
 	remoteMu.Unlock()
 	if !containsString(seenAuth, "Bearer "+credential) {
 		t.Fatalf("remote credential not delivered: %v", seenAuth)
+	}
+}
+
+func TestSupervisorRejectsUnissuedAndRevokedSessionCapabilities(t *testing.T) {
+	worker := &Worker{
+		servers: map[string]Server{
+			"remote": {
+				Config: workerapi.ServerConfig{Name: "remote", URL: "https://example.com/mcp", Credential: true},
+				Credential: func() (workerapi.CredentialResponse, error) {
+					return workerapi.CredentialResponse{Headers: map[string]string{"Authorization": "Bearer secret"}}, nil
+				},
+			},
+		},
+		sessionCapabilities: make(map[string]struct{}),
+	}
+	credentialRequest := func(capability string) workerproto.Request {
+		body, err := json.Marshal(workerapi.CredentialRequest{Server: "remote", Session: capability})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return workerproto.Request{Op: workerapi.OpCredential, Body: body}
+	}
+
+	forged := "0123456789abcdef0123456789abcdef"
+	if _, err := worker.credential(credentialRequest(forged)); err == nil {
+		t.Fatal("unissued session capability released a credential")
+	}
+	if err := worker.openWorkerStream(context.Background(), workerapi.OpenRequest{
+		Kind: workerapi.StreamRemote, Server: "remote", Session: forged,
+	}, nil); err == nil {
+		t.Fatal("unissued session capability opened a remote stream")
+	}
+
+	capability, err := worker.registerSessionCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.credential(credentialRequest(capability)); err != nil {
+		t.Fatalf("active supervisor capability rejected: %v", err)
+	}
+	worker.revokeSessionCapability(capability)
+	if _, err := worker.credential(credentialRequest(capability)); err == nil {
+		t.Fatal("revoked session capability released a credential")
 	}
 }
 

@@ -65,7 +65,7 @@ that directory:
 
 ```console
 $ gantry start dev -image alpine:latest \
-    -share "code=$PWD@/workspace,ro,uid=1000,gid=1000" \
+    -share "code=$PWD,mount=/workspace,ro,uid=1000,gid=1000" \
     -mcp -mcp-fs-root /workspace -mcp-fs-user 1000:1000
 ```
 

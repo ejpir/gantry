@@ -176,10 +176,15 @@ OCI runtime.
 `crun` is the default runtime. `runsc` runs a gVisor sandbox inside the VM and
 uses compatible guest assets.
 
-For a persistent sandbox, Gantry keeps one long-lived workload container.
-Each `gantry exec <name>` creates an OCI exec process in that container. The
-supervisor multiplexes concurrent sessions over the VM's single ttrpc
-dial-back connection, while separate virtio-vsock streams carry their I/O.
+For a persistent sandbox, Gantry keeps one long-lived base container to own
+the assembled image, writable layer, and guest share mounts. Each `gantry exec
+<name>` runs as PID 1 in a dedicated short-lived container whose rootfs is a
+bind mount of that base root. This preserves shared filesystem state and
+concurrent sessions, while giving every session an independent PID namespace
+and task lifecycle. Normal exit or an explicit kill tears down the entire
+session process tree, then deletes its task, rootfs bind, and bundle. The
+supervisor multiplexes these sessions over the VM's single ttrpc dial-back
+connection, while separate virtio-vsock streams carry their I/O.
 
 ## Boot flow
 
@@ -329,7 +334,10 @@ in-guest filesystem hardening work.
 The callback bridge recognizes supported guest loopback authorization URLs
 and creates a short-lived listener on host loopback. It validates the expected
 path and state, accepts one callback, and replays that callback to the guest
-loopback service. It is separate from general port publishing.
+loopback service. Redirects returned by that service are restricted to
+absolute paths on the bridge origin, so the guest cannot use the host browser
+as an external or host-local request proxy. The bridge is separate from
+general port publishing.
 
 With custody enabled, the supervisor performs the provider-specific code
 exchange. It writes the refresh token to `oauth-tokens.json` in the protected

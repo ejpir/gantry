@@ -88,18 +88,27 @@ func (n *winShareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 		return errno
 	}
 	if f != nil {
-		file, ok := f.(*winShareFile)
-		if !ok || !file.belongsTo(n) {
+		if file, ok := f.(*winShareFile); ok {
+			if !file.belongsTo(n) {
+				return syscall.EBADF
+			}
+			info, errno := n.backend.infoForHandle(windows.Handle(file.wf.file.Fd()))
+			if errno == 0 {
+				out.Attr = info.attr
+				if !n.isExportRoot() {
+					cacheAttr(n.export, out)
+				}
+			}
+			return errno
+		}
+		// go-fuse represents NodeReaddirer streams with an internal directory
+		// handle and may pass that handle to GETATTR after OPENDIR. It does not
+		// expose the backing Windows HANDLE, so resolve the directory through
+		// this node's pinned export root instead. Reject other handle types on
+		// non-directories rather than weakening regular-file ownership checks.
+		if n.StableAttr().Mode&fuse.S_IFMT != fuse.S_IFDIR {
 			return syscall.EBADF
 		}
-		info, errno := n.backend.infoForHandle(windows.Handle(file.wf.file.Fd()))
-		if errno == 0 {
-			out.Attr = info.attr
-			if !n.isExportRoot() {
-				cacheAttr(n.export, out)
-			}
-		}
-		return errno
 	}
 	h, info, errno := n.backend.resolve(n.relPath(), winMetadataAccess,
 		windows.FILE_OPEN, winBaseOpenOpts)

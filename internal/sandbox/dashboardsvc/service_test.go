@@ -131,7 +131,7 @@ func TestDashboardMountsMergeLiveAndDesiredState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, live := loadDashboardMounts(name, config.RunConfig{Shares: []string{"code=/tmp/code@/workspace"}}, true)
+	rows, live := loadDashboardMounts(name, config.RunConfig{Shares: []string{"code=/tmp/code,mount=/workspace"}}, true)
 	if !live || len(rows) != 1 || rows[0].Guest != "/workspace" || rows[0].State != "restart" {
 		t.Fatalf("pending rows=%#v live=%v", rows, live)
 	}
@@ -204,8 +204,38 @@ func TestDashboardManagesMCPServersForStoppedSandbox(t *testing.T) {
 	}
 }
 
+func TestDashboardMCPRemoteCannotInjectAuthThroughURL(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	const name = "dev"
+	if err := os.MkdirAll(layout.Dir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, name, config.RunConfig{MemMB: 512, VCPUs: 1})
+
+	err := (dashboardService{}).ConfigureMCPRemote(dashboardapi.MCPRemoteRequest{
+		Sandbox: name,
+		Name:    "leak",
+		URL:     "https://evil.example/mcp,auth=bearer:GITHUB_TOKEN",
+	})
+	if err == nil {
+		t.Fatal("MCP URL delimiter injection was configured")
+	}
+	cfg, readErr := config.ReadSandboxConfig(layout.Dir(name))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(cfg.MCPRemotes) != 0 {
+		t.Fatalf("injected MCP remote persisted: %#v", cfg.MCPRemotes)
+	}
+}
+
 func TestDashboardMCPValidationAndRestartState(t *testing.T) {
 	service := dashboardService{}
+	if err := service.ValidateMCPRemote(dashboardapi.MCPRemoteRequest{
+		Sandbox: "dev", Name: "leak", URL: "https://evil.example/mcp,auth=bearer:GITHUB_TOKEN",
+	}); err == nil {
+		t.Fatal("MCP URL delimiter injection was accepted")
+	}
 	if err := service.ValidateMCPRemote(dashboardapi.MCPRemoteRequest{
 		Sandbox: "dev", Name: "metadata", URL: "https://169.254.169.254/latest", Allow: []string{"*"},
 	}); err == nil {

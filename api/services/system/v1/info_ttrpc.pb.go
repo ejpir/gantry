@@ -10,6 +10,7 @@ import (
 
 type TTRPCSystemService interface {
 	Info(context.Context, *emptypb.Empty) (*InfoResponse, error)
+	Sync(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 }
 
 func RegisterTTRPCSystemService(srv *ttrpc.Server, svc TTRPCSystemService) {
@@ -21,6 +22,13 @@ func RegisterTTRPCSystemService(srv *ttrpc.Server, svc TTRPCSystemService) {
 					return nil, err
 				}
 				return svc.Info(ctx, &req)
+			},
+			"Sync": func(ctx context.Context, unmarshal func(interface{}) error) (interface{}, error) {
+				var req emptypb.Empty
+				if err := unmarshal(&req); err != nil {
+					return nil, err
+				}
+				return svc.Sync(ctx, &req)
 			},
 		},
 	})
@@ -39,6 +47,14 @@ func NewTTRPCSystemClient(client *ttrpc.Client) TTRPCSystemService {
 func (c *ttrpcsystemClient) Info(ctx context.Context, req *emptypb.Empty) (*InfoResponse, error) {
 	var resp InfoResponse
 	if err := c.client.Call(ctx, "containerd.vminitd.services.system.v1.System", "Info", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *ttrpcsystemClient) Sync(ctx context.Context, req *emptypb.Empty) (*emptypb.Empty, error) {
+	var resp emptypb.Empty
+	if err := c.client.Call(ctx, "containerd.vminitd.services.system.v1.System", "Sync", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

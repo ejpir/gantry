@@ -150,18 +150,17 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 		Secrets:        br.secretEnv(),
 		Environment:    br.cfg.ProxyEnvironment(),
 		PathPrepend:    br.guestToolsPath(),
-		// one VM = one container workload with a well-known id, so a
-		// concurrent session can find it and Exec into it instead of
-		// fighting over the rw rootfs stack with a second Create
-		ID:               "sb",
-		ExecIntoExisting: true,
-		ImgCfg:           br.cfg.ImageCfg,
-		Cols:             req.Cols,
-		Rows:             req.Rows,
-		Terminal:         req.Terminal,
-		Quiet:            req.Quiet,
-		KillCh:           killCh,
-		ExitStatus:       &status,
+		// The well-known base task owns the assembled writable root. Each
+		// concurrent session bind-mounts it into an isolated short-lived task.
+		ID:             "sb",
+		SandboxSession: true,
+		ImgCfg:         br.cfg.ImageCfg,
+		Cols:           req.Cols,
+		Rows:           req.Rows,
+		Terminal:       req.Terminal,
+		Quiet:          req.Quiet,
+		KillCh:         killCh,
+		ExitStatus:     &status,
 	}, stdin, stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)

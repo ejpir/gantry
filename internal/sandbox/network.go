@@ -32,9 +32,9 @@ type Network struct {
 	Backend control.NetworkBackend
 	// Split reports that networking runs in a separate _net-worker
 	// process: Conn is the supervisor end of the framed data channel.
-	// Policy stays as the supervisor's authoritative copy for display
-	// and rollback (Opts does NOT attach it to the device — enforcement
-	// is the worker's). Traffic is the supervisor-owned lifetime recorder;
+	// Policy stays as the supervisor's stable live-policy holder for display,
+	// rollback, and host-side credential gates (Opts does NOT attach it to the
+	// device — enforcement is the worker's). Traffic is the supervisor-owned lifetime recorder;
 	// the worker keeps only per-boot in-memory counters.
 	Split  bool
 	Worker *networker.Worker
@@ -182,10 +182,16 @@ func startNetworkWithWorkerStart(c config.RunConfig, workdir string, startWorker
 			}, workdir)
 		}
 		if err == nil {
+			var backend control.NetworkBackend
+			backend, err = control.NewPolicyMirrorBackend(netWorker, n.Policy)
+			if err != nil {
+				_ = netWorker.Close()
+				return nil, err
+			}
 			traffic := netpol.NewTrafficRecorder(filepath.Join(workdir, netpol.TrafficFileName))
 			netWorker.StartTrafficSync(traffic)
 			n.Conn = conn
-			n.Backend = netWorker
+			n.Backend = backend
 			n.Split = true
 			n.Worker = netWorker
 			n.Traffic = traffic

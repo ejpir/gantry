@@ -80,9 +80,10 @@ type mcSpike struct {
 	opts    SpikeOptions
 	report  io.Writer
 
-	owned  map[string]string
-	steps  int
-	passed int
+	ownedMu sync.Mutex
+	owned   map[string]string
+	steps   int
+	passed  int
 }
 
 // runSpike executes the scenario and always releases acquired guest
@@ -100,7 +101,7 @@ func (s *mcSpike) runSpike() error {
 		{"create+start long-lived container with arbitrary ID", s.assertArbitraryID},
 		{"concurrent second container keeps own exit status and output", s.assertConcurrentContainer},
 		{"deleting one container leaves the other running", s.assertIndependentTeardown},
-		{"concurrent execs keep independent streams and exit codes", s.assertConcurrentExec},
+		{"isolated session tasks share one root with independent streams and exit codes", s.assertConcurrentSessionTasks},
 		{"killing one container leaves the guest healthy", s.assertKillAndGuestHealth},
 	}
 	for _, step := range steps {
@@ -158,9 +159,10 @@ func (s *mcSpike) assertIndependentTeardown() (string, error) {
 	return "mc-b deleted; mc-a unaffected", nil
 }
 
-// assertConcurrentExec: two genuinely concurrent exec processes in mc-a keep
-// separate streams and exit codes.
-func (s *mcSpike) assertConcurrentExec() (string, error) {
+// assertConcurrentSessionTasks: two concurrent containers bind the rootfs
+// owned by mc-a. Each command is PID 1 in its own PID namespace, matching the
+// production session lifecycle that prevents background descendants escaping.
+func (s *mcSpike) assertConcurrentSessionTasks() (string, error) {
 	type outcome struct {
 		name   string
 		status int
@@ -170,17 +172,14 @@ func (s *mcSpike) assertConcurrentExec() (string, error) {
 	start := func(name, script string) <-chan outcome {
 		ch := make(chan outcome, 1)
 		go func() {
-			var out syncBuffer
-			status := -1
-			err := sessionExec(s.task, SessionOptions{
-				StreamSock: s.streams.StreamSock,
-				StreamDial: s.streams.StreamDial,
-				ImgCfg:     s.opts.ImgCfg,
-				Quiet:      true,
-				Args:       []string{"/bin/sh", "-c", script},
-				ExitStatus: &status,
-			}, "mc-a", strings.NewReader(""), &out)
-			ch <- outcome{name, status, out.String(), err}
+			config, err := configJSONWithTransportCwdEnv(nil, nil, false,
+				[]string{"/bin/sh", "-c", script}, s.opts.ImgCfg, false, "", nil)
+			if err != nil {
+				ch <- outcome{name: name, status: -1, err: err}
+				return
+			}
+			status, out, err := s.runToCompletionCustom(name, config, sandboxSessionRootfs("mc-a"))
+			ch <- outcome{name, status, out, err}
 		}()
 		return ch
 	}
@@ -199,7 +198,7 @@ func (s *mcSpike) assertConcurrentExec() (string, error) {
 			return "", fmt.Errorf("%s output missing its marker: %q", result.name, result.out)
 		}
 	}
-	return "exec-one → 7 and exec-two → 9 with isolated output", nil
+	return "session tasks shared mc-a's root while retaining isolated output and lifecycle", nil
 }
 
 // assertKillAndGuestHealth: SIGKILL-all on mc-a tears it down, and a fresh
@@ -250,7 +249,7 @@ func (s *mcSpike) startLongLived(id string, args []string) (uint32, error) {
 	if err != nil {
 		return 0, fmt.Errorf("task Create: %w", err)
 	}
-	s.owned[id] = bundlePath
+	s.recordOwned(id, bundlePath)
 	if _, err := s.task.Start(ctx, &v3.StartRequest{ID: id}); err != nil {
 		return 0, fmt.Errorf("task Start: %w", err)
 	}
@@ -295,7 +294,7 @@ func (s *mcSpike) runToCompletionCustom(id, config string, rootfs []*types.Mount
 	}); err != nil {
 		return -1, "", fmt.Errorf("task Create: %w", err)
 	}
-	s.owned[id] = bundlePath
+	s.recordOwned(id, bundlePath)
 	var out syncBuffer
 	// Attach the output relay before Start so a fast process cannot race ahead
 	// of the host reader (mirrors Session).
@@ -330,12 +329,22 @@ func (s *mcSpike) running(id string) bool {
 
 // deleteTask removes id's task and unwinds its bundle mounts, then forgets
 // it. Best effort: the guest is about to be powered off either way.
+func (s *mcSpike) recordOwned(id, bundlePath string) {
+	s.ownedMu.Lock()
+	s.owned[id] = bundlePath
+	s.ownedMu.Unlock()
+}
+
 func (s *mcSpike) deleteTask(id string) {
+	s.ownedMu.Lock()
 	bundlePath, ok := s.owned[id]
+	if ok {
+		delete(s.owned, id)
+	}
+	s.ownedMu.Unlock()
 	if !ok {
 		return
 	}
-	delete(s.owned, id)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, _ = s.task.Delete(ctx, &v3.DeleteRequest{ID: id})
@@ -345,10 +354,12 @@ func (s *mcSpike) deleteTask(id string) {
 
 // cleanup kills and deletes any tasks still owned after a failed assertion.
 func (s *mcSpike) cleanup() {
+	s.ownedMu.Lock()
 	ids := make([]string, 0, len(s.owned))
 	for id := range s.owned {
 		ids = append(ids, id)
 	}
+	s.ownedMu.Unlock()
 	for _, id := range ids {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, _ = s.task.Kill(ctx, &v3.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true})

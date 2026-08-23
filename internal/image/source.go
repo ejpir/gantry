@@ -68,6 +68,40 @@ type descriptor struct {
 	} `json:"platform"`
 }
 
+func validateSHA256Digest(digest string) error {
+	const prefix = "sha256:"
+	if len(digest) != len(prefix)+sha256.Size*2 {
+		return fmt.Errorf("invalid SHA-256 digest length %d", len(digest))
+	}
+	if !strings.HasPrefix(digest, prefix) {
+		return fmt.Errorf("unsupported digest algorithm")
+	}
+	for i := len(prefix); i < len(digest); i++ {
+		if (digest[i] < '0' || digest[i] > '9') && (digest[i] < 'a' || digest[i] > 'f') {
+			return fmt.Errorf("invalid SHA-256 digest encoding")
+		}
+	}
+	return nil
+}
+
+func validateDescriptor(desc descriptor) error {
+	if err := validateSHA256Digest(desc.Digest); err != nil {
+		return err
+	}
+	if desc.Size < 0 {
+		return fmt.Errorf("invalid descriptor size %d", desc.Size)
+	}
+	return nil
+}
+
+func shortDigest(digest string) string {
+	const abbreviatedLength = 19
+	if len(digest) <= abbreviatedLength {
+		return digest
+	}
+	return digest[:abbreviatedLength]
+}
+
 // ---------------- OCI layout directory ----------------
 
 // loadOCILayout reads an OCI image layout directory (oci-layout +
@@ -104,11 +138,10 @@ func loadOCILayout(dir, ref, arch string) (*pulled, error) {
 		}
 	}
 	blobPath := func(digest string) (string, error) {
-		algo, hex, ok := strings.Cut(digest, ":")
-		if !ok || algo != "sha256" {
-			return "", fmt.Errorf("unsupported digest %q", digest)
+		if err := validateSHA256Digest(digest); err != nil {
+			return "", err
 		}
-		return filepath.Join(dir, "blobs", algo, hex), nil
+		return filepath.Join(dir, "blobs", "sha256", strings.TrimPrefix(digest, "sha256:")), nil
 	}
 	readBlob := func(d descriptor) ([]byte, error) {
 		p, err := blobPath(d.Digest)

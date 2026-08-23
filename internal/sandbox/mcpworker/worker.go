@@ -4,6 +4,7 @@ package mcpworker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,9 +42,12 @@ type Worker struct {
 	audit   func(mcpgw.Event)
 	conf    *workerconf.Report
 
-	sessions  chan struct{}
-	closeOnce sync.Once
-	closeErr  error
+	sessions chan struct{}
+
+	sessionMu           sync.RWMutex
+	sessionCapabilities map[string]struct{}
+	closeOnce           sync.Once
+	closeErr            error
 }
 
 func Start(servers []Server, workdir, confinement string, audit func(mcpgw.Event)) (*Worker, error) {
@@ -89,7 +93,8 @@ func start(servers []Server, workdir, confinement string, audit func(mcpgw.Event
 	}
 	handle := &Worker{
 		child: child, servers: serverMap, audit: audit,
-		sessions: make(chan struct{}, 16),
+		sessions:            make(chan struct{}, 16),
+		sessionCapabilities: make(map[string]struct{}),
 	}
 	fail := func(cause error) (*Worker, error) {
 		_ = child.Terminate(5 * time.Second)
@@ -157,7 +162,7 @@ func (worker *Worker) observe(brokerDone <-chan error) {
 }
 
 func (worker *Worker) openWorkerStream(ctx context.Context, request workerapi.OpenRequest, stream *workerapi.Stream) error {
-	if !validSessionToken(request.Session) {
+	if !worker.hasSessionCapability(request.Session) {
 		return fmt.Errorf("invalid MCP session capability")
 	}
 	server, ok := worker.servers[request.Server]
@@ -206,7 +211,7 @@ func (worker *Worker) credential(request workerproto.Request) (any, error) {
 	if err := decodeStrictBody(request, &body); err != nil {
 		return nil, err
 	}
-	if !validSessionToken(body.Session) {
+	if !worker.hasSessionCapability(body.Session) {
 		return nil, fmt.Errorf("invalid MCP session capability")
 	}
 	server, ok := worker.servers[body.Server]
@@ -272,7 +277,13 @@ func (worker *Worker) Serve(ctx context.Context, conn net.Conn) error {
 	default:
 		return fmt.Errorf("mcp supervisor session limit reached")
 	}
-	stream, err := worker.mux.Open(ctx, workerapi.OpenRequest{Kind: workerapi.StreamGuest})
+	capability, err := worker.registerSessionCapability()
+	if err != nil {
+		return fmt.Errorf("create MCP session capability: %w", err)
+	}
+	defer worker.revokeSessionCapability(capability)
+
+	stream, err := worker.mux.Open(ctx, workerapi.OpenRequest{Kind: workerapi.StreamGuest, Session: capability})
 	if err != nil {
 		return err
 	}
@@ -309,9 +320,40 @@ func (worker *Worker) Close() error {
 	return worker.closeErr
 }
 
-func validSessionToken(value string) bool {
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == 16
+func (worker *Worker) registerSessionCapability() (string, error) {
+	for {
+		var raw [16]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return "", err
+		}
+		capability := hex.EncodeToString(raw[:])
+		worker.sessionMu.Lock()
+		if worker.sessionCapabilities == nil {
+			worker.sessionCapabilities = make(map[string]struct{})
+		}
+		if _, exists := worker.sessionCapabilities[capability]; !exists {
+			worker.sessionCapabilities[capability] = struct{}{}
+			worker.sessionMu.Unlock()
+			return capability, nil
+		}
+		worker.sessionMu.Unlock()
+	}
+}
+
+func (worker *Worker) revokeSessionCapability(capability string) {
+	worker.sessionMu.Lock()
+	delete(worker.sessionCapabilities, capability)
+	worker.sessionMu.Unlock()
+}
+
+func (worker *Worker) hasSessionCapability(capability string) bool {
+	if !workerapi.ValidSessionCapability(capability) {
+		return false
+	}
+	worker.sessionMu.RLock()
+	_, active := worker.sessionCapabilities[capability]
+	worker.sessionMu.RUnlock()
+	return active
 }
 
 func proxy(left, right io.ReadWriteCloser) {

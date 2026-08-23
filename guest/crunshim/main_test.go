@@ -54,7 +54,7 @@ func TestSuperviseReturnsWithParkedGrandchild(t *testing.T) {
 	os.Stderr = w
 
 	start := time.Now()
-	rc := supervise([]string{"crun"}, false)
+	rc := supervise([]string{"crun"}, false, false)
 	elapsed := time.Since(start)
 
 	os.Stderr = oldErr
@@ -116,7 +116,7 @@ func TestSuperviseExecStdioPassthrough(t *testing.T) {
 	os.Stdout, os.Stderr = w, w
 
 	start := time.Now()
-	rc := supervise([]string{"crun", "exec", "sb"}, false)
+	rc := supervise([]string{"crun", "exec", "sb"}, false, false)
 	elapsed := time.Since(start)
 
 	os.Stdout, os.Stderr = oldOut, oldErr
@@ -137,6 +137,36 @@ func TestSuperviseExecStdioPassthrough(t *testing.T) {
 	}
 	if !strings.Contains(live, "crunshim-test-marker") {
 		t.Fatalf("exec stdio did not reach our stdout live: %q", live)
+	}
+}
+
+func TestSuperviseMarkedCreateStdioPassthrough(t *testing.T) {
+	if os.Getenv("CRUNSHIM_STDIO_CREATE_HELPER") == "1" {
+		fmt.Println("marked-create-output")
+		os.Exit(0)
+	}
+	old := realRuntime
+	realRuntime = os.Args[0]
+	defer func() { realRuntime = old }()
+	t.Setenv("CRUNSHIM_STDIO_CREATE_HELPER", "1")
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = w, w
+	rc := supervise([]string{"crun", "create", "sb-session-1"}, false, true)
+	os.Stdout, os.Stderr = oldOut, oldErr
+	_ = w.Close()
+	output, _ := io.ReadAll(r)
+	_ = r.Close()
+
+	if rc != 0 {
+		t.Fatalf("supervise rc = %d, want 0", rc)
+	}
+	if !strings.Contains(string(output), "marked-create-output") {
+		t.Fatalf("marked create output did not reach runtime stdio: %q", output)
 	}
 }
 
@@ -169,6 +199,29 @@ func TestInsertFlags(t *testing.T) {
 	withDirectfs := insertFlags(append(append([]string(nil), in...), "--directfs=true"), false)
 	if strings.Contains(strings.Join(withDirectfs, " "), "--directfs=false") {
 		t.Errorf("caller --directfs=true overridden: %v", withDirectfs)
+	}
+	if !strings.Contains(joined, "--overlay2=none") {
+		t.Errorf("Gantry rootfs must bypass runsc's redundant overlay: %v", out2)
+	}
+	withOverlay := insertFlags(append(append([]string(nil), in...), "--overlay2=all:memory"), false)
+	if n := strings.Count(strings.Join(withOverlay, " "), "--overlay2="); n != 1 {
+		t.Errorf("caller overlay mode must win, got %d --overlay2 flags: %v", n, withOverlay)
+	}
+}
+
+func TestRuntimeStdioPassthroughMarker(t *testing.T) {
+	bundle := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundle, "config.json"), []byte(`{
+		"annotations":{"io.gantry.runtime-stdio-passthrough":"true"}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"crun", "create", "--bundle", bundle, "sb-session-1"}
+	if !runtimeStdioPassthrough(args) {
+		t.Fatal("marked workload create did not request runtime stdio passthrough")
+	}
+	if runtimeStdioPassthrough([]string{"crun", "start", "sb-session-1"}) {
+		t.Fatal("non-create command requested runtime stdio passthrough")
 	}
 }
 
@@ -218,12 +271,19 @@ func TestSweepFilestores(t *testing.T) {
 		}
 	})
 
-	t.Run("no state sweeps stale filestore", func(t *testing.T) {
-		_, args, filestore := setup(t)
+	t.Run("no state sweeps only matching stale filestore", func(t *testing.T) {
+		bundle, args, filestore := setup(t)
+		sibling := filepath.Join(bundle, "rootfs", ".gvisor.filestore.other-live-task")
+		if err := os.WriteFile(sibling, []byte("live"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		stubRuntime(t, "absent")
 		sweepFilestores(args)
 		if _, err := os.Stat(filestore); !os.IsNotExist(err) {
 			t.Errorf("stale filestore not swept: %v", err)
+		}
+		if _, err := os.Stat(sibling); err != nil {
+			t.Errorf("another container's filestore was removed: %v", err)
 		}
 	})
 

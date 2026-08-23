@@ -472,7 +472,7 @@ func TestPiSandboxName(t *testing.T) {
 	}
 }
 
-// Share specs are absolutized in Resolve — the explicit @CTRPATH must
+// Share specs are absolutized in Resolve — the explicit mount target must
 // survive the normalization (it was silently dropped, which is why
 // `gantry pi` mounted the project at /host/ws instead of /workspace).
 func TestResolveShareCtrPathPreserved(t *testing.T) {
@@ -480,7 +480,7 @@ func TestResolveShareCtrPathPreserved(t *testing.T) {
 	if err := os.WriteFile(layer, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _, err := resolveSandbox(t, "-share", "ws=/tmp@/workspace", "-share", "code=/tmp@/src,ro", "-rwlayer", layer)
+	cfg, _, err := resolveSandbox(t, "-share", "ws=/tmp,mount=/workspace", "-share", "code=/tmp,mount=/src,ro", "-rwlayer", layer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -589,7 +589,7 @@ func TestResolveShareOwnerRoundTrip(t *testing.T) {
 		t.Fatalf("uid/gid lost in round-trip: spec=%q parsed=%+v", cfg.Shares[0], parsed)
 	}
 	// ro + ctrpath + owner all compose
-	cfg, _, err = parse("-share", "code="+shareDir+"@/data,ro,uid=7,gid=8")
+	cfg, _, err = parse("-share", "code="+shareDir+",mount=/data,ro,uid=7,gid=8")
 	if err != nil {
 		t.Fatal(err)
 	}

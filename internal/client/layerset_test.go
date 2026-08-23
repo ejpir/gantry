@@ -43,6 +43,16 @@ func TestLayerSetDevices(t *testing.T) {
 	}
 }
 
+func TestSandboxSessionRootfsUsesGuestPOSIXBasePath(t *testing.T) {
+	mounts := sandboxSessionRootfs("sb")
+	if len(mounts) != 1 || mounts[0].Type != "bind" || mounts[0].Source != "/run/bundles/sb/rootfs" {
+		t.Fatalf("session rootfs = %+v", mounts)
+	}
+	if len(mounts[0].Options) != 2 || mounts[0].Options[0] != "rbind" || mounts[0].Options[1] != "rprivate" {
+		t.Fatalf("session rootfs options = %v", mounts[0].Options)
+	}
+}
+
 func TestRootfsMountsLayerSet(t *testing.T) {
 	ls := LayerSet{FSMeta: "/s/fsmeta.erofs", Layers: []string{"/s/1.erofs", "/s/2.erofs"}}
 	m := RootfsMountsLayerSet(ls)

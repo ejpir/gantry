@@ -41,8 +41,8 @@ func ParseRef(s string) (Ref, error) {
 	rest := s
 	if i := strings.Index(rest, "@"); i >= 0 {
 		r.Digest = rest[i+1:]
-		if !strings.HasPrefix(r.Digest, "sha256:") || len(r.Digest) != 71 {
-			return r, fmt.Errorf("invalid digest in image reference %q", s)
+		if err := validateSHA256Digest(r.Digest); err != nil {
+			return r, fmt.Errorf("invalid digest in image reference %q: %w", s, err)
 		}
 		rest = rest[:i]
 	}

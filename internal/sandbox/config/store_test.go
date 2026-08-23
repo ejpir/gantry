@@ -257,7 +257,7 @@ func TestConfigStoreSetShareForRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := newTestConfigStore(t, dir, RunConfig{Ports: []string{"127.0.0.1:8080:80"}})
-	share, err := store.SetShareForRestart("workspace="+host+"@/Users/eh04xk,uid=1000,gid=1000", false)
+	share, err := store.SetShareForRestart("workspace="+host+",mount=/Users/eh04xk,uid=1000,gid=1000", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,16 +268,16 @@ func TestConfigStoreSetShareForRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Shares) != 1 || cfg.Shares[0] != "workspace="+share.Path+"@/Users/eh04xk,uid=1000,gid=1000" || len(cfg.Ports) != 1 {
+	if len(cfg.Shares) != 1 || cfg.Shares[0] != "workspace="+share.Path+",mount=/Users/eh04xk,uid=1000,gid=1000" || len(cfg.Ports) != 1 {
 		t.Fatalf("persisted config = %+v", cfg)
 	}
-	if _, err := store.SetShareForRestart("workspace="+host+"@/workspace", false); err == nil {
+	if _, err := store.SetShareForRestart("workspace="+host+",mount=/workspace", false); err == nil {
 		t.Fatal("duplicate tag did not require replace")
 	}
-	if _, err := store.SetShareForRestart("workspace="+host+"@/workspace", true); err != nil {
+	if _, err := store.SetShareForRestart("workspace="+host+",mount=/workspace", true); err != nil {
 		t.Fatal(err)
 	}
-	if got := store.Snapshot().Shares; len(got) != 1 || got[0] != "workspace="+share.Path+"@/workspace" {
+	if got := store.Snapshot().Shares; len(got) != 1 || got[0] != "workspace="+share.Path+",mount=/workspace" {
 		t.Fatalf("replacement = %v", got)
 	}
 }
@@ -304,7 +304,7 @@ func TestConfigStoreRejectsDescriptorIdentityAlias(t *testing.T) {
 func TestConfigStoreRemoveShareForRestart(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{
-		Shares: []string{"code=/tmp/code,ro", "data=/tmp/data@/workspace"},
+		Shares: []string{"code=/tmp/code,ro", "data=/tmp/data,mount=/workspace"},
 		Ports:  []string{"127.0.0.1:8080:80"},
 	})
 	removed, err := store.RemoveShareForRestart("code")
@@ -318,13 +318,13 @@ func TestConfigStoreRemoveShareForRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Shares) != 1 || cfg.Shares[0] != "data=/tmp/data@/workspace" || len(cfg.Ports) != 1 {
+	if len(cfg.Shares) != 1 || cfg.Shares[0] != "data=/tmp/data,mount=/workspace" || len(cfg.Ports) != 1 {
 		t.Fatalf("persisted config = %+v", cfg)
 	}
 	if _, err := store.RemoveShareForRestart("missing"); err == nil {
 		t.Fatal("missing share removal succeeded")
 	}
-	if got := store.Snapshot().Shares; len(got) != 1 || got[0] != "data=/tmp/data@/workspace" {
+	if got := store.Snapshot().Shares; len(got) != 1 || got[0] != "data=/tmp/data,mount=/workspace" {
 		t.Fatalf("failed removal changed shares: %v", got)
 	}
 }
@@ -340,11 +340,11 @@ func TestConfigStoreShareRestartHubConfinement(t *testing.T) {
 	}
 	store := newTestConfigStore(t, dir, RunConfig{})
 	for _, alias := range []string{"/run/gantry/shares", "/run/gantry", "/run", "/", "/run/gantry/shares/x"} {
-		if _, err := store.SetShareForRestart("s"+strings.ReplaceAll(alias, "/", "_")+"="+host+"@"+alias, false); err == nil {
+		if _, err := store.SetShareForRestart("s"+strings.ReplaceAll(alias, "/", "_")+"="+host+",mount="+alias, false); err == nil {
 			t.Errorf("alias %q must be rejected (hub overlap)", alias)
 		}
 	}
-	if _, err := store.SetShareForRestart("code="+host+"@/host/code", false); err != nil {
+	if _, err := store.SetShareForRestart("code="+host+",mount=/host/code", false); err != nil {
 		t.Errorf("unrelated alias must pass: %v", err)
 	}
 }

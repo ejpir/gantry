@@ -30,6 +30,9 @@ const (
 	frameClose
 )
 
+// OpenHandler validates and prepares an incoming stream. It must return without
+// waiting for stream I/O; handler-owned goroutines may start immediately, and
+// the mux gates their frames until the successful acknowledgement is on the wire.
 type OpenHandler func(context.Context, OpenRequest, *Stream) error
 
 // Mux carries bounded full-duplex byte streams over one inherited worker
@@ -94,6 +97,9 @@ func (mux *Mux) Open(ctx context.Context, request OpenRequest) (*Stream, error) 
 	id := mux.nextID
 	mux.nextID += 2
 	stream := newStream(mux, id)
+	// Locally opened streams cannot escape to the caller before their
+	// acknowledgement, so only peer-opened streams need an I/O readiness gate.
+	stream.markReady()
 	ack := make(chan error, 1)
 	mux.streams[id] = stream
 	mux.pending[id] = ack
@@ -248,7 +254,11 @@ func (mux *Mux) handleOpen(request OpenRequest, stream *Stream) {
 	defer func() { <-mux.opens }()
 	if mux.onOpen == nil {
 		stream.closeLocal(false)
-		_ = mux.writeFrame(frameOpenError, stream.id, []byte("stream type unavailable"))
+		err := mux.writeFrame(frameOpenError, stream.id, []byte("stream type unavailable"))
+		stream.markReady()
+		if err != nil {
+			mux.fail(err)
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -256,12 +266,20 @@ func (mux *Mux) handleOpen(request OpenRequest, stream *Stream) {
 	cancel()
 	if err != nil {
 		stream.closeLocal(false)
-		_ = mux.writeFrame(frameOpenError, stream.id, []byte("stream unavailable"))
+		writeErr := mux.writeFrame(frameOpenError, stream.id, []byte("stream unavailable"))
+		stream.markReady()
+		if writeErr != nil {
+			mux.fail(writeErr)
+		}
 		return
 	}
 	if err := mux.writeFrame(frameOpenOK, stream.id, nil); err != nil {
 		mux.fail(err)
+		return
 	}
+	// The peer must observe acceptance before a handler goroutine can emit a
+	// data or close frame for the new stream.
+	stream.markReady()
 }
 
 func (mux *Mux) stream(id uint64) *Stream {
@@ -350,12 +368,14 @@ type Stream struct {
 	mux *Mux
 	id  uint64
 
-	readMu sync.Mutex
-	buf    []byte
-	recv   chan []byte
-	local  chan struct{}
-	remote chan struct{}
-	abortC chan struct{}
+	readMu  sync.Mutex
+	writeMu sync.Mutex
+	buf     []byte
+	recv    chan []byte
+	local   chan struct{}
+	remote  chan struct{}
+	abortC  chan struct{}
+	ready   chan struct{}
 
 	stateMu       sync.Mutex
 	localClosed   bool
@@ -363,6 +383,7 @@ type Stream struct {
 	localOnce     sync.Once
 	remoteOnce    sync.Once
 	abortOnce     sync.Once
+	readyOnce     sync.Once
 	readDeadline  time.Time
 	writeDeadline time.Time
 	deadlineWake  chan struct{}
@@ -370,7 +391,8 @@ type Stream struct {
 
 func newStream(mux *Mux, id uint64) *Stream {
 	return &Stream{mux: mux, id: id, recv: make(chan []byte, muxQueueDepth),
-		local: make(chan struct{}), remote: make(chan struct{}), abortC: make(chan struct{}), deadlineWake: make(chan struct{})}
+		local: make(chan struct{}), remote: make(chan struct{}), abortC: make(chan struct{}),
+		ready: make(chan struct{}), deadlineWake: make(chan struct{})}
 }
 
 func (stream *Stream) Read(p []byte) (int, error) {
@@ -445,20 +467,35 @@ func (stream *Stream) Write(p []byte) (int, error) {
 	if !deadline.IsZero() && !time.Now().Before(deadline) {
 		return 0, timeoutError("write")
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if err := stream.waitReady(); err != nil {
+		return 0, err
+	}
 	written := 0
 	for len(p) != 0 {
+		// Keep the closed-state check and frame write atomic with respect to
+		// closeLocal. Otherwise a close frame can overtake a writer that already
+		// observed the stream as open, leaving a data frame after the peer has
+		// removed the stream.
+		stream.writeMu.Lock()
 		stream.stateMu.Lock()
 		closed = stream.localClosed
 		deadline = stream.writeDeadline
 		stream.stateMu.Unlock()
 		if closed {
+			stream.writeMu.Unlock()
 			return written, net.ErrClosed
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			stream.writeMu.Unlock()
 			return written, timeoutError("write")
 		}
 		n := min(len(p), muxMaxPayload)
-		if err := stream.mux.writeFrame(frameData, stream.id, p[:n]); err != nil {
+		err := stream.mux.writeFrame(frameData, stream.id, p[:n])
+		stream.writeMu.Unlock()
+		if err != nil {
 			stream.mux.fail(err)
 			return written, err
 		}
@@ -474,6 +511,9 @@ func (stream *Stream) Close() error {
 }
 
 func (stream *Stream) closeLocal(notify bool) {
+	stream.writeMu.Lock()
+	defer stream.writeMu.Unlock()
+
 	stream.stateMu.Lock()
 	if stream.localClosed {
 		stream.stateMu.Unlock()
@@ -483,7 +523,7 @@ func (stream *Stream) closeLocal(notify bool) {
 	remoteClosed := stream.remoteClosed
 	stream.stateMu.Unlock()
 	stream.localOnce.Do(func() { close(stream.local) })
-	if notify {
+	if notify && stream.waitReadyForClose() {
 		if err := stream.mux.writeFrame(frameClose, stream.id, nil); err != nil {
 			stream.mux.fail(err)
 		}
@@ -507,6 +547,32 @@ func (stream *Stream) closeRemote() {
 }
 
 func (stream *Stream) abort() { stream.abortOnce.Do(func() { close(stream.abortC) }) }
+
+func (stream *Stream) markReady() { stream.readyOnce.Do(func() { close(stream.ready) }) }
+
+func (stream *Stream) waitReady() error {
+	select {
+	case <-stream.ready:
+		return nil
+	case <-stream.local:
+		return net.ErrClosed
+	case <-stream.abortC:
+		return net.ErrClosed
+	case <-stream.mux.done:
+		return net.ErrClosed
+	}
+}
+
+func (stream *Stream) waitReadyForClose() bool {
+	select {
+	case <-stream.ready:
+		return true
+	case <-stream.abortC:
+		return false
+	case <-stream.mux.done:
+		return false
+	}
+}
 
 func (stream *Stream) deliver(payload []byte) error {
 	stream.stateMu.Lock()

@@ -232,8 +232,8 @@ func ExchangeCode(ctx context.Context, spec CustodySpec, code, verifier, clientI
 }
 
 // RefreshTokens exchanges a refresh token for a fresh access token. A
-// rotated refresh token in the response replaces the stored one (sbx's
-// re-capture semantics).
+// rotated refresh token in the response replaces the stored one (matching
+// the reference implementation's re-capture semantics).
 func RefreshTokens(ctx context.Context, spec CustodySpec, refreshToken, clientID string) (TokenResponse, error) {
 	return postToken(ctx, spec, map[string]string{
 		"grant_type":    "refresh_token",

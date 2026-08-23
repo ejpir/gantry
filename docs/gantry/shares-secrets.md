@@ -13,17 +13,17 @@ $ gantry start dev -image alpine:latest \
     -share "code=$PWD"
 ```
 
-Choose another path inside the container with `@`:
+Choose another path inside the container with `mount=`:
 
 ```console
 $ gantry start dev -image alpine:latest \
-    -share "code=$PWD@/workspace"
+    -share "code=$PWD,mount=/workspace"
 ```
 
 A share specification has this form:
 
 ```text
-TAG=HOST_PATH[@CONTAINER_PATH][,ro][,uid=N,gid=N]
+TAG=HOST_PATH[,mount=CONTAINER_PATH][,ro][,uid=N,gid=N]
 ```
 
 | Part | Meaning |
@@ -34,9 +34,21 @@ TAG=HOST_PATH[@CONTAINER_PATH][,ro][,uid=N,gid=N]
 | `ro` | Make the export read-only. |
 | `uid`, `gid` | Replace the numeric owner shown in the guest. Use both together. |
 
+The former `HOST_PATH@CONTAINER_PATH` spelling is rejected because `@/` is a
+valid host-path sequence and could select the wrong export root. Use `mount=`
+instead. Paths that collide with reserved grammar suffixes can be represented
+unambiguously with base64url encoding, for example:
+
+```text
+code=L3RtcC9wcm9qZWN0QC9zdWJkaXI,encoding=base64url
+```
+
+This represents the literal host path `/tmp/project@/subdir` with no explicit
+container mount target.
+
 To make a share readable through Gantry's built-in filesystem MCP server,
 set its MCP filesystem root to the share's container path—for example,
-`/workspace` for `@/workspace` or `/host/code` for the default `code` mount.
+`/workspace` for `mount=/workspace` or `/host/code` for the default `code` mount.
 The MCP filesystem user must also have read permission. Remote MCP servers do
 not receive direct access to guest mounts. See
 [MCP gateway: Read a mounted workspace through MCP](mcp-gateway.md#read-a-mounted-workspace-through-mcp).
@@ -47,7 +59,7 @@ Append `,ro` when the workload only needs to inspect files:
 
 ```console
 $ gantry start review -image alpine:latest \
-    -share "source=$PWD@/workspace,ro"
+    -share "source=$PWD,mount=/workspace,ro"
 ```
 
 Read-only enforcement happens at the host export, not only at the guest mount.
@@ -64,7 +76,7 @@ Use `uid` and `gid` when the image runs as a non-root account:
 
 ```console
 $ gantry start dev -image node:latest \
-    -share "code=$PWD@/workspace,uid=1000,gid=1000"
+    -share "code=$PWD,mount=/workspace,uid=1000,gid=1000"
 ```
 
 This changes the numeric owner presented to the guest. It does not call
@@ -75,14 +87,14 @@ This changes the numeric owner presented to the guest. It does not call
 Add and inspect a share:
 
 ```console
-$ gantry share add dev "docs=$PWD/docs@/reference,ro"
+$ gantry share add dev "docs=$PWD/docs,mount=/reference,ro"
 $ gantry share ls dev
 ```
 
 Replace a tag or remove it:
 
 ```console
-$ gantry share add --replace dev "docs=$PWD/new-docs@/reference,ro"
+$ gantry share add --replace dev "docs=$PWD/new-docs,mount=/reference,ro"
 $ gantry share remove dev docs
 ```
 

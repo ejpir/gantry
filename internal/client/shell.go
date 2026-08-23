@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -33,17 +34,17 @@ type ShellOptions struct {
 
 func (options ShellOptions) sessionOptions(entries []ShareEntry) SessionOptions {
 	return SessionOptions{
-		StreamSock:       options.StreamSock,
-		Shares:           entries,
-		RW:               options.RW,
-		LayerSet:         options.LayerSet,
-		Args:             options.Args,
-		ID:               options.ID,
-		ImgCfg:           options.ImgCfg,
-		Secrets:          options.Secrets,
-		Environment:      options.Environment,
-		ExitStatus:       options.ExitStatus,
-		ExecIntoExisting: true,
+		StreamSock:     options.StreamSock,
+		Shares:         entries,
+		RW:             options.RW,
+		LayerSet:       options.LayerSet,
+		Args:           options.Args,
+		ID:             options.ID,
+		ImgCfg:         options.ImgCfg,
+		Secrets:        options.Secrets,
+		Environment:    options.Environment,
+		ExitStatus:     options.ExitStatus,
+		SandboxSession: true,
 	}
 }
 
@@ -102,11 +103,9 @@ func Shell(options ShellOptions) error {
 
 	err = Session(client, session, os.Stdin, os.Stdout)
 	if options.RW {
-		id := session.ID
-		if id == "" {
-			id = "shell"
+		if syncErr := SyncGuest(client, 5*time.Second); syncErr != nil {
+			err = errors.Join(err, syncErr)
 		}
-		SyncGuest(client, options.StreamSock, id, 5*time.Second)
 	}
 	return err
 }

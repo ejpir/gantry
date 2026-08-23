@@ -21,7 +21,10 @@ func ConfigureMCPRemote(name, raw string, replace bool) error {
 	if err != nil {
 		return err
 	}
-	canonical := remote.String()
+	canonical, err := mcpspec.Encode(remote)
+	if err != nil {
+		return err
+	}
 	return mutateRunningOrStopped(name,
 		func() error {
 			return mcpControlRPC(name, "mcp.remote.set", controlproto.MCPRequest{Spec: canonical, Replace: replace})
