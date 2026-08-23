@@ -380,8 +380,16 @@ try {
     $isolation = Get-Content -Raw (Join-Path $mcpStateDir "isolation.json")
     Assert-Contains "mcp: Windows split worker topology reported" $isolation "split-mcp"
     Assert-Contains "mcp: Windows Job confinement applied" $isolation "worker job active"
-    Assert-Contains "mcp: Windows weak filesystem boundary is honest" $isolation '"name": "fs-read"'
-    Assert-Contains "mcp: Windows filesystem denial remains unenforced" $isolation '"state": "unenforced"'
+    Assert-Contains "mcp: Windows AppContainer confinement applied" $isolation "zero-capability AppContainer token active"
+    Assert-Contains "mcp: Windows filesystem boundary reported" $isolation '"name": "fs-read"'
+    $isolationReport = $isolation | ConvertFrom-Json
+    foreach ($propertyName in @("fs-read", "fs-write", "net-dial", "exec")) {
+        $property = $isolationReport.mcpConfinement.properties | Where-Object { $_.name -eq $propertyName }
+        if ($null -eq $property -or $property.state -ne "enforced") {
+            throw "mcp: Windows AppContainer property $propertyName was not enforced: $($property | ConvertTo-Json -Compress)"
+        }
+    }
+    "PASS mcp: Windows AppContainer enforces fs-read/fs-write/net-dial/exec"
 
     $daemonPid = [int](Get-Content -Raw (Join-Path $mcpStateDir "vmm.pid"))
     $mcpProcess = Get-CimInstance Win32_Process | Where-Object {

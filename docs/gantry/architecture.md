@@ -109,10 +109,17 @@ the per-launch nonce that correlates them, grant capabilities to the child.
 
 ### VMM worker
 
-The VMM worker owns guest RAM, the platform hypervisor, virtual CPUs, and the
-virtio device model. The supervisor passes pre-opened files and authenticated
-channels, so a confined worker does not need general host-path access. On
-Linux its Landlock policy therefore allows no new path access. Shares remain
+The VMM worker normally owns guest RAM, the platform hypervisor, virtual CPUs,
+and the virtio device model. On Windows, WHPX rejects AppContainer tokens, so a
+narrow Job-confined `_whpx-worker` owns only the partition/vCPUs while the
+zero-capability AppContainer VMM worker retains boot and device emulation. They
+map one anonymous RAM section and exchange validated exits through fixed
+shared-memory mailboxes/events; low-volume control uses authenticated pipes.
+The broker receives no disks, share roots, guest console, or network handles.
+
+The supervisor passes pre-opened files and authenticated channels, so a
+confined worker does not need general host-path access. On Linux its Landlock
+policy therefore allows no new path access. Shares remain
 in the supervisor and cross a path-neutral broker or vhost relay, so live
 share add/remove does not require changing the worker's Linux Landlock or
 macOS Seatbelt profile.
@@ -162,9 +169,10 @@ worker.
 On Linux the MCP profile adds a deny-all Landlock filesystem ruleset to the
 private mount root, descriptor closure, namespace/task controls, and its
 no-socket/no-exec seccomp allowlist. macOS applies a deny-default Seatbelt
-profile. Windows `auto` establishes a one-process, kill-on-close Job boundary
-but reports ambient filesystem and network access as unenforced; `required`
-therefore fails closed.
+profile. Windows uses a zero-capability AppContainer plus one-process,
+kill-on-close Job and verifies fs-read, fs-write, net-dial, and exec denial.
+Windows `required` still fails closed because the separate network-worker tier
+is unavailable.
 
 ## Guest components
 
@@ -388,13 +396,14 @@ output-size bounds.
 The default layout is:
 
 ```text
-<user-cache>/gantry/assets/<version>/
+<user-cache>/gantry/assets/<version>-<build-id>/
     └── verified release kernel, system root, and default image
 
 ~/.gantry/
 ├── credentials.json
 ├── images/
 │   ├── index.json
+│   ├── tmp/pull-*/            # private, removed after image construction
 │   ├── sha256-<digest>.erofs
 │   └── sha256-<digest>.json
 ├── rwlayers/

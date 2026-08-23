@@ -128,10 +128,11 @@ func (m *Machine) releaseRAM() error {
 	if len(m.ram) == 0 {
 		return nil
 	}
-	if err := freeGuestRAM(m.ram); err != nil {
+	if err := freeGuestRAM(m.ram, m.ramShared); err != nil {
 		return fmt.Errorf("release guest RAM: %w", err)
 	}
 	m.ram = nil
+	m.ramShared = false
 	m.mem = nil
 	return nil
 }
@@ -180,6 +181,11 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 	claim(o.Rootfs, "rootfs", false)
 	claim(o.KVM, "KVM", false)
 	claim(o.SharedRAM, "shared guest RAM", false)
+	claim(o.WHPXMailbox, "WHPX mailbox section", false)
+	claim(o.WHPXRequestEvent, "WHPX request event", false)
+	for i, event := range o.WHPXReplyEvents {
+		claim(event, fmt.Sprintf("WHPX reply event %d", i), false)
+	}
 	for i, f := range o.DisksRO {
 		claim(f, fmt.Sprintf("read-only disk %d", i), true)
 	}

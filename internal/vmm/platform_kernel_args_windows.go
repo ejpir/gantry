@@ -4,13 +4,17 @@ package vmm
 
 import "fmt"
 
-func platformKernelArgs(cmdline, arch string) (string, error) {
+func platformKernelArgs(cmdline, arch string, brokerFrequency uint64) (string, error) {
 	if arch != "amd64" || kernelArgPresent(cmdline, "tsc_early_khz") {
 		return cmdline, nil
 	}
-	frequency, err := whpxProcessorClockFrequency()
-	if err != nil {
-		return cmdline, err
+	frequency := brokerFrequency
+	if frequency == 0 {
+		var err error
+		frequency, err = whpxProcessorClockFrequency()
+		if err != nil {
+			return cmdline, err
+		}
 	}
 	// Reject an implausible capability instead of silently distorting guest
 	// time. Current x86 TSC rates sit comfortably inside these broad bounds.

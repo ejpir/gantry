@@ -41,7 +41,7 @@ func launchPlatformProcess(executable string, argv, environment []string, spec L
 	defer ClearInheritedHandles(handles)
 
 	process, containment, err := StartWindowsProcess(executable, argv, environment,
-		[]*os.File{diagnostic, diagnostic, diagnostic}, handles, spec.Confinement)
+		[]*os.File{diagnostic, diagnostic, diagnostic}, handles, spec.Role, spec.Confinement)
 	// CreateProcess has duplicated the child pipe ends. Closing these copies is
 	// what makes process death produce EOF on the supervisor channels.
 	CloseFiles(channelFiles)

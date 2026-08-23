@@ -26,6 +26,9 @@ const (
 	// RoleMCP parses guest and upstream MCP traffic while host authority stays
 	// behind supervisor-owned capability brokers.
 	RoleMCP Role = "mcp"
+	// RoleWHPX is the narrow Windows hypervisor broker. It owns the opaque
+	// partition object but no guest disks, shares, network, or console handles.
+	RoleWHPX Role = "whpx"
 
 	nonceLen         = 32
 	handshakeTimeout = 15 * time.Second
@@ -34,7 +37,7 @@ const (
 // Valid reports whether the role names a compiled worker implementation.
 func (r Role) Valid() bool {
 	switch r {
-	case RoleVMM, RoleNet, RoleMCP:
+	case RoleVMM, RoleNet, RoleMCP, RoleWHPX:
 		return true
 	default:
 		return false

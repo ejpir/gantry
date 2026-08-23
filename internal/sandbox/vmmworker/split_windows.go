@@ -2,6 +2,7 @@ package vmmworker
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vmm"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
+	"github.com/ejpir/gantry/internal/workerproto"
 )
 
 const Supported = true
@@ -39,10 +41,26 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	if !opts.BootTimingStart.IsZero() {
 		bootCfg.BootTimingStartUnixNano = opts.BootTimingStart.UnixNano()
 	}
-	// WHPX does not use a pre-opened hypervisor device, and the experimental
-	// Unix vhost shared-memory backend is deliberately not enabled here.
+	// Brokered WHPX keeps the opaque partition in a narrow full-token process
+	// while device emulation runs in the AppContainer VMM worker. Auto mode may
+	// fall back to the established Job-only worker if broker setup is unavailable.
 	bootCfg.VhostShares = false
-	bootCfg.HasSharedRAM = false
+	brokeredWHPX := bootCfg.Confinement != "off" && os.Getenv("GANTRY_WINDOWS_WHPX_BROKER") != "0"
+	var sharedRAM *os.File
+	if brokeredWHPX {
+		rawToken, err := workerproto.NewNonce()
+		if err != nil {
+			return nil, fmt.Errorf("WHPX broker peer token: %w", err)
+		}
+		token := hex.EncodeToString(rawToken)
+		sharedRAM, err = newSharedRAM(dir, opts.MemSize)
+		if err != nil {
+			return nil, err
+		}
+		bootCfg.HasSharedRAM = true
+		bootCfg.WHPXBroker = true
+		bootCfg.WHPXToken = token
+	}
 	if !nw.Split && nw.Policy != nil {
 		raw, err := netpol.Marshal(nw.Policy)
 		if err != nil {
@@ -50,11 +68,27 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		}
 		bootCfg.Policy = raw
 	}
-	vw, err := spawnVMMWorker(bootCfg, vmmworkerapi.Assets{
+	workerAssets := vmmworkerapi.Assets{
 		NetConn: opts.NetConn, Console: console, Kernel: opts.Kernel,
 		Rootfs: opts.Rootfs, DisksRO: opts.DisksRO, Disks: opts.Disks,
-	}, dir)
+		SharedRAM: sharedRAM,
+	}
+	vw, err := spawnVMMWorker(bootCfg, workerAssets, dir)
+	if err != nil && brokeredWHPX && bootCfg.Confinement != "required" {
+		if sharedRAM != nil {
+			_ = sharedRAM.Close()
+		}
+		fmt.Fprintf(os.Stderr, "daemon: brokered WHPX unavailable (%v), retrying with Job-only VMM confinement\n", err)
+		bootCfg.WHPXBroker = false
+		bootCfg.WHPXToken = ""
+		bootCfg.HasSharedRAM = false
+		workerAssets.SharedRAM = nil
+		vw, err = spawnVMMWorker(bootCfg, workerAssets, dir)
+	}
 	if err != nil {
+		if sharedRAM != nil {
+			_ = sharedRAM.Close()
+		}
 		return nil, err
 	}
 	if bootCfg.Policy != nil && nw.Traffic != nil {

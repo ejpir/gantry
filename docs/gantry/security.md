@@ -80,8 +80,11 @@ platform confinement:
   private snapshots of `/etc/hosts`, `/etc/nsswitch.conf`, and
   `/etc/resolv.conf`; no directory subtree is allowlisted.
 - macOS uses Seatbelt profiles with role-specific file and network access.
-- Windows uses separate workers and a Job Object, but cannot yet verify the
-  required ambient filesystem and network restrictions.
+- Windows runs MCP and VMM device emulation in zero-capability AppContainers
+  inside one-process Jobs. Because WHPX rejects that token, a separate narrow
+  Job-confined broker owns only the partition/vCPUs and shared RAM. The VMM
+  worker's filesystem, ambient-network, and exec denials are actively verified;
+  the independent Windows network-worker tier remains unavailable.
 
 Workers probe the controls from inside the confined process. Gantry writes
 the measured properties to `isolation.json`; the TUI currently shows the

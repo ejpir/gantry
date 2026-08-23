@@ -34,6 +34,23 @@ func SocketpairConns() (a, b net.Conn, err error) {
 	return accepted, dialed, nil
 }
 
+// PipePairFiles returns two full-duplex anonymous-pipe endpoints suitable for
+// inheritance by two different child processes. Each endpoint is ordered as
+// read, write. The caller owns all four files.
+func PipePairFiles() (a, b [2]*os.File, err error) {
+	aRead, bWrite, err := os.Pipe()
+	if err != nil {
+		return a, b, fmt.Errorf("worker peer pipe A: %w", err)
+	}
+	bRead, aWrite, err := os.Pipe()
+	if err != nil {
+		_ = aRead.Close()
+		_ = bWrite.Close()
+		return a, b, fmt.Errorf("worker peer pipe B: %w", err)
+	}
+	return [2]*os.File{aRead, aWrite}, [2]*os.File{bRead, bWrite}, nil
+}
+
 func PipeChannels(count int) (supervisor []net.Conn, childFiles []*os.File, err error) {
 	cleanup := func() {
 		for _, conn := range supervisor {

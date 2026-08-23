@@ -62,4 +62,6 @@ require (
 	gvisor.dev/gvisor v0.0.0-20240916094835-a174eb65023f // indirect
 )
 
+replace github.com/atotto/clipboard => ./third_party/clipboard
+
 replace github.com/hanwen/go-fuse/v2 => ./third_party/go-fuse

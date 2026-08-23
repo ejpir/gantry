@@ -29,7 +29,7 @@ func testNonce(t *testing.T) []byte {
 }
 
 func TestWorkerRolesAreClosedSet(t *testing.T) {
-	for _, role := range []Role{RoleVMM, RoleNet, RoleMCP} {
+	for _, role := range []Role{RoleVMM, RoleNet, RoleMCP, RoleWHPX} {
 		if !role.Valid() {
 			t.Errorf("role %q is not valid", role)
 		}

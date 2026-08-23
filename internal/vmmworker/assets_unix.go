@@ -6,11 +6,21 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+
+	"github.com/ejpir/gantry/internal/vmm"
 )
 
 const maxInheritedDisks = 128
 
 func (config Config) validate() error {
+	if config.WHPXBroker {
+		// Validate before the Windows loader derives a dynamic inherited-handle
+		// table from VCPUs. The backend validates ordinary configurations again
+		// in Prepare; only broker mode needs this pre-loader bound.
+		if err := vmm.ValidateResources(config.MemSize, config.VCPUs); err != nil {
+			return err
+		}
+	}
 	if config.NDisksRO < 0 || config.NDisks < 0 {
 		return fmt.Errorf("negative disk count")
 	}
@@ -33,8 +43,16 @@ func (config Config) validate() error {
 	if runtime.GOOS == "windows" && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
 		return fmt.Errorf("windows writable disks must be locked by the worker process")
 	}
-	if config.VhostShares != config.HasSharedRAM {
-		return fmt.Errorf("vhost shares and shared guest RAM must be enabled together")
+	if config.VhostShares && !config.HasSharedRAM {
+		return fmt.Errorf("vhost shares require shared guest RAM")
+	}
+	if config.HasSharedRAM && !config.VhostShares && !config.WHPXBroker {
+		return fmt.Errorf("shared guest RAM requires vhost shares or a WHPX broker")
+	}
+	if config.WHPXBroker {
+		if runtime.GOOS != "windows" || !config.HasSharedRAM || config.WHPXToken == "" {
+			return fmt.Errorf("WHPX broker requires Windows shared RAM and a peer token")
+		}
 	}
 	return nil
 }
@@ -57,7 +75,10 @@ func (assets Assets) close() {
 			}
 		}
 	}
-	for _, file := range []*os.File{assets.Console, assets.Kernel, assets.Rootfs, assets.SharedRAM, assets.KVM} {
+	for _, file := range append(
+		[]*os.File{assets.Console, assets.Kernel, assets.Rootfs, assets.SharedRAM, assets.WHPXMailbox, assets.WHPXRequestEvent, assets.KVM},
+		assets.WHPXReplyEvents...,
+	) {
 		if file != nil {
 			_ = file.Close()
 		}
@@ -67,5 +88,8 @@ func (assets Assets) close() {
 	}
 	if assets.ShareConn != nil {
 		_ = assets.ShareConn.Close()
+	}
+	if assets.WHPXConn != nil {
+		_ = assets.WHPXConn.Close()
 	}
 }

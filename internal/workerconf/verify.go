@@ -85,12 +85,13 @@ func Verify(spec Spec, report *Report) {
 // must fail (ENOENT in the empty private root, EPERM under a path
 // filter); success means the worker can still read user files.
 func probeFSRead() PropertyResult {
-	f, err := os.Open(probeReadPath)
+	path := probeFSReadPath()
+	f, err := os.Open(path)
 	if err != nil {
 		return PropertyResult{Property: PropFSRead, State: StateEnforced, Detail: errString(err)}
 	}
 	_ = f.Close()
-	return PropertyResult{Property: PropFSRead, State: StateUnenforced, Detail: "opened " + probeReadPath}
+	return PropertyResult{Property: PropFSRead, State: StateUnenforced, Detail: "opened " + path}
 }
 
 // probeFSWrite creates a file in the user's HOME (or temp dir). The
@@ -111,20 +112,29 @@ func probeFSWrite() PropertyResult {
 	return PropertyResult{Property: PropFSWrite, State: StateUnenforced, Detail: "created " + path}
 }
 
-// probeNetDial dials loopback port 1: nothing listens there, so an
-// unconfined process gets a fast ECONNREFUSED, while a confined one
-// fails earlier with EPERM at socket()/connect(). A timeout proves
-// nothing and is indeterminate.
+// probeNetDial attempts the platform probe target. Windows receives a live,
+// supervisor-owned listener so success unambiguously proves ambient connect
+// authority; Unix uses a closed loopback port where confinement fails earlier
+// at socket/connect. A timeout proves nothing and is indeterminate.
 func probeNetDial(noNetwork bool) PropertyResult {
 	if !noNetwork {
 		return PropertyResult{Property: PropNetDial, State: StateDisabled}
 	}
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:1", 500*time.Millisecond)
+	target := probeNetDialAddress()
+	timeout := 500 * time.Millisecond
+	if runtime.GOOS == "windows" {
+		// The Windows target is an already-listening loopback socket. An
+		// unconstrained connect completes locally in well under this bound;
+		// AppContainer policy drops are additionally authenticated by direct
+		// zero-capability token inspection before a timeout counts as enforced.
+		timeout = 50 * time.Millisecond
+	}
+	conn, err := net.DialTimeout("tcp", target, timeout)
 	if err == nil {
 		_ = conn.Close()
-		return PropertyResult{Property: PropNetDial, State: StateUnenforced, Detail: "connected to 127.0.0.1:1"}
+		return PropertyResult{Property: PropNetDial, State: StateUnenforced, Detail: "connected to " + target}
 	}
-	if os.IsPermission(err) || errors.Is(err, syscall.EPERM) {
+	if isConfinementPermission(err) {
 		return PropertyResult{Property: PropNetDial, State: StateEnforced, Detail: errString(err)}
 	}
 	if isConnectionRefused(err) {

@@ -2,4 +2,4 @@
 
 package vmm
 
-func platformKernelArgs(cmdline, _ string) (string, error) { return cmdline, nil }
+func platformKernelArgs(cmdline, _ string, _ uint64) (string, error) { return cmdline, nil }

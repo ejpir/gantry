@@ -49,22 +49,31 @@ type Config struct {
 	// corresponding inherited backing descriptor.
 	VhostShares  bool `json:"vhostShares,omitempty"`
 	HasSharedRAM bool `json:"hasSharedRAM,omitempty"`
+	// WHPXBroker selects the Windows AppContainer-device-worker topology. The
+	// opaque partition remains in a separate narrow broker process.
+	WHPXBroker                  bool   `json:"whpxBroker,omitempty"`
+	WHPXToken                   string `json:"whpxToken,omitempty"`
+	WHPXProcessorClockFrequency uint64 `json:"whpxProcessorClockFrequency,omitempty"`
 }
 
 // Assets contains the pre-opened capabilities consumed by the child. ShareConn
 // carries bounded FUSE messages and intentionally conveys no host filesystem
 // descriptor or path.
 type Assets struct {
-	ShareConn  net.Conn
-	NetConn    net.Conn
-	Console    *os.File
-	Kernel     *os.File
-	Rootfs     *os.File
-	DisksRO    []*os.File
-	Disks      []*os.File
-	SharedRAM  *os.File
-	VhostQueue []VhostQueueFiles
-	KVM        *os.File
+	ShareConn        net.Conn
+	NetConn          net.Conn
+	Console          *os.File
+	Kernel           *os.File
+	Rootfs           *os.File
+	DisksRO          []*os.File
+	Disks            []*os.File
+	SharedRAM        *os.File
+	WHPXConn         net.Conn
+	WHPXMailbox      *os.File
+	WHPXRequestEvent *os.File
+	WHPXReplyEvents  []*os.File
+	VhostQueue       []VhostQueueFiles
+	KVM              *os.File
 }
 
 // VhostQueueFiles are the two unidirectional doorbells for one virtqueue.

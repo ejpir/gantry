@@ -16,6 +16,13 @@ const (
 	winNet     = 7
 	winConsole = 8
 	winKernel  = 9
+
+	winBrokerRead           = 7
+	winBrokerWrite          = 8
+	winSharedRAM            = 9
+	winBrokerMailbox        = 10
+	winBrokerRequestEvent   = 11
+	winBrokerFirstReplySlot = 12
 )
 
 func Main() int { return NewRuntime().Main() }
@@ -60,7 +67,42 @@ func commandError(channel string, err error) int {
 
 func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error) {
 	assets := Assets{ShareConn: share}
-	slot := uintptr(winConsole)
+	netSlot := uintptr(winNet)
+	assetSlot := uintptr(winConsole)
+	if config.WHPXBroker {
+		brokerRead, err := workerproto.InheritedFile(winBrokerRead, "WHPX broker read pipe")
+		if err != nil {
+			return assets, err
+		}
+		brokerWrite, err := workerproto.InheritedFile(winBrokerWrite, "WHPX broker write pipe")
+		if err != nil {
+			_ = brokerRead.Close()
+			return assets, err
+		}
+		assets.WHPXConn = workerproto.NewPipeConn(brokerRead, brokerWrite)
+		assets.SharedRAM, err = workerproto.InheritedFile(winSharedRAM, "shared RAM")
+		if err != nil {
+			return assets, err
+		}
+		assets.WHPXMailbox, err = workerproto.InheritedFile(winBrokerMailbox, "WHPX mailbox section")
+		if err != nil {
+			return assets, err
+		}
+		assets.WHPXRequestEvent, err = workerproto.InheritedFile(winBrokerRequestEvent, "WHPX request event")
+		if err != nil {
+			return assets, err
+		}
+		for vp := 0; vp < config.VCPUs; vp++ {
+			event, eventErr := workerproto.InheritedFile(uintptr(winBrokerFirstReplySlot+vp), fmt.Sprintf("WHPX reply event %d", vp))
+			if eventErr != nil {
+				return assets, eventErr
+			}
+			assets.WHPXReplyEvents = append(assets.WHPXReplyEvents, event)
+		}
+		netSlot = uintptr(winBrokerFirstReplySlot + config.VCPUs)
+		assetSlot = netSlot + 1
+	}
+	slot := assetSlot
 	next := func(name string) *os.File {
 		file, err := workerproto.InheritedFile(slot, name)
 		slot++
@@ -70,9 +112,9 @@ func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error)
 		return file
 	}
 
-	_, netFile, err := workerproto.RecvFD(fdChannel)
+	netFile, err := workerproto.InheritedFile(netSlot, "net")
 	if err != nil {
-		return assets, fmt.Errorf("net: receive socket: %w", err)
+		return assets, fmt.Errorf("net: %w", err)
 	}
 	netConn, err := net.FileConn(netFile)
 	_ = netFile.Close()
@@ -108,8 +150,8 @@ func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error)
 		}
 		assets.Disks = append(assets.Disks, file)
 	}
-	if config.HasSharedRAM || config.HasKVM {
-		return assets, fmt.Errorf("shared RAM and KVM handles are unavailable with WHPX")
+	if config.HasKVM || (config.HasSharedRAM && !config.WHPXBroker) {
+		return assets, fmt.Errorf("unexpected shared RAM or KVM handle in WHPX worker")
 	}
 	return assets, nil
 }

@@ -141,6 +141,10 @@ func runMain(args []string) int {
 		// Hidden worker role (Phase 2): owns the hypervisor, guest RAM,
 		// devices, and the vsock data plane.
 		return vmmworker.Main()
+	case "_whpx-worker":
+		// Hidden Windows-only broker for the process-local WHPX partition.
+		// Device emulation remains in the AppContainer VMM worker.
+		return vmm.WHPXBrokerMain()
 	case "_mcp-worker":
 		// Hidden capability-limited MCP parser and policy worker. Host paths,
 		// destinations, credentials, and guest argv remain supervisor-owned.

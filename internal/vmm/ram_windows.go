@@ -15,25 +15,37 @@ import (
 // large heap before the worker can acknowledge its bootstrap; VirtualAlloc
 // reserves the address range in one operation and lets the virtio-mem path
 // commit only its small boot region initially.
-//
-// A future Windows vhost data path can use a CreateFileMapping section here;
-// reject a Unix-style backing file rather than pretending it is shared.
 func allocGuestRAM(size, initialCommit uint64, backing *os.File) ([]byte, error) {
-	if backing != nil {
-		return nil, fmt.Errorf("shared guest RAM is not implemented on Windows")
-	}
-	if size == 0 || initialCommit > size {
+	if size == 0 || initialCommit > size || uint64(uintptr(size)) != size {
 		return nil, fmt.Errorf("invalid Windows guest RAM reservation %d/%d", initialCommit, size)
 	}
-	base, err := windows.VirtualAlloc(0, uintptr(size), windows.MEM_RESERVE, windows.PAGE_READWRITE)
+	var (
+		base   uintptr
+		err    error
+		shared bool
+	)
+	if backing != nil {
+		// The supervisor creates this pagefile-backed SEC_RESERVE section and
+		// gives the same kernel object to the WHPX broker. Each process maps at
+		// an unrelated address and refers to guest memory only by offsets.
+		const fileMapReadWrite = 0x0002 | 0x0004
+		base, err = windows.MapViewOfFile(windows.Handle(backing.Fd()), fileMapReadWrite, 0, 0, uintptr(size))
+		shared = true
+	} else {
+		base, err = windows.VirtualAlloc(0, uintptr(size), windows.MEM_RESERVE, windows.PAGE_READWRITE)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reserve %d bytes of Windows guest RAM: %w", size, err)
 	}
-	// VirtualAlloc's x/sys signature returns uintptr even though the value is a
-	// live allocation base; converting that API result is the intended use.
+	// VirtualAlloc and MapViewOfFile return live allocation bases; converting
+	// those API results is the intended use.
 	ram := unsafe.Slice((*byte)(unsafe.Pointer(base)), int(size)) //nolint:govet
 	if err := commitGuestRAM(ram, 0, initialCommit); err != nil {
-		_ = windows.VirtualFree(base, 0, windows.MEM_RELEASE)
+		if shared {
+			_ = windows.UnmapViewOfFile(base)
+		} else {
+			_ = windows.VirtualFree(base, 0, windows.MEM_RELEASE)
+		}
 		return nil, err
 	}
 	return ram, nil
@@ -57,11 +69,18 @@ func commitGuestRAM(ram []byte, offset, size uint64) error {
 	return nil
 }
 
-func freeGuestRAM(ram []byte) error {
+func freeGuestRAM(ram []byte, shared bool) error {
 	if len(ram) == 0 {
 		return nil
 	}
-	if err := windows.VirtualFree(uintptr(unsafe.Pointer(&ram[0])), 0, windows.MEM_RELEASE); err != nil {
+	base := uintptr(unsafe.Pointer(&ram[0]))
+	if shared {
+		if err := windows.UnmapViewOfFile(base); err != nil {
+			return fmt.Errorf("unmap Windows shared guest RAM: %w", err)
+		}
+		return nil
+	}
+	if err := windows.VirtualFree(base, 0, windows.MEM_RELEASE); err != nil {
 		return fmt.Errorf("release Windows guest RAM reservation: %w", err)
 	}
 	return nil
