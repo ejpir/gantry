@@ -255,6 +255,7 @@ network endpoint, and virtio-vsock forwarding options. Prefer `start` and
 ```text
 gantry version
 gantry update
+gantry update --force   # reinstall a deliberately rebuilt/retagged release
 ```
 
 ## Environment variables

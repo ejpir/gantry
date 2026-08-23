@@ -72,6 +72,10 @@ the installed binary explicitly:
 $ gantry update
 ```
 
+Release tags are expected to be immutable. If a tag was deliberately rebuilt
+while testing release infrastructure, use `gantry update --force`; the build
+revision in the new binary selects a fresh guest-asset cache.
+
 Updates and release guest assets are verified with SHA-256 sidecars before
 they replace local files. Release artifacts also include Sigstore build
 provenance.
@@ -79,8 +83,11 @@ provenance.
 ## First-start downloads
 
 On first use, Gantry downloads the matching guest kernel, system root, and
-default Alpine image. Assets are cached per Gantry release in the operating
-system's user cache directory. They are verified and staged atomically.
+default Alpine image. Assets are cached per release **and host-binary build**
+in the operating system's user cache directory. They are verified and staged
+atomically. On Windows this is normally
+`%LOCALAPPDATA%\gantry\assets\<version>-<build-id>`; deleting
+`%USERPROFILE%\.gantry` does not remove that OS-managed asset cache.
 
 Set `GANTRY_ARTIFACTS` to an explicit directory for local packaging,
 development, or air-gapped installations:

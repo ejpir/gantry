@@ -409,7 +409,7 @@ jobs:
           if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
             version="$REF_NAME"
           fi
-          go build -trimpath -ldflags "-X github.com/ejpir/gantry/internal/guestasset.Version=${version}" \
+          go build -trimpath -ldflags "-X github.com/ejpir/gantry/internal/guestasset.Version=${version} -X github.com/ejpir/gantry/internal/guestasset.BuildID=${GITHUB_SHA}" \
             -o "$RUNNER_TEMP/dist/gantry-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" ./cmd/gantry
           if [[ "${GOOS}" == darwin ]]; then
             codesign --force --sign - --entitlements config/entitlements.plist \

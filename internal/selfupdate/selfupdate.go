@@ -210,6 +210,17 @@ func defaultCacheFile() string {
 // Apply downloads the latest platform binary and its checksum sidecar, then
 // replaces the current executable atomically or stages a post-exit handoff.
 func Apply(ctx context.Context, progress func(string, ...any)) (Result, error) {
+	return apply(ctx, progress, false)
+}
+
+// ApplyForce reinstalls the latest release even when its semantic version is
+// unchanged. Normal releases are immutable; this escape hatch is useful when
+// repairing or deliberately rebuilding a release under an existing tag.
+func ApplyForce(ctx context.Context, progress func(string, ...any)) (Result, error) {
+	return apply(ctx, progress, true)
+}
+
+func apply(ctx context.Context, progress func(string, ...any), force bool) (Result, error) {
 	status, err := Refresh(ctx)
 	if err != nil {
 		return Result{}, err
@@ -217,14 +228,18 @@ func Apply(ctx context.Context, progress func(string, ...any)) (Result, error) {
 	if !semver.IsValid(status.Current) {
 		return Result{}, fmt.Errorf("development builds cannot self-update; install a tagged Gantry release first")
 	}
-	if !status.Available {
+	if !status.Available && !force {
 		return Result{Previous: status.Current, Installed: status.Current}, nil
 	}
 	target, err := executablePath()
 	if err != nil {
 		return Result{}, err
 	}
-	staged, err := stageBinary(ctx, target, status.Latest, progress)
+	version := status.Latest
+	if version == "" || semver.Compare(version, status.Current) < 0 {
+		version = status.Current
+	}
+	staged, err := stageBinary(ctx, target, version, progress)
 	if err != nil {
 		return Result{}, err
 	}
@@ -239,7 +254,7 @@ func Apply(ctx context.Context, progress func(string, ...any)) (Result, error) {
 	}
 	committed = true
 	return Result{
-		Previous: status.Current, Installed: status.Latest, Executable: target,
+		Previous: status.Current, Installed: version, Executable: target,
 	}, nil
 }
 

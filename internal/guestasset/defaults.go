@@ -31,7 +31,10 @@ var (
 	}
 )
 
-var releaseVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$`)
+var (
+	releaseVersionRE = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9._-]+)?$`)
+	releaseBuildIDRE = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+)
 
 // Path returns the conventional location of a generated guest artifact.
 // GANTRY_ARTIFACTS selects an explicit artifact directory. In a source
@@ -65,18 +68,25 @@ func releaseAssetPath(name string) string {
 		return Path(name)
 	}
 	if cache, err := userCacheDir(); err == nil && cache != "" {
-		return filepath.Join(cache, "gantry", "assets", Version, name)
+		return filepath.Join(cache, "gantry", "assets", releaseAssetCacheKey(), name)
 	}
 	// UserCacheDir should be available on every supported host. Keep a
 	// user-writable fallback for unusual stripped-down environments instead of
 	// falling back to the process cwd (which may be Program Files on Windows).
 	if home, err := userHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".gantry", "assets", Version, name)
+		return filepath.Join(home, ".gantry", "assets", releaseAssetCacheKey(), name)
 	}
 	// The OS temp directory is the final user-writable fallback. Isolate its
 	// otherwise shared namespace by account; ensure() verifies and hardens this
 	// root before trusting any existing artifact beneath it.
-	return filepath.Join(systemTempDir(), fallbackAssetDirName(), "assets", Version, name)
+	return filepath.Join(systemTempDir(), fallbackAssetDirName(), "assets", releaseAssetCacheKey(), name)
+}
+
+func releaseAssetCacheKey() string {
+	if !releaseBuildIDRE.MatchString(BuildID) {
+		return Version
+	}
+	return Version + "-" + strings.ToLower(BuildID)
 }
 
 func fallbackAssetDirName() string {
@@ -101,7 +111,12 @@ func IsManagedReleaseKernel(path string) bool {
 		return false
 	}
 	versionDir := filepath.Dir(filepath.Clean(path))
-	if !releaseVersionRE.MatchString(filepath.Base(versionDir)) {
+	versionName := filepath.Base(versionDir)
+	if split := strings.LastIndex(versionName, "-"); split > 0 &&
+		releaseVersionRE.MatchString(versionName[:split]) && releaseBuildIDRE.MatchString(versionName[split+1:]) {
+		versionName = versionName[:split]
+	}
+	if !releaseVersionRE.MatchString(versionName) {
 		return false
 	}
 	assetsDir := filepath.Dir(versionDir)
