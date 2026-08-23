@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -26,3 +27,5 @@ func brokerRoundTrip([]byte) (credproto.Response, error) {
 func dialVsockFile(uint32, time.Duration) (*os.File, error) {
 	return nil, fmt.Errorf("vsock is only reachable from inside a gantry guest")
 }
+
+func interruptMCPConn(conn io.ReadWriteCloser) { _ = conn.Close() }

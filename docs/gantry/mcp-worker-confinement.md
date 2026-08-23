@@ -349,8 +349,11 @@ token, assigns it to a kill-on-close, one-process Job, and only then resumes its
 primary thread. It receives authenticated inherited pipe handles but no
 filesystem or socket capabilities. Active probes verify fs-read, fs-write,
 net-dial, and exec denial; `required` fails closed if any property is not
-confirmed. The capability-bearing Windows network worker is a separate role
-and does not widen the MCP token.
+confirmed. The supervisor retains each path-addressed AF_UNIX endpoint and
+relays it through a connected Winsock pair transferred to the VMM worker;
+Windows AF_UNIX sockets are not duplicated across the process boundary. The
+capability-bearing Windows network worker is a separate role and does not
+widen the MCP token.
 
 ## In-guest filesystem helper hardening
 

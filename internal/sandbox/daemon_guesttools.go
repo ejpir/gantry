@@ -58,9 +58,10 @@ func hasBoundSecrets(names []string) bool {
 
 // deliverGuestTools stages and installs gantry-guest when the sandbox
 // needs it: bound secrets (credhelper mode), OAuth custody (oauth login
-// mode), or the MCP gateway (mcp-proxy / mcp-serve modes). It runs concurrently with readiness publication — never
-// on the boot path — and flips broker.guestToolsReady when the helper is
-// in place; sessions started after that point get the git wiring.
+// mode), or the MCP gateway (mcp-proxy / mcp-serve modes). Ordinary helper
+// delivery runs concurrently with readiness; MCP startup waits for it because
+// advertising a gateway without its guest proxy would be a false ready state.
+// broker.guestToolsReady flips only after content verification.
 func (d *daemonRuntime) deliverGuestTools() {
 	need := hasBoundSecrets(d.store.Snapshot().SecretNames) || d.cfg.OAuthCustodyEnabled() || d.cfg.MCP
 	if d.broker == nil || !need {
@@ -145,7 +146,7 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte) err
 		}
 	}()
 
-	script := fmt.Sprintf("mkdir -p %[1]s && cp %[2]s/gantry-guest %[1]s/gantry-guest && chmod 755 %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper",
+	script := fmt.Sprintf("mkdir -p %[1]s && cp %[2]s/gantry-guest %[1]s/gantry-guest.tmp && chmod 755 %[1]s/gantry-guest.tmp && mv %[1]s/gantry-guest.tmp %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper",
 		guestToolsDirGuest, ctrPath)
 	if _, _, err := d.broker.internalExec(strings.NewReader(""), []string{"sh", "-c", script},
 		guestToolsTimeout, 4<<10, guestToolsDeliverOp); err != nil {

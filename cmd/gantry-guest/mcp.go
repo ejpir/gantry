@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
@@ -53,21 +54,183 @@ func runMCPProxy() int {
 }
 
 func proxyMCP(conn io.ReadWriteCloser, stdin io.Reader, stdout io.Writer, grace time.Duration) {
-	defer func() { _ = conn.Close() }()
-	// Agent → gateway. Keep the connection open briefly after stdin EOF so
-	// pipelined requests can finish and late responses can drain. Do not
-	// half-close AF_VSOCK here: the VMM's stream bridge can observe the FIN
-	// before forwarding data already queued behind the first frame, dropping
-	// the rest of a short pipelined session.
+	defer interruptMCPConn(conn)
+	tracker := newMCPProxyTracker()
+	inputObserver := newMCPLineObserver(tracker.observeRequest)
+	outputObserver := newMCPLineObserver(tracker.observeResponse)
+
+	// Agent → gateway. Do not half-close AF_VSOCK here: the VMM's stream
+	// bridge can observe the FIN before forwarding data already queued behind
+	// the first frame. Instead, retain the connection until every trackable
+	// request has received its response. Malformed/non-JSON input falls back to
+	// the bounded grace period because its completion cannot be correlated.
 	go func() {
-		_, _ = io.Copy(conn, stdin)
-		time.Sleep(grace)
-		_ = conn.Close()
+		_, _ = io.Copy(conn, io.TeeReader(stdin, inputObserver))
+		inputObserver.finish()
+		tracker.finishInput()
+		tracker.wait(grace)
+		interruptMCPConn(conn)
 	}()
 
-	// Gateway → agent: until the gateway ends the session or the grace
-	// timer above closes the connection.
-	_, _ = io.Copy(stdout, conn)
+	// Gateway → agent: observe only bytes successfully written to stdout, then
+	// release the connection as soon as stdin is closed and no request IDs are
+	// outstanding. interruptMCPConn uses shutdown(2) for raw AF_VSOCK files so
+	// a blocked Read is actually woken rather than retaining the exec forever.
+	_, _ = io.Copy(io.MultiWriter(stdout, outputObserver), conn)
+	outputObserver.finish()
+}
+
+type mcpProxyTracker struct {
+	mu          sync.Mutex
+	pending     map[string]int
+	inputDone   bool
+	trackedIDs  bool
+	untrackable bool
+	complete    chan struct{}
+	completeOne sync.Once
+}
+
+func newMCPProxyTracker() *mcpProxyTracker {
+	return &mcpProxyTracker{pending: make(map[string]int), complete: make(chan struct{})}
+}
+
+func (tracker *mcpProxyTracker) observeRequest(line []byte) {
+	var message struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+	}
+	if json.Unmarshal(line, &message) != nil || message.JSONRPC != "2.0" || message.Method == "" {
+		tracker.markUntrackable()
+		return
+	}
+	key, hasID := mcpProxyIDKey(message.ID)
+	if !hasID {
+		return
+	}
+	tracker.mu.Lock()
+	tracker.trackedIDs = true
+	tracker.pending[key]++
+	tracker.mu.Unlock()
+}
+
+func (tracker *mcpProxyTracker) observeResponse(line []byte) {
+	var message struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(line, &message) != nil || message.JSONRPC != "2.0" {
+		return
+	}
+	key, hasID := mcpProxyIDKey(message.ID)
+	if !hasID {
+		return
+	}
+	tracker.mu.Lock()
+	if count := tracker.pending[key]; count > 1 {
+		tracker.pending[key] = count - 1
+	} else if count == 1 {
+		delete(tracker.pending, key)
+	}
+	tracker.checkCompleteLocked()
+	tracker.mu.Unlock()
+}
+
+func (tracker *mcpProxyTracker) markUntrackable() {
+	tracker.mu.Lock()
+	tracker.untrackable = true
+	tracker.mu.Unlock()
+}
+
+func (tracker *mcpProxyTracker) finishInput() {
+	tracker.mu.Lock()
+	tracker.inputDone = true
+	tracker.checkCompleteLocked()
+	tracker.mu.Unlock()
+}
+
+func (tracker *mcpProxyTracker) checkCompleteLocked() {
+	if tracker.inputDone && tracker.trackedIDs && !tracker.untrackable && len(tracker.pending) == 0 {
+		tracker.completeOne.Do(func() { close(tracker.complete) })
+	}
+}
+
+func (tracker *mcpProxyTracker) wait(grace time.Duration) {
+	if grace <= 0 {
+		grace = proxyGraceAfterStdinEOF
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-tracker.complete:
+	case <-timer.C:
+	}
+}
+
+func mcpProxyIDKey(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", false
+	}
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return "", false
+	}
+	return string(canonical), true
+}
+
+type mcpLineObserver struct {
+	line     []byte
+	overflow bool
+	observe  func([]byte)
+}
+
+func newMCPLineObserver(observe func([]byte)) *mcpLineObserver {
+	return &mcpLineObserver{observe: observe}
+}
+
+func (observer *mcpLineObserver) Write(data []byte) (int, error) {
+	written := len(data)
+	for len(data) != 0 {
+		newline := bytes.IndexByte(data, '\n')
+		part := data
+		if newline >= 0 {
+			part = data[:newline]
+		}
+		if !observer.overflow {
+			if len(observer.line)+len(part) > mcpproto.MaxFrameBytes {
+				observer.line = nil
+				observer.overflow = true
+			} else {
+				observer.line = append(observer.line, part...)
+			}
+		}
+		if newline < 0 {
+			break
+		}
+		observer.emit()
+		data = data[newline+1:]
+	}
+	return written, nil
+}
+
+func (observer *mcpLineObserver) finish() {
+	if observer.overflow || len(observer.line) != 0 {
+		observer.emit()
+	}
+}
+
+func (observer *mcpLineObserver) emit() {
+	if observer.overflow {
+		observer.observe(nil)
+	} else if line := bytes.TrimRight(observer.line, "\r"); len(line) != 0 {
+		observer.observe(line)
+	}
+	observer.line = nil
+	observer.overflow = false
 }
 
 // --- mcp-serve filesystem ------------------------------------------------

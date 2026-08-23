@@ -79,6 +79,16 @@ func dialVsockFile(port uint32, timeout time.Duration) (*os.File, error) {
 	return os.NewFile(uintptr(fd), "vsock"), nil
 }
 
+func interruptMCPConn(conn io.ReadWriteCloser) {
+	if file, ok := conn.(*os.File); ok {
+		// Closing an os.File does not reliably interrupt another goroutine
+		// blocked in a raw AF_VSOCK read. Shutdown wakes that read before Close
+		// releases the descriptor, preventing mcp-proxy from pinning its exec.
+		_ = unix.Shutdown(int(file.Fd()), unix.SHUT_RDWR)
+	}
+	_ = conn.Close()
+}
+
 // readLineBounded reads one '\n'-terminated line, refusing more than max
 // bytes. Local to the guest so cmd/gantry-guest needs no controlproto
 // import (which would drag in the control plane's dependency tree). Only

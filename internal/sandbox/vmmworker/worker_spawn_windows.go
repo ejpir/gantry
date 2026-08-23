@@ -3,9 +3,11 @@ package vmmworker
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/worker"
@@ -280,21 +282,57 @@ func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 		var token [workerproto.FDTokenLen]byte
 		copy(token[:], decoded)
 		socket := filepath.Join(dir, fmt.Sprintf("%d.sock", body.Port))
-		conn, err := net.DialTimeout("unix", socket, 3*time.Second)
+		hostConn, err := net.DialTimeout("unix", socket, 3*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("vsock.forward %s: %w", socket, err)
 		}
-		file, err := worker.ConnFile(conn)
+		// WSADuplicateSocket can reconstruct a Windows AF_UNIX socket in
+		// another process, but on supported Server 2022 hosts that socket does
+		// not reliably carry bytes after the source process closes its copy.
+		// Transfer one end of a connected Winsock TCP pair instead and retain
+		// all host-path/AF_UNIX authority in this supervisor relay.
+		supervisor, target, err := worker.SocketpairConns()
 		if err != nil {
-			_ = conn.Close()
+			_ = hostConn.Close()
+			return nil, fmt.Errorf("vsock.forward relay: %w", err)
+		}
+		file, err := worker.ConnFile(target)
+		_ = target.Close()
+		if err != nil {
+			_ = supervisor.Close()
+			_ = hostConn.Close()
 			return nil, err
 		}
 		err = w.sendFD(token, file)
 		_ = file.Close()
-		_ = conn.Close()
 		if err != nil {
+			_ = supervisor.Close()
+			_ = hostConn.Close()
 			return nil, fmt.Errorf("vsock.forward: %w", err)
 		}
+		go relayWindowsVsock(supervisor, hostConn)
 		return nil, nil
 	}
+}
+
+func relayWindowsVsock(left, right net.Conn) {
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = left.Close()
+			_ = right.Close()
+		})
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(left, right)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(right, left)
+		done <- struct{}{}
+	}()
+	<-done
+	closeBoth()
+	<-done
 }
