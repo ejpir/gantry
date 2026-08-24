@@ -80,12 +80,14 @@ $ gantry stop dev
 $ gantry export dev -o dev.oci.tar
 ```
 
-Export requires a stopped sandbox so the ext4 writable layer is clean and
-consistent. It is implemented with pure-Go EROFS and ext4 readers and does not
-need root, loop mounts, Docker, or containerd. Gantry converts overlayfs
-whiteouts and opaque directories into their OCI layer equivalents and
-preserves ownership, modes, symlinks, device metadata, and supported extended
-attributes. Host shares are separate mounts and are not copied into the image.
+Export requires a stopped sandbox and an exclusively locked ext4 writable
+layer. A read-only in-memory view replays any committed journal metadata; the
+source disk is not changed. The export path uses pure-Go EROFS and ext4
+readers and does not need root, loop mounts, Docker, or containerd. Gantry
+converts overlayfs whiteouts and opaque directories into their OCI layer
+equivalents and preserves ownership, modes, symlinks, device metadata, and
+supported extended attributes. Host shares are separate mounts and are not
+copied into the image.
 
 The archive defaults to the local image name
 `gantry-export/dev:latest`. Choose a team name or version at export time when

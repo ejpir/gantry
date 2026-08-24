@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	backendfile "github.com/diskfs/go-diskfs/backend/file"
 	"github.com/diskfs/go-diskfs/filesystem/ext4"
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/ext4view"
 	erofs "github.com/erofs/go-erofs"
 )
 
@@ -449,7 +449,10 @@ func writeExt4UpperLayer(writer *tar.Writer, layer *os.File) error {
 	if err != nil {
 		return err
 	}
-	storage := backendfile.New(layer, true)
+	storage, _, err := ext4view.New(layer)
+	if err != nil {
+		return err
+	}
 	filesystem, err := ext4.Read(storage, info.Size(), 0, 512)
 	if err != nil {
 		return err
@@ -570,9 +573,12 @@ func overlayAttributes(attributes map[string][]byte) (bool, error) {
 				opaque = true
 			}
 			delete(attributes, name)
-		case "trusted.overlay.origin", "user.overlay.origin":
-			// Origin file handles are overlay implementation metadata and are
-			// meaningless once the upper is represented as an OCI layer.
+		case "trusted.overlay.origin", "user.overlay.origin",
+			"trusted.overlay.uuid", "user.overlay.uuid",
+			"trusted.overlay.impure", "user.overlay.impure":
+			// Origin handles, upper UUIDs, and the impure marker are overlay
+			// implementation metadata and are meaningless once the upper is
+			// represented as an OCI layer.
 			delete(attributes, name)
 		case "trusted.overlay.redirect", "user.overlay.redirect", "trusted.overlay.metacopy", "user.overlay.metacopy":
 			return false, fmt.Errorf("unsupported overlay metadata %s; export would not reproduce the merged filesystem", name)

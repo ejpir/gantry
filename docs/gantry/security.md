@@ -168,9 +168,10 @@ checks its association with the image to reduce accidental reuse, but it is
 not a cryptographically sealed snapshot. Do not attach one writable layer to
 multiple running VMs.
 
-`gantry export` requires the sandbox to be stopped, verifies that the ext4
-layer was cleanly unmounted, and holds its exclusive disk lock while producing
-an OCI archive. Host shares are not included. Every file persisted by guest
+`gantry export` requires the sandbox to be stopped, verifies the ext4 health
+state, replays committed journal metadata into a read-only in-memory view, and
+holds its exclusive disk lock while producing an OCI archive. The source disk
+is not modified. Host shares are not included. Every file persisted by guest
 software is included, however, so an export may contain login state, keys,
 history, or other credentials. Exports are atomically published with private
 permissions and a protected Windows DACL, but must still be reviewed before
