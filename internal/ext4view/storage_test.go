@@ -3,6 +3,7 @@ package ext4view
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -142,6 +143,39 @@ func TestNewRejectsUnsupportedJournalFeatures(t *testing.T) {
 	}
 }
 
+func TestReaderMaterializesSparseHolesAndUnwrittenExtents(t *testing.T) {
+	path := makeJournalImage(t, true, 0)
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, _, err := New(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = view.Close() }()
+	reader, err := NewReader(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := reader.OpenRegularFile(11, 4*testBlockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(opened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, 4*testBlockSize)
+	copy(want[testBlockSize:2*testBlockSize], bytes.Repeat([]byte{'D'}, testBlockSize))
+	if !bytes.Equal(data, want) {
+		t.Fatal("sparse file data did not preserve initialized extents and zero-fill holes")
+	}
+}
+
 func TestReadAtSynthesizesChecksumsOnlyWithoutMetadataCSum(t *testing.T) {
 	path := makeJournalImage(t, true, 0)
 	file, err := os.Open(path)
@@ -238,15 +272,32 @@ func makeJournalImage(t *testing.T, committed bool, journalFeatures uint32) stri
 	binary.LittleEndian.PutUint16(extentRoot[4:6], 4)
 	binary.LittleEndian.PutUint16(extentRoot[12+4:12+6], 8)
 	binary.LittleEndian.PutUint32(extentRoot[12+8:12+12], 16)
-	// Deliberately stale checksum fields on inode 11 exercise the compatibility
-	// patch for filesystems created without metadata_csum.
+	// Inode 11 is a sparse regular file: a hole, one initialized extent, one
+	// unwritten extent, and a trailing hole. It also has deliberately stale
+	// checksum fields to exercise the compatibility patch for filesystems
+	// created without metadata_csum.
 	inode11 := inodeTable[10*256 : 11*256]
+	binary.LittleEndian.PutUint16(inode11[0x00:0x02], 0o100600)
+	binary.LittleEndian.PutUint32(inode11[0x04:0x08], 4*testBlockSize)
+	binary.LittleEndian.PutUint32(inode11[0x20:0x24], ext4ExtentsInodeFlag)
+	fileExtentRoot := inode11[0x28:0x64]
+	binary.LittleEndian.PutUint16(fileExtentRoot[0:2], 0xf30a)
+	binary.LittleEndian.PutUint16(fileExtentRoot[2:4], 2)
+	binary.LittleEndian.PutUint16(fileExtentRoot[4:6], 4)
+	binary.LittleEndian.PutUint32(fileExtentRoot[12:16], 1)
+	binary.LittleEndian.PutUint16(fileExtentRoot[16:18], 1)
+	binary.LittleEndian.PutUint32(fileExtentRoot[20:24], 6)
+	binary.LittleEndian.PutUint32(fileExtentRoot[24:28], 2)
+	binary.LittleEndian.PutUint16(fileExtentRoot[28:30], 0x8001)
+	binary.LittleEndian.PutUint32(fileExtentRoot[32:36], 7)
 	binary.LittleEndian.PutUint32(inode11[0x64:0x68], 7)
 	binary.LittleEndian.PutUint32(inode11[0x7c:0x80], 0xdeadbeef)
 	writeBlock(4, inodeTable[:testBlockSize])
 	writeBlock(5, inodeTable[testBlockSize:])
 
 	writeBlock(3, bytes.Repeat([]byte{'H'}, testBlockSize))
+	writeBlock(6, bytes.Repeat([]byte{'D'}, testBlockSize))
+	writeBlock(7, bytes.Repeat([]byte{'U'}, testBlockSize)) // unwritten: must read as zero
 	journalSuper := make([]byte, testBlockSize)
 	binary.BigEndian.PutUint32(journalSuper[0:4], jbd2Magic)
 	binary.BigEndian.PutUint32(journalSuper[4:8], jbd2SuperblockV2)

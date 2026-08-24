@@ -85,11 +85,12 @@ layer. A read-only in-memory view replays any committed journal metadata; the
 source disk is not changed. The export path uses pure-Go EROFS and ext4
 readers and does not need root, loop mounts, Docker, or containerd. Gantry
 converts overlayfs whiteouts and opaque directories into their OCI layer
-equivalents and preserves ownership, modes, symlinks, device metadata, and
-supported extended attributes. Host shares are separate mounts and are not
-copied into the image. Large exports continuously report processed and
-compressed sizes, throughput, elapsed time, archive-copy percentage, and the
-final disk-sync phase.
+equivalents and preserves ownership, modes, symlinks, sparse-file and
+unwritten-extent zero semantics, device metadata, and supported extended
+attributes. Host shares are separate mounts and are not copied into the image.
+Large exports
+continuously report processed and compressed sizes, throughput, elapsed time,
+archive-copy percentage, and the final disk-sync phase.
 
 The archive defaults to the local image name
 `gantry-export/dev:latest`. Choose a team name or version at export time when

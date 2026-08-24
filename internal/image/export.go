@@ -606,14 +606,18 @@ func writeExt4UpperLayer(writer *tar.Writer, layer *os.File) error {
 		return err
 	}
 	defer func() { _ = filesystem.Close() }()
+	fileReader, err := ext4view.NewReader(storage)
+	if err != nil {
+		return err
+	}
 	if _, err := filesystem.Stat("upper"); err != nil {
 		return fmt.Errorf("writable layer has no /upper directory: %w", err)
 	}
 	hardlinks := map[uint32]string{}
-	return walkExt4Upper(writer, filesystem, "upper", "", hardlinks)
+	return walkExt4Upper(writer, filesystem, fileReader, "upper", "", hardlinks)
 }
 
-func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, sourceDir, archiveDir string, hardlinks map[uint32]string) error {
+func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, fileReader *ext4view.Reader, sourceDir, archiveDir string, hardlinks map[uint32]string) error {
 	attributes, err := filesystem.GetXattr(sourceDir)
 	if err != nil {
 		return err
@@ -687,9 +691,9 @@ func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, sourceDir, a
 		}
 		var data io.ReadCloser
 		if entryInfo.Mode().IsRegular() {
-			opened, err := filesystem.Open(sourcePath)
+			opened, err := fileReader.OpenRegularFile(stat.Ino, entryInfo.Size())
 			if err != nil {
-				return err
+				return fmt.Errorf("open sparse-aware ext4 file %s: %w", sourcePath, err)
 			}
 			data = opened
 		}
@@ -697,7 +701,7 @@ func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, sourceDir, a
 			return err
 		}
 		if entryInfo.IsDir() {
-			if err := walkExt4Upper(writer, filesystem, sourcePath, archivePath, hardlinks); err != nil {
+			if err := walkExt4Upper(writer, filesystem, fileReader, sourcePath, archivePath, hardlinks); err != nil {
 				return err
 			}
 		}
