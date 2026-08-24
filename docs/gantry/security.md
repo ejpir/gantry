@@ -168,13 +168,22 @@ checks its association with the image to reduce accidental reuse, but it is
 not a cryptographically sealed snapshot. Do not attach one writable layer to
 multiple running VMs.
 
+`gantry export` requires the sandbox to be stopped, verifies that the ext4
+layer was cleanly unmounted, and holds its exclusive disk lock while producing
+an OCI archive. Host shares are not included. Every file persisted by guest
+software is included, however, so an export may contain login state, keys,
+history, or other credentials. Exports are atomically published with private
+permissions and a protected Windows DACL, but must still be reviewed before
+being shared.
+
 ## Known limitations
 
 - Gantry is experimental and has not established a stable security boundary
   for hostile public multi-tenancy.
 - Windows support is experimental; strict mode does not support host-loopback
   access, published ports, `-gvproxy`, or host-path packet capture.
-- Snapshots are not supported.
+- Live/incremental snapshots and snapshot rollback are not supported; portable
+  OCI export requires a stopped sandbox.
 - The embedded guest network is IPv4-only.
 - A default policy permits the public internet.
 - Proxy enforcement targets direct web traffic on TCP 80/443 and UDP 443; it

@@ -44,11 +44,12 @@ usage:
   gantry tui                        # interactive local sandbox dashboard
   gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
-  gantry image <verb>               # OCI image cache: ls|pull|rm|prune|login|logout|credentials
+  gantry image <verb>               # OCI images: ls|pull|import|rm|prune|login|logout|credentials
   gantry share <verb>               # live host shares: add|remove|ls
   gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
   gantry net-policy <verb>          # live egress policy: set|default|show
   gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
+  gantry export [options] <name>    # package a stopped sandbox as a portable OCI archive
   gantry stop <name>                # stop a sandbox
   gantry resume <name>              # boot a stopped sandbox from saved config
   gantry delete <name>              # stop + remove a sandbox
@@ -56,11 +57,13 @@ usage:
   gantry update                     # update Gantry in place
 
 -image accepts an OCI reference (debian:bookworm-slim,
-ghcr.io/org/app@sha256:...), an OCI layout dir, a docker save tar, or a
-plain .erofs file. Examples:
+ghcr.io/org/app@sha256:...), an OCI layout directory/archive, a Docker save
+tar, or a plain .erofs file. Examples:
   gantry start dev -image alpine:latest
   gantry exec -image debian:bookworm-slim -- /bin/sh
   gantry image pull ghcr.io/org/app:latest
+  gantry export dev -o dev.oci.tar
+  gantry image import dev.oci.tar
 Run 'gantry start --help' or 'gantry exec --help' for all flags.
 `)
 }
@@ -217,6 +220,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return controlcmd.CmdNetworkPolicy(argv), true
 	case "import":
 		return sandbox.CmdImport(argv), true
+	case "export":
+		return sandbox.CmdExport(argv), true
 	default:
 		return 0, false
 	}

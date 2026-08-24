@@ -17,7 +17,7 @@ import (
 //
 //  1. existing file ending in .erofs → use as-is (no config available)
 //  2. directory containing oci-layout → OCI layout source
-//  3. existing file that parses as a docker save tar → docker save source
+//  3. existing file that parses as an OCI archive or docker save tar → local source
 //  4. otherwise → image reference; registry pull (Phase 2)
 //
 // Resolved images are cached by manifest digest in the Store.
@@ -227,7 +227,7 @@ func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		}
 		load = func() (*pulled, error) { return loadOCILayout(ref, ref, arch, st.newTempDir) }
 	} else if gutil.FileExists(ref) {
-		load = func() (*pulled, error) { return loadDockerSave(ref, ref, arch, st.newTempDir) }
+		load = func() (*pulled, error) { return loadImageArchive(ref, ref, arch, st.newTempDir) }
 	} else if looksLikeMissingPath(ref) {
 		// An explicit path that doesn't exist must not fall through to
 		// the registry branch: ParseRef would mangle "./pi-agent.tar"
@@ -275,34 +275,88 @@ func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 		return nil, err
 	}
 	defer p.Close()
+	return cachePulled(st, p, ref, arch, logf, say)
+}
 
-	// fast path: exact digest already cached (index lookup is for refs;
-	// the digest check covers re-pulls of the same content under any ref)
+// ImportArchive imports a local OCI image-layout directory, OCI archive, or
+// Docker save archive under a reusable local reference. When reference is
+// empty, the archive must provide org.opencontainers.image.ref.name or a
+// Docker RepoTag. No registry lookup is performed.
+func ImportArchive(source, reference, arch string, st *Store, logf func(string, ...any)) (*Resolved, error) {
+	if st == nil {
+		st = DefaultStore()
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return nil, fmt.Errorf("image archive %s: %w", source, err)
+	}
+	var pulledImage *pulled
+	if info.IsDir() {
+		if !gutil.FileExists(filepath.Join(source, "oci-layout")) {
+			return nil, fmt.Errorf("%s is a directory but has no oci-layout marker", source)
+		}
+		pulledImage, err = loadOCILayout(source, source, arch, st.newTempDir)
+	} else {
+		pulledImage, err = loadImageArchive(source, source, arch, st.newTempDir)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer pulledImage.Close()
+	if reference == "" {
+		reference = pulledImage.ref
+		if reference == "" || reference == source {
+			return nil, errors.New("image archive has no local reference; pass -name REF")
+		}
+	}
+	if err := validateLocalReference(reference); err != nil {
+		return nil, fmt.Errorf("invalid imported image reference %q: %w", reference, err)
+	}
+	say := func(format string, args ...any) {
+		if logf != nil {
+			logf(format, args...)
+		}
+	}
+	return cachePulled(st, pulledImage, reference, arch, logf, say)
+}
+
+func cachePulled(st *Store, pulledImage *pulled, reference, arch string, logf func(string, ...any), say func(string, ...any)) (*Resolved, error) {
+	// Fast path: exact digest already cached (index lookup is for refs; the
+	// digest check covers imports or pulls of the same content under any ref).
 	built := false
-	m, err := st.ensure(p.digest, func(outPath string) (*Meta, error) {
+	metadata, err := st.ensure(pulledImage.digest, func(outPath string) (*Meta, error) {
 		built = true
-		say("building %s → %s (linux/%s)", ref, shortDigest(p.digest), arch)
-		if _, err := Build(outPath, p.layers, p.config, logf); err != nil {
+		say("building %s → %s (linux/%s)", reference, shortDigest(pulledImage.digest), arch)
+		if _, err := Build(outPath, pulledImage.layers, pulledImage.config, logf); err != nil {
 			return nil, err
 		}
-		fi, _ := os.Stat(outPath)
+		info, _ := os.Stat(outPath)
 		var size int64
-		if fi != nil {
-			size = fi.Size()
+		if info != nil {
+			size = info.Size()
 		}
 		return &Meta{
-			Ref: ref, Digest: p.digest, RefDigest: p.refDigest, Arch: arch,
-			Created: nowRFC(), Size: size, Config: p.config,
+			Ref: reference, Digest: pulledImage.digest, RefDigest: pulledImage.refDigest, Arch: arch,
+			Created: nowRFC(), Size: size, Config: pulledImage.config,
 		}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	// ensure returns existing metadata when the same content was already
+	// cached under another ref. Record this imported/pulled alias as well.
+	if metadata.Ref != reference {
+		alias := *metadata
+		alias.Ref = reference
+		if err := st.indexRef(&alias, pulledImage.digest); err != nil {
+			return nil, err
+		}
+	}
 	return &Resolved{
-		Digest: p.digest,
-		Path:   st.ErofsPath(p.digest),
-		Config: m.Config,
-		Ref:    ref,
+		Digest: pulledImage.digest,
+		Path:   st.ErofsPath(pulledImage.digest),
+		Config: metadata.Config,
+		Ref:    reference,
 		Cached: !built,
 	}, nil
 }

@@ -12,6 +12,7 @@ Use `-image` with any of these inputs:
 - A digest-pinned reference, such as
   `ghcr.io/example/app@sha256:...`.
 - A local OCI image-layout directory containing `oci-layout`.
+- An OCI image-layout tar archive.
 - A Docker save archive.
 - A prebuilt `.erofs` filesystem.
 
@@ -67,6 +68,58 @@ For a different target architecture:
 
 ```console
 $ gantry image pull -platform linux/amd64 alpine:latest
+```
+
+## Export and share a sandbox
+
+Stop a persistent sandbox, then package its immutable base image and writable
+filesystem changes into a standard OCI image-layout archive:
+
+```console
+$ gantry stop dev
+$ gantry export dev -o dev.oci.tar
+```
+
+Export requires a stopped sandbox so the ext4 writable layer is clean and
+consistent. It is implemented with pure-Go EROFS and ext4 readers and does not
+need root, loop mounts, Docker, or containerd. Gantry converts overlayfs
+whiteouts and opaque directories into their OCI layer equivalents and
+preserves ownership, modes, symlinks, device metadata, and supported extended
+attributes. Host shares are separate mounts and are not copied into the image.
+
+The archive defaults to the local image name
+`gantry-export/dev:latest`. Choose a team name or version at export time when
+needed:
+
+```console
+$ gantry export dev -o dev-v3.oci.tar --name team/dev:v3
+```
+
+A colleague can import the archive into Gantry's local cache and start a new
+sandbox without registry access:
+
+```console
+$ gantry image import dev-v3.oci.tar
+$ gantry start colleague-dev -image team/dev:v3
+```
+
+Use `gantry image import -name team/dev:v3 ARCHIVE` for an OCI archive that
+does not contain a reference, or to override the archived reference. Imported
+references are local cache names; they are not pushed to a registry.
+
+> [!WARNING]
+> An export contains every file persisted inside the sandbox. This can include
+> package-manager credentials, SSH keys, agent login state, shell history, and
+> other secrets created by guest programs. The archive is written with mode
+> `0600`, but you must review or clean the sandbox before sharing it. Gantry's
+> host-injected secret values are not stored in `sandbox.json`; files that guest
+> software deliberately persists are part of the exported filesystem.
+
+The archive can also be used directly as an image source without a separate
+cache name:
+
+```console
+$ gantry start colleague-dev -image ./dev-v3.oci.tar
 ```
 
 ## Inspect and remove images

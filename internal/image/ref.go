@@ -81,6 +81,46 @@ func ParseRef(s string) (Ref, error) {
 	return r, nil
 }
 
+// validateLocalReference accepts the tag-shaped names used for imported OCI
+// archives. A digest-pinned alias would claim that the user-supplied digest is
+// the exported manifest digest and would no longer resolve through the cache
+// when those values differ.
+func validateLocalReference(reference string) error {
+	parsed, err := ParseRef(reference)
+	if err != nil {
+		return err
+	}
+	if parsed.Digest != "" {
+		return fmt.Errorf("local imported image references must use a tag, not a digest")
+	}
+	for _, component := range strings.Split(parsed.Repo, "/") {
+		if component == "" || !asciiAlphaNumeric(component[0]) || !asciiAlphaNumeric(component[len(component)-1]) {
+			return fmt.Errorf("repository components must start and end with a lowercase letter or digit")
+		}
+		for index := range component {
+			character := component[index]
+			if !asciiAlphaNumeric(character) && character != '.' && character != '_' && character != '-' {
+				return fmt.Errorf("repository contains invalid character %q", character)
+			}
+		}
+	}
+	if parsed.Tag == "" || len(parsed.Tag) > 128 ||
+		(!asciiAlphaNumeric(parsed.Tag[0]) && parsed.Tag[0] != '_' && (parsed.Tag[0] < 'A' || parsed.Tag[0] > 'Z')) {
+		return fmt.Errorf("invalid local image tag")
+	}
+	for index := range parsed.Tag {
+		character := parsed.Tag[index]
+		if !asciiAlphaNumeric(character) && character != '_' && character != '.' && character != '-' && (character < 'A' || character > 'Z') {
+			return fmt.Errorf("tag contains invalid character %q", character)
+		}
+	}
+	return nil
+}
+
+func asciiAlphaNumeric(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
+}
+
 // isLoopbackRegistry reports whether the registry is a loopback address —
 // the one case where plain HTTP (and credentials over it) is acceptable,
 // matching Docker's own insecure exception.

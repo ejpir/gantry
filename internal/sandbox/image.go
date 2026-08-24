@@ -23,10 +23,10 @@ import (
 	"golang.org/x/term"
 )
 
-// CmdImage implements `gantry image <ls|pull|rm|prune|login|logout|credentials>`.
+// CmdImage implements `gantry image <ls|pull|import|rm|prune|login|logout|credentials>`.
 func CmdImage(argv []string) int {
 	if len(argv) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: gantry image <ls|pull|rm|prune|login|logout|credentials>")
+		fmt.Fprintln(os.Stderr, "usage: gantry image <ls|pull|import|rm|prune|login|logout|credentials>")
 		return 2
 	}
 	st := image.DefaultStore()
@@ -43,32 +43,66 @@ func CmdImage(argv []string) int {
 			fmt.Println("(no cached images — `gantry image pull REF` or -image with a reference builds one)")
 		}
 		return 0
-	case "pull":
+	case "pull", "import":
+		verb := argv[0]
 		arch := hostGuestArch()
-		var ref string
+		var source, localName string
 		for i := 1; i < len(argv); i++ {
-			if argv[i] == "-platform" || argv[i] == "--platform" {
+			switch argv[i] {
+			case "-platform", "--platform":
 				i++
 				if i >= len(argv) {
-					fmt.Fprintln(os.Stderr, "pull: -platform needs a value (e.g. linux/amd64)")
+					fmt.Fprintf(os.Stderr, "%s: -platform needs a value (e.g. linux/amd64)\n", verb)
 					return 2
 				}
 				arch = strings.TrimPrefix(argv[i], "linux/")
-			} else {
-				ref = argv[i]
+			case "-name", "--name":
+				if verb != "import" {
+					fmt.Fprintln(os.Stderr, "pull: -name is only valid with `gantry image import`")
+					return 2
+				}
+				i++
+				if i >= len(argv) {
+					fmt.Fprintln(os.Stderr, "import: -name needs a value")
+					return 2
+				}
+				localName = argv[i]
+			default:
+				if strings.HasPrefix(argv[i], "-") || source != "" {
+					nameUsage := ""
+					if verb == "import" {
+						nameUsage = " [-name REF]"
+					}
+					fmt.Fprintf(os.Stderr, "usage: gantry image %s [-platform linux/ARCH]%s SOURCE\n", verb, nameUsage)
+					return 2
+				}
+				source = argv[i]
 			}
 		}
-		if ref == "" {
-			fmt.Fprintln(os.Stderr, "usage: gantry image pull [-platform linux/ARCH] REF|OCI-LAYOUT-DIR|DOCKER-SAVE-TAR")
+		if source == "" {
+			if verb == "import" {
+				fmt.Fprintln(os.Stderr, "usage: gantry image import [-platform linux/ARCH] [-name REF] OCI-ARCHIVE|OCI-LAYOUT-DIR|DOCKER-SAVE-TAR")
+			} else {
+				fmt.Fprintln(os.Stderr, "usage: gantry image pull [-platform linux/ARCH] REF|OCI-ARCHIVE|OCI-LAYOUT-DIR|DOCKER-SAVE-TAR")
+			}
 			return 2
 		}
 		logf := func(format string, a ...any) { fmt.Printf("gantry image: "+format+"\n", a...) }
-		r, err := image.Resolve(ref, arch, st, logf)
+		var resolved *image.Resolved
+		var err error
+		if verb == "import" {
+			resolved, err = image.ImportArchive(source, localName, arch, st, logf)
+		} else {
+			resolved, err = image.Resolve(source, arch, st, logf)
+		}
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "gantry image pull:", err)
+			fmt.Fprintf(os.Stderr, "gantry image %s: %v\n", verb, err)
 			return 1
 		}
-		fmt.Printf("gantry image: %s cached at %s\n", trunc(r.Digest, 19), r.Path)
+		fmt.Printf("gantry image: %s cached as %s at %s\n", trunc(resolved.Digest, 19), resolved.Ref, resolved.Path)
+		if verb == "import" {
+			fmt.Printf("gantry image: create with `gantry start NAME -image %s`\n", resolved.Ref)
+		}
 		return 0
 	case "rm":
 		if len(argv) != 2 {
@@ -129,7 +163,7 @@ func CmdImage(argv []string) int {
 		}
 		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown gantry image verb %q (ls|pull|rm|prune|login|logout|credentials)\n", argv[0])
+		fmt.Fprintf(os.Stderr, "unknown gantry image verb %q (ls|pull|import|rm|prune|login|logout|credentials)\n", argv[0])
 		return 2
 	}
 }
