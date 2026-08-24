@@ -23,6 +23,24 @@ import (
 // and resolves the image config's user against the merged passwd/group.
 // Returns the number of entries emitted.
 func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...any)) (int, error) {
+	// go-erofs spools file contents before finalizing metadata. Its default is
+	// os.TempDir, which points at %LOCALAPPDATA%\\Temp on Windows and may be
+	// inaccessible or quarantined by endpoint controls. Keep the spool in a
+	// private, output-local build directory and remove it even on Windows,
+	// where an open temporary file cannot always be unlinked immediately.
+	spoolRoot := filepath.Join(filepath.Dir(outPath), "tmp")
+	if err := os.MkdirAll(spoolRoot, 0o700); err != nil {
+		return 0, fmt.Errorf("create image build staging directory: %w", err)
+	}
+	if err := os.Chmod(spoolRoot, 0o700); err != nil {
+		return 0, fmt.Errorf("secure image build staging directory: %w", err)
+	}
+	spoolDir, err := os.MkdirTemp(spoolRoot, "mkfs-")
+	if err != nil {
+		return 0, fmt.Errorf("create image build staging directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(spoolDir) }()
+
 	// Unique temp name: a fixed outPath+".tmp" let one process delete
 	// another's in-flight build during crash-litter cleanup (review
 	// finding 4). CreateTemp also makes the file 0600, so the final
@@ -34,9 +52,13 @@ func Build(outPath string, layers []*os.File, cfg *Config, logf func(string, ...
 	tmp := f.Name()
 	defer func() { _ = os.Remove(tmp) }()
 
-	w := erofs.Create(f, erofs.WithBlockSize(4096))
+	w := erofs.Create(f, erofs.WithBlockSize(4096), erofs.WithTempDir(spoolDir))
 	idx, err := flattenLayers(w, layers, logf)
 	if err != nil {
+		// Close the writer before removing spoolDir. go-erofs unlinks its
+		// spool while open on Unix, but Windows keeps the named file until
+		// the handle closes.
+		_ = w.Close()
 		_ = f.Close()
 		return 0, fmt.Errorf("flatten: %w", err)
 	}
