@@ -123,7 +123,10 @@ func cachedRef(ref, arch string, st *Store, res *auth.Resolver, say func(string,
 	current, err := c.headManifest(context.Background(), parsed.Repo, parsed.Tag)
 	if err != nil {
 		var se *statusError
-		if errors.As(err, &se) && se.code >= 400 && se.code < 500 {
+		var authErr *registryAuthError
+		refused := errors.As(err, &authErr) ||
+			(errors.As(err, &se) && se.code >= 400 && se.code < 500)
+		if refused {
 			pinned := parsed.Registry + "/" + parsed.Repo + "@" + cached
 			return nil, fmt.Errorf(`%v
 The registry (or a filtering proxy) actively REFUSED the freshness
@@ -240,7 +243,14 @@ func resolveAuth(ref, arch string, st *Store, res *auth.Resolver, logf func(stri
 			}
 		}
 		if cachedOnly {
-			return nil, fmt.Errorf("image %s is not in the local linux/%s cache; run `gantry image pull %s` before asking the manager to create a sandbox", ref, arch, ref)
+			parsed, err := ParseRef(ref)
+			if err != nil {
+				return nil, err
+			}
+			loginRegistry := registryLoginName(parsed.Registry)
+			return nil, fmt.Errorf("image %s is not in the local linux/%s cache; the manager does not read registry credentials or pull over the network\n"+
+				"run `gantry image pull %s` in your shell before asking the manager to create a sandbox; for a private registry, first run `gantry image login %s` or `docker login %s`",
+				ref, arch, ref, loginRegistry, loginRegistry)
 		}
 		if res == nil {
 			res = auth.Resolve()
