@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,7 +83,7 @@ func TestWindowsSocketTransferWaitsForReconstruction(t *testing.T) {
 	}
 }
 
-func TestWindowsUnixSocketTransferPreservesData(t *testing.T) {
+func TestWindowsUnixSocketTransferFailsClosed(t *testing.T) {
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("gantry-fdpass-%d.sock", os.Getpid()))
 	_ = os.Remove(path)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
@@ -97,61 +98,31 @@ func TestWindowsUnixSocketTransferPreservesData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = peer.Close() }()
 	source, err := listener.AcceptUnix()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Guest-facing peers can send immediately after connect, before the
-	// supervisor has transferred the accepted socket into another worker.
-	// Buffered pre-transfer bytes must survive the Winsock reconstruction.
-	payload := []byte("unix-socket-transfer")
-	if _, err := peer.Write(payload); err != nil {
-		t.Fatal(err)
-	}
+	defer func() { _ = source.Close() }()
 	file, err := source.File()
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = file.Close() }()
 
 	sender, receiver := net.Pipe()
-	bound := ForProcess(sender, uint32(os.Getpid()))
-	mux := NewFDMux(receiver)
-	defer func() { _ = mux.Close() }()
+	defer func() { _ = sender.Close() }()
+	defer func() { _ = receiver.Close() }()
 	var token [FDTokenLen]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		t.Fatal(err)
 	}
-	wait, err := mux.Expect(token)
-	if err != nil {
-		t.Fatal(err)
+	err = SendFD(ForProcess(sender, uint32(os.Getpid())), token, file)
+	if err == nil {
+		t.Fatal("AF_UNIX transfer succeeded; expected supervisor-relay requirement")
 	}
-	sent := make(chan error, 1)
-	go func() { sent <- SendFD(bound, token, file) }()
-	receivedFile, err := wait.Wait(5 * time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := <-sent; err != nil {
-		t.Fatal(err)
-	}
-	_ = file.Close()
-	_ = source.Close()
-	received, err := net.FileConn(receivedFile)
-	_ = receivedFile.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = received.Close() }()
-	defer func() { _ = peer.Close() }()
-	if err := received.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(received, got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("payload = %q, want %q", got, payload)
+	if !strings.Contains(err.Error(), "AF_UNIX sockets require a supervisor-owned relay") {
+		t.Fatalf("AF_UNIX transfer error = %v", err)
 	}
 }
 

@@ -53,6 +53,9 @@ func SendFD(conn net.Conn, token [FDTokenLen]byte, file *os.File) error {
 	if err := windows.WSADuplicateSocket(windows.Handle(file.Fd()), pc.pid, &info); err != nil {
 		return fmt.Errorf("workerproto: duplicate socket for PID %d: %w", pc.pid, err)
 	}
+	if err := validateWindowsSocketTransfer(&info); err != nil {
+		return err
+	}
 	deadline := time.Now().Add(fdSendTimeout)
 	if err := pc.SetDeadline(deadline); err != nil && !isWindowsPipeConn(pc.Conn) {
 		return fmt.Errorf("workerproto: bound socket send: %w", err)
@@ -94,6 +97,9 @@ func recvFDMsg(conn net.Conn) ([FDTokenLen]byte, *os.File, error) {
 	}
 	copy(token[:], payload[:FDTokenLen])
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&info)), int(unsafe.Sizeof(info))), payload[FDTokenLen:])
+	if err := validateWindowsSocketTransfer(&info); err != nil {
+		return token, nil, err
+	}
 	handle, err := windows.WSASocket(-1, -1, -1, &info, 0,
 		windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
 	if err != nil {
@@ -124,6 +130,19 @@ func recvFDMsg(conn net.Conn) ([FDTokenLen]byte, *os.File, error) {
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
 	return token, file, nil
+}
+
+func validateWindowsSocketTransfer(info *windows.WSAProtocolInfo) error {
+	// Windows can reconstruct AF_UNIX sockets with WSADuplicateSocket, but the
+	// resulting handle is not portable across supported Windows releases. It
+	// may fail Go's getsockname-based import or stop carrying data when the
+	// source closes, depending on the host release. Production keeps
+	// AF_UNIX path authority in the supervisor and transfers one end of a TCP
+	// relay instead; fail closed if another caller bypasses that boundary.
+	if info.AddressFamily == windows.AF_UNIX {
+		return fmt.Errorf("workerproto: Windows AF_UNIX sockets require a supervisor-owned relay")
+	}
+	return nil
 }
 
 func materializeSocketFile(file *os.File) (*os.File, error) {
