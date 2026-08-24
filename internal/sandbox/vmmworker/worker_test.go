@@ -221,6 +221,21 @@ func TestVMMWorkerBootTimingOrigin(t *testing.T) {
 	}
 }
 
+func TestVMMWorkerBootsWithoutNetworkOrShares(t *testing.T) {
+	assets := testAssets(t)
+	assets.worker.NetConn = nil
+	h := startVMMWorkerHarness(t, vmmworkerapi.Config{
+		MemSize: 1 << 20, NoNetwork: true, NoShares: true,
+	}, assets)
+
+	if (*h.fake).opts.NetConn != nil {
+		t.Fatal("offline worker retained a network connection")
+	}
+	if len((*h.fake).opts.Filesystems) != 0 {
+		t.Fatalf("shareless worker filesystems = %d, want 0", len((*h.fake).opts.Filesystems))
+	}
+}
+
 // TestVMMWorkerNetPolicyEnforcement is the regression for the split-VMM
 // local-netstack policy drop: in the degraded topology (net-worker
 // failed in auto, VMM split succeeded) the worker's virtio-net device is

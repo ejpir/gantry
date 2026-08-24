@@ -114,6 +114,42 @@ func TestRegistryTokenDanceBasic(t *testing.T) {
 	}
 }
 
+func TestRegistryMissingCredentialErrorIsActionable(t *testing.T) {
+	reg := newFakeRegistry(t, "private-user")
+	registry := hostOf(reg.srv.URL)
+	c := newRegistryClient(registry, nil, nil)
+	_, _, err := c.fetchManifest(context.Background(), "library/app", "latest")
+	if err == nil {
+		t.Fatal("anonymous private pull succeeded")
+	}
+	for _, want := range []string{
+		"authentication required to pull library/app",
+		"no usable registry pull credential is configured",
+		"gantry image login " + registry,
+		"docker login " + registry,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing-credential error %q does not contain %q", err, want)
+		}
+	}
+}
+
+func TestRegistryRejectedCredentialNamesSafeSource(t *testing.T) {
+	reg := newFakeRegistry(t, "private-user")
+	const secret = "must-not-leak"
+	cred := &auth.Credential{
+		Username: "wrong-user", Secret: auth.Secret(secret), Source: "docker config credsStore",
+	}
+	c := newRegistryClient(hostOf(reg.srv.URL), cred, nil)
+	_, _, err := c.fetchManifest(context.Background(), "library/app", "latest")
+	if err == nil || !strings.Contains(err.Error(), "configured credential from docker config credsStore was rejected") {
+		t.Fatalf("rejected-credential error = %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("rejected-credential error leaked secret: %v", err)
+	}
+}
+
 func TestRegistryRejectsShortLayerDigestWithProgress(t *testing.T) {
 	reg := newFakeRegistry(t, "")
 	config := []byte(`{"architecture":"amd64","os":"linux","config":{}}`)
@@ -395,8 +431,10 @@ func TestResolvePreferCachedSkipsRegistryFreshness(t *testing.T) {
 func TestResolveCachedOnlyMissDoesNotContactRegistry(t *testing.T) {
 	reg := newFakeIndexRegistry(t, "arm64")
 	_, err := ResolveCachedOnly(reg.ref(), "arm64", NewStore(t.TempDir()), nil)
-	if err == nil || !strings.Contains(err.Error(), "gantry image pull") {
-		t.Fatalf("cached-only miss error = %v, want pull instruction", err)
+	if err == nil || !strings.Contains(err.Error(), "gantry image pull") ||
+		!strings.Contains(err.Error(), "manager does not read registry credentials") ||
+		!strings.Contains(err.Error(), "gantry image login "+hostOf(reg.srv.URL)) {
+		t.Fatalf("cached-only miss error = %v, want pull and private-registry login instructions", err)
 	}
 	if reg.manifestGets != 0 || reg.manifestHeads != 0 || reg.blobGets != 0 {
 		t.Fatalf("cached-only miss contacted registry: GETs=%d HEADs=%d blobs=%d",
@@ -480,6 +518,27 @@ func TestBlobLargerThanDescriptor(t *testing.T) {
 // HTTP error — e.g. a Zscaler 403 block page — is a refusal, not an
 // outage: Resolve must fail loudly rather than silently boot the stale
 // cached image.
+func TestCacheFallbackRefusedWhenAuthenticationIsRequired(t *testing.T) {
+	reg := newFakeIndexRegistry(t, "arm64")
+	st := NewStore(t.TempDir())
+
+	if _, err := Resolve(reg.ref(), "arm64", st, nil); err != nil {
+		t.Fatal(err)
+	}
+	reg.denyStatus = http.StatusUnauthorized
+	_, err := Resolve(reg.ref(), "arm64", st, nil)
+	if err == nil {
+		t.Fatal("missing credentials on the freshness HEAD fell back to the cached image")
+	}
+	if !strings.Contains(err.Error(), "authentication required") ||
+		!strings.Contains(err.Error(), "no usable registry pull credential") {
+		t.Errorf("error does not explain the missing credential: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NOT used silently") {
+		t.Errorf("error does not explain the refused fallback: %v", err)
+	}
+}
+
 func TestCacheFallbackRefusedOnHTTPError(t *testing.T) {
 	reg := newFakeIndexRegistry(t, "arm64")
 	st := NewStore(t.TempDir())

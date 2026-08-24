@@ -41,6 +41,50 @@ type bearerToken struct {
 	expires time.Time
 }
 
+// registryAuthError is a definitive registry refusal, not a connectivity
+// failure. Besides making the CLI error actionable, the type prevents cached
+// tag resolution from silently treating a missing/rejected credential as an
+// offline registry and booting stale content.
+type registryAuthError struct {
+	registry string
+	scope    string
+	status   string
+	source   string
+}
+
+func (e *registryAuthError) Error() string {
+	repository := strings.TrimPrefix(e.scope, "repository:")
+	repository = strings.TrimSuffix(repository, ":pull")
+	if repository == "" {
+		repository = "the requested repository"
+	}
+	credential := "no usable registry pull credential is configured"
+	if e.source != "" {
+		credential = fmt.Sprintf("the configured credential from %s was rejected", e.source)
+	}
+	loginRegistry := registryLoginName(e.registry)
+	return fmt.Sprintf("registry %s authentication required to pull %s (%s): %s; run `gantry image login %s` or `docker login %s`",
+		e.registry, repository, e.status, credential, loginRegistry, loginRegistry)
+}
+
+func registryLoginName(registry string) string {
+	if registry == "registry-1.docker.io" || registry == "index.docker.io" {
+		return "docker.io"
+	}
+	return registry
+}
+
+func (c *registryClient) authError(scope, status string) error {
+	source := ""
+	if c.cred != nil {
+		source = c.cred.Source
+		if source == "" {
+			source = "the active credential source"
+		}
+	}
+	return &registryAuthError{registry: c.reg, scope: scope, status: status, source: source}
+}
+
 // imageManifest is the union we care about: a single-platform manifest
 // (config+layers) or an OCI index / docker manifest list (manifests).
 type imageManifest struct {
@@ -164,7 +208,7 @@ func (c *registryClient) do(ctx context.Context, method, rawurl, accept, scope s
 	// over plaintext (loopback excepted, per isLoopbackRegistry).
 	if strings.HasPrefix(chal, "Basic") {
 		if c.cred == nil || c.cred.Username == "" {
-			return nil, fmt.Errorf("%s requires basic auth but no credential is configured", c.reg)
+			return nil, c.authError(scope, resp.Status)
 		}
 		if c.scheme() != "https" && !isLoopbackRegistry(c.reg) {
 			return nil, fmt.Errorf("refusing to send basic-auth credentials to %s over plaintext HTTP", c.reg)
@@ -179,7 +223,12 @@ func (c *registryClient) do(ctx context.Context, method, rawurl, accept, scope s
 		req.SetBasicAuth(c.cred.Username, c.cred.Secret.Raw())
 		return c.hc.Do(req)
 	}
-	// parse WWW-Authenticate and retry with a token
+	// Parse WWW-Authenticate and retry with a token. A 401 without a
+	// supported challenge is still a definitive authentication refusal; do
+	// not later misclassify it as an unreachable registry.
+	if !strings.HasPrefix(chal, "Bearer ") {
+		return nil, c.authError(scope, resp.Status)
+	}
 	if err := c.acquireToken(ctx, chal, scope); err != nil {
 		return nil, err
 	}
@@ -260,6 +309,9 @@ func (c *registryClient) acquireToken(ctx context.Context, challenge, wantScope 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return c.authError(scope, "token request: "+resp.Status)
+		}
 		return fmt.Errorf("token request failed: %s", resp.Status)
 	}
 	var tok struct {
@@ -309,6 +361,9 @@ func (c *registryClient) fetchManifest(ctx context.Context, repo, reference stri
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, "", c.authError("repository:"+repo+":pull", resp.Status)
+		}
 		return nil, "", fmt.Errorf("manifest %s@%s: %s", repo, reference, resp.Status)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
@@ -354,6 +409,9 @@ func (c *registryClient) headManifest(ctx context.Context, repo, reference strin
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return "", c.authError("repository:"+repo+":pull", resp.Status)
+		}
 		return "", &statusError{op: "HEAD", repo: repo, reference: reference, status: resp.Status, code: resp.StatusCode}
 	}
 	return resp.Header.Get("Docker-Content-Digest"), nil
@@ -373,6 +431,9 @@ func (c *registryClient) fetchBlob(ctx context.Context, repo string, desc descri
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return 0, c.authError("repository:"+repo+":pull", resp.Status)
+		}
 		return 0, fmt.Errorf("blob %s: %s", desc.Digest, resp.Status)
 	}
 	f, err := os.Create(dst)

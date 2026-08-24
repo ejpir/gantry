@@ -32,6 +32,12 @@ func (n *winShareNode) mutable() syscall.Errno {
 	return n.export.mutable()
 }
 
+var _ fs.NodeSyncfser = (*winShareNode)(nil)
+
+func (n *winShareNode) Syncfs(context.Context) syscall.Errno {
+	return syncExport(n.export)
+}
+
 func (n *winShareNode) isExportRoot() bool {
 	return n.export != nil && n.export.node == n
 }

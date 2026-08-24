@@ -25,6 +25,12 @@ type Config struct {
 	GuestCID uint64  `json:"guestCID"`
 	HasRoot  bool    `json:"hasRootfs"`
 
+	// NoNetwork and NoShares make absent data-plane devices explicit before
+	// the worker reconstructs its inherited asset table. The negative form
+	// preserves the established wire default for existing split topologies.
+	NoNetwork bool `json:"noNetwork,omitempty"`
+	NoShares  bool `json:"noShares,omitempty"`
+
 	// BootTimingStartUnixNano carries the supervisor's diagnostic clock into
 	// the worker. Zero disables guest milestone collection.
 	BootTimingStartUnixNano int64  `json:"bootTimingStartUnixNano,omitempty"`

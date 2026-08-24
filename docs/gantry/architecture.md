@@ -146,7 +146,16 @@ The network worker necessarily retains restricted stream and datagram socket
 creation authority. It does not receive secrets, writable disks, guest RAM,
 or host share roots. Its Linux Landlock policy allows reads of only the exact
 private resolver snapshots copied into its private root; it delegates no
-filesystem subtree.
+filesystem subtree. Windows gives the role a fixed network-capability set in
+an AppContainer inside a one-process Job, then verifies denial of undelegated
+filesystem access and child execution before constructing the stack.
+
+Windows AppContainer network isolation does not permit host loopback without a
+privileged machine-wide exemption, which Gantry deliberately does not install.
+`auto` therefore falls back to the in-supervisor stack when startup includes a
+published port or a loopback-allowing policy; `required` rejects those options.
+A live port publish or loopback-enabling policy mutation against an already
+split Windows network worker is rejected explicitly.
 
 An explicit `-gvproxy` selects an external backend instead. Live policy,
 traffic inspection, proxy enforcement, and built-in port publishing require
@@ -157,7 +166,10 @@ the embedded stack.
 An MCP-enabled sandbox has one `_mcp-worker`. It owns guest MCP parsing,
 JSON-RPC routing, tool policy, local stdio framing, and remote HTTP/TLS/SSE.
 The supervisor relays opaque guest and upstream bytes over a bounded
-multiplexer; it does not parse MCP payloads.
+multiplexer; it does not parse MCP payloads. On Windows, the supervisor keeps
+the path-addressed AF_UNIX endpoint and relays it through a connected Winsock
+pair transferred to the VMM worker. This avoids unreliable cross-process
+AF_UNIX duplication without granting the VMM worker path or dial authority.
 
 The worker can request only a configured server ID. The supervisor maps that
 ID to a fixed guest helper, a validated and DNS-pinned remote dial, and the one
@@ -171,8 +183,10 @@ private mount root, descriptor closure, namespace/task controls, and its
 no-socket/no-exec seccomp allowlist. macOS applies a deny-default Seatbelt
 profile. Windows uses a zero-capability AppContainer plus one-process,
 kill-on-close Job and verifies fs-read, fs-write, net-dial, and exec denial.
-Windows `required` still fails closed because the separate network-worker tier
-is unavailable.
+Windows `required` uses the brokered WHPX VMM and, when networking is enabled,
+the AppContainer network worker after their required properties are verified.
+An intentionally offline `-net=false` topology omits virtio-net and still runs
+the split VMM rather than falling back to the supervisor.
 
 ## Guest components
 
@@ -239,8 +253,10 @@ read-only and path-confinement policy. On supported Unix hosts, the split VMM
 uses shared guest RAM and vhost-style doorbells so the VMM worker does not
 receive host share roots; other paths use an authenticated request relay.
 
-There is no filesystem sync or private checkout layer: host-share changes are
-changes to the original host directory.
+There is no private checkout layer: host-share changes are changes to the
+original host directory. Guest `syncfs` requests are handled by the share hub:
+Unix syncs each pinned backing filesystem, while Windows flushes every live
+writable share handle (closed handles are flushed by FUSE `FLUSH`).
 
 ## Host capability bridges
 

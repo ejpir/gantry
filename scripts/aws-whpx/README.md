@@ -54,9 +54,14 @@ high-memory validation polls `MemTotal` before running its memory-touch test.
 Set `GANTRY_VIRTIO_MEM=0` when deliberately booting a custom kernel that lacks
 built-in `CONFIG_VIRTIO_MEM` support.
 
-Windows `auto` now expects the VMM report to verify fs-read, fs-write,
-net-dial, and exec denial and to disclose the separate Job-confined trusted
-WHPX broker. `required` must still fail closed while the Windows network-worker
-confinement tier is unavailable. Set `GANTRY_WINDOWS_WHPX_BROKER=0` to exercise
-the older Job-only compatibility fallback; that fallback must report fs/net
-as unenforced rather than silently claiming the AppContainer tier.
+Windows `auto` now expects `split-net+split-vmm`: the network report verifies
+its capability-bearing AppContainer and fs-read/fs-write/exec denial, while the
+VMM report verifies fs-read/fs-write/net-dial/exec denial and discloses the
+separate Job-confined trusted WHPX broker. The field battery also boots
+`required` and validates DNS/TCP/TLS/HTTP, plus an offline `-net=false`
+`split-vmm` boot. Because Windows AppContainer network
+isolation blocks host loopback, startup ports and loopback-allowing policies
+fall back in `auto` and fail closed in `required`. Set
+`GANTRY_WINDOWS_WHPX_BROKER=0` to exercise the older Job-only VMM compatibility
+fallback; that fallback must report fs/net as unenforced rather than silently
+claiming the AppContainer tier.

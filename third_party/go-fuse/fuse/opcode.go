@@ -412,6 +412,14 @@ func doFsyncDir(server *protocolServer, req *request) {
 	req.status = server.fileSystem.FsyncDir(req.cancel, (*FsyncIn)(req.inData()))
 }
 
+func doSyncFs(server *protocolServer, req *request) {
+	if syncer, ok := server.fileSystem.(RawFileSystemSyncfser); ok {
+		req.status = syncer.SyncFs(req.cancel, req.inHeader())
+		return
+	}
+	req.status = ENOSYS
+}
+
 func doSetXAttr(server *protocolServer, req *request) {
 	if server.opts.DisableXAttrs {
 		req.status = ENOSYS
@@ -683,6 +691,7 @@ func init() {
 		_OP_INTERRUPT:       doInterrupt,
 		_OP_COPY_FILE_RANGE: doCopyFileRange,
 		_OP_LSEEK:           doLseek,
+		_OP_SYNCFS:          doSyncFs,
 	} {
 		operationHandlers[op].Func = v
 	}

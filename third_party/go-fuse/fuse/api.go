@@ -389,6 +389,13 @@ type MountOptions struct {
 	ExtraCapabilities uint64
 }
 
+// RawFileSystemSyncfser is the optional whole-filesystem durability hook for
+// FUSE_SYNCFS. It is separate from RawFileSystem so existing implementations
+// keep returning ENOSYS unless they can provide real sync semantics.
+type RawFileSystemSyncfser interface {
+	SyncFs(cancel <-chan struct{}, input *InHeader) Status
+}
+
 // RawFileSystem is an interface close to the FUSE wire protocol.
 //
 // Unless you really know what you are doing, you should not implement

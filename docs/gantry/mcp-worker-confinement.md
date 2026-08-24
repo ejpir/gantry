@@ -4,8 +4,9 @@
 spawn brokers, Linux Landlock/seccomp profile, Seatbelt profile, Windows Job
 boundary, and effective-state reporting are implemented. The in-guest
 filesystem helper remains a separate unprivileged process, but its `os.Root`
-is path containment rather than a complete process sandbox. Apple-silicon
-field validation and a strict Windows filesystem/network boundary also remain.
+is path containment rather than a complete process sandbox. Windows uses a
+verified zero-capability AppContainer and one-process Job for the host MCP
+worker; Apple-silicon end-to-end MCP field validation remains follow-up work.
 
 This design separates those two concerns:
 
@@ -343,15 +344,16 @@ exec results rather than assuming the profile worked.
 
 ### Windows
 
-Windows creates a separate process in a kill-on-close, one-process Job Object.
-The Job-only tier is a process boundary, not a filesystem or network boundary,
-and reports those properties as unenforced.
-
-Strict mode requires a field-proven restricted-token/AppContainer or equivalent
-profile that can run Go TLS and inherited stream handles while denying ambient
-file and network access. Until then, `-process-isolation=required` with MCP
-fails closed on Windows. `auto` may run the separate Job-contained worker only
-when `isolation.json` clearly reports the weaker properties.
+Windows creates the MCP process suspended under a zero-capability AppContainer
+token, assigns it to a kill-on-close, one-process Job, and only then resumes its
+primary thread. It receives authenticated inherited pipe handles but no
+filesystem or socket capabilities. Active probes verify fs-read, fs-write,
+net-dial, and exec denial; `required` fails closed if any property is not
+confirmed. The supervisor retains each path-addressed AF_UNIX endpoint and
+relays it through a connected Winsock pair transferred to the VMM worker;
+Windows AF_UNIX sockets are not duplicated across the process boundary. The
+capability-bearing Windows network worker is a separate role and does not
+widen the MCP token.
 
 ## In-guest filesystem helper hardening
 
@@ -491,12 +493,12 @@ The TUI now manages configured MCP servers and restart-required state. A
 worker-confinement evidence view remains follow-up work; the version 3
 `isolation.json` file is currently the authoritative detailed view.
 
-### M4 — macOS and Windows enforcement (partial)
+### M4 — macOS and Windows enforcement (Windows complete; macOS field follow-up)
 
 - field-test the complete inherited-relay path under Seatbelt on Apple silicon;
 - use the cross-platform relay without adding ambient network rules;
-- keep Windows Job-only results honest while developing a strict token or
-  AppContainer tier; and
+- run Windows MCP under a verified zero-capability AppContainer and one-process
+  Job with authenticated inherited pipes; and
 - refuse `required` wherever mandatory properties cannot be proved.
 
 ### M5 — Optional credential/policy strengthening

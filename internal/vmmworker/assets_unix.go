@@ -43,6 +43,12 @@ func (config Config) validate() error {
 	if runtime.GOOS == "windows" && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
 		return fmt.Errorf("windows writable disks must be locked by the worker process")
 	}
+	if config.NoNetwork && len(config.Policy) != 0 {
+		return fmt.Errorf("network policy supplied without a network device")
+	}
+	if config.NoShares && config.VhostShares {
+		return fmt.Errorf("vhost shares configured without a share device")
+	}
 	if config.VhostShares && !config.HasSharedRAM {
 		return fmt.Errorf("vhost shares require shared guest RAM")
 	}

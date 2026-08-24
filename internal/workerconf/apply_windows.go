@@ -2,15 +2,22 @@ package workerconf
 
 import (
 	"fmt"
+	"sort"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 const tokenIsAppContainer = 29
-const tokenCapabilities = 30
+const tokenCapabilitiesClass = 30
 
 var isProcessInJobProc = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+
+var requiredNetworkCapabilitySIDs = []string{
+	"S-1-15-3-1", // internetClient
+	"S-1-15-3-2", // internetClientServer
+	"S-1-15-3-3", // privateNetworkClientServer
+}
 
 // Apply records the parent-installed Windows controls. AppContainer/restricted
 // tokens and Job membership must be established by CreateProcess/AssignProcess
@@ -23,11 +30,24 @@ func Apply(spec Spec) (*Report, error) {
 	rep := DisabledReport("windows", "")
 	token := windows.GetCurrentProcessToken()
 	appContainer, appContainerErr := tokenIsAppContainerEnabled(token)
+	var capabilities []string
+	var capabilitiesErr error
+	if appContainerErr == nil && appContainer {
+		capabilities, capabilitiesErr = tokenCapabilities(token)
+	}
+	hasCapabilities := len(capabilities) != 0
 	restricted, tokenErr := token.IsRestricted()
 	inJob, jobErr := currentProcessInJob()
 	rep.Applied = appContainer || restricted || inJob
 	if appContainer {
-		rep.Notes = append(rep.Notes, "zero-capability AppContainer token active")
+		switch {
+		case capabilitiesErr != nil:
+			rep.Notes = append(rep.Notes, "AppContainer token active; capabilities unreadable")
+		case hasCapabilities:
+			rep.Notes = append(rep.Notes, fmt.Sprintf("network-capable AppContainer token active (%v)", capabilities))
+		default:
+			rep.Notes = append(rep.Notes, "zero-capability AppContainer token active")
+		}
 	} else if appContainerErr == nil {
 		rep.Notes = append(rep.Notes, "AppContainer token absent")
 	}
@@ -41,12 +61,21 @@ func Apply(spec Spec) (*Report, error) {
 	} else if jobErr == nil {
 		rep.Notes = append(rep.Notes, "worker job absent")
 	}
-	if appContainerErr != nil || tokenErr != nil || jobErr != nil {
-		return &rep, fmt.Errorf("inspect Windows confinement: appcontainer=%v token=%v job=%v",
-			appContainerErr, tokenErr, jobErr)
+	if appContainerErr != nil || capabilitiesErr != nil || tokenErr != nil || jobErr != nil {
+		return &rep, fmt.Errorf("inspect Windows confinement: appcontainer=%v capabilities=%v token=%v job=%v",
+			appContainerErr, capabilitiesErr, tokenErr, jobErr)
 	}
 	if !rep.Applied {
 		return &rep, fmt.Errorf("windows worker AppContainer/token/job confinement not installed")
+	}
+	if appContainer && spec.NoNetwork && hasCapabilities {
+		return &rep, fmt.Errorf("windows no-network worker received AppContainer capabilities")
+	}
+	if appContainer && !spec.NoNetwork {
+		if !sameStrings(capabilities, requiredNetworkCapabilitySIDs) {
+			return &rep, fmt.Errorf("windows network worker capability set %v does not match required %v",
+				capabilities, requiredNetworkCapabilitySIDs)
+		}
 	}
 	return &rep, nil
 }
@@ -63,18 +92,45 @@ func tokenIsAppContainerEnabled(token windows.Token) (bool, error) {
 }
 
 func tokenHasCapabilities(token windows.Token) (bool, error) {
+	capabilities, err := tokenCapabilities(token)
+	return len(capabilities) != 0, err
+}
+
+func tokenCapabilities(token windows.Token) ([]string, error) {
 	var size uint32
-	err := windows.GetTokenInformation(token, tokenCapabilities, nil, 0, &size)
+	err := windows.GetTokenInformation(token, tokenCapabilitiesClass, nil, 0, &size)
 	if err != windows.ERROR_INSUFFICIENT_BUFFER {
-		return false, err
+		return nil, err
 	}
 	buffer := make([]byte, size)
-	if err := windows.GetTokenInformation(token, tokenCapabilities,
+	if err := windows.GetTokenInformation(token, tokenCapabilitiesClass,
 		&buffer[0], size, &size); err != nil {
-		return false, err
+		return nil, err
 	}
 	groups := (*windows.Tokengroups)(unsafe.Pointer(&buffer[0]))
-	return groups.GroupCount != 0, nil
+	capabilities := make([]string, 0, groups.GroupCount)
+	for _, group := range groups.AllGroups() {
+		if group.Sid == nil {
+			return nil, fmt.Errorf("windows token contains a nil capability SID")
+		}
+		capabilities = append(capabilities, group.Sid.String())
+	}
+	sort.Strings(capabilities)
+	return capabilities, nil
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	rightSorted := append([]string(nil), right...)
+	sort.Strings(rightSorted)
+	for index := range left {
+		if left[index] != rightSorted[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func currentProcessInJob() (bool, error) {

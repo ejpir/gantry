@@ -64,6 +64,27 @@ func mustParse(t *testing.T, js string) *Policy {
 	return p
 }
 
+func TestPolicyMayAllowLoopback(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "default local wall", raw: `{"default":"allow"}`, want: false},
+		{name: "allow local", raw: `{"default":"deny","allowLocal":true}`, want: true},
+		{name: "explicit loopback", raw: `{"default":"deny","rules":[{"action":"allow","cidr":"127.0.0.1/32","proto":"tcp","ports":"80"}]}`, want: true},
+		{name: "allow all rule", raw: `{"default":"deny","rules":[{"action":"allow","proto":"tcp","ports":"443"}]}`, want: true},
+		{name: "private only", raw: `{"default":"deny","rules":[{"action":"allow","cidr":"10.0.0.0/8"}]}`, want: false},
+		{name: "loopback deny", raw: `{"default":"allow","rules":[{"action":"deny","cidr":"127.0.0.0/8"}]}`, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := mustParse(t, test.raw).MayAllowLoopback(); got != test.want {
+				t.Fatalf("MayAllowLoopback() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPolicyParse(t *testing.T) {
 	p := mustParse(t, `{
 		"default": "deny",

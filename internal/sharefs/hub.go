@@ -12,6 +12,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ejpir/gantry/internal/fusewire"
@@ -281,6 +282,23 @@ func (h *Hub) Remove(tag string, force bool) (*Export, error) {
 		exp.finish()
 	}
 	return exp, nil
+}
+
+func (h *Hub) syncExports() syscall.Errno {
+	h.mu.RLock()
+	exports := make([]*Export, 0, len(h.all))
+	for export := range h.all {
+		if export.usable() {
+			exports = append(exports, export)
+		}
+	}
+	h.mu.RUnlock()
+	for _, export := range exports {
+		if errno := syncExport(export); errno != 0 {
+			return errno
+		}
+	}
+	return 0
 }
 
 // Close revokes every export and releases pinned roots at VM shutdown.

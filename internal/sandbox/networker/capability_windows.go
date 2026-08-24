@@ -2,7 +2,7 @@
 
 package networker
 
-// Windows can re-exec the network worker, but networkworker confinement is
-// intentionally unavailable there. Auto mode should take its fallback before
-// spawning a child that can only reject the bootstrap.
-const ConfinementPlatform = false
+// Windows runs the network worker in a capability-bearing AppContainer inside
+// a one-process Job. The role retains socket authority while filesystem and
+// child-process denials are verified in-process before the stack starts.
+const ConfinementPlatform = true

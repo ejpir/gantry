@@ -33,7 +33,7 @@ type windowsCreatedProcess struct {
 // process suspended also closes the historical race between CreateProcess and
 // AssignProcessToJobObject.
 func createWindowsProcessSuspended(exe string, argv, env []string, files []*os.File,
-	handles []syscall.Handle, appContainerSID *windows.SID) (*windowsCreatedProcess, error) {
+	handles []syscall.Handle, profile *windowsAppContainerProfile) (*windowsCreatedProcess, error) {
 	if len(files) != 3 {
 		return nil, fmt.Errorf("windows worker requires exactly three standard handles")
 	}
@@ -78,7 +78,7 @@ func createWindowsProcessSuspended(exe string, argv, env []string, files []*os.F
 	}
 
 	attributeCount := uint32(1)
-	if appContainerSID != nil {
+	if profile != nil {
 		attributeCount++
 	}
 	attributes, err := windows.NewProcThreadAttributeList(attributeCount)
@@ -91,8 +91,13 @@ func createWindowsProcessSuspended(exe string, argv, env []string, files []*os.F
 		return nil, fmt.Errorf("set inherited-handle list: %w", err)
 	}
 
-	securityCapabilities := windowsSecurityCapabilities{appContainerSID: appContainerSID}
-	if appContainerSID != nil {
+	securityCapabilities := windowsSecurityCapabilities{}
+	if profile != nil {
+		securityCapabilities.appContainerSID = profile.sid
+		securityCapabilities.capabilityCount = uint32(len(profile.capabilities))
+		if len(profile.capabilities) != 0 {
+			securityCapabilities.capabilities = &profile.capabilities[0]
+		}
 		if err := attributes.Update(procThreadAttributeSecurityCapabilities,
 			unsafe.Pointer(&securityCapabilities), unsafe.Sizeof(securityCapabilities)); err != nil {
 			return nil, fmt.Errorf("set AppContainer security capabilities: %w", err)
@@ -128,6 +133,7 @@ func createWindowsProcessSuspended(exe string, argv, env []string, files []*os.F
 	}
 	runtime.KeepAlive(inherited)
 	runtime.KeepAlive(securityCapabilities)
+	runtime.KeepAlive(profile)
 	return &windowsCreatedProcess{
 		process: process, processHandle: processInfo.Process, threadHandle: processInfo.Thread,
 	}, nil

@@ -405,6 +405,10 @@ try {
     Assert-NotContains "mcp: Windows dead worker withdrawn from topology" $isolation "split-mcp"
     Assert-Contains "mcp: Windows dead worker degradation recorded" $isolation "mcp worker confinement report unavailable"
 
+    Invoke-Gantry @("stop", $MCPSandbox)
+    $daemonLog = Get-Content -Raw (Join-Path $mcpStateDir "daemon.log")
+    Assert-NotContains "shares: Windows shutdown handles FUSE SYNCFS" $daemonLog "Unimplemented opcode SYNCFS"
+
     "RESULT: Windows WHPX secrets/OAuth/MCP validation passed"
 }
 finally {

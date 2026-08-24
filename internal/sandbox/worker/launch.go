@@ -29,13 +29,18 @@ type InheritedFile struct {
 // RPC operations, inherited-file validation, and failure policy remain owned
 // by the VMM, network, and MCP worker packages.
 type LaunchSpec struct {
-	Role           workerproto.Role
-	EntryPoint     string
-	Environment    []string
-	Channels       []string
-	InheritedFiles []InheritedFile
-	DiagnosticPath string
-	Confinement    string
+	Role        workerproto.Role
+	EntryPoint  string
+	Environment []string
+	Channels    []string
+	// TransferableChannels names channels whose supervisor endpoint may be
+	// handed to another child process. Windows creates these as inherited
+	// Winsock connections instead of anonymous pipes; Unix channels are already
+	// socketpairs. Entries must also appear in Channels.
+	TransferableChannels []string
+	InheritedFiles       []InheritedFile
+	DiagnosticPath       string
+	Confinement          string
 
 	// ExitClosers are role-owned capabilities that must be revoked when the
 	// process is reaped. Ownership transfers to Child only after a successful
@@ -159,6 +164,16 @@ func validateLaunchSpec(spec LaunchSpec) error {
 			return fmt.Errorf("worker %s channel name %q is duplicated", spec.Role, name)
 		}
 		seenNames[name] = struct{}{}
+	}
+	seenTransferable := make(map[string]struct{}, len(spec.TransferableChannels))
+	for _, name := range spec.TransferableChannels {
+		if _, exists := seenNames[name]; !exists {
+			return fmt.Errorf("worker %s transferable channel %q is not declared", spec.Role, name)
+		}
+		if _, exists := seenTransferable[name]; exists {
+			return fmt.Errorf("worker %s transferable channel %q is duplicated", spec.Role, name)
+		}
+		seenTransferable[name] = struct{}{}
 	}
 	seenSlots := make(map[int]struct{}, len(spec.InheritedFiles))
 	for index, inherited := range spec.InheritedFiles {

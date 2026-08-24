@@ -3,9 +3,11 @@ package vmmworker
 import (
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/worker"
@@ -15,8 +17,11 @@ import (
 )
 
 func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir string) (*vmmWorker, error) {
-	if assets.NetConn == nil || assets.Console == nil || assets.Kernel == nil {
-		return nil, fmt.Errorf("handle table: net conn, console and kernel are required")
+	if assets.Console == nil || assets.Kernel == nil {
+		return nil, fmt.Errorf("handle table: console and kernel are required")
+	}
+	if cfg.NoNetwork != (assets.NetConn == nil) {
+		return nil, fmt.Errorf("handle table: network presence does not match boot config")
 	}
 	consoleInfo, err := assets.Console.Stat()
 	if err != nil {
@@ -25,11 +30,14 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	if consoleInfo.Mode()&os.ModeNamedPipe == 0 {
 		return nil, fmt.Errorf("handle table: console must be a supervisor-brokered pipe, got mode %s", consoleInfo.Mode())
 	}
-	netFile, err := worker.ConnFile(assets.NetConn)
-	if err != nil {
-		return nil, fmt.Errorf("handle table: net conn: %w", err)
+	var netFile *os.File
+	if assets.NetConn != nil {
+		netFile, err = worker.ConnFile(assets.NetConn)
+		if err != nil {
+			return nil, fmt.Errorf("handle table: net conn: %w", err)
+		}
+		defer func() { _ = netFile.Close() }()
 	}
-	defer func() { _ = netFile.Close() }()
 
 	assetFiles := []*os.File{assets.Console, assets.Kernel}
 	closeAfterAck := append([]*os.File(nil), assetFiles...)
@@ -88,10 +96,14 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		closeAfterAck = append(closeAfterAck, assets.SharedRAM)
 	}
 
-	// Direct mode keeps the established slot table. Brokered mode inserts the
-	// peer pipe, shared RAM, and mailbox capabilities before the network socket.
+	// Direct mode keeps the established slot table when networking is present.
+	// Brokered mode inserts the peer pipe, shared RAM, and mailbox capabilities
+	// before the optional network socket. Offline workers receive no socket.
 	inherited := make([]worker.InheritedFile, 0, len(assetFiles)+cfg.VCPUs+7)
-	netSlot, assetSlot := 7, 8
+	netSlot, assetSlot := 7, 7
+	if netFile != nil {
+		assetSlot++
+	}
 	environment := vmmWorkerEnv()
 	if cfg.WHPXBroker {
 		inherited = append(inherited,
@@ -105,10 +117,15 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 			inherited = append(inherited, worker.InheritedFile{Slot: 12 + index, File: event})
 		}
 		netSlot = 12 + cfg.VCPUs
-		assetSlot = netSlot + 1
+		assetSlot = netSlot
+		if netFile != nil {
+			assetSlot++
+		}
 		environment = append(environment, "GANTRY_WINDOWS_WHPX_BROKER_ACTIVE=1")
 	}
-	inherited = append(inherited, worker.InheritedFile{Slot: netSlot, File: netFile})
+	if netFile != nil {
+		inherited = append(inherited, worker.InheritedFile{Slot: netSlot, File: netFile})
+	}
 	for index, file := range assetFiles {
 		inherited = append(inherited, worker.InheritedFile{Slot: assetSlot + index, File: file})
 	}
@@ -169,7 +186,13 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	for _, file := range closeAfterAck {
 		_ = file.Close()
 	}
-	_ = assets.NetConn.Close()
+	if assets.NetConn != nil {
+		_ = assets.NetConn.Close()
+	}
+	if cfg.NoShares {
+		_ = shareSup.Close()
+		shareSup = nil
+	}
 
 	w := &vmmWorker{
 		child: child, brokerChild: brokerChild, proc: child.Process,
@@ -259,21 +282,57 @@ func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 		var token [workerproto.FDTokenLen]byte
 		copy(token[:], decoded)
 		socket := filepath.Join(dir, fmt.Sprintf("%d.sock", body.Port))
-		conn, err := net.DialTimeout("unix", socket, 3*time.Second)
+		hostConn, err := net.DialTimeout("unix", socket, 3*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("vsock.forward %s: %w", socket, err)
 		}
-		file, err := worker.ConnFile(conn)
+		// WSADuplicateSocket can reconstruct a Windows AF_UNIX socket in
+		// another process, but on supported Server 2022 hosts that socket does
+		// not reliably carry bytes after the source process closes its copy.
+		// Transfer one end of a connected Winsock TCP pair instead and retain
+		// all host-path/AF_UNIX authority in this supervisor relay.
+		supervisor, target, err := worker.SocketpairConns()
 		if err != nil {
-			_ = conn.Close()
+			_ = hostConn.Close()
+			return nil, fmt.Errorf("vsock.forward relay: %w", err)
+		}
+		file, err := worker.ConnFile(target)
+		_ = target.Close()
+		if err != nil {
+			_ = supervisor.Close()
+			_ = hostConn.Close()
 			return nil, err
 		}
 		err = w.sendFD(token, file)
 		_ = file.Close()
-		_ = conn.Close()
 		if err != nil {
+			_ = supervisor.Close()
+			_ = hostConn.Close()
 			return nil, fmt.Errorf("vsock.forward: %w", err)
 		}
+		go relayWindowsVsock(supervisor, hostConn)
 		return nil, nil
 	}
+}
+
+func relayWindowsVsock(left, right net.Conn) {
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = left.Close()
+			_ = right.Close()
+		})
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(left, right)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(right, left)
+		done <- struct{}{}
+	}()
+	<-done
+	closeBoth()
+	<-done
 }

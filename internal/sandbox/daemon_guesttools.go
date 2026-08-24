@@ -58,9 +58,10 @@ func hasBoundSecrets(names []string) bool {
 
 // deliverGuestTools stages and installs gantry-guest when the sandbox
 // needs it: bound secrets (credhelper mode), OAuth custody (oauth login
-// mode), or the MCP gateway (mcp-proxy / mcp-serve modes). It runs concurrently with readiness publication — never
-// on the boot path — and flips broker.guestToolsReady when the helper is
-// in place; sessions started after that point get the git wiring.
+// mode), or the MCP gateway (mcp-proxy / mcp-serve modes). Ordinary helper
+// delivery runs concurrently with readiness; MCP startup waits for it because
+// advertising a gateway without its guest proxy would be a false ready state.
+// broker.guestToolsReady flips only after content verification.
 func (d *daemonRuntime) deliverGuestTools() {
 	need := hasBoundSecrets(d.store.Snapshot().SecretNames) || d.cfg.OAuthCustodyEnabled() || d.cfg.MCP
 	if d.broker == nil || !need {
@@ -145,8 +146,12 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte) err
 		}
 	}()
 
-	script := fmt.Sprintf("mkdir -p %[1]s && cp %[2]s/gantry-guest %[1]s/gantry-guest && chmod 755 %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper",
-		guestToolsDirGuest, ctrPath)
+	// Read exactly the verified asset size rather than asking cp to read until
+	// EOF and copy metadata. Some ARM64 virtio-fs guests can deliver all bytes
+	// but stall cp's final source operation until the exec timeout. head -c is
+	// available in both the supported BusyBox and GNU guest images.
+	script := fmt.Sprintf("mkdir -p %[1]s && head -c %[3]d %[2]s/gantry-guest > %[1]s/gantry-guest.tmp && chmod 755 %[1]s/gantry-guest.tmp && mv %[1]s/gantry-guest.tmp %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper",
+		guestToolsDirGuest, ctrPath, len(data))
 	if _, _, err := d.broker.internalExec(strings.NewReader(""), []string{"sh", "-c", script},
 		guestToolsTimeout, 4<<10, guestToolsDeliverOp); err != nil {
 		return err
@@ -176,22 +181,34 @@ func (d *daemonRuntime) deliverGuestToolsViaExec(data []byte, sum [32]byte) erro
 // against the host asset. A mismatch is an error; callers fail closed.
 func (d *daemonRuntime) verifyGuestTools(sum [32]byte, size int64) error {
 	out, _, err := d.broker.internalExec(strings.NewReader(""), []string{"sh", "-c",
-		fmt.Sprintf("wc -c < %[1]s/gantry-guest; sha256sum %[1]s/gantry-guest", guestToolsDirGuest)},
+		fmt.Sprintf("size=$(wc -c < %[1]s/gantry-guest) && sum=$(sha256sum %[1]s/gantry-guest) && sum=${sum%%%% *} && printf '\\nGANTRY_GUEST_TOOLS_VERIFY %%s %%s\\n' \"$size\" \"$sum\"", guestToolsDirGuest)},
 		15*time.Second, 4<<10, guestToolsVerifyOp)
-	fields := strings.Fields(string(out))
-	gotSize, gotSum := "", ""
-	if len(fields) > 0 {
-		gotSize = fields[0]
-	}
-	if len(fields) > 1 {
-		gotSum = fields[1]
-	}
+	gotSize, gotSum := parseGuestToolsVerification(out)
 	wantSum := hex.EncodeToString(sum[:])
 	if err != nil || gotSum != wantSum || gotSize != fmt.Sprint(size) {
 		return fmt.Errorf("integrity check failed (guest %s bytes sha256 %s, want %d bytes sha256 %s; exec err: %v)",
 			gotSize, gotSum, size, wantSum, err)
 	}
 	return nil
+}
+
+// parseGuestToolsVerification extracts only the tagged command-result line
+// from an internal exec transcript. Session lifecycle diagnostics can be
+// emitted around it on slower guests; treating the first two whitespace fields
+// as the result incorrectly rejects an intact helper and falls back to the less
+// reliable bulk exec channel.
+func parseGuestToolsVerification(out []byte) (size, sum string) {
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != "GANTRY_GUEST_TOOLS_VERIFY" || len(fields[2]) != sha256.Size*2 {
+			continue
+		}
+		if decoded, err := hex.DecodeString(fields[2]); err == nil && len(decoded) == sha256.Size {
+			size = fields[1]
+			sum = strings.ToLower(fields[2])
+		}
+	}
+	return size, sum
 }
 
 // readCapped reads path with a hard size ceiling.

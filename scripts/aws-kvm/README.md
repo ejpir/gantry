@@ -75,8 +75,9 @@ before running the full battery or expect that section to fail.
 |---|---|
 | `infra-up.sh` | Idempotently create/reuse the S3 bucket, IAM profile, VPC endpoints, security groups, and test instance. |
 | `stage-assets.sh` | Cross-build `gantry-linux-amd64` and upload the standard test assets. |
-| `run-tests.sh` | Upload a fresh binary, populate `/opt/gantry`, and run `test-battery.sh`. |
-| `test-battery.sh` | Exercise crun, runsc, DNS/egress, concurrency, shares, cached OCI images, secrets, and OAuth custody on the instance. |
+| `run-tests.sh` | Upload a fresh x86_64 binary, populate `/opt/gantry`, and run `test-battery.sh`. |
+| `run-tests-arm64.sh` | Upload current ARM64 binaries and boot assets, then run the maintained confinement/share/MCP battery on Graviton. |
+| `test-battery.sh` | Exercise x86_64 crun, runsc, DNS/egress, concurrency, shares, cached OCI images, secrets, and OAuth custody. |
 | `directory-validation.sh` | Exercise large shared-directory scans and host/guest coherence. |
 | `self-update-validation.sh` | Verify a disposable tagged binary updates in place from a checksummed GitHub release. |
 | `confinement-battery.sh` | Require split network/VMM workers and verify namespaces, private root, seccomp, shares, and egress. |
@@ -97,20 +98,27 @@ register probes, deferred SMP, 1/2/4/8-vCPU scaling, functional 8-vCPU exec,
 and final timing collection.
 
 Create or reuse the dedicated ARM host without colliding with the x86
-`gantry-kvm-test` tag:
+`gantry-kvm-test` tag, then validate the current source tree:
 
 ```sh
 source ~/keys
 SUBNET_ID=subnet-xxxxxxxx sh scripts/aws-kvm/infra-up-arm64.sh
 export GANTRY_TEST_IID=i-xxxxxxxxxxxxxxxxx
 
-python3 scripts/aws-kvm/ssm.py \
-  scripts/aws-kvm/experiments/aws-arm-final-battery.sh 900
+sh scripts/aws-kvm/run-tests-arm64.sh 1200
 
 sh scripts/aws-kvm/infra-down-arm64.sh
 ```
 
-The ARM experiments expect their named provenance assets to be present in
+The ARM runner exercises required split-worker confinement, egress, live and
+boot shares, `FUSE_SYNCFS`, MCP helper delivery and proxying, and worker-death
+degradation with the freshly built binary and guest helper. It expects
+`ubuntu-arm64.erofs` in the staging bucket; the runner stages the remaining
+current assets.
+
+The historical ARM performance and SMP experiments can still be replayed with
+`scripts/aws-kvm/experiments/aws-arm-final-battery.sh`. Those experiments
+expect their named provenance assets to be present in
 `/opt/gantry`, notably `gantry-linux-arm64-kvm-fixed`,
 `gantry-kernel-arm64-deferred-smp`, `nerdbox-rootfs-arm64.erofs`, and
 `ubuntu-arm64.erofs`. Their README lists the variants. Keep those names when

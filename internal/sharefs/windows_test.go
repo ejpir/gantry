@@ -17,6 +17,47 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+func TestWindowsSyncfsFlushesTrackedWritableHandles(t *testing.T) {
+	root := t.TempDir()
+	backend, err := newWinExportFS(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = backend.Close() }()
+	file, _, errno := backend.create("", "sync.txt", linuxOCreat|2, 0o644)
+	if errno != 0 {
+		t.Fatalf("create errno %v", errno)
+	}
+	if _, err := file.write([]byte("syncfs-data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.RLock()
+	tracked := len(backend.openFiles)
+	backend.mu.RUnlock()
+	if tracked != 1 {
+		t.Fatalf("tracked open files = %d, want 1", tracked)
+	}
+	if errno := backend.syncOpenFiles(); errno != 0 {
+		t.Fatalf("sync errno %v", errno)
+	}
+	if err := file.close(); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.RLock()
+	tracked = len(backend.openFiles)
+	backend.mu.RUnlock()
+	if tracked != 0 {
+		t.Fatalf("tracked open files after close = %d, want 0", tracked)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sync.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "syncfs-data" {
+		t.Fatalf("synced data = %q", data)
+	}
+}
+
 func TestValidWinGuestName(t *testing.T) {
 	valid := []string{"hello.txt", "README", "a b", "café", ".hidden"}
 	for _, name := range valid {

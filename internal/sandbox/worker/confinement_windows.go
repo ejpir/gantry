@@ -143,13 +143,15 @@ func StartWindowsProcess(exe string, argv, env []string, files []*os.File,
 	// WHPX rejects AppContainer tokens at WHvCreatePartition, so only the
 	// brokered topology may place the VMM's device half in AppContainer. The
 	// narrow RoleWHPX child retains the partition under a Job-only boundary.
+	// The network role receives a separate capability-bearing AppContainer;
+	// MCP and device emulation continue to receive zero-capability identities.
 	brokeredVMM := role == workerproto.RoleVMM && environmentContains(env, "GANTRY_WINDOWS_WHPX_BROKER_ACTIVE=1")
-	appContainerEligible := role == workerproto.RoleMCP || brokeredVMM
+	appContainerEligible := role == workerproto.RoleMCP || role == workerproto.RoleNet || brokeredVMM
 	appContainerRequired := appContainerEligible && confinement == "required"
 	useAppContainer := appContainerEligible && os.Getenv("GANTRY_WINDOWS_APPCONTAINER") != "0"
 	var profile *windowsAppContainerProfile
 	if useAppContainer {
-		profile, err = openWindowsWorkerAppContainer()
+		profile, err = openWindowsWorkerAppContainer(role == workerproto.RoleNet)
 		if err != nil {
 			if appContainerRequired {
 				_ = job.Close()
@@ -162,25 +164,21 @@ func StartWindowsProcess(exe string, argv, env []string, files []*os.File,
 		defer func() { _ = profile.Close() }()
 	}
 
-	startSuspended := func(sid *windows.SID) (*windowsCreatedProcess, error) {
-		return createWindowsProcessSuspended(exe, argv, env, files, handles, sid)
+	startSuspended := func(selected *windowsAppContainerProfile) (*windowsCreatedProcess, error) {
+		return createWindowsProcessSuspended(exe, argv, env, files, handles, selected)
 	}
-	var appContainerSID *windows.SID
-	if profile != nil {
-		appContainerSID = profile.sid
-	}
-	created, err := startSuspended(appContainerSID)
-	if err != nil && appContainerSID != nil && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+	created, err := startSuspended(profile)
+	if err != nil && profile != nil && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		// Unpackaged binaries outside Windows/Program Files do not necessarily
-		// carry an ALL APPLICATION PACKAGES execute ACE. Grant this one private
-		// AppContainer identity read/execute access to the current binary only.
-		if aclErr := grantAppContainerExecutableAccess(exe, appContainerSID); aclErr == nil {
-			created, err = startSuspended(appContainerSID)
+		// carry an ACE for the private worker identity. Grant it read/execute on
+		// this binary only; inherited handles provide every other capability.
+		if aclErr := grantWindowsWorkerExecutableAccess(exe, profile.sid); aclErr == nil {
+			created, err = startSuspended(profile)
 		} else {
 			err = errors.Join(err, aclErr)
 		}
 	}
-	if err != nil && appContainerSID != nil && !appContainerRequired {
+	if err != nil && profile != nil && !appContainerRequired {
 		fmt.Fprintf(os.Stderr, "Windows worker AppContainer launch failed: %v; using Job-only confinement\n", err)
 		created, err = startSuspended(nil)
 	}

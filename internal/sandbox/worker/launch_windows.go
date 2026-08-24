@@ -9,9 +9,11 @@ import (
 
 func launchPlatformProcess(executable string, argv, environment []string, spec LaunchSpec,
 	diagnostic *os.File) (*os.Process, map[string]net.Conn, Containment, error) {
-	supervisorEnds, channelFiles, err := PipeChannels(len(spec.Channels))
-	if err != nil {
-		return nil, nil, nil, err
+	supervisorEnds := make([]net.Conn, 0, len(spec.Channels))
+	channelFiles := make([]*os.File, 0, 2*len(spec.Channels))
+	transferable := make(map[string]struct{}, len(spec.TransferableChannels))
+	for _, name := range spec.TransferableChannels {
+		transferable[name] = struct{}{}
 	}
 	keepSupervisor := false
 	defer func() {
@@ -23,10 +25,43 @@ func launchPlatformProcess(executable string, argv, environment []string, spec L
 		}
 	}()
 
-	// Anonymous pipes use two handles per logical channel but retain the same
-	// child slot numbering as Unix descriptors. Role-specific file capabilities
-	// use explicit slots and are inherited only through the handle allowlist.
-	environment = PipeEnv(environment, channelFiles, firstWorkerSlot)
+	// Anonymous pipes use two handles per ordinary logical channel. A channel
+	// that must cross into another child uses a directly inherited Winsock
+	// handle: DuplicateHandle does not produce a transferable socket, whereas
+	// TCPConn.File followed by PROC_THREAD_ATTRIBUTE_HANDLE_LIST does.
+	for index, name := range spec.Channels {
+		slot := firstWorkerSlot + index
+		if _, ok := transferable[name]; ok {
+			supervisor, child, err := SocketpairConns()
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("worker channel %s: %w", name, err)
+			}
+			file, err := ConnFile(child)
+			_ = child.Close()
+			if err != nil {
+				_ = supervisor.Close()
+				return nil, nil, nil, fmt.Errorf("worker transferable channel %s: %w", name, err)
+			}
+			supervisorEnds = append(supervisorEnds, supervisor)
+			channelFiles = append(channelFiles, file)
+			environment = append(environment, "GANTRY_WORKER_HANDLE_"+strconv.Itoa(slot)+"="+
+				strconv.FormatUint(uint64(file.Fd()), 10))
+			continue
+		}
+		supervisor, child, err := PipeChannels(1)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("worker channel %s: %w", name, err)
+		}
+		supervisorEnds = append(supervisorEnds, supervisor[0])
+		channelFiles = append(channelFiles, child...)
+		environment = append(environment,
+			"GANTRY_WORKER_READ_"+strconv.Itoa(slot)+"="+strconv.FormatUint(uint64(child[0].Fd()), 10),
+			"GANTRY_WORKER_WRITE_"+strconv.Itoa(slot)+"="+strconv.FormatUint(uint64(child[1].Fd()), 10),
+		)
+	}
+
+	// Role-specific capabilities use explicit slots and are inherited only
+	// through the same exact handle allowlist.
 	inheritedFiles := make([]*os.File, 0, len(spec.InheritedFiles))
 	for _, capability := range spec.InheritedFiles {
 		environment = append(environment, "GANTRY_WORKER_HANDLE_"+strconv.Itoa(capability.Slot)+"="+

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -216,6 +217,66 @@ func TestResolveRunscExplicitRootfsMissing(t *testing.T) {
 func TestResolveSharesRequireWritableRoot(t *testing.T) {
 	if _, _, err := resolveSandbox(t, "-rw=false", "-share", "code=/tmp"); err == nil || !strings.Contains(err.Error(), "writable container root") {
 		t.Errorf("shares with -rw=false: want writable-root error, got %v", err)
+	}
+}
+
+func TestResolveNewSandboxPropagatesMissingRegistryCredential(t *testing.T) {
+	var registry *httptest.Server
+	registry = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case strings.HasPrefix(req.URL.Path, "/v2/private/app/manifests/"):
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="test",scope="repository:private/app:pull"`, registry.URL))
+			w.WriteHeader(http.StatusUnauthorized)
+		case req.URL.Path == "/token":
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	t.Cleanup(registry.Close)
+
+	dir := t.TempDir()
+	kernel := make([]byte, 0x40)
+	binary.LittleEndian.PutUint32(kernel[0x38:], 0x644d5241) // raw arm64 Image
+	kernelPath := filepath.Join(dir, "kernel")
+	rootfsPath := filepath.Join(dir, "rootfs.erofs")
+	if err := os.WriteFile(kernelPath, kernel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rootfsPath, []byte("rootfs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyHome := filepath.Join(dir, "home")
+	if err := os.MkdirAll(emptyHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("USERPROFILE", emptyHome)
+	t.Setenv("GANTRY_REGISTRY_AUTH", "")
+	t.Setenv("GANTRY_IMAGES", filepath.Join(dir, "images"))
+	t.Setenv("XDG_RUNTIME_DIR", "")
+
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	rf := config.RegisterRunFlags(fs)
+	ref := strings.TrimPrefix(registry.URL, "http://") + "/private/app:latest"
+	if err := fs.Parse([]string{
+		"-kernel", kernelPath, "-rootfs", rootfsPath,
+		"-image", ref, "-rw=false",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := Resolve(rf, fs, nil)
+	if err == nil {
+		t.Fatal("new sandbox resolution succeeded without private-registry credentials")
+	}
+	for _, want := range []string{
+		"authentication required to pull private/app",
+		"no usable registry pull credential is configured",
+		"gantry image login " + strings.TrimPrefix(registry.URL, "http://"),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("new-sandbox error %q does not contain %q", err, want)
+		}
 	}
 }
 

@@ -39,6 +39,37 @@ func TestProxyMCPDrainsPipelinedRequestsAfterStdinEOF(t *testing.T) {
 	}
 }
 
+func TestProxyMCPExitsWhenTrackedResponsesDrain(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = server.Close() }()
+	requests := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize"}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":"call-2","method":"tools/call"}`,
+	}, "\n") + "\n"
+	go func() {
+		reader := bufio.NewReader(server)
+		for range 3 {
+			_, _ = reader.ReadString('\n')
+		}
+		_, _ = io.WriteString(server, `{"jsonrpc":"2.0","id":1,"result":{}}`+"\n")
+		time.Sleep(25 * time.Millisecond)
+		_, _ = io.WriteString(server, `{"jsonrpc":"2.0","id":"call-2","result":{}}`+"\n")
+	}()
+
+	var output bytes.Buffer
+	started := time.Now()
+	proxyMCP(client, strings.NewReader(requests), &output, 5*time.Second)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("proxy retained a fully drained session for %s", elapsed)
+	}
+	for _, id := range []string{`"id":1`, `"id":"call-2"`} {
+		if !strings.Contains(output.String(), id) {
+			t.Fatalf("proxy output %q lacks %s", output.String(), id)
+		}
+	}
+}
+
 // requirePosixFs skips fs-server tests on Windows: mcp-serve filesystem is
 // a linux-guest component and relInRoot deliberately speaks POSIX path
 // semantics ("/" separators, no drive letters) — asserting them under

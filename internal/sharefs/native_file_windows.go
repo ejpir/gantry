@@ -17,13 +17,19 @@ type winOpenFile struct {
 	writable   bool // opened with any write access; Flush/Fsync gate on it
 	closeOnce  sync.Once
 	closeErr   error
+	onClose    func(*winOpenFile)
 }
 
 func (f *winOpenFile) close() error {
 	if f == nil || f.file == nil {
 		return nil
 	}
-	f.closeOnce.Do(func() { f.closeErr = f.file.Close() })
+	f.closeOnce.Do(func() {
+		f.closeErr = f.file.Close()
+		if f.onClose != nil {
+			f.onClose(f)
+		}
+	})
 	return f.closeErr
 }
 

@@ -8,7 +8,19 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const windowsWorkerAppContainerName = "Gantry.Worker.NoNetwork.v1"
+const (
+	windowsWorkerNoNetworkAppContainerName = "Gantry.Worker.NoNetwork.v1"
+	windowsWorkerNetworkAppContainerName   = "Gantry.Worker.Network.v1"
+)
+
+// Well-known Windows capability SIDs. The network worker is itself the
+// egress-policy enforcement point and therefore needs ordinary stream and
+// datagram authority. Filesystem and process authority remain absent.
+var windowsNetworkCapabilitySIDs = []string{
+	"S-1-15-3-1", // internetClient
+	"S-1-15-3-2", // internetClientServer
+	"S-1-15-3-3", // privateNetworkClientServer
+}
 
 const hresultAlreadyExists = 0x800700b7
 
@@ -18,11 +30,20 @@ var (
 )
 
 type windowsAppContainerProfile struct {
-	sid *windows.SID
+	sid          *windows.SID
+	capabilities []windows.SIDAndAttributes
+	// capabilitySIDs retains the Go allocations referenced by capabilities.
+	capabilitySIDs []*windows.SID
 }
 
-func openWindowsWorkerAppContainer() (*windowsAppContainerProfile, error) {
-	name, err := windows.UTF16PtrFromString(windowsWorkerAppContainerName)
+func openWindowsWorkerAppContainer(network bool) (*windowsAppContainerProfile, error) {
+	profileName := windowsWorkerNoNetworkAppContainerName
+	descriptionText := "Zero-capability identity for Gantry worker processes"
+	if network {
+		profileName = windowsWorkerNetworkAppContainerName
+		descriptionText = "Network-capable identity for Gantry's confined network worker"
+	}
+	name, err := windows.UTF16PtrFromString(profileName)
 	if err != nil {
 		return nil, fmt.Errorf("encode AppContainer name: %w", err)
 	}
@@ -30,9 +51,17 @@ func openWindowsWorkerAppContainer() (*windowsAppContainerProfile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode AppContainer display name: %w", err)
 	}
-	description, err := windows.UTF16PtrFromString("Zero-capability identity for Gantry worker processes")
+	description, err := windows.UTF16PtrFromString(descriptionText)
 	if err != nil {
 		return nil, fmt.Errorf("encode AppContainer description: %w", err)
+	}
+	capabilities, capabilitySIDs, err := windowsAppContainerCapabilities(network)
+	if err != nil {
+		return nil, err
+	}
+	var capabilityPointer uintptr
+	if len(capabilities) != 0 {
+		capabilityPointer = uintptr(unsafe.Pointer(&capabilities[0]))
 	}
 
 	var sid *windows.SID
@@ -40,16 +69,20 @@ func openWindowsWorkerAppContainer() (*windowsAppContainerProfile, error) {
 		uintptr(unsafe.Pointer(name)),
 		uintptr(unsafe.Pointer(displayName)),
 		uintptr(unsafe.Pointer(description)),
-		0,
-		0,
+		capabilityPointer,
+		uintptr(len(capabilities)),
 		uintptr(unsafe.Pointer(&sid)),
 	)
+	runtime.KeepAlive(capabilities)
+	runtime.KeepAlive(capabilitySIDs)
 	switch code := uint32(hresult); code {
 	case 0:
 		if sid == nil {
 			return nil, fmt.Errorf("CreateAppContainerProfile returned a nil SID")
 		}
-		return &windowsAppContainerProfile{sid: sid}, nil
+		return &windowsAppContainerProfile{
+			sid: sid, capabilities: capabilities, capabilitySIDs: capabilitySIDs,
+		}, nil
 	case hresultAlreadyExists:
 		// Profiles are per-user and persistent. Reusing one stable identity avoids
 		// accumulating package profiles on every worker launch.
@@ -65,7 +98,28 @@ func openWindowsWorkerAppContainer() (*windowsAppContainerProfile, error) {
 	if sid == nil {
 		return nil, fmt.Errorf("DeriveAppContainerSidFromAppContainerName returned a nil SID")
 	}
-	return &windowsAppContainerProfile{sid: sid}, nil
+	return &windowsAppContainerProfile{
+		sid: sid, capabilities: capabilities, capabilitySIDs: capabilitySIDs,
+	}, nil
+}
+
+func windowsAppContainerCapabilities(network bool) ([]windows.SIDAndAttributes, []*windows.SID, error) {
+	if !network {
+		return nil, nil, nil
+	}
+	attributes := make([]windows.SIDAndAttributes, 0, len(windowsNetworkCapabilitySIDs))
+	sids := make([]*windows.SID, 0, len(windowsNetworkCapabilitySIDs))
+	for _, text := range windowsNetworkCapabilitySIDs {
+		sid, err := windows.StringToSid(text)
+		if err != nil {
+			return nil, nil, fmt.Errorf("derive AppContainer capability %s: %w", text, err)
+		}
+		sids = append(sids, sid)
+		attributes = append(attributes, windows.SIDAndAttributes{
+			Sid: sid, Attributes: windows.SE_GROUP_ENABLED,
+		})
+	}
+	return attributes, sids, nil
 }
 
 func (profile *windowsAppContainerProfile) Close() error {
@@ -77,7 +131,7 @@ func (profile *windowsAppContainerProfile) Close() error {
 	return err
 }
 
-func grantAppContainerExecutableAccess(path string, sid *windows.SID) error {
+func grantWindowsWorkerExecutableAccess(path string, sid *windows.SID) error {
 	if sid == nil {
 		return fmt.Errorf("grant AppContainer executable access: nil SID")
 	}

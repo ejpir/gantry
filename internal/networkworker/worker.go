@@ -65,6 +65,9 @@ func Run(control, data net.Conn) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+	if cfg.HostLoopbackUnavailable && (len(cfg.Forwards) != 0 || policy.MayAllowLoopback()) {
+		return fmt.Errorf("bootstrap: host loopback is unavailable to the confined network worker")
+	}
 	if cfg.Debug {
 		_ = os.Setenv("GANTRY_DEBUG_NET", "1")
 	}
@@ -147,7 +150,8 @@ func Run(control, data net.Conn) (retErr error) {
 
 	state := &state{
 		stack: stack, policy: policy, traffic: traffic,
-		currentDigest: sha256.Sum256(cfg.Policy),
+		currentDigest:           sha256.Sum256(cfg.Policy),
+		hostLoopbackUnavailable: cfg.HostLoopbackUnavailable,
 	}
 	serveErr := make(chan error, 1)
 	go func() {

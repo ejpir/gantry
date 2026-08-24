@@ -38,12 +38,30 @@ const (
 	fuseGetxattr    = 22
 	fuseOpendir     = 27
 	fuseReaddirplus = 44
+	fuseSyncfs      = 50
 	fuseListxattr   = 23
 	fuseSetxattr    = 21
 	fuseRemovexattr = 24
 	fuseStatx       = 52
 	linuxENOSYS     = 38
 )
+
+func TestShareHubSyncfsFlushesExports(t *testing.T) {
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	fuseInitHub(t, hub)
+	publishHubShare(t, hub, "work", t.TempDir(), false)
+	n, errno, _ := hubReq(t, hub, [][]byte{fuseInHeader(fuseSyncfs, 2, 1, 0)}, 16)
+	if errno != 0 {
+		t.Fatalf("SYNCFS errno %d", errno)
+	}
+	if n != 16 {
+		t.Fatalf("SYNCFS response size = %d, want 16", n)
+	}
+}
 
 func TestShareHubReadlinkUsesResponsePayloadCapacity(t *testing.T) {
 	if runtime.GOOS == "windows" {

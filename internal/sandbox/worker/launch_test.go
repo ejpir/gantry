@@ -39,6 +39,22 @@ func TestLaunchSpecRejectsAuthorityAndAmbiguousTables(t *testing.T) {
 			want: "duplicated",
 		},
 		{
+			name: "undeclared transferable channel",
+			spec: LaunchSpec{
+				Role: workerproto.RoleNet, EntryPoint: "_net-worker", Channels: []string{"control", "data"},
+				TransferableChannels: []string{"other"},
+			},
+			want: "is not declared",
+		},
+		{
+			name: "duplicate transferable channel",
+			spec: LaunchSpec{
+				Role: workerproto.RoleNet, EntryPoint: "_net-worker", Channels: []string{"control", "data"},
+				TransferableChannels: []string{"data", "data"},
+			},
+			want: "is duplicated",
+		},
+		{
 			name: "reserved environment",
 			spec: LaunchSpec{
 				Role: workerproto.RoleMCP, EntryPoint: "_mcp-worker", Channels: []string{"control"},

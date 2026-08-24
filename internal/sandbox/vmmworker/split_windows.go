@@ -23,18 +23,29 @@ var ErrUnavailable = fmt.Errorf("split VMM unavailable on this platform/topology
 
 func CrossProcNetConn() (sup, dev net.Conn, err error) { return worker.SocketpairConns() }
 
-func vmmSplitPossible(mode string, nw *NetAttachment, shareManager *control.ShareManager) bool {
-	return mode != "off" && nw != nil && nw.Conn != nil &&
-		shareManager != nil && shareManager.Hub() != nil
+func vmmSplitPossible(mode string, _ *NetAttachment, _ *control.ShareManager) bool {
+	return mode != "off"
 }
 
 func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManager *control.ShareManager, dir string, console *os.File) (Runner, error) {
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, ErrUnavailable
 	}
+	hasNetwork := nw != nil && nw.Conn != nil
+	if hasNetwork != (opts.NetConn != nil) {
+		return nil, fmt.Errorf("split VMM network attachment mismatch")
+	}
+	if cfg.Net && !hasNetwork {
+		// External endpoint transports cannot be delegated to the confined
+		// Windows worker. Never reinterpret an enabled-but-untransferable
+		// network as an intentionally offline VM.
+		return nil, ErrUnavailable
+	}
+	hasShares := shareManager != nil && shareManager.Hub() != nil
 	bootCfg := vmmworkerapi.Config{
 		MemSize: opts.MemSize, VCPUs: opts.VCPUs, Cmdline: opts.Cmdline,
 		NetMAC: opts.NetMAC, GuestCID: opts.GuestCID, HasRoot: opts.Rootfs != nil,
+		NoNetwork: !hasNetwork, NoShares: !hasShares,
 		NDisksRO: len(opts.DisksRO), NDisks: len(opts.Disks),
 		Confinement: config.NormalizeProcessIsolation(cfg.ProcessIsolation),
 	}
@@ -61,7 +72,7 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		bootCfg.WHPXBroker = true
 		bootCfg.WHPXToken = token
 	}
-	if !nw.Split && nw.Policy != nil {
+	if hasNetwork && !nw.Split && nw.Policy != nil {
 		raw, err := netpol.Marshal(nw.Policy)
 		if err != nil {
 			return nil, fmt.Errorf("marshal network policy for worker: %w", err)
@@ -94,9 +105,14 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	if bootCfg.Policy != nil && nw.Traffic != nil {
 		vw.startTrafficSync(nw.Traffic)
 	}
-	if err := vw.startShareBroker(shareManager.Hub()); err != nil {
-		_ = vw.Close()
-		return nil, fmt.Errorf("share backend: %w", err)
+	if hasShares {
+		if err := vw.startShareBroker(shareManager.Hub()); err != nil {
+			_ = vw.Close()
+			return nil, fmt.Errorf("share backend: %w", err)
+		}
+	} else if vw.share != nil {
+		_ = vw.share.Close()
+		vw.share = nil
 	}
 	return vw, nil
 }
