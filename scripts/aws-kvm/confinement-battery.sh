@@ -1,14 +1,18 @@
 #!/bin/bash
 # confinement-battery.sh — worker confinement (docs/worker-confinement.md)
-# on real x86_64 KVM + AL2023. Runs ON the test instance via ssm.py,
-# AFTER run-tests.sh has populated /opt/gantry. AL2023 has no AppArmor
+# on real x86_64 or ARM64 KVM + AL2023. Runs ON the test instance via ssm.py,
+# after the architecture's runner has populated /opt/gantry. AL2023 has no AppArmor
 # userns restriction, so the FULL stack is expected: private mount root
 # + seccomp filter, all probes enforced. Sandboxes are named c*; the
 # stock battery's t* sandboxes are untouched.
 set +e
 cd /opt/gantry || exit 1
 
-G=./gantry-linux-amd64
+G=${GANTRY_TEST_EXE:-./gantry-linux-amd64}
+KERNEL=${GANTRY_TEST_KERNEL:-nerdbox-kernel-x86_64}
+ROOTFS=${GANTRY_TEST_ROOTFS:-nerdbox-rootfs-x86_64.erofs}
+IMAGE=${GANTRY_TEST_IMAGE:-debian-bookworm-amd64.erofs}
+EXPECTED_ARCH=${GANTRY_TEST_ARCH:-x86_64}
 # SSM does not consistently provide HOME. Pin the same state root Gantry uses
 # so evidence checks never inspect /tmp/.gantry while the daemon selected its
 # separate no-home fallback.
@@ -42,8 +46,8 @@ $G stop c1 >/dev/null 2>&1; $G stop c2 >/dev/null 2>&1; $G stop c3 >/dev/null 2>
 rm -rf "$SBX"/c1 "$SBX"/c2 "$SBX"/c3
 
 echo "===== c1: -process-isolation=required under real KVM ====="
-$G start c1 -process-isolation=required -kernel nerdbox-kernel-x86_64 \
-  -rootfs nerdbox-rootfs-x86_64.erofs -image debian-bookworm-amd64.erofs 2>&1 | tail -2
+$G start c1 -process-isolation=required -kernel "$KERNEL" \
+  -rootfs "$ROOTFS" -image "$IMAGE" 2>&1 | tail -2
 sleep 1
 
 ISO=""
@@ -60,7 +64,7 @@ if printf '%s' "$ISO" | grep -qa '"state":"unenforced"'; then bad "required: no 
 [ "$(role_prop "$SBX/c1/isolation.json" vmmConfinement landlock)" = enforced ] && ok "required: VMM Landlock enforced" || bad "required: VMM Landlock enforced"
 [ "$(role_prop "$SBX/c1/isolation.json" networkConfinement landlock)" = enforced ] && ok "required: network Landlock enforced" || bad "required: network Landlock enforced"
 
-R=$(xe c1 'uname -m; echo M1');           chk "required: boot+exec"   "x86_64"  "$R"
+R=$(xe c1 'uname -m; echo M1');           chk "required: boot+exec"   "$EXPECTED_ARCH"  "$R"
 R=$(xe c1 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443" && echo EGRESS-OK')
                                           chk "required: egress"      "EGRESS-OK" "$R"
 
@@ -83,8 +87,8 @@ fi
 
 echo "===== c2: auto mode + confined share hot-add (linux keeps it) ====="
 mkdir -p /tmp/hottest && echo hotcontent > /tmp/hottest/hot.txt
-$G start c2 -process-isolation=auto -kernel nerdbox-kernel-x86_64 \
-  -rootfs nerdbox-rootfs-x86_64.erofs -image debian-bookworm-amd64.erofs \
+$G start c2 -process-isolation=auto -kernel "$KERNEL" \
+  -rootfs "$ROOTFS" -image "$IMAGE" \
   -share boot=/tmp/hottest,ro >/dev/null 2>&1
 sleep 1
 ISO2=""
@@ -109,14 +113,21 @@ chk "auto: hot-added share serves"        "liveadd" "$R"
 R=$(xe c2 'echo w > /host/live/w.txt && echo WR-OK')
 chk "auto: hot-added rw write"            "WR-OK"  "$R"
 [ -f /tmp/hottest2/w.txt ] && ok "auto: write visible on host" || bad "auto: write visible on host"
+R=$(xe c2 'sync -f /host/live && echo SYNCFS-OK')
+chk "auto: share syncfs succeeds"          "SYNCFS-OK" "$R"
+if grep -Rqa 'Unimplemented opcode SYNCFS' "$SBX/c2"/*.log 2>/dev/null; then
+  bad "auto: SYNCFS opcode implemented"
+else
+  ok "auto: SYNCFS opcode implemented"
+fi
 
 echo "----- worker-vmm.log postmortem captured -----"
 [ -s "$SBX"/c1/worker-vmm.log ] && ok "postmortem: worker-vmm.log nonempty" || { bad "postmortem: worker-vmm.log nonempty"; ls -la "$SBX"/c1/; }
 
 echo "===== c3: required MCP worker + Landlock + nonfatal worker death ====="
 $G start c3 -process-isolation=required -mcp -mcp-fs-root /work -mcp-fs-user nobody \
-  -kernel nerdbox-kernel-x86_64 -rootfs nerdbox-rootfs-x86_64.erofs \
-  -image debian-bookworm-amd64.erofs >/tmp/c3-start.log 2>&1
+  -kernel "$KERNEL" -rootfs "$ROOTFS" \
+  -image "$IMAGE" >/tmp/c3-start.log 2>&1
 C3START=$?
 [ "$C3START" = 0 ] && ok "mcp required: sandbox started" || { bad "mcp required: sandbox started"; tail -20 /tmp/c3-start.log; }
 sleep 2
@@ -136,8 +147,9 @@ if [ -z "$MCP_PID" ]; then bad "mcp worker: child process running"; else
   [ "$WETC" = "0" ] && ok "mcp worker: private root" || bad "mcp worker: private root (/etc has $WETC entries)"
 fi
 
-# The guest helper arrives asynchronously. A bounded probe proves MCP still
-# works through the opaque supervisor relay after all in-worker controls land.
+# MCP readiness now includes verified guest-helper delivery. A bounded probe
+# proves the helper and opaque supervisor relay both remain functional after
+# all in-worker controls land.
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   R=$(xe c3 'test -x /run/gantry/bin/gantry-guest && echo READY')
   printf '%s' "$R" | grep -qa READY && break

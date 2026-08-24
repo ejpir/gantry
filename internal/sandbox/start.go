@@ -281,6 +281,19 @@ func startSandboxDaemon(cmd *exec.Cmd) (sandboxDaemonProcess, error) {
 	return &execSandboxDaemon{cmd: cmd, handshake: writeHandshake}, nil
 }
 
+const defaultSandboxDaemonReadyTimeout = 20 * time.Second
+
+func sandboxDaemonReadyTimeout(cfg config.RunConfig) time.Duration {
+	if cfg.MCP {
+		// MCP readiness includes verified delivery of gantry-guest. Allow both
+		// bounded delivery channels to fail before the launcher gives up, so a
+		// slow architecture reports the actual fail-closed delivery error rather
+		// than an unrelated 20-second guest-RPC timeout.
+		return 2*guestToolsTimeout + time.Minute
+	}
+	return defaultSandboxDaemonReadyTimeout
+}
+
 func sandboxLaunchLabel(transient bool) string {
 	label := "gantry start"
 	if transient {
@@ -507,7 +520,7 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 		}
 		return 0
 	}
-	timeout := time.NewTimer(20 * time.Second)
+	timeout := time.NewTimer(sandboxDaemonReadyTimeout(cfg))
 	defer timeout.Stop()
 	fallbackPoll := time.NewTicker(100 * time.Millisecond)
 	defer fallbackPoll.Stop()
