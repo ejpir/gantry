@@ -41,7 +41,11 @@ const (
 	jbd2CompatChecksum     = uint32(0x1)
 	jbd2IncompatRevoke     = uint32(0x1)
 	jbd2Incompat64Bit      = uint32(0x2)
-	jbd2IncompatChecksumV3 = uint32(0x10) // test coverage for unsupported features
+	jbd2IncompatAsync      = uint32(0x4)
+	jbd2IncompatChecksumV2 = uint32(0x8)
+	jbd2IncompatChecksumV3 = uint32(0x10)
+	jbd2IncompatFastCommit = uint32(0x20)
+	jbd2ChecksumCRC32C     = byte(4)
 	jbd2TagEscape          = uint32(0x1)
 	jbd2TagSameUUID        = uint32(0x2)
 	jbd2TagDeleted         = uint32(0x4)
@@ -95,19 +99,28 @@ type extent struct {
 }
 
 type journal struct {
-	view      *storage
-	extents   []extent
-	maxLen    uint32
-	first     uint32
-	sequence  uint32
-	start     uint32
-	incompat  uint32
-	blockSize uint32
+	view            *storage
+	extents         []extent
+	maxLen          uint32
+	first           uint32
+	sequence        uint32
+	start           uint32
+	incompat        uint32
+	blockSize       uint32
+	checksumVersion int
+	checksumSeed    uint32
 }
 
 type journalTag struct {
-	block uint64
-	flags uint32
+	block    uint64
+	flags    uint32
+	checksum uint32
+}
+
+type journalData struct {
+	data     []byte
+	flags    uint32
+	checksum uint32
 }
 
 // New returns a backend suitable for ext4.Read. It owns file through the
@@ -335,7 +348,11 @@ func parseExtentNode(source io.ReaderAt, superblock ext4Superblock, node []byte,
 		entry := node[12+index*12 : 24+index*12]
 		logical := binary.LittleEndian.Uint32(entry[0:4])
 		if depth == 0 {
-			length := uint32(binary.LittleEndian.Uint16(entry[4:6]) & 0x7fff)
+			encodedLength := binary.LittleEndian.Uint16(entry[4:6])
+			if encodedLength > 0x8000 {
+				return nil, errors.New("ext4 journal contains an unwritten extent")
+			}
+			length := extentLength(encodedLength)
 			physical := uint64(binary.LittleEndian.Uint16(entry[6:8]))<<32 | uint64(binary.LittleEndian.Uint32(entry[8:12]))
 			if length == 0 || physical >= superblock.blockCount || uint64(length) > superblock.blockCount-physical {
 				return nil, errors.New("invalid ext4 extent range")
@@ -363,6 +380,17 @@ func parseExtentNode(source io.ReaderAt, superblock ext4Superblock, node []byte,
 	return result, nil
 }
 
+func extentLength(encoded uint16) uint32 {
+	// ext4 reserves values above 0x8000 for unwritten extents, subtracting
+	// 0x8000 to recover their length. Exactly 0x8000 is the valid, initialized
+	// maximum of 32,768 blocks; masking off the high bit would misread it as an
+	// empty extent. Large internal journals commonly use this boundary value.
+	if encoded <= 0x8000 {
+		return uint32(encoded)
+	}
+	return uint32(encoded - 0x8000)
+}
+
 func openJournal(view *storage, extents []extent) (*journal, error) {
 	block, err := readExtentBlock(view.Storage, extents, 0, uint32(view.blockSize))
 	if err != nil {
@@ -381,14 +409,21 @@ func openJournal(view *storage, extents []extent) (*journal, error) {
 	start := binary.BigEndian.Uint32(block[0x1c:0x20])
 	compat := binary.BigEndian.Uint32(block[0x24:0x28])
 	incompat := binary.BigEndian.Uint32(block[0x28:0x2c])
-	unsupported := incompat & ^uint32(jbd2IncompatRevoke|jbd2Incompat64Bit)
-	if compat&jbd2CompatChecksum != 0 || unsupported != 0 {
-		return nil, errors.New("JBD2 checksum or fast-commit recovery is not supported")
+	roCompat := binary.BigEndian.Uint32(block[0x2c:0x30])
+	if compat != 0 || roCompat != 0 {
+		return nil, fmt.Errorf("unsupported JBD2 compatible features %#x/%#x", compat, roCompat)
+	}
+	supported := uint32(jbd2IncompatRevoke | jbd2Incompat64Bit | jbd2IncompatChecksumV2 | jbd2IncompatChecksumV3)
+	if unsupported := incompat & ^supported; unsupported != 0 {
+		return nil, fmt.Errorf("unsupported JBD2 incompatible features %#x", unsupported)
+	}
+	if incompat&jbd2IncompatChecksumV2 != 0 && incompat&jbd2IncompatChecksumV3 != 0 {
+		return nil, errors.New("JBD2 checksum v2 and v3 are both enabled")
 	}
 	if blockSize != uint32(view.blockSize) || maxLen < 2 || first == 0 || first >= maxLen || start >= maxLen {
 		return nil, errors.New("invalid JBD2 geometry")
 	}
-	return &journal{
+	journal := &journal{
 		view:      view,
 		extents:   extents,
 		maxLen:    maxLen,
@@ -397,7 +432,28 @@ func openJournal(view *storage, extents []extent) (*journal, error) {
 		start:     start,
 		incompat:  incompat,
 		blockSize: blockSize,
-	}, nil
+	}
+	if incompat&(jbd2IncompatChecksumV2|jbd2IncompatChecksumV3) != 0 {
+		if block[0x50] != jbd2ChecksumCRC32C {
+			return nil, fmt.Errorf("unsupported JBD2 checksum type %d", block[0x50])
+		}
+		journal.checksumVersion = 2
+		if incompat&jbd2IncompatChecksumV3 != 0 {
+			journal.checksumVersion = 3
+		}
+		journal.checksumSeed = crc.CRC32c(^uint32(0), block[0x30:0x40])
+		if len(block) < ext4SuperblockSize {
+			return nil, errors.New("truncated JBD2 superblock checksum")
+		}
+		provided := binary.BigEndian.Uint32(block[0xfc:0x100])
+		copyBlock := append([]byte(nil), block[:ext4SuperblockSize]...)
+		clear(copyBlock[0xfc:0x100])
+		calculated := crc.CRC32c(^uint32(0), copyBlock)
+		if provided != calculated {
+			return nil, fmt.Errorf("invalid JBD2 superblock checksum: got %#x, want %#x", provided, calculated)
+		}
+	}
+	return journal, nil
 }
 
 func (j *journal) replay() (int, error) {
@@ -410,7 +466,7 @@ func (j *journal) replay() (int, error) {
 	limit := j.maxLen - j.first
 	replayed := 0
 	for visited < limit {
-		pending := make(map[uint64][]byte)
+		pending := make(map[uint64]journalData)
 		revoked := make(map[uint64]struct{})
 		transactionSeen := false
 		committed := false
@@ -428,6 +484,9 @@ func (j *journal) replay() (int, error) {
 			switch kind {
 			case jbd2Descriptor:
 				transactionSeen = true
+				if err := j.verifyMetadataChecksum(block, "descriptor", sequence); err != nil {
+					return 0, err
+				}
 				tags, err := j.parseTags(block)
 				if err != nil {
 					return 0, err
@@ -449,13 +508,13 @@ func (j *journal) replay() (int, error) {
 					}
 					visited++
 					position = j.next(position)
-					if tag.flags&jbd2TagEscape != 0 {
-						binary.BigEndian.PutUint32(data[0:4], jbd2Magic)
-					}
-					pending[tag.block] = data
+					pending[tag.block] = journalData{data: data, flags: tag.flags, checksum: tag.checksum}
 				}
 			case jbd2Revoke:
 				transactionSeen = true
+				if err := j.verifyMetadataChecksum(block, "revoke", sequence); err != nil {
+					return 0, err
+				}
 				if j.incompat&jbd2IncompatRevoke == 0 {
 					return 0, errors.New("JBD2 revoke block without advertised feature")
 				}
@@ -463,6 +522,11 @@ func (j *journal) replay() (int, error) {
 					return 0, err
 				}
 			case jbd2Commit:
+				if err := j.verifyCommitChecksum(block, sequence); err != nil {
+					// A torn final commit is an uncommitted tail. As with kernel
+					// recovery, do not expose any data from this transaction.
+					return replayed, nil
+				}
 				if !transactionSeen {
 					return 0, errors.New("JBD2 commit has no descriptor")
 				}
@@ -481,8 +545,14 @@ func (j *journal) replay() (int, error) {
 			delete(pending, block)
 			delete(j.view.overlay, block)
 		}
-		for block, data := range pending {
-			j.view.overlay[block] = data
+		for block, item := range pending {
+			if err := j.verifyDataChecksum(item.data, item.checksum, sequence); err != nil {
+				return 0, fmt.Errorf("journal data for filesystem block %d: %w", block, err)
+			}
+			if item.flags&jbd2TagEscape != 0 {
+				binary.BigEndian.PutUint32(item.data[0:4], jbd2Magic)
+			}
+			j.view.overlay[block] = item.data
 			replayed++
 		}
 		sequence++
@@ -495,27 +565,42 @@ func (j *journal) parseTags(block []byte) ([]journalTag, error) {
 	if j.incompat&jbd2Incompat64Bit != 0 {
 		tagSize = 12
 	}
+	switch j.checksumVersion {
+	case 2:
+		tagSize += 2
+	case 3:
+		tagSize = 16
+	}
+	limit := len(block)
+	if j.checksumVersion != 0 {
+		limit -= 4 // descriptor checksum tail
+	}
 	var tags []journalTag
 	for offset := 12; ; {
-		if offset+tagSize > len(block) {
+		if offset+tagSize > limit {
 			return nil, errors.New("truncated JBD2 descriptor tag")
 		}
 		target := uint64(binary.BigEndian.Uint32(block[offset : offset+4]))
-		flags := binary.BigEndian.Uint32(block[offset+4 : offset+8])
+		flags := uint32(binary.BigEndian.Uint16(block[offset+6 : offset+8]))
+		checksum := uint32(binary.BigEndian.Uint16(block[offset+4 : offset+6]))
+		if j.checksumVersion == 3 {
+			flags = binary.BigEndian.Uint32(block[offset+4 : offset+8])
+			checksum = binary.BigEndian.Uint32(block[offset+12 : offset+16])
+		}
 		if flags & ^uint32(jbd2TagEscape|jbd2TagSameUUID|jbd2TagDeleted|jbd2TagLast) != 0 {
 			return nil, fmt.Errorf("unsupported JBD2 tag flags %#x", flags)
 		}
-		if tagSize == 12 {
+		if j.incompat&jbd2Incompat64Bit != 0 {
 			target |= uint64(binary.BigEndian.Uint32(block[offset+8:offset+12])) << 32
 		}
 		offset += tagSize
 		if flags&jbd2TagSameUUID == 0 {
-			if offset+16 > len(block) {
+			if offset+16 > limit {
 				return nil, errors.New("truncated JBD2 descriptor UUID")
 			}
 			offset += 16
 		}
-		tags = append(tags, journalTag{block: target, flags: flags})
+		tags = append(tags, journalTag{block: target, flags: flags, checksum: checksum})
 		if len(tags) > int(j.maxLen) {
 			return nil, errors.New("too many JBD2 descriptor tags")
 		}
@@ -530,11 +615,15 @@ func (j *journal) parseRevokes(block []byte, revoked map[uint64]struct{}) error 
 		return errors.New("truncated JBD2 revoke block")
 	}
 	used := int(binary.BigEndian.Uint32(block[12:16]))
+	limit := len(block)
+	if j.checksumVersion != 0 {
+		limit -= 4
+	}
 	width := 4
 	if j.incompat&jbd2Incompat64Bit != 0 {
 		width = 8
 	}
-	if used < 16 || used > len(block) || (used-16)%width != 0 {
+	if used < 16 || used > limit || (used-16)%width != 0 {
 		return errors.New("invalid JBD2 revoke length")
 	}
 	for offset := 16; offset < used; offset += width {
@@ -548,6 +637,62 @@ func (j *journal) parseRevokes(block []byte, revoked map[uint64]struct{}) error 
 			return fmt.Errorf("revoked journal block %d is outside filesystem", target)
 		}
 		revoked[target] = struct{}{}
+	}
+	return nil
+}
+
+func (j *journal) verifyMetadataChecksum(block []byte, kind string, sequence uint32) error {
+	if j.checksumVersion == 0 {
+		return nil
+	}
+	if len(block) < 4 {
+		return fmt.Errorf("truncated JBD2 %s checksum in transaction %d", kind, sequence)
+	}
+	provided := binary.BigEndian.Uint32(block[len(block)-4:])
+	copyBlock := append([]byte(nil), block...)
+	clear(copyBlock[len(copyBlock)-4:])
+	calculated := crc.CRC32c(j.checksumSeed, copyBlock)
+	if provided != calculated {
+		return fmt.Errorf("invalid JBD2 %s checksum in transaction %d: got %#x, want %#x", kind, sequence, provided, calculated)
+	}
+	return nil
+}
+
+func (j *journal) verifyCommitChecksum(block []byte, sequence uint32) error {
+	if j.checksumVersion == 0 {
+		return nil
+	}
+	if len(block) < 20 {
+		return fmt.Errorf("truncated JBD2 commit checksum in transaction %d", sequence)
+	}
+	// Checksum v2/v3 use h_chksum[0], but unlike the older compatible
+	// checksum format they leave h_chksum_type and h_chksum_size unset.
+	provided := binary.BigEndian.Uint32(block[16:20])
+	copyBlock := append([]byte(nil), block...)
+	clear(copyBlock[16:20])
+	calculated := crc.CRC32c(j.checksumSeed, copyBlock)
+	if provided != calculated {
+		return fmt.Errorf("invalid JBD2 commit checksum in transaction %d: got %#x, want %#x", sequence, provided, calculated)
+	}
+	return nil
+}
+
+func (j *journal) verifyDataChecksum(block []byte, provided, sequence uint32) error {
+	if j.checksumVersion == 0 {
+		return nil
+	}
+	var sequenceBytes [4]byte
+	binary.BigEndian.PutUint32(sequenceBytes[:], sequence)
+	calculated := crc.CRC32c(j.checksumSeed, sequenceBytes[:])
+	calculated = crc.CRC32c(calculated, block)
+	if j.checksumVersion == 2 {
+		if uint16(provided) != uint16(calculated) {
+			return fmt.Errorf("invalid JBD2 checksum: got %#x, want %#x", uint16(provided), uint16(calculated))
+		}
+		return nil
+	}
+	if provided != calculated {
+		return fmt.Errorf("invalid JBD2 checksum: got %#x, want %#x", provided, calculated)
 	}
 	return nil
 }
