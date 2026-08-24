@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +55,9 @@ func TestExportOCIRoundTripIncludesPersistentUpper(t *testing.T) {
 	}
 	if info, err := os.Stat(archive); err != nil || info.Size() == 0 {
 		t.Fatalf("archive stat = %+v, %v", info, err)
-	} else if info.Mode().Perm()&0o077 != 0 {
+	} else if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		// Windows reports synthesized Unix mode bits. CmdExport applies and
+		// verifies the archive's private DACL after ExportOCI returns.
 		t.Fatalf("archive mode = %o, want private", info.Mode().Perm())
 	}
 	assertOCIArchiveShape(t, archive, "gantry-export/dev:latest", 2)
@@ -145,6 +149,40 @@ func TestExportOCIRefusesOverwriteUnlessForced(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(output); string(data) == "keep" {
 		t.Fatal("forced export did not replace output")
+	}
+}
+
+func TestExportProgressReportsLongRunningPhases(t *testing.T) {
+	var messages []string
+	logf := func(format string, args ...any) {
+		messages = append(messages, fmt.Sprintf(format, args...))
+	}
+
+	layer := newLayerProgress("test layer", logf)
+	layer.started = time.Now().Add(-10 * time.Second)
+	layer.lastReport = time.Now().Add(-exportProgressInterval)
+	layer.addCompressed(512 << 20)
+	layer.addProcessed(1 << 30)
+	layer.finish()
+
+	archive := newArchiveProgress(2<<30, logf)
+	archive.started = time.Now().Add(-10 * time.Second)
+	archive.lastReport = time.Now().Add(-exportProgressInterval)
+	archive.add(1 << 30)
+	archive.finish()
+
+	joined := strings.Join(messages, "\n")
+	for _, want := range []string{
+		"exporting test layer [working]",
+		"1.0G processed, 512.0M compressed",
+		"exported test layer:",
+		"writing OCI archive [==========··········]  50%",
+		"1.0G/2.0G",
+		"assembled OCI archive:",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("progress missing %q:\n%s", want, joined)
+		}
 	}
 }
 

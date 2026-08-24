@@ -87,7 +87,9 @@ readers and does not need root, loop mounts, Docker, or containerd. Gantry
 converts overlayfs whiteouts and opaque directories into their OCI layer
 equivalents and preserves ownership, modes, symlinks, device metadata, and
 supported extended attributes. Host shares are separate mounts and are not
-copied into the image.
+copied into the image. Large exports continuously report processed and
+compressed sizes, throughput, elapsed time, archive-copy percentage, and the
+final disk-sync phase.
 
 The archive defaults to the local image name
 `gantry-export/dev:latest`. Choose a team name or version at export time when

@@ -24,6 +24,7 @@ import (
 	"github.com/diskfs/go-diskfs/filesystem/ext4"
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/ext4view"
+	"github.com/ejpir/gantry/internal/gutil"
 	erofs "github.com/erofs/go-erofs"
 )
 
@@ -110,7 +111,7 @@ func ExportOCI(options ExportOptions) (*ExportResult, error) {
 	}
 	var layers []exportedLayer
 	say("exporting immutable base filesystem")
-	baseLayer, err := writeLayerBlob(filepath.Join(staging, "base.tar.gz"), func(writer *tar.Writer) error {
+	baseLayer, err := writeLayerBlob(filepath.Join(staging, "base.tar.gz"), "immutable base filesystem", say, func(writer *tar.Writer) error {
 		return writeEROFSLayer(writer, options.Base, options.Extras)
 	})
 	if err != nil {
@@ -120,7 +121,7 @@ func ExportOCI(options ExportOptions) (*ExportResult, error) {
 
 	if options.RWLayer != nil {
 		say("exporting persistent sandbox changes")
-		upperLayer, err := writeLayerBlob(filepath.Join(staging, "upper.tar.gz"), func(writer *tar.Writer) error {
+		upperLayer, err := writeLayerBlob(filepath.Join(staging, "upper.tar.gz"), "persistent sandbox changes", say, func(writer *tar.Writer) error {
 			return writeExt4UpperLayer(writer, options.RWLayer)
 		})
 		if err != nil {
@@ -169,6 +170,11 @@ func ExportOCI(options ExportOptions) (*ExportResult, error) {
 	layoutBlob := []byte(`{"imageLayoutVersion":"1.0.0"}`)
 
 	say("writing OCI archive %s", options.Output)
+	var archivePayloadSize int64
+	for _, layer := range layers {
+		archivePayloadSize += layer.descriptor.Size
+	}
+	archiveProgress := newArchiveProgress(archivePayloadSize, say)
 	if err := atomicfile.WriteDurable(options.Output, 0o600, func(output io.Writer) error {
 		tw := tar.NewWriter(output)
 		writeBytes := func(name string, data []byte) error {
@@ -187,7 +193,7 @@ func ExportOCI(options ExportOptions) (*ExportResult, error) {
 				return err
 			}
 			defer func() { _ = file.Close() }()
-			written, err := io.CopyN(tw, file, size)
+			written, err := io.CopyN(progressWriter{Writer: tw, Add: archiveProgress.add}, file, size)
 			if err != nil {
 				return err
 			}
@@ -213,10 +219,16 @@ func ExportOCI(options ExportOptions) (*ExportResult, error) {
 				return err
 			}
 		}
-		return tw.Close()
+		if err := tw.Close(); err != nil {
+			return err
+		}
+		archiveProgress.finish()
+		say("syncing OCI archive to disk")
+		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("write OCI archive: %w", err)
 	}
+	say("finished syncing OCI archive")
 	info, err := os.Stat(options.Output)
 	if err != nil {
 		return nil, fmt.Errorf("stat OCI archive: %w", err)
@@ -282,17 +294,20 @@ func marshalExportConfig(created time.Time, architecture string, config *Config,
 	return blob, nil
 }
 
-func writeLayerBlob(output string, write func(*tar.Writer) error) (exportedLayer, error) {
+func writeLayerBlob(output, description string, logf func(string, ...any), write func(*tar.Writer) error) (exportedLayer, error) {
 	file, err := os.OpenFile(output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return exportedLayer{}, err
 	}
+	progress := newLayerProgress(description, logf)
 	compressedHash := sha256.New()
-	gzipWriter := gzip.NewWriter(io.MultiWriter(file, compressedHash))
+	compressedOutput := progressWriter{Writer: io.MultiWriter(file, compressedHash), Add: progress.addCompressed}
+	gzipWriter := gzip.NewWriter(compressedOutput)
 	gzipWriter.ModTime = time.Unix(0, 0)
 	gzipWriter.OS = 255
 	uncompressedHash := sha256.New()
-	tarWriter := tar.NewWriter(io.MultiWriter(gzipWriter, uncompressedHash))
+	uncompressedOutput := progressWriter{Writer: io.MultiWriter(gzipWriter, uncompressedHash), Add: progress.addProcessed}
+	tarWriter := tar.NewWriter(uncompressedOutput)
 	fail := func(operationErr error) (exportedLayer, error) {
 		return exportedLayer{}, errors.Join(operationErr, tarWriter.Close(), gzipWriter.Close(), file.Close())
 	}
@@ -311,6 +326,7 @@ func writeLayerBlob(output string, write func(*tar.Writer) error) (exportedLayer
 	if err := file.Close(); err != nil {
 		return exportedLayer{}, err
 	}
+	progress.finish()
 	info, err := os.Stat(output)
 	if err != nil {
 		return exportedLayer{}, err
@@ -324,6 +340,138 @@ func writeLayerBlob(output string, write func(*tar.Writer) error) (exportedLayer
 		diffID: fmt.Sprintf("sha256:%x", uncompressedHash.Sum(nil)),
 		path:   output,
 	}, nil
+}
+
+const exportProgressInterval = 5 * time.Second
+
+type progressWriter struct {
+	io.Writer
+	Add func(int64)
+}
+
+func (writer progressWriter) Write(data []byte) (int, error) {
+	count, err := writer.Writer.Write(data)
+	if count > 0 && writer.Add != nil {
+		writer.Add(int64(count))
+	}
+	return count, err
+}
+
+type layerProgress struct {
+	description string
+	logf        func(string, ...any)
+	started     time.Time
+	lastReport  time.Time
+	processed   int64
+	compressed  int64
+}
+
+func newLayerProgress(description string, logf func(string, ...any)) *layerProgress {
+	now := time.Now()
+	return &layerProgress{description: description, logf: logf, started: now, lastReport: now}
+}
+
+func (progress *layerProgress) addCompressed(count int64) {
+	progress.compressed += count
+}
+
+func (progress *layerProgress) addProcessed(count int64) {
+	progress.processed += count
+	now := time.Now()
+	if now.Sub(progress.lastReport) < exportProgressInterval {
+		return
+	}
+	progress.lastReport = now
+	elapsed := now.Sub(progress.started)
+	progress.logf("exporting %s [working] %s processed, %s compressed (%s/s, %s elapsed)",
+		progress.description,
+		gutil.HumanSize(progress.processed),
+		gutil.HumanSize(progress.compressed),
+		progressRate(progress.processed, elapsed),
+		progressDuration(elapsed),
+	)
+}
+
+func (progress *layerProgress) finish() {
+	elapsed := time.Since(progress.started)
+	progress.logf("exported %s: %s processed, %s compressed in %s",
+		progress.description,
+		gutil.HumanSize(progress.processed),
+		gutil.HumanSize(progress.compressed),
+		progressDuration(elapsed),
+	)
+}
+
+type archiveProgress struct {
+	logf       func(string, ...any)
+	started    time.Time
+	lastReport time.Time
+	written    int64
+	total      int64
+}
+
+func newArchiveProgress(total int64, logf func(string, ...any)) *archiveProgress {
+	now := time.Now()
+	return &archiveProgress{logf: logf, started: now, lastReport: now, total: total}
+}
+
+func (progress *archiveProgress) add(count int64) {
+	progress.written += count
+	now := time.Now()
+	if now.Sub(progress.lastReport) < exportProgressInterval {
+		return
+	}
+	progress.lastReport = now
+	progress.report(now, false)
+}
+
+func (progress *archiveProgress) finish() {
+	progress.report(time.Now(), true)
+}
+
+func (progress *archiveProgress) report(now time.Time, finished bool) {
+	elapsed := now.Sub(progress.started)
+	if finished {
+		progress.logf("assembled OCI archive: %s copied in %s",
+			gutil.HumanSize(progress.written), progressDuration(elapsed))
+		return
+	}
+	percent := 0
+	if progress.total > 0 {
+		percent = int(progress.written * 100 / progress.total)
+		if percent > 100 {
+			percent = 100
+		}
+	}
+	progress.logf("writing OCI archive [%s] %3d%% (%s/%s, %s/s, %s elapsed)",
+		progressBar(percent),
+		percent,
+		gutil.HumanSize(progress.written),
+		gutil.HumanSize(progress.total),
+		progressRate(progress.written, elapsed),
+		progressDuration(elapsed),
+	)
+}
+
+func progressBar(percent int) string {
+	const width = 20
+	completed := percent * width / 100
+	return strings.Repeat("=", completed) + strings.Repeat("·", width-completed)
+}
+
+func progressRate(bytes int64, elapsed time.Duration) string {
+	seconds := elapsed.Seconds()
+	if seconds <= 0 {
+		return "0B"
+	}
+	return gutil.HumanSize(int64(float64(bytes) / seconds))
+}
+
+func progressDuration(elapsed time.Duration) time.Duration {
+	if elapsed < time.Second {
+		return 0
+	}
+	return elapsed.Round(time.Second)
 }
 
 type erofsTree interface {

@@ -48,6 +48,23 @@ func TestProgressPrinterRepaintsPersistentDiskCreation(t *testing.T) {
 	}
 }
 
+func TestProgressPrinterRepaintsExportProgress(t *testing.T) {
+	var output bytes.Buffer
+	progress := newProgressPrinter(&output, "gantry export: ", true)
+	progress.Printf("exporting immutable base filesystem")
+	progress.Printf("exporting immutable base filesystem [working] 1.0G processed, 500.0M compressed")
+	progress.Printf("writing OCI archive [==========··········] 50%% (500.0M/1.0G)")
+	progress.Printf("syncing OCI archive to disk")
+
+	got := output.String()
+	if strings.Count(got, "\n") != 3 {
+		t.Fatalf("terminal export progress used %d lines, want intro, progress, and syncing:\n%q", strings.Count(got, "\n"), got)
+	}
+	if !strings.Contains(got, "\r\x1b[2Kgantry export: writing OCI archive [==========··········] 50%") {
+		t.Fatalf("terminal export progress was not repainted: %q", got)
+	}
+}
+
 func TestProgressPrinterFinishTerminatesActiveRow(t *testing.T) {
 	var output bytes.Buffer
 	progress := newProgressPrinter(&output, "", true)

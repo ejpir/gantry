@@ -85,9 +85,9 @@ options:
 	}
 
 	fmt.Fprintln(os.Stderr, "WARNING: the exported image includes every file persisted inside the sandbox and may contain credentials; review it before sharing.")
-	result, err := exportSandbox(name, *output, *reference, *force, func(format string, args ...any) {
-		fmt.Printf("gantry export: "+format+"\n", args...)
-	})
+	progress := gutil.NewProgressPrinter(os.Stdout, "gantry export: ")
+	result, err := exportSandbox(name, *output, *reference, *force, progress.Printf)
+	progress.Finish()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry export:", err)
 		return 1
