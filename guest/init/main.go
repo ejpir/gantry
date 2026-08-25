@@ -74,6 +74,7 @@ func main() {
 	mount("sysfs", "/sys", "sysfs", pseudo)
 	mount("tmpfs", "/tmp", "tmpfs", pseudo)
 	mountCgroups()
+	go spreadVirtioIRQs()
 
 	// Same hardening sysctls DefaultCmdline passes to production boots;
 	// repeated here because this init also runs on bare debug boots whose

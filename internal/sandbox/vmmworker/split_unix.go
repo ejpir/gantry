@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
@@ -79,9 +81,15 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	// The KVM open is best-effort: without it the worker's Prepare fails
 	// exactly like the monolithic path would.
 	bootCfg.Confinement = config.NormalizeProcessIsolation(cfg.ProcessIsolation)
-	// Opt-in while the vhost data plane is field-validated. The fallback is
-	// the established framed share broker; no persisted sandbox format changes.
-	bootCfg.VhostShares = os.Getenv("GANTRY_VHOST_SHARES") == "1"
+	// Apple-silicon macOS defaults to the vhost data plane: synchronous framed
+	// FUSE handling can otherwise pin an HVF exit thread under host disk load.
+	// Linux retains the established broker default. GANTRY_VHOST_SHARES=0/1 is
+	// an explicit cross-platform override and is intentionally not persisted.
+	vhostShares, vhostErr := resolveVhostShares(runtime.GOOS, runtime.GOARCH, os.Getenv("GANTRY_VHOST_SHARES"))
+	if vhostErr != nil {
+		return nil, vhostErr
+	}
+	bootCfg.VhostShares = vhostShares
 	bootCfg.HasSharedRAM = bootCfg.VhostShares
 	if bootCfg.Confinement != "off" {
 		confRoot := filepath.Join(dir, "vmmroot")
@@ -155,6 +163,19 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		return nil, fmt.Errorf("share backend: %w", err)
 	}
 	return vw, nil
+}
+
+func resolveVhostShares(goos, goarch, value string) (bool, error) {
+	switch strings.TrimSpace(value) {
+	case "":
+		return goos == "darwin" && goarch == "arm64", nil
+	case "0":
+		return false, nil
+	case "1":
+		return true, nil
+	default:
+		return false, fmt.Errorf("GANTRY_VHOST_SHARES must be 0 or 1")
+	}
 }
 
 // syncWorkerTraffic pulls enforcement counters from the worker into the

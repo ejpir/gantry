@@ -61,6 +61,48 @@ func TestSignalWakeNeverBlocks(t *testing.T) {
 	}
 }
 
+func TestIRQWakeTargetsAffinityCPUAndCompatibilityCPU0(t *testing.T) {
+	b := &hvfBackend{m: &Machine{vcpus: 4, irqTargets: map[int]int{73: 1}}}
+	for id := range 4 {
+		b.vcpus = append(b.vcpus, &hvfVCPU{id: id, wake: make(chan struct{}, 1)})
+	}
+
+	b.wakeIRQTarget(73)
+	for id, vc := range b.vcpus {
+		woke := false
+		select {
+		case <-vc.wake:
+			woke = true
+		default:
+		}
+		want := id == 0 || id == 1
+		if woke != want {
+			t.Errorf("vCPU %d wake = %v, want %v", id, woke, want)
+		}
+	}
+}
+
+func TestIRQWakeUnknownRouteUsesCPU0Only(t *testing.T) {
+	b := &hvfBackend{m: &Machine{vcpus: 3}}
+	for id := range 3 {
+		b.vcpus = append(b.vcpus, &hvfVCPU{id: id, wake: make(chan struct{}, 1)})
+	}
+
+	b.wakeIRQTarget(99)
+	for id, vc := range b.vcpus {
+		select {
+		case <-vc.wake:
+			if id != 0 {
+				t.Errorf("unknown IRQ woke vCPU %d, want CPU 0 only", id)
+			}
+		default:
+			if id == 0 {
+				t.Fatal("unknown IRQ did not wake compatibility CPU 0")
+			}
+		}
+	}
+}
+
 func TestRunStatsAggregatesVCPUs(t *testing.T) {
 	b := &hvfBackend{}
 	for range 2 {

@@ -59,6 +59,34 @@ func TestInterruptRouterDisableDrainsCallbacks(t *testing.T) {
 	}
 }
 
+func TestVirtioInterruptTargetsSpreadAcrossVCPUs(t *testing.T) {
+	for _, test := range []struct {
+		slot, vcpus, want int
+	}{
+		{slot: 25, vcpus: 12, want: 1},
+		{slot: 26, vcpus: 12, want: 2},
+		{slot: 27, vcpus: 12, want: 3},
+		{slot: 5, vcpus: 2, want: 1},
+		{slot: 9, vcpus: 1, want: 0},
+		{slot: -1, vcpus: 12, want: 0},
+	} {
+		if got := virtioInterruptTarget(test.slot, test.vcpus); got != test.want {
+			t.Errorf("target(slot=%d, vcpus=%d) = %d, want %d", test.slot, test.vcpus, got, test.want)
+		}
+	}
+
+	machine := &Machine{vcpus: 4, irqTargets: map[int]int{48: 3, 49: 7}}
+	if got := machine.interruptTarget(48); got != 3 {
+		t.Fatalf("configured interrupt target = %d, want 3", got)
+	}
+	if got := machine.interruptTarget(49); got != 0 {
+		t.Fatalf("out-of-range interrupt target = %d, want compatibility CPU 0", got)
+	}
+	if got := machine.interruptTarget(99); got != 0 {
+		t.Fatalf("unknown interrupt target = %d, want compatibility CPU 0", got)
+	}
+}
+
 func writeResourceTestFile(t *testing.T, name string, data []byte) *os.File {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)

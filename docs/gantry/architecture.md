@@ -249,14 +249,22 @@ Writable ext4 layers are private and must not be shared by running VMs.
 Host directories use a single multiplexed virtio-fs share hub. Each admitted
 tag appears in the guest namespace and is bind-mounted into the container at
 its selected path. The supervisor retains the host roots and applies
-read-only and path-confinement policy. On supported Unix hosts, the split VMM
-uses shared guest RAM and vhost-style doorbells so the VMM worker does not
-receive host share roots; other paths use an authenticated request relay.
+read-only and path-confinement policy. On Apple silicon macOS, the split VMM
+uses shared guest RAM and vhost-style doorbells by default so host filesystem
+latency never holds an HVF exit thread; set `GANTRY_VHOST_SHARES=0` only to
+diagnose the framed-broker fallback. Linux keeps that fallback by default and
+can opt into vhost shares with `GANTRY_VHOST_SHARES=1`. Neither path gives the
+VMM worker host share roots.
 
 There is no private checkout layer: host-share changes are changes to the
 original host directory. Guest `syncfs` requests are handled by the share hub:
 Unix syncs each pinned backing filesystem, while Windows flushes every live
 writable share handle (closed handles are flushed by FUSE `FLUSH`).
+
+On SMP guests, PID 1 spreads virtio interrupt affinity by device slot after
+deferred CPU onlining completes. The HVF backend uses the same slot mapping to
+wake the assigned vCPU (plus CPU 0 for compatibility with custom system roots),
+rather than waking every vCPU for each filesystem completion.
 
 ## Host capability bridges
 

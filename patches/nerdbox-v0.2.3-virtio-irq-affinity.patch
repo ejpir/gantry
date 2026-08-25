@@ -1,0 +1,220 @@
+diff --git a/pkg/vminit/initd/initd.go b/pkg/vminit/initd/initd.go
+index 6ecda89..4408fe6 100644
+--- a/pkg/vminit/initd/initd.go
++++ b/pkg/vminit/initd/initd.go
+@@ -204,6 +204,8 @@ func systemInit(ctx context.Context, config Config, shutdownSvc shutdown.Service
+ 		return err
+ 	}
+ 
++	go spreadVirtioIRQs(ctx)
++
+ 	dhcpRenewer, dhcpReleaser, err := vmnetworking.SetupVM(ctx, config.Networks, config.Debug)
+ 	if err != nil {
+ 		return err
+diff --git a/pkg/vminit/initd/irqaffinity.go b/pkg/vminit/initd/irqaffinity.go
+new file mode 100644
+index 0000000..9863467
+--- /dev/null
++++ b/pkg/vminit/initd/irqaffinity.go
+@@ -0,0 +1,148 @@
++//go:build linux
++
++/*
++   Copyright The containerd Authors.
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
++*/
++
++package initd
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/containerd/log"
++)
++
++type virtioIRQRoute struct {
++	irq    int
++	target int
++}
++
++// virtioIRQRoutings mirrors Gantry's VMM slot%vcpus interrupt-target policy.
++// Linux names a virtio-mmio device by its slot (virtio0, virtio1, ...), so no
++// unstable IRQ number or device-type ordering table is baked into the guest.
++func virtioIRQRoutings(interrupts string, vcpus int) []virtioIRQRoute {
++	if vcpus <= 1 {
++		return nil
++	}
++	var routes []virtioIRQRoute
++	for _, line := range strings.Split(interrupts, "\n") {
++		fields := strings.Fields(line)
++		if len(fields) < 2 {
++			continue
++		}
++		irq, err := strconv.Atoi(strings.TrimSuffix(fields[0], ":"))
++		if err != nil {
++			continue
++		}
++		name := fields[len(fields)-1]
++		if !strings.HasPrefix(name, "virtio") {
++			continue
++		}
++		slot, err := strconv.Atoi(strings.TrimPrefix(name, "virtio"))
++		if err != nil || slot < 0 {
++			continue
++		}
++		routes = append(routes, virtioIRQRoute{irq: irq, target: slot % vcpus})
++	}
++	return routes
++}
++
++// cpuListSize returns one past the greatest CPU in a Linux cpulist. Gantry's
++// topology is contiguous, making this both the configured vCPU count and the
++// modulus shared with the VMM.
++func cpuListSize(list string) (int, error) {
++	maximum := -1
++	for _, part := range strings.Split(strings.TrimSpace(list), ",") {
++		bounds := strings.SplitN(part, "-", 2)
++		end, err := strconv.Atoi(bounds[len(bounds)-1])
++		if err != nil || end < 0 {
++			return 0, fmt.Errorf("invalid CPU list %q", list)
++		}
++		if len(bounds) == 2 {
++			start, startErr := strconv.Atoi(bounds[0])
++			if startErr != nil || start < 0 || start > end {
++				return 0, fmt.Errorf("invalid CPU list %q", list)
++			}
++		}
++		if end > maximum {
++			maximum = end
++		}
++	}
++	return maximum + 1, nil
++}
++
++func readCPUListSize(path string) (int, error) {
++	value, err := os.ReadFile(path)
++	if err != nil {
++		return 0, err
++	}
++	return cpuListSize(string(value))
++}
++
++// spreadVirtioIRQs keeps high-rate filesystem interrupts from sharing CPU 0
++// with network and vsock terminal completions. Gantry's deferred-SMP kernel
++// starts vminitd with CPU0 only, so wait asynchronously until the first vsock
++// packet has onlined the configured set. Failure is a performance degradation,
++// not a boot failure: custom kernels may expose no writable affinity controls.
++func spreadVirtioIRQs(ctx context.Context) {
++	vcpus, err := readCPUListSize("/sys/devices/system/cpu/present")
++	if err != nil || vcpus <= 1 {
++		return
++	}
++
++	ticker := time.NewTicker(25 * time.Millisecond)
++	defer ticker.Stop()
++	deadline := time.NewTimer(10 * time.Second)
++	defer deadline.Stop()
++	for {
++		online, onlineErr := readCPUListSize("/sys/devices/system/cpu/online")
++		if onlineErr == nil && online >= vcpus {
++			break
++		}
++		select {
++		case <-ctx.Done():
++			return
++		case <-deadline.C:
++			log.G(ctx).WithField("vcpus", vcpus).Warn("timed out waiting to spread virtio IRQ affinity")
++			return
++		case <-ticker.C:
++		}
++	}
++
++	interrupts, err := os.ReadFile("/proc/interrupts")
++	if err != nil {
++		log.G(ctx).WithError(err).Warn("failed to read interrupts for affinity")
++		return
++	}
++	configured := 0
++	for _, route := range virtioIRQRoutings(string(interrupts), vcpus) {
++		path := fmt.Sprintf("/proc/irq/%d/smp_affinity_list", route.irq)
++		if err := os.WriteFile(path, []byte(strconv.Itoa(route.target)), 0644); err != nil {
++			log.G(ctx).WithError(err).WithFields(log.Fields{
++				"irq": route.irq, "cpu": route.target,
++			}).Warn("failed to set virtio IRQ affinity")
++			continue
++		}
++		configured++
++	}
++	log.G(ctx).WithFields(log.Fields{
++		"configured": configured, "vcpus": vcpus,
++	}).Debug("spread virtio IRQ affinity")
++}
+diff --git a/pkg/vminit/initd/irqaffinity_test.go b/pkg/vminit/initd/irqaffinity_test.go
+new file mode 100644
+index 0000000..e92146f
+--- /dev/null
++++ b/pkg/vminit/initd/irqaffinity_test.go
+@@ -0,0 +1,47 @@
++//go:build linux
++
++package initd
++
++import (
++	"reflect"
++	"testing"
++)
++
++func TestCPUListSize(t *testing.T) {
++	for _, test := range []struct {
++		list string
++		want int
++	}{
++		{list: "0", want: 1},
++		{list: "0-11", want: 12},
++		{list: "0-3,8,10-11", want: 12},
++	} {
++		got, err := cpuListSize(test.list)
++		if err != nil || got != test.want {
++			t.Errorf("cpuListSize(%q) = %d, %v; want %d", test.list, got, err, test.want)
++		}
++	}
++	for _, invalid := range []string{"x", "3-1", "-1"} {
++		if _, err := cpuListSize(invalid); err == nil {
++			t.Errorf("cpuListSize(%q) succeeded", invalid)
++		}
++	}
++}
++
++func TestVirtioIRQRoutings(t *testing.T) {
++	interrupts := `            CPU0 CPU1 CPU2 CPU3
++ 11: 1 2 3 4 GICv3 27 Level arch_timer
++ 14: 99 0 0 0 GICv3 73 Edge virtio25
++ 42: 20 0 0 0 GICv3 74 Edge virtio26
++ 43: 10 0 0 0 GICv3 75 Edge virtio27
++IPI0: 1 1 1 1 Rescheduling interrupts
++ 44: 1 0 0 0 GICv3 76 Edge virtio-nope
++`
++	want := []virtioIRQRoute{{irq: 14, target: 1}, {irq: 42, target: 2}, {irq: 43, target: 3}}
++	if got := virtioIRQRoutings(interrupts, 12); !reflect.DeepEqual(got, want) {
++		t.Fatalf("routes = %#v, want %#v", got, want)
++	}
++	if got := virtioIRQRoutings(interrupts, 1); got != nil {
++		t.Fatalf("single-CPU routes = %#v, want nil", got)
++	}
++}

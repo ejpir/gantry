@@ -5,6 +5,7 @@ package vmmworker
 import (
 	"fmt"
 	"os"
+	"runtime"
 )
 
 // newSharedRAM creates an anonymous-by-unlink file object suitable for mapping
@@ -15,7 +16,7 @@ func newSharedRAM(dir string, size uint64) (*os.File, error) {
 	if size == 0 || size > uint64(^uint64(0)>>1) {
 		return nil, fmt.Errorf("shared guest RAM: invalid size %d", size)
 	}
-	file, err := os.CreateTemp(dir, ".gantry-guest-ram-*")
+	file, err := os.CreateTemp(sharedRAMBackingDir(runtime.GOOS, dir), ".gantry-guest-ram-*")
 	if err != nil {
 		return nil, fmt.Errorf("create shared guest RAM: %w", err)
 	}
@@ -30,4 +31,14 @@ func newSharedRAM(dir string, size uint64) (*os.File, error) {
 		return nil, fmt.Errorf("size shared guest RAM: %w", err)
 	}
 	return file, nil
+}
+
+func sharedRAMBackingDir(goos, sandboxDir string) string {
+	if goos == "darwin" {
+		// Sandbox state normally lives below /Users on macOS and is itself a
+		// virtiofs mount when Gantry runs in Docker Sandbox. Guest RAM must not
+		// turn that shared mount into a multi-gigabyte random-write backing store.
+		return os.TempDir()
+	}
+	return sandboxDir
 }
