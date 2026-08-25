@@ -20,6 +20,8 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/miekg/dns v1.1.72
 	github.com/opencontainers/runtime-spec v1.3.0
+	github.com/pkg/sftp v1.13.10
+	golang.org/x/crypto v0.53.0
 	golang.org/x/mod v0.36.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.44.0
@@ -42,6 +44,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inetaf/tcpproxy v0.0.0-20250222171855-c4b9df066048 // indirect
 	github.com/insomniacslk/dhcp v0.0.0-20250919081422-f80a1952f48e // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
@@ -52,7 +55,6 @@ require (
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/text v0.38.0 // indirect

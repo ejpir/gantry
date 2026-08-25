@@ -41,17 +41,20 @@ type daemonRuntime struct {
 	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
-	consoleLog  *boundedlog.Pipe
-	network     *Network
-	shares      *control.ShareManager
-	ports       *control.PortManager
-	runner      vmmworker.Runner
-	machine     *vmm.Machine
-	rpc         *ttrpc.Client
-	control     net.Listener
-	broker      *broker
-	mcpListener net.Listener
-	mcpWorker   *mcpworkersup.Worker
+	consoleLog         *boundedlog.Pipe
+	network            *Network
+	shares             *control.ShareManager
+	guestToolsStageDir string
+	ports              *control.PortManager
+	runner             vmmworker.Runner
+	machine            *vmm.Machine
+	rpc                *ttrpc.Client
+	control            net.Listener
+	broker             *broker
+	sshListener        net.Listener
+	sshCancel          func()
+	mcpListener        net.Listener
+	mcpWorker          *mcpworkersup.Worker
 
 	guestErr <-chan error
 	signals  chan os.Signal
@@ -93,13 +96,14 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
-	// MCP advertises a guest-side proxy as part of its ready contract, so wait
-	// for the verified helper and fail closed if it cannot be installed. Other
-	// consumers (bound secrets and OAuth custody) retain asynchronous delivery
-	// so their optional helper never extends the ordinary VM boot path.
-	if d.cfg.MCP {
-		d.deliverGuestTools()
-		if !d.broker.guestToolsReady.Load() {
+	// MCP and SSH advertise endpoints that require the verified guest helper,
+	// so both are part of the ready contract. Other consumers (bound secrets
+	// and OAuth custody) retain asynchronous delivery and do not extend boot.
+	if d.cfg.MCP || d.cfg.SSH {
+		if !d.deliverGuestTools() {
+			if d.cfg.SSH {
+				return daemonFailure(fmt.Errorf("SSH requires verified guest tools; disable -ssh or repair the gantry-guest asset"))
+			}
 			return daemonFailure(fmt.Errorf("mcp guest helper delivery failed"))
 		}
 	} else {
@@ -131,6 +135,12 @@ func (d *daemonRuntime) bootLog(phase string) {
 }
 
 func (d *daemonRuntime) close() {
+	if d.sshCancel != nil {
+		d.sshCancel()
+	}
+	if d.sshListener != nil {
+		_ = d.sshListener.Close()
+	}
 	if d.mcpListener != nil {
 		_ = d.mcpListener.Close()
 	}
@@ -153,6 +163,9 @@ func (d *daemonRuntime) close() {
 	}
 	if d.shares != nil {
 		_ = d.shares.Close()
+	}
+	if d.guestToolsStageDir != "" {
+		_ = os.RemoveAll(d.guestToolsStageDir)
 	}
 	if d.network != nil {
 		d.network.Close()

@@ -112,7 +112,9 @@ func downloadable(name string, kind assetKind) bool {
 			name == "nerdbox-rootfs-gvisor-x86_64.erofs"
 	case imageAsset:
 		return name == "gantry-default-image-arm64.erofs" ||
-			name == "gantry-default-image-x86_64.erofs"
+			name == "gantry-default-image-x86_64.erofs" ||
+			name == "gantry-ide-image-arm64.erofs" ||
+			name == "gantry-ide-image-x86_64.erofs"
 	case guestToolsAsset:
 		return name == "gantry-guest-arm64" ||
 			name == "gantry-guest-x86_64"

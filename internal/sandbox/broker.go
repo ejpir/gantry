@@ -18,6 +18,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
@@ -166,6 +167,24 @@ func (br *broker) handle(c net.Conn) {
 		br.mcpControl(c, req)
 	case "audit.tail":
 		_ = json.NewEncoder(c).Encode(&controlproto.AuditResponse{Lines: br.audit.tail()})
+	case "ide.audit":
+		if len(req.Args) != 3 || !layout.ValidName(req.Args[0]) || !layout.ValidName(req.Args[1]) ||
+			(req.Args[2] != "primary" && req.Args[2] != "sidecar") {
+			_, _ = fmt.Fprintln(c, `{"error":"invalid IDE audit edge"}`)
+			return
+		}
+		sidecar, primary, edge := req.Args[0], req.Args[1], req.Args[2]
+		owner := filepath.Base(br.dir)
+		if (edge == "primary" && owner != primary) || (edge == "sidecar" && owner != sidecar) || sidecar != primary+ideSidecarSuffix {
+			_, _ = fmt.Fprintln(c, `{"error":"invalid IDE audit edge"}`)
+			return
+		}
+		if edge == "primary" {
+			br.auditf("ide sidecar %s created for %s", sidecar, primary)
+		} else {
+			br.auditf("ide sidecar %s created from %s", sidecar, primary)
+		}
+		_, _ = fmt.Fprintln(c, `{"ok":true}`)
 	case "capture.read":
 		br.captureControl(c, req)
 	case "session":

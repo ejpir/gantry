@@ -199,6 +199,17 @@ func DefaultImage() string {
 	return Path("shell-rootfs.erofs")
 }
 
+// DefaultIDEImage returns the curated glibc editor sidecar image. Unlike the
+// workload default it is intentionally uniform: bash, tar, curl, git,
+// ca-certificates and libstdc++ with an unprivileged gantry user.
+func DefaultIDEImage() string {
+	name := "gantry-ide-image-arm64.erofs"
+	if runtime.GOARCH == "amd64" {
+		name = "gantry-ide-image-x86_64.erofs"
+	}
+	return releaseAssetPath(name)
+}
+
 // GVisorRootfs maps a rootfs image name to its gVisor variant.
 func GVisorRootfs(path string) string {
 	if strings.Contains(path, "rootfs-gvisor-") {

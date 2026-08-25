@@ -41,6 +41,7 @@ usage:
   gantry ls                         # list sandboxes
   gantry audit <name>               # security-event trail (credentials, secrets, custody)
   gantry mcp <name> [tools]         # MCP gateway: configured servers; live tool list
+  gantry ssh NAME [-- CMD]          # SSH through the sandbox-local socket
   gantry tui                        # interactive local sandbox dashboard
   gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
@@ -214,6 +215,12 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return controlcmd.CmdShare(argv), true
 	case "mcp":
 		return sandbox.CmdMCP(argv), true
+	case "ssh":
+		return sandbox.CmdSSH(argv), true
+	case "ssh-proxy":
+		return sandbox.CmdSSHProxy(argv), true
+	case "ssh-known-hosts":
+		return sandbox.CmdSSHKnownHosts(argv), true
 	case "ports":
 		return controlcmd.CmdPorts(argv), true
 	case "net-policy":

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/image"
 )
 
 // defaultInternalExecTimeout bounds internal execs whose caller passes a
@@ -68,6 +69,17 @@ func (c *execCapture) snapshot() ([]byte, bool) {
 // retained stdout; op names the caller for error attribution. User secrets
 // are deliberately NOT injected into this internal process.
 func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
+	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg)
+}
+
+// internalExecAsRoot is reserved for trusted helpers which must install into
+// or deliberately manage root-owned runtime state. User-requested commands
+// continue through internalExec with the image identity.
+func (br *broker) internalExecAsRoot(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
+	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, mcpLauncherImageConfig(br.cfg.ImageCfg))
+}
+
+func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config) ([]byte, int, error) {
 	if !br.limits.acquireSession() {
 		return nil, 0, fmt.Errorf("sandbox session limit reached")
 	}
@@ -98,7 +110,7 @@ func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Dura
 		Args:           args,
 		ID:             "sb",
 		SandboxSession: true,
-		ImgCfg:         br.cfg.ImageCfg,
+		ImgCfg:         imageConfig,
 		Environment:    br.cfg.ProxyEnvironment(),
 		Quiet:          true,
 		ExitStatus:     &status,

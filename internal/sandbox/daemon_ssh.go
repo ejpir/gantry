@@ -1,0 +1,159 @@
+package sandbox
+
+import (
+	"context"
+	"fmt"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/sshgw"
+)
+
+func sshInstallDir() string {
+	// layout.Root is ~/.gantry/sandboxes (or GANTRY_HOME). Install identity
+	// and managed client config are siblings of sandbox state, not a fake
+	// sandbox that would appear in gantry ls.
+	return filepath.Join(filepath.Dir(layout.Root()), "ssh")
+}
+
+func sshHostKeyPath() string { return filepath.Join(sshInstallDir(), "host_ed25519") }
+
+func defaultSSHUser(cfgUser string, uid uint32) string {
+	if userName, _, ok := strings.Cut(cfgUser, ":"); ok {
+		cfgUser = userName
+	}
+	if cfgUser != "" {
+		return cfgUser
+	}
+	if uid != 0 {
+		return strconv.FormatUint(uint64(uid), 10)
+	}
+	return "root"
+}
+
+func (d *daemonRuntime) startSSHGateway() error {
+	if !d.cfg.SSH {
+		return nil
+	}
+	listener, endpoint, err := listenSSH(d.name, d.dir)
+	if err != nil {
+		return fmt.Errorf("SSH gateway listener %s: %w", endpoint, err)
+	}
+
+	defaultUser := "root"
+	if d.cfg.ImageCfg != nil {
+		defaultUser = defaultSSHUser(d.cfg.ImageCfg.User, d.cfg.ImageCfg.UID)
+	}
+	hostUser := ""
+	if current, err := user.Current(); err == nil {
+		hostUser = current.Username
+	}
+	gateway, err := sshgw.New(sshgw.Config{
+		Name: d.name, HostKeyPath: sshHostKeyPath(), DefaultUser: defaultUser,
+		HostUser: hostUser, Spawner: sshgw.SpawnFunc(d.broker.spawnSSH),
+		Auditf: d.broker.auditf, PeerAllowed: localsec.PeerSameUser,
+	})
+	if err != nil {
+		_ = listener.Close()
+		removeSSHRuntime(d.name, d.dir)
+		return fmt.Errorf("SSH gateway: %w", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.sshListener, d.sshCancel = listener, cancel
+	d.broker.auditf("ssh: gateway enabled on sandbox-local socket")
+	go func() {
+		if err := gateway.Serve(ctx, listener); err != nil {
+			d.broker.auditf("ssh: gateway stopped: %v", err)
+		}
+	}()
+	return nil
+}
+
+func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int, error) {
+	if !br.guestToolsReady.Load() {
+		return 255, fmt.Errorf("SSH session refused")
+	}
+	if !br.limits.acquireSession() {
+		return 255, fmt.Errorf("SSH session refused")
+	}
+	defer br.limits.releaseSession()
+
+	args := []string{"/run/gantry/bin/gantry-guest", "ssh-session", request.User}
+	switch {
+	case request.Forward != nil:
+		args = append(args, "tcp", request.Forward.Host, strconv.FormatUint(uint64(request.Forward.Port), 10))
+	case request.Subsystem == "sftp":
+		args = append(args, "sftp")
+	case request.Command != "":
+		args = append(args, "exec", request.Command)
+	default:
+		args = append(args, "shell")
+	}
+
+	killCh := make(chan struct{}, 1)
+	finished := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			select {
+			case killCh <- struct{}{}:
+			default:
+			}
+		case <-finished:
+		}
+	}()
+	defer close(finished)
+
+	var resize <-chan client.WindowSize
+	if request.Resize != nil {
+		updates := make(chan client.WindowSize, 8)
+		resize = updates
+		go func() {
+			for {
+				select {
+				case size, ok := <-request.Resize:
+					if !ok {
+						return
+					}
+					update := client.WindowSize{Cols: size.Width, Rows: size.Height}
+					select {
+					case updates <- update:
+					default:
+						select {
+						case <-updates:
+						default:
+						}
+						select {
+						case updates <- update:
+						default:
+						}
+					}
+				case <-finished:
+					return
+				}
+			}
+		}()
+	}
+
+	manifest := client.LoadShareManifest(br.dir)
+	rootImageCfg := mcpLauncherImageConfig(br.cfg.ImageCfg)
+	var status int
+	err := client.Session(br.rpc, client.SessionOptions{
+		StreamSock: br.streamSock, StreamDial: br.streamDial,
+		Shares: manifest.Shares, ShareTransport: manifest.Transport,
+		RW: br.cfg.RW, LayerSet: br.cfg.LayerSet, Args: args,
+		ID: "sb", SandboxSession: true, ImgCfg: rootImageCfg,
+		Environment: append(br.cfg.ProxyEnvironment(), request.Env...),
+		Terminal:    request.Terminal, Cols: request.Window.Width, Rows: request.Window.Height,
+		Resize: resize, Quiet: true, KillCh: killCh, ExitStatus: &status,
+	}, request.Stdin, request.Stdout)
+	if err != nil {
+		return 255, fmt.Errorf("SSH session refused")
+	}
+	return status, nil
+}

@@ -33,6 +33,13 @@ const (
 
 // SessionOptions configures one container session over an established ttrpc
 // connection. Callers retain ownership of the connection and IO endpoints.
+// WindowSize is a terminal size update supplied by protocol frontends such
+// as the SSH gateway.
+type WindowSize struct {
+	Cols uint32
+	Rows uint32
+}
+
 type SessionOptions struct {
 	StreamSock string
 	// StreamDial replaces the Unix forwarding path in split-worker mode.
@@ -48,8 +55,11 @@ type SessionOptions struct {
 	ID         string
 	Cols, Rows uint32
 	Terminal   bool
-	KillCh     <-chan struct{}
-	Quiet      bool
+	// Resize carries terminal-size changes after process start. Nil means the
+	// initial Cols/Rows are the only size request.
+	Resize <-chan WindowSize
+	KillCh <-chan struct{}
+	Quiet  bool
 	// ExitStatus receives a successfully waited process's numeric status.
 	ExitStatus *int
 	// SandboxSession shares the persistent sandbox rootfs while giving this
@@ -455,6 +465,28 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	if options.Terminal && options.Cols != 0 && options.Rows != 0 {
 		_, _ = taskClient.ResizePty(ctx, &v3.ResizePtyRequest{ID: options.ID, Width: options.Cols, Height: options.Rows})
 	}
+	resizeDone := make(chan struct{})
+	if options.Terminal && options.Resize != nil {
+		go func() {
+			for {
+				select {
+				case size, ok := <-options.Resize:
+					if !ok {
+						return
+					}
+					if size.Cols == 0 || size.Rows == 0 {
+						continue
+					}
+					resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					_, _ = taskClient.ResizePty(resizeCtx, &v3.ResizePtyRequest{ID: options.ID, Width: size.Cols, Height: size.Rows})
+					resizeCancel()
+				case <-resizeDone:
+					return
+				}
+			}
+		}()
+	}
+	defer close(resizeDone)
 
 	stopKill := watchKill(options.KillCh, func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -465,9 +497,13 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 
 	response, waitErr := taskClient.Wait(context.Background(), &v3.WaitRequest{ID: options.ID})
 	if waitErr != nil {
-		_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
+		if !options.Quiet {
+			_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
+		}
 	} else {
-		_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", response.ExitStatus)
+		if !options.Quiet {
+			_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", response.ExitStatus)
+		}
 		if options.ExitStatus != nil {
 			*options.ExitStatus = int(response.ExitStatus)
 		}
@@ -476,7 +512,9 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cleanupCancel()
 	cleanupErr := cleanupContainer(cleanupCtx, taskClient, mountClient, options, bundlePath, setup.owned, func(format string, args ...any) {
-		_, _ = fmt.Fprintf(stdout, format, args...)
+		if !options.Quiet {
+			_, _ = fmt.Fprintf(stdout, format, args...)
+		}
 	})
 	if cleanupErr == nil {
 		bundleCleanupSafe = removeSessionBundle

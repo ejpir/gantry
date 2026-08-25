@@ -107,6 +107,10 @@ func (d *daemonRuntime) startControl() error {
 		_ = credLn.Close()
 		return err
 	}
+	if err := d.startSSHGateway(); err != nil {
+		_ = credLn.Close()
+		return err
+	}
 	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)
 	return nil

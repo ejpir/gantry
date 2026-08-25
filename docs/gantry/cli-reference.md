@@ -42,6 +42,7 @@ Common flags:
 | `-mcp-fs-root PATH` | Confine the MCP filesystem server to PATH (default `/`) |
 | `-mcp-fs-user USER` | Run MCP local servers as this guest user (name, numeric UID from passwd, or explicit `UID:GID`; default `nobody`; root refused) |
 | `-mcp-remote SPEC` | Add a remote streamable-HTTP MCP server: `name=ID,url=URL[,auth=bearer:SECRET\|header:NAME:SECRET\|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET]`; repeatable |
+| `-ssh` | Enable the sandbox-local SSH protocol endpoint (off by default; no TCP listener) |
 | `-process-isolation MODE` | `auto`, `required`, or `off` |
 
 Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, `-layerset`, and
@@ -122,6 +123,20 @@ persisted by guest programs and is therefore created with mode `0600`.
 
 Import it on another host with `gantry image import ARCHIVE`, then use the
 reported local reference with `gantry start -image`.
+
+## SSH access
+
+```text
+gantry ssh NAME [-- COMMAND ...]
+gantry ssh --ide NAME [-disk-size MIB] [-- COMMAND ...]
+gantry ssh doctor NAME
+gantry ssh setup [--remove]
+```
+
+`gantry ssh` uses stock OpenSSH through the private per-sandbox socket. The
+hidden `ssh-proxy` and `ssh-known-hosts` commands are used by OpenSSH client
+configuration and should not normally be invoked directly. See
+[SSH access](ssh-access.md).
 
 ## Images
 

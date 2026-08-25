@@ -96,8 +96,14 @@ type RunConfig struct {
 	// secret names). Parsed at resolve time into immutable worker metadata
 	// plus supervisor-owned capability mappings.
 	MCPRemotes []string `json:"mcp_remotes,omitempty"`
-	MemMB      uint     `json:"memMB"`
-	VCPUs      int      `json:"vcpus,omitempty"`
+	// SSH enables the per-sandbox local SSH protocol endpoint. It is opt-in;
+	// no ssh.sock exists when false.
+	SSH bool `json:"ssh,omitempty"`
+	// IDESidecarFor links an explicitly created editor sidecar back to its
+	// primary sandbox. Empty on ordinary sandboxes.
+	IDESidecarFor string `json:"ide_sidecar_for,omitempty"`
+	MemMB         uint   `json:"memMB"`
+	VCPUs         int    `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1). Source-backed
@@ -141,6 +147,7 @@ type RunFlags struct {
 	MCP                                     *bool
 	MCPFSRoot, MCPFSUser                    *string
 	MCPRemotes                              *gutil.StrList
+	SSH                                     *bool
 	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
@@ -172,6 +179,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		MCPFSRoot:        fs.String("mcp-fs-root", "/", "jail directory for the gateway's built-in filesystem server"),
 		MCPFSUser:        fs.String("mcp-fs-user", "nobody", "unprivileged guest user or UID:GID the gateway's local servers run as"),
 		MCPRemotes:       &gutil.StrList{},
+		SSH:              fs.Bool("ssh", false, "enable SSH protocol access on the sandbox-local ssh.sock (no TCP listener)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),

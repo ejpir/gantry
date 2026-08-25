@@ -353,13 +353,13 @@ func (r *runResolver) resolveSecrets() error {
 	}
 	r.cfg.SecretNames = names
 	r.cfg.SecretSources = sources
-	// Host-bound secrets (NAME@host), OAuth custody, and the MCP gateway
-	// all need the multicall helper inside the guest (credhelper / oauth
-	// login / mcp-proxy / mcp-serve modes).
+	// Host-bound secrets (NAME@host), OAuth custody, MCP, and SSH all need
+	// the multicall helper inside the guest (credential, gateway, verified
+	// user, SFTP, and loopback relay modes).
 	// Stage the asset here — during CLI resolution, with progress — so a
 	// first-run download never lands on the VM boot path. Failure to stage
 	// is not fatal: the daemon warns loudly at delivery time instead.
-	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP {
+	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP || *r.flags.SSH {
 		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
 		if err != nil {
 			// Not fatal: the daemon warns loudly at delivery time instead.
@@ -425,6 +425,7 @@ func (r *runResolver) resolveSessionOptions() error {
 		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
 	}
 	r.cfg.MCP = *r.flags.MCP
+	r.cfg.SSH = *r.flags.SSH
 	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
 	r.cfg.MCPFSUser = *r.flags.MCPFSUser
 	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
