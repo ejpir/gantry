@@ -19,7 +19,8 @@ import (
 
 var (
 	hvVmConfigCreate                func() uintptr
-	hvVmConfigSetIpaSize            func(config uintptr, ipaSize uint64) uint32
+	hvVmConfigGetDefaultIpaSize     func(ipaSize *uint32) uint32
+	hvVmConfigSetIpaSize            func(config uintptr, ipaSize uint32) uint32
 	hvVmCreate                      func(config uintptr) uint32
 	hvVmDestroy                     func() uint32
 	hvVmMap                         func(addr unsafe.Pointer, ipa uint64, size uint64, flags uint64) uint32
@@ -46,8 +47,18 @@ var (
 	loadHVFErr  error
 )
 
+// Hypervisor.framework returns encoded mach_error_t values, not small ordinal
+// integers. These constants come from Hypervisor/hv_error.h.
 const (
-	hvSuccess = 0
+	hvSuccess           uint32 = 0
+	hvError             uint32 = 0xfae94001
+	hvBusy              uint32 = 0xfae94002
+	hvBadArgument       uint32 = 0xfae94003
+	hvIllegalGuestState uint32 = 0xfae94004
+	hvNoResources       uint32 = 0xfae94005
+	hvNoDevice          uint32 = 0xfae94006
+	hvDenied            uint32 = 0xfae94007
+	hvUnsupported       uint32 = 0xfae9400f
 
 	hvMemoryRead  = 1
 	hvMemoryWrite = 2
@@ -87,21 +98,23 @@ type hvVcpuExit struct {
 // hvReturnString decodes hv_return_t for readable errors.
 func hvReturnString(ret uint32) string {
 	switch ret {
-	case 0:
+	case hvSuccess:
 		return "HV_SUCCESS"
-	case 1:
+	case hvError:
 		return "HV_ERROR"
-	case 2:
+	case hvBusy:
 		return "HV_BUSY"
-	case 3:
+	case hvBadArgument:
 		return "HV_BAD_ARGUMENT"
-	case 5:
+	case hvIllegalGuestState:
+		return "HV_ILLEGAL_GUEST_STATE"
+	case hvNoResources:
 		return "HV_NO_RESOURCES"
-	case 6:
+	case hvNoDevice:
 		return "HV_NO_DEVICE"
-	case 7:
+	case hvDenied:
 		return "HV_DENIED (check hypervisor entitlement)"
-	case 8:
+	case hvUnsupported:
 		return "HV_UNSUPPORTED"
 	}
 	return fmt.Sprintf("hv_return_t(%#x)", ret)
@@ -139,6 +152,7 @@ func loadHVFSymbols() error {
 		name string
 	}{
 		{&hvVmConfigCreate, "hv_vm_config_create"},
+		{&hvVmConfigGetDefaultIpaSize, "hv_vm_config_get_default_ipa_size"},
 		{&hvVmConfigSetIpaSize, "hv_vm_config_set_ipa_size"},
 		{&hvVmCreate, "hv_vm_create"},
 		{&hvVmDestroy, "hv_vm_destroy"},
