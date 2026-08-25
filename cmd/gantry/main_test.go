@@ -26,6 +26,7 @@ func TestWriteMainHelpListsCommands(t *testing.T) {
 		"gantry ports <verb>",
 		"gantry net-policy <verb>",
 		"gantry import [<name>]",
+		"gantry export [options] <name>",
 		"gantry stop <name>",
 		"gantry resume <name>",
 		"gantry delete <name>",

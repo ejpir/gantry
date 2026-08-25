@@ -13,7 +13,7 @@ require (
 	github.com/containerd/ttrpc v1.2.9
 	github.com/containerd/typeurl/v2 v2.3.0
 	github.com/containers/gvisor-tap-vsock v0.8.9
-	github.com/diskfs/go-diskfs v1.9.4
+	github.com/diskfs/go-diskfs v1.9.5-0.20260817111438-26c6e3ab5c8d
 	github.com/ebitengine/purego v0.10.2
 	github.com/erofs/go-erofs v0.3.2-0.20260721150545-622ddde0629e
 	github.com/google/gopacket v1.1.19

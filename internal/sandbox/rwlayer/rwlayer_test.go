@@ -20,10 +20,11 @@ func TestProbeExt4(t *testing.T) {
 	binary.LittleEndian.PutUint16(sb[56:58], 0xef53)
 	binary.LittleEndian.PutUint16(sb[58:60], 3) // mounted + errors
 	binary.LittleEndian.PutUint16(sb[52:54], 66)
-	binary.LittleEndian.PutUint32(sb[0x170:0x174], 5)
-	binary.LittleEndian.PutUint32(sb[0x1A8:0x1AC], 1753500000)
-	copy(sb[0x184:0x1A4], "ext4_first")
-	copy(sb[0x1BC:0x1DC], "ext4_validate_block_bitmap")
+	binary.LittleEndian.PutUint32(sb[0x60:0x64], 0x4) // journal recovery required
+	binary.LittleEndian.PutUint32(sb[0x194:0x198], 5)
+	binary.LittleEndian.PutUint32(sb[0x1CC:0x1D0], 1753500000)
+	copy(sb[0x1A8:0x1C8], "ext4_first")
+	copy(sb[0x1E0:0x200], "ext4_validate_block_bitmap")
 	if err := os.WriteFile(img, buf, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +32,7 @@ func TestProbeExt4(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.State != 3 || info.MountCount != 66 || info.ErrorCount != 5 {
+	if info.State != 3 || !info.RecoveryNeeded || info.MountCount != 66 || info.ErrorCount != 5 {
 		t.Errorf("%+v", info)
 	}
 	if info.LastErrFunc != "ext4_validate_block_bitmap" || info.FirstErrFunc != "ext4_first" {

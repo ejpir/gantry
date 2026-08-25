@@ -309,6 +309,33 @@ func TestConfigPrecedence(t *testing.T) {
 }
 
 // the builder end-to-end: build + verify + read back
+func TestBuildKeepsMkfsSpoolOutOfSystemTemp(t *testing.T) {
+	layer := writeLayer(t, tarEntry{"payload", tar.TypeReg, 0o644, 0, 0, "content", "", 0, 0})
+	outputDir := t.TempDir()
+	unusableTemp := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(unusableTemp, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Unix consults TMPDIR; Windows GetTempPath consults TMP/TEMP. If Build
+	// falls back to the process-wide directory, creating the EROFS spool under
+	// this regular file fails with a permission/path error.
+	t.Setenv("TMPDIR", unusableTemp)
+	t.Setenv("TMP", unusableTemp)
+	t.Setenv("TEMP", unusableTemp)
+
+	output := filepath.Join(outputDir, "img.erofs")
+	if _, err := Build(output, []*os.File{layer}, nil, t.Logf); err != nil {
+		t.Fatalf("Build used the unavailable system temp directory: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(outputDir, "tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("image build staging was not cleaned: %v", entries)
+	}
+}
+
 func TestBuildAndVerify(t *testing.T) {
 	l1 := writeLayer(t,
 		tarEntry{"etc", tar.TypeDir, 0o755, 0, 0, "", "", 0, 0},

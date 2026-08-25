@@ -59,13 +59,14 @@ func checkPlatform(cfg *ociConfig, arch, ref string) error {
 
 // descriptor is an OCI content descriptor.
 type descriptor struct {
-	MediaType string `json:"mediaType"`
-	Digest    string `json:"digest"`
-	Size      int64  `json:"size"`
-	Platform  *struct {
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int64             `json:"size"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Platform    *struct {
 		Architecture string `json:"architecture"`
 		OS           string `json:"os"`
-	} `json:"platform"`
+	} `json:"platform,omitempty"`
 }
 
 func validateSHA256Digest(digest string) error {
@@ -182,7 +183,11 @@ func loadOCILayout(dir, ref, arch string, newTempDir func() (string, error)) (*p
 		return nil, err
 	}
 
-	p := &pulled{digest: man.Digest, ref: ref, tmpDir: ""}
+	pulledRef := ref
+	if annotated := man.Annotations[ociRefNameAnnotation]; annotated != "" {
+		pulledRef = annotated
+	}
+	p := &pulled{digest: man.Digest, ref: pulledRef, tmpDir: ""}
 	tmp, err := newTempDir()
 	if err != nil {
 		return nil, err
@@ -309,7 +314,11 @@ func loadDockerSave(tarPath, ref, arch string, newTempDir func() (string, error)
 		return fail(err)
 	}
 
-	p := &pulled{ref: ref, tmpDir: tmp}
+	pulledRef := ref
+	if len(m.RepoTags) > 0 && m.RepoTags[0] != "" {
+		pulledRef = m.RepoTags[0]
+	}
+	p := &pulled{ref: pulledRef, tmpDir: tmp}
 	h := sha256.New()
 	h.Write(cfgData)
 	for i, lname := range m.Layers {

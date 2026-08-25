@@ -20,7 +20,7 @@ Common flags:
 
 | Flag | Description |
 |---|---|
-| `-image SOURCE` | OCI reference, OCI layout, Docker save archive, or EROFS file |
+| `-image SOURCE` | OCI reference, OCI layout/archive, Docker save archive, or EROFS file |
 | `-cpus N` | Guest virtual CPU count |
 | `-mem MIB` | Guest memory in MiB |
 | `-disk-size MIB` | Initial private writable-layer size |
@@ -105,11 +105,30 @@ gantry delete NAME
 Shared host directories, cached images, and an explicitly supplied `-rwlayer`
 are not deleted.
 
+### `gantry export`
+
+Package a stopped sandbox's immutable base and persistent overlay changes as a
+portable OCI image-layout archive:
+
+```text
+gantry export [--name REF] [-o OUTPUT] [--force] NAME [OUTPUT]
+```
+
+The output defaults to `NAME.oci.tar`, and its embedded local reference
+defaults to `gantry-export/<normalized-name>:latest`. The sandbox must be
+stopped so the writable ext4 filesystem is consistent. Host shares are not
+copied. The archive can contain credentials or other sensitive files
+persisted by guest programs and is therefore created with mode `0600`.
+
+Import it on another host with `gantry image import ARCHIVE`, then use the
+reported local reference with `gantry start -image`.
+
 ## Images
 
 ```text
 gantry image ls
 gantry image pull [-platform linux/ARCH] SOURCE
+gantry image import [-platform linux/ARCH] [-name REF] ARCHIVE_OR_OCI_LAYOUT
 gantry image rm REF_OR_DIGEST
 gantry image prune
 gantry image login REGISTRY [-u USER] [--password-stdin]
@@ -117,6 +136,8 @@ gantry image logout REGISTRY
 gantry image credentials [REGISTRY...]
 ```
 
+`import` stores an OCI layout/archive or Docker save archive under its embedded
+reference. Pass `-name` when the source has no reference or to override it.
 `prune` removes every cached digest not referenced by saved sandbox state.
 
 ## Host shares

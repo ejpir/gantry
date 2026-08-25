@@ -483,6 +483,17 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	if cfg == 0 {
 		return fmt.Errorf("hv_vm_config_create returned nil")
 	}
+	var ipaBits uint32
+	if ret := hvVmConfigGetDefaultIpaSize(&ipaBits); ret != hvSuccess {
+		osRelease(cfg)
+		return fmt.Errorf("hv_vm_config_get_default_ipa_size: %s", hvReturnString(ret))
+	}
+	// Set the framework-reported default explicitly. QEMU follows the same
+	// sequence, avoiding any dependency on an implicit per-host default.
+	if ret := hvVmConfigSetIpaSize(cfg, ipaBits); ret != hvSuccess {
+		osRelease(cfg)
+		return fmt.Errorf("hv_vm_config_set_ipa_size(%d): %s", ipaBits, hvReturnString(ret))
+	}
 	if ret := hvVmCreate(cfg); ret != hvSuccess {
 		osRelease(cfg)
 		return fmt.Errorf("hv_vm_create: %s", hvReturnString(ret))
@@ -491,9 +502,16 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 	b.vmCreated = true
 
 	// guest RAM: same addresses as the KVM backend
-	if ret := hvVmMap(unsafe.Pointer(&m.ram[0]), boot.RAMBase, uint64(len(m.ram)),
-		hvMemoryRead|hvMemoryWrite|hvMemoryExec); ret != hvSuccess {
-		return fmt.Errorf("hv_vm_map: %s", hvReturnString(ret))
+	hostPtr := unsafe.Pointer(&m.ram[0])
+	hostAddr := uintptr(hostPtr)
+	ramSize := uint64(len(m.ram))
+	flags := uint64(hvMemoryRead | hvMemoryWrite | hvMemoryExec)
+	if ret := hvVmMap(hostPtr, boot.RAMBase, ramSize, flags); ret != hvSuccess {
+		pageSize := uint64(os.Getpagesize())
+		return fmt.Errorf(
+			"hv_vm_map: %s (host_addr=%#x ipa=%#x size=%#x flags=%#x page_size=%#x alignment_remainders: host=%#x ipa=%#x size=%#x ipa_bits=%d)",
+			hvReturnString(ret), hostAddr, uint64(boot.RAMBase), ramSize, flags, pageSize,
+			uint64(hostAddr)%pageSize, uint64(boot.RAMBase)%pageSize, ramSize%pageSize, ipaBits)
 	}
 	b.mapped = true
 

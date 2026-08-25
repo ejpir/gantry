@@ -57,6 +57,7 @@ Create a persistent sandbox and reconnect to it later:
 ./gantry start dev -image debian:bookworm-slim
 ./gantry exec dev -- /bin/bash
 ./gantry stop dev
+./gantry export dev -o dev.oci.tar   # optional: share the stopped sandbox
 ./gantry resume dev
 ./gantry delete dev
 ```
@@ -85,8 +86,9 @@ architecture, and the security model.
 
 ## What Gantry supports
 
-- **OCI images:** registry references, OCI layouts, Docker save archives, and
-  EROFS images. Images are flattened, verified, and cached by digest.
+- **OCI images:** registry references, OCI layouts/archives, Docker save
+  archives, and EROFS images. Images are flattened, verified, and cached by
+  digest; stopped sandboxes can be exported as portable OCI archives.
 - **Persistent sandboxes:** configurable vCPUs, memory, writable disk, runtime,
   networking, and process isolation.
 - **Runtimes:** `crun` by default, or in-VM gVisor with `-runtime runsc`.

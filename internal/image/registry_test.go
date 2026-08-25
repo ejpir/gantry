@@ -276,6 +276,17 @@ func TestParseRef(t *testing.T) {
 			t.Errorf("%q should fail", bad)
 		}
 	}
+	for _, reference := range []string{"team/export:v1", "team/export:V1"} {
+		if err := validateLocalReference(reference); err != nil {
+			t.Fatalf("tagged local reference %q: %v", reference, err)
+		}
+	}
+	if err := validateLocalReference("team/Export:v1"); err == nil {
+		t.Fatal("uppercase repository component was accepted")
+	}
+	if err := validateLocalReference("team/export@sha256:" + strings.Repeat("a", 64)); err == nil {
+		t.Fatal("digest-shaped local alias was accepted")
+	}
 }
 
 // redaction: a debug-mode pull must not leak the secret or the token
