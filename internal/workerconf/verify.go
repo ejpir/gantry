@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -94,15 +93,14 @@ func probeFSRead() PropertyResult {
 	return PropertyResult{Property: PropFSRead, State: StateUnenforced, Detail: "opened " + path}
 }
 
-// probeFSWrite creates a file in the user's HOME (or temp dir). The
-// private root contains neither path, so confined creation fails; an
-// unconfined success is cleaned up immediately.
+// probeFSWrite creates a file in a platform-selected supervisor-visible
+// directory. The private root contains no such path, so confined creation
+// fails; an unconfined success is cleaned up immediately.
 func probeFSWrite() PropertyResult {
-	dir := os.Getenv("HOME")
-	if dir == "" {
-		dir = os.TempDir()
+	path := probeFSWritePath(os.Getpid())
+	if path == "" {
+		return PropertyResult{Property: PropFSWrite, State: StateIndeterminate, Detail: "write probe path unavailable"}
 	}
-	path := filepath.Join(dir, fmt.Sprintf(".workerconf-probe-%d", os.Getpid()))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return PropertyResult{Property: PropFSWrite, State: StateEnforced, Detail: errString(err)}

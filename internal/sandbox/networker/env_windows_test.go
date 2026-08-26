@@ -20,7 +20,7 @@ func TestWindowsNetworkEnvironmentIsRoleSpecific(t *testing.T) {
 	t.Setenv("GANTRY_BOOT_PROFILE", "1")
 	t.Setenv("GANTRY_SECRET_TEST", "must-not-cross")
 
-	want := []string{`SystemRoot=C:\Windows`, `TEMP=C:\Temp`, "GODEBUG=netdns=go"}
+	want := []string{`SystemRoot=C:\Windows`, "GODEBUG=netdns=go"}
 	if got := workerEnv(); !slices.Equal(got, want) {
 		t.Fatalf("network worker environment = %v, want %v", got, want)
 	}

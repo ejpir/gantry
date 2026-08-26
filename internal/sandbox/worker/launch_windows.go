@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -75,8 +76,12 @@ func launchPlatformProcess(executable string, argv, environment []string, spec L
 	}
 	defer ClearInheritedHandles(handles)
 
+	probeDir := ""
+	if spec.DiagnosticPath != "" {
+		probeDir = filepath.Dir(spec.DiagnosticPath)
+	}
 	process, containment, err := StartWindowsProcess(executable, argv, environment,
-		[]*os.File{diagnostic, diagnostic, diagnostic}, handles, spec.Role, spec.Confinement)
+		[]*os.File{diagnostic, diagnostic, diagnostic}, handles, probeDir, spec.Role, spec.Confinement)
 	// CreateProcess has duplicated the child pipe ends. Closing these copies is
 	// what makes process death produce EOF on the supervisor channels.
 	CloseFiles(channelFiles)

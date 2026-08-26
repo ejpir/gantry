@@ -59,6 +59,16 @@ func TestSSHGuestToolsWaitReportsFailureAndCancellation(t *testing.T) {
 	}
 }
 
+func TestGuestToolsStageBaseAvoidsWindowsTemp(t *testing.T) {
+	const sandboxDir = `C:\Users\tester\.gantry\sandboxes\dev`
+	if got := guestToolsStageBase("windows", sandboxDir); got != sandboxDir {
+		t.Fatalf("Windows stage base = %q, want sandbox state %q", got, sandboxDir)
+	}
+	if got := guestToolsStageBase("linux", sandboxDir); got != "" {
+		t.Fatalf("Linux stage base = %q, want OS temporary directory", got)
+	}
+}
+
 func TestParseGuestToolsVerificationIgnoresSessionDiagnostics(t *testing.T) {
 	const wantSum = "e6a4c87f683ab0c07fd85517986f5a488c5359b19b1314546ec2d12a2e76bb23"
 	transcript := []byte("client: task started — shell is live\n" +

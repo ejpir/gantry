@@ -179,12 +179,15 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte) err
 	if d.shares == nil {
 		return fmt.Errorf("share manager unavailable")
 	}
-	// Sandbox state commonly sits beneath a broad persisted workspace share
-	// (for example, the user's whole home directory). Staging there would make
-	// this export overlap that share and correctly fail closed. A private OS
-	// temporary directory is outside normal workspace roots and is removed only
-	// after the share backend closes.
-	stageDir, err := os.MkdirTemp("", "gantry-guest-tools-*")
+	// Unix staging stays outside broad persisted workspace shares such as the
+	// user's home. Windows must not depend on %LOCALAPPDATA%\\Temp: service and
+	// AppContainer launches can inherit a TEMP path the supervisor cannot open.
+	// Its sandbox state directory already has a protected, account-owned DACL.
+	stageBase := guestToolsStageBase(runtime.GOOS, d.dir)
+	if runtime.GOOS == "windows" && stageBase == "" {
+		return fmt.Errorf("sandbox state directory unavailable for guest-tools staging")
+	}
+	stageDir, err := os.MkdirTemp(stageBase, "gantry-guest-tools-*")
 	if err != nil {
 		return err
 	}
@@ -270,6 +273,15 @@ func (d *daemonRuntime) verifyGuestTools(sum [32]byte, size int64) error {
 			gotSize, gotSum, size, wantSum, err)
 	}
 	return nil
+}
+
+// guestToolsStageBase keeps Windows staging in Gantry-owned sandbox state.
+// An empty base deliberately selects the OS temporary directory on Unix.
+func guestToolsStageBase(goos, sandboxDir string) string {
+	if goos == "windows" {
+		return sandboxDir
+	}
+	return ""
 }
 
 // parseGuestToolsVerification finds either the tagged shell-probe result used

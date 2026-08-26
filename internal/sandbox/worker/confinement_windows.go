@@ -75,7 +75,7 @@ func (job *windowsJob) assignHandle(process windows.Handle, pid int) error {
 }
 
 func StartWindowsProcess(exe string, argv, env []string, files []*os.File,
-	handles []syscall.Handle, role workerproto.Role, confinement string) (*os.Process, Containment, error) {
+	handles []syscall.Handle, probeDir string, role workerproto.Role, confinement string) (*os.Process, Containment, error) {
 	unconfinedEnv := append([]string(nil), env...)
 	startUnconfined := func() (*os.Process, error) {
 		return os.StartProcess(exe, argv, &os.ProcAttr{
@@ -93,7 +93,19 @@ func StartWindowsProcess(exe string, argv, env []string, files []*os.File,
 	env = appendMissingWindowsEnvironment(env,
 		"USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData")
 
-	probe, err := os.CreateTemp("", "gantry-workerconf-read-*")
+	if probeDir == "" {
+		err := fmt.Errorf("windows confinement probe directory is unavailable")
+		if confinement == "required" {
+			return nil, nil, err
+		}
+		fmt.Fprintf(os.Stderr, "Windows worker filesystem probe unavailable: %v; retrying unconfined\n", err)
+		process, startErr := startUnconfined()
+		return process, nil, startErr
+	}
+	// Keep the negative filesystem probe in Gantry-owned sandbox state. The
+	// process TEMP directory can be inaccessible for service accounts and is
+	// intentionally inaccessible to AppContainer workers.
+	probe, err := os.CreateTemp(probeDir, "gantry-workerconf-read-*")
 	if err != nil {
 		if confinement == "required" {
 			return nil, nil, fmt.Errorf("create Windows confinement probe: %w", err)

@@ -51,11 +51,15 @@ func TestWindowsSuspendedJobLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GANTRY_WINDOWS_APPCONTAINER", "0")
+	probeDir := t.TempDir()
+	unusableTemp := filepath.Join(probeDir, "missing-temp")
+	t.Setenv("TEMP", unusableTemp)
+	t.Setenv("TMP", unusableTemp)
 	environment := windowsTestEnvironment(suspendedTestChild + "=1")
 	process, containment, err := StartWindowsProcess(executable,
 		[]string{executable, "-test.run=^TestWindowsSuspendedJobLaunch$"},
 		environment, []*os.File{os.Stdin, os.Stdout, os.Stderr}, nil,
-		workerproto.RoleVMM, "auto")
+		probeDir, workerproto.RoleVMM, "auto")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +108,7 @@ func testWindowsRequiredAppContainerLaunch(t *testing.T, role workerproto.Role, 
 	process, containment, err := StartWindowsProcess(executable,
 		[]string{executable, "-test.run=^" + t.Name() + "$"},
 		environment, []*os.File{os.Stdin, os.Stdout, os.Stderr}, nil,
-		role, "required")
+		filepath.Dir(deniedPath), role, "required")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +125,7 @@ func testWindowsRequiredAppContainerLaunch(t *testing.T, role workerproto.Role, 
 func windowsTestEnvironment(extra ...string) []string {
 	environment := append([]string(nil), extra...)
 	for _, name := range []string{
-		"SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP",
+		"SystemRoot", "WINDIR", "SystemDrive",
 		"USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData",
 	} {
 		if value := os.Getenv(name); value != "" {

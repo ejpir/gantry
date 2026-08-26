@@ -8,10 +8,12 @@ import (
 )
 
 func TestWindowsMCPWorkerEnvironmentHasNoAmbientAuthority(t *testing.T) {
+	t.Setenv("TEMP", `C:\Users\tester\AppData\Local\Temp`)
+	t.Setenv("TMP", `C:\Users\tester\AppData\Local\Temp`)
 	for _, entry := range workerEnvironment() {
 		name, _, _ := strings.Cut(entry, "=")
 		switch name {
-		case "SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP":
+		case "SystemRoot", "WINDIR", "SystemDrive":
 		default:
 			t.Fatalf("unexpected MCP worker environment entry %q", entry)
 		}

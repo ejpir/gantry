@@ -7,11 +7,11 @@ import (
 )
 
 // vmmWorkerEnv is the WHPX role's explicit environment allowlist. Windows'
-// runtime and Winsock initialization need a small set of OS bootstrap paths;
-// no general supervisor environment is inherited.
+// runtime and Winsock initialization need the OS bootstrap paths; no general
+// supervisor environment or inaccessible account TEMP path is inherited.
 func vmmWorkerEnv() []string {
-	out := make([]string, 0, 12)
-	for _, key := range []string{"SystemRoot", "WINDIR", "SystemDrive", "TEMP", "TMP"} {
+	out := make([]string, 0, 10)
+	for _, key := range []string{"SystemRoot", "WINDIR", "SystemDrive"} {
 		if value := os.Getenv(key); value != "" {
 			out = append(out, key+"="+value)
 		}

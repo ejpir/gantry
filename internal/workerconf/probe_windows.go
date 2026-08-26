@@ -2,8 +2,10 @@ package workerconf
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 
 	"golang.org/x/sys/windows"
 )
@@ -17,6 +19,22 @@ func probeFSReadPath() string {
 		return path
 	}
 	return probeReadPath
+}
+
+func probeFSWritePath(pid int) string {
+	// Normal worker launches place both filesystem probes in the protected
+	// sandbox state directory. This avoids consulting an inherited service
+	// account TEMP path while retaining an honest unconfined positive control.
+	if readPath := os.Getenv("GANTRY_WORKER_PROBE_READ_PATH"); readPath != "" {
+		return filepath.Join(filepath.Dir(readPath), fmt.Sprintf(".workerconf-probe-%d", pid))
+	}
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
+		return filepath.Join(dir, fmt.Sprintf(".workerconf-probe-%d", pid))
+	}
+	if dir := os.Getenv("USERPROFILE"); dir != "" {
+		return filepath.Join(dir, fmt.Sprintf(".workerconf-probe-%d", pid))
+	}
+	return ""
 }
 
 func probeNetDialAddress() string {
