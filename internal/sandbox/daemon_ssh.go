@@ -23,6 +23,26 @@ func sshInstallDir() string {
 
 func sshHostKeyPath() string { return filepath.Join(sshInstallDir(), "host_ed25519") }
 
+func sshHostUser(current *user.User) string {
+	if current == nil {
+		return ""
+	}
+	// Go's Windows os/user lookup resolves LocalSystem's SID through the
+	// machine account (MACHINE$), while OpenSSH correctly puts "system" on the
+	// wire. Preserve the SSH-visible account name so implicit-user mapping still
+	// selects the image default on services and SSM field hosts.
+	switch strings.ToUpper(current.Uid) {
+	case "S-1-5-18":
+		return "system"
+	case "S-1-5-19":
+		return "local service"
+	case "S-1-5-20":
+		return "network service"
+	default:
+		return current.Username
+	}
+}
+
 func defaultSSHUser(cfgUser string, uid uint32) string {
 	if userName, _, ok := strings.Cut(cfgUser, ":"); ok {
 		cfgUser = userName
@@ -53,7 +73,7 @@ func (d *daemonRuntime) startSSHGateway() error {
 	}
 	hostUser := ""
 	if current, err := user.Current(); err == nil {
-		hostUser = current.Username
+		hostUser = sshHostUser(current)
 	}
 	gateway, err := sshgw.New(sshgw.Config{
 		Name: d.name, HostKeyPath: sshHostKeyPath(), DefaultUser: defaultUser,
@@ -163,7 +183,7 @@ func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int
 	rootImageCfg := mcpLauncherImageConfig(br.cfg.ImageCfg)
 	var status int
 	err := client.Session(br.rpc, client.SessionOptions{
-		StreamSock: br.streamSock, StreamDial: br.streamDial,
+		StreamSock: br.streamSock, StreamDial: br.streamDial, SetupLocker: &br.sessionSetupMu,
 		Shares: manifest.Shares, ShareTransport: manifest.Transport,
 		RW: br.cfg.RW, LayerSet: br.cfg.LayerSet, Args: args,
 		ID: "sb", SandboxSession: true, NestedContainers: br.devContainers.Load(), ImgCfg: rootImageCfg,

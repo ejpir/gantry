@@ -141,6 +141,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock:     br.streamSock,
 		StreamDial:     br.streamDial,
+		SetupLocker:    &br.sessionSetupMu,
 		Shares:         manifest.Shares,
 		ShareTransport: manifest.Transport,
 		RW:             br.cfg.RW,

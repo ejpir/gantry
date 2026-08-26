@@ -100,13 +100,13 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
-	// MCP is part of the ready contract because its advertised tool surface is
-	// unusable without gantry-guest. SSH/Dev Containers delivery is asynchronous:
-	// the VM and control plane become ready immediately, while an SSH request
-	// arriving during setup waits for the delivery result in spawnSSH.
-	if d.cfg.MCP {
+	// MCP, bound secrets, and OAuth custody are part of the ready contract: their
+	// advertised interfaces are unusable without gantry-guest. Only SSH and Dev
+	// Containers delivery is asynchronous; an early SSH request waits for it.
+	requireGuestToolsAtReady := d.cfg.MCP || hasBoundSecrets(d.cfg.SecretNames) || d.cfg.OAuthCustodyEnabled()
+	if requireGuestToolsAtReady {
 		if !d.deliverGuestToolsAndSignal() {
-			return daemonFailure(fmt.Errorf("mcp guest helper delivery failed"))
+			return daemonFailure(fmt.Errorf("required guest helper delivery failed"))
 		}
 	} else {
 		go d.deliverGuestToolsAndSignal()

@@ -60,6 +60,52 @@ func TestCheckFindsNewerStableRelease(t *testing.T) {
 	}
 }
 
+func TestCheckAcceptsGitHubReleaseMetadataLargerThan64KiB(t *testing.T) {
+	preserveTestGlobals(t)
+	guestasset.Version = "v1.2.3"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]string{
+			"tag_name": "v1.4.0",
+			"assets":   strings.Repeat("x", 80<<10),
+		})
+	}))
+	defer server.Close()
+	latestReleaseEndpoint = server.URL
+	httpClient = server.Client()
+
+	status, err := Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Latest != "v1.4.0" {
+		t.Fatalf("Check = %+v", status)
+	}
+}
+
+func TestCheckRetriesTruncatedReleaseMetadata(t *testing.T) {
+	preserveTestGlobals(t)
+	guestasset.Version = "v1.2.3"
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(writer, `{"tag_name":`)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(releaseResponse{TagName: "v1.4.0"})
+	}))
+	defer server.Close()
+	latestReleaseEndpoint = server.URL
+	httpClient = server.Client()
+
+	status, err := Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Latest != "v1.4.0" || calls.Load() != 2 {
+		t.Fatalf("Check = %+v after %d calls", status, calls.Load())
+	}
+}
+
 func TestCheckSkipsDevelopmentBuild(t *testing.T) {
 	preserveTestGlobals(t)
 	guestasset.Version = "dev"

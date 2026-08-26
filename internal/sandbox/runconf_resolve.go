@@ -208,12 +208,24 @@ func (r *runResolver) resolveBootAssets() error {
 	return nil
 }
 
+func defaultDevContainersImageConfig() *image.Config {
+	return &image.Config{
+		Env: []string{
+			"HOME=/home/gantry",
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		},
+		Cmd: []string{"/bin/bash"}, User: "gantry", UID: 1000, GID: 1000,
+		WorkingDir: "/home/gantry",
+	}
+}
+
 func (r *runResolver) resolveImage() error {
 	r.cfg.Image = *r.flags.Image
 	if r.cfg.Image == "" {
 		r.cfg.Image = guestasset.DefaultImage()
 		if r.cfg.DevContainers && *r.flags.LayerSet == "" {
 			r.cfg.Image = guestasset.DefaultDevContainersImage()
+			r.cfg.ImageCfg = defaultDevContainersImageConfig()
 		}
 		if !gutil.FileExists(r.cfg.Image) {
 			imagePath, err := guestasset.EnsureImage(r.cfg.Image, r.report)

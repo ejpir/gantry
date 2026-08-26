@@ -126,6 +126,10 @@ func TestResolveDevContainersDefaultsAndOverrides(t *testing.T) {
 	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || !cfg.RW {
 		t.Fatalf("devcontainers config = %+v", cfg)
 	}
+	if cfg.ImageCfg == nil || cfg.ImageCfg.User != "gantry" || cfg.ImageCfg.UID != 1000 ||
+		cfg.ImageCfg.GID != 1000 || cfg.ImageCfg.WorkingDir != "/home/gantry" {
+		t.Fatalf("curated development image config = %+v", cfg.ImageCfg)
+	}
 	if cfg.MemMB != config.DefaultDevContainersMemoryMiB ||
 		cfg.VCPUs != min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs()) ||
 		cfg.RWLayerSizeMiB != config.DefaultDevContainersDiskSizeMiB {

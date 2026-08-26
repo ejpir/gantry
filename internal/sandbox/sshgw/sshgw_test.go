@@ -38,6 +38,24 @@ func TestCorruptHostKeyFailsWithoutRekey(t *testing.T) {
 	}
 }
 
+func TestSameHostAccountHandlesWindowsIdentityForms(t *testing.T) {
+	for _, test := range []struct {
+		requested string
+		host      string
+		want      bool
+	}{
+		{requested: "system", host: `NT AUTHORITY\SYSTEM`, want: true},
+		{requested: "Alice", host: `MACHINE\alice`, want: true},
+		{requested: "alice", host: "alice@example.com", want: true},
+		{requested: "guest", host: `MACHINE\alice`, want: false},
+		{requested: "alice", host: "", want: false},
+	} {
+		if got := sameHostAccount(test.requested, test.host); got != test.want {
+			t.Errorf("sameHostAccount(%q, %q) = %t, want %t", test.requested, test.host, got, test.want)
+		}
+	}
+}
+
 func TestEnvironmentAllowlist(t *testing.T) {
 	for _, name := range []string{"TERM", "LANG", "LC_ALL", "COLORTERM", "TERM_PROGRAM"} {
 		if !allowedEnv(name) {

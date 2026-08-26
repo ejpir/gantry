@@ -360,10 +360,10 @@ try {
         '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fs__write_file","arguments":{"path":"/work/x"}}}'
     ) -join "`n"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($requests + "`n"))
-    Invoke-Gantry @("exec", $MCPSandbox, "--", "sh", "-c", "printf '%s' '$encoded' | base64 -d > /tmp/mcp-requests.ndjson")
+    Invoke-Gantry @("exec", $MCPSandbox, "--", "sh", "-c", "printf '%s' '$encoded' | base64 -d > /work/.gantry-mcp-requests")
     $mcpOutput = Invoke-GantryCapture @(
         "exec", $MCPSandbox, "--", "sh", "-c",
-        "timeout 45 /run/gantry/bin/gantry-guest mcp-proxy < /tmp/mcp-requests.ndjson 2>&1"
+        "timeout 45 /run/gantry/bin/gantry-guest mcp-proxy < /work/.gantry-mcp-requests 2>&1"
     )
     Assert-Contains "mcp: Windows tools/list exposes fs read" $mcpOutput "fs__read_file"
     Assert-Contains "mcp: Windows filesystem read round trip" $mcpOutput "hello-windows-mcp"

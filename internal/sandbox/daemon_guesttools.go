@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -37,14 +38,15 @@ import (
 // boot failure: ambient secrets still work, bound ones are unusable that
 // boot and the warning says so.
 const (
-	guestToolsMaxBytes  = 64 << 20
-	guestToolsDirGuest  = "/run/gantry/bin"
-	guestToolsShareTag  = "gantry-tools"
-	guestToolsShareDir  = "guesttools" // legacy in-sandbox staging directory; delete cleanup only
-	guestToolsDeliverOp = "guest tools delivery"
-	guestToolsInstallOp = "guest tools install"
-	guestToolsVerifyOp  = "guest tools verify"
-	guestToolsTimeout   = 120 * time.Second
+	guestToolsMaxBytes     = 64 << 20
+	guestToolsDirGuest     = "/run/gantry/bin"
+	guestToolsShareTag     = "gantry-tools"
+	guestToolsShareDir     = "guesttools" // legacy in-sandbox staging directory; delete cleanup only
+	guestToolsDeliverOp    = "guest tools delivery"
+	guestToolsInstallOp    = "guest tools install"
+	guestToolsVerifyOp     = "guest tools verify"
+	guestToolsShareTimeout = 30 * time.Second
+	guestToolsTimeout      = 120 * time.Second
 )
 
 // hasBoundSecrets reports whether any persisted secret spec carries a
@@ -205,14 +207,34 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte) err
 		}
 	}()
 
-	_, status, err := d.broker.internalExecAsRoot(strings.NewReader(""),
-		[]string{ctrPath + "/gantry-guest", "install-self"},
-		15*time.Second, 4<<10, guestToolsInstallOp)
-	if err != nil {
-		return err
+	status := -1
+	directErr := fmt.Errorf("host share does not expose executable mode")
+	// Windows host shares always synthesize regular files as 0644. Attempting
+	// exec there is guaranteed to fail and can wedge old crun versions while
+	// asynchronous delivery races the first user session.
+	if runtime.GOOS != "windows" {
+		_, status, directErr = d.broker.internalExecAsRoot(strings.NewReader(""),
+			[]string{ctrPath + "/gantry-guest", "install-self"},
+			15*time.Second, 4<<10, guestToolsInstallOp)
+		if directErr == nil && status == 0 {
+			return d.verifyGuestTools(sum, int64(len(data)))
+		}
 	}
-	if status != 0 {
-		return fmt.Errorf("%s exited with status %d", guestToolsInstallOp, status)
+
+	// Windows host shares deliberately synthesize regular files as 0644 because
+	// NTFS has no POSIX execute bit. Images with a shell can still copy the
+	// staged, host-verified payload to guest-owned /run before executing it. Keep
+	// the direct static-helper path first so distroless images remain supported
+	// on hosts whose share backend preserves executable mode.
+	copyScript := fmt.Sprintf("mkdir -p %[1]s && rm -f %[1]s/gantry-guest.share %[1]s/gantry-guest %[1]s/credhelper && cp \"$1\" %[1]s/gantry-guest.share && chmod 755 %[1]s/gantry-guest.share && mv %[1]s/gantry-guest.share %[1]s/gantry-guest && ln %[1]s/gantry-guest %[1]s/credhelper", guestToolsDirGuest)
+	copyOut, copyStatus, copyErr := d.broker.internalExecAsRoot(strings.NewReader(""),
+		[]string{"sh", "-c", copyScript, "gantry-guest-share-copy", ctrPath + "/gantry-guest"},
+		guestToolsShareTimeout, 4<<10, guestToolsInstallOp)
+	if copyErr != nil {
+		return fmt.Errorf("execute shared helper: %v; copy shared helper: %w (output %q)", directErr, copyErr, copyOut)
+	}
+	if copyStatus != 0 {
+		return fmt.Errorf("execute shared helper status %d; copy shared helper exited with status %d (output %q)", status, copyStatus, copyOut)
 	}
 	return d.verifyGuestTools(sum, int64(len(data)))
 }

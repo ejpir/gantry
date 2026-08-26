@@ -25,11 +25,13 @@ import (
 )
 
 const (
-	checkInterval      = 24 * time.Hour
-	failedCheckRetry   = time.Hour
-	maxReleaseMetadata = int64(64 << 10)
-	maxChecksumSize    = int64(4 << 10)
-	maxBinarySize      = int64(256 << 20)
+	checkInterval          = 24 * time.Hour
+	failedCheckRetry       = time.Hour
+	maxReleaseMetadata     = int64(1 << 20)
+	maxChecksumSize        = int64(4 << 10)
+	maxBinarySize          = int64(256 << 20)
+	releaseCheckAttempts   = 3
+	releaseCheckRetryDelay = 100 * time.Millisecond
 )
 
 var (
@@ -77,6 +79,27 @@ func Enabled() bool { return semver.IsValid(Current()) }
 // Check asks GitHub for the latest stable release. It performs no I/O for a
 // development build because "dev" cannot be ordered against release tags.
 func Check(ctx context.Context) (Status, error) {
+	for attempt := 0; ; attempt++ {
+		status, err := checkOnce(ctx)
+		if err == nil || !errors.Is(err, io.ErrUnexpectedEOF) || attempt+1 >= releaseCheckAttempts {
+			return status, err
+		}
+		timer := time.NewTimer(releaseCheckRetryDelay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return status, ctx.Err()
+		}
+	}
+}
+
+func checkOnce(ctx context.Context) (Status, error) {
 	status := Status{Current: Current()}
 	if !semver.IsValid(status.Current) {
 		return status, nil

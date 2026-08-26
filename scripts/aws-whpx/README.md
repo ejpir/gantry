@@ -4,8 +4,8 @@ These files preserve the EC2 Windows Server 2022 acceptance run for the WHPX
 backend. The replay validates the AppContainer device VMM plus narrow WHPX
 broker, shared-memory exit mailboxes, Job boundaries, guest exec and writable
 layer, live and persistent NTFS shares, DNS → TCP → TLS → HTTP using the staged
-`netprobe` image, host-bound secrets, OAuth token custody, MCP policy, audit
-behavior, and large shared directories.
+`netprobe` image, host-bound secrets, OAuth token custody, MCP policy, SSH and
+nested Dev Containers, audit behavior, and large shared directories.
 
 From the repository root:
 
@@ -22,11 +22,11 @@ read at the top of `field-validation.ps1`, notably `GANTRY_TEST_ROOT`,
 `GANTRY_HOME`, `GANTRY_TEST_SANDBOX`, `GANTRY_TEST_KERNEL`,
 `GANTRY_TEST_ROOTFS`, and `GANTRY_TEST_NETPROBE_IMAGE`.
 
-The instance needs SSM connectivity, WHPX enabled, outbound security-group
-access, and the kernel/rootfs/netprobe assets already staged. No credential is
-embedded in the scripts. The host helper builds fresh Windows host and Linux
-guest-helper binaries, uploads them to S3, and gives the instance one-hour
-presigned download URLs.
+The instance needs SSM connectivity, WHPX enabled, Windows OpenSSH, outbound
+security-group access, and the kernel/rootfs/netprobe assets already staged.
+No credential is embedded in the scripts. The host helper builds fresh Windows
+host and Linux guest-helper binaries and stages those plus the curated IDE
+image through presigned S3 URLs.
 
 To start both reusable field hosts, run the Linux and Windows batteries, test a
 real checksummed self-update on disposable binaries, and stop the instances on

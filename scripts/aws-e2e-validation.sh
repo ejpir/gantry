@@ -34,10 +34,12 @@ WINDOWS_IID=${GANTRY_WINDOWS_IID:-$(instance_by_name gantry-whpx-test)}
 [ -n "$WINDOWS_IID" ] || { echo "Windows WHPX instance not found (set GANTRY_WINDOWS_IID)" >&2; exit 1; }
 
 DIRECTORY_RUN=
+IDE_BUILD_DIR=
 cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	[ -z "$DIRECTORY_RUN" ] || rm -f -- "$DIRECTORY_RUN"
+	[ -z "$IDE_BUILD_DIR" ] || rm -rf -- "$IDE_BUILD_DIR"
 	if [ "${GANTRY_KEEP_INSTANCES:-0}" != 1 ]; then
 		echo "== stopping AWS validation instances =="
 		aws ec2 stop-instances --region "$REGION" \
@@ -49,6 +51,21 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+
+# Build the curated x86_64 image from the current Dockerfile so the field run
+# validates these source changes rather than a stale release or S3 object. A
+# caller may provide an already-built image when replaying in an air-gapped
+# environment.
+IDE_IMAGE=${GANTRY_TEST_IDE_IMAGE:-}
+if [ -z "$IDE_IMAGE" ]; then
+	IDE_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gantry-ide-x86_64.XXXXXX")
+	IDE_IMAGE=$IDE_BUILD_DIR/gantry-ide-image-x86_64.erofs
+	sh scripts/mkideimage.sh "$IDE_IMAGE" linux/amd64
+fi
+[ -s "$IDE_IMAGE" ] || { echo "curated IDE image missing: $IDE_IMAGE" >&2; exit 1; }
+echo "== staging current curated IDE image =="
+aws s3 cp "$IDE_IMAGE" "s3://$BUCKET/gantry-ide-image-x86_64.erofs" \
+	--region "$REGION" --only-show-errors
 
 instance_state() {
 	aws ec2 describe-instances --region "$REGION" --instance-ids "$1" \
@@ -106,18 +123,26 @@ start_instance "$WINDOWS_IID"
 wait_ssm "$LINUX_IID"
 wait_ssm "$WINDOWS_IID"
 
-echo "===== Linux + Windows: verified self-update battery ====="
-GANTRY_LINUX_IID=$LINUX_IID GANTRY_WINDOWS_IID=$WINDOWS_IID \
-	GANTRY_TEST_BUCKET=$BUCKET GANTRY_TEST_REGION=$REGION \
-	sh scripts/aws-selfupdate-validation.sh
+if [ "${GANTRY_SKIP_SELFUPDATE:-0}" = 1 ]; then
+	echo "===== Linux + Windows: self-update battery skipped by GANTRY_SKIP_SELFUPDATE ====="
+else
+	echo "===== Linux + Windows: verified self-update battery ====="
+	GANTRY_LINUX_IID=$LINUX_IID GANTRY_WINDOWS_IID=$WINDOWS_IID \
+		GANTRY_TEST_BUCKET=$BUCKET GANTRY_TEST_REGION=$REGION \
+		sh scripts/aws-selfupdate-validation.sh
+fi
 
-echo "===== Windows WHPX: field + security + directory batteries ====="
+echo "===== Windows WHPX: field + security + SSH/Dev Containers + directory batteries ====="
 GANTRY_TEST_IID=$WINDOWS_IID GANTRY_TEST_BUCKET=$BUCKET \
 	GANTRY_TEST_REGION=$REGION sh scripts/aws-whpx/replay.sh
 
 echo "===== Linux KVM: main field battery ====="
 GANTRY_TEST_IID=$LINUX_IID BUCKET=$BUCKET REGION=$REGION \
 	sh scripts/aws-kvm/run-tests.sh 1800
+
+echo "===== Linux KVM: SSH/Dev Containers battery ====="
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py scripts/aws-kvm/ssh-devcontainers-validation.sh 1800
 
 echo "===== Linux KVM: large-directory battery ====="
 DIRECTORY_RUN=$(mktemp "${TMPDIR:-/tmp}/gantry-linux-directory.XXXXXX.sh")

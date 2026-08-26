@@ -1,6 +1,7 @@
 package workerproto
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -146,21 +147,64 @@ func validateWindowsSocketTransfer(info *windows.WSAProtocolInfo) error {
 }
 
 func materializeSocketFile(file *os.File) (*os.File, error) {
-	socket, err := net.FileConn(file)
+	remote, err := net.FileConn(file)
 	_ = file.Close()
 	if err != nil {
 		return nil, fmt.Errorf("workerproto: import reconstructed socket: %w", err)
 	}
-	defer func() { _ = socket.Close() }()
-	fileSocket, ok := socket.(interface{ File() (*os.File, error) })
-	if !ok {
-		return nil, fmt.Errorf("workerproto: reconstructed socket type %T cannot be materialized", socket)
-	}
-	materialized, err := fileSocket.File()
+	consumer, relay, err := windowsLoopbackPair()
 	if err != nil {
-		return nil, fmt.Errorf("workerproto: materialize reconstructed socket: %w", err)
+		_ = remote.Close()
+		return nil, err
 	}
+	materialized, err := consumer.File()
+	_ = consumer.Close()
+	if err != nil {
+		_ = relay.Close()
+		_ = remote.Close()
+		return nil, fmt.Errorf("workerproto: materialize local relay socket: %w", err)
+	}
+	// A WSADuplicateSocket reconstruction can become unusable after the source
+	// process closes its final handle even though the initial import succeeded.
+	// Keep that socket inside this process and hand callers a freshly-created
+	// local TCP endpoint; the relay owns both unstable handles until EOF.
+	go relayWindowsSocket(remote, relay)
 	return materialized, nil
+}
+
+func windowsLoopbackPair() (a, b *net.TCPConn, resultErr error) {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, nil, fmt.Errorf("workerproto: local relay listen: %w", err)
+	}
+	defer func() { resultErr = errors.Join(resultErr, listener.Close()) }()
+	dialed, err := net.DialTCP("tcp4", nil, listener.Addr().(*net.TCPAddr))
+	if err != nil {
+		return nil, nil, fmt.Errorf("workerproto: local relay dial: %w", err)
+	}
+	accepted, err := listener.AcceptTCP()
+	if err != nil {
+		_ = dialed.Close()
+		return nil, nil, fmt.Errorf("workerproto: local relay accept: %w", err)
+	}
+	return accepted, dialed, nil
+}
+
+func relayWindowsSocket(a, b net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	copyOne := func(dst, src net.Conn) {
+		defer wg.Done()
+		_, _ = io.Copy(dst, src)
+		if closeWriter, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = closeWriter.CloseWrite()
+		}
+	}
+	go copyOne(a, b)
+	go copyOne(b, a)
+	wg.Wait()
+	_ = a.Close()
+	_ = b.Close()
 }
 
 func writeAll(conn net.Conn, data []byte) error {

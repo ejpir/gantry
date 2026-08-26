@@ -3,6 +3,7 @@ package client
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -18,12 +19,18 @@ var nestedContainerCapabilities = []string{
 	"CAP_SYS_ADMIN",
 }
 
+var nestedDeviceMode os.FileMode = 0o666
+
+var nestedContainerDevices = []specs.LinuxDevice{
+	// The ordinary Gantry /dev is intentionally minimal. Have the OCI runtime
+	// create only the two kernel device nodes needed by fuse-overlayfs and
+	// slirp4netns. Binding them from the VM root would make the profile depend
+	// on distro-specific boot-time /dev population.
+	{Path: "/dev/fuse", Type: "c", Major: 10, Minor: 229, FileMode: &nestedDeviceMode},
+	{Path: "/dev/net/tun", Type: "c", Major: 10, Minor: 200, FileMode: &nestedDeviceMode},
+}
+
 var nestedContainerMounts = []specs.Mount{
-	// The ordinary Gantry /dev is intentionally minimal. Expose only the two
-	// kernel devices required by slirp4netns and fuse-overlayfs, never host block
-	// devices or a container-engine socket.
-	{Destination: "/dev/fuse", Type: "bind", Source: "/dev/fuse", Options: []string{"rbind", "rprivate", "rw"}},
-	{Destination: "/dev/net/tun", Type: "bind", Source: "/dev/net/tun", Options: []string{"rbind", "rprivate", "rw"}},
 	// Nested cgroup management is disabled in the curated image. A read-only
 	// cgroup2 view is nevertheless required because inner crun validates the
 	// filesystem mounted at this conventional path. Do not delegate the guest's
@@ -49,6 +56,7 @@ func applyNestedContainersRuntimeConfig(config *runtimeConfig) {
 		return
 	}
 	config.Linux.RootfsPropagation = "rshared"
+	config.Linux.Devices = append(config.Linux.Devices, nestedContainerDevices...)
 	config.Mounts = append(config.Mounts, nestedContainerMounts...)
 	if config.Annotations == nil {
 		config.Annotations = make(map[string]string)
@@ -56,6 +64,23 @@ func applyNestedContainersRuntimeConfig(config *runtimeConfig) {
 	config.Annotations[nestedContainersAnnotation] = "v1"
 
 	if config.Process.User.UID != 0 {
+		// The curated image deliberately uses a non-root development user and a
+		// setuid sudo wrapper for rootful Podman. Keep the user's effective and
+		// permitted sets empty, but retain the profile's bounded capabilities so
+		// the kernel can grant them only after the audited setuid transition.
+		// The long-lived nobody anchor has no-new-privileges and must retain no
+		// capability set at all.
+		if config.Process.NoNewPrivileges {
+			return
+		}
+		if config.Process.Capabilities == nil {
+			config.Process.Capabilities = &specs.LinuxCapabilities{}
+		}
+		for _, capabilities := range [][]string{containerCapabilities, nestedContainerCapabilities} {
+			for _, capability := range capabilities {
+				config.Process.Capabilities.Bounding = appendUniqueString(config.Process.Capabilities.Bounding, capability)
+			}
+		}
 		return
 	}
 	if config.Process.Capabilities == nil {

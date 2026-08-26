@@ -32,7 +32,8 @@ func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) 
 	}
 	restartRequired := before.MemMB != after.MemMB || before.VCPUs != after.VCPUs ||
 		before.ProcessIsolation != after.ProcessIsolation
-	changed := restartRequired || before.SSH != after.SSH || before.DevContainers != after.DevContainers
+	changed := restartRequired || before.SSH != after.SSH || before.DevContainers != after.DevContainers ||
+		before.Runtime != after.Runtime
 	if !changed {
 		return false, nil
 	}

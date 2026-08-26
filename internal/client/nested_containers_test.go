@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 func TestNestedContainersConfigIsNarrowAndRootOnly(t *testing.T) {
@@ -19,6 +20,22 @@ func TestNestedContainersConfigIsNarrowAndRootOnly(t *testing.T) {
 	config := decodeRuntimeConfig(t, encoded)
 	if config.Linux.RootfsPropagation != "rshared" {
 		t.Fatalf("rootfs propagation = %q, want rshared", config.Linux.RootfsPropagation)
+	}
+	for _, expected := range nestedContainerDevices {
+		var device *specs.LinuxDevice
+		for index := range config.Linux.Devices {
+			if config.Linux.Devices[index].Path == expected.Path {
+				device = &config.Linux.Devices[index]
+				break
+			}
+		}
+		if device == nil || device.Type != "c" || device.Major != expected.Major || device.Minor != expected.Minor ||
+			device.FileMode == nil || *device.FileMode != 0o666 {
+			t.Errorf("device %s = %+v, want narrow character device %d:%d mode 0666", expected.Path, device, expected.Major, expected.Minor)
+		}
+		if mount := findMount(config.Mounts, expected.Path); mount != nil {
+			t.Errorf("device %s unexpectedly depends on VM-root bind mount: %+v", expected.Path, mount)
+		}
 	}
 	for _, expected := range nestedContainerMounts {
 		mount := findMount(config.Mounts, expected.Destination)
@@ -42,7 +59,7 @@ func TestNestedContainersConfigIsNarrowAndRootOnly(t *testing.T) {
 	}
 }
 
-func TestNestedContainersConfigDoesNotGiveNonRootCapabilities(t *testing.T) {
+func TestNestedContainersConfigGivesNonRootOnlySudoBoundingSet(t *testing.T) {
 	base, err := configJSON(nil, true, []string{"true"}, &image.Config{User: "gantry", UID: 1000, GID: 1000}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -52,8 +69,17 @@ func TestNestedContainersConfigDoesNotGiveNonRootCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := decodeRuntimeConfig(t, encoded)
-	if config.Process.Capabilities != nil {
-		t.Fatalf("non-root process gained capabilities: %+v", config.Process.Capabilities)
+	capabilities := config.Process.Capabilities
+	if capabilities == nil {
+		t.Fatal("non-root development process has no bounding set for setuid sudo")
+	}
+	for _, capability := range []string{"CAP_SETUID", "CAP_SETGID", "CAP_SYS_ADMIN", "CAP_NET_ADMIN"} {
+		if !slices.Contains(capabilities.Bounding, capability) {
+			t.Errorf("non-root development process bounding set is missing %s: %+v", capability, capabilities)
+		}
+	}
+	if len(capabilities.Effective) != 0 || len(capabilities.Permitted) != 0 || len(capabilities.Ambient) != 0 {
+		t.Fatalf("non-root development process received active capabilities: %+v", capabilities)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -44,7 +45,12 @@ type SessionOptions struct {
 	StreamSock string
 	// StreamDial replaces the Unix forwarding path in split-worker mode.
 	StreamDial func() (net.Conn, error)
-	Shares     []ShareEntry
+	// SetupLocker serializes stream attachment and task Create/Start. Running
+	// sessions remain concurrent after setup unless HoldSetupLocker is set for
+	// a trusted bulk-transfer session that must exclude new stream setup.
+	SetupLocker     sync.Locker
+	HoldSetupLocker bool
+	Shares          []ShareEntry
 	// ShareTransport is the persistent sandbox's multiplexed hub. Nil selects
 	// the direct-run per-device protocol.
 	ShareTransport *shares.Transport
@@ -59,7 +65,10 @@ type SessionOptions struct {
 	// initial Cols/Rows are the only size request.
 	Resize <-chan WindowSize
 	KillCh <-chan struct{}
-	Quiet  bool
+	// WaitContext bounds the task Wait RPC for internal one-shot sessions. Nil
+	// preserves an interactive user's unbounded session lifetime.
+	WaitContext context.Context
+	Quiet       bool
 	// ExitStatus receives a successfully waited process's numeric status.
 	ExitStatus *int
 	// SandboxSession shares the persistent sandbox rootfs while giving this
@@ -324,6 +333,19 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
+	setupLocked := false
+	releaseSessionSetup := func() {
+		if setupLocked {
+			setupLocked = false
+			options.SetupLocker.Unlock()
+		}
+	}
+	if options.SetupLocker != nil {
+		options.SetupLocker.Lock()
+		setupLocked = true
+		defer releaseSessionSetup()
+	}
+
 	taskClient := v3.NewTTRPCTaskClient(client)
 	rootfsMounts := options.RootfsMountsFor()
 	mountSessionShares := true
@@ -466,6 +488,9 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	// Preserve fast process output by attaching stdout before Start while
 	// deferring stdin data and EOF until the guest has committed stdio setup.
 	streams.relayInput(stdin)
+	if !options.HoldSetupLocker {
+		releaseSessionSetup()
+	}
 	logf("task started — shell is live (type 'exit' to leave)")
 	if options.Terminal && options.Cols != 0 && options.Rows != 0 {
 		_, _ = taskClient.ResizePty(ctx, &v3.ResizePtyRequest{ID: options.ID, Width: options.Cols, Height: options.Rows})
@@ -500,7 +525,11 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	})
 	defer stopKill()
 
-	response, waitErr := taskClient.Wait(context.Background(), &v3.WaitRequest{ID: options.ID})
+	waitCtx := options.WaitContext
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	response, waitErr := taskClient.Wait(waitCtx, &v3.WaitRequest{ID: options.ID})
 	if waitErr != nil {
 		if !options.Quiet {
 			_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
@@ -572,7 +601,17 @@ func sandboxContainerConfig(options SessionOptions) (string, error) {
 	return string(result), nil
 }
 
+var sandboxContainerSetupMu sync.Mutex
+
 func ensureSandboxContainer(client *ttrpc.Client, taskClient v3.TTRPCTaskService, ctx context.Context, options SessionOptions, logf func(string, ...any)) error {
+	// Guest-tool delivery starts asynchronously at readiness and can become the
+	// first session at exactly the same time as an immediate user exec/doctor.
+	// Bundle creation, rootfs mounting, and base-task creation are one ownership
+	// transaction; lock only that short ensure phase. Once the anchor is running,
+	// isolated user tasks and all stream traffic remain fully concurrent.
+	sandboxContainerSetupMu.Lock()
+	defer sandboxContainerSetupMu.Unlock()
+
 	state, err := taskClient.State(ctx, &v3.StateRequest{ID: options.ID})
 	if err == nil && state.Status == tasktypes.Status_RUNNING {
 		return nil

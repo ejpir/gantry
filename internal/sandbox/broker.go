@@ -42,12 +42,13 @@ type broker struct {
 	streamSock string
 	// streamDial replaces the streamSock unix dial in the split-VMM
 	// topology (streams cross the worker bridge).
-	streamDial func() (net.Conn, error)
-	store      *config.ConfigStore
-	shares     *control.ShareManager
-	ports      *control.PortManager
-	netPolicy  *control.NetworkPolicyManager
-	capture    packetCaptureBackend
+	streamDial     func() (net.Conn, error)
+	sessionSetupMu sync.Mutex
+	store          *config.ConfigStore
+	shares         *control.ShareManager
+	ports          *control.PortManager
+	netPolicy      *control.NetworkPolicyManager
+	capture        packetCaptureBackend
 	// secretStore resolves values at use time (source TTL, fail-closed);
 	// memory only, VM lifetime — never serialized.
 	secretStore *secret.Store

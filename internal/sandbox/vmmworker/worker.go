@@ -38,7 +38,8 @@ type vmmWorker struct {
 	proc        *os.Process
 	client      *workerproto.Client // control (fd 3)
 	fdChan      net.Conn            // fd 5, send side
-	fdSend      sync.Mutex          // serialize SCM_RIGHTS sends
+	fdSend      sync.Mutex          // serialize individual descriptor frames
+	streamDial  sync.Mutex          // keep each stream descriptor paired with its RPC
 	bridge      net.Conn
 	bridgeE     chan error
 	share       net.Conn // fd 6 peer: supervisor side of the FUSE relay
@@ -362,6 +363,14 @@ func (w *vmmWorker) sendFD(token [workerproto.FDTokenLen]byte, f *os.File) error
 // a fresh socketpair, one end transferred to the worker, the other
 // returned for the broker's session protocol.
 func (w *vmmWorker) DialStream(guestPort uint32) (net.Conn, error) {
+	// The descriptor channel and RPC channel are independent transports. If two
+	// callers send descriptors A/B and their RPCs arrive B/A, the worker pairs
+	// each token with the wrong socket and both sessions wedge or fail. Serialize
+	// the complete descriptor+RPC transaction; only setup is ordered, while the
+	// returned streams remain fully concurrent.
+	w.streamDial.Lock()
+	defer w.streamDial.Unlock()
+
 	sup, wrk, err := worker.SocketpairConns()
 	if err != nil {
 		return nil, err

@@ -25,10 +25,11 @@ The scripts default to `eu-west-1`, `c5.metal`, and bucket
 `gantry-kvm-test-<account-id>`. Override these with `REGION`, `INSTANCE_TYPE`,
 and `BUCKET`.
 
-For routine x86_64 acceptance, the repository-level orchestrator starts the
-reusable Linux KVM and Windows WHPX hosts, waits for SSM, tests real checksummed
-self-updates on disposable binaries, runs every maintained field battery, and
-stops both instances on exit:
+For routine x86_64 acceptance, the repository-level orchestrator builds and
+stages the current curated Dev Containers image, starts the reusable Linux KVM
+and Windows WHPX hosts, waits for SSM, tests real checksummed self-updates on
+disposable binaries, runs every maintained field battery, and stops both
+instances on exit:
 
 ```sh
 source ~/keys
@@ -37,7 +38,9 @@ sh scripts/aws-e2e-validation.sh
 
 Set `GANTRY_KEEP_INSTANCES=1` to leave both hosts running for investigation.
 Instance IDs and the bucket can be overridden with `GANTRY_LINUX_IID`,
-`GANTRY_WINDOWS_IID`, and `GANTRY_TEST_BUCKET`.
+`GANTRY_WINDOWS_IID`, and `GANTRY_TEST_BUCKET`. The orchestrator needs a Docker-
+compatible builder for the x86-64 curated image; set `GANTRY_TEST_IDE_IMAGE` to
+an already-built EROFS image to skip that build.
 
 ## Quick start
 
@@ -78,6 +81,7 @@ before running the full battery or expect that section to fail.
 | `run-tests.sh` | Upload a fresh x86_64 binary, populate `/opt/gantry`, and run `test-battery.sh`. |
 | `run-tests-arm64.sh` | Upload current ARM64 binaries and boot assets, then run the maintained confinement/share/MCP battery on Graviton. |
 | `test-battery.sh` | Exercise x86_64 crun, runsc, DNS/egress, concurrency, shares, cached OCI images, secrets, and OAuth custody. |
+| `ssh-devcontainers-validation.sh` | Exercise direct and managed SSH, SFTP, asynchronous helper readiness, nested Podman, and stop/resume state handling. |
 | `directory-validation.sh` | Exercise large shared-directory scans and host/guest coherence. |
 | `self-update-validation.sh` | Verify a disposable tagged binary updates in place from a checksummed GitHub release. |
 | `confinement-battery.sh` | Require split network/VMM workers and verify namespaces, private root, seccomp, shares, and egress. |

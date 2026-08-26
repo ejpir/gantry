@@ -134,6 +134,20 @@ func (g *Gateway) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+func sameHostAccount(requested, hostIdentity string) bool {
+	account := func(value string) string {
+		value = strings.TrimSpace(value)
+		if slash := strings.LastIndexAny(value, `\\/`); slash >= 0 {
+			value = value[slash+1:]
+		}
+		if at := strings.IndexByte(value, '@'); at > 0 {
+			value = value[:at]
+		}
+		return value
+	}
+	return hostIdentity != "" && strings.EqualFold(account(requested), account(hostIdentity))
+}
+
 func (g *Gateway) serveConn(parent context.Context, raw net.Conn) {
 	defer func() { _ = raw.Close() }()
 	_ = raw.SetDeadline(time.Now().Add(HandshakeTimeout))
@@ -148,7 +162,9 @@ func (g *Gateway) serveConn(parent context.Context, raw net.Conn) {
 	user := conn.User()
 	// Stock ssh must put a username on the wire. When it chose the host
 	// account implicitly, interpret that value as "the image default".
-	if user == "" || (g.cfg.HostUser != "" && user == g.cfg.HostUser) {
+	// Windows user.Current commonly returns DOMAIN\\User while OpenSSH sends
+	// only "user" (and lower-cases built-in accounts such as SYSTEM).
+	if user == "" || sameHostAccount(user, g.cfg.HostUser) {
 		user = g.cfg.DefaultUser
 	}
 	g.auditf("connection open user=%s", user)

@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -69,17 +70,17 @@ func (c *execCapture) snapshot() ([]byte, bool) {
 // retained stdout; op names the caller for error attribution. User secrets
 // are deliberately NOT injected into this internal process.
 func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
-	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg)
+	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg, false)
 }
 
 // internalExecAsRoot is reserved for trusted helpers which must install into
 // or deliberately manage root-owned runtime state. User-requested commands
 // continue through internalExec with the image identity.
 func (br *broker) internalExecAsRoot(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
-	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, mcpLauncherImageConfig(br.cfg.ImageCfg))
+	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, mcpLauncherImageConfig(br.cfg.ImageCfg), true)
 }
 
-func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config) ([]byte, int, error) {
+func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker bool) ([]byte, int, error) {
 	if !br.limits.acquireSession() {
 		return nil, 0, fmt.Errorf("sandbox session limit reached")
 	}
@@ -94,6 +95,8 @@ func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, ti
 		stdin = strings.NewReader("")
 	}
 	killCh := make(chan struct{}, 1)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), timeout+5*time.Second)
+	defer waitCancel()
 	var expired atomic.Bool
 	timer := time.AfterFunc(timeout, func() {
 		expired.Store(true)
@@ -101,20 +104,23 @@ func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, ti
 	})
 	manifest := client.LoadShareManifest(br.dir)
 	err := client.Session(br.rpc, client.SessionOptions{
-		StreamSock:     br.streamSock,
-		StreamDial:     br.streamDial,
-		Shares:         manifest.Shares,
-		ShareTransport: manifest.Transport,
-		RW:             br.cfg.RW,
-		LayerSet:       br.cfg.LayerSet,
-		Args:           args,
-		ID:             "sb",
-		SandboxSession: true,
-		ImgCfg:         imageConfig,
-		Environment:    br.cfg.ProxyEnvironment(),
-		Quiet:          true,
-		ExitStatus:     &status,
-		KillCh:         killCh,
+		StreamSock:      br.streamSock,
+		StreamDial:      br.streamDial,
+		SetupLocker:     &br.sessionSetupMu,
+		HoldSetupLocker: holdSetupLocker,
+		Shares:          manifest.Shares,
+		ShareTransport:  manifest.Transport,
+		RW:              br.cfg.RW,
+		LayerSet:        br.cfg.LayerSet,
+		Args:            args,
+		ID:              "sb",
+		SandboxSession:  true,
+		ImgCfg:          imageConfig,
+		Environment:     br.cfg.ProxyEnvironment(),
+		Quiet:           true,
+		ExitStatus:      &status,
+		KillCh:          killCh,
+		WaitContext:     waitCtx,
 	}, stdin, &capture)
 	_ = timer.Stop()
 	stdout, overflow := capture.snapshot()

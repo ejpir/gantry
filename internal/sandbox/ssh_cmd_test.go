@@ -1,12 +1,27 @@
 package sandbox
 
 import (
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
+
+func TestSSHHostUserUsesOpenSSHNamesForWindowsServiceSIDs(t *testing.T) {
+	for _, test := range []struct {
+		uid, username, want string
+	}{
+		{uid: "S-1-5-18", username: `WORKGROUP\MACHINE$`, want: "system"},
+		{uid: "S-1-5-19", username: `NT AUTHORITY\LOCAL SERVICE`, want: "local service"},
+		{uid: "1000", username: "alice", want: "alice"},
+	} {
+		if got := sshHostUser(&user.User{Uid: test.uid, Username: test.username}); got != test.want {
+			t.Errorf("sshHostUser(%q, %q) = %q, want %q", test.uid, test.username, got, test.want)
+		}
+	}
+}
 
 func TestUpdateManagedSSHBlockIdempotent(t *testing.T) {
 	block := sshConfigBegin + "\nHost *.gantry\n" + sshConfigEnd
