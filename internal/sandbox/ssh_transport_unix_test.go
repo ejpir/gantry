@@ -9,7 +9,14 @@ import (
 )
 
 func TestSSHListenerIsPrivateLocalSocket(t *testing.T) {
-	dir := t.TempDir()
+	// macOS limits Unix-domain socket paths to 104 bytes, while t.TempDir's
+	// test-derived directory name can exceed that before ssh.sock is appended.
+	// Production sockets share the already-short sandbox runtime directory.
+	dir, err := os.MkdirTemp("", "gantry-ssh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	listener, path, err := listenSSH("demo", dir)
 	if err != nil {
 		t.Fatal(err)

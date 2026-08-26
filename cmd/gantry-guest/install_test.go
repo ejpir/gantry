@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -31,7 +32,10 @@ func TestInstallSelfFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if helperInfo.Mode().Perm() != 0o755 {
+	// install-self runs in a Linux guest. Windows accepts Chmod but does not
+	// expose POSIX executable bits through FileMode, so only assert them where
+	// the host filesystem represents them.
+	if runtime.GOOS != "windows" && helperInfo.Mode().Perm() != 0o755 {
 		t.Fatalf("installed mode = %o, want 755", helperInfo.Mode().Perm())
 	}
 	credentialInfo, err := os.Stat(filepath.Join(destination, "credhelper"))
