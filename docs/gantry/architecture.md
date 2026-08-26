@@ -117,9 +117,9 @@ features unavailable.
 
 SSH helper delivery runs asynchronously once guest RPC and the local control
 broker exist, so SSH and Dev Containers do not extend VM readiness. An SSH
-session arriving during delivery waits for its result. MCP remains part of the
-ready contract because its advertised tool surface requires the verified
-helper. Bound credentials and OAuth custody also use asynchronous delivery.
+session arriving during delivery waits for its result. MCP, bound credentials,
+and OAuth custody remain part of the ready contract because their advertised
+interfaces require the verified helper.
 
 ### Worker launch substrate
 
