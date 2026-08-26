@@ -14,6 +14,7 @@ import (
 	"github.com/ejpir/gantry/internal/secret"
 
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
@@ -63,15 +64,31 @@ func hasBoundSecrets(names []string) bool {
 // consumers use asynchronous delivery. broker.guestToolsReady flips only
 // after content verification.
 func (d *daemonRuntime) deliverGuestTools() bool {
-	need := hasBoundSecrets(d.store.Snapshot().SecretNames) || d.cfg.OAuthCustodyEnabled() || d.cfg.MCP || d.cfg.SSH
-	if d.broker == nil || !need {
+	cfg := d.store.Snapshot()
+	need := hasBoundSecrets(cfg.SecretNames) || cfg.OAuthCustodyEnabled() || cfg.MCP || cfg.SSH
+	if !need {
+		return true
+	}
+	return d.ensureGuestTools(cfg)
+}
+
+func (d *daemonRuntime) ensureGuestTools(cfg config.RunConfig) bool {
+	if d.broker == nil {
+		return false
+	}
+	if d.broker.guestToolsReady.Load() {
+		return true
+	}
+	d.guestToolsMu.Lock()
+	defer d.guestToolsMu.Unlock()
+	if d.broker.guestToolsReady.Load() {
 		return true
 	}
 	progress := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "daemon: "+format+"\n", a...) }
 	// The CLI persists the path it resolved (dev tree, release cache, or
 	// GANTRY_ARTIFACTS); fall back to the default for configs written
 	// before this field existed.
-	assetPath := d.cfg.GuestTools
+	assetPath := cfg.GuestTools
 	if assetPath == "" {
 		assetPath = guestasset.DefaultGuestTools()
 	}

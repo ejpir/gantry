@@ -11,13 +11,27 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i
       -e "s|https\?://deb.debian.org/debian|${DEBIAN_MIRROR}|g" {} + \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-       bash ca-certificates curl git libstdc++6 openssh-client sudo tar \
+       bash buildah ca-certificates curl fuse-overlayfs git libnss-myhostname \
+       libstdc++6 openssh-client podman slirp4netns sudo tar uidmap \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 gantry \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash gantry \
+    && if ! grep -q '^hosts:.*myhostname' /etc/nsswitch.conf; then \
+         sed -i '/^hosts:/ s/ files/ files myhostname/' /etc/nsswitch.conf; \
+       fi \
     && printf 'gantry ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/gantry \
     && chmod 0440 /etc/sudoers.d/gantry \
     && visudo -cf /etc/sudoers.d/gantry
+
+RUN install -d -m 0755 /etc/containers/containers.conf.d \
+    && printf '[containers]\ncgroups = "disabled"\nnetns = "slirp4netns"\ndefault_sysctls = []\n' \
+       > /etc/containers/containers.conf.d/gantry.conf \
+    && printf '%s\n' \
+       '#!/bin/sh' \
+       'export BUILDAH_FORMAT=docker' \
+       'exec sudo -n -H --preserve-env=HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy /usr/bin/podman "$@"' \
+       > /usr/local/bin/docker \
+    && chmod 0755 /usr/local/bin/docker
 
 USER gantry
 WORKDIR /home/gantry

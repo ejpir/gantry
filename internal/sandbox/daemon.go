@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
@@ -44,6 +45,7 @@ type daemonRuntime struct {
 	consoleLog         *boundedlog.Pipe
 	network            *Network
 	shares             *control.ShareManager
+	guestToolsMu       sync.Mutex
 	guestToolsStageDir string
 	ports              *control.PortManager
 	runner             vmmworker.Runner
@@ -51,6 +53,8 @@ type daemonRuntime struct {
 	rpc                *ttrpc.Client
 	control            net.Listener
 	broker             *broker
+	configureMu        sync.Mutex
+	sshMu              sync.Mutex
 	sshListener        net.Listener
 	sshCancel          func()
 	mcpListener        net.Listener
@@ -135,12 +139,7 @@ func (d *daemonRuntime) bootLog(phase string) {
 }
 
 func (d *daemonRuntime) close() {
-	if d.sshCancel != nil {
-		d.sshCancel()
-	}
-	if d.sshListener != nil {
-		_ = d.sshListener.Close()
-	}
+	d.stopSSHGateway()
 	if d.mcpListener != nil {
 		_ = d.mcpListener.Close()
 	}

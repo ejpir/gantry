@@ -65,6 +65,9 @@ type SessionOptions struct {
 	// SandboxSession shares the persistent sandbox rootfs while giving this
 	// command an isolated task and PID namespace.
 	SandboxSession bool
+	// NestedContainers enables the explicit OCI profile needed by an inner
+	// Podman runtime. It is never inferred from image contents.
+	NestedContainers bool
 	// ImgCfg provides the image environment, user, command, and default working dir.
 	ImgCfg *image.Config
 	// Cwd overrides the image working directory for this process. It is a guest
@@ -292,17 +295,13 @@ func isolatedSessionConfig(encoded string, options SessionOptions) (string, erro
 		processEnvironment(options.ImgCfg, options.Secrets, options.Environment),
 		options.PathPrepend,
 	)
-	// The recursively bind-mounted sandbox rootfs already includes the base
-	// container's /tmp mount. Mounting a new tmpfs here would give every exec
-	// a private, empty /tmp and break persistent-sandbox semantics across
-	// sessions. Namespace-specific mounts such as /proc and /dev remain fresh.
-	mounts := config.Mounts[:0]
-	for _, mount := range config.Mounts {
-		if mount.Destination != "/tmp" {
-			mounts = append(mounts, mount)
-		}
-	}
-	config.Mounts = mounts
+	// Keep every OCI mount, including /tmp. The isolated task bind-mounts the
+	// base task's rootfs path from the guest mount namespace; child mounts made
+	// privately inside the base task's mount namespace are not visible there.
+	// Omitting /tmp therefore exposed stale image/overlay metadata instead of
+	// sharing the base tmpfs. A fresh mode=1777 tmpfs per isolated session is
+	// safer than a persistent /tmp and keeps package-manager privilege drops
+	// working.
 	result, err := json.Marshal(config)
 	if err != nil {
 		return "", fmt.Errorf("encode isolated session config: %w", err)
@@ -348,6 +347,12 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, options.Terminal, options.Cwd, options.Environment)
 	if err != nil {
 		return err
+	}
+	if options.NestedContainers {
+		config, err = nestedContainersConfig(config)
+		if err != nil {
+			return err
+		}
 	}
 	if isolatedSession {
 		config, err = isolatedSessionConfig(config, options)
@@ -548,6 +553,12 @@ func sandboxContainerConfig(options SessionOptions) (string, error) {
 	config.Process.User = specs.User{UID: 65534, GID: 65534}
 	config.Process.NoNewPrivileges = true
 	config.Process.Capabilities = &specs.LinuxCapabilities{}
+	if options.NestedContainers {
+		applyNestedContainersRuntimeConfig(&config)
+		// The anchor remains deliberately unprivileged. Expanded capabilities
+		// belong only to root SSH sessions which launch the nested runtime.
+		config.Process.Capabilities = &specs.LinuxCapabilities{}
+	}
 	config.Mounts = append(config.Mounts, specs.Mount{
 		Destination: sandboxAnchorPath,
 		Type:        "bind",

@@ -355,9 +355,9 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 		m.closeDialog()
 		return m, nil
 	case "tab", "down":
-		return m, m.focusCreate((m.createFocus + 1) % 9)
+		return m, m.focusCreate((m.createFocus + 1) % 11)
 	case "shift+tab", "up":
-		return m, m.focusCreate((m.createFocus + 8) % 9)
+		return m, m.focusCreate((m.createFocus + 10) % 11)
 	case "left", "h":
 		if m.adjustCreateChoice(-1) {
 			return m, nil
@@ -367,7 +367,7 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 			return m, nil
 		}
 	case " ", "space":
-		if m.createFocus == 2 || m.createFocus == 3 || m.createFocus == 7 {
+		if m.createFocus == 2 || m.createFocus == 3 || m.createFocus == 4 || m.createFocus == 5 || m.createFocus == 9 {
 			m.adjustCreateChoice(1)
 			return m, nil
 		}
@@ -390,7 +390,7 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 	case "ctrl+enter":
 		return m.submitCreate()
 	case "enter":
-		if m.createFocus < 8 {
+		if m.createFocus < 10 {
 			return m, m.focusCreate(m.createFocus + 1)
 		}
 		return m.submitCreate()
@@ -415,12 +415,29 @@ func (m *sandboxTUIModel) adjustCreateChoice(delta int) bool {
 			m.createRuntime = "crun"
 		} else {
 			m.createRuntime = "runsc"
+			m.createDevContainers = false
 		}
 		return true
 	case 3:
 		m.cycleCreateKernel(delta)
 		return true
-	case 7:
+	case 4:
+		m.createSSH = !m.createSSH
+		if !m.createSSH {
+			m.createDevContainers = false
+		}
+		return true
+	case 5:
+		m.createDevContainers = !m.createDevContainers
+		if m.createDevContainers {
+			m.createSSH = true
+			m.createRuntime = "crun"
+			m.createCPUs.Set(maxInt(m.createCPUs.Value, m.limits.DefaultDevContainersVCPUs))
+			m.createMemory.Set(maxInt(m.createMemory.Value, int(m.limits.DefaultDevContainersMemoryMiB)))
+			m.createDisk.Set(maxInt(m.createDisk.Value, int(m.limits.DefaultDevContainersDiskMiB)))
+		}
+		return true
+	case 9:
 		m.createIsolation = cycleIsolation(m.createIsolation, delta)
 		return true
 	default:
@@ -430,13 +447,13 @@ func (m *sandboxTUIModel) adjustCreateChoice(delta int) bool {
 
 func (m *sandboxTUIModel) adjustCreateSlider(delta int) bool {
 	switch m.createFocus {
-	case 4:
+	case 6:
 		m.createCPUs.Adjust(delta)
 		return true
-	case 5:
+	case 7:
 		m.createMemory.Adjust(delta)
 		return true
-	case 6:
+	case 8:
 		m.createDisk.Adjust(delta)
 		return true
 	default:
@@ -447,11 +464,11 @@ func (m *sandboxTUIModel) adjustCreateSlider(delta int) bool {
 func (m *sandboxTUIModel) setCreateSliderBoundary(maximum bool) bool {
 	var slider *resourceSlider
 	switch m.createFocus {
-	case 4:
-		slider = &m.createCPUs
-	case 5:
-		slider = &m.createMemory
 	case 6:
+		slider = &m.createCPUs
+	case 7:
+		slider = &m.createMemory
+	case 8:
 		slider = &m.createDisk
 	default:
 		return false
@@ -500,6 +517,12 @@ func (m *sandboxTUIModel) createArgv(name string) []string {
 	if k := m.createKernelSelection(); k != "" {
 		argv = append(argv, "-kernel", k)
 	}
+	if m.createSSH {
+		argv = append(argv, "-ssh")
+	}
+	if m.createDevContainers {
+		argv = append(argv, "-devcontainers")
+	}
 	if m.createCPUs.Value != 1 {
 		argv = append(argv, "-cpus", strconv.Itoa(m.createCPUs.Value))
 	}
@@ -529,12 +552,14 @@ func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
 	m.createKernels = m.service.KernelChoices()
 	m.createKernel = 0
 	m.createIsolation = "auto"
+	m.createSSH = false
+	m.createDevContainers = false
 	m.resizeInputs()
 	return m.focusCreate(0)
 }
 
 func (m *sandboxTUIModel) focusCreate(index int) tea.Cmd {
-	m.createFocus = clampInt(index, 0, 8)
+	m.createFocus = clampInt(index, 0, 10)
 	m.createName.Blur()
 	m.createImage.Blur()
 	m.ensureDialogFocusVisible()
@@ -555,20 +580,28 @@ func (m *sandboxTUIModel) submitCreate() (tea.Model, tea.Cmd) {
 		m.createErrFocus = 0
 		switch dashboardErrorField(err) {
 		case "cpu":
-			m.createErrFocus = 4
-			return m, m.focusCreate(4)
-		case "memory":
-			m.createErrFocus = 5
-			return m, m.focusCreate(5)
-		case "disk":
 			m.createErrFocus = 6
 			return m, m.focusCreate(6)
-		case "isolation":
+		case "memory":
 			m.createErrFocus = 7
 			return m, m.focusCreate(7)
+		case "disk":
+			m.createErrFocus = 8
+			return m, m.focusCreate(8)
+		case "isolation":
+			m.createErrFocus = 9
+			return m, m.focusCreate(9)
 		default:
 			return m, m.focusCreate(0)
 		}
+	}
+	if err := m.service.ValidateSandboxConfig(dashboardapi.SandboxConfigRequest{
+		Name: name, MemMB: uint(m.createMemory.Value), VCPUs: m.createCPUs.Value,
+		ProcessIsolation: m.createIsolation, SSH: m.createSSH, DevContainers: m.createDevContainers,
+	}); err != nil {
+		m.formError = err.Error()
+		m.createErrFocus = 5
+		return m, m.focusCreate(5)
 	}
 	return m.beginAction("create", name, m.createArgv(name), false)
 }
@@ -590,6 +623,8 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 	if m.editIsolation == "" {
 		m.editIsolation = "auto"
 	}
+	m.editSSH = selected.SSH
+	m.editDevContainers = selected.DevContainers
 	m.resizeInputs()
 	return m.focusEdit(0)
 }
@@ -600,28 +635,19 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 		m.closeDialog()
 		return m, nil
 	case "tab", "down":
-		return m, m.focusEdit((m.editFocus + 1) % 4)
+		return m, m.focusEdit((m.editFocus + 1) % 6)
 	case "shift+tab", "up":
-		return m, m.focusEdit((m.editFocus + 3) % 4)
+		return m, m.focusEdit((m.editFocus + 5) % 6)
 	case "left", "h":
-		if m.adjustEditSlider(-1) {
-			return m, nil
-		}
-		if m.editFocus == 2 {
-			m.editIsolation = cycleIsolation(m.editIsolation, -1)
+		if m.adjustEditSlider(-1) || m.adjustEditChoice(-1) {
 			return m, nil
 		}
 	case "right", "l":
-		if m.adjustEditSlider(1) {
-			return m, nil
-		}
-		if m.editFocus == 2 {
-			m.editIsolation = cycleIsolation(m.editIsolation, 1)
+		if m.adjustEditSlider(1) || m.adjustEditChoice(1) {
 			return m, nil
 		}
 	case " ", "space":
-		if m.editFocus == 2 {
-			m.editIsolation = cycleIsolation(m.editIsolation, 1)
+		if m.adjustEditChoice(1) {
 			return m, nil
 		}
 	case "pgup":
@@ -643,7 +669,7 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 	case "ctrl+enter":
 		return m.submitEdit()
 	case "enter":
-		if m.editFocus < 3 {
+		if m.editFocus < 5 {
 			return m, m.focusEdit(m.editFocus + 1)
 		}
 		return m.submitEdit()
@@ -653,12 +679,36 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 	return m, nil
 }
 
-func (m *sandboxTUIModel) adjustEditSlider(delta int) bool {
+func (m *sandboxTUIModel) adjustEditChoice(delta int) bool {
 	switch m.editFocus {
 	case 0:
-		m.editCPUs.Adjust(delta)
+		m.editSSH = !m.editSSH
+		if !m.editSSH {
+			m.editDevContainers = false
+		}
 		return true
 	case 1:
+		m.editDevContainers = !m.editDevContainers
+		if m.editDevContainers {
+			m.editSSH = true
+			m.editCPUs.Set(maxInt(m.editCPUs.Value, m.limits.DefaultDevContainersVCPUs))
+			m.editMemory.Set(maxInt(m.editMemory.Value, int(m.limits.DefaultDevContainersMemoryMiB)))
+		}
+		return true
+	case 4:
+		m.editIsolation = cycleIsolation(m.editIsolation, delta)
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *sandboxTUIModel) adjustEditSlider(delta int) bool {
+	switch m.editFocus {
+	case 2:
+		m.editCPUs.Adjust(delta)
+		return true
+	case 3:
 		m.editMemory.Adjust(delta)
 		return true
 	default:
@@ -670,9 +720,9 @@ func (m *sandboxTUIModel) adjustEditSlider(delta int) bool {
 func (m *sandboxTUIModel) setEditSliderBoundary(maximum bool) bool {
 	var slider *resourceSlider
 	switch m.editFocus {
-	case 0:
+	case 2:
 		slider = &m.editCPUs
-	case 1:
+	case 3:
 		slider = &m.editMemory
 	default:
 		return false
@@ -686,7 +736,7 @@ func (m *sandboxTUIModel) setEditSliderBoundary(maximum bool) bool {
 }
 
 func (m *sandboxTUIModel) focusEdit(index int) tea.Cmd {
-	m.editFocus = clampInt(index, 0, 3)
+	m.editFocus = clampInt(index, 0, 5)
 	m.ensureDialogFocusVisible()
 	return nil
 }
@@ -697,23 +747,28 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	memMB, vcpus := uint(m.editMemory.Value), m.editCPUs.Value
-	err := m.service.ValidateResources(memMB, vcpus, m.editIsolation)
-	if err != nil {
+	request := dashboardapi.SandboxConfigRequest{
+		Name: selected.Name, MemMB: uint(m.editMemory.Value), VCPUs: m.editCPUs.Value,
+		ProcessIsolation: m.editIsolation, SSH: m.editSSH, DevContainers: m.editDevContainers,
+	}
+	if err := m.service.ValidateSandboxConfig(request); err != nil {
 		m.formError = err.Error()
-		if strings.Contains(err.Error(), "CPU") {
-			return m, m.focusEdit(0)
+		if dashboardErrorField(err) == "devcontainers" {
+			return m, m.focusEdit(1)
 		}
-		if strings.Contains(err.Error(), "isolation") {
+		if strings.Contains(err.Error(), "CPU") {
 			return m, m.focusEdit(2)
 		}
-		return m, m.focusEdit(1)
+		if strings.Contains(err.Error(), "isolation") {
+			return m, m.focusEdit(4)
+		}
+		return m, m.focusEdit(3)
 	}
 	m.dialog = tuiNoDialog
 	m.dialogScroll = 0
 	m.busyAction = "edit"
 	m.busyName = selected.Name
-	return m, tea.Batch(saveSandboxResourcesCmd(m.service, selected.Name, memMB, vcpus, m.editIsolation, selected.State == tuiRunning), m.ensureAnimation())
+	return m, tea.Batch(saveSandboxConfigCmd(m.service, request, selected.State == tuiRunning), m.ensureAnimation())
 }
 
 func cycleIsolation(current string, delta int) string {
@@ -1594,9 +1649,9 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 	}
 	switch m.dialog {
 	case tuiCreateDialog:
-		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create"}), m.createFocus == 8
+		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "SSH", "Dev Containers", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create"}), m.createFocus == 10
 	case tuiEditDialog:
-		return choose(m.editFocus, []string{"CPUs", "Memory", "Process isolation", "Save"}), m.editFocus == 3
+		return choose(m.editFocus, []string{"SSH", "Dev Containers", "CPUs", "Memory", "Process isolation", "Save"}), m.editFocus == 5
 	case tuiShareAddDialog:
 		_, _, button := m.shareDialogCopy()
 		return choose(m.shareFocus, []string{"Sandbox", "Tag", "Host path", "Mount point", "Guest owner", "Mode", button}), m.shareFocus == 6
@@ -1915,14 +1970,15 @@ func (m sandboxTUIModel) confirmationActionLabel() string {
 
 func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
 	if m.dialogButtonHit(mouse, bounds, "Create") {
-		m.createFocus = 8
+		m.createFocus = 10
 		return m.submitCreate()
 	}
 	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
 		{label: "Name", focus: 0}, {label: "OCI image", focus: 1},
 		{label: "Runtime", focus: 2}, {label: "Kernel", focus: 3},
-		{label: "CPUs", focus: 4}, {label: "Memory", focus: 5},
-		{label: "Persistent disk", focus: 6}, {label: "Process isolation", focus: 7},
+		{label: "SSH", focus: 4}, {label: "Dev Containers", focus: 5},
+		{label: "CPUs", focus: 6}, {label: "Memory", focus: 7},
+		{label: "Persistent disk", focus: 8}, {label: "Process isolation", focus: 9},
 	})
 	if !ok {
 		return m, nil
@@ -1936,16 +1992,19 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 	case 3:
 		m.createFocus = focus
 		m.cycleCreateKernel(1)
-	case 4:
+	case 4, 5:
+		m.createFocus = focus
+		m.adjustCreateChoice(1)
+	case 6:
 		m.setSliderFromMouse(&m.createCPUs, bounds, mouse.X, "CPU")
 		return m, m.focusCreate(focus)
-	case 5:
+	case 7:
 		m.setSliderFromMouse(&m.createMemory, bounds, mouse.X, "MiB")
 		return m, m.focusCreate(focus)
-	case 6:
+	case 8:
 		m.setSliderFromMouse(&m.createDisk, bounds, mouse.X, "MiB")
 		return m, m.focusCreate(focus)
-	case 7:
+	case 9:
 		m.createFocus = focus
 		m.createIsolation = cycleIsolation(m.createIsolation, 1)
 	}
@@ -1954,23 +2013,27 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 
 func (m *sandboxTUIModel) updateEditDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
 	if m.dialogButtonHit(mouse, bounds, "Save") {
-		m.editFocus = 3
+		m.editFocus = 5
 		return m.submitEdit()
 	}
 	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
-		{label: "CPUs", focus: 0}, {label: "Memory", focus: 1}, {label: "Process isolation", focus: 2},
+		{label: "SSH", focus: 0}, {label: "Dev Containers", focus: 1},
+		{label: "CPUs", focus: 2}, {label: "Memory", focus: 3}, {label: "Process isolation", focus: 4},
 	})
 	if !ok {
 		return m, nil
 	}
 	switch focus {
-	case 0:
+	case 0, 1:
+		m.editFocus = focus
+		m.adjustEditChoice(1)
+	case 2:
 		m.setSliderFromMouse(&m.editCPUs, bounds, mouse.X, "CPU")
 		return m, m.focusEdit(focus)
-	case 1:
+	case 3:
 		m.setSliderFromMouse(&m.editMemory, bounds, mouse.X, "MiB")
 		return m, m.focusEdit(focus)
-	case 2:
+	case 4:
 		m.editFocus = focus
 		m.editIsolation = cycleIsolation(m.editIsolation, 1)
 	}

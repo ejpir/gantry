@@ -26,6 +26,7 @@ var resolveAssets = []string{
 	"nerdbox-kernel-arm64", "nerdbox-rootfs-arm64.erofs",
 	"nerdbox-kernel-x86_64", "nerdbox-rootfs-x86_64.erofs",
 	"debian-bookworm.erofs",
+	"gantry-ide-image-arm64.erofs", "gantry-ide-image-x86_64.erofs",
 }
 
 // touch the asset files Resolve requires, in a temp cwd
@@ -114,6 +115,32 @@ func TestResolveRWWithLayer(t *testing.T) {
 func TestResolveRuntimeSwitch(t *testing.T) {
 	if _, _, err := resolveSandbox(t, "-runtime", "bogus"); err == nil || !strings.Contains(err.Error(), "crun or runsc") {
 		t.Errorf("bogus runtime: want switch error, got %v", err)
+	}
+}
+
+func TestResolveDevContainersDefaultsAndOverrides(t *testing.T) {
+	cfg, _, err := resolveSandbox(t, "-ssh", "-devcontainers", "-rwlayer", "debian-bookworm.erofs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || !cfg.RW {
+		t.Fatalf("devcontainers config = %+v", cfg)
+	}
+	if cfg.MemMB != config.DefaultDevContainersMemoryMiB ||
+		cfg.VCPUs != min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs()) ||
+		cfg.RWLayerSizeMiB != config.DefaultDevContainersDiskSizeMiB {
+		t.Fatalf("devcontainers defaults = %d MiB, %d CPU, %d MiB disk", cfg.MemMB, cfg.VCPUs, cfg.RWLayerSizeMiB)
+	}
+
+	cfg, _, err = resolveSandbox(t, "-ssh", "-devcontainers", "-rwlayer", "debian-bookworm.erofs", "-mem", "2048", "-cpus", "1", "-disk-size", "8192")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MemMB != 2048 || cfg.VCPUs != 1 || cfg.RWLayerSizeMiB != 8192 {
+		t.Fatalf("explicit resources were replaced: %+v", cfg)
+	}
+	if _, _, err := resolveSandbox(t, "-devcontainers", "-rwlayer", "debian-bookworm.erofs"); err == nil || !strings.Contains(err.Error(), "requires -ssh") {
+		t.Fatalf("devcontainers without SSH error = %v", err)
 	}
 }
 

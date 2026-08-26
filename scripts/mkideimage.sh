@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the curated editor-sidecar image and flatten it to EROFS.
+# Build the curated SSH/Dev Containers image and flatten it to EROFS.
 #
 # With no arguments, build the current host architecture into the conventional
 # artifacts/ release-asset path. A platform can be selected explicitly:
@@ -24,7 +24,7 @@ fi
 case "$PLATFORM" in
   linux/amd64) ASSET_ARCH=x86_64 ;;
   linux/arm64) ASSET_ARCH=arm64 ;;
-  *) echo "unsupported IDE image platform $PLATFORM (want linux/amd64 or linux/arm64)" >&2; exit 2 ;;
+  *) echo "unsupported development image platform $PLATFORM (want linux/amd64 or linux/arm64)" >&2; exit 2 ;;
 esac
 OUT=${1:-artifacts/gantry-ide-image-${ASSET_ARCH}.erofs}
 mkdir -p "$(dirname "$OUT")"

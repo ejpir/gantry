@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -35,94 +34,11 @@ var (
 	openSSHVersionRE = regexp.MustCompile(`OpenSSH(?:_for_Windows)?_([0-9]+)\.([0-9]+)`)
 )
 
-const ideSSHUsage = "usage: gantry ssh --ide NAME [-disk-size MIB] [-- CMD ...]"
-
-func parseIDESidecarArgs(argv []string) (string, ideSidecarOptions, []string, bool, error) {
-	var (
-		name    string
-		options ideSidecarOptions
-	)
-	for index := 0; index < len(argv); index++ {
-		argument := argv[index]
-		switch {
-		case argument == "-h" || argument == "--help" || argument == "-help":
-			return "", options, nil, true, nil
-		case argument == "--":
-			if name == "" {
-				return "", options, nil, false, fmt.Errorf("sandbox name must precede --")
-			}
-			return name, options, append([]string(nil), argv[index:]...), false, nil
-		case argument == "-disk-size" || argument == "--disk-size":
-			index++
-			if index >= len(argv) {
-				return "", options, nil, false, fmt.Errorf("%s requires a MiB value", argument)
-			}
-			size, err := parseIDESidecarDiskSize(argv[index])
-			if err != nil {
-				return "", options, nil, false, err
-			}
-			options.diskSizeMiB = &size
-		case strings.HasPrefix(argument, "-disk-size=") || strings.HasPrefix(argument, "--disk-size="):
-			_, value, _ := strings.Cut(argument, "=")
-			size, err := parseIDESidecarDiskSize(value)
-			if err != nil {
-				return "", options, nil, false, err
-			}
-			options.diskSizeMiB = &size
-		case strings.HasPrefix(argument, "-"):
-			return "", options, nil, false, fmt.Errorf("unknown option %q", argument)
-		case name == "":
-			name = argument
-		default:
-			return "", options, nil, false, fmt.Errorf("unexpected argument %q; commands require --", argument)
-		}
-	}
-	if name == "" {
-		return "", options, nil, false, fmt.Errorf("sandbox name is required")
-	}
-	return name, options, nil, false, nil
-}
-
-func parseIDESidecarDiskSize(value string) (uint, error) {
-	size, err := strconv.ParseUint(value, 10, 0)
-	if err != nil {
-		return 0, fmt.Errorf("invalid -disk-size %q", value)
-	}
-	result := uint(size)
-	if err := config.ValidateRWLayerSize(result); err != nil {
-		return 0, err
-	}
-	return result, nil
-}
-
-func printIDESSHUsage() {
-	fmt.Println(ideSSHUsage)
-	fmt.Printf("  -disk-size MIB  initial sidecar writable-layer size (%d..%d MiB; creation only)\n",
-		config.MinRWLayerSizeMiB, config.MaxRWLayerSizeMiB)
-}
-
 // CmdSSH implements the stock-client wrapper and its setup/doctor helpers.
 func CmdSSH(argv []string) int {
 	if len(argv) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: gantry ssh NAME [-- CMD ...] | gantry ssh doctor NAME | gantry ssh setup [--remove]")
 		return 2
-	}
-	if argv[0] == "--ide" {
-		name, options, command, help, err := parseIDESidecarArgs(argv[1:])
-		if help {
-			printIDESSHUsage()
-			return 0
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "gantry ssh --ide:", err)
-			fmt.Fprintln(os.Stderr, ideSSHUsage)
-			return 2
-		}
-		sidecar, status := ensureIDESidecar(name, options)
-		if status != 0 {
-			return status
-		}
-		return CmdSSH(append([]string{sidecar}, command...))
 	}
 	switch argv[0] {
 	case "setup":
@@ -229,12 +145,6 @@ func readSSHConfig(name string) (config.RunConfig, error) {
 	var cfg config.RunConfig
 	data, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json"))
 	if err != nil {
-		if strings.HasSuffix(name, ideSidecarSuffix) {
-			primary := strings.TrimSuffix(name, ideSidecarSuffix)
-			if layout.ValidName(primary) {
-				return cfg, fmt.Errorf("IDE sidecar %q does not exist; create it explicitly with: gantry ssh --ide %s", name, primary)
-			}
-		}
 		return cfg, fmt.Errorf("sandbox %q does not exist", name)
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -557,13 +467,14 @@ func cmdSSHDoctor(name string) int {
 		return 1
 	}
 	fmt.Printf("%-18s %s\n", "SSH enabled", yesNo(cfg.SSH))
+	fmt.Printf("%-18s %s\n", "Dev Containers", yesNo(cfg.DevContainers))
 	if _, alive := layout.PID(name); !alive {
 		fmt.Printf("%-18s no\nRemote-SSH will fail: sandbox is stopped (run gantry resume %s)\n", "Sandbox running", name)
 		return 1
 	}
 	fmt.Printf("%-18s yes\n", "Sandbox running")
 	if !cfg.SSH {
-		fmt.Printf("Remote-SSH will fail: SSH is disabled (restart %s with -ssh)\n", name)
+		fmt.Printf("Remote-SSH will fail: SSH is disabled (run gantry configure %s -ssh)\n", name)
 		return 1
 	}
 	self, err := os.Executable()
@@ -582,6 +493,9 @@ echo GANTRY_SSH_DOCTOR_runtime=$l
 if [ -n "$HOME" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then h=yes; else h=no; fi
 echo GANTRY_SSH_DOCTOR_home=$h
 echo GANTRY_SSH_DOCTOR_user=$(id -un 2>/dev/null || echo unknown)
+echo GANTRY_SSH_DOCTOR_podman=$(check command -v podman)
+echo GANTRY_SSH_DOCTOR_fuse=$(check test -c /dev/fuse)
+echo GANTRY_SSH_DOCTOR_tun=$(check test -c /dev/net/tun)
 `
 	output, probeErr := exec.Command(self, "exec", name, "--", "sh", "-c", probe).CombinedOutput()
 	values := make(map[string]string)
@@ -592,7 +506,7 @@ echo GANTRY_SSH_DOCTOR_user=$(id -un 2>/dev/null || echo unknown)
 	}
 	if probeErr != nil || values["sh"] != "yes" {
 		fmt.Printf("%-18s no\n", "Bourne shell")
-		fmt.Println("Remote-SSH will fail: no sh in image (install one, choose another image, or use gantry ssh --ide " + name + ")")
+		fmt.Println("Remote-SSH will fail: no sh in image (install one or choose another image)")
 		return 1
 	}
 	fmt.Printf("%-18s %s\n", "Bourne shell", values["sh"])
@@ -607,7 +521,16 @@ echo GANTRY_SSH_DOCTOR_user=$(id -un 2>/dev/null || echo unknown)
 		{"home", "default user's HOME is not writable"},
 	} {
 		if values[requirement.key] != "yes" {
-			fmt.Printf("Remote-SSH will fail: %s (fix the image or use gantry ssh --ide %s)\n", requirement.fix, name)
+			fmt.Printf("Remote-SSH will fail: %s (fix the image)\n", requirement.fix)
+			return 1
+		}
+	}
+	if cfg.DevContainers {
+		fmt.Printf("%-18s %s\n", "Podman", values["podman"])
+		fmt.Printf("%-18s %s\n", "/dev/fuse", values["fuse"])
+		fmt.Printf("%-18s %s\n", "/dev/net/tun", values["tun"])
+		if values["podman"] != "yes" || values["fuse"] != "yes" || values["tun"] != "yes" {
+			fmt.Println("Dev Containers will fail: install Podman and verify the nested-runtime devices")
 			return 1
 		}
 	}

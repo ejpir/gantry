@@ -77,101 +77,89 @@ Client environment requests are limited to `TERM`, `LANG`, `LC_*`,
 `COLORTERM`, and `TERM_PROGRAM`. Drops and all session/channel/forward/SFTP
 lifecycle events are recorded by `gantry audit NAME` and in `audit.log`.
 
-## Editor sidecars
+## Remote editors
 
-For distroless, musl-minimal, or production-parity workload images, create an
-explicit editor sidecar:
-
-```console
-$ gantry ssh --ide dev
-$ gantry ssh --ide dev -disk-size 8192
-```
-
-`-disk-size` selects the initial private writable-layer size in MiB and only
-applies when the sidecar is created. To change an existing sidecar's fixed-size
-disk, delete `dev-ide` and recreate it with the desired size. `--help` reports
-options without creating anything. On first creation, Gantry uses a staged
-local artifact when available; otherwise it downloads the architecture-specific
-`gantry-ide-image-<arch>.erofs` release asset and verifies its published SHA-256
-sidecar before use.
-
-This creates the ordinary sandbox `dev-ide`, then connects to it. The sidecar:
-
-- uses Gantry's curated Debian/glibc editor image with bash, tar, curl, Git,
-  certificates, libstdc++, and passwordless guest `sudo`;
-- copies the primary's **persisted** share specifications verbatim, including
-  mount paths, read-only flags, and UID/GID mappings;
-- enables SSH and creates an independent writable layer;
-- starts with no secrets or OAuth custody inherited from the primary;
-- extends the primary egress policy with the `ide-servers` download domains;
-- appears in `gantry ls` and has its own audit log.
-
-Creation is never implicit. `ssh dev-ide.gantry` before creation tells you to
-run `gantry ssh --ide dev`. A primary with no persisted shares is refused.
-Re-running the command attaches idempotently. Delete the sidecar explicitly;
-`gantry delete dev` warns but does not remove `dev-ide`.
-
-### VS Code Remote SSH
-
-Create the sidecar and install Gantry's managed `*.gantry` OpenSSH configuration:
+Enable SSH when creating a development sandbox, or add it to a running VM:
 
 ```console
-$ gantry ssh --ide dev -disk-size 8192
+$ gantry start dev -ssh
+$ gantry configure dev -ssh
 $ gantry ssh setup
 ```
 
-Install VS Code's **Remote - SSH** extension and set server downloads to happen
-on the client before upload to the sidecar:
+VS Code Remote SSH needs a Bourne shell, tar, a writable home, and a compatible
+libc/libstdc++ runtime in the selected image. `gantry ssh doctor dev` reports
+these requirements. Setting `remote.SSH.localServerDownload=always` makes VS
+Code download its server on the client and upload it over SFTP.
 
-```json
-{
-  "remote.SSH.localServerDownload": "always"
-}
-```
-
-Open a shared project at the same container path copied from the primary
-sandbox's persisted share specification:
+Open a shared project at its guest path:
 
 ```console
-$ code --remote ssh-remote+dev-ide.gantry /workspace/project
+$ code --remote ssh-remote+dev.gantry /workspace/project
 ```
 
-For example, when a host repository is shared at its original macOS path:
+Remote terminals, tasks, and workspace extensions run inside `dev`; UI-only
+extensions may still run locally.
+
+## Dev Containers
+
+Dev Containers run as nested OCI containers inside the same sandbox VM. Create
+a development sandbox with the curated Podman image and resource defaults:
 
 ```console
-$ code --remote ssh-remote+codex-dev-ide.gantry /Users/example/repos/minivm
+$ gantry start dev -ssh -devcontainers
 ```
 
-If the `code` shell command is not on `PATH`, run **Shell Command: Install
-'code' command in PATH** from VS Code's Command Palette, or invoke the macOS
-application CLI directly:
+Unless explicitly overridden, `-devcontainers` selects 4096 MiB RAM, 4 vCPUs
+(capped by the host), and a 32768 MiB sparse writable disk. Each value remains
+independently configurable:
 
 ```console
-$ "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
-    --remote ssh-remote+codex-dev-ide.gantry /Users/example/repos/minivm
+$ gantry start dev -ssh -devcontainers -mem 8192 -cpus 6 -disk-size 49152
 ```
 
-The VS Code status bar should show `SSH: dev-ide.gantry`. Remote terminals,
-tasks, and workspace extensions then run in the IDE sidecar; UI-only extensions
-may still run locally. Use **Developer: Show Running Extensions** to inspect an
-extension's location.
+Enable the profile later without rebooting an already-running VM:
 
-### Installing additional IDE tools
+```console
+$ gantry configure dev -ssh -devcontainers
+```
 
-The curated sidecar grants its `gantry` user passwordless `sudo` inside the
-guest, so a VS Code terminal can install packages without a separate root SSH
-session:
+SSH and Dev Containers apply immediately to newly created sessions. Memory,
+CPU, and process-isolation changes made with `gantry configure` are persisted
+for the next VM start. The writable disk size is selected when the sandbox is
+created. Enabling the profile later does not replace the sandbox image: a
+custom image must already provide Podman and its userspace dependencies;
+`gantry ssh doctor dev` verifies them.
+
+After connecting with Remote SSH, install VS Code's **Dev Containers**
+extension and run **Dev Containers: Reopen in Container**. The curated image
+provides `/usr/local/bin/docker`, a Docker-compatible wrapper around rootful
+Podman. No host Docker socket or TCP container-engine endpoint is exposed.
+
+The profile adds only the outer OCI facilities needed by the nested runtime:
+`/dev/fuse`, `/dev/net/tun`, a read-only cgroup2 view, shared root mount
+propagation, and the mount/network administration capabilities used by inner
+`crun`. Nested cgroup management is disabled and Podman defaults to
+`slirp4netns`. Gantry's VM allocation and network worker remain the resource
+and egress boundaries.
+
+Nested images, containers, and volumes consume the sandbox's private writable
+disk. Inner containers share the VM's memory and CPU allocation. Host bind
+mounts are limited to paths already shared into the sandbox. A nested-runtime
+escape can therefore control the sandbox VM and its shared files, but does not
+escape the microVM or gain an undeclared host path.
+
+### Installing additional tools
+
+The curated image grants its `gantry` user passwordless `sudo`, so tools can be
+installed from an SSH terminal:
 
 ```console
 $ sudo apt-get update
 $ sudo apt-get install -y jq ripgrep python3
 ```
 
-These changes persist on the sidecar's private writable disk across
-stop/resume and disappear when the sidecar is deleted. Passwordless `sudo`
-makes workspace agents effectively root **inside this sidecar**; it grants no
-host root authority, but root processes can still modify files under explicitly
-shared host paths.
+Changes persist on the sandbox's private writable disk until it is deleted.
 
 ## Diagnostics
 
@@ -181,6 +169,6 @@ $ gantry audit dev
 ```
 
 Remote editor servers may additionally require a Bourne shell, tar, a writable
-home, and their expected libc/libstdc++ runtime. The curated sidecar supplies
-these. For VS Code, `remote.SSH.localServerDownload=always` keeps editor-server
+home, and their expected libc/libstdc++ runtime. The curated development image
+supplies these. For VS Code, `remote.SSH.localServerDownload=always` keeps editor-server
 downloads client-side and uploads them over SFTP.

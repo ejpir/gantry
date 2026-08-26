@@ -113,10 +113,9 @@ func TestIsolatedSessionConfigCarriesEphemeralSecretsAndToolsPath(t *testing.T) 
 			t.Errorf("session environment %v does not contain %q", process.Env, want)
 		}
 	}
-	for _, mount := range decoded.Mounts {
-		if mount.Destination == "/tmp" {
-			t.Fatalf("isolated session replaces persistent sandbox /tmp: %+v", mount)
-		}
+	tmp := findMount(decoded.Mounts, "/tmp")
+	if tmp == nil || tmp.Type != "tmpfs" || !slices.Contains(tmp.Options, "mode=1777") {
+		t.Fatalf("isolated session /tmp mount = %+v, want mode=1777 tmpfs", tmp)
 	}
 	if findMount(decoded.Mounts, "/proc") == nil {
 		t.Fatal("isolated session lost namespace-specific /proc mount")

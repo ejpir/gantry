@@ -37,7 +37,9 @@ func defaultSSHUser(cfgUser string, uid uint32) string {
 }
 
 func (d *daemonRuntime) startSSHGateway() error {
-	if !d.cfg.SSH {
+	d.sshMu.Lock()
+	defer d.sshMu.Unlock()
+	if d.sshListener != nil {
 		return nil
 	}
 	listener, endpoint, err := listenSSH(d.name, d.dir)
@@ -66,12 +68,29 @@ func (d *daemonRuntime) startSSHGateway() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.sshListener, d.sshCancel = listener, cancel
 	d.broker.auditf("ssh: gateway enabled on sandbox-local socket")
+	if d.broker.devContainers.Load() {
+		d.broker.auditf("devcontainers: nested-runtime profile enabled inside sandbox VM")
+	}
 	go func() {
 		if err := gateway.Serve(ctx, listener); err != nil {
 			d.broker.auditf("ssh: gateway stopped: %v", err)
 		}
 	}()
 	return nil
+}
+
+func (d *daemonRuntime) stopSSHGateway() {
+	d.sshMu.Lock()
+	cancel, listener := d.sshCancel, d.sshListener
+	d.sshCancel, d.sshListener = nil, nil
+	d.sshMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if listener != nil {
+		_ = listener.Close()
+	}
+	removeSSHRuntime(d.name, d.dir)
 }
 
 func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int, error) {
@@ -147,7 +166,7 @@ func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int
 		StreamSock: br.streamSock, StreamDial: br.streamDial,
 		Shares: manifest.Shares, ShareTransport: manifest.Transport,
 		RW: br.cfg.RW, LayerSet: br.cfg.LayerSet, Args: args,
-		ID: "sb", SandboxSession: true, ImgCfg: rootImageCfg,
+		ID: "sb", SandboxSession: true, NestedContainers: br.devContainers.Load(), ImgCfg: rootImageCfg,
 		Environment: append(br.cfg.ProxyEnvironment(), request.Env...),
 		Terminal:    request.Terminal, Cols: request.Window.Width, Rows: request.Window.Height,
 		Resize: resize, Quiet: true, KillCh: killCh, ExitStatus: &status,

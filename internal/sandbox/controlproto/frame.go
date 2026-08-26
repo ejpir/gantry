@@ -16,6 +16,7 @@ const (
 	HandshakeTimeout = 5 * time.Second
 	OverloadTimeout  = time.Second
 	CallTimeout      = 30 * time.Second
+	ConfigureTimeout = 150 * time.Second // guest-helper delivery may use the bounded exec fallback
 )
 
 var ErrFrameTooLarge = errors.New("control frame too large")

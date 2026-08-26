@@ -266,6 +266,14 @@ deferred CPU onlining completes. The HVF backend uses the same slot mapping to
 wake the assigned vCPU (plus CPU 0 for compatibility with custom system roots),
 rather than waking every vCPU for each filesystem completion.
 
+A sandbox created or live-configured with `-devcontainers` uses an explicit
+outer OCI profile for an inner Podman runtime in the same microVM. The profile
+exposes only FUSE, TUN, a read-only cgroup2 view, shared root propagation, and
+the namespace-administration capabilities needed by inner `crun`. Nested
+cgroup management is disabled and no host container-engine socket is mounted.
+New sessions observe live profile changes; existing sessions retain the OCI
+configuration with which they started.
+
 ## Host capability bridges
 
 Shares, secrets, OAuth, and MCP deliberately cross the VM boundary in narrow,

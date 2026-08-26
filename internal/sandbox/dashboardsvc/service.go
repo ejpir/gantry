@@ -3,6 +3,7 @@ package dashboardsvc
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -49,12 +50,15 @@ func (dashboardService) Command(argv ...string) (*exec.Cmd, error) {
 
 func (dashboardService) ResourceLimits() dashboardapi.ResourceLimits {
 	return dashboardapi.ResourceLimits{
-		MinMemoryMB:        uint(config.MinSandboxMemMB),
-		MaxMemoryMB:        uint(config.MaxSandboxMemMB),
-		MinDiskSizeMiB:     config.MinRWLayerSizeMiB,
-		MaxDiskSizeMiB:     config.MaxRWLayerSizeMiB,
-		DefaultDiskSizeMiB: config.DefaultRWLayerSizeMiB,
-		MaxVCPUs:           config.MaxSandboxVCPUs(),
+		MinMemoryMB:                   uint(config.MinSandboxMemMB),
+		MaxMemoryMB:                   uint(config.MaxSandboxMemMB),
+		MinDiskSizeMiB:                config.MinRWLayerSizeMiB,
+		MaxDiskSizeMiB:                config.MaxRWLayerSizeMiB,
+		DefaultDiskSizeMiB:            config.DefaultRWLayerSizeMiB,
+		MaxVCPUs:                      config.MaxSandboxVCPUs(),
+		DefaultDevContainersMemoryMiB: config.DefaultDevContainersMemoryMiB,
+		DefaultDevContainersDiskMiB:   config.DefaultDevContainersDiskSizeMiB,
+		DefaultDevContainersVCPUs:     min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs()),
 	}
 }
 
@@ -94,6 +98,38 @@ func (dashboardService) ValidateResources(memMB uint, vcpus int, processIsolatio
 
 func (dashboardService) SetResources(name string, memMB uint, vcpus int, processIsolation string) error {
 	return controlcmd.SetResources(name, memMB, vcpus, processIsolation)
+}
+
+func (service dashboardService) ValidateSandboxConfig(request dashboardapi.SandboxConfigRequest) error {
+	if request.DevContainers && !request.SSH {
+		return dashboardapi.Invalid("devcontainers", errors.New("devcontainers requires SSH"))
+	}
+	if err := service.ValidateResources(request.MemMB, request.VCPUs, request.ProcessIsolation); err != nil {
+		return err
+	}
+	if cfg, err := config.ReadSandboxConfig(layout.Dir(request.Name)); err == nil {
+		ssh, devContainers := request.SSH, request.DevContainers
+		memMB, vcpus, isolation := request.MemMB, request.VCPUs, request.ProcessIsolation
+		if err := config.ApplySandboxUpdate(&cfg, config.SandboxUpdate{
+			SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB, VCPUs: &vcpus,
+			ProcessIsolation: &isolation,
+		}); err != nil {
+			return dashboardapi.Invalid("devcontainers", err)
+		}
+	}
+	return nil
+}
+
+func (service dashboardService) ConfigureSandbox(request dashboardapi.SandboxConfigRequest) (bool, error) {
+	if err := service.ValidateSandboxConfig(request); err != nil {
+		return false, err
+	}
+	ssh, devContainers := request.SSH, request.DevContainers
+	memMB, vcpus, isolation := request.MemMB, request.VCPUs, request.ProcessIsolation
+	return controlcmd.Configure(request.Name, controlproto.ConfigureRequest{
+		SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB, VCPUs: &vcpus,
+		ProcessIsolation: &isolation,
+	})
 }
 
 func (dashboardService) ValidateNetworkPolicy(path string, allowLocal bool) error {
@@ -612,6 +648,8 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			if cfg.VCPUs > 0 {
 				sandbox.VCPUs = cfg.VCPUs
 			}
+			sandbox.SSH = cfg.SSH
+			sandbox.DevContainers = cfg.DevContainers
 			sandbox.SecretCount = len(cfg.SecretNames)
 			if sandbox.SecretCount > 0 {
 				sandbox.Secrets = strings.Join(cfg.SecretNames, ", ")

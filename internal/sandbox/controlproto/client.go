@@ -16,13 +16,17 @@ import (
 var controlRequestSequence atomic.Uint64
 
 func Call[Response any](name string, request Request) (Response, error) {
+	return CallWithTimeout[Response](name, request, CallTimeout)
+}
+
+func CallWithTimeout[Response any](name string, request Request, timeout time.Duration) (Response, error) {
 	var response Response
 	conn, err := dial(name)
 	if err != nil {
 		return response, fmt.Errorf("connect to broker: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.SetDeadline(time.Now().Add(CallTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return response, fmt.Errorf("set broker deadline: %w", err)
 	}
 	if err := json.NewEncoder(conn).Encode(&request); err != nil {

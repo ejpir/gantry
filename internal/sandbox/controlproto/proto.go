@@ -27,6 +27,7 @@ type Request struct {
 	Share     *ShareRequest          `json:"share,omitempty"`
 	Port      *PortRequest           `json:"port,omitempty"`
 	Resources *ResourceRequest       `json:"resources,omitempty"`
+	Configure *ConfigureRequest      `json:"configure,omitempty"`
 	NetPolicy *NetworkPolicyRequest  `json:"net_policy,omitempty"`
 	Secret    *SecretRequest         `json:"secret,omitempty"`
 	MCP       *MCPRequest            `json:"mcp,omitempty"`
@@ -42,6 +43,23 @@ type ResourceRequest struct {
 type ResourceResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// ConfigureRequest contains only explicitly supplied settings. Resource
+// changes persist for the next VM start; SSH and Dev Containers are also
+// applied to a running daemon immediately.
+type ConfigureRequest struct {
+	SSH              *bool   `json:"ssh,omitempty"`
+	DevContainers    *bool   `json:"devcontainers,omitempty"`
+	MemMB            *uint   `json:"mem_mb,omitempty"`
+	VCPUs            *int    `json:"vcpus,omitempty"`
+	ProcessIsolation *string `json:"process_isolation,omitempty"`
+}
+
+type ConfigureResponse struct {
+	OK              bool   `json:"ok"`
+	RestartRequired bool   `json:"restart_required,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type SecretRequest struct {

@@ -90,7 +90,7 @@ jobs:
       - name: build test image
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: ./scripts/mkimage.sh alpine:3.22 "$RUNNER_TEMP/bundle/alpine.erofs" "linux/${{ matrix.docker_arch }}"
-      - name: build curated IDE sidecar image
+      - name: build curated SSH and Dev Containers image
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: ./scripts/mkideimage.sh "$RUNNER_TEMP/bundle/ide.erofs" "linux/${{ matrix.docker_arch }}"
       - uses: actions/upload-artifact@v4

@@ -37,6 +37,7 @@ usage:
              -vsockfwd /tmp/gantry-vsock               #   real nerdbox guest
   gantry exec [flags] [-- CMD]      # one-shot: boot VM + shell in one command
   gantry start <name> [flags]       # create a long-lived sandbox VM
+  gantry configure <name> [flags]   # update SSH, Dev Containers, and resources
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
   gantry audit <name>               # security-event trail (credentials, secrets, custody)
@@ -205,6 +206,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 	switch command {
 	case "start":
 		return sandbox.CmdStart(argv), true
+	case "configure":
+		return controlcmd.CmdConfigure(argv), true
 	case "pi":
 		return sandbox.CmdPi(argv), true
 	case "pi-serve":

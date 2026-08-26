@@ -43,10 +43,24 @@ Common flags:
 | `-mcp-fs-user USER` | Run MCP local servers as this guest user (name, numeric UID from passwd, or explicit `UID:GID`; default `nobody`; root refused) |
 | `-mcp-remote SPEC` | Add a remote streamable-HTTP MCP server: `name=ID,url=URL[,auth=bearer:SECRET\|header:NAME:SECRET\|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET]`; repeatable |
 | `-ssh` | Enable the sandbox-local SSH protocol endpoint (off by default; no TCP listener) |
+| `-devcontainers` | Enable nested Podman/Dev Containers; uses development resource defaults unless overridden |
 | `-process-isolation MODE` | `auto`, `required`, or `off` |
 
 Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, `-layerset`, and
 `-gvproxy`.
+
+### `gantry configure`
+
+Persist settings on an existing sandbox and hot-apply SSH and Dev Containers
+to a running VM:
+
+```text
+gantry configure NAME [--ssh[=BOOL]] [--devcontainers[=BOOL]]
+                      [--mem MIB] [--cpus N] [--process-isolation MODE]
+```
+
+Memory, CPU, and process-isolation changes apply on the next VM start. SSH and
+Dev Containers apply immediately to newly created sessions.
 
 ### `gantry exec`
 
@@ -128,15 +142,15 @@ reported local reference with `gantry start -image`.
 
 ```text
 gantry ssh NAME [-- COMMAND ...]
-gantry ssh --ide NAME [-disk-size MIB] [-- COMMAND ...]
 gantry ssh doctor NAME
 gantry ssh setup [--remove]
 ```
 
 `gantry ssh` uses stock OpenSSH through the private per-sandbox socket. The
 hidden `ssh-proxy` and `ssh-known-hosts` commands are used by OpenSSH client
-configuration and should not normally be invoked directly. See
-[SSH access](ssh-access.md).
+configuration and should not normally be invoked directly. `-devcontainers`
+enables nested Podman inside the same sandbox VM and never exposes a host
+container engine. See [SSH access](ssh-access.md).
 
 ## Images
 

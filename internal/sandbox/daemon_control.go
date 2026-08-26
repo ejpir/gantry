@@ -63,6 +63,8 @@ func (d *daemonRuntime) startControl() error {
 		shutdown:    d.shutdown,
 		audit:       d.audit,
 	}
+	d.broker.devContainers.Store(d.cfg.DevContainers)
+	d.broker.configure = d.configureSandbox
 	d.secretStore.SetLogger(d.broker.auditf)
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
@@ -107,9 +109,11 @@ func (d *daemonRuntime) startControl() error {
 		_ = credLn.Close()
 		return err
 	}
-	if err := d.startSSHGateway(); err != nil {
-		_ = credLn.Close()
-		return err
+	if d.cfg.SSH {
+		if err := d.startSSHGateway(); err != nil {
+			_ = credLn.Close()
+			return err
+		}
 	}
 	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)

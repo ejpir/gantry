@@ -37,6 +37,7 @@ Create a long-lived sandbox VM running an OCI image; attach with
 examples:
   gantry start dev -image alpine:latest
   gantry start dev -image debian:bookworm-slim -cpus 2 -mem 1024
+  gantry start dev -ssh -devcontainers
   gantry start dev -image ghcr.io/org/app@sha256:... -share code=$HOME/repos,ro
   gantry start agent -secret GITHUB_TOKEN -image python:3.12 -net-policy allow-github.json
   gantry start dev -runtime runsc -image alpine:latest

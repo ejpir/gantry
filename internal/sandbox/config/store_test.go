@@ -155,6 +155,41 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	}
 }
 
+func TestValidateDevContainersFailsClosed(t *testing.T) {
+	valid := RunConfig{DevContainers: true, SSH: true, RW: true, RWLayer: "/tmp/dev.ext4", Runtime: "crun"}
+	if err := ValidateDevContainers(valid); err != nil {
+		t.Fatalf("valid profile: %v", err)
+	}
+	for name, mutate := range map[string]func(*RunConfig){
+		"SSH disabled":   func(cfg *RunConfig) { cfg.SSH = false },
+		"read-only root": func(cfg *RunConfig) { cfg.RW = false },
+		"missing disk":   func(cfg *RunConfig) { cfg.RWLayer = "" },
+		"gVisor runtime": func(cfg *RunConfig) { cfg.Runtime = "runsc" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := valid
+			mutate(&cfg)
+			if err := ValidateDevContainers(cfg); err == nil {
+				t.Fatalf("accepted unsafe config: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestApplySandboxUpdateEnablesDevContainers(t *testing.T) {
+	cfg := RunConfig{MemMB: 512, VCPUs: 1, RW: true, RWLayer: "/tmp/dev.ext4", Runtime: "crun"}
+	ssh, devContainers := true, true
+	memMB, vcpus := uint(4096), min(4, MaxSandboxVCPUs())
+	if err := ApplySandboxUpdate(&cfg, SandboxUpdate{
+		SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB, VCPUs: &vcpus,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != memMB || cfg.VCPUs != vcpus {
+		t.Fatalf("updated config = %+v", cfg)
+	}
+}
+
 func TestConfigStoreLoadCorrupt(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), []byte("{"), 0o600); err != nil {

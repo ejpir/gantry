@@ -53,6 +53,9 @@ func ReadSandboxConfig(dir string) (RunConfig, error) {
 	if err := ValidateProxyConfig(cfg); err != nil {
 		return RunConfig{}, fmt.Errorf("invalid sandbox proxy: %w", err)
 	}
+	if err := ValidateDevContainers(cfg); err != nil {
+		return RunConfig{}, fmt.Errorf("invalid devcontainers profile: %w", err)
+	}
 	return cfg, nil
 }
 
@@ -170,6 +173,65 @@ const (
 	MinSandboxMemMB = (vmm.MinMemoryBytes + (1 << 20) - 1) >> 20
 	MaxSandboxMemMB = vmm.MaxMemoryBytes >> 20
 )
+
+// ValidateDevContainers fails closed before exposing the devices and OCI
+// capabilities needed by a nested runtime.
+func ValidateDevContainers(cfg RunConfig) error {
+	if !cfg.DevContainers {
+		return nil
+	}
+	if !cfg.SSH {
+		return fmt.Errorf("profile requires SSH")
+	}
+	if !cfg.RW || cfg.RWLayer == "" {
+		return fmt.Errorf("profile requires a private writable layer")
+	}
+	if cfg.Runtime != "crun" {
+		return fmt.Errorf("profile requires the crun runtime")
+	}
+	return nil
+}
+
+// SandboxUpdate contains only explicitly requested mutable settings.
+type SandboxUpdate struct {
+	SSH              *bool
+	DevContainers    *bool
+	MemMB            *uint
+	VCPUs            *int
+	ProcessIsolation *string
+}
+
+func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
+	if cfg == nil {
+		return fmt.Errorf("sandbox configuration is nil")
+	}
+	if update.SSH != nil {
+		cfg.SSH = *update.SSH
+	}
+	if update.DevContainers != nil {
+		cfg.DevContainers = *update.DevContainers
+	}
+	if update.MemMB != nil {
+		cfg.MemMB = *update.MemMB
+	}
+	if update.VCPUs != nil {
+		cfg.VCPUs = *update.VCPUs
+	}
+	if update.ProcessIsolation != nil {
+		cfg.ProcessIsolation = *update.ProcessIsolation
+	}
+	if err := ValidateSandboxResources(cfg.MemMB, cfg.VCPUs); err != nil {
+		return err
+	}
+	if err := ValidateProcessIsolation(cfg.ProcessIsolation); err != nil {
+		return err
+	}
+	return ValidateDevContainers(*cfg)
+}
+
+func (s *ConfigStore) Configure(update SandboxUpdate) error {
+	return s.Mutate(func(cfg *RunConfig) error { return ApplySandboxUpdate(cfg, update) })
+}
 
 func ValidateSandboxResources(memMB uint, vcpus int) error {
 	if uint64(memMB) < MinSandboxMemMB {

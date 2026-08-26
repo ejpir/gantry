@@ -158,11 +158,6 @@ func cleanupSandboxRuntime(dir string) {
 }
 
 func CmdDelete(name string) int {
-	if sidecar, err := ideSidecarName(name); err == nil {
-		if cfg, readErr := config.ReadSandboxConfig(layout.Dir(sidecar)); readErr == nil && cfg.IDESidecarFor == name {
-			fmt.Fprintf(os.Stderr, "gantry delete: warning: IDE sidecar %q still exists; remove it explicitly with gantry delete %s\n", sidecar, sidecar)
-		}
-	}
 	if err := deleteSandbox(name); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry delete:", err)
 		return 1
@@ -172,7 +167,6 @@ func CmdDelete(name string) int {
 }
 
 func deleteSandbox(name string) error {
-	cfg, _ := config.ReadSandboxConfig(layout.Dir(name))
 	lock, err := layout.HoldLaunchLock(name)
 	if err != nil {
 		return fmt.Errorf("refusing to delete while the sandbox is launching: %w", err)
@@ -187,8 +181,5 @@ func deleteSandbox(name string) error {
 		return err
 	}
 	rwlayer.Forget(name)
-	if cfg.IDESidecarFor != "" {
-		_ = os.Remove(filepath.Join(sshInstallDir(), name+"-ide-servers.json"))
-	}
 	return nil
 }

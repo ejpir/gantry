@@ -18,7 +18,6 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
-	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
@@ -62,6 +61,10 @@ type broker struct {
 	// guestToolsReady records that gantry-guest was staged into the guest
 	// this boot; secretEnv wires git's credential.helper only when set.
 	guestToolsReady atomic.Bool
+	// devContainers is live configuration: configure updates it without
+	// restarting the VM, and newly created user sessions read it atomically.
+	devContainers atomic.Bool
+	configure     func(controlproto.ConfigureRequest) (bool, error)
 	// audit is the bounded security-event trail served by audit.tail. auditMu
 	// serializes all sinks, including on-disk rotation and LogFunc callbacks.
 	audit   *auditRing
@@ -127,6 +130,9 @@ func (br *broker) handle(c net.Conn) {
 		_, _ = fmt.Fprintln(c, `{"error":"bad request"}`)
 		return
 	}
+	if req.Op == "sandbox.configure" {
+		_ = c.SetWriteDeadline(time.Now().Add(controlproto.ConfigureTimeout))
+	}
 	switch req.Op {
 	case "daemon.shutdown":
 		if br.shutdown == nil {
@@ -159,6 +165,8 @@ func (br *broker) handle(c net.Conn) {
 		br.portControl(c, req)
 	case "resources.set":
 		br.resourceControl(c, req)
+	case "sandbox.configure":
+		br.configureControl(c, req)
 	case "netpolicy.set", "netpolicy.get":
 		br.networkPolicyControl(c, req)
 	case "secret.set", "secret.remove":
@@ -167,24 +175,6 @@ func (br *broker) handle(c net.Conn) {
 		br.mcpControl(c, req)
 	case "audit.tail":
 		_ = json.NewEncoder(c).Encode(&controlproto.AuditResponse{Lines: br.audit.tail()})
-	case "ide.audit":
-		if len(req.Args) != 3 || !layout.ValidName(req.Args[0]) || !layout.ValidName(req.Args[1]) ||
-			(req.Args[2] != "primary" && req.Args[2] != "sidecar") {
-			_, _ = fmt.Fprintln(c, `{"error":"invalid IDE audit edge"}`)
-			return
-		}
-		sidecar, primary, edge := req.Args[0], req.Args[1], req.Args[2]
-		owner := filepath.Base(br.dir)
-		if (edge == "primary" && owner != primary) || (edge == "sidecar" && owner != sidecar) || sidecar != primary+ideSidecarSuffix {
-			_, _ = fmt.Fprintln(c, `{"error":"invalid IDE audit edge"}`)
-			return
-		}
-		if edge == "primary" {
-			br.auditf("ide sidecar %s created for %s", sidecar, primary)
-		} else {
-			br.auditf("ide sidecar %s created from %s", sidecar, primary)
-		}
-		_, _ = fmt.Fprintln(c, `{"ok":true}`)
 	case "capture.read":
 		br.captureControl(c, req)
 	case "session":
