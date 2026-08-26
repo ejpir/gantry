@@ -40,11 +40,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Use an intentionally empty build context. The IDE Dockerfile has no COPY or
-# ADD instructions, and sending the repository as context is both unnecessary
-# and disastrous for remote engines: development trees commonly contain
-# multi-gigabyte VM disks, OCI archives, and build artifacts.
+# Use a minimal build context containing only the Dockerfile and its Podman
+# launcher. Sending the repository is disastrous for remote engines:
+# development trees commonly contain multi-gigabyte VM disks and OCI archives.
 cp scripts/ide-image.Dockerfile "$WORK/Dockerfile"
+cp scripts/gantry-podman "$WORK/gantry-podman"
 
 # BuildKit's predefined proxy arguments are intentionally forwarded by name,
 # not embedded in the Dockerfile or image metadata. Supplying --build-arg NAME

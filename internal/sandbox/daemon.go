@@ -100,18 +100,16 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
-	// MCP and SSH advertise endpoints that require the verified guest helper,
-	// so both are part of the ready contract. Other consumers (bound secrets
-	// and OAuth custody) retain asynchronous delivery and do not extend boot.
-	if d.cfg.MCP || d.cfg.SSH {
-		if !d.deliverGuestTools() {
-			if d.cfg.SSH {
-				return daemonFailure(fmt.Errorf("SSH requires verified guest tools; disable -ssh or repair the gantry-guest asset"))
-			}
+	// MCP is part of the ready contract because its advertised tool surface is
+	// unusable without gantry-guest. SSH/Dev Containers delivery is asynchronous:
+	// the VM and control plane become ready immediately, while an SSH request
+	// arriving during setup waits for the delivery result in spawnSSH.
+	if d.cfg.MCP {
+		if !d.deliverGuestToolsAndSignal() {
 			return daemonFailure(fmt.Errorf("mcp guest helper delivery failed"))
 		}
 	} else {
-		go d.deliverGuestTools()
+		go d.deliverGuestToolsAndSignal()
 	}
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in

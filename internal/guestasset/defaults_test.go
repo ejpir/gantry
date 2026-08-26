@@ -155,6 +155,40 @@ func TestPathSelection(t *testing.T) {
 	}
 }
 
+func TestDaemonGuestToolsUsesExecutableSibling(t *testing.T) {
+	oldVersion := Version
+	t.Cleanup(func() { Version = oldVersion })
+	t.Setenv("GANTRY_ARTIFACTS", "")
+	Version = "dev"
+	t.Chdir(t.TempDir())
+
+	artifacts := t.TempDir()
+	executable := filepath.Join(artifacts, "gantry-darwin-arm64")
+	tools := filepath.Join(artifacts, filepath.Base(DefaultGuestTools()))
+	if err := os.WriteFile(tools, []byte("guest tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := DaemonGuestTools(executable); got != tools {
+		t.Fatalf("DaemonGuestTools = %q, want executable sibling %q", got, tools)
+	}
+}
+
+func TestDaemonGuestToolsFallsBackToUserCache(t *testing.T) {
+	oldVersion, oldCache := Version, userCacheDir
+	t.Cleanup(func() { Version, userCacheDir = oldVersion, oldCache })
+	t.Setenv("GANTRY_ARTIFACTS", "")
+	Version = "dev"
+	cache := t.TempDir()
+	userCacheDir = func() (string, error) { return cache, nil }
+	t.Chdir(t.TempDir())
+
+	name := filepath.Base(DefaultGuestTools())
+	want := filepath.Join(cache, "gantry", "assets", "dev", name)
+	if got := DaemonGuestTools(filepath.Join(t.TempDir(), "gantry")); got != want {
+		t.Fatalf("DaemonGuestTools = %q, want user cache %q", got, want)
+	}
+}
+
 func TestGVisorVariantsAreIdempotent(t *testing.T) {
 	rootfs := GVisorRootfs("nerdbox-rootfs-arm64.erofs")
 	if want := "nerdbox-rootfs-gvisor-arm64.erofs"; rootfs != want {

@@ -94,7 +94,7 @@ func (d *daemonRuntime) stopSSHGateway() {
 }
 
 func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int, error) {
-	if !br.guestToolsReady.Load() {
+	if !br.waitForGuestTools(ctx) {
 		return 255, fmt.Errorf("SSH session refused")
 	}
 	if !br.limits.acquireSession() {

@@ -217,6 +217,17 @@ func (c RunConfig) OAuthCustodyEnabled() bool {
 	return c.OAuthCustody != nil && *c.OAuthCustody
 }
 
+// NormalizeRuntime resolves legacy configurations that predate the persisted
+// runtime field. crun was the only/default runtime for those configurations;
+// runsc has always been recorded explicitly because it selects different boot
+// assets.
+func NormalizeRuntime(runtime string) string {
+	if runtime == "" {
+		return "crun"
+	}
+	return runtime
+}
+
 // NormalizeProcessIsolation resolves an unset persisted value to "auto": try
 // to confine, degrading with a warning where the platform cannot.
 func NormalizeProcessIsolation(mode string) string {

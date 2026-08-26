@@ -128,8 +128,10 @@ func TestDashboardConfiguresStoppedSandboxFeatures(t *testing.T) {
 	if err := os.MkdirAll(layout.Dir(name), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Imported and legacy profiles omitted Runtime even though their standard
+	// guest rootfs uses crun. Enabling Dev Containers must honor that default.
 	writeDashboardTestConfig(t, name, config.RunConfig{
-		Runtime: "crun", RW: true, RWLayer: filepath.Join(t.TempDir(), "dev.ext4"), MemMB: 512, VCPUs: 1,
+		RW: true, RWLayer: filepath.Join(t.TempDir(), "dev.ext4"), MemMB: 512, VCPUs: 1,
 	})
 	request := dashboardapi.SandboxConfigRequest{
 		Name: name, SSH: true, DevContainers: true, MemMB: 4096,
@@ -142,7 +144,7 @@ func TestDashboardConfiguresStoppedSandboxFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != request.MemMB || cfg.VCPUs != request.VCPUs {
+	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || cfg.MemMB != request.MemMB || cfg.VCPUs != request.VCPUs {
 		t.Fatalf("configured sandbox = %+v", cfg)
 	}
 }

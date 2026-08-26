@@ -186,7 +186,7 @@ func ValidateDevContainers(cfg RunConfig) error {
 	if !cfg.RW || cfg.RWLayer == "" {
 		return fmt.Errorf("profile requires a private writable layer")
 	}
-	if cfg.Runtime != "crun" {
+	if NormalizeRuntime(cfg.Runtime) != "crun" {
 		return fmt.Errorf("profile requires the crun runtime")
 	}
 	return nil
@@ -205,6 +205,9 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 	if cfg == nil {
 		return fmt.Errorf("sandbox configuration is nil")
 	}
+	// Persist the historical default when an old/imported profile is next
+	// changed, avoiding a permanently ambiguous runtime field.
+	cfg.Runtime = NormalizeRuntime(cfg.Runtime)
 	if update.SSH != nil {
 		cfg.SSH = *update.SSH
 	}

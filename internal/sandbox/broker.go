@@ -60,7 +60,11 @@ type broker struct {
 	cred *credhelper.Broker
 	// guestToolsReady records that gantry-guest was staged into the guest
 	// this boot; secretEnv wires git's credential.helper only when set.
-	guestToolsReady atomic.Bool
+	// guestToolsDone lets an SSH request arriving immediately after VM
+	// readiness wait for asynchronous delivery instead of racing it.
+	guestToolsReady    atomic.Bool
+	guestToolsDone     chan struct{}
+	guestToolsDoneOnce sync.Once
 	// devContainers is live configuration: configure updates it without
 	// restarting the VM, and newly created user sessions read it atomically.
 	devContainers atomic.Bool

@@ -626,9 +626,7 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			if sandbox.Image == "" {
 				sandbox.Image = "unknown"
 			}
-			if cfg.Runtime != "" {
-				sandbox.Runtime = cfg.Runtime
-			}
+			sandbox.Runtime = config.NormalizeRuntime(cfg.Runtime)
 			sandbox.RW, sandbox.RWLayer = cfg.RW, cfg.RWLayer
 			sandbox.DiskSizeMiB = dashboardDiskSizeMiB(cfg)
 			sandbox.Net, sandbox.Shares, sandbox.Ports = cfg.Net, len(cfg.Shares), len(cfg.Ports)

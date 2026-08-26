@@ -160,6 +160,11 @@ func TestValidateDevContainersFailsClosed(t *testing.T) {
 	if err := ValidateDevContainers(valid); err != nil {
 		t.Fatalf("valid profile: %v", err)
 	}
+	legacy := valid
+	legacy.Runtime = ""
+	if err := ValidateDevContainers(legacy); err != nil {
+		t.Fatalf("legacy default-crun profile: %v", err)
+	}
 	for name, mutate := range map[string]func(*RunConfig){
 		"SSH disabled":   func(cfg *RunConfig) { cfg.SSH = false },
 		"read-only root": func(cfg *RunConfig) { cfg.RW = false },

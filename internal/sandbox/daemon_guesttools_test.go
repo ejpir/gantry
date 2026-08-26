@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -11,9 +12,50 @@ func TestMCPReadyTimeoutCoversBothGuestToolDeliveryAttempts(t *testing.T) {
 	if got := sandboxDaemonReadyTimeout(config.RunConfig{}); got != defaultSandboxDaemonReadyTimeout {
 		t.Fatalf("ordinary ready timeout = %s, want %s", got, defaultSandboxDaemonReadyTimeout)
 	}
+	if got := sandboxDaemonReadyTimeout(config.RunConfig{SSH: true, DevContainers: true}); got != defaultSandboxDaemonReadyTimeout {
+		t.Fatalf("async SSH/Dev Containers ready timeout = %s, want %s", got, defaultSandboxDaemonReadyTimeout)
+	}
 	got := sandboxDaemonReadyTimeout(config.RunConfig{MCP: true})
 	if wantMin := 2*guestToolsTimeout + time.Second; got < wantMin {
 		t.Fatalf("MCP ready timeout = %s, want at least %s", got, wantMin)
+	}
+}
+
+func TestSSHWaitsForAsynchronousGuestToolsDelivery(t *testing.T) {
+	br := &broker{guestToolsDone: make(chan struct{})}
+	result := make(chan bool, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		result <- br.waitForGuestTools(context.Background())
+	}()
+	<-started
+	select {
+	case <-result:
+		t.Fatal("SSH wait returned before guest-tools delivery completed")
+	default:
+	}
+
+	br.guestToolsReady.Store(true)
+	br.finishGuestToolsDelivery()
+	br.finishGuestToolsDelivery() // completion is idempotent across shutdown paths
+	if ready := <-result; !ready {
+		t.Fatal("SSH wait did not observe delivered guest tools")
+	}
+}
+
+func TestSSHGuestToolsWaitReportsFailureAndCancellation(t *testing.T) {
+	failed := &broker{guestToolsDone: make(chan struct{})}
+	failed.finishGuestToolsDelivery()
+	if failed.waitForGuestTools(context.Background()) {
+		t.Fatal("failed guest-tools delivery reported ready")
+	}
+
+	pending := &broker{guestToolsDone: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if pending.waitForGuestTools(ctx) {
+		t.Fatal("canceled SSH request reported guest tools ready")
 	}
 }
 

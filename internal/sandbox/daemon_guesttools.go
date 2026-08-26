@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -59,10 +60,10 @@ func hasBoundSecrets(names []string) bool {
 }
 
 // deliverGuestTools stages and installs gantry-guest when the sandbox needs
-// it: bound secrets, OAuth custody, MCP, or SSH. MCP and SSH block readiness
-// because their advertised endpoints require the verified helper; other
-// consumers use asynchronous delivery. broker.guestToolsReady flips only
-// after content verification.
+// it: bound secrets, OAuth custody, MCP, or SSH. MCP blocks readiness because
+// its advertised endpoint requires the verified helper; the other consumers
+// use asynchronous delivery, and early SSH sessions wait for completion.
+// broker.guestToolsReady flips only after content verification.
 func (d *daemonRuntime) deliverGuestTools() bool {
 	cfg := d.store.Snapshot()
 	need := hasBoundSecrets(cfg.SecretNames) || cfg.OAuthCustodyEnabled() || cfg.MCP || cfg.SSH
@@ -70,6 +71,43 @@ func (d *daemonRuntime) deliverGuestTools() bool {
 		return true
 	}
 	return d.ensureGuestTools(cfg)
+}
+
+// deliverGuestToolsAndSignal releases requests waiting for the one boot-time
+// delivery attempt whether it succeeds or fails. Success is published before
+// the signal by ensureGuestTools, so waiters cannot observe a false negative.
+func (d *daemonRuntime) deliverGuestToolsAndSignal() (ready bool) {
+	defer d.broker.finishGuestToolsDelivery()
+	return d.deliverGuestTools()
+}
+
+func (br *broker) finishGuestToolsDelivery() {
+	if br == nil {
+		return
+	}
+	br.guestToolsDoneOnce.Do(func() {
+		if br.guestToolsDone != nil {
+			close(br.guestToolsDone)
+		}
+	})
+}
+
+func (br *broker) waitForGuestTools(ctx context.Context) bool {
+	if br == nil {
+		return false
+	}
+	if br.guestToolsReady.Load() {
+		return true
+	}
+	if br.guestToolsDone == nil {
+		return false
+	}
+	select {
+	case <-br.guestToolsDone:
+		return br.guestToolsReady.Load()
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (d *daemonRuntime) ensureGuestTools(cfg config.RunConfig) bool {
@@ -86,11 +124,13 @@ func (d *daemonRuntime) ensureGuestTools(cfg config.RunConfig) bool {
 	}
 	progress := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "daemon: "+format+"\n", a...) }
 	// The CLI persists the path it resolved (dev tree, release cache, or
-	// GANTRY_ARTIFACTS); fall back to the default for configs written
-	// before this field existed.
+	// GANTRY_ARTIFACTS). Imported and legacy profiles can lack that field;
+	// resolve their fallback relative to the executable rather than the
+	// daemon's deliberately read-only cwd (/).
 	assetPath := cfg.GuestTools
 	if assetPath == "" {
-		assetPath = guestasset.DefaultGuestTools()
+		executable, _ := os.Executable()
+		assetPath = guestasset.DaemonGuestTools(executable)
 	}
 	path, err := guestasset.EnsureGuestTools(assetPath, progress)
 	if err != nil {
