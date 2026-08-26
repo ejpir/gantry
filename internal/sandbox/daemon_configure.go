@@ -18,9 +18,10 @@ func sandboxUpdate(request controlproto.ConfigureRequest) config.SandboxUpdate {
 	}
 }
 
-// configureSandbox applies session capabilities immediately and persists VM
-// allocation changes for the next boot. Existing sessions retain the OCI
-// profile with which they were created.
+// configureSandbox applies SSH immediately when possible and persists VM
+// allocation or Dev Containers topology changes for the next boot. The IDE
+// image is a second block-backed OCI root and therefore cannot be toggled on a
+// running VM without a restart.
 func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) (bool, error) {
 	d.configureMu.Lock()
 	defer d.configureMu.Unlock()
@@ -31,7 +32,7 @@ func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) 
 		return false, err
 	}
 	restartRequired := before.MemMB != after.MemMB || before.VCPUs != after.VCPUs ||
-		before.ProcessIsolation != after.ProcessIsolation
+		before.ProcessIsolation != after.ProcessIsolation || before.DevContainers != after.DevContainers
 	changed := restartRequired || before.SSH != after.SSH || before.DevContainers != after.DevContainers ||
 		before.Runtime != after.Runtime
 	if !changed {
@@ -51,6 +52,9 @@ func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) 
 			}
 			if request.DevContainers != nil && current.DevContainers == after.DevContainers {
 				current.DevContainers = before.DevContainers
+				if current.DevContainersDiskMiB == after.DevContainersDiskMiB {
+					current.DevContainersDiskMiB = before.DevContainersDiskMiB
+				}
 			}
 			if request.MemMB != nil && current.MemMB == after.MemMB {
 				current.MemMB = before.MemMB
@@ -72,24 +76,26 @@ func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) 
 		if err != nil {
 			return errors.Join(cause, fmt.Errorf("roll back sandbox configuration: %w", err))
 		}
-		d.broker.devContainers.Store(before.DevContainers)
 		return cause
 	}
 
 	if after.SSH && !before.SSH {
-		if !d.ensureGuestTools(after) {
+		activeTarget := guestToolsTarget{ide: d.cfg.DevContainers, label: "workload"}
+		if activeTarget.ide {
+			activeTarget.label = "IDE"
+		}
+		if !d.ensureGuestToolsTargetsAndSignal(after, []guestToolsTarget{activeTarget}) {
 			return false, rollback(fmt.Errorf("SSH requires verified guest tools"))
 		}
 		if err := d.startSSHGateway(); err != nil {
 			return false, rollback(err)
 		}
 	}
-	d.broker.devContainers.Store(after.DevContainers)
 	if before.SSH && !after.SSH {
 		d.stopSSHGateway()
 	}
 	if before.DevContainers != after.DevContainers {
-		d.broker.auditf("devcontainers: nested-runtime profile enabled=%t", after.DevContainers)
+		d.broker.auditf("devcontainers: IDE container enabled=%t after restart", after.DevContainers)
 	}
 	return restartRequired, nil
 }

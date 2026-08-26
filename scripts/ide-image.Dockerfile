@@ -24,9 +24,12 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i
     && visudo -cf /etc/sudoers.d/gantry
 
 # Nested Podman cannot manage the VM's cgroup tree or writable kernel sysctls.
-# Use userspace networking and suppress Podman's default sysctl writes. The
-# launcher clears only stale /run state when Gantry boots a new VM; persistent
-# images and volumes remain under /var/lib/containers.
+# Use userspace networking and suppress Podman's default sysctl writes. Podman
+# must create its inner namespaces through the rootful launcher; both `podman`
+# and the Docker-compatible command invoke it transparently while the SSH/IDE
+# session itself remains the unprivileged gantry user. The launcher clears only
+# stale /run state when Gantry boots a new VM; persistent images and volumes
+# remain under /var/lib/containers.
 COPY gantry-podman /usr/local/libexec/gantry-podman
 RUN install -d -m 0755 /etc/containers/containers.conf.d \
     && printf '[containers]\ncgroups = "disabled"\nnetns = "slirp4netns"\ndefault_sysctls = []\n' \
@@ -35,10 +38,17 @@ RUN install -d -m 0755 /etc/containers/containers.conf.d \
     && printf '%s\n' \
        '#!/bin/sh' \
        'unset DOCKER_HOST DOCKER_CONTEXT CONTAINER_HOST XDG_RUNTIME_DIR' \
+       'if [ "$(id -u)" -eq 0 ]; then' \
+       '  exec /usr/local/libexec/gantry-podman "$@"' \
+       'fi' \
+       'exec sudo -n -H --preserve-env=BUILDAH_FORMAT,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy /usr/local/libexec/gantry-podman "$@"' \
+       > /usr/local/bin/podman \
+    && printf '%s\n' \
+       '#!/bin/sh' \
        'export BUILDAH_FORMAT=docker' \
-       'exec sudo -n -H --preserve-env=HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy /usr/local/libexec/gantry-podman "$@"' \
+       'exec /usr/local/bin/podman "$@"' \
        > /usr/local/bin/docker \
-    && chmod 0755 /usr/local/bin/docker
+    && chmod 0755 /usr/local/bin/podman /usr/local/bin/docker
 
 USER gantry
 WORKDIR /home/gantry

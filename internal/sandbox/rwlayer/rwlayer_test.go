@@ -12,6 +12,12 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
+func TestDevContainersLayerCannotAliasSandboxLayer(t *testing.T) {
+	if !strings.Contains(DevContainersName("dev"), "@") {
+		t.Fatalf("unsafe IDE layer name %q", DevContainersName("dev"))
+	}
+}
+
 func TestProbeExt4(t *testing.T) {
 	// synthetic superblock: magic, state, error fields at the verified offsets
 	img := filepath.Join(t.TempDir(), "x.ext4")

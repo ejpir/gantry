@@ -118,8 +118,8 @@ func CmdSSH(argv []string) int {
 	}
 	if userName == "" {
 		userName = "root"
-		if cfg.ImageCfg != nil {
-			userName = defaultSSHUser(cfg.ImageCfg.User, cfg.ImageCfg.UID)
+		if imageConfig := sshImageConfig(cfg); imageConfig != nil {
+			userName = defaultSSHUser(imageConfig.User, imageConfig.UID)
 		}
 	}
 	args = append(args, "-l", userName, name+".gantry")
@@ -497,7 +497,10 @@ echo GANTRY_SSH_DOCTOR_podman=$(check command -v podman)
 echo GANTRY_SSH_DOCTOR_fuse=$(check test -c /dev/fuse)
 echo GANTRY_SSH_DOCTOR_tun=$(check test -c /dev/net/tun)
 `
-	output, probeErr := exec.Command(self, "exec", name, "--", "sh", "-c", probe).CombinedOutput()
+	// Probe the environment the SSH gateway actually selects. With Dev
+	// Containers enabled this is the curated IDE peer container, while ordinary
+	// `gantry exec` deliberately remains in the workload image.
+	output, probeErr := exec.Command(self, "ssh", name, "--", "sh", "-c", probe).CombinedOutput()
 	values := make(map[string]string)
 	for _, line := range strings.Split(string(output), "\n") {
 		if key, value, ok := strings.Cut(strings.TrimSpace(line), "="); ok && strings.HasPrefix(key, "GANTRY_SSH_DOCTOR_") {
@@ -530,7 +533,7 @@ echo GANTRY_SSH_DOCTOR_tun=$(check test -c /dev/net/tun)
 		fmt.Printf("%-18s %s\n", "/dev/fuse", values["fuse"])
 		fmt.Printf("%-18s %s\n", "/dev/net/tun", values["tun"])
 		if values["podman"] != "yes" || values["fuse"] != "yes" || values["tun"] != "yes" {
-			fmt.Println("Dev Containers will fail: install Podman and verify the nested-runtime devices")
+			fmt.Println("Dev Containers will fail: curated IDE image or nested-runtime devices are incomplete")
 			return 1
 		}
 	}

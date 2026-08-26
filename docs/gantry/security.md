@@ -163,17 +163,18 @@ Gantry's self-updater and guest-asset downloader verify release files against
 SHA-256 sidecars before installation. Image cache files are content-addressed
 by the selected manifest digest and published atomically after construction.
 
-The sandbox writable layer is mutable and persists across stop/resume. Gantry
-checks its association with the image to reduce accidental reuse, but it is
-not a cryptographically sealed snapshot. Do not attach one writable layer to
-multiple running VMs.
+Sandbox writable layers are mutable and persist across stop/resume. Gantry
+checks each layer's association with its workload or IDE image to reduce
+accidental reuse, but they are not cryptographically sealed snapshots. Do not
+attach one writable layer to multiple running VMs.
 
 `gantry export` requires the sandbox to be stopped, verifies the ext4 health
 state, replays committed journal metadata into a read-only in-memory view, and
 holds its exclusive disk lock while producing an OCI archive. The source disk
-is not modified. Host shares are not included. Every file persisted by guest
-software is included, however, so an export may contain login state, keys,
-history, or other credentials. Exports are atomically published with private
+is not modified. Host shares and the optional Dev Containers IDE layer are not
+included. Every file persisted in the workload layer is included, however, so
+an export may contain login state, keys, history, or other credentials. Exports
+are atomically published with private
 permissions and a protected Windows DACL, but must still be reviewed before
 being shared.
 
@@ -191,9 +192,9 @@ being shared.
   is not a universal transparent proxy.
 - Writable shares and published non-loopback ports intentionally weaken the
   sandbox boundary.
-- Removing a sandbox permanently removes its Gantry-managed default writable
-  layer; Gantry does not provide recovery or snapshot rollback. Explicit
-  `-rwlayer` paths remain caller-owned.
+- Removing a sandbox permanently removes its Gantry-managed workload and IDE
+  writable layers; Gantry does not provide recovery or snapshot rollback.
+  Explicit `-rwlayer` paths remain caller-owned.
 
 Report vulnerabilities privately as described in
 [SECURITY.md](../../SECURITY.md).

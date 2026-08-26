@@ -10,6 +10,38 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 )
 
+func TestConfigureDevContainersRequiresRestartAndKeepsLiveTarget(t *testing.T) {
+	dir := t.TempDir()
+	initial := config.RunConfig{SSH: true, Runtime: "crun", MemMB: 512, VCPUs: 1}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	br := &broker{}
+	daemon := &daemonRuntime{store: store, broker: br}
+	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{DevContainers: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restart {
+		t.Fatal("enabling the second OCI root did not require restart")
+	}
+	if br.devContainers.Load() {
+		t.Fatal("running broker switched to an IDE root that is not attached")
+	}
+	if persisted := store.Snapshot(); !persisted.DevContainers {
+		t.Fatal("Dev Containers setting was not persisted")
+	}
+}
+
 func TestConfigurePersistsRuntimeNormalizationOnOtherwiseNoopUpdate(t *testing.T) {
 	dir := t.TempDir()
 	initial := config.RunConfig{

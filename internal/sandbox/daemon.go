@@ -42,23 +42,23 @@ type daemonRuntime struct {
 	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
-	consoleLog         *boundedlog.Pipe
-	network            *Network
-	shares             *control.ShareManager
-	guestToolsMu       sync.Mutex
-	guestToolsStageDir string
-	ports              *control.PortManager
-	runner             vmmworker.Runner
-	machine            *vmm.Machine
-	rpc                *ttrpc.Client
-	control            net.Listener
-	broker             *broker
-	configureMu        sync.Mutex
-	sshMu              sync.Mutex
-	sshListener        net.Listener
-	sshCancel          func()
-	mcpListener        net.Listener
-	mcpWorker          *mcpworkersup.Worker
+	consoleLog          *boundedlog.Pipe
+	network             *Network
+	shares              *control.ShareManager
+	guestToolsMu        sync.Mutex
+	guestToolsStageDirs []string
+	ports               *control.PortManager
+	runner              vmmworker.Runner
+	machine             *vmm.Machine
+	rpc                 *ttrpc.Client
+	control             net.Listener
+	broker              *broker
+	configureMu         sync.Mutex
+	sshMu               sync.Mutex
+	sshListener         net.Listener
+	sshCancel           func()
+	mcpListener         net.Listener
+	mcpWorker           *mcpworkersup.Worker
 
 	guestErr <-chan error
 	signals  chan os.Signal
@@ -100,16 +100,21 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
-	// MCP, bound secrets, and OAuth custody are part of the ready contract: their
-	// advertised interfaces are unusable without gantry-guest. Only SSH and Dev
-	// Containers delivery is asynchronous; an early SSH request waits for it.
-	requireGuestToolsAtReady := d.cfg.MCP || hasBoundSecrets(d.cfg.SecretNames) || d.cfg.OAuthCustodyEnabled()
-	if requireGuestToolsAtReady {
-		if !d.deliverGuestToolsAndSignal() {
+	// MCP, bound secrets, and OAuth custody require the workload helper before
+	// readiness. SSH helper delivery remains asynchronous even when it targets a
+	// second IDE root; an early connection waits on that root's own completion.
+	plan := planGuestToolsDelivery(d.cfg)
+	workloadTarget := guestToolsTarget{label: "workload"}
+	ideTarget := guestToolsTarget{ide: true, label: "IDE"}
+	if plan.workloadRequired {
+		if !d.ensureGuestToolsTargetsAndSignal(d.cfg, []guestToolsTarget{workloadTarget}) {
 			return daemonFailure(fmt.Errorf("required guest helper delivery failed"))
 		}
-	} else {
-		go d.deliverGuestToolsAndSignal()
+	} else if plan.workloadAsync {
+		go d.ensureGuestToolsTargetsAndSignal(d.cfg, []guestToolsTarget{workloadTarget})
+	}
+	if plan.ideAsync {
+		go d.ensureGuestToolsTargetsAndSignal(d.cfg, []guestToolsTarget{ideTarget})
 	}
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in
@@ -161,8 +166,12 @@ func (d *daemonRuntime) close() {
 	if d.shares != nil {
 		_ = d.shares.Close()
 	}
-	if d.guestToolsStageDir != "" {
-		_ = os.RemoveAll(d.guestToolsStageDir)
+	d.guestToolsMu.Lock()
+	stageDirs := append([]string(nil), d.guestToolsStageDirs...)
+	d.guestToolsStageDirs = nil
+	d.guestToolsMu.Unlock()
+	for _, stageDir := range stageDirs {
+		_ = os.RemoveAll(stageDir)
 	}
 	if d.network != nil {
 		d.network.Close()

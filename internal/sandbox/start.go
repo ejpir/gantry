@@ -360,6 +360,18 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 		}
 		oldKernel := cfg.Kernel
 		refreshed, changed, err := refreshSavedKernelForRestart(dir, cfg, progress)
+		if err == nil {
+			cfg = refreshed
+			var profileChanged bool
+			var warnings []string
+			cfg, profileChanged, warnings, err = prepareDevContainersProfile(name, cfg, progress)
+			for _, warning := range warnings {
+				writef(output, "%s: %s\n", label, warning)
+			}
+			if err == nil && profileChanged {
+				err = config.WriteSandboxConfig(dir, cfg)
+			}
+		}
 		if progressPrinter != nil {
 			progressPrinter.Finish()
 		}
@@ -367,7 +379,6 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 			writeLine(errorOutput, label+":", err)
 			return 1
 		}
-		cfg = refreshed
 		if changed && cfg.Kernel != oldKernel {
 			writef(output, "%s: updated saved kernel to %s\n", label, cfg.Kernel)
 		}

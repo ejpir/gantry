@@ -16,6 +16,7 @@ import (
 	"github.com/ejpir/gantry/internal/shares"
 
 	v3 "github.com/containerd/containerd/api/runtime/task/v3"
+	"github.com/containerd/containerd/api/types"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	bundle "github.com/containerd/nerdbox/api/services/bundle/v1"
 	mountapi "github.com/containerd/nerdbox/api/services/mount/v1"
@@ -56,11 +57,15 @@ type SessionOptions struct {
 	ShareTransport *shares.Transport
 	RW             bool
 	// LayerSet replaces the flattened image with native multi-device EROFS.
-	LayerSet   *LayerSet
-	Args       []string
-	ID         string
-	Cols, Rows uint32
-	Terminal   bool
+	LayerSet *LayerSet
+	// RootfsMountsOverride selects an explicitly attached image/writable-disk
+	// chain. Persistent multi-image VMs use it to distinguish workload and IDE
+	// containers without changing vminitd's generic bundle/task protocol.
+	RootfsMountsOverride []*types.Mount
+	Args                 []string
+	ID                   string
+	Cols, Rows           uint32
+	Terminal             bool
 	// Resize carries terminal-size changes after process start. Nil means the
 	// initial Cols/Rows are the only size request.
 	Resize <-chan WindowSize

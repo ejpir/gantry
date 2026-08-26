@@ -123,6 +123,9 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 			Entrypoint: []string{"/bin/app"},
 			Cmd:        []string{"serve"},
 		},
+		DevContainersImageCfg: &image.Config{
+			Env: []string{"HOME=/home/gantry"}, Cmd: []string{"/bin/bash"},
+		},
 		LayerSet: &client.LayerSet{FSMeta: "meta", Layers: []string{"layer"}},
 	})
 
@@ -138,13 +141,16 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	snapshot.ImageCfg.Env[0] = "changed"
 	snapshot.ImageCfg.Entrypoint[0] = "changed"
 	snapshot.ImageCfg.Cmd[0] = "changed"
+	snapshot.DevContainersImageCfg.Env[0] = "changed"
+	snapshot.DevContainersImageCfg.Cmd[0] = "changed"
 	snapshot.LayerSet.Layers[0] = "changed"
 
 	got := store.Snapshot()
 	if got.Shares[0] != "code=/tmp/code" || got.Ports[0] != "127.0.0.1:8080:80" || got.SecretNames[0] != "TOKEN" {
 		t.Fatalf("snapshot mutated store slices: %+v", got)
 	}
-	if !*got.OAuthBridge || !*got.OAuthCustody || got.ImageCfg.Env[0] != "A=1" || got.ImageCfg.Entrypoint[0] != "/bin/app" || got.ImageCfg.Cmd[0] != "serve" {
+	if !*got.OAuthBridge || !*got.OAuthCustody || got.ImageCfg.Env[0] != "A=1" || got.ImageCfg.Entrypoint[0] != "/bin/app" || got.ImageCfg.Cmd[0] != "serve" ||
+		got.DevContainersImageCfg.Env[0] != "HOME=/home/gantry" || got.DevContainersImageCfg.Cmd[0] != "/bin/bash" {
 		t.Fatalf("snapshot mutated nested config: %+v", got)
 	}
 	if got.MCPRemotes[0] == "changed" || got.SecretSources[0].Name == "changed" || got.SecretSources[0].Source.Argv[0] == "changed" {
@@ -165,10 +171,13 @@ func TestValidateDevContainersFailsClosed(t *testing.T) {
 	if err := ValidateDevContainers(legacy); err != nil {
 		t.Fatalf("legacy default-crun profile: %v", err)
 	}
+	readOnlyWorkload := valid
+	readOnlyWorkload.RW, readOnlyWorkload.RWLayer = false, ""
+	if err := ValidateDevContainers(readOnlyWorkload); err != nil {
+		t.Fatalf("read-only workload with peer IDE profile: %v", err)
+	}
 	for name, mutate := range map[string]func(*RunConfig){
 		"SSH disabled":   func(cfg *RunConfig) { cfg.SSH = false },
-		"read-only root": func(cfg *RunConfig) { cfg.RW = false },
-		"missing disk":   func(cfg *RunConfig) { cfg.RWLayer = "" },
 		"gVisor runtime": func(cfg *RunConfig) { cfg.Runtime = "runsc" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -190,7 +199,7 @@ func TestApplySandboxUpdateEnablesDevContainers(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != memMB || cfg.VCPUs != vcpus {
+	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != memMB || cfg.VCPUs != vcpus || cfg.DevContainersDiskMiB != DefaultDevContainersDiskSizeMiB {
 		t.Fatalf("updated config = %+v", cfg)
 	}
 }

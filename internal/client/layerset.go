@@ -128,6 +128,13 @@ func RootfsMountsLayerSet(ls LayerSet) []*types.Mount {
 	return rootfsMountsDevs(true, ls.FSMetaDev(), ls.LayerDevs(), ls.RWLayerDev())
 }
 
+// RootfsMountsDevices renders one rootfs chain from explicit guest block
+// devices. Multi-image VMs use this after assigning all read-only disks before
+// all writable disks, which shifts the historical /dev/vdc writable slot.
+func RootfsMountsDevices(rw bool, imageDev string, layerDevs []string, rwDev string) []*types.Mount {
+	return rootfsMountsDevs(rw, imageDev, layerDevs, rwDev)
+}
+
 // rootfsMountsDevs builds the mount chain. layerDevs nil selects the
 // flattened single-device image at imageDev.
 func rootfsMountsDevs(rw bool, imageDev string, layerDevs []string, rwDev string) []*types.Mount {

@@ -70,17 +70,16 @@ func (c *execCapture) snapshot() ([]byte, bool) {
 // retained stdout; op names the caller for error attribution. User secrets
 // are deliberately NOT injected into this internal process.
 func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
-	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg, false)
+	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg, false, false)
 }
 
-// internalExecAsRoot is reserved for trusted helpers which must install into
-// or deliberately manage root-owned runtime state. User-requested commands
-// continue through internalExec with the image identity.
-func (br *broker) internalExecAsRoot(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
-	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, mcpLauncherImageConfig(br.cfg.ImageCfg), true)
+func (br *broker) internalExecAsRootTarget(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, ide bool) ([]byte, int, error) {
+	target := br.sessionTarget(ide)
+	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op,
+		mcpLauncherImageConfig(target.imageConfig), true, ide)
 }
 
-func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker bool) ([]byte, int, error) {
+func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker, ide bool) ([]byte, int, error) {
 	if !br.limits.acquireSession() {
 		return nil, 0, fmt.Errorf("sandbox session limit reached")
 	}
@@ -103,17 +102,14 @@ func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, ti
 		killCh <- struct{}{}
 	})
 	manifest := client.LoadShareManifest(br.dir)
-	err := client.Session(br.rpc, client.SessionOptions{
+	options := client.SessionOptions{
 		StreamSock:      br.streamSock,
 		StreamDial:      br.streamDial,
 		SetupLocker:     &br.sessionSetupMu,
 		HoldSetupLocker: holdSetupLocker,
 		Shares:          manifest.Shares,
 		ShareTransport:  manifest.Transport,
-		RW:              br.cfg.RW,
-		LayerSet:        br.cfg.LayerSet,
 		Args:            args,
-		ID:              "sb",
 		SandboxSession:  true,
 		ImgCfg:          imageConfig,
 		Environment:     br.cfg.ProxyEnvironment(),
@@ -121,7 +117,13 @@ func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, ti
 		ExitStatus:      &status,
 		KillCh:          killCh,
 		WaitContext:     waitCtx,
-	}, stdin, &capture)
+	}
+	target := br.sessionTarget(ide)
+	applySessionTarget(&options, target)
+	// Trusted internal callers may deliberately override only the process
+	// identity; the selected workload/IDE root remains fixed above.
+	options.ImgCfg = imageConfig
+	err := client.Session(br.rpc, options, stdin, &capture)
 	_ = timer.Stop()
 	stdout, overflow := capture.snapshot()
 	return internalExecOutcome(stdout, status, err, overflow, expired.Load(), timeout, maxResponse, op)

@@ -14,7 +14,7 @@ func CmdConfigure(argv []string) int {
 	flags := flag.NewFlagSet("configure", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	ssh := flags.Bool("ssh", false, "enable the live sandbox-local SSH endpoint")
-	devContainers := flags.Bool("devcontainers", false, "enable nested Podman/Dev Containers for new sessions")
+	devContainers := flags.Bool("devcontainers", false, "enable the in-VM IDE container and nested Podman after restart")
 	memMB := flags.Uint("mem", 0, "guest RAM in MiB (applies after restart)")
 	vcpus := flags.Int("cpus", 0, "guest vCPU count (applies after restart)")
 	isolation := flags.String("process-isolation", "", "process isolation after restart: auto | required | off")
@@ -67,7 +67,7 @@ func CmdConfigure(argv []string) int {
 	}
 	fmt.Printf("gantry configure: sandbox %q updated\n", name)
 	if restart {
-		fmt.Println("gantry configure: restart required to apply VM resource changes")
+		fmt.Println("gantry configure: restart required to apply VM or Dev Containers changes")
 	}
 	return 0
 }

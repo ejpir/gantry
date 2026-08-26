@@ -89,13 +89,18 @@ these requirements.
 
 ## Use Dev Containers
 
-Create a sandbox with SSH, nested Podman, and the curated development image:
+Create a sandbox with a workload image plus the curated IDE environment:
 
 ```console
-$ gantry start dev -ssh -devcontainers
+$ gantry start dev -image ubuntu:latest -ssh -devcontainers
 $ gantry ssh doctor dev
 $ gantry ssh setup
 ```
+
+Both OCI environments run under `crun` in the same microVM. `gantry exec dev`
+enters the workload selected by `-image`; SSH enters the curated IDE image,
+where nested Podman is available. Omitting `-image` uses Gantry's ordinary
+default workload image without changing the IDE environment.
 
 Then:
 
@@ -104,8 +109,11 @@ Then:
 3. Install the **Dev Containers** extension.
 4. Run **Dev Containers: Reopen in Container**.
 
-The extension can use its normal Docker-compatible workflow. Gantry does not
-mount or expose a container engine from the host.
+The extension can use its normal Docker-compatible workflow. The curated
+image's `podman` and `docker` commands transparently launch rootful Podman via
+passwordless `sudo`; the SSH and editor session itself remains the unprivileged
+`gantry` user. Gantry does not mount or expose a container engine from the
+host.
 
 Unless overridden, `-devcontainers` selects:
 
@@ -113,7 +121,7 @@ Unless overridden, `-devcontainers` selects:
 |---|---:|
 | Memory | 4096 MiB |
 | vCPUs | 4, capped by the host |
-| Writable disk | 32768 MiB |
+| IDE writable disk | 32768 MiB |
 
 Override any value when creating the sandbox:
 
@@ -121,10 +129,10 @@ Override any value when creating the sandbox:
 $ gantry start dev -ssh -devcontainers -mem 8192 -cpus 6 -disk-size 49152
 ```
 
-Nested images, volumes, and filesystem layers are stored on the sandbox's
-private writable disk and persist across stop/resume. Running inner containers
-do not survive a VM restart. They share the VM's memory and CPU allocation,
-and can bind-mount only paths already available inside the outer sandbox.
+Nested images, volumes, and filesystem layers are stored on the IDE
+container's private writable disk and persist across stop/resume. Running inner
+containers do not survive a VM restart. They share the microVM's memory and CPU
+allocation and can bind-mount only paths available inside the IDE container.
 
 ### Enable Dev Containers on an existing sandbox
 
@@ -132,14 +140,16 @@ and can bind-mount only paths already available inside the outer sandbox.
 $ gantry configure dev -ssh -devcontainers
 ```
 
-SSH and the nested-runtime profile apply to new sessions immediately; reconnect
-before opening the Dev Container. Memory, CPU, and process-isolation changes
-apply after the next VM start. The writable-disk size is fixed when the
-sandbox is created.
+The profile adds a second image and writable block device, so enabling or
+disabling it on a running sandbox requires a restart:
 
-Enabling the profile later does not replace a custom base image or install
-Podman into it. Use a sandbox created with the curated image, or ensure your
-custom image already provides Podman and its dependencies. Check it with:
+```console
+$ gantry restart dev
+```
+
+The workload image is never replaced and does not need Podman or editor tools.
+The IDE writable-disk size is fixed when the profile is first prepared. Check
+the SSH-selected IDE environment with:
 
 ```console
 $ gantry ssh doctor dev

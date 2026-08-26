@@ -16,11 +16,13 @@ BUCKET=${GANTRY_TEST_BUCKET:-gantry-kvm-test-$ACCOUNT}
 KEY=${GANTRY_TEST_BINARY_KEY:-whpx/gantry-field.exe}
 GUEST_KEY=${GANTRY_TEST_GUEST_KEY:-whpx/gantry-guest-x86_64}
 IDE_KEY=${GANTRY_TEST_IDE_KEY:-gantry-ide-image-x86_64.erofs}
+WORKLOAD_KEY=${GANTRY_TEST_WORKLOAD_KEY:-debian-bookworm-amd64.erofs}
 KERNEL_KEY=${GANTRY_TEST_KERNEL_KEY:-gantry-kernel-x86_64}
 ROOTFS_KEY=${GANTRY_TEST_ROOTFS_KEY:-nerdbox-rootfs-x86_64.erofs}
 REMOTE_EXE=${GANTRY_TEST_EXE:-C:/gantry/gantry-field.exe}
 REMOTE_GUEST=${GANTRY_TEST_GUEST:-C:/gantry/gantry-guest-x86_64}
 REMOTE_IDE=${GANTRY_TEST_REMOTE_IDE_IMAGE:-C:/gantry/gantry-ide-image-x86_64.erofs}
+REMOTE_WORKLOAD=${GANTRY_TEST_WORKLOAD_IMAGE:-C:/gantry/debian-bookworm-amd64.erofs}
 REMOTE_KERNEL=${GANTRY_TEST_CURRENT_KERNEL:-C:/gantry/gantry-kernel-x86_64}
 REMOTE_ROOTFS=${GANTRY_TEST_CURRENT_ROOTFS:-C:/gantry/nerdbox-rootfs-x86_64.erofs}
 BIN=$(mktemp "${TMPDIR:-/tmp}/gantry-windows-amd64.XXXXXX.exe")
@@ -45,6 +47,8 @@ GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$INSTANCE" \
 	--s3-download "$BUCKET" "$GUEST_KEY" "$REMOTE_GUEST" 600
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$INSTANCE" \
 	--s3-download "$BUCKET" "$IDE_KEY" "$REMOTE_IDE" 900
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$INSTANCE" \
+	--s3-download "$BUCKET" "$WORKLOAD_KEY" "$REMOTE_WORKLOAD" 900
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$INSTANCE" \
 	--s3-download "$BUCKET" "$KERNEL_KEY" "$REMOTE_KERNEL" 900
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$INSTANCE" \

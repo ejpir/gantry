@@ -114,6 +114,9 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 	if err := r.resolveWritableLayer(); err != nil {
 		return r.cfg, r.warnings, err
 	}
+	if err := r.resolveDevContainersProfile(); err != nil {
+		return r.cfg, r.warnings, err
+	}
 	mark("launcher writable layer resolved")
 	if err := r.resolveNetworking(); err != nil {
 		return r.cfg, r.warnings, err
@@ -133,8 +136,10 @@ func (r *runResolver) initialize() error {
 		if !r.explicit.vcpus {
 			*r.flags.VCPUs = min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs())
 		}
-		if !r.explicit.diskSize {
-			*r.flags.RWLayerSizeMiB = config.DefaultDevContainersDiskSizeMiB
+		if r.explicit.diskSize {
+			r.cfg.DevContainersDiskMiB = *r.flags.RWLayerSizeMiB
+		} else {
+			r.cfg.DevContainersDiskMiB = config.DefaultDevContainersDiskSizeMiB
 		}
 	}
 	if err := config.ValidateSandboxResources(*r.flags.MemMB, *r.flags.VCPUs); err != nil {
@@ -208,25 +213,10 @@ func (r *runResolver) resolveBootAssets() error {
 	return nil
 }
 
-func defaultDevContainersImageConfig() *image.Config {
-	return &image.Config{
-		Env: []string{
-			"HOME=/home/gantry",
-			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		},
-		Cmd: []string{"/bin/bash"}, User: "gantry", UID: 1000, GID: 1000,
-		WorkingDir: "/home/gantry",
-	}
-}
-
 func (r *runResolver) resolveImage() error {
 	r.cfg.Image = *r.flags.Image
 	if r.cfg.Image == "" {
 		r.cfg.Image = guestasset.DefaultImage()
-		if r.cfg.DevContainers && *r.flags.LayerSet == "" {
-			r.cfg.Image = guestasset.DefaultDevContainersImage()
-			r.cfg.ImageCfg = defaultDevContainersImageConfig()
-		}
 		if !gutil.FileExists(r.cfg.Image) {
 			imagePath, err := guestasset.EnsureImage(r.cfg.Image, r.report)
 			if err != nil {
@@ -330,6 +320,16 @@ func (r *runResolver) resolveWritableLayer() error {
 		return nil
 	}
 	return rwlayer.CheckPairing(r.cfg.RWLayer, r.cfg.ImageIdentity())
+}
+
+func (r *runResolver) resolveDevContainersProfile() error {
+	prepared, _, warnings, err := prepareDevContainersProfile(r.flags.Name, r.cfg, r.progress)
+	if err != nil {
+		return err
+	}
+	r.cfg = prepared
+	r.warnings = append(r.warnings, warnings...)
+	return nil
 }
 
 func (r *runResolver) resolveNetworking() error {
@@ -465,6 +465,9 @@ func (r *runResolver) resolveSessionOptions() error {
 	if r.cfg.DevContainers && !r.cfg.SSH {
 		return fmt.Errorf("-devcontainers requires -ssh")
 	}
+	if r.cfg.DevContainers && config.NormalizeRuntime(*r.flags.Runtime) != "crun" {
+		return fmt.Errorf("-devcontainers requires -runtime crun")
+	}
 	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
 	r.cfg.MCPFSUser = *r.flags.MCPFSUser
 	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
@@ -514,6 +517,12 @@ func (r *runResolver) normalizeAndValidatePaths() error {
 	if err := makeAbsolute("rwlayer", &r.cfg.RWLayer); err != nil {
 		return err
 	}
+	if err := makeAbsolute("devcontainers image", &r.cfg.DevContainersImage); err != nil {
+		return err
+	}
+	if err := makeAbsolute("devcontainers rwlayer", &r.cfg.DevContainersRWLayer); err != nil {
+		return err
+	}
 	if err := makeAbsolute("netpol", &r.cfg.NetPol); err != nil {
 		return err
 	}
@@ -530,6 +539,14 @@ func (r *runResolver) normalizeAndValidatePaths() error {
 	}
 	if r.cfg.RW && r.cfg.RWLayer != "" && !gutil.FileExists(r.cfg.RWLayer) {
 		return fmt.Errorf("rwlayer %s does not exist; create it with:\n  ./scripts/mkrwlayer.sh %s 512", r.cfg.RWLayer, r.cfg.RWLayer)
+	}
+	if r.cfg.DevContainers {
+		if !gutil.FileExists(r.cfg.DevContainersImage) {
+			return fmt.Errorf("dev containers image %s does not exist", r.cfg.DevContainersImage)
+		}
+		if !gutil.FileExists(r.cfg.DevContainersRWLayer) {
+			return fmt.Errorf("dev containers rwlayer %s does not exist", r.cfg.DevContainersRWLayer)
+		}
 	}
 
 	parsed, err := shares.ParseSpecs(r.cfg.Shares)

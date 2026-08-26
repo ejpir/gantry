@@ -1,7 +1,7 @@
 #!/bin/sh
 # Root-side Podman launcher for Gantry's curated Dev Containers image.
 #
-# The outer workload root is persistent, including /run. Podman records the
+# The curated IDE root is persistent, including /run. Podman records the
 # kernel boot ID beneath its runroot and refuses to start after a VM reboot if
 # that transient state survived. Inner containers cannot survive a VM reboot,
 # so clear only Podman's /run state once per new guest boot while preserving

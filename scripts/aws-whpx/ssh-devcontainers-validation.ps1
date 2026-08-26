@@ -13,6 +13,7 @@ $StateRoot = Value-OrDefault "GANTRY_HOME" (Join-Path $Root "state-ssh-devcontai
 $Kernel = Value-OrDefault "GANTRY_TEST_CURRENT_KERNEL" (Join-Path $Root "gantry-kernel-x86_64")
 $Rootfs = Value-OrDefault "GANTRY_TEST_CURRENT_ROOTFS" (Join-Path $Root "nerdbox-rootfs-x86_64.erofs")
 $Image = Value-OrDefault "GANTRY_TEST_IDE_IMAGE" (Join-Path $Root "gantry-ide-image-x86_64.erofs")
+$Workload = Value-OrDefault "GANTRY_TEST_WORKLOAD_IMAGE" (Join-Path $Root "debian-bookworm-amd64.erofs")
 $Sandbox = Value-OrDefault "GANTRY_TEST_SANDBOX" "ssh-devcontainers-whpx"
 $Config = Join-Path (Join-Path $StateRoot $Sandbox) "sandbox.json"
 $Log = Join-Path (Join-Path $StateRoot $Sandbox) "daemon.log"
@@ -105,11 +106,11 @@ function Invoke-GuestScript([string]$ScriptText) {
     # complex Linux scripts as base64 so Gantry receives one unambiguous arg.
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ScriptText))
     return Invoke-GantryCapture @(
-        "exec", $script:Sandbox, "--", "sh", "-c", "echo '$encoded' | base64 -d | sh"
+        "ssh", $script:Sandbox, "--", "sh", "-c", "echo '$encoded' | base64 -d | sh"
     )
 }
 
-foreach ($path in @($Gantry, $GuestTools, $Kernel, $Rootfs, $Image)) {
+foreach ($path in @($Gantry, $GuestTools, $Kernel, $Rootfs, $Image, $Workload)) {
     if (-not (Test-Path $path -PathType Leaf)) { throw "required file missing: $path" }
 }
 if ($null -eq (Get-Command ssh.exe -ErrorAction SilentlyContinue)) {
@@ -124,6 +125,7 @@ try {
         "start", $Sandbox,
         "-kernel", $Kernel,
         "-rootfs", $Rootfs,
+        "-image", $Workload,
         "-ssh",
         "-devcontainers",
         "-mem", "4096",
@@ -137,6 +139,9 @@ try {
     Assert-Matches "doctor reports SSH enabled" $doctor "(?m)^SSH enabled\s+yes$"
     Assert-Matches "doctor reports Dev Containers enabled" $doctor "(?m)^Dev Containers\s+yes$"
     Assert-Matches "doctor finds Podman" $doctor "(?m)^Podman\s+yes$"
+
+    $workload = Invoke-GantryCapture @("exec", $Sandbox, "--", "sh", "-c", "test ! -e /usr/local/libexec/gantry-podman && echo GANTRY-WORKLOAD-SEPARATE")
+    Assert-Contains "workload and IDE OCI roots are separate" $workload "GANTRY-WORKLOAD-SEPARATE"
 
     $direct = Invoke-GantryCapture @("ssh", $Sandbox, "--", "/bin/echo", "GANTRY-DIRECT-SSH")
     Assert-Contains "direct gantry ssh command" $direct "GANTRY-DIRECT-SSH"
@@ -170,6 +175,8 @@ docker build -t localhost/gantry-field-inner:latest "$context"
 docker volume rm -f gantry-field-volume >/dev/null 2>&1 || true
 docker volume create gantry-field-volume >/dev/null
 docker run --rm localhost/gantry-field-inner:latest /bin/echo GANTRY-NESTED-PODMAN
+test "$(id -u)" = 1000
+podman run --rm localhost/gantry-field-inner:latest /bin/echo GANTRY-NONROOT-PODMAN-CLI
 docker run --rm -v gantry-field-volume:/data localhost/gantry-field-inner:latest /bin/sh -c 'printf GANTRY-VOLUME-PERSISTED > /data/marker'
 sudo mkdir -p /run/libpod/gantry-field-stale
 sudo touch /run/libpod/gantry-field-stale/marker
@@ -240,7 +247,7 @@ test "$(cat /proc/sys/kernel/random/boot_id)" = "$(sudo cat /run/gantry/podman/b
         throw "configure did not normalize omitted runtime to crun"
     }
     $finalNested = Invoke-GantryCapture @(
-        "exec", $Sandbox, "--", "env", "DOCKER_HOST=tcp://127.0.0.1:1",
+        "ssh", $Sandbox, "--", "env", "DOCKER_HOST=tcp://127.0.0.1:1",
         "docker", "run", "--rm", "localhost/gantry-field-inner:latest",
         "/bin/echo", "GANTRY-FINAL-NESTED"
     )

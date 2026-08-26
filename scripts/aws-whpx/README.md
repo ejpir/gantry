@@ -25,8 +25,8 @@ read at the top of `field-validation.ps1`, notably `GANTRY_TEST_ROOT`,
 The instance needs SSM connectivity, WHPX enabled, Windows OpenSSH, outbound
 security-group access, and the kernel/rootfs/netprobe assets already staged.
 No credential is embedded in the scripts. The host helper builds fresh Windows
-host and Linux guest-helper binaries and stages those plus the curated IDE
-image through presigned S3 URLs.
+host and Linux guest-helper binaries, then downloads those plus the staged
+workload, curated IDE, kernel, and rootfs assets through presigned S3 URLs.
 
 To start both reusable field hosts, run the Linux and Windows batteries, test a
 real checksummed self-update on disposable binaries, and stop the instances on

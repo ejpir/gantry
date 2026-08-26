@@ -216,8 +216,18 @@ func HealthWarning(path string) string {
 	return fmt.Sprintf("rwlayer %s: %s\nit mounts, but consider recreating it: ./scripts/mkrwlayer.sh %s 512", path, info.Diagnosis(), path)
 }
 
-// Forget removes a sandbox's default layer + sidecar (delete).
+// @ is intentionally outside the sandbox-name alphabet, so an IDE layer can
+// never alias the primary layer of another valid sandbox name.
+const devContainersLayerSuffix = "@devcontainers"
+
+// DevContainersName is the managed writable-layer identity for the curated
+// IDE environment that shares a VM with the named workload sandbox.
+func DevContainersName(name string) string { return name + devContainersLayerSuffix }
+
+// Forget removes a sandbox's managed workload and IDE layers plus sidecars.
 func Forget(name string) {
-	_ = os.Remove(Path(name))
-	_ = os.Remove(pairingPath(Path(name)))
+	for _, managedName := range []string{name, DevContainersName(name)} {
+		_ = os.Remove(Path(managedName))
+		_ = os.Remove(pairingPath(Path(managedName)))
+	}
 }

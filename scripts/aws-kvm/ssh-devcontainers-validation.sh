@@ -9,6 +9,7 @@ G=${GANTRY_TEST_EXE:-$ROOT/gantry-linux-amd64}
 KERNEL=${GANTRY_TEST_KERNEL:-$ROOT/nerdbox-kernel-x86_64}
 ROOTFS=${GANTRY_TEST_ROOTFS:-$ROOT/nerdbox-rootfs-x86_64.erofs}
 IMAGE=${GANTRY_TEST_IDE_IMAGE:-$ROOT/gantry-ide-image-x86_64.erofs}
+WORKLOAD=${GANTRY_TEST_WORKLOAD_IMAGE:-$ROOT/debian-bookworm-amd64.erofs}
 GUEST=${GANTRY_TEST_GUEST:-$ROOT/gantry-guest-x86_64}
 SANDBOX=${GANTRY_TEST_SANDBOX:-ssh-devcontainers-kvm}
 STATE_ROOT=${GANTRY_HOME:-$ROOT/state-ssh-devcontainers}
@@ -36,7 +37,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-for path in "$G" "$KERNEL" "$ROOTFS" "$IMAGE" "$GUEST"; do
+for path in "$G" "$KERNEL" "$ROOTFS" "$IMAGE" "$WORKLOAD" "$GUEST"; do
   [ -s "$path" ] || fail "required asset missing: $path"
 done
 command -v ssh >/dev/null || fail "OpenSSH client is not installed on the field host"
@@ -46,7 +47,7 @@ command -v sftp >/dev/null || fail "SFTP client is not installed on the field ho
 "$G" delete "$SANDBOX" >/dev/null 2>&1 || true
 
 run "$G" start "$SANDBOX" \
-  -kernel "$KERNEL" -rootfs "$ROOTFS" \
+  -kernel "$KERNEL" -rootfs "$ROOTFS" -image "$WORKLOAD" \
   -ssh -devcontainers -mem 4096 -cpus 2 -disk-size 2048
 
 doctor=$("$G" ssh doctor "$SANDBOX" 2>&1)
@@ -54,7 +55,12 @@ printf '%s\n' "$doctor"
 grep -q 'SSH enabled[[:space:]]*yes' <<<"$doctor" || fail "SSH doctor did not report SSH enabled"
 grep -q 'Dev Containers[[:space:]]*yes' <<<"$doctor" || fail "SSH doctor did not report Dev Containers enabled"
 grep -q 'Podman[[:space:]]*yes' <<<"$doctor" || fail "SSH doctor did not find Podman"
-pass "doctor verifies the curated image and nested-runtime devices"
+pass "doctor verifies the curated IDE image and nested-runtime devices"
+
+workload=$("$G" exec "$SANDBOX" -- sh -c 'test ! -e /usr/local/libexec/gantry-podman && echo GANTRY-WORKLOAD-SEPARATE' 2>&1)
+printf '%s\n' "$workload"
+grep -q GANTRY-WORKLOAD-SEPARATE <<<"$workload" || fail "gantry exec did not remain in the workload image"
+pass "workload and IDE OCI roots are separate inside one VM"
 
 direct=$("$G" ssh "$SANDBOX" -- /bin/echo GANTRY-DIRECT-SSH 2>&1)
 printf '%s\n' "$direct"
@@ -97,13 +103,15 @@ docker build -t localhost/gantry-field-inner:latest "$context"
 docker volume rm -f gantry-field-volume >/dev/null 2>&1 || true
 docker volume create gantry-field-volume >/dev/null
 docker run --rm localhost/gantry-field-inner:latest /bin/echo GANTRY-NESTED-PODMAN
+test "$(id -u)" = 1000
+podman run --rm localhost/gantry-field-inner:latest /bin/echo GANTRY-NONROOT-PODMAN-CLI
 docker run --rm -v gantry-field-volume:/data localhost/gantry-field-inner:latest /bin/sh -c 'printf GANTRY-VOLUME-PERSISTED > /data/marker'
 sudo mkdir -p /run/libpod/gantry-field-stale
 sudo touch /run/libpod/gantry-field-stale/marker
 sudo touch /var/lib/containers/gantry-field-persistent-marker
 EOF
 )
-nested=$("$G" exec "$SANDBOX" -- sh -c "$build_script" 2>&1)
+nested=$("$G" ssh "$SANDBOX" -- sh -c "$build_script" 2>&1)
 printf '%s\n' "$nested"
 grep -q GANTRY-NESTED-PODMAN <<<"$nested" || fail "offline nested Podman image did not run"
 pass "offline nested Podman build, run, and volume write"
@@ -142,7 +150,7 @@ pass "readiness returned in $((ready_ms - start_ms)) ms before padded helper del
 boot_after=$("$G" exec "$SANDBOX" -- cat /proc/sys/kernel/random/boot_id | grep -Eo '[0-9a-f]{8}-[0-9a-f-]{27}' | tail -1)
 [ -n "$boot_after" ] || fail "could not read the resumed VM boot ID"
 [ "$boot_before" != "$boot_after" ] || fail "VM boot ID did not change across stop/resume"
-restart_check=$("$G" exec "$SANDBOX" -- env "GANTRY_OLD_BOOT_ID=$boot_before" sh -c '
+restart_check=$("$G" ssh "$SANDBOX" -- env "GANTRY_OLD_BOOT_ID=$boot_before" sh -c '
 set -eux
 exec 2>&1
 sudo mkdir -p /run/libpod/gantry-field-stale /run/gantry/podman
@@ -185,7 +193,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 if config.get("runtime") != "crun":
     raise SystemExit("configure did not normalize omitted runtime to crun")
 PY
-final_nested=$("$G" exec "$SANDBOX" -- env DOCKER_HOST=tcp://127.0.0.1:1 docker run --rm localhost/gantry-field-inner:latest /bin/echo GANTRY-FINAL-NESTED 2>&1)
+final_nested=$("$G" ssh "$SANDBOX" -- env DOCKER_HOST=tcp://127.0.0.1:1 docker run --rm localhost/gantry-field-inner:latest /bin/echo GANTRY-FINAL-NESTED 2>&1)
 printf '%s\n' "$final_nested"
 grep -q GANTRY-FINAL-NESTED <<<"$final_nested" || fail "nested runtime failed after legacy-profile resume"
 pass "legacy runtime normalization and cwd-independent guest-helper fallback"
