@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -84,6 +85,42 @@ func serveVhostWire(conn *net.UnixConn, handler fusewire.Handler) error {
 			source.SetNotificationSink(sink)
 		}
 	})
+}
+
+type synchronousVhostNotifier struct {
+	mu    sync.Mutex
+	sink  fusewire.NotificationSink
+	ready chan struct{}
+	once  sync.Once
+}
+
+func newSynchronousVhostNotifier() *synchronousVhostNotifier {
+	return &synchronousVhostNotifier{ready: make(chan struct{})}
+}
+
+func (h *synchronousVhostNotifier) SetNotificationSink(sink fusewire.NotificationSink) {
+	h.mu.Lock()
+	h.sink = sink
+	h.mu.Unlock()
+	if sink != nil {
+		h.once.Do(func() { close(h.ready) })
+	}
+}
+
+func (h *synchronousVhostNotifier) HandleRequest(in, out [][]byte) (int, fuse.Status) {
+	h.mu.Lock()
+	sink := h.sink
+	h.mu.Unlock()
+	if sink == nil {
+		return 0, fuse.EIO
+	}
+	message := make([]byte, 32) // header + empty fuse_notify_prune_out
+	binary.LittleEndian.PutUint32(message[0:4], uint32(len(message)))
+	binary.LittleEndian.PutUint32(message[4:8], 9) // FUSE_NOTIFY_PRUNE
+	if status := sink(message); status != fuse.OK {
+		return 0, status
+	}
+	return fusewire.WriteError(in, out, fuse.OK), fuse.OK
 }
 
 func newVhostWireGuest(t *testing.T, handler fusewire.Handler) (*vhostWireGuest, func()) {
@@ -604,6 +641,31 @@ func TestVhostFSShareHubReverseInvalidation(t *testing.T) {
 	}
 	if code := int32(binary.LittleEndian.Uint32(message[4:8])); code != -fuse.NOTIFY_INVAL_ENTRY {
 		t.Fatalf("notification code = %d, want INVAL_ENTRY", code)
+	}
+}
+
+func TestVhostFSSynchronousNotificationDoesNotDeadlockRequest(t *testing.T) {
+	handler := newSynchronousVhostNotifier()
+	guest, cleanup := newVhostWireGuest(t, handler)
+	defer cleanup()
+	notificationAddress := guest.postNotificationBuffer()
+	select {
+	case <-handler.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("notification sink was not attached")
+	}
+
+	// Node-budget pruning emits its reverse notification synchronously from
+	// inside the FUSE request handler. The vhost transport must queue delivery
+	// until that request releases its completion ordering lock; acquiring the
+	// write lock directly here used to deadlock both sides permanently.
+	errno, _ := guest.request(fuse.OpGetattr, 1, nil, 16)
+	if errno != 0 {
+		t.Fatalf("request errno %d", errno)
+	}
+	message := guest.waitNotification(notificationAddress)
+	if code := binary.LittleEndian.Uint32(message[4:8]); code != 9 {
+		t.Fatalf("notification code = %d, want FUSE_NOTIFY_PRUNE", code)
 	}
 }
 
