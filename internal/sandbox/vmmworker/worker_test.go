@@ -713,6 +713,7 @@ func TestVMMWorkerConcurrentVsockConnectKeepsDescriptorsPaired(t *testing.T) {
 	const sessions = 24
 	start := make(chan struct{})
 	errors := make(chan error, sessions)
+	senders := make(chan net.Conn, sessions)
 	for index := range sessions {
 		go func() {
 			<-start
@@ -721,17 +722,28 @@ func TestVMMWorkerConcurrentVsockConnectKeepsDescriptorsPaired(t *testing.T) {
 				errors <- err
 				return
 			}
-			defer func() { _ = conn.Close() }()
-			_, err = fmt.Fprintf(conn, "session-%02d", index)
+			payload := fmt.Sprintf("session-%02d", index)
+			written, err := io.WriteString(conn, payload)
+			if err == nil && written != len(payload) {
+				err = io.ErrShortWrite
+			}
+			senders <- conn
 			errors <- err
 		}()
 	}
 	close(start)
+	var senderConns []net.Conn
 	for range sessions {
 		if err := <-errors; err != nil {
 			t.Fatalf("concurrent DialStream: %v", err)
 		}
+		senderConns = append(senderConns, <-senders)
 	}
+	defer func() {
+		for _, conn := range senderConns {
+			_ = conn.Close()
+		}
+	}()
 
 	injected := (*h.fake).injectedSnapshot()
 	if len(injected) != sessions {
