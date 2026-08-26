@@ -14,6 +14,7 @@
 //	ready                touched once the guest RPC connection is held
 //	mcp-restart-required persisted MCP settings differ from the live worker
 //	ctl.sock             session broker (JSON line, then raw stdio)
+//	ssh.sock             opt-in local SSH protocol endpoint (Unix; named pipe on Windows)
 //	1025.sock         vsock dial-back accept target
 //	listen-1026.sock  vsock stream listener
 //	console.log       guest serial console

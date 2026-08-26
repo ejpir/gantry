@@ -141,7 +141,7 @@ sleep 3   # guest-tools delivery races readiness; give the async push a moment
 
 R=$(xe t7 'printenv BOUND_TOKEN || echo ABSENT'); chk "binding: bound secret NOT ambient" "ABSENT" "$R"
 R=$(xe t7 'printenv GIT_CONFIG_VALUE_0');         chk "binding: git wired via env config" "/run/gantry/bin/credhelper" "$R"
-R=$(xe t7 'test -x /run/gantry/bin/gantry-guest && test -L /run/gantry/bin/credhelper && echo HELPER-OK')
+R=$(xe t7 'test -x /run/gantry/bin/gantry-guest && test -x /run/gantry/bin/credhelper && echo HELPER-OK')
                                                   chk "binding: helper staged in guest" "HELPER-OK" "$R"
 
 QB='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
@@ -295,8 +295,8 @@ cat > /tmp/t11-reqs.ndjson <<'EOF'
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fs__write_file","arguments":{"path":"/work/x"}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fs__github-authorize","arguments":{}}}
 EOF
-{ echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t11-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t11 >/dev/null 2>&1
-R=$(printf '{ cat /tmp/reqs; sleep 4; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t11 2>&1)
+{ echo 'cat > /work/.gantry-mcp-requests <<MEOF'; cat /tmp/t11-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t11 >/dev/null 2>&1
+R=$(printf '{ cat /work/.gantry-mcp-requests; sleep 4; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t11 2>&1)
 L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: tools/list exposes fs__read_file"      "fs__read_file" "$L2"
 if printf '%s' "$L2" | grep -qa 'github-authorize'; then bad "mcp: auth tool hidden from listing"; else ok "mcp: auth tool hidden from listing"; fi
 L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: read_file round trip"                 "hello-mcp" "$L3"
@@ -394,8 +394,8 @@ cat > /tmp/t12-reqs.ndjson <<'EOF'
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mock__leak_sse","arguments":{}}}
 {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"mock__err_http","arguments":{}}}
 EOF
-{ echo 'cat > /tmp/reqs <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t12 >/dev/null 2>&1
-R=$(printf '{ cat /tmp/reqs; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t12 2>&1)
+{ echo 'cat > /work/.gantry-mcp-requests <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t12 >/dev/null 2>&1
+R=$(printf '{ cat /work/.gantry-mcp-requests; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t12 2>&1)
 L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: remote tools listed alongside fs"         "mock__echo_auth" "$L2"
                                             chk "mcp: fs server still listed"                 "fs__read_file" "$L2"
 chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$(cat /tmp/mock-mcp-auth.log 2>/dev/null)"

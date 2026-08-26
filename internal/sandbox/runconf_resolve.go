@@ -22,9 +22,12 @@ import (
 )
 
 type explicitRunFlags struct {
-	kernel bool
-	rootfs bool
-	rw     bool
+	kernel   bool
+	rootfs   bool
+	rw       bool
+	mem      bool
+	vcpus    bool
+	diskSize bool
 }
 
 func collectExplicitRunFlags(fs *flag.FlagSet) (set explicitRunFlags) {
@@ -36,6 +39,12 @@ func collectExplicitRunFlags(fs *flag.FlagSet) (set explicitRunFlags) {
 			set.rootfs = true
 		case "rw":
 			set.rw = true
+		case "mem":
+			set.mem = true
+		case "cpus":
+			set.vcpus = true
+		case "disk-size":
+			set.diskSize = true
 		}
 	})
 	return set
@@ -117,6 +126,17 @@ func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(
 }
 
 func (r *runResolver) initialize() error {
+	if *r.flags.DevContainers {
+		if !r.explicit.mem {
+			*r.flags.MemMB = min(config.DefaultDevContainersMemoryMiB, uint(config.MaxSandboxMemMB))
+		}
+		if !r.explicit.vcpus {
+			*r.flags.VCPUs = min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs())
+		}
+		if !r.explicit.diskSize {
+			*r.flags.RWLayerSizeMiB = config.DefaultDevContainersDiskSizeMiB
+		}
+	}
 	if err := config.ValidateSandboxResources(*r.flags.MemMB, *r.flags.VCPUs); err != nil {
 		return err
 	}
@@ -188,10 +208,25 @@ func (r *runResolver) resolveBootAssets() error {
 	return nil
 }
 
+func defaultDevContainersImageConfig() *image.Config {
+	return &image.Config{
+		Env: []string{
+			"HOME=/home/gantry",
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		},
+		Cmd: []string{"/bin/bash"}, User: "gantry", UID: 1000, GID: 1000,
+		WorkingDir: "/home/gantry",
+	}
+}
+
 func (r *runResolver) resolveImage() error {
 	r.cfg.Image = *r.flags.Image
 	if r.cfg.Image == "" {
 		r.cfg.Image = guestasset.DefaultImage()
+		if r.cfg.DevContainers && *r.flags.LayerSet == "" {
+			r.cfg.Image = guestasset.DefaultDevContainersImage()
+			r.cfg.ImageCfg = defaultDevContainersImageConfig()
+		}
 		if !gutil.FileExists(r.cfg.Image) {
 			imagePath, err := guestasset.EnsureImage(r.cfg.Image, r.report)
 			if err != nil {
@@ -353,13 +388,13 @@ func (r *runResolver) resolveSecrets() error {
 	}
 	r.cfg.SecretNames = names
 	r.cfg.SecretSources = sources
-	// Host-bound secrets (NAME@host), OAuth custody, and the MCP gateway
-	// all need the multicall helper inside the guest (credhelper / oauth
-	// login / mcp-proxy / mcp-serve modes).
+	// Host-bound secrets (NAME@host), OAuth custody, MCP, and SSH all need
+	// the multicall helper inside the guest (credential, gateway, verified
+	// user, SFTP, and loopback relay modes).
 	// Stage the asset here — during CLI resolution, with progress — so a
 	// first-run download never lands on the VM boot path. Failure to stage
 	// is not fatal: the daemon warns loudly at delivery time instead.
-	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP {
+	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP || *r.flags.SSH {
 		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
 		if err != nil {
 			// Not fatal: the daemon warns loudly at delivery time instead.
@@ -425,6 +460,11 @@ func (r *runResolver) resolveSessionOptions() error {
 		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
 	}
 	r.cfg.MCP = *r.flags.MCP
+	r.cfg.SSH = *r.flags.SSH
+	r.cfg.DevContainers = *r.flags.DevContainers
+	if r.cfg.DevContainers && !r.cfg.SSH {
+		return fmt.Errorf("-devcontainers requires -ssh")
+	}
 	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
 	r.cfg.MCPFSUser = *r.flags.MCPFSUser
 	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
@@ -459,6 +499,9 @@ func (r *runResolver) resolveSessionOptions() error {
 }
 
 func (r *runResolver) normalizeAndValidatePaths() error {
+	if err := config.ValidateDevContainers(r.cfg); err != nil {
+		return fmt.Errorf("-devcontainers: %w", err)
+	}
 	if err := makeAbsolute("kernel", &r.cfg.Kernel); err != nil {
 		return err
 	}

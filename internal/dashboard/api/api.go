@@ -43,6 +43,8 @@ type Sandbox struct {
 	MemMB            uint
 	VCPUs            int
 	ProcessIsolation string
+	SSH              bool
+	DevContainers    bool
 	Dir              string
 	ConfigPath       string
 	Updated          time.Time
@@ -170,12 +172,24 @@ type Snapshot struct {
 }
 
 type ResourceLimits struct {
-	MinMemoryMB        uint
-	MaxMemoryMB        uint
-	MinDiskSizeMiB     uint
-	MaxDiskSizeMiB     uint
-	DefaultDiskSizeMiB uint
-	MaxVCPUs           int
+	MinMemoryMB                   uint
+	MaxMemoryMB                   uint
+	MinDiskSizeMiB                uint
+	MaxDiskSizeMiB                uint
+	DefaultDiskSizeMiB            uint
+	MaxVCPUs                      int
+	DefaultDevContainersMemoryMiB uint
+	DefaultDevContainersDiskMiB   uint
+	DefaultDevContainersVCPUs     int
+}
+
+type SandboxConfigRequest struct {
+	Name             string
+	MemMB            uint
+	VCPUs            int
+	ProcessIsolation string
+	SSH              bool
+	DevContainers    bool
 }
 
 type PolicyResult struct {
@@ -239,6 +253,8 @@ type Service interface {
 	ValidateCreate(name string, memMB, diskSizeMiB uint, vcpus int, processIsolation string) error
 	ValidateResources(memMB uint, vcpus int, processIsolation string) error
 	SetResources(name string, memMB uint, vcpus int, processIsolation string) error
+	ValidateSandboxConfig(SandboxConfigRequest) error
+	ConfigureSandbox(SandboxConfigRequest) (restartRequired bool, err error)
 	ValidateNetworkPolicy(path string, allowLocal bool) error
 	SetNetworkPolicy(name, path string, allowLocal bool) (PolicyResult, error)
 	ValidateNetworkRule(RuleRequest) error

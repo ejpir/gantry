@@ -1143,22 +1143,22 @@ func TestSandboxTUICreateResourceSliders(t *testing.T) {
 	m.loading = false
 	m.openCreateDialog()
 	m.createName.SetValue("bigger")
-	m.focusCreate(4)
+	m.focusCreate(6)
 	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	if m.createCPUs.Value != 2 {
 		t.Fatalf("CPU slider = %d, want 2", m.createCPUs.Value)
 	}
-	m.focusCreate(5)
+	m.focusCreate(7)
 	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	if m.createMemory.Value != 640 {
 		t.Fatalf("memory slider = %d, want 640", m.createMemory.Value)
 	}
-	m.focusCreate(6)
+	m.focusCreate(8)
 	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	if m.createDisk.Value != 1024 {
 		t.Fatalf("disk slider = %d, want 1024", m.createDisk.Value)
 	}
-	m.focusCreate(7)
+	m.focusCreate(9)
 	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	if m.createIsolation != "required" {
 		t.Fatalf("isolation choice = %q, want required", m.createIsolation)
@@ -1166,6 +1166,28 @@ func TestSandboxTUICreateResourceSliders(t *testing.T) {
 	argv := strings.Join(m.createArgv("bigger"), " ")
 	if !strings.Contains(argv, "-cpus 2") || !strings.Contains(argv, "-mem 640") || !strings.Contains(argv, "-disk-size 1024") || !strings.Contains(argv, "-process-isolation required") {
 		t.Fatalf("create argv = %q", argv)
+	}
+}
+
+func TestSandboxTUICreateDevContainersEnablesSSHAndDefaults(t *testing.T) {
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+	m.loading = false
+	m.openCreateDialog()
+	m.focusCreate(5)
+	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeySpace})
+	if !m.createSSH || !m.createDevContainers || m.createRuntime != "crun" {
+		t.Fatalf("features = ssh:%t devcontainers:%t runtime:%s", m.createSSH, m.createDevContainers, m.createRuntime)
+	}
+	if m.createCPUs.Value != m.limits.DefaultDevContainersVCPUs ||
+		m.createMemory.Value != int(m.limits.DefaultDevContainersMemoryMiB) ||
+		m.createDisk.Value != int(m.limits.DefaultDevContainersDiskMiB) {
+		t.Fatalf("devcontainer defaults = %d CPU, %d MiB RAM, %d MiB disk", m.createCPUs.Value, m.createMemory.Value, m.createDisk.Value)
+	}
+	argv := strings.Join(m.createArgv("dev"), " ")
+	for _, want := range []string{"-ssh", "-devcontainers", "-cpus", "-mem", "-disk-size"} {
+		if !strings.Contains(argv, want) {
+			t.Errorf("create argv %q lacks %q", argv, want)
+		}
 	}
 }
 
@@ -1181,12 +1203,13 @@ func TestSandboxTUIEditResourceSliders(t *testing.T) {
 	if m.dialog != tuiEditDialog || m.editCPUs.Value != 2 || m.editMemory.Value != 2048 {
 		t.Fatalf("edit dialog state: dialog=%d cpu=%d memory=%d", m.dialog, m.editCPUs.Value, m.editMemory.Value)
 	}
+	m.focusEdit(2)
 	_, _ = m.updateEditDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
 	if m.editCPUs.Value != 3 {
 		t.Fatalf("edited CPU = %d, want 3", m.editCPUs.Value)
 	}
 	plain := ansi.Strip(m.View().Content)
-	for _, want := range []string{"Edit Sandbox", "3 CPU", "2048 MiB", "Restart"} {
+	for _, want := range []string{"Edit Sandbox", "3 CPU", "2048 MiB", "restart"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("edit dialog missing %q:\n%s", want, plain)
 		}
@@ -1230,6 +1253,7 @@ func TestSandboxTUICreateButtonHitbox(t *testing.T) {
 	m.width, m.height = 100, 30
 	m.openCreateDialog()
 	m.createName.SetValue("click-create")
+	m.focusCreate(10)
 
 	plain := ansi.Strip(m.View().Content)
 	buttonX, buttonY := -1, -1
@@ -1248,6 +1272,51 @@ func TestSandboxTUICreateButtonHitbox(t *testing.T) {
 	m = *model.(*sandboxTUIModel)
 	if m.dialog != tuiNoDialog || m.busyAction != "create" || m.busyName != "click-create" {
 		t.Fatalf("Create click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+	}
+}
+
+func TestSandboxTUIFeatureToggleHitboxesUseRenderedRows(t *testing.T) {
+	clickControl := func(t *testing.T, m *sandboxTUIModel, label string) *sandboxTUIModel {
+		t.Helper()
+		plain := ansi.Strip(m.View().Content)
+		for y, line := range strings.Split(plain, "\n") {
+			marker := "│  " + label
+			index := strings.Index(line, marker)
+			if index < 0 {
+				continue
+			}
+			x := lipgloss.Width(line[:index+len("│  ")]) + 1
+			model, _ := m.updateMouseClick(tea.Mouse{X: x, Y: y, Button: tea.MouseLeft})
+			return model.(*sandboxTUIModel)
+		}
+		t.Fatalf("control %q not rendered:\n%s", label, plain)
+		return m
+	}
+
+	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+	m.loading = false
+	m.width, m.height = 100, 42
+	m.openCreateDialog()
+	m = *clickControl(t, &m, "SSH")
+	if !m.createSSH || m.createDevContainers {
+		t.Fatalf("create SSH click = ssh:%t devcontainers:%t", m.createSSH, m.createDevContainers)
+	}
+	m = *clickControl(t, &m, "Dev Containers")
+	if !m.createSSH || !m.createDevContainers {
+		t.Fatalf("create Dev Containers click = ssh:%t devcontainers:%t", m.createSSH, m.createDevContainers)
+	}
+
+	m.dialog = tuiNoDialog
+	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiRunning, MemMB: 4096, VCPUs: 2}}
+	m.cursor = 0
+	m.openEditDialog()
+	m = *clickControl(t, &m, "Dev Containers")
+	if !m.editSSH || !m.editDevContainers {
+		t.Fatalf("edit Dev Containers click = ssh:%t devcontainers:%t", m.editSSH, m.editDevContainers)
+	}
+	m = *clickControl(t, &m, "SSH")
+	if m.editSSH || m.editDevContainers {
+		t.Fatalf("edit SSH disable click = ssh:%t devcontainers:%t", m.editSSH, m.editDevContainers)
 	}
 }
 
@@ -1323,13 +1392,13 @@ func TestSandboxTUIOversizedDialogScrollsAndFollowsFocus(t *testing.T) {
 		t.Fatalf("oversized dialog has no initial scroll affordance: max=%d\n%s", m.dialogMaxScroll(), initial)
 	}
 
-	m.focusCreate(6)
+	m.focusCreate(8)
 	disk := ansi.Strip(m.renderDialog(theme))
 	if m.dialogScroll == 0 || !strings.Contains(disk, "Persistent disk") || !strings.Contains(disk, "512 MiB") {
 		t.Fatalf("disk focus was not scrolled into view: scroll=%d\n%s", m.dialogScroll, disk)
 	}
 
-	m.focusCreate(8)
+	m.focusCreate(10)
 	footer := ansi.Strip(m.renderDialog(theme))
 	if !strings.Contains(footer, "Create") || !strings.Contains(footer, "esc cancel") {
 		t.Fatalf("dialog footer was not reachable: scroll=%d\n%s", m.dialogScroll, footer)
@@ -1400,7 +1469,7 @@ func TestSandboxTUIFormDialogsKeepFooterAndBorder(t *testing.T) {
 		dialog tuiDialog
 		open   func()
 	}{
-		{name: "create", dialog: tuiCreateDialog, open: func() { m.openCreateDialog() }},
+		{name: "create", dialog: tuiCreateDialog, open: func() { m.openCreateDialog(); m.focusCreate(10) }},
 		{name: "mount", dialog: tuiShareAddDialog, open: func() { m.openShareAddDialog(false) }},
 		{name: "publish port", dialog: tuiPortPublishDialog, open: func() { m.openPortPublishDialog() }},
 		{name: "MCP remote", dialog: tuiMCPRemoteDialog, open: func() { m.openMCPRemoteDialog(false); m.focusMCPRemote(mcpRemoteSubmitFocus) }},
@@ -1476,7 +1545,7 @@ func TestSandboxTUIFormDialogsUseSpaciousSections(t *testing.T) {
 		render func() string
 		labels []string
 	}{
-		{name: "create", render: func() string { return m.renderCreateDialog(theme, 58) }, labels: []string{"Name", "OCI image", "Runtime", "Kernel", "CPUs", "Memory", "Persistent disk", "Process isolation"}},
+		{name: "create", render: func() string { return m.renderCreateDialog(theme, 58) }, labels: []string{"Name", "OCI image", "Runtime", "Kernel", "SSH", "Dev Containers", "CPUs", "Memory", "Persistent disk", "Process isolation"}},
 		{name: "mount", render: func() string { return m.renderShareAddDialog(theme, 62) }, labels: []string{"Sandbox", "Tag", "Host path", "Mount point", "Guest owner", "Mode"}},
 		{name: "port", render: func() string { return m.renderPortPublishDialog(theme, 62) }, labels: []string{"Host bind", "Guest port", "Protocol"}},
 		{name: "policy", render: func() string { return m.renderNetworkPolicyDialog(theme, 62) }, labels: []string{"Sandbox", "Policy file", "Local network override"}},

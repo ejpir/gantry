@@ -57,9 +57,11 @@ type runtimeRoot struct {
 }
 
 type runtimeLinux struct {
-	Namespaces    []specs.LinuxNamespace `json:"namespaces"`
-	MaskedPaths   []string               `json:"maskedPaths"`
-	ReadonlyPaths []string               `json:"readonlyPaths"`
+	Namespaces        []specs.LinuxNamespace `json:"namespaces"`
+	Devices           []specs.LinuxDevice    `json:"devices,omitempty"`
+	MaskedPaths       []string               `json:"maskedPaths"`
+	ReadonlyPaths     []string               `json:"readonlyPaths"`
+	RootfsPropagation string                 `json:"rootfsPropagation,omitempty"`
 }
 
 // RootfsMountsFor describes how the guest assembles the container rootfs.

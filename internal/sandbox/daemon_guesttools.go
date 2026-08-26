@@ -2,18 +2,21 @@ package sandbox
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/ejpir/gantry/internal/secret"
 
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
@@ -21,10 +24,10 @@ import (
 // (-secret NAME@host) need the multicall helper inside the guest. Two
 // channels, in preference order:
 //
-//  1. share hot-add — the daemon stages the binary in a sandbox-local
-//     directory, live-adds it as a read-only share, and a short guest
-//     command copies it into /run/gantry/bin. The virtio-fs path is built
-//     for bulk file data; the exec channel is not.
+//  1. share hot-add — the daemon stages the binary outside user share roots,
+//     live-adds it at /host/gantry-tools, and invokes its static install-self
+//     mode as root to copy it into /run/gantry/bin. The virtio-fs path is
+//     built for bulk file data; the exec channel is not.
 //  2. exec-channel fallback (no virtio-fs hub, or -rw=false) — base64
 //     through the session stdin pipe. Small commands only: bulk transfer
 //     over this channel risks truncation under load.
@@ -35,13 +38,15 @@ import (
 // boot failure: ambient secrets still work, bound ones are unusable that
 // boot and the warning says so.
 const (
-	guestToolsMaxBytes  = 64 << 20
-	guestToolsDirGuest  = "/run/gantry/bin"
-	guestToolsShareTag  = "gantry-tools"
-	guestToolsShareDir  = "guesttools"
-	guestToolsDeliverOp = "guest tools delivery"
-	guestToolsVerifyOp  = "guest tools verify"
-	guestToolsTimeout   = 120 * time.Second
+	guestToolsMaxBytes     = 64 << 20
+	guestToolsDirGuest     = "/run/gantry/bin"
+	guestToolsShareTag     = "gantry-tools"
+	guestToolsShareDir     = "guesttools" // legacy in-sandbox staging directory; delete cleanup only
+	guestToolsDeliverOp    = "guest tools delivery"
+	guestToolsInstallOp    = "guest tools install"
+	guestToolsVerifyOp     = "guest tools verify"
+	guestToolsShareTimeout = 30 * time.Second
+	guestToolsTimeout      = 120 * time.Second
 )
 
 // hasBoundSecrets reports whether any persisted secret spec carries a
@@ -56,82 +61,138 @@ func hasBoundSecrets(names []string) bool {
 	return false
 }
 
-// deliverGuestTools stages and installs gantry-guest when the sandbox
-// needs it: bound secrets (credhelper mode), OAuth custody (oauth login
-// mode), or the MCP gateway (mcp-proxy / mcp-serve modes). Ordinary helper
-// delivery runs concurrently with readiness; MCP startup waits for it because
-// advertising a gateway without its guest proxy would be a false ready state.
+// deliverGuestTools stages and installs gantry-guest when the sandbox needs
+// it: bound secrets, OAuth custody, MCP, or SSH. MCP blocks readiness because
+// its advertised endpoint requires the verified helper; the other consumers
+// use asynchronous delivery, and early SSH sessions wait for completion.
 // broker.guestToolsReady flips only after content verification.
-func (d *daemonRuntime) deliverGuestTools() {
-	need := hasBoundSecrets(d.store.Snapshot().SecretNames) || d.cfg.OAuthCustodyEnabled() || d.cfg.MCP
-	if d.broker == nil || !need {
+func (d *daemonRuntime) deliverGuestTools() bool {
+	cfg := d.store.Snapshot()
+	need := hasBoundSecrets(cfg.SecretNames) || cfg.OAuthCustodyEnabled() || cfg.MCP || cfg.SSH
+	if !need {
+		return true
+	}
+	return d.ensureGuestTools(cfg)
+}
+
+// deliverGuestToolsAndSignal releases requests waiting for the one boot-time
+// delivery attempt whether it succeeds or fails. Success is published before
+// the signal by ensureGuestTools, so waiters cannot observe a false negative.
+func (d *daemonRuntime) deliverGuestToolsAndSignal() (ready bool) {
+	defer d.broker.finishGuestToolsDelivery()
+	return d.deliverGuestTools()
+}
+
+func (br *broker) finishGuestToolsDelivery() {
+	if br == nil {
 		return
+	}
+	br.guestToolsDoneOnce.Do(func() {
+		if br.guestToolsDone != nil {
+			close(br.guestToolsDone)
+		}
+	})
+}
+
+func (br *broker) waitForGuestTools(ctx context.Context) bool {
+	if br == nil {
+		return false
+	}
+	if br.guestToolsReady.Load() {
+		return true
+	}
+	if br.guestToolsDone == nil {
+		return false
+	}
+	select {
+	case <-br.guestToolsDone:
+		return br.guestToolsReady.Load()
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (d *daemonRuntime) ensureGuestTools(cfg config.RunConfig) bool {
+	if d.broker == nil {
+		return false
+	}
+	if d.broker.guestToolsReady.Load() {
+		return true
+	}
+	d.guestToolsMu.Lock()
+	defer d.guestToolsMu.Unlock()
+	if d.broker.guestToolsReady.Load() {
+		return true
 	}
 	progress := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "daemon: "+format+"\n", a...) }
 	// The CLI persists the path it resolved (dev tree, release cache, or
-	// GANTRY_ARTIFACTS); fall back to the default for configs written
-	// before this field existed.
-	assetPath := d.cfg.GuestTools
+	// GANTRY_ARTIFACTS). Imported and legacy profiles can lack that field;
+	// resolve their fallback relative to the executable rather than the
+	// daemon's deliberately read-only cwd (/).
+	assetPath := cfg.GuestTools
 	if assetPath == "" {
-		assetPath = guestasset.DefaultGuestTools()
+		executable, _ := os.Executable()
+		assetPath = guestasset.DaemonGuestTools(executable)
 	}
 	path, err := guestasset.EnsureGuestTools(assetPath, progress)
 	if err != nil {
 		d.guestToolsFailed("guest tools unavailable: %v", err)
-		return
+		return false
 	}
 	data, err := readCapped(path, guestToolsMaxBytes)
 	if err != nil {
 		d.guestToolsFailed("read guest tools: %v", err)
-		return
+		return false
 	}
 	sum := sha256.Sum256(data)
 
 	if err := d.deliverGuestToolsViaShare(data, sum); err == nil {
 		d.broker.guestToolsReady.Store(true)
-		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via share (credential helper for bound secrets)")
-		return
+		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via share")
+		return true
 	} else {
 		fmt.Fprintf(os.Stderr, "daemon: share delivery unavailable (%v); trying exec channel\n", err)
 	}
 	if err := d.deliverGuestToolsViaExec(data, sum); err == nil {
 		d.broker.guestToolsReady.Store(true)
-		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via exec channel (credential helper for bound secrets)")
-		return
+		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via exec channel")
+		return true
 	} else {
 		d.guestToolsFailed("exec-channel delivery: %v", err)
+		return false
 	}
 }
 
 func (d *daemonRuntime) guestToolsFailed(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "daemon: WARNING: "+format+"\n", a...)
-	fmt.Fprintln(os.Stderr, "daemon: bound secrets will NOT be usable in the guest this boot")
+	fmt.Fprintln(os.Stderr, "daemon: guest-tool-backed features will NOT be usable in the guest this boot")
 	// Remove whatever landed: a stale or corrupt helper must not be
 	// executable (earlier boots may have left one in a persistent layer).
-	_, _, _ = d.broker.internalExec(strings.NewReader(""), []string{"sh", "-c",
+	_, _, _ = d.broker.internalExecAsRoot(strings.NewReader(""), []string{"sh", "-c",
 		fmt.Sprintf("rm -rf %[1]s", guestToolsDirGuest)}, 15*time.Second, 4<<10, guestToolsVerifyOp)
 }
 
-// deliverGuestToolsViaShare hot-adds the staged binary as a read-only
-// share and copies it into place inside the guest. The share is removed
-// afterwards; the copy lives in guest tmpfs for the boot's lifetime.
+// deliverGuestToolsViaShare hot-adds the staged binary directly at the
+// trusted guest-tools path. Verification executes the static helper itself,
+// so distroless images need no shell, cp, wc, or sha256sum.
 func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte) error {
 	if d.shares == nil {
 		return fmt.Errorf("share manager unavailable")
 	}
-	stageDir := filepath.Join(d.dir, guestToolsShareDir)
-	if err := os.MkdirAll(stageDir, 0o700); err != nil {
+	// Sandbox state commonly sits beneath a broad persisted workspace share
+	// (for example, the user's whole home directory). Staging there would make
+	// this export overlap that share and correctly fail closed. A private OS
+	// temporary directory is outside normal workspace roots and is removed only
+	// after the share backend closes.
+	stageDir, err := os.MkdirTemp("", "gantry-guest-tools-*")
+	if err != nil {
 		return err
 	}
+	d.guestToolsStageDir = stageDir
 	stagePath := filepath.Join(stageDir, "gantry-guest")
-	if err := os.WriteFile(stagePath+".tmp", data, 0o755); err != nil {
+	if err := os.WriteFile(stagePath, data, 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(stagePath+".tmp", stagePath); err != nil {
-		return err
-	}
-	defer func() { _ = os.RemoveAll(stageDir) }()
-
 	entry, err := d.shares.Add(guestToolsShareTag+"="+stageDir+",ro", false, true)
 	if err != nil {
 		return fmt.Errorf("share hot-add: %w", err)
@@ -146,15 +207,34 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte) err
 		}
 	}()
 
-	// Read exactly the verified asset size rather than asking cp to read until
-	// EOF and copy metadata. Some ARM64 virtio-fs guests can deliver all bytes
-	// but stall cp's final source operation until the exec timeout. head -c is
-	// available in both the supported BusyBox and GNU guest images.
-	script := fmt.Sprintf("mkdir -p %[1]s && head -c %[3]d %[2]s/gantry-guest > %[1]s/gantry-guest.tmp && chmod 755 %[1]s/gantry-guest.tmp && mv %[1]s/gantry-guest.tmp %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper",
-		guestToolsDirGuest, ctrPath, len(data))
-	if _, _, err := d.broker.internalExec(strings.NewReader(""), []string{"sh", "-c", script},
-		guestToolsTimeout, 4<<10, guestToolsDeliverOp); err != nil {
-		return err
+	status := -1
+	directErr := fmt.Errorf("host share does not expose executable mode")
+	// Windows host shares always synthesize regular files as 0644. Attempting
+	// exec there is guaranteed to fail and can wedge old crun versions while
+	// asynchronous delivery races the first user session.
+	if runtime.GOOS != "windows" {
+		_, status, directErr = d.broker.internalExecAsRoot(strings.NewReader(""),
+			[]string{ctrPath + "/gantry-guest", "install-self"},
+			15*time.Second, 4<<10, guestToolsInstallOp)
+		if directErr == nil && status == 0 {
+			return d.verifyGuestTools(sum, int64(len(data)))
+		}
+	}
+
+	// Windows host shares deliberately synthesize regular files as 0644 because
+	// NTFS has no POSIX execute bit. Images with a shell can still copy the
+	// staged, host-verified payload to guest-owned /run before executing it. Keep
+	// the direct static-helper path first so distroless images remain supported
+	// on hosts whose share backend preserves executable mode.
+	copyScript := fmt.Sprintf("mkdir -p %[1]s && rm -f %[1]s/gantry-guest.share %[1]s/gantry-guest %[1]s/credhelper && cp \"$1\" %[1]s/gantry-guest.share && chmod 755 %[1]s/gantry-guest.share && mv %[1]s/gantry-guest.share %[1]s/gantry-guest && ln %[1]s/gantry-guest %[1]s/credhelper", guestToolsDirGuest)
+	copyOut, copyStatus, copyErr := d.broker.internalExecAsRoot(strings.NewReader(""),
+		[]string{"sh", "-c", copyScript, "gantry-guest-share-copy", ctrPath + "/gantry-guest"},
+		guestToolsShareTimeout, 4<<10, guestToolsInstallOp)
+	if copyErr != nil {
+		return fmt.Errorf("execute shared helper: %v; copy shared helper: %w (output %q)", directErr, copyErr, copyOut)
+	}
+	if copyStatus != 0 {
+		return fmt.Errorf("execute shared helper status %d; copy shared helper exited with status %d (output %q)", status, copyStatus, copyOut)
 	}
 	return d.verifyGuestTools(sum, int64(len(data)))
 }
@@ -170,18 +250,18 @@ func (d *daemonRuntime) deliverGuestToolsViaExec(data []byte, sum [32]byte) erro
 	}
 	_ = enc.Close()
 	script := fmt.Sprintf("mkdir -p %[1]s && base64 -d > %[1]s/gantry-guest.tmp && chmod 755 %[1]s/gantry-guest.tmp && mv %[1]s/gantry-guest.tmp %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper", guestToolsDirGuest)
-	if _, _, err := d.broker.internalExec(bytes.NewReader(encoded.Bytes()), []string{"sh", "-c", script},
+	if _, _, err := d.broker.internalExecAsRoot(bytes.NewReader(encoded.Bytes()), []string{"sh", "-c", script},
 		guestToolsTimeout, 4<<10, guestToolsDeliverOp); err != nil {
 		return err
 	}
 	return d.verifyGuestTools(sum, int64(len(data)))
 }
 
-// verifyGuestTools compares the staged guest binary's sha256 and size
+// verifyGuestTools compares the running guest binary's sha256 and size
 // against the host asset. A mismatch is an error; callers fail closed.
 func (d *daemonRuntime) verifyGuestTools(sum [32]byte, size int64) error {
-	out, _, err := d.broker.internalExec(strings.NewReader(""), []string{"sh", "-c",
-		fmt.Sprintf("size=$(wc -c < %[1]s/gantry-guest) && sum=$(sha256sum %[1]s/gantry-guest) && sum=${sum%%%% *} && printf '\\nGANTRY_GUEST_TOOLS_VERIFY %%s %%s\\n' \"$size\" \"$sum\"", guestToolsDirGuest)},
+	out, _, err := d.broker.internalExecAsRoot(strings.NewReader(""),
+		[]string{guestToolsDirGuest + "/gantry-guest", "verify-self"},
 		15*time.Second, 4<<10, guestToolsVerifyOp)
 	gotSize, gotSum := parseGuestToolsVerification(out)
 	wantSum := hex.EncodeToString(sum[:])
@@ -192,20 +272,21 @@ func (d *daemonRuntime) verifyGuestTools(sum [32]byte, size int64) error {
 	return nil
 }
 
-// parseGuestToolsVerification extracts only the tagged command-result line
-// from an internal exec transcript. Session lifecycle diagnostics can be
-// emitted around it on slower guests; treating the first two whitespace fields
-// as the result incorrectly rejects an intact helper and falls back to the less
-// reliable bulk exec channel.
+// parseGuestToolsVerification finds either the tagged shell-probe result used
+// by older helpers or verify-self's two-field output inside an exec transcript.
+// Session lifecycle diagnostics may surround the command result.
 func parseGuestToolsVerification(out []byte) (size, sum string) {
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 || fields[0] != "GANTRY_GUEST_TOOLS_VERIFY" || len(fields[2]) != sha256.Size*2 {
+		if len(fields) == 3 && fields[0] == "GANTRY_GUEST_TOOLS_VERIFY" {
+			fields = fields[1:]
+		}
+		if len(fields) != 2 || len(fields[1]) != sha256.Size*2 {
 			continue
 		}
-		if decoded, err := hex.DecodeString(fields[2]); err == nil && len(decoded) == sha256.Size {
-			size = fields[1]
-			sum = strings.ToLower(fields[2])
+		if decoded, err := hex.DecodeString(fields[1]); err == nil && len(decoded) == sha256.Size {
+			size = fields[0]
+			sum = strings.ToLower(fields[1])
 		}
 	}
 	return size, sum

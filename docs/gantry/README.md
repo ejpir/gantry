@@ -46,6 +46,8 @@ filesystem by digest.
   project sandbox.
 - [Editor integration](../editor-integration.md) — run an agent from an editor
   against a sandbox, and what that still needs.
+- [SSH access](ssh-access.md) — stock SSH, SFTP, loopback forwarding, managed
+  `*.gantry` hostnames, remote editors, and nested Dev Containers.
 - [Manager API](manager-api.md) — automate local sandbox lifecycle over an
   authenticated Unix socket.
 - [Architecture](architecture.md) — supervisor, workers, microVM, storage,

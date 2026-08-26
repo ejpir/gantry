@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,11 +34,23 @@ const (
 
 // SessionOptions configures one container session over an established ttrpc
 // connection. Callers retain ownership of the connection and IO endpoints.
+// WindowSize is a terminal size update supplied by protocol frontends such
+// as the SSH gateway.
+type WindowSize struct {
+	Cols uint32
+	Rows uint32
+}
+
 type SessionOptions struct {
 	StreamSock string
 	// StreamDial replaces the Unix forwarding path in split-worker mode.
 	StreamDial func() (net.Conn, error)
-	Shares     []ShareEntry
+	// SetupLocker serializes stream attachment and task Create/Start. Running
+	// sessions remain concurrent after setup unless HoldSetupLocker is set for
+	// a trusted bulk-transfer session that must exclude new stream setup.
+	SetupLocker     sync.Locker
+	HoldSetupLocker bool
+	Shares          []ShareEntry
 	// ShareTransport is the persistent sandbox's multiplexed hub. Nil selects
 	// the direct-run per-device protocol.
 	ShareTransport *shares.Transport
@@ -48,13 +61,22 @@ type SessionOptions struct {
 	ID         string
 	Cols, Rows uint32
 	Terminal   bool
-	KillCh     <-chan struct{}
-	Quiet      bool
+	// Resize carries terminal-size changes after process start. Nil means the
+	// initial Cols/Rows are the only size request.
+	Resize <-chan WindowSize
+	KillCh <-chan struct{}
+	// WaitContext bounds the task Wait RPC for internal one-shot sessions. Nil
+	// preserves an interactive user's unbounded session lifetime.
+	WaitContext context.Context
+	Quiet       bool
 	// ExitStatus receives a successfully waited process's numeric status.
 	ExitStatus *int
 	// SandboxSession shares the persistent sandbox rootfs while giving this
 	// command an isolated task and PID namespace.
 	SandboxSession bool
+	// NestedContainers enables the explicit OCI profile needed by an inner
+	// Podman runtime. It is never inferred from image contents.
+	NestedContainers bool
 	// ImgCfg provides the image environment, user, command, and default working dir.
 	ImgCfg *image.Config
 	// Cwd overrides the image working directory for this process. It is a guest
@@ -282,17 +304,13 @@ func isolatedSessionConfig(encoded string, options SessionOptions) (string, erro
 		processEnvironment(options.ImgCfg, options.Secrets, options.Environment),
 		options.PathPrepend,
 	)
-	// The recursively bind-mounted sandbox rootfs already includes the base
-	// container's /tmp mount. Mounting a new tmpfs here would give every exec
-	// a private, empty /tmp and break persistent-sandbox semantics across
-	// sessions. Namespace-specific mounts such as /proc and /dev remain fresh.
-	mounts := config.Mounts[:0]
-	for _, mount := range config.Mounts {
-		if mount.Destination != "/tmp" {
-			mounts = append(mounts, mount)
-		}
-	}
-	config.Mounts = mounts
+	// Keep every OCI mount, including /tmp. The isolated task bind-mounts the
+	// base task's rootfs path from the guest mount namespace; child mounts made
+	// privately inside the base task's mount namespace are not visible there.
+	// Omitting /tmp therefore exposed stale image/overlay metadata instead of
+	// sharing the base tmpfs. A fresh mode=1777 tmpfs per isolated session is
+	// safer than a persistent /tmp and keeps package-manager privilege drops
+	// working.
 	result, err := json.Marshal(config)
 	if err != nil {
 		return "", fmt.Errorf("encode isolated session config: %w", err)
@@ -314,6 +332,19 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
+
+	setupLocked := false
+	releaseSessionSetup := func() {
+		if setupLocked {
+			setupLocked = false
+			options.SetupLocker.Unlock()
+		}
+	}
+	if options.SetupLocker != nil {
+		options.SetupLocker.Lock()
+		setupLocked = true
+		defer releaseSessionSetup()
+	}
 
 	taskClient := v3.NewTTRPCTaskClient(client)
 	rootfsMounts := options.RootfsMountsFor()
@@ -338,6 +369,12 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	config, err := configJSONWithTransportCwdEnv(options.Shares, options.ShareTransport, options.RW, options.Args, options.ImgCfg, options.Terminal, options.Cwd, options.Environment)
 	if err != nil {
 		return err
+	}
+	if options.NestedContainers {
+		config, err = nestedContainersConfig(config)
+		if err != nil {
+			return err
+		}
 	}
 	if isolatedSession {
 		config, err = isolatedSessionConfig(config, options)
@@ -451,10 +488,35 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	// Preserve fast process output by attaching stdout before Start while
 	// deferring stdin data and EOF until the guest has committed stdio setup.
 	streams.relayInput(stdin)
+	if !options.HoldSetupLocker {
+		releaseSessionSetup()
+	}
 	logf("task started — shell is live (type 'exit' to leave)")
 	if options.Terminal && options.Cols != 0 && options.Rows != 0 {
 		_, _ = taskClient.ResizePty(ctx, &v3.ResizePtyRequest{ID: options.ID, Width: options.Cols, Height: options.Rows})
 	}
+	resizeDone := make(chan struct{})
+	if options.Terminal && options.Resize != nil {
+		go func() {
+			for {
+				select {
+				case size, ok := <-options.Resize:
+					if !ok {
+						return
+					}
+					if size.Cols == 0 || size.Rows == 0 {
+						continue
+					}
+					resizeCtx, resizeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					_, _ = taskClient.ResizePty(resizeCtx, &v3.ResizePtyRequest{ID: options.ID, Width: size.Cols, Height: size.Rows})
+					resizeCancel()
+				case <-resizeDone:
+					return
+				}
+			}
+		}()
+	}
+	defer close(resizeDone)
 
 	stopKill := watchKill(options.KillCh, func() {
 		killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -463,11 +525,19 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	})
 	defer stopKill()
 
-	response, waitErr := taskClient.Wait(context.Background(), &v3.WaitRequest{ID: options.ID})
+	waitCtx := options.WaitContext
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	response, waitErr := taskClient.Wait(waitCtx, &v3.WaitRequest{ID: options.ID})
 	if waitErr != nil {
-		_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
+		if !options.Quiet {
+			_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
+		}
 	} else {
-		_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", response.ExitStatus)
+		if !options.Quiet {
+			_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", response.ExitStatus)
+		}
 		if options.ExitStatus != nil {
 			*options.ExitStatus = int(response.ExitStatus)
 		}
@@ -476,7 +546,9 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cleanupCancel()
 	cleanupErr := cleanupContainer(cleanupCtx, taskClient, mountClient, options, bundlePath, setup.owned, func(format string, args ...any) {
-		_, _ = fmt.Fprintf(stdout, format, args...)
+		if !options.Quiet {
+			_, _ = fmt.Fprintf(stdout, format, args...)
+		}
 	})
 	if cleanupErr == nil {
 		bundleCleanupSafe = removeSessionBundle
@@ -510,6 +582,12 @@ func sandboxContainerConfig(options SessionOptions) (string, error) {
 	config.Process.User = specs.User{UID: 65534, GID: 65534}
 	config.Process.NoNewPrivileges = true
 	config.Process.Capabilities = &specs.LinuxCapabilities{}
+	if options.NestedContainers {
+		applyNestedContainersRuntimeConfig(&config)
+		// The anchor remains deliberately unprivileged. Expanded capabilities
+		// belong only to root SSH sessions which launch the nested runtime.
+		config.Process.Capabilities = &specs.LinuxCapabilities{}
+	}
 	config.Mounts = append(config.Mounts, specs.Mount{
 		Destination: sandboxAnchorPath,
 		Type:        "bind",
@@ -523,7 +601,17 @@ func sandboxContainerConfig(options SessionOptions) (string, error) {
 	return string(result), nil
 }
 
+var sandboxContainerSetupMu sync.Mutex
+
 func ensureSandboxContainer(client *ttrpc.Client, taskClient v3.TTRPCTaskService, ctx context.Context, options SessionOptions, logf func(string, ...any)) error {
+	// Guest-tool delivery starts asynchronously at readiness and can become the
+	// first session at exactly the same time as an immediate user exec/doctor.
+	// Bundle creation, rootfs mounting, and base-task creation are one ownership
+	// transaction; lock only that short ensure phase. Once the anchor is running,
+	// isolated user tasks and all stream traffic remain fully concurrent.
+	sandboxContainerSetupMu.Lock()
+	defer sandboxContainerSetupMu.Unlock()
+
 	state, err := taskClient.State(ctx, &v3.StateRequest{ID: options.ID})
 	if err == nil && state.Status == tasktypes.Status_RUNNING {
 		return nil

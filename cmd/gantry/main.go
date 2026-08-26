@@ -37,10 +37,12 @@ usage:
              -vsockfwd /tmp/gantry-vsock               #   real nerdbox guest
   gantry exec [flags] [-- CMD]      # one-shot: boot VM + shell in one command
   gantry start <name> [flags]       # create a long-lived sandbox VM
+  gantry configure <name> [flags]   # update SSH, Dev Containers, and resources
   gantry exec <name> [-- CMD]       # attach a shell to a running sandbox
   gantry ls                         # list sandboxes
   gantry audit <name>               # security-event trail (credentials, secrets, custody)
   gantry mcp <name> [tools]         # MCP gateway: configured servers; live tool list
+  gantry ssh NAME [-- CMD]          # SSH through the sandbox-local socket
   gantry tui                        # interactive local sandbox dashboard
   gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
@@ -204,6 +206,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 	switch command {
 	case "start":
 		return sandbox.CmdStart(argv), true
+	case "configure":
+		return controlcmd.CmdConfigure(argv), true
 	case "pi":
 		return sandbox.CmdPi(argv), true
 	case "pi-serve":
@@ -214,6 +218,12 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return controlcmd.CmdShare(argv), true
 	case "mcp":
 		return sandbox.CmdMCP(argv), true
+	case "ssh":
+		return sandbox.CmdSSH(argv), true
+	case "ssh-proxy":
+		return sandbox.CmdSSHProxy(argv), true
+	case "ssh-known-hosts":
+		return sandbox.CmdSSHKnownHosts(argv), true
 	case "ports":
 		return controlcmd.CmdPorts(argv), true
 	case "net-policy":

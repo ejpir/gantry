@@ -96,8 +96,14 @@ type RunConfig struct {
 	// secret names). Parsed at resolve time into immutable worker metadata
 	// plus supervisor-owned capability mappings.
 	MCPRemotes []string `json:"mcp_remotes,omitempty"`
-	MemMB      uint     `json:"memMB"`
-	VCPUs      int      `json:"vcpus,omitempty"`
+	// SSH enables the per-sandbox local SSH protocol endpoint. It is opt-in;
+	// no ssh.sock exists when false.
+	SSH bool `json:"ssh,omitempty"`
+	// DevContainers enables the explicit nested-container OCI profile. It
+	// exposes no host container engine; inner runtimes remain inside this VM.
+	DevContainers bool `json:"devcontainers,omitempty"`
+	MemMB         uint `json:"memMB"`
+	VCPUs         int  `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1). Source-backed
@@ -141,6 +147,7 @@ type RunFlags struct {
 	MCP                                     *bool
 	MCPFSRoot, MCPFSUser                    *string
 	MCPRemotes                              *gutil.StrList
+	SSH, DevContainers                      *bool
 	ProcessIsolation                        *string
 	MemMB                                   *uint
 	VCPUs                                   *int
@@ -172,6 +179,8 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		MCPFSRoot:        fs.String("mcp-fs-root", "/", "jail directory for the gateway's built-in filesystem server"),
 		MCPFSUser:        fs.String("mcp-fs-user", "nobody", "unprivileged guest user or UID:GID the gateway's local servers run as"),
 		MCPRemotes:       &gutil.StrList{},
+		SSH:              fs.Bool("ssh", false, "enable SSH protocol access on the sandbox-local ssh.sock (no TCP listener)"),
+		DevContainers:    fs.Bool("devcontainers", false, "enable nested Podman/Dev Containers inside this VM (requires -ssh and crun)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
@@ -206,6 +215,17 @@ func (c RunConfig) OAuthBridgeEnabled() bool {
 // OAuthCustodyEnabled resolves the default-off custody setting.
 func (c RunConfig) OAuthCustodyEnabled() bool {
 	return c.OAuthCustody != nil && *c.OAuthCustody
+}
+
+// NormalizeRuntime resolves legacy configurations that predate the persisted
+// runtime field. crun was the only/default runtime for those configurations;
+// runsc has always been recorded explicitly because it selects different boot
+// assets.
+func NormalizeRuntime(runtime string) string {
+	if runtime == "" {
+		return "crun"
+	}
+	return runtime
 }
 
 // NormalizeProcessIsolation resolves an unset persisted value to "auto": try
@@ -356,6 +376,13 @@ const (
 	DefaultRWLayerSizeMiB = 512
 	MinRWLayerSizeMiB     = 512
 	MaxRWLayerSizeMiB     = 64 << 10
+
+	// Dev Containers need room for an editor server, image layers, and builds.
+	// These replace ordinary defaults only when the corresponding start flag
+	// was not explicitly supplied.
+	DefaultDevContainersMemoryMiB   = 4 << 10
+	DefaultDevContainersVCPUs       = 4
+	DefaultDevContainersDiskSizeMiB = 32 << 10
 )
 
 func ValidateRWLayerSize(sizeMiB uint) error {

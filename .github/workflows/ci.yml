@@ -67,7 +67,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/bundle
-          key: guest-assets-v0.2.3-${{ matrix.name }}-${{ hashFiles('scripts/mkrootfs.sh', 'patches/nerdbox-v0.2.3-*.patch', 'scripts/mkimage.sh', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
+          key: guest-assets-v0.2.3-${{ matrix.name }}-${{ hashFiles('scripts/mkrootfs.sh', 'patches/nerdbox-v0.2.3-*.patch', 'scripts/mkimage.sh', 'scripts/mkideimage.sh', 'scripts/ide-image.Dockerfile', 'scripts/gantry-podman', 'scripts/mkrootfs-gvisor.sh', 'guest/crunshim/**', '.github/workflows/ci.yml') }}
+      - uses: docker/setup-qemu-action@v3
+        if: steps.guest-cache.outputs.cache-hit != 'true'
       - uses: docker/setup-buildx-action@v3
         if: steps.guest-cache.outputs.cache-hit != 'true'
       - name: install EROFS tools
@@ -88,6 +90,9 @@ jobs:
       - name: build test image
         if: steps.guest-cache.outputs.cache-hit != 'true'
         run: ./scripts/mkimage.sh alpine:3.22 "$RUNNER_TEMP/bundle/alpine.erofs" "linux/${{ matrix.docker_arch }}"
+      - name: build curated SSH and Dev Containers image
+        if: steps.guest-cache.outputs.cache-hit != 'true'
+        run: ./scripts/mkideimage.sh "$RUNNER_TEMP/bundle/ide.erofs" "linux/${{ matrix.docker_arch }}"
       - uses: actions/upload-artifact@v4
         with:
           name: guest-assets-${{ matrix.name }}
@@ -494,6 +499,10 @@ jobs:
             "${{ runner.temp }}/release/gantry-default-image-arm64.erofs"
           cp "${{ runner.temp }}/guest/guest-assets-amd64/alpine.erofs" \
             "${{ runner.temp }}/release/gantry-default-image-x86_64.erofs"
+          cp "${{ runner.temp }}/guest/guest-assets-arm64/ide.erofs" \
+            "${{ runner.temp }}/release/gantry-ide-image-arm64.erofs"
+          cp "${{ runner.temp }}/guest/guest-assets-amd64/ide.erofs" \
+            "${{ runner.temp }}/release/gantry-ide-image-x86_64.erofs"
       - name: checksum sidecars
         run: |
           cd "${{ runner.temp }}/release"

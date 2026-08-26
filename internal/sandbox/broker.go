@@ -42,12 +42,13 @@ type broker struct {
 	streamSock string
 	// streamDial replaces the streamSock unix dial in the split-VMM
 	// topology (streams cross the worker bridge).
-	streamDial func() (net.Conn, error)
-	store      *config.ConfigStore
-	shares     *control.ShareManager
-	ports      *control.PortManager
-	netPolicy  *control.NetworkPolicyManager
-	capture    packetCaptureBackend
+	streamDial     func() (net.Conn, error)
+	sessionSetupMu sync.Mutex
+	store          *config.ConfigStore
+	shares         *control.ShareManager
+	ports          *control.PortManager
+	netPolicy      *control.NetworkPolicyManager
+	capture        packetCaptureBackend
 	// secretStore resolves values at use time (source TTL, fail-closed);
 	// memory only, VM lifetime — never serialized.
 	secretStore *secret.Store
@@ -60,7 +61,15 @@ type broker struct {
 	cred *credhelper.Broker
 	// guestToolsReady records that gantry-guest was staged into the guest
 	// this boot; secretEnv wires git's credential.helper only when set.
-	guestToolsReady atomic.Bool
+	// guestToolsDone lets an SSH request arriving immediately after VM
+	// readiness wait for asynchronous delivery instead of racing it.
+	guestToolsReady    atomic.Bool
+	guestToolsDone     chan struct{}
+	guestToolsDoneOnce sync.Once
+	// devContainers is live configuration: configure updates it without
+	// restarting the VM, and newly created user sessions read it atomically.
+	devContainers atomic.Bool
+	configure     func(controlproto.ConfigureRequest) (bool, error)
 	// audit is the bounded security-event trail served by audit.tail. auditMu
 	// serializes all sinks, including on-disk rotation and LogFunc callbacks.
 	audit   *auditRing
@@ -126,6 +135,9 @@ func (br *broker) handle(c net.Conn) {
 		_, _ = fmt.Fprintln(c, `{"error":"bad request"}`)
 		return
 	}
+	if req.Op == "sandbox.configure" {
+		_ = c.SetWriteDeadline(time.Now().Add(controlproto.ConfigureTimeout))
+	}
 	switch req.Op {
 	case "daemon.shutdown":
 		if br.shutdown == nil {
@@ -158,6 +170,8 @@ func (br *broker) handle(c net.Conn) {
 		br.portControl(c, req)
 	case "resources.set":
 		br.resourceControl(c, req)
+	case "sandbox.configure":
+		br.configureControl(c, req)
 	case "netpolicy.set", "netpolicy.get":
 		br.networkPolicyControl(c, req)
 	case "secret.set", "secret.remove":

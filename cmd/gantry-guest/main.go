@@ -49,6 +49,21 @@ func main() {
 		os.Exit(runMCPProxy())
 	case "mcp-serve":
 		os.Exit(runMCPServe(args))
+	case "user-exists":
+		os.Exit(runUserExists(args))
+	case "ssh-session":
+		os.Exit(runSSHSession(args))
+	case "sftp-serve":
+		if err := serveSFTP(); err != nil {
+			debugf("sftp: %v", err)
+			os.Exit(1)
+		}
+	case "tcp-relay":
+		os.Exit(runTCPRelay(args))
+	case "verify-self":
+		os.Exit(runVerifySelf(args))
+	case "install-self":
+		os.Exit(runInstallSelf(args))
 	case "version":
 		fmt.Println("gantry-guest", version)
 	default:
@@ -65,6 +80,12 @@ modes:
   oauth        custody-mode OAuth login: gantry-guest oauth login <provider>
   mcp-proxy    bridge agent stdio MCP to the host gateway (vsock 1029)
   mcp-serve    run a contained local MCP server: mcp-serve filesystem --root DIR --user U
+  user-exists  exit successfully only when NAME exists in guest /etc/passwd
+  ssh-session  verified-user SSH session launcher (daemon use only)
+  sftp-serve   SFTP server over stdin/stdout, under the current POSIX identity
+  tcp-relay    bridge stdin/stdout to a guest-loopback HOST PORT
+  verify-self  print executable size and sha256 (daemon integrity probe)
+  install-self install into the trusted runtime path (daemon use only)
   version      print the release version
 `)
 }

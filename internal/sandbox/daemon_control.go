@@ -47,22 +47,25 @@ func (d *daemonRuntime) startControl() error {
 		streamDial = func() (net.Conn, error) { return d.runner.DialStream(1026) }
 	}
 	d.broker = &broker{
-		cfg:         d.cfg,
-		dir:         d.dir,
-		rpc:         d.rpc,
-		streamSock:  filepath.Join(d.dir, "listen-1026.sock"),
-		streamDial:  streamDial,
-		secretStore: d.secretStore,
-		store:       d.store,
-		shares:      d.shares,
-		ports:       d.ports,
-		netPolicy:   control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
-		capture:     packetCaptureBackendFor(d.network, d.runner),
-		sessions:    map[string]chan struct{}{},
-		sessionCtl:  map[string]net.Conn{},
-		shutdown:    d.shutdown,
-		audit:       d.audit,
+		cfg:            d.cfg,
+		dir:            d.dir,
+		rpc:            d.rpc,
+		streamSock:     filepath.Join(d.dir, "listen-1026.sock"),
+		streamDial:     streamDial,
+		secretStore:    d.secretStore,
+		store:          d.store,
+		shares:         d.shares,
+		ports:          d.ports,
+		netPolicy:      control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
+		capture:        packetCaptureBackendFor(d.network, d.runner),
+		guestToolsDone: make(chan struct{}),
+		sessions:       map[string]chan struct{}{},
+		sessionCtl:     map[string]net.Conn{},
+		shutdown:       d.shutdown,
+		audit:          d.audit,
 	}
+	d.broker.devContainers.Store(d.cfg.DevContainers)
+	d.broker.configure = d.configureSandbox
 	d.secretStore.SetLogger(d.broker.auditf)
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
@@ -106,6 +109,12 @@ func (d *daemonRuntime) startControl() error {
 	if err := d.startMCPGateway(); err != nil {
 		_ = credLn.Close()
 		return err
+	}
+	if d.cfg.SSH {
+		if err := d.startSSHGateway(); err != nil {
+			_ = credLn.Close()
+			return err
+		}
 	}
 	go func() { _ = d.broker.cred.Serve(credLn) }()
 	go d.broker.serve(listener)

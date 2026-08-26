@@ -17,8 +17,14 @@ import (
 )
 
 func TestDashboardResourceLimitsUseHostVCPUCapability(t *testing.T) {
-	if got, want := (dashboardService{}).ResourceLimits().MaxVCPUs, vmm.MaxSupportedVCPUs(); got != want {
+	limits := (dashboardService{}).ResourceLimits()
+	if got, want := limits.MaxVCPUs, vmm.MaxSupportedVCPUs(); got != want {
 		t.Fatalf("dashboard max vCPUs = %d, want host capability %d", got, want)
+	}
+	if limits.DefaultDevContainersMemoryMiB != config.DefaultDevContainersMemoryMiB ||
+		limits.DefaultDevContainersDiskMiB != config.DefaultDevContainersDiskSizeMiB ||
+		limits.DefaultDevContainersVCPUs != min(config.DefaultDevContainersVCPUs, vmm.MaxSupportedVCPUs()) {
+		t.Fatalf("dashboard Dev Containers defaults = %+v", limits)
 	}
 }
 
@@ -39,6 +45,7 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	writeDashboardTestConfig(t, "alpha", config.RunConfig{
 		Image: "/cache/alpine.erofs", ImageRef: "alpine:latest", Runtime: "crun", Kernel: "/cache/gantry-kernel-arm64",
 		RW: true, RWLayer: rwLayer, RWLayerSizeMiB: 1024, Net: true, MemMB: 768, VCPUs: 2,
+		SSH: true, DevContainers: true,
 		Shares: []string{"code=/tmp"}, Ports: []string{"127.0.0.1:8080:80"}, SecretNames: []string{"TOKEN"},
 	})
 	traffic := netpol.TrafficSnapshot{
@@ -67,7 +74,7 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	if alpha.Image != "alpine:latest" || !alpha.RW || !alpha.Net || alpha.Secrets != "TOKEN" {
 		t.Fatalf("alpha metadata = %#v", alpha)
 	}
-	if alpha.Runtime != "crun" || alpha.MemMB != 768 || alpha.VCPUs != 2 || alpha.Shares != 1 {
+	if alpha.Runtime != "crun" || alpha.MemMB != 768 || alpha.VCPUs != 2 || alpha.Shares != 1 || !alpha.SSH || !alpha.DevContainers {
 		t.Fatalf("alpha runtime metadata = %#v", alpha)
 	}
 	if alpha.Kernel != "/cache/gantry-kernel-arm64" || alpha.RWLayer != rwLayer || alpha.DiskSizeMiB != 2048 || alpha.Ports != 1 {
@@ -112,6 +119,33 @@ func TestDashboardDiskSizeFallsBackToConfiguredCapacity(t *testing.T) {
 	cfg := config.RunConfig{RWLayer: filepath.Join(t.TempDir(), "missing.ext4"), RWLayerSizeMiB: 4096}
 	if got := dashboardDiskSizeMiB(cfg); got != 4096 {
 		t.Fatalf("disk size = %d MiB, want configured 4096 MiB", got)
+	}
+}
+
+func TestDashboardConfiguresStoppedSandboxFeatures(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	name := "dev"
+	if err := os.MkdirAll(layout.Dir(name), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Imported and legacy profiles omitted Runtime even though their standard
+	// guest rootfs uses crun. Enabling Dev Containers must honor that default.
+	writeDashboardTestConfig(t, name, config.RunConfig{
+		RW: true, RWLayer: filepath.Join(t.TempDir(), "dev.ext4"), MemMB: 512, VCPUs: 1,
+	})
+	request := dashboardapi.SandboxConfigRequest{
+		Name: name, SSH: true, DevContainers: true, MemMB: 4096,
+		VCPUs: min(4, config.MaxSandboxVCPUs()), ProcessIsolation: "auto",
+	}
+	if restart, err := (dashboardService{}).ConfigureSandbox(request); err != nil || restart {
+		t.Fatalf("ConfigureSandbox = restart %t, err %v", restart, err)
+	}
+	cfg, err := config.ReadSandboxConfig(layout.Dir(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || cfg.MemMB != request.MemMB || cfg.VCPUs != request.VCPUs {
+		t.Fatalf("configured sandbox = %+v", cfg)
 	}
 }
 

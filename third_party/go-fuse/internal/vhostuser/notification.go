@@ -15,12 +15,13 @@ type notificationQueue struct {
 	mu sync.Mutex
 	vq *Virtq
 
-	ready    func(func([]byte) syscall.Errno)
-	attached bool
-	closed   bool
-	slots    []*VirtqElem
-	pending  [][]byte
-	bytes    int
+	ready          func(func([]byte) syscall.Errno)
+	attached       bool
+	closed         bool
+	flushScheduled bool
+	slots          []*VirtqElem
+	pending        [][]byte
+	bytes          int
 }
 
 func newNotificationQueue(vq *Virtq, ready func(func([]byte) syscall.Errno)) *notificationQueue {
@@ -66,21 +67,45 @@ func (q *notificationQueue) enqueue(message []byte) syscall.Errno {
 		return syscall.EINVAL
 	}
 	copyOfMessage := append([]byte(nil), message...)
-	q.vq.completionMu.Lock()
-	defer q.vq.completionMu.Unlock()
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	if q.closed {
+		q.mu.Unlock()
 		return syscall.EIO
 	}
 	if len(q.pending) >= maxPendingNotifications ||
 		q.bytes+len(copyOfMessage) > maxPendingNotificationBytes {
+		q.mu.Unlock()
 		return syscall.EAGAIN
 	}
 	q.pending = append(q.pending, copyOfMessage)
 	q.bytes += len(copyOfMessage)
-	q.flushLocked()
+	startFlush := !q.flushScheduled
+	if startFlush {
+		q.flushScheduled = true
+	}
+	q.mu.Unlock()
+
+	// A FUSE handler can synchronously emit a notification (notably the node
+	// budget's PRUNE request). Request processing holds completionMu.RLock so
+	// that notifications become visible only after the operation they
+	// invalidate. Acquiring completionMu.Lock here would make that handler wait
+	// for its own read lock forever. Defer delivery to a goroutine: it waits for
+	// the request completion and preserves the same ordering without recursion.
+	if startFlush {
+		go q.flush()
+	}
 	return 0
+}
+
+func (q *notificationQueue) flush() {
+	q.vq.completionMu.Lock()
+	defer q.vq.completionMu.Unlock()
+	q.mu.Lock()
+	if !q.closed {
+		q.flushLocked()
+	}
+	q.flushScheduled = false
+	q.mu.Unlock()
 }
 
 func (q *notificationQueue) flushLocked() {

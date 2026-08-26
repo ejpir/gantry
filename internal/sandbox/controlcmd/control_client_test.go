@@ -116,6 +116,59 @@ func TestSetResourcesLivePassesIsolationThroughUnchanged(t *testing.T) {
 	}
 }
 
+func TestConfigureLiveSendsOnlyRequestedSettings(t *testing.T) {
+	useShortGantryHome(t)
+	captured := fakeLiveSandbox(t, "configure-live", `{"ok":true,"restart_required":true}`)
+	ssh, devContainers := true, true
+	memMB := uint(4096)
+	restart, err := Configure("configure-live", controlproto.ConfigureRequest{
+		SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restart {
+		t.Fatal("restart requirement was not returned")
+	}
+	req := <-captured
+	if req.Op != "sandbox.configure" || req.Configure == nil || req.Configure.SSH == nil || !*req.Configure.SSH ||
+		req.Configure.DevContainers == nil || !*req.Configure.DevContainers || req.Configure.MemMB == nil || *req.Configure.MemMB != 4096 {
+		t.Fatalf("configure request = %#v", req)
+	}
+	if req.Configure.VCPUs != nil || req.Configure.ProcessIsolation != nil {
+		t.Fatalf("unset configure fields were sent: %+v", req.Configure)
+	}
+}
+
+func TestConfigureStoppedPersistsFeaturesAndResources(t *testing.T) {
+	useShortGantryHome(t)
+	dir := writeSandboxConfig(t, "configure-stopped")
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mutate(func(cfg *config.RunConfig) error {
+		cfg.RW, cfg.RWLayer, cfg.Runtime = true, filepath.Join(dir, "rw.ext4"), "crun"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ssh, devContainers := true, true
+	memMB, vcpus := uint(4096), min(4, config.MaxSandboxVCPUs())
+	if restart, err := Configure("configure-stopped", controlproto.ConfigureRequest{
+		SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB, VCPUs: &vcpus,
+	}); err != nil || restart {
+		t.Fatalf("Configure stopped = restart %t, err %v", restart, err)
+	}
+	cfg, err := config.ReadSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != memMB || cfg.VCPUs != vcpus {
+		t.Fatalf("persisted configure = %+v", cfg)
+	}
+}
+
 func TestConfigureMCPRemoteExplainsLegacyDaemon(t *testing.T) {
 	useShortGantryHome(t)
 	captured := fakeLiveSandbox(t, "legacy-mcp", `{"error":"unknown op"}`)

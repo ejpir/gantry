@@ -116,6 +116,7 @@ func (br *broker) spawnGuestStdio(ctx context.Context, args []string) (io.WriteC
 		_ = client.Session(br.rpc, client.SessionOptions{
 			StreamSock:     br.streamSock,
 			StreamDial:     br.streamDial,
+			SetupLocker:    &br.sessionSetupMu,
 			Shares:         manifest.Shares,
 			ShareTransport: manifest.Transport,
 			RW:             br.cfg.RW,

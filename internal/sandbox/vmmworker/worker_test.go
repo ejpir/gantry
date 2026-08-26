@@ -103,6 +103,12 @@ func (f *fakeVMM) lastInjected() net.Conn {
 	return f.injected[len(f.injected)-1]
 }
 
+func (f *fakeVMM) injectedSnapshot() []net.Conn {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]net.Conn(nil), f.injected...)
+}
+
 // newFakeRuntime routes machine boot to a fake runner and returns it after
 // Serve starts through holder.
 func newFakeRuntime() (vmmworkerapi.Runtime, **fakeVMM) {
@@ -698,6 +704,65 @@ func TestVMMWorkerVsockConnect(t *testing.T) {
 	}
 	if string(buf[:n]) != "session-bytes" {
 		t.Fatalf("injected conn read %q", buf[:n])
+	}
+}
+
+func TestVMMWorkerConcurrentVsockConnectKeepsDescriptorsPaired(t *testing.T) {
+	h := startVMMWorkerHarness(t, vmmworkerapi.Config{}, testAssets(t))
+
+	const sessions = 24
+	start := make(chan struct{})
+	errors := make(chan error, sessions)
+	senders := make(chan net.Conn, sessions)
+	for index := range sessions {
+		go func() {
+			<-start
+			conn, err := h.w.DialStream(1026)
+			if err != nil {
+				errors <- err
+				return
+			}
+			payload := fmt.Sprintf("session-%02d", index)
+			written, err := io.WriteString(conn, payload)
+			if err == nil && written != len(payload) {
+				err = io.ErrShortWrite
+			}
+			senders <- conn
+			errors <- err
+		}()
+	}
+	close(start)
+	var senderConns []net.Conn
+	for range sessions {
+		if err := <-errors; err != nil {
+			t.Fatalf("concurrent DialStream: %v", err)
+		}
+		senderConns = append(senderConns, <-senders)
+	}
+	defer func() {
+		for _, conn := range senderConns {
+			_ = conn.Close()
+		}
+	}()
+
+	injected := (*h.fake).injectedSnapshot()
+	if len(injected) != sessions {
+		t.Fatalf("injected streams = %d, want %d", len(injected), sessions)
+	}
+	seen := make(map[string]bool, sessions)
+	for _, conn := range injected {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buf := make([]byte, len("session-00"))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatalf("read injected stream: %v", err)
+		}
+		seen[string(buf)] = true
+	}
+	for index := range sessions {
+		key := fmt.Sprintf("session-%02d", index)
+		if !seen[key] {
+			t.Errorf("missing payload %q from concurrently paired streams", key)
+		}
 	}
 }
 

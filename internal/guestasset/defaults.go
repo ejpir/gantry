@@ -67,6 +67,10 @@ func releaseAssetPath(name string) string {
 	if !releaseVersionRE.MatchString(Version) {
 		return Path(name)
 	}
+	return cachedAssetPath(name)
+}
+
+func cachedAssetPath(name string) string {
 	if cache, err := userCacheDir(); err == nil && cache != "" {
 		return filepath.Join(cache, "gantry", "assets", releaseAssetCacheKey(), name)
 	}
@@ -174,6 +178,33 @@ func DefaultGuestTools() string {
 	return releaseAssetPath("gantry-guest-arm64")
 }
 
+// DaemonGuestTools returns a cwd-independent guest-helper path. Development
+// daemons deliberately run with cwd "/", so an imported/legacy profile that
+// has no persisted GuestTools path cannot use DefaultGuestTools' source-tree
+// relative fallback. Prefer the helper beside the host executable (the normal
+// artifacts/ layout), then use the writable per-user asset cache.
+func DaemonGuestTools(executable string) string {
+	path := DefaultGuestTools()
+	if filepath.IsAbs(path) {
+		return path
+	}
+	name := filepath.Base(path)
+	if executable != "" {
+		dir := filepath.Dir(executable)
+		for _, candidate := range []string{
+			filepath.Join(dir, name),
+			filepath.Join(dir, "artifacts", name),
+		} {
+			if gutil.FileExists(candidate) {
+				if absolute, err := filepath.Abs(candidate); err == nil {
+					return absolute
+				}
+			}
+		}
+	}
+	return cachedAssetPath(name)
+}
+
 // DefaultRootfs returns the release rootfs for the host architecture.
 func DefaultRootfs() string {
 	if runtime.GOARCH == "amd64" {
@@ -197,6 +228,18 @@ func DefaultImage() string {
 		return path
 	}
 	return Path("shell-rootfs.erofs")
+}
+
+// DefaultDevContainersImage returns the curated glibc development image.
+// Unlike the workload default it is intentionally uniform: editor
+// prerequisites, the OS-managed CA store and Podman/Buildah tooling with an
+// unprivileged gantry user. Nested-runtime authority remains explicitly gated.
+func DefaultDevContainersImage() string {
+	name := "gantry-ide-image-arm64.erofs"
+	if runtime.GOARCH == "amd64" {
+		name = "gantry-ide-image-x86_64.erofs"
+	}
+	return releaseAssetPath(name)
 }
 
 // GVisorRootfs maps a rootfs image name to its gVisor variant.

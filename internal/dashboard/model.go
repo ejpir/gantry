@@ -218,66 +218,70 @@ type sandboxTUIModel struct {
 	updateChecked bool
 	exitMessage   string
 
-	dialog          tuiDialog
-	dialogScroll    int
-	confirmRemove   bool
-	createFocus     int
-	createErrFocus  int
-	createName      textinput.Model
-	createImage     textinput.Model
-	createCPUs      resourceSlider
-	createMemory    resourceSlider
-	createDisk      resourceSlider
-	createRuntime   string   // "crun" (default) or "runsc"
-	createKernels   []string // staged kernel paths; index 0 in the UI is "auto"
-	createKernel    int
-	createIsolation string
-	editFocus       int
-	editCPUs        resourceSlider
-	editMemory      resourceSlider
-	editIsolation   string
-	shareFocus      int
-	shareSandbox    sandboxPicker
-	shareTag        textinput.Model
-	sharePath       textinput.Model
-	shareMount      textinput.Model
-	shareOwner      textinput.Model
-	shareRO         bool
-	shareReplace    bool
-	portFocus       int
-	portSandbox     sandboxPicker
-	portBind        textinput.Model
-	portGuest       textinput.Model
-	portUDP         bool
-	policyFocus     int
-	policySandbox   sandboxPicker
-	policyPath      textinput.Model
-	policyLocal     bool
-	ruleFocus       int
-	ruleSandbox     sandboxPicker
-	ruleTarget      textinput.Model
-	rulePorts       textinput.Model
-	ruleAction      string
-	ruleProtocol    string
-	secretFocus     int
-	secretSandbox   sandboxPicker
-	secretName      textinput.Model
-	secretValue     textinput.Model
-	mcpFocus        int
-	mcpSandbox      sandboxPicker
-	mcpName         textinput.Model
-	mcpURL          textinput.Model
-	mcpAuthKind     string
-	mcpAuthHeader   textinput.Model
-	mcpAuthRef      textinput.Model
-	mcpAllow        textinput.Model
-	mcpDeny         textinput.Model
-	mcpRedact       textinput.Model
-	mcpEditing      bool
-	mcpFSFocus      int
-	mcpFSRoot       textinput.Model
-	mcpFSUser       textinput.Model
-	formError       string
+	dialog              tuiDialog
+	dialogScroll        int
+	confirmRemove       bool
+	createFocus         int
+	createErrFocus      int
+	createName          textinput.Model
+	createImage         textinput.Model
+	createCPUs          resourceSlider
+	createMemory        resourceSlider
+	createDisk          resourceSlider
+	createRuntime       string   // "crun" (default) or "runsc"
+	createKernels       []string // staged kernel paths; index 0 in the UI is "auto"
+	createKernel        int
+	createIsolation     string
+	createSSH           bool
+	createDevContainers bool
+	editFocus           int
+	editCPUs            resourceSlider
+	editMemory          resourceSlider
+	editIsolation       string
+	editSSH             bool
+	editDevContainers   bool
+	shareFocus          int
+	shareSandbox        sandboxPicker
+	shareTag            textinput.Model
+	sharePath           textinput.Model
+	shareMount          textinput.Model
+	shareOwner          textinput.Model
+	shareRO             bool
+	shareReplace        bool
+	portFocus           int
+	portSandbox         sandboxPicker
+	portBind            textinput.Model
+	portGuest           textinput.Model
+	portUDP             bool
+	policyFocus         int
+	policySandbox       sandboxPicker
+	policyPath          textinput.Model
+	policyLocal         bool
+	ruleFocus           int
+	ruleSandbox         sandboxPicker
+	ruleTarget          textinput.Model
+	rulePorts           textinput.Model
+	ruleAction          string
+	ruleProtocol        string
+	secretFocus         int
+	secretSandbox       sandboxPicker
+	secretName          textinput.Model
+	secretValue         textinput.Model
+	mcpFocus            int
+	mcpSandbox          sandboxPicker
+	mcpName             textinput.Model
+	mcpURL              textinput.Model
+	mcpAuthKind         string
+	mcpAuthHeader       textinput.Model
+	mcpAuthRef          textinput.Model
+	mcpAllow            textinput.Model
+	mcpDeny             textinput.Model
+	mcpRedact           textinput.Model
+	mcpEditing          bool
+	mcpFSFocus          int
+	mcpFSRoot           textinput.Model
+	mcpFSUser           textinput.Model
+	formError           string
 
 	lastClickIndex int
 	lastClickAt    time.Time
@@ -1100,16 +1104,23 @@ func operationProgressLine(line string) (string, bool) {
 	return line, true
 }
 
-func saveSandboxResourcesCmd(service dashboardapi.Service, name string, memMB uint, vcpus int, processIsolation string, running bool) tea.Cmd {
+func saveSandboxConfigCmd(service dashboardapi.Service, request dashboardapi.SandboxConfigRequest, running bool) tea.Cmd {
 	return func() tea.Msg {
-		err := service.SetResources(name, memMB, vcpus, processIsolation)
-		body := fmt.Sprintf("%d CPU · %d MiB RAM · isolation %s", vcpus, memMB, processIsolation)
-		if running {
-			body += " · restart to apply"
-		} else {
+		restart, err := service.ConfigureSandbox(request)
+		state := func(enabled bool) string {
+			if enabled {
+				return "on"
+			}
+			return "off"
+		}
+		body := fmt.Sprintf("SSH %s · Dev Containers %s · %d CPU · %d MiB RAM · isolation %s",
+			state(request.SSH), state(request.DevContainers), request.VCPUs, request.MemMB, request.ProcessIsolation)
+		if restart && running {
+			body += " · restart to apply resource changes"
+		} else if !running {
 			body += " · applies on next start"
 		}
-		return tuiProcessDoneMsg{action: "edit", name: name, output: body, err: err}
+		return tuiProcessDoneMsg{action: "edit", name: request.Name, output: body, err: err}
 	}
 }
 

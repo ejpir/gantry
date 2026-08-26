@@ -150,9 +150,11 @@ func requestDaemonShutdown(name string) error {
 }
 
 func cleanupSandboxRuntime(dir string) {
+	removeSSHRuntime(filepath.Base(dir), dir)
 	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", daemonReadySocketName, "ctl.sock", "1025.sock", "listen-1026.sock", credhelper.SockName, mcpproto.SockName, "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
 		_ = os.Remove(filepath.Join(dir, f))
 	}
+	_ = os.RemoveAll(filepath.Join(dir, guestToolsShareDir))
 }
 
 func CmdDelete(name string) int {

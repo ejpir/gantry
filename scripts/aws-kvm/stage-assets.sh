@@ -34,7 +34,8 @@ fi
 
 echo "== uploading to s3://$BUCKET =="
 for f in "$BIN" "$ARTIFACTS/gantry-guest-x86_64" "$ARTIFACTS/nerdbox-kernel-x86_64" "$ARTIFACTS/nerdbox-rootfs-x86_64.erofs" \
-         "$ARTIFACTS/nerdbox-rootfs-gvisor-x86_64.erofs" "$ARTIFACTS/debian-bookworm-amd64.erofs" "$ARTIFACTS/rwlayer-amd64.ext4"; do
+         "$ARTIFACTS/nerdbox-rootfs-gvisor-x86_64.erofs" "$ARTIFACTS/debian-bookworm-amd64.erofs" \
+         "$ARTIFACTS/gantry-ide-image-x86_64.erofs" "$ARTIFACTS/rwlayer-amd64.ext4"; do
 	[ -f "$f" ] || { echo "MISSING: $f" >&2; exit 1; }
 	aws s3 cp "$f" "s3://$BUCKET/$(basename "$f")" --quiet &
 done

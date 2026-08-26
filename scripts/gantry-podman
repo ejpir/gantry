@@ -1,0 +1,38 @@
+#!/bin/sh
+# Root-side Podman launcher for Gantry's curated Dev Containers image.
+#
+# The outer workload root is persistent, including /run. Podman records the
+# kernel boot ID beneath its runroot and refuses to start after a VM reboot if
+# that transient state survived. Inner containers cannot survive a VM reboot,
+# so clear only Podman's /run state once per new guest boot while preserving
+# images, volumes, and layers under /var/lib/containers.
+set -eu
+
+state_dir=/run/gantry/podman
+boot_id_file=$state_dir/boot-id
+lock_file=$state_dir/boot.lock
+current_boot_id=$(cat /proc/sys/kernel/random/boot_id)
+
+install -d -m 0755 "$state_dir"
+exec 9>"$lock_file"
+flock 9
+
+cached_boot_id=
+if [ -f "$boot_id_file" ]; then
+  IFS= read -r cached_boot_id <"$boot_id_file" || true
+fi
+if [ -n "$cached_boot_id" ] && [ "$cached_boot_id" != "$current_boot_id" ]; then
+  rm -rf /run/containers/storage /run/libpod
+fi
+if [ "$cached_boot_id" != "$current_boot_id" ]; then
+  temporary=$boot_id_file.tmp.$$
+  trap 'rm -f "$temporary"' EXIT HUP INT TERM
+  printf '%s\n' "$current_boot_id" >"$temporary"
+  chmod 0644 "$temporary"
+  mv -f "$temporary" "$boot_id_file"
+  trap - EXIT HUP INT TERM
+fi
+
+flock -u 9
+exec 9>&-
+exec /usr/bin/podman "$@"

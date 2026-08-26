@@ -1110,6 +1110,8 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
 		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.VCPUs), sandbox.MemMB)},
 		{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
+		{"SSH", map[bool]string{true: "enabled", false: "disabled"}[sandbox.SSH]},
+		{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
 		{"Storage", sandboxStorageSummary(*sandbox, true)},
 		{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
 	}
@@ -1252,16 +1254,20 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 	kernelLabel := formLabel(theme, "Kernel", m.createFocus == 3)
 	kernelValue := lipgloss.NewStyle().Foreground(theme.text).Render(truncateText(m.createKernelLabel(), maxInt(12, width-16))) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles)")
-	cpuLabel := formLabel(theme, "CPUs", m.createFocus == 4)
-	cpuSlider := m.createCPUs.View(theme, width, m.createFocus == 4, "CPU")
-	memoryLabel := formLabel(theme, "Memory", m.createFocus == 5)
-	memorySlider := m.createMemory.View(theme, width, m.createFocus == 5, "MiB")
-	diskLabel := formLabel(theme, "Persistent disk", m.createFocus == 6)
-	diskSlider := m.createDisk.View(theme, width, m.createFocus == 6, "MiB")
-	isolationLabel := formLabel(theme, "Process isolation", m.createFocus == 7)
+	sshLabel := formLabel(theme, "SSH", m.createFocus == 4)
+	sshValue := renderFeatureToggle(theme, m.createSSH)
+	devLabel := formLabel(theme, "Dev Containers", m.createFocus == 5)
+	devValue := renderFeatureToggle(theme, m.createDevContainers)
+	cpuLabel := formLabel(theme, "CPUs", m.createFocus == 6)
+	cpuSlider := m.createCPUs.View(theme, width, m.createFocus == 6, "CPU")
+	memoryLabel := formLabel(theme, "Memory", m.createFocus == 7)
+	memorySlider := m.createMemory.View(theme, width, m.createFocus == 7, "MiB")
+	diskLabel := formLabel(theme, "Persistent disk", m.createFocus == 8)
+	diskSlider := m.createDisk.View(theme, width, m.createFocus == 8, "MiB")
+	isolationLabel := formLabel(theme, "Process isolation", m.createFocus == 9)
 	isolationValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.createIsolation) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
-	create := renderDialogButton(theme, "Create", m.createFocus == 8, false)
+	create := renderDialogButton(theme, "Create", m.createFocus == 10, false)
 	buttons := alignRight(create, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  enter continue  •  esc cancel")
 	gap := m.formSectionGap()
@@ -1270,6 +1276,8 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 		imageLabel + "\n" + imageField,
 		runtimeLabel + "\n" + runtimeValue,
 		kernelLabel + "\n" + kernelValue,
+		sshLabel + "\n" + sshValue,
+		devLabel + "\n" + devValue,
 		cpuLabel + "\n" + cpuSlider,
 		memoryLabel + "\n" + memorySlider,
 		diskLabel + "\n" + diskSlider,
@@ -1290,27 +1298,40 @@ func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
 	if sandbox == nil {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No sandbox selected.")
 	}
-	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText("Change the VM allocation for "+sandbox.Name+".", width))
-	cpuLabel := formLabel(theme, "CPUs", m.editFocus == 0)
-	cpuSlider := m.editCPUs.View(theme, width, m.editFocus == 0, "CPU")
-	memoryLabel := formLabel(theme, "Memory", m.editFocus == 1)
-	memorySlider := m.editMemory.View(theme, width, m.editFocus == 1, "MiB")
-	isolationLabel := formLabel(theme, "Process isolation", m.editFocus == 2)
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText("Change live capabilities and the next VM allocation for "+sandbox.Name+".", width))
+	sshLabel := formLabel(theme, "SSH", m.editFocus == 0)
+	sshValue := renderFeatureToggle(theme, m.editSSH)
+	devLabel := formLabel(theme, "Dev Containers", m.editFocus == 1)
+	devValue := renderFeatureToggle(theme, m.editDevContainers)
+	cpuLabel := formLabel(theme, "CPUs", m.editFocus == 2)
+	cpuSlider := m.editCPUs.View(theme, width, m.editFocus == 2, "CPU")
+	memoryLabel := formLabel(theme, "Memory", m.editFocus == 3)
+	memorySlider := m.editMemory.View(theme, width, m.editFocus == 3, "MiB")
+	isolationLabel := formLabel(theme, "Process isolation", m.editFocus == 4)
 	isolationValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.editIsolation) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
 	note := "Applied when the sandbox next starts."
 	if sandbox.State == tuiRunning {
-		note = "Restart the sandbox to apply this allocation."
+		note = "SSH and Dev Containers apply live; restart to apply allocation changes."
 	}
 	noteLine := lipgloss.NewStyle().Foreground(theme.warning).Render(truncateText(note, width))
 	errorLine := ""
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	save := renderDialogButton(theme, "Save", m.editFocus == 3, false)
+	save := renderDialogButton(theme, "Save", m.editFocus == 5, false)
 	buttons := alignRight(save, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText("←/→ adjust  •  PgUp/PgDn jump  •  tab next  •  esc cancel", width))
-	return header + "\n" + description + "\n\n" + cpuLabel + "\n" + cpuSlider + "\n\n" + memoryLabel + "\n" + memorySlider + "\n\n" + isolationLabel + "\n" + isolationValue + "\n\n" + noteLine + "\n" + renderFormFooter(errorLine, buttons, hint)
+	return header + "\n" + description + "\n\n" + sshLabel + "\n" + sshValue + "\n\n" + devLabel + "\n" + devValue + "\n\n" + cpuLabel + "\n" + cpuSlider + "\n\n" + memoryLabel + "\n" + memorySlider + "\n\n" + isolationLabel + "\n" + isolationValue + "\n\n" + noteLine + "\n" + renderFormFooter(errorLine, buttons, hint)
+}
+
+func renderFeatureToggle(theme tuiTheme, enabled bool) string {
+	value := "off"
+	if enabled {
+		value = "on"
+	}
+	return lipgloss.NewStyle().Foreground(theme.text).Render(value) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
 }
 
 func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) string {

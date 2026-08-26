@@ -255,6 +255,7 @@ func inspectDockerImport(root, name, as, logPath, workspaceOwner string) (*docke
 		rwLayer:       rwLayer,
 		runtime:       runtimeConfig,
 		config: config.RunConfig{
+			Runtime:  "crun",
 			ImageRef: runtimeConfig.Spec.Template,
 			ImageCfg: imageConfig,
 			LayerSet: layers,

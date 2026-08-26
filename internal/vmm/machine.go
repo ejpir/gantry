@@ -210,8 +210,13 @@ type Machine struct {
 	hotMem         *virtio.Mem     // nil unless the x86 virtio-mem path is active
 	hotMemDeferred bool            // tail publication is owned by the daemon-ready edge
 	interrupts     interruptRouter // published by the backend; disabled before native teardown
-	kvmFD          *os.File        // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
-	stdinDone      chan struct{}
+	// irqTargets is immutable once Prepare returns. Each virtio slot targets
+	// slot%vcpus; the guest init applies the same policy to Linux IRQ affinity.
+	// Native backends can therefore wake the vCPU that will service an IRQ
+	// instead of creating an SMP-wide wakeup herd.
+	irqTargets map[int]int
+	kvmFD      *os.File // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
+	stdinDone  chan struct{}
 	// consoleStdin wires host stdin into the guest UART (interactive `run`;
 	// off for `exec`, where the terminal belongs to the container session).
 	consoleStdin bool
@@ -332,7 +337,31 @@ func (m *Machine) addVirtio(dev virtio.Device, name string) (*virtio.Core, error
 	}
 	core := virtio.NewCoreAt(dev, m.mem, base, irq, m.raise, name)
 	m.virtios = append(m.virtios, core)
+	if m.irqTargets == nil {
+		m.irqTargets = make(map[int]int)
+	}
+	m.irqTargets[irq] = virtioInterruptTarget(idx, m.vcpus)
 	return core, nil
+}
+
+// virtioInterruptTarget is mirrored by the production guest-init patch which
+// writes /proc/irq/*/smp_affinity_list. Keeping the target a pure function of
+// the virtio slot means the VMM does not need to inspect guest GIC state.
+func virtioInterruptTarget(slot, vcpus int) int {
+	if slot < 0 || vcpus <= 1 {
+		return 0
+	}
+	return slot % vcpus
+}
+
+func (m *Machine) interruptTarget(irq int) int {
+	if m == nil {
+		return 0
+	}
+	if target, ok := m.irqTargets[irq]; ok && target >= 0 && target < m.vcpus {
+		return target
+	}
+	return 0
 }
 
 // raise routes a device interrupt to the backend's irq line (if installed).
@@ -576,7 +605,8 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 		whpxBroker: o.WHPXBroker, whpxToken: o.WHPXToken,
 		whpxMailbox: inputs.takeFile(o.WHPXMailbox), whpxRequestEvent: inputs.takeFile(o.WHPXRequestEvent),
 		whpxReplyEvents: make([]*os.File, len(o.WHPXReplyEvents)),
-		bootTiming:      newBootTimeline(bootTimingStart, nil)}
+		bootTiming:      newBootTimeline(bootTimingStart, nil), vcpus: o.VCPUs,
+		irqTargets: make(map[int]int)}
 	for index, event := range o.WHPXReplyEvents {
 		m.whpxReplyEvents[index] = inputs.takeFile(event)
 	}

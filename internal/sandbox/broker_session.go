@@ -141,6 +141,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 	err := client.Session(br.rpc, client.SessionOptions{
 		StreamSock:     br.streamSock,
 		StreamDial:     br.streamDial,
+		SetupLocker:    &br.sessionSetupMu,
 		Shares:         manifest.Shares,
 		ShareTransport: manifest.Transport,
 		RW:             br.cfg.RW,
@@ -152,15 +153,16 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 		PathPrepend:    br.guestToolsPath(),
 		// The well-known base task owns the assembled writable root. Each
 		// concurrent session bind-mounts it into an isolated short-lived task.
-		ID:             "sb",
-		SandboxSession: true,
-		ImgCfg:         br.cfg.ImageCfg,
-		Cols:           req.Cols,
-		Rows:           req.Rows,
-		Terminal:       req.Terminal,
-		Quiet:          req.Quiet,
-		KillCh:         killCh,
-		ExitStatus:     &status,
+		ID:               "sb",
+		SandboxSession:   true,
+		NestedContainers: br.devContainers.Load(),
+		ImgCfg:           br.cfg.ImageCfg,
+		Cols:             req.Cols,
+		Rows:             req.Rows,
+		Terminal:         req.Terminal,
+		Quiet:            req.Quiet,
+		KillCh:           killCh,
+		ExitStatus:       &status,
 	}, stdin, stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)

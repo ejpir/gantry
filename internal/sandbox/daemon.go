@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
@@ -41,17 +42,23 @@ type daemonRuntime struct {
 	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
-	consoleLog  *boundedlog.Pipe
-	network     *Network
-	shares      *control.ShareManager
-	ports       *control.PortManager
-	runner      vmmworker.Runner
-	machine     *vmm.Machine
-	rpc         *ttrpc.Client
-	control     net.Listener
-	broker      *broker
-	mcpListener net.Listener
-	mcpWorker   *mcpworkersup.Worker
+	consoleLog         *boundedlog.Pipe
+	network            *Network
+	shares             *control.ShareManager
+	guestToolsMu       sync.Mutex
+	guestToolsStageDir string
+	ports              *control.PortManager
+	runner             vmmworker.Runner
+	machine            *vmm.Machine
+	rpc                *ttrpc.Client
+	control            net.Listener
+	broker             *broker
+	configureMu        sync.Mutex
+	sshMu              sync.Mutex
+	sshListener        net.Listener
+	sshCancel          func()
+	mcpListener        net.Listener
+	mcpWorker          *mcpworkersup.Worker
 
 	guestErr <-chan error
 	signals  chan os.Signal
@@ -93,17 +100,16 @@ func (d *daemonRuntime) run() int {
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
-	// MCP advertises a guest-side proxy as part of its ready contract, so wait
-	// for the verified helper and fail closed if it cannot be installed. Other
-	// consumers (bound secrets and OAuth custody) retain asynchronous delivery
-	// so their optional helper never extends the ordinary VM boot path.
-	if d.cfg.MCP {
-		d.deliverGuestTools()
-		if !d.broker.guestToolsReady.Load() {
-			return daemonFailure(fmt.Errorf("mcp guest helper delivery failed"))
+	// MCP, bound secrets, and OAuth custody are part of the ready contract: their
+	// advertised interfaces are unusable without gantry-guest. Only SSH and Dev
+	// Containers delivery is asynchronous; an early SSH request waits for it.
+	requireGuestToolsAtReady := d.cfg.MCP || hasBoundSecrets(d.cfg.SecretNames) || d.cfg.OAuthCustodyEnabled()
+	if requireGuestToolsAtReady {
+		if !d.deliverGuestToolsAndSignal() {
+			return daemonFailure(fmt.Errorf("required guest helper delivery failed"))
 		}
 	} else {
-		go d.deliverGuestTools()
+		go d.deliverGuestToolsAndSignal()
 	}
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in
@@ -131,6 +137,7 @@ func (d *daemonRuntime) bootLog(phase string) {
 }
 
 func (d *daemonRuntime) close() {
+	d.stopSSHGateway()
 	if d.mcpListener != nil {
 		_ = d.mcpListener.Close()
 	}
@@ -153,6 +160,9 @@ func (d *daemonRuntime) close() {
 	}
 	if d.shares != nil {
 		_ = d.shares.Close()
+	}
+	if d.guestToolsStageDir != "" {
+		_ = os.RemoveAll(d.guestToolsStageDir)
 	}
 	if d.network != nil {
 		d.network.Close()

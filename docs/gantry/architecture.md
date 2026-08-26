@@ -90,6 +90,37 @@ The supervisor is the trusted host control plane for one sandbox. It owns:
 The supervisor runs with the privileges of the user who launched Gantry. It
 does not run as a system daemon.
 
+### SSH gateway and guest helper
+
+SSH is a host-side protocol gateway, not an `sshd` inside the microVM. On Unix
+it listens on `ssh.sock` in the sandbox's private state directory and verifies
+the connecting process's UID; Windows uses a protected local endpoint. No TCP
+SSH listener is created. `gantry ssh` supplies OpenSSH with a `ProxyCommand`
+and `KnownHostsCommand`; `gantry ssh setup` installs the equivalent managed
+wildcard configuration using locked, atomic writes. One install-wide Ed25519
+host key identifies Gantry's local gateways.
+
+After the SSH handshake, the gateway maps each session, PTY, SFTP, or guest
+loopback-forward request onto the supervisor's existing session broker. SSH
+sessions execute `/run/gantry/bin/gantry-guest ssh-session` as the selected
+OCI user. The gateway accepts no client credential because access to the
+private local endpoint, including its same-user check, is the authentication
+boundary. It rejects remote forwarding, agent forwarding, and non-loopback
+forward targets.
+
+`gantry-guest` also supports bound credentials, OAuth custody, and MCP. The
+supervisor reads the size-bounded host asset, hashes it, installs it through a
+temporary read-only share when possible, and falls back to the bounded exec
+stream. It verifies the installed size and SHA-256 before marking the helper
+usable; a failed attempt removes stale guest content and leaves helper-backed
+features unavailable.
+
+SSH helper delivery runs asynchronously once guest RPC and the local control
+broker exist, so SSH and Dev Containers do not extend VM readiness. An SSH
+session arriving during delivery waits for its result. MCP, bound credentials,
+and OAuth custody remain part of the ready contract because their advertised
+interfaces require the verified helper.
+
 ### Worker launch substrate
 
 Split roles use one process-neutral launch harness in
@@ -249,14 +280,44 @@ Writable ext4 layers are private and must not be shared by running VMs.
 Host directories use a single multiplexed virtio-fs share hub. Each admitted
 tag appears in the guest namespace and is bind-mounted into the container at
 its selected path. The supervisor retains the host roots and applies
-read-only and path-confinement policy. On supported Unix hosts, the split VMM
-uses shared guest RAM and vhost-style doorbells so the VMM worker does not
-receive host share roots; other paths use an authenticated request relay.
+read-only and path-confinement policy. On Apple silicon macOS, the split VMM
+uses shared guest RAM and vhost-style doorbells by default so host filesystem
+latency never holds an HVF exit thread; set `GANTRY_VHOST_SHARES=0` only to
+diagnose the framed-broker fallback. Linux keeps that fallback by default and
+can opt into vhost shares with `GANTRY_VHOST_SHARES=1`. Neither path gives the
+VMM worker host share roots.
 
 There is no private checkout layer: host-share changes are changes to the
 original host directory. Guest `syncfs` requests are handled by the share hub:
 Unix syncs each pinned backing filesystem, while Windows flushes every live
 writable share handle (closed handles are flushed by FUSE `FLUSH`).
+
+On SMP guests, PID 1 spreads virtio interrupt affinity by device slot after
+deferred CPU onlining completes. The HVF backend uses the same slot mapping to
+wake the assigned vCPU (plus CPU 0 for compatibility with custom system roots),
+rather than waking every vCPU for each filesystem completion.
+
+A sandbox created or live-configured with `-devcontainers` uses an explicit
+outer OCI profile for an inner Podman runtime in the same microVM. The profile
+exposes only FUSE, TUN, a read-only cgroup2 view, shared root propagation, and
+the namespace-administration capabilities needed by inner `crun`. New sessions
+observe live profile changes; existing sessions retain the OCI configuration
+with which they started.
+
+The curated image exposes `/usr/local/bin/docker` as a rootful Podman wrapper.
+It discards inherited Docker/Podman endpoint and runtime-directory variables,
+preserves the configured proxy environment, and invokes Podman through
+passwordless `sudo`. Its containers configuration disables nested cgroup
+management and default sysctl writes and selects `slirp4netns`, avoiding guest
+bridge sysctls that the outer profile deliberately leaves read-only. No host
+container-engine socket or TCP endpoint crosses the microVM boundary.
+
+The wrapper serializes its boot check and compares the current kernel boot ID
+with the cached ID under `/run/gantry/podman`. On a boot transition it removes
+only Podman's stale runroot state under `/run/containers/storage` and
+`/run/libpod`; images, layers, and volumes under `/var/lib/containers` remain
+on the private writable disk. Inner processes cannot survive a VM stop, so
+retaining their `/run` bookkeeping would be incorrect.
 
 ## Host capability bridges
 
@@ -417,6 +478,9 @@ The default layout is:
 
 ~/.gantry/
 ├── credentials.json
+├── ssh/
+│   ├── config                    # managed Host *.gantry block
+│   └── host_ed25519              # install-wide SSH host key
 ├── images/
 │   ├── index.json
 │   ├── tmp/pull-*/            # private, removed after image construction

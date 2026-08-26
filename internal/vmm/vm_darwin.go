@@ -32,8 +32,9 @@ import (
 // SMP: vCPU 0 boots on the main run-loop thread; secondary vCPUs are created
 // at VM startup on dedicated pinned threads, then parked until the guest calls
 // PSCI CPU_ON (FDT advertises one node per vCPU). HVF vCPUs are thread-affine.
-// Device-raised SPIs are global (hv_gic routes them); we kick every vCPU so
-// the IRQ is applied promptly.
+// Device-raised SPIs are global (hv_gic routes them). Gantry's guest init pins
+// each virtio IRQ to slot%vcpus, allowing the backend to wake that target
+// instead of every parked vCPU.
 type hvfBackend struct {
 	m         *Machine
 	debug     bool
@@ -130,17 +131,29 @@ func (b *hvfBackend) deliverIRQ(irq int, level bool) {
 		}
 		return
 	}
-	b.wakeIdleVCPUs()
+	// Deasserting a line cannot make new guest work runnable. Waking on both
+	// assertion and acknowledgement doubled the interrupt wakeup rate.
+	if level {
+		b.wakeIRQTarget(irq)
+	}
 }
 
-// wakeIdleVCPUs releases run-loop threads parked after a trapped WFI. vCPUs
-// currently in hv_vcpu_run are woken by the injected GIC interrupt itself.
-func (b *hvfBackend) wakeIdleVCPUs() {
+// wakeIRQTarget releases only the run-loop thread to which guest init routes
+// this virtio interrupt. CPU 0 is also signalled as a compatibility target for
+// custom/older rootfs images which have not applied Gantry's affinity policy.
+// This bounds each interrupt to at most two wakeups instead of one per vCPU;
+// vCPUs already inside hv_vcpu_run are woken directly by hv_gic_set_spi.
+func (b *hvfBackend) wakeIRQTarget(irq int) {
+	target := b.m.interruptTarget(irq)
 	b.vcpuMu.Lock()
-	for _, vc := range b.vcpus {
-		vc.signalWake()
+	defer b.vcpuMu.Unlock()
+	if len(b.vcpus) == 0 {
+		return
 	}
-	b.vcpuMu.Unlock()
+	b.vcpus[0].signalWake()
+	if target > 0 && target < len(b.vcpus) {
+		b.vcpus[target].signalWake()
+	}
 }
 
 func (b *hvfBackend) kickVCPUs() error {
