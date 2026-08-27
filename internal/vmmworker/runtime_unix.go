@@ -7,7 +7,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/ejpir/gantry/internal/diskbroker"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sharebroker"
 	"github.com/ejpir/gantry/internal/shares"
@@ -172,24 +171,6 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		bootStart = time.Unix(0, config.BootTimingStartUnixNano)
 	}
 	netPolicy, netTraffic := netDeviceHooks(policy, traffic)
-	var diskBackends []virtio.BlkBackend
-	if config.DisksBrokered {
-		if len(assets.DiskConns) != len(config.WritableDiskSizes) {
-			return fmt.Errorf("descriptor table: disk broker count %d does not match size count %d", len(assets.DiskConns), len(config.WritableDiskSizes))
-		}
-		diskBackends = make([]virtio.BlkBackend, 0, len(assets.DiskConns))
-		for index, conn := range assets.DiskConns {
-			client, err := diskbroker.NewClient(conn, fmt.Sprintf("brokered-rw-%d", index), config.WritableDiskSizes[index])
-			if err != nil {
-				for _, backend := range diskBackends {
-					_ = backend.Close()
-				}
-				return err
-			}
-			diskBackends = append(diskBackends, client)
-			assets.DiskConns[index] = nil // the Machine owns the client now
-		}
-	}
 	sharedRAM := assets.SharedRAM
 	if config.VhostShares {
 		// Prepare consumes every descriptor-bearing option on entry.
@@ -207,7 +188,6 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		Rootfs:                      assets.Rootfs,
 		DisksRO:                     assets.DisksRO,
 		Disks:                       assets.Disks,
-		DiskBackends:                diskBackends,
 		DisksPrelocked:              config.DisksPrelocked,
 		SharedRAM:                   sharedRAM,
 		WHPXBroker:                  assets.WHPXConn,

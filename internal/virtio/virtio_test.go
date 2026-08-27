@@ -310,7 +310,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = blk.Close() }()
+	defer func() { _ = blk.file.Close() }()
 	if f := blk.features(); f&(1<<BlkFRO) != 0 || f&(1<<BlkFFlush) == 0 {
 		t.Fatalf("writable features = %#x (want FLUSH, no RO)", f)
 	}
@@ -347,15 +347,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 		t.Fatalf("write status = %d", st[0])
 	}
 	got := make([]byte, 512)
-	image, err := os.Open(img)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := image.ReadAt(got, 4*512); err != nil {
-		_ = image.Close()
-		t.Fatal(err)
-	}
-	if err := image.Close(); err != nil {
+	if _, err := blk.file.ReadAt(got, 4*512); err != nil {
 		t.Fatal(err)
 	}
 	if got[0] != 0xab || got[511] != 0xab {
@@ -381,7 +373,7 @@ func TestVirtioBlkWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = roBlk.Close() }()
+	defer func() { _ = roBlk.file.Close() }()
 	if roBlk.features()&(1<<BlkFRO) == 0 {
 		t.Fatal("read-only device lost VIRTIO_BLK_F_RO")
 	}

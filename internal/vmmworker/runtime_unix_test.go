@@ -27,9 +27,9 @@ func TestKeepFDsMatchesDescriptorTable(t *testing.T) {
 	if base != 9 {
 		t.Fatalf("base keepFDs = %d, want 9", base)
 	}
-	full := keepFDs(Config{HasRoot: true, NDisksRO: 2, NDisks: 1, HasKVM: true})
-	if full != base+5 {
-		t.Fatalf("full keepFDs = %d, want %d", full, base+5)
+	full := keepFDs(Config{HasRoot: true, NDisksRO: 2, NDisks: 2, HasKVM: true})
+	if full != base+6 {
+		t.Fatalf("full keepFDs = %d, want %d", full, base+6)
 	}
 }
 
@@ -38,9 +38,6 @@ func TestConfigRejectsUnboundedDescriptorTables(t *testing.T) {
 		{NDisksRO: -1},
 		{NDisks: -1},
 		{NDisksRO: maxInheritedDisks, NDisks: 1},
-		{NDisks: 2, DisksPrelocked: true, MaxWritableFileSize: 1},
-		{DisksBrokered: true},
-		{NDisks: 2, DisksBrokered: true, WritableDiskSizes: []uint64{1}},
 		{NoNetwork: true, Policy: []byte(`{}`)},
 		{NoShares: true, VhostShares: true, HasSharedRAM: true},
 	} {
@@ -48,11 +45,8 @@ func TestConfigRejectsUnboundedDescriptorTables(t *testing.T) {
 			t.Fatalf("validate(%+v) succeeded", config)
 		}
 	}
-	if err := (Config{NDisksRO: maxInheritedDisks - 1, NDisks: 1, DisksPrelocked: true, MaxWritableFileSize: 1}).validate(); err != nil {
-		t.Fatalf("valid descriptor table: %v", err)
-	}
-	if err := (Config{NDisks: 2, DisksBrokered: true, WritableDiskSizes: []uint64{1, 2}}).validate(); err != nil {
-		t.Fatalf("valid brokered descriptor table: %v", err)
+	if err := (Config{NDisksRO: maxInheritedDisks - 2, NDisks: 2, DisksPrelocked: true, MaxWritableFileSize: 1}).validate(); err != nil {
+		t.Fatalf("valid multi-disk descriptor table: %v", err)
 	}
 }
 

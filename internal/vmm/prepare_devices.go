@@ -29,12 +29,11 @@ func checkNilInterface(field string, value any) error {
 
 type diskInput struct {
 	file     *os.File
-	backend  virtio.BlkBackend
 	writable bool
 }
 
 func (m *Machine) attachDisks(o Opts, inputs *prepareInputs) error {
-	disks := make([]diskInput, 0, 1+len(o.DisksRO)+len(o.Disks)+len(o.DiskBackends))
+	disks := make([]diskInput, 0, 1+len(o.DisksRO)+len(o.Disks))
 	if o.Rootfs != nil {
 		disks = append(disks, diskInput{file: o.Rootfs})
 	}
@@ -44,33 +43,20 @@ func (m *Machine) attachDisks(o Opts, inputs *prepareInputs) error {
 	for _, file := range o.Disks {
 		disks = append(disks, diskInput{file: file, writable: true})
 	}
-	for _, backend := range o.DiskBackends {
-		disks = append(disks, diskInput{backend: backend, writable: true})
-	}
 
 	for index, disk := range disks {
-		path := ""
+		path := disk.file.Name()
 		var block *virtio.Blk
 		var err error
-		switch {
-		case disk.backend != nil:
-			path = disk.backend.Name()
-			block, err = virtio.NewBlkBackend(disk.backend, disk.writable)
-		case disk.writable && o.DisksPrelocked:
-			path = disk.file.Name()
+		if disk.writable && o.DisksPrelocked {
 			block, err = virtio.NewBlkFilePrelocked(disk.file, true)
-		default:
-			path = disk.file.Name()
+		} else {
 			block, err = virtio.NewBlkFile(disk.file, disk.writable)
 		}
 		if err != nil {
 			return fmt.Errorf("disk %s: %w", path, err)
 		}
-		if disk.backend != nil {
-			inputs.takeDiskBackend(disk.backend)
-		} else {
-			inputs.takeFile(disk.file) // block now owns the descriptor.
-		}
+		inputs.takeFile(disk.file) // block now owns the descriptor.
 		core, err := m.addVirtio(block, "blk")
 		if err != nil {
 			return err

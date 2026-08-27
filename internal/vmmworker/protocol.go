@@ -33,13 +33,11 @@ type Config struct {
 
 	// BootTimingStartUnixNano carries the supervisor's diagnostic clock into
 	// the worker. Zero disables guest milestone collection.
-	BootTimingStartUnixNano int64    `json:"bootTimingStartUnixNano,omitempty"`
-	NDisksRO                int      `json:"nDisksRO"`
-	NDisks                  int      `json:"nDisks"`
-	DisksBrokered           bool     `json:"disksBrokered,omitempty"`
-	WritableDiskSizes       []uint64 `json:"writableDiskSizes,omitempty"`
-	DisksPrelocked          bool     `json:"disksPrelocked,omitempty"`
-	MaxWritableFileSize     uint64   `json:"maxWritableFileSize,omitempty"`
+	BootTimingStartUnixNano int64  `json:"bootTimingStartUnixNano,omitempty"`
+	NDisksRO                int    `json:"nDisksRO"`
+	NDisks                  int    `json:"nDisks"`
+	DisksPrelocked          bool   `json:"disksPrelocked,omitempty"`
+	MaxWritableFileSize     uint64 `json:"maxWritableFileSize,omitempty"`
 
 	// Policy is present only when the worker-side virtio-net device is the
 	// enforcement point. Empty policy means a separate network worker owns it.
@@ -75,7 +73,6 @@ type Assets struct {
 	Rootfs           *os.File
 	DisksRO          []*os.File
 	Disks            []*os.File
-	DiskConns        []net.Conn
 	SharedRAM        *os.File
 	WHPXConn         net.Conn
 	WHPXMailbox      *os.File

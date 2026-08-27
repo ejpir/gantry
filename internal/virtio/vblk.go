@@ -27,38 +27,8 @@ const (
 	BlkFFlush = 9 // feature: cache flush command
 )
 
-// BlkBackend is the fixed-size storage capability behind a virtio-blk
-// device. Split VMMs use a brokered implementation so their untrusted worker
-// never receives a writable host-file descriptor.
-type BlkBackend interface {
-	ReadAt([]byte, int64) (int, error)
-	WriteAt([]byte, int64) (int, error)
-	Sync() error
-	Close() error
-	Name() string
-	Size() uint64
-}
-
-type fileBlkBackend struct {
-	file *os.File
-	size uint64
-}
-
-func (backend *fileBlkBackend) ReadAt(buffer []byte, offset int64) (int, error) {
-	return backend.file.ReadAt(buffer, offset)
-}
-
-func (backend *fileBlkBackend) WriteAt(buffer []byte, offset int64) (int, error) {
-	return backend.file.WriteAt(buffer, offset)
-}
-
-func (backend *fileBlkBackend) Sync() error  { return backend.file.Sync() }
-func (backend *fileBlkBackend) Close() error { return backend.file.Close() }
-func (backend *fileBlkBackend) Name() string { return backend.file.Name() }
-func (backend *fileBlkBackend) Size() uint64 { return backend.size }
-
 type Blk struct {
-	backend  BlkBackend
+	file     *os.File
 	lock     *os.File // held for the VM's lifetime on writable images
 	core     *Core
 	size     uint64
@@ -127,27 +97,10 @@ func newBlkFile(f *os.File, writable, prelocked bool) (*Blk, error) {
 		}
 		return nil, err
 	}
-	b.backend = &fileBlkBackend{file: f, size: uint64(fi.Size())}
+	b.file = f
 	b.size = uint64(fi.Size())
 	b.writable = writable
 	return b, nil
-}
-
-// NewBlkBackend attaches an already bounded storage capability. The caller
-// retains ownership on error; Blk owns and closes it after a successful call.
-// Writable remote backends are prelocked by their trusted broker.
-func NewBlkBackend(backend BlkBackend, writable bool) (*Blk, error) {
-	if backend == nil {
-		return nil, fmt.Errorf("nil block backend")
-	}
-	size := backend.Size()
-	if size == 0 || size > uint64(^uint64(0)>>1) {
-		return nil, fmt.Errorf("block backend %s has invalid size %d", backend.Name(), size)
-	}
-	return &Blk{
-		backend: backend, size: size, writable: writable,
-		debugLog: os.Getenv("GANTRY_DEBUG_BLK") != "",
-	}, nil
 }
 
 // Close flushes a writable image to the host filesystem and releases the
@@ -157,11 +110,11 @@ func NewBlkBackend(backend BlkBackend, writable bool) (*Blk, error) {
 // to be a power cut for persistent disks).
 func (b *Blk) Close() error {
 	var err error
-	if b.backend != nil {
+	if b.file != nil {
 		if b.writable {
-			err = b.backend.Sync()
+			err = b.file.Sync()
 		}
-		if cerr := b.backend.Close(); err == nil {
+		if cerr := b.file.Close(); err == nil {
 			err = cerr
 		}
 	}
@@ -233,7 +186,7 @@ func (b *Blk) handleQueue(qn int) {
 			if sector > uint64(b.size)>>9 {
 				status = BlkSIOErr
 			} else if off := int64(sector * 512); off+int64(dataLen) <= int64(b.size) {
-				if _, err := b.backend.ReadAt(buf, off); err != nil {
+				if _, err := b.file.ReadAt(buf, off); err != nil {
 					status = BlkSIOErr
 				}
 			} else {
@@ -264,12 +217,12 @@ func (b *Blk) handleQueue(qn int) {
 				status = BlkSIOErr // also rules out *512 overflow
 			} else if off := int64(sector * 512); off+int64(dataLen) > int64(b.size) {
 				status = BlkSIOErr // fixed-size image, no growth
-			} else if _, err := b.backend.WriteAt(buf, off); err != nil {
+			} else if _, err := b.file.WriteAt(buf, off); err != nil {
 				status = BlkSIOErr
 			}
 		case BlkTFlush:
 			if b.writable {
-				if err := b.backend.Sync(); err != nil {
+				if err := b.file.Sync(); err != nil {
 					status = BlkSIOErr
 				}
 			}

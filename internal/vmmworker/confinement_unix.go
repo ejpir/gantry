@@ -21,12 +21,8 @@ func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, as
 		return report, fmt.Errorf("%s", message)
 	}
 	fileLimitNote := ""
-	if config.DisksBrokered {
-		fileLimitNote = "writable disk files and locks remain supervisor-owned behind fixed-size brokers"
-		report.Notes = append(report.Notes, fileLimitNote)
-	}
 	if config.MaxWritableFileSize != 0 {
-		fileLimitNote = fmt.Sprintf("writable file growth capped at %d bytes; disk locks remain supervisor-owned", config.MaxWritableFileSize)
+		fileLimitNote = fmt.Sprintf("writable file growth capped process-wide at %d bytes; disk locks remain supervisor-owned", config.MaxWritableFileSize)
 		report.Notes = append(report.Notes, fileLimitNote)
 	}
 	if config.Confinement == "" || config.Confinement == "off" {
@@ -34,9 +30,7 @@ func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, as
 	}
 
 	spec := workerconf.DefaultSpec(keepFDs(config), config.ConfRoot)
-	connections := []net.Conn{control, bridge, fdChannel, assets.ShareConn, assets.NetConn}
-	connections = append(connections, assets.DiskConns...)
-	for _, conn := range connections {
+	for _, conn := range []net.Conn{control, bridge, fdChannel, assets.ShareConn, assets.NetConn} {
 		if fd, ok := connFD(conn); ok {
 			spec.KeepFDExtra = append(spec.KeepFDExtra, fd)
 		}
