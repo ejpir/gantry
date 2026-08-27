@@ -57,7 +57,11 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateMCPRemoteDialogKey(msg)
 	case tuiMCPFilesystemDialog:
 		return m.updateMCPFilesystemDialogKey(msg)
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog:
+	case tuiImagePullDialog:
+		return m.updateImagePullDialogKey(msg)
+	case tuiRegistryLoginDialog:
+		return m.updateRegistryLoginDialogKey(msg)
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog, tuiImagePruneDialog, tuiRegistryLogoutDialog:
 		return m.updateConfirmationDialogKey(msg.String())
 	case tuiHelpDialog, tuiInfoDialog, tuiPacketDetailDialog:
 		switch msg.String() {
@@ -151,6 +155,19 @@ func (m *sandboxTUIModel) updateFocusedDialogInput(msg tea.Msg) (tea.Model, tea.
 			m.mcpFSRoot, cmd = m.mcpFSRoot.Update(msg)
 		case 2:
 			m.mcpFSUser, cmd = m.mcpFSUser.Update(msg)
+		}
+	case tuiImagePullDialog:
+		if m.pullFocus == 0 {
+			m.pullRef, cmd = m.pullRef.Update(msg)
+		}
+	case tuiRegistryLoginDialog:
+		switch m.loginFocus {
+		case 0:
+			m.loginRegistry, cmd = m.loginRegistry.Update(msg)
+		case 1:
+			m.loginUsername, cmd = m.loginUsername.Update(msg)
+		case 2:
+			m.loginPassword, cmd = m.loginPassword.Update(msg)
 		}
 	}
 	return m, cmd
@@ -287,6 +304,21 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		if m.mcpFSFocus == 2 {
 			return m.mcpFSUser.Value(), "MCP filesystem user"
 		}
+	case tuiImagePullDialog:
+		if m.pullFocus == 0 {
+			return m.pullRef.Value(), "image reference"
+		}
+		if m.pullFocus == 1 {
+			return m.pullArch, "image architecture"
+		}
+	case tuiRegistryLoginDialog:
+		switch m.loginFocus {
+		case 0:
+			return m.loginRegistry.Value(), "registry"
+		case 1:
+			return m.loginUsername.Value(), "registry username"
+		}
+		// The registry password is deliberately not copyable.
 	case tuiInfoDialog:
 		return wholeDialog("sandbox details")
 	case tuiPacketDetailDialog:
@@ -333,6 +365,12 @@ func (m *sandboxTUIModel) submitConfirmationDialog() (tea.Model, tea.Cmd) {
 		return m.removeSelectedMCPRemote()
 	case tuiUpdateDialog:
 		return m.beginUpdate()
+	case tuiImageRemoveDialog:
+		return m.removeSelectedImage()
+	case tuiImagePruneDialog:
+		return m.pruneImages()
+	case tuiRegistryLogoutDialog:
+		return m.logoutSelectedRegistry()
 	default:
 		return m, nil
 	}
@@ -1543,6 +1581,11 @@ func (m *sandboxTUIModel) closeDialog() {
 	m.mcpSandbox.open = false
 	m.mcpEditing = false
 	m.shareReplace = false
+	m.pullRef.Blur()
+	m.loginRegistry.Blur()
+	m.loginUsername.Blur()
+	m.loginPassword.Blur()
+	m.loginPassword.Reset()
 }
 
 func (m sandboxTUIModel) dialogViewportHeight() int {
@@ -1635,6 +1678,10 @@ func (m sandboxTUIModel) dialogFocusAtStart() bool {
 		return m.mcpFocus == 0
 	case tuiMCPFilesystemDialog:
 		return m.mcpFSFocus == 0
+	case tuiImagePullDialog:
+		return m.pullFocus == 0
+	case tuiRegistryLoginDialog:
+		return m.loginFocus == 0
 	default:
 		return false
 	}
@@ -1674,6 +1721,10 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 		return choose(m.mcpFocus, []string{"Sandbox", "Name", "HTTPS URL", "Authentication", "Secret / provider reference", "Header name", "Allow tool globs", "Deny tool globs", "Additional redact secret names", button}), m.mcpFocus == mcpRemoteSubmitFocus
 	case tuiMCPFilesystemDialog:
 		return choose(m.mcpFSFocus, []string{"Sandbox", "Guest root", "Unprivileged guest user", "Save"}), m.mcpFSFocus == 3
+	case tuiImagePullDialog:
+		return choose(m.pullFocus, []string{"Image reference", "Architecture", "Pull"}), m.pullFocus == tuiImagePullSubmitFocus
+	case tuiRegistryLoginDialog:
+		return choose(m.loginFocus, []string{"Registry", "Username", "Password / token", "Store login"}), m.loginFocus == tuiRegistryLoginSubmitFocus
 	default:
 		return "", false
 	}
@@ -1713,6 +1764,12 @@ func (m *sandboxTUIModel) resizeInputs() {
 	m.mcpRedact.SetWidth(mcpFieldWidth)
 	m.mcpFSRoot.SetWidth(mcpFieldWidth)
 	m.mcpFSUser.SetWidth(mcpFieldWidth)
+	imageWidth, _ := m.dialogSize(tuiImagePullDialog)
+	imageFieldWidth := maxInt(12, imageWidth-10)
+	m.pullRef.SetWidth(imageFieldWidth)
+	m.loginRegistry.SetWidth(imageFieldWidth)
+	m.loginUsername.SetWidth(imageFieldWidth)
+	m.loginPassword.SetWidth(imageFieldWidth)
 }
 
 func (m *sandboxTUIModel) applyInputTheme() {
@@ -1747,6 +1804,10 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	m.mcpRedact.SetStyles(styles)
 	m.mcpFSRoot.SetStyles(styles)
 	m.mcpFSUser.SetStyles(styles)
+	m.pullRef.SetStyles(styles)
+	m.loginRegistry.SetStyles(styles)
+	m.loginUsername.SetStyles(styles)
+	m.loginPassword.SetStyles(styles)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(theme.accent)
 }
 
@@ -1913,7 +1974,7 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m, nil
 	}
 	switch m.dialog {
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog, tuiImagePruneDialog, tuiRegistryLogoutDialog:
 		return m.updateConfirmationDialogMouse(mouse, bounds)
 	case tuiCreateDialog:
 		return m.updateCreateDialogMouse(mouse, bounds)
@@ -1933,6 +1994,10 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m.updateMCPRemoteDialogMouse(mouse, bounds)
 	case tuiMCPFilesystemDialog:
 		return m.updateMCPFilesystemDialogMouse(mouse, bounds)
+	case tuiImagePullDialog:
+		return m.updateImagePullDialogMouse(mouse, bounds)
+	case tuiRegistryLoginDialog:
+		return m.updateRegistryLoginDialogMouse(mouse, bounds)
 	default:
 		return m, nil
 	}
@@ -1963,6 +2028,12 @@ func (m sandboxTUIModel) confirmationActionLabel() string {
 		return "Remove"
 	case tuiUpdateDialog:
 		return "Update"
+	case tuiImageRemoveDialog:
+		return "Remove"
+	case tuiImagePruneDialog:
+		return "Prune"
+	case tuiRegistryLogoutDialog:
+		return "Logout"
 	default:
 		return ""
 	}

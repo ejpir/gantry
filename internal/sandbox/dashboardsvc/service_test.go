@@ -2,9 +2,12 @@ package dashboardsvc
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -520,4 +523,229 @@ func TestDashboardKernelChoicesMatchHostArchitecture(t *testing.T) {
 	if len(choices) != 1 || filepath.Base(choices[0]) != name {
 		t.Fatalf("kernel choices = %v", choices)
 	}
+}
+
+// writeDashboardTestImage seeds a fake image store entry: meta JSON, erofs
+// payload, and an index.json ref entry, matching internal/image's layout.
+func writeDashboardTestImage(t *testing.T, store, ref, arch, digest string, size int64) {
+	t.Helper()
+	file := strings.NewReplacer(":", "-", "/", "-").Replace(digest)
+	meta := fmt.Sprintf(`{"ref":%q,"digest":%q,"arch":%q,"created":"2025-01-02T03:04:05Z","size":%d,"config":{"user":"1000","workingDir":"/app","entrypoint":["/bin/server"],"env":["A=1","B=2"]}}`,
+		ref, digest, arch, size)
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, file+".json"), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, file+".erofs"), []byte("erofs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	indexPath := filepath.Join(store, "index.json")
+	refs := map[string]string{}
+	if raw, err := os.ReadFile(indexPath); err == nil {
+		var idx struct {
+			Refs map[string]string `json:"refs"`
+		}
+		if json.Unmarshal(raw, &idx) == nil {
+			refs = idx.Refs
+		}
+	}
+	refs[ref+"/"+arch] = digest
+	index, err := json.Marshal(struct {
+		Refs map[string]string `json:"refs"`
+	}{refs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, index, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDashboardListsImagesAndRegistryCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "xdg"))
+	t.Setenv("GANTRY_REGISTRY_AUTH", "")
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	store := filepath.Join(home, "images")
+	t.Setenv("GANTRY_IMAGES", store)
+	writeDashboardTestImage(t, store, "ghcr.io/org/app:latest", "arm64", "sha256:aaa111", 4096)
+	writeDashboardTestImage(t, store, "debian:bookworm-slim", "amd64", "sha256:bbb222", 2048)
+
+	// One sandbox references the first digest; the second image is unused.
+	if err := os.MkdirAll(layout.Dir("dev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, "dev", config.RunConfig{ImageDigest: "sha256:aaa111", MemMB: 512, VCPUs: 1})
+
+	// A stored credential for quay.io joins the defaults and the ghcr.io
+	// registry referenced by the cached image.
+	if _, err := (dashboardService{}).StoreRegistryLogin(dashboardapi.RegistryLoginRequest{
+		Registry: "quay.io", Username: "robot", Secret: "s3cret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := (dashboardService{}).Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Images) != 2 {
+		t.Fatalf("images = %#v", snapshot.Images)
+	}
+	first := snapshot.Images[0]
+	if first.Ref != "debian:bookworm-slim" || first.InUse {
+		t.Fatalf("first image row = %#v", first)
+	}
+	second := snapshot.Images[1]
+	if second.Ref != "ghcr.io/org/app:latest" || !second.InUse || second.Size != 4096 {
+		t.Fatalf("second image row = %#v", second)
+	}
+	if second.User != "1000" || second.WorkingDir != "/app" || second.EnvCount != 2 || len(second.Entrypoint) != 1 {
+		t.Fatalf("image config row = %#v", second)
+	}
+
+	registries := map[string]dashboardapi.RegistryAuth{}
+	for _, row := range snapshot.Registries {
+		registries[row.Registry] = row
+	}
+	for _, want := range []string{"docker.io", "ghcr.io", "quay.io", "gcr.io"} {
+		if _, ok := registries[want]; !ok {
+			t.Fatalf("registries missing %q: %#v", want, snapshot.Registries)
+		}
+	}
+	if !registries["quay.io"].HasSecret || registries["quay.io"].Username != "robot" {
+		t.Fatalf("quay.io credential row = %#v", registries["quay.io"])
+	}
+	if registries["ghcr.io"].HasSecret || registries["docker.io"].HasSecret {
+		t.Fatalf("anonymous registries gained secrets: %#v", snapshot.Registries)
+	}
+}
+
+func TestDashboardRemovesAndPrunesImages(t *testing.T) {
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	store := t.TempDir()
+	t.Setenv("GANTRY_IMAGES", store)
+	writeDashboardTestImage(t, store, "alpine:latest", "arm64", "sha256:ccc333", 1024)
+	writeDashboardTestImage(t, store, "debian:stable", "arm64", "sha256:ddd444", 2048)
+	if err := os.MkdirAll(layout.Dir("dev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, "dev", config.RunConfig{ImageDigest: "sha256:ddd444", MemMB: 512, VCPUs: 1})
+
+	service := dashboardService{}
+	if err := service.RemoveImage("alpine:latest"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RemoveImage("alpine:latest"); err == nil {
+		t.Fatal("removing an already-removed image succeeded")
+	}
+
+	// Prune keeps the digest the sandbox config references.
+	writeDashboardTestImage(t, store, "busybox:latest", "arm64", "sha256:eee555", 512)
+	pruned, err := service.PruneImages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned = %d, want 1", pruned)
+	}
+	snapshot, err := service.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Images) != 1 || snapshot.Images[0].Digest != "sha256:ddd444" || !snapshot.Images[0].InUse {
+		t.Fatalf("images after prune = %#v", snapshot.Images)
+	}
+}
+
+func TestDashboardRegistryLoginValidation(t *testing.T) {
+	service := dashboardService{}
+	if err := service.ValidateRegistryLogin(dashboardapi.RegistryLoginRequest{Username: "u", Secret: "p"}); dashboardErrorFieldForTest(err) != "registry" {
+		t.Fatalf("missing registry error = %v", err)
+	}
+	if err := service.ValidateRegistryLogin(dashboardapi.RegistryLoginRequest{Registry: "https://ghcr.io", Username: "u", Secret: "p"}); dashboardErrorFieldForTest(err) != "registry" {
+		t.Fatalf("scheme-prefixed registry error = %v", err)
+	}
+	if err := service.ValidateRegistryLogin(dashboardapi.RegistryLoginRequest{Registry: "ghcr.io", Secret: "p"}); dashboardErrorFieldForTest(err) != "username" {
+		t.Fatalf("missing username error = %v", err)
+	}
+	if err := service.ValidateRegistryLogin(dashboardapi.RegistryLoginRequest{Registry: "ghcr.io", Username: "u"}); dashboardErrorFieldForTest(err) != "secret" {
+		t.Fatalf("missing secret error = %v", err)
+	}
+}
+
+func TestDashboardRegistryLoginStoreAndErase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "xdg"))
+	t.Setenv("GANTRY_REGISTRY_AUTH", "")
+	t.Setenv("GANTRY_HOME", t.TempDir())
+	service := dashboardService{}
+
+	// No docker-credential helper in the synthetic HOME: plaintext fallback
+	// must come with its security warning.
+	warning, err := service.StoreRegistryLogin(dashboardapi.RegistryLoginRequest{
+		Registry: "ghcr.io", Username: "octocat", Secret: "token123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warning == "" {
+		t.Fatal("plaintext store lost its security warning")
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".gantry", "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "ghcr.io") {
+		t.Fatalf("credentials.json missing registry: %s", raw)
+	}
+
+	snapshot, err := service.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range snapshot.Registries {
+		if row.Registry == "ghcr.io" && row.HasSecret && row.Username == "octocat" {
+			found = true
+		}
+	}
+	listed, err := json.Marshal(snapshot.Registries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(listed), "token123") {
+		t.Fatalf("registry snapshot leaked stored secret: %s", listed)
+	}
+	if !found {
+		t.Fatalf("stored login not listed: %#v", snapshot.Registries)
+	}
+
+	if err := service.RemoveRegistryLogin("ghcr.io"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = service.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range snapshot.Registries {
+		if row.Registry == "ghcr.io" && row.HasSecret {
+			t.Fatalf("erased login still listed: %#v", row)
+		}
+	}
+	if err := service.RemoveRegistryLogin("  "); err == nil {
+		t.Fatal("blank registry erase succeeded")
+	}
+}
+
+func dashboardErrorFieldForTest(err error) string {
+	var fieldErr *dashboardapi.FieldError
+	if errors.As(err, &fieldErr) {
+		return fieldErr.Field
+	}
+	return ""
 }

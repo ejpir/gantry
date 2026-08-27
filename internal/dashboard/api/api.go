@@ -123,6 +123,40 @@ type SecretRequest struct {
 	Value   secret.Value
 }
 
+// Image is one cached OCI image in the local image store. Entrypoint, Cmd,
+// and EnvCount describe the image config captured at build time.
+type Image struct {
+	Ref        string
+	Digest     string
+	Arch       string
+	Created    string
+	Size       int64
+	InUse      bool // a sandbox config references this digest
+	User       string
+	WorkingDir string
+	Entrypoint []string
+	Cmd        []string
+	EnvCount   int
+}
+
+// RegistryAuth describes the credential resolution for one registry. The
+// secret value itself never crosses the dashboard boundary: HasSecret only
+// reports that one exists.
+type RegistryAuth struct {
+	Registry  string
+	Username  string
+	Source    string
+	HasSecret bool
+}
+
+// RegistryLoginRequest carries a registry credential to store. Secret is
+// write-only: it is persisted (helper or 0600 file) and then dropped.
+type RegistryLoginRequest struct {
+	Registry string
+	Username string
+	Secret   secret.Value
+}
+
 // MCPServer contains configuration references only. AuthRef and Redact are
 // secret/custody names; credential values never cross the dashboard boundary.
 type MCPServer struct {
@@ -169,6 +203,8 @@ type Snapshot struct {
 	Ports      []Port
 	Secrets    []Secret
 	MCPServers []MCPServer
+	Images     []Image
+	Registries []RegistryAuth
 }
 
 type ResourceLimits struct {
@@ -269,6 +305,11 @@ type Service interface {
 	ValidateMCPFilesystem(MCPFilesystemRequest) error
 	ConfigureMCPFilesystem(MCPFilesystemRequest) error
 	RemoveMCPRemote(MCPServer) error
+	RemoveImage(refOrDigest string) error
+	PruneImages() (int, error)
+	ValidateRegistryLogin(RegistryLoginRequest) error
+	StoreRegistryLogin(RegistryLoginRequest) (warning string, err error)
+	RemoveRegistryLogin(registry string) error
 	PlanShare(ShareRequest) (SharePlan, error)
 	ConfigureShare(SharePlan) error
 	RemoveShare(Mount) error

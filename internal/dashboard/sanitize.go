@@ -86,4 +86,25 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 			row.Redact[j] = safeUILine(row.Redact[j])
 		}
 	}
+	for i := range snapshot.Images {
+		row := &snapshot.Images[i]
+		row.Ref = safeUILine(row.Ref)
+		row.Digest = safeUILine(row.Digest)
+		row.Arch = safeUILine(row.Arch)
+		row.Created = safeUILine(row.Created)
+		row.User = safeUILine(row.User)
+		row.WorkingDir = safeUILine(row.WorkingDir)
+		for j := range row.Entrypoint {
+			row.Entrypoint[j] = safeUILine(row.Entrypoint[j])
+		}
+		for j := range row.Cmd {
+			row.Cmd[j] = safeUILine(row.Cmd[j])
+		}
+	}
+	for i := range snapshot.Registries {
+		row := &snapshot.Registries[i]
+		row.Registry = safeUILine(row.Registry)
+		row.Username = safeUILine(row.Username)
+		row.Source = safeUILine(row.Source)
+	}
 }

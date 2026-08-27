@@ -17,6 +17,8 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/image/auth"
 	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
@@ -374,6 +376,86 @@ func (dashboardService) RemoveMCPRemote(row dashboardapi.MCPServer) error {
 		return fmt.Errorf("MCP server %q is not a removable remote", row.Name)
 	}
 	return controlcmd.RemoveMCPRemote(row.Sandbox, row.Name)
+}
+
+func (dashboardService) RemoveImage(refOrDigest string) error {
+	refOrDigest = strings.TrimSpace(refOrDigest)
+	if refOrDigest == "" {
+		return fmt.Errorf("image reference or digest is required")
+	}
+	return image.DefaultStore().Remove(refOrDigest)
+}
+
+func (dashboardService) PruneImages() (int, error) {
+	store := image.DefaultStore()
+	used := dashboardImageDigestsInUse()
+	pruned := 0
+	for _, meta := range store.List() {
+		if used[meta.Digest] {
+			continue
+		}
+		if err := store.Remove(meta.Digest); err != nil {
+			return pruned, err
+		}
+		pruned++
+	}
+	return pruned, nil
+}
+
+func (dashboardService) ValidateRegistryLogin(request dashboardapi.RegistryLoginRequest) error {
+	registry := strings.TrimSpace(request.Registry)
+	if registry == "" {
+		return dashboardapi.Invalid("registry", fmt.Errorf("registry host is required"))
+	}
+	if strings.ContainsAny(registry, " /\t\n") || strings.Contains(registry, "://") {
+		return dashboardapi.Invalid("registry", fmt.Errorf("registry must be a bare host like ghcr.io"))
+	}
+	if strings.TrimSpace(request.Username) == "" {
+		return dashboardapi.Invalid("username", fmt.Errorf("username is required"))
+	}
+	if request.Secret == "" {
+		return dashboardapi.Invalid("secret", fmt.Errorf("password or token is required"))
+	}
+	return nil
+}
+
+func (service dashboardService) StoreRegistryLogin(request dashboardapi.RegistryLoginRequest) (string, error) {
+	if err := service.ValidateRegistryLogin(request); err != nil {
+		return "", err
+	}
+	return auth.Resolve().Store(strings.TrimSpace(request.Registry), strings.TrimSpace(request.Username), auth.Secret(request.Secret.Raw()))
+}
+
+func (dashboardService) RemoveRegistryLogin(registry string) error {
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		return fmt.Errorf("registry host is required")
+	}
+	return auth.Resolve().Erase(registry)
+}
+
+// dashboardImageDigestsInUse scans sandbox configs for referenced image
+// digests, mirroring `gantry image prune` semantics.
+func dashboardImageDigestsInUse() map[string]bool {
+	used := map[string]bool{}
+	entries, err := os.ReadDir(layout.Root())
+	if err != nil {
+		return used
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(layout.Dir(entry.Name()), "sandbox.json"))
+		if err != nil {
+			continue
+		}
+		var cfg config.RunConfig
+		if json.Unmarshal(raw, &cfg) == nil && cfg.ImageDigest != "" {
+			used[cfg.ImageDigest] = true
+		}
+	}
+	return used
 }
 
 func dashboardRuleForTraffic(row dashboardapi.Traffic, action string) (dashboardapi.RuleRequest, error) {
@@ -744,7 +826,58 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 		}
 		return data.MCPServers[i].Name < data.MCPServers[j].Name
 	})
+	data.Images, data.Registries = loadDashboardImages()
 	return data, nil
+}
+
+// loadDashboardImages reads the local OCI image store and the registry
+// credential resolution. Both are host-local stores; sandbox configs only
+// contribute the digests that mark an image as in use.
+func loadDashboardImages() ([]dashboardapi.Image, []dashboardapi.RegistryAuth) {
+	store := image.DefaultStore()
+	metas := store.List()
+	sort.Slice(metas, func(i, j int) bool {
+		if metas[i].Ref == metas[j].Ref {
+			return metas[i].Arch < metas[j].Arch
+		}
+		return metas[i].Ref < metas[j].Ref
+	})
+	used := dashboardImageDigestsInUse()
+	images := make([]dashboardapi.Image, 0, len(metas))
+	for _, meta := range metas {
+		row := dashboardapi.Image{
+			Ref: meta.Ref, Digest: meta.Digest, Arch: meta.Arch,
+			Created: meta.Created, Size: meta.Size, InUse: used[meta.Digest],
+		}
+		if meta.Config != nil {
+			row.User = meta.Config.User
+			row.WorkingDir = meta.Config.WorkingDir
+			row.Entrypoint = append([]string(nil), meta.Config.Entrypoint...)
+			row.Cmd = append([]string(nil), meta.Config.Cmd...)
+			row.EnvCount = len(meta.Config.Env)
+		}
+		images = append(images, row)
+	}
+
+	// The default registries mirror `gantry image credentials`; known stored
+	// credentials and registries referenced by cached images join them.
+	registries := []string{"docker.io", "ghcr.io", "quay.io", "gcr.io"}
+	resolver := auth.Resolve()
+	registries = append(registries, resolver.Registries()...)
+	for _, meta := range metas {
+		if ref, err := image.ParseRef(meta.Ref); err == nil {
+			registries = append(registries, ref.Registry)
+		}
+	}
+	rows := resolver.Table(registries)
+	credentials := make([]dashboardapi.RegistryAuth, 0, len(rows))
+	for _, row := range rows {
+		credentials = append(credentials, dashboardapi.RegistryAuth{
+			Registry: row.Registry, Username: row.Username,
+			Source: row.Source, HasSecret: row.Secret.Raw() != "",
+		})
+	}
+	return images, credentials
 }
 
 func loadDashboardMCPServers(sandbox string, cfg config.RunConfig, running bool) []dashboardapi.MCPServer {

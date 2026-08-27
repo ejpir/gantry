@@ -61,6 +61,7 @@ const (
 	tuiSecretsPage
 	tuiMCPPage
 	tuiPacketsPage
+	tuiImagesPage
 	tuiPageCount
 )
 
@@ -71,6 +72,15 @@ type tuiMountRow = dashboardapi.Mount
 type tuiPortRow = dashboardapi.Port
 type tuiSecretRow = dashboardapi.Secret
 type tuiMCPRow = dashboardapi.MCPServer
+type tuiImageRow = dashboardapi.Image
+type tuiRegistryRow = dashboardapi.RegistryAuth
+
+// Images page sections: one page manages both the cached image store and
+// the registry credentials used to pull into it.
+const (
+	tuiImageSectionImages      = "images"
+	tuiImageSectionCredentials = "credentials"
+)
 
 type tuiDialog uint8
 
@@ -95,6 +105,11 @@ const (
 	tuiMCPRemoveDialog
 	tuiUpdateDialog
 	tuiPacketDetailDialog
+	tuiImagePullDialog
+	tuiImageRemoveDialog
+	tuiImagePruneDialog
+	tuiRegistryLoginDialog
+	tuiRegistryLogoutDialog
 )
 
 type tuiToastKind uint8
@@ -114,15 +129,17 @@ type tuiToast struct {
 }
 
 type tuiRefreshMsg struct {
-	sandboxes []tuiSandbox
-	traffic   []tuiTrafficRow
-	rules     []tuiRuleRow
-	mounts    []tuiMountRow
-	ports     []tuiPortRow
-	secrets   []tuiSecretRow
-	mcp       []tuiMCPRow
-	err       error
-	at        time.Time
+	sandboxes  []tuiSandbox
+	traffic    []tuiTrafficRow
+	rules      []tuiRuleRow
+	mounts     []tuiMountRow
+	ports      []tuiPortRow
+	secrets    []tuiSecretRow
+	mcp        []tuiMCPRow
+	images     []tuiImageRow
+	registries []tuiRegistryRow
+	err        error
+	at         time.Time
 }
 
 type tuiTickMsg struct{}
@@ -168,33 +185,40 @@ type sandboxTUIModel struct {
 	cursor    int // len(sandboxes) is the trailing "New Sandbox" card
 	scrollRow int
 
-	traffic       []tuiTrafficRow
-	trafficCursor int
-	trafficScroll int
-	rules         []tuiRuleRow
-	rulesCursor   int
-	rulesScroll   int
-	mounts        []tuiMountRow
-	mountCursor   int
-	mountScroll   int
-	ports         []tuiPortRow
-	portCursor    int
-	portScroll    int
-	secrets       []tuiSecretRow
-	secretCursor  int
-	secretScroll  int
-	mcpServers    []tuiMCPRow
-	mcpCursor     int
-	mcpScroll     int
-	packets       []tuiPacketRow
-	packetCursor  int
-	packetScroll  int
-	packetAfter   map[string]uint64
-	packetLoading bool
-	packetPaused  bool
-	packetError   string
-	packetEvicted uint64
-	packetDetail  *tuiPacketRow
+	traffic        []tuiTrafficRow
+	trafficCursor  int
+	trafficScroll  int
+	rules          []tuiRuleRow
+	rulesCursor    int
+	rulesScroll    int
+	mounts         []tuiMountRow
+	mountCursor    int
+	mountScroll    int
+	ports          []tuiPortRow
+	portCursor     int
+	portScroll     int
+	secrets        []tuiSecretRow
+	secretCursor   int
+	secretScroll   int
+	mcpServers     []tuiMCPRow
+	mcpCursor      int
+	mcpScroll      int
+	images         []tuiImageRow
+	imageCursor    int
+	imageScroll    int
+	registries     []tuiRegistryRow
+	registryCursor int
+	registryScroll int
+	imageSection   string
+	packets        []tuiPacketRow
+	packetCursor   int
+	packetScroll   int
+	packetAfter    map[string]uint64
+	packetLoading  bool
+	packetPaused   bool
+	packetError    string
+	packetEvicted  uint64
+	packetDetail   *tuiPacketRow
 
 	width  int
 	height int
@@ -281,6 +305,13 @@ type sandboxTUIModel struct {
 	mcpFSFocus          int
 	mcpFSRoot           textinput.Model
 	mcpFSUser           textinput.Model
+	pullFocus           int
+	pullRef             textinput.Model
+	pullArch            string
+	loginFocus          int
+	loginRegistry       textinput.Model
+	loginUsername       textinput.Model
+	loginPassword       textinput.Model
 	formError           string
 
 	lastClickIndex int
@@ -384,6 +415,24 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	mcpFSUser.Placeholder = "nobody or 1000:1000"
 	mcpFSUser.CharLimit = 128
 	mcpFSUser.Prompt = ""
+	pullRef := textinput.New()
+	pullRef.Placeholder = "debian:bookworm-slim or ghcr.io/org/app:latest"
+	pullRef.CharLimit = 512
+	pullRef.Prompt = ""
+	loginRegistry := textinput.New()
+	loginRegistry.Placeholder = "ghcr.io"
+	loginRegistry.CharLimit = 253
+	loginRegistry.Prompt = ""
+	loginUsername := textinput.New()
+	loginUsername.Placeholder = "username"
+	loginUsername.CharLimit = 256
+	loginUsername.Prompt = ""
+	loginPassword := textinput.New()
+	loginPassword.Placeholder = "password or token — never displayed again"
+	loginPassword.CharLimit = 1 << 20
+	loginPassword.Prompt = ""
+	loginPassword.EchoMode = textinput.EchoPassword
+	loginPassword.EchoCharacter = '•'
 
 	m := sandboxTUIModel{
 		service:         service,
@@ -428,6 +477,12 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		mcpRedact:       mcpRedact,
 		mcpFSRoot:       mcpFSRoot,
 		mcpFSUser:       mcpFSUser,
+		pullRef:         pullRef,
+		pullArch:        "auto",
+		loginRegistry:   loginRegistry,
+		loginUsername:   loginUsername,
+		loginPassword:   loginPassword,
+		imageSection:    tuiImageSectionImages,
 		lastClickIndex:  -1,
 		packetAfter:     make(map[string]uint64),
 	}
@@ -544,7 +599,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	if selected := m.selected(); selected != nil {
 		selectedName = selected.Name
 	}
-	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey := m.selectedTableKeys()
+	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey := m.selectedTableKeys()
 	m.sandboxes = msg.sandboxes
 	m.traffic = msg.traffic
 	m.rules = msg.rules
@@ -552,6 +607,8 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	m.ports = msg.ports
 	m.secrets = msg.secrets
 	m.mcpServers = msg.mcp
+	m.images = msg.images
+	m.registries = msg.registries
 
 	target := m.selectNext
 	if target == "" {
@@ -578,7 +635,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	} else if !found && m.cursor > len(m.sandboxes) {
 		m.cursor = len(m.sandboxes)
 	}
-	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey)
+	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey)
 	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 	return m, m.ensureAnimation()
@@ -607,7 +664,7 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 		title = actionTitle(msg.action) + " failed"
 		body = compactCommandError(msg.output, msg.err)
 		m.selectNext = ""
-	} else if (msg.action == "edit" || msg.action == "share configure" || msg.action == "netpolicy set" || strings.HasPrefix(msg.action, "mcp ")) && msg.output != "" {
+	} else if (msg.action == "edit" || msg.action == "share configure" || msg.action == "netpolicy set" || msg.action == "registry login" || msg.action == "image prune" || strings.HasPrefix(msg.action, "mcp ")) && msg.output != "" {
 		body = strings.TrimSpace(msg.output)
 	} else if msg.action == "open" {
 		// An interactive command that exits non-zero is useful information, but
@@ -778,6 +835,52 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			m.confirmRemove = false
 			return nil, true
 		}
+	case tuiImagesPage:
+		switch key {
+		case "s":
+			m.switchImageSection()
+			return nil, true
+		}
+		if m.imageSection == tuiImageSectionCredentials {
+			switch key {
+			case "a", "l":
+				return m.openRegistryLoginDialog(), true
+			case "d", "delete", "x":
+				row := m.selectedRegistry()
+				if row == nil {
+					return nil, true
+				}
+				if !row.HasSecret {
+					return m.showToast(tuiToastInfo, "Nothing stored", "No credential is stored for "+row.Registry+" — anonymous pulls use it as-is."), true
+				}
+				m.dialog = tuiRegistryLogoutDialog
+				m.dialogScroll = 0
+				m.confirmRemove = false
+				return nil, true
+			}
+			return nil, false
+		}
+		switch key {
+		case "p", "a":
+			return m.openImagePullDialog(), true
+		case "d", "delete", "x":
+			if m.selectedImage() == nil {
+				return nil, true
+			}
+			m.dialog = tuiImageRemoveDialog
+			m.dialogScroll = 0
+			m.confirmRemove = false
+			return nil, true
+		case "u":
+			if m.prunableImageCount() == 0 {
+				return m.showToast(tuiToastInfo, "Nothing to prune", "Every cached image is referenced by a sandbox."), true
+			}
+			m.dialog = tuiImagePruneDialog
+			m.dialogScroll = 0
+			m.confirmRemove = false
+			return nil, true
+		}
+		return nil, false
 	case tuiPacketsPage:
 		return m.updatePacketActionKey(key)
 	}
@@ -852,6 +955,8 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 		m.setPage(tuiMCPPage)
 	case "8":
 		m.setPage(tuiPacketsPage)
+	case "9":
+		m.setPage(tuiImagesPage)
 	case "tab", "]":
 		m.cyclePage(1)
 	case "shift+tab", "[":
@@ -1095,6 +1200,13 @@ func operationProgressLine(line string) (string, bool) {
 		}
 	}
 	if start < 0 {
+		// Image pulls report one line per layer instead of a progress bar.
+		// The CLI prefixes those with "gantry image: "; its failure line is
+		// "gantry image <verb>: " (no space before the colon), so the two
+		// never collide.
+		if index := strings.Index(line, "gantry image: "); index >= 0 {
+			return strings.TrimSpace(line[index+len("gantry image: "):]), true
+		}
 		return "", false
 	}
 	line = line[start:]
@@ -1157,6 +1269,45 @@ func removeSecretCmd(service dashboardapi.Service, row tuiSecretRow) tea.Cmd {
 	return func() tea.Msg {
 		err := service.RemoveSecret(row)
 		return tuiProcessDoneMsg{action: "secret remove", name: row.Sandbox + "/" + row.Name, err: err}
+	}
+}
+
+func removeImageCmd(service dashboardapi.Service, row tuiImageRow) tea.Cmd {
+	return func() tea.Msg {
+		err := service.RemoveImage(row.Ref)
+		return tuiProcessDoneMsg{action: "image remove", name: row.Ref, err: err}
+	}
+}
+
+func pruneImagesCmd(service dashboardapi.Service) tea.Cmd {
+	return func() tea.Msg {
+		count, err := service.PruneImages()
+		body := fmt.Sprintf("%d unused images removed", count)
+		if count == 1 {
+			body = "1 unused image removed"
+		}
+		return tuiProcessDoneMsg{action: "image prune", name: "", output: body, err: err}
+	}
+}
+
+// storeRegistryLoginCmd persists a credential and scrubs the request's secret
+// before the result message crosses the Bubble Tea boundary.
+func storeRegistryLoginCmd(service dashboardapi.Service, request dashboardapi.RegistryLoginRequest) tea.Cmd {
+	return func() tea.Msg {
+		warning, err := service.StoreRegistryLogin(request)
+		request.Secret = secret.Value("")
+		msg := tuiProcessDoneMsg{action: "registry login", name: request.Registry, err: err}
+		if err == nil && warning != "" {
+			msg.output = warning
+		}
+		return msg
+	}
+}
+
+func removeRegistryLoginCmd(service dashboardapi.Service, row tuiRegistryRow) tea.Cmd {
+	return func() tea.Msg {
+		err := service.RemoveRegistryLogin(row.Registry)
+		return tuiProcessDoneMsg{action: "registry logout", name: row.Registry, err: err}
 	}
 }
 
@@ -1301,6 +1452,39 @@ func (m *sandboxTUIModel) selectedMCPServer() *tuiMCPRow {
 	return &m.mcpServers[m.mcpCursor]
 }
 
+func (m *sandboxTUIModel) selectedImage() *tuiImageRow {
+	if m.imageCursor < 0 || m.imageCursor >= len(m.images) {
+		return nil
+	}
+	return &m.images[m.imageCursor]
+}
+
+func (m *sandboxTUIModel) selectedRegistry() *tuiRegistryRow {
+	if m.registryCursor < 0 || m.registryCursor >= len(m.registries) {
+		return nil
+	}
+	return &m.registries[m.registryCursor]
+}
+
+func (m *sandboxTUIModel) switchImageSection() {
+	if m.imageSection == tuiImageSectionImages {
+		m.imageSection = tuiImageSectionCredentials
+	} else {
+		m.imageSection = tuiImageSectionImages
+	}
+	m.ensureTableCursorVisible()
+}
+
+func (m *sandboxTUIModel) prunableImageCount() int {
+	count := 0
+	for _, row := range m.images {
+		if !row.InUse {
+			count++
+		}
+	}
+	return count
+}
+
 func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
 	for i := range m.sandboxes {
 		if m.sandboxes[i].Name == name {
@@ -1413,6 +1597,11 @@ func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
 		return &m.secretCursor, &m.secretScroll, len(m.secrets)
 	case tuiMCPPage:
 		return &m.mcpCursor, &m.mcpScroll, len(m.mcpServers)
+	case tuiImagesPage:
+		if m.imageSection == tuiImageSectionCredentials {
+			return &m.registryCursor, &m.registryScroll, len(m.registries)
+		}
+		return &m.imageCursor, &m.imageScroll, len(m.images)
 	case tuiPacketsPage:
 		return &m.packetCursor, &m.packetScroll, len(m.packets)
 	default:
@@ -1449,7 +1638,7 @@ func (m *sandboxTUIModel) ensureTableCursorVisible() {
 	*scroll = clampInt(*scroll, 0, maxInt(0, count-visible))
 }
 
-func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret, mcp string) {
+func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret, mcp, image, registry string) {
 	if m.trafficCursor >= 0 && m.trafficCursor < len(m.traffic) {
 		traffic = trafficRowKey(m.traffic[m.trafficCursor])
 	}
@@ -1468,10 +1657,16 @@ func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret
 	if m.mcpCursor >= 0 && m.mcpCursor < len(m.mcpServers) {
 		mcp = mcpRowKey(m.mcpServers[m.mcpCursor])
 	}
+	if m.imageCursor >= 0 && m.imageCursor < len(m.images) {
+		image = imageRowKey(m.images[m.imageCursor])
+	}
+	if m.registryCursor >= 0 && m.registryCursor < len(m.registries) {
+		registry = m.registries[m.registryCursor].Registry
+	}
 	return
 }
 
-func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, secret, mcp string) {
+func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, secret, mcp, image, registry string) {
 	for i := range m.traffic {
 		if traffic != "" && trafficRowKey(m.traffic[i]) == traffic {
 			m.trafficCursor = i
@@ -1508,12 +1703,26 @@ func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, sec
 			break
 		}
 	}
+	for i := range m.images {
+		if image != "" && imageRowKey(m.images[i]) == image {
+			m.imageCursor = i
+			break
+		}
+	}
+	for i := range m.registries {
+		if registry != "" && m.registries[i].Registry == registry {
+			m.registryCursor = i
+			break
+		}
+	}
 	m.trafficCursor = clampTableCursor(m.trafficCursor, len(m.traffic))
 	m.rulesCursor = clampTableCursor(m.rulesCursor, len(m.rules))
 	m.mountCursor = clampTableCursor(m.mountCursor, len(m.mounts))
 	m.portCursor = clampTableCursor(m.portCursor, len(m.ports))
 	m.secretCursor = clampTableCursor(m.secretCursor, len(m.secrets))
 	m.mcpCursor = clampTableCursor(m.mcpCursor, len(m.mcpServers))
+	m.imageCursor = clampTableCursor(m.imageCursor, len(m.images))
+	m.registryCursor = clampTableCursor(m.registryCursor, len(m.registries))
 }
 
 func trafficRowKey(row tuiTrafficRow) string {
@@ -1543,6 +1752,10 @@ func secretRowKey(row tuiSecretRow) string { return row.Sandbox + "\x00" + row.N
 
 func mcpRowKey(row tuiMCPRow) string { return row.Sandbox + "\x00" + row.Name + "\x00" + row.Type }
 
+// imageRowKey keys on ref+arch (the store's index granularity) rather than
+// digest so a re-pull of the same tag keeps the selection.
+func imageRowKey(row tuiImageRow) string { return row.Ref + "\x00" + row.Arch }
+
 func clampTableCursor(cursor, count int) int {
 	if count == 0 {
 		return 0
@@ -1557,7 +1770,8 @@ func refreshSandboxesCmd(service dashboardapi.Service) tea.Cmd {
 		return tuiRefreshMsg{
 			sandboxes: data.Sandboxes, traffic: data.Traffic,
 			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, secrets: data.Secrets,
-			mcp: data.MCPServers, err: err, at: time.Now(),
+			mcp: data.MCPServers, images: data.Images, registries: data.Registries,
+			err: err, at: time.Now(),
 		}
 	}
 }
@@ -1640,6 +1854,16 @@ func actionTitle(action string) string {
 		return "Save MCP filesystem server"
 	case "mcp remove":
 		return "Remove MCP server"
+	case "image pull":
+		return "Pull image"
+	case "image remove":
+		return "Remove image"
+	case "image prune":
+		return "Prune images"
+	case "registry login":
+		return "Registry login"
+	case "registry logout":
+		return "Registry logout"
 	case "update":
 		return "Update Gantry"
 	default:
@@ -1689,6 +1913,16 @@ func actionPastTense(action string) string {
 		return "MCP filesystem server saved"
 	case "mcp remove":
 		return "MCP server removed"
+	case "image pull":
+		return "Image pulled"
+	case "image remove":
+		return "Image removed"
+	case "image prune":
+		return "Images pruned"
+	case "registry login":
+		return "Login stored"
+	case "registry logout":
+		return "Logged out"
 	case "update":
 		return "Gantry updated"
 	default:
