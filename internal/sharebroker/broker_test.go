@@ -135,12 +135,21 @@ func TestAcceptsNoReplyRequest(t *testing.T) {
 }
 
 type brokerSpyRWC struct {
-	mu     sync.Mutex
-	writes int
-	closed bool
+	mu        sync.Mutex
+	writes    int
+	closed    bool
+	closedCh  chan struct{}
+	closeOnce sync.Once
 }
 
-func (s *brokerSpyRWC) Read([]byte) (int, error) { return 0, io.EOF }
+func newBrokerSpyRWC() *brokerSpyRWC {
+	return &brokerSpyRWC{closedCh: make(chan struct{})}
+}
+
+func (s *brokerSpyRWC) Read([]byte) (int, error) {
+	<-s.closedCh
+	return 0, io.EOF
+}
 func (s *brokerSpyRWC) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,8 +158,9 @@ func (s *brokerSpyRWC) Write(p []byte) (int, error) {
 }
 func (s *brokerSpyRWC) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
+	s.mu.Unlock()
+	s.closeOnce.Do(func() { close(s.closedCh) })
 	return nil
 }
 func (s *brokerSpyRWC) writeCount() int {
@@ -195,7 +205,7 @@ func (s *brokerOwnedSpyRWC) isClosed() bool {
 }
 
 func TestClientRejectsOversizedRequestBeforeWrite(t *testing.T) {
-	stream := &brokerSpyRWC{}
+	stream := newBrokerSpyRWC()
 	proxy, err := NewClient(stream)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +226,7 @@ func TestClientRejectsOversizedRequestBeforeWrite(t *testing.T) {
 }
 
 func TestClientRejectsMalformedFUSEShapeBeforeWrite(t *testing.T) {
-	stream := &brokerSpyRWC{}
+	stream := newBrokerSpyRWC()
 	proxy, err := NewClient(stream)
 	if err != nil {
 		t.Fatal(err)
