@@ -238,8 +238,10 @@ bind mount of that workload root.
 With Dev Containers enabled, the same VM receives a second curated EROFS image
 and writable layer. A separate long-lived IDE base container mounts those
 devices; SSH sessions bind-mount the IDE root and receive the nested-runtime
-OCI profile. Podman in that environment creates the containers described by
-`.devcontainer/devcontainer.json`. The workload root and IDE root are peer
+OCI profile. The VS Code Dev Containers extension reads
+`.devcontainer/devcontainer.json` and drives Podman through the curated
+Docker-compatible CLI to build and start the inner container. The workload
+root and IDE root are peer
 `crun` containers—enabling the profile never replaces `-image` and does not
 require Podman in the workload.
 
