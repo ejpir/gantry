@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +30,10 @@ import (
 
 // realRuntime is a var so tests can point supervise at a helper process.
 var realRuntime = "/sbin/crun.runsc"
+
+// hangDumpDelay is a var so the timeout path can be covered without making
+// tests wait for the production diagnostic interval.
+var hangDumpDelay = 25 * time.Second
 
 const runtimeStdioPassthroughMarker = "io.gantry.runtime-stdio-passthrough"
 
@@ -323,13 +326,13 @@ func supervise(args []string, debug bool, runtimeStdio bool) int {
 			}
 		}
 	}()
-	// a hung runsc (deadlock waiting on gofer/sandbox sync) is otherwise
-	// invisible: after 25s, SIGQUIT the child AND every runsc-sandbox
-	// grandchild found via /proc (their Go runtime dumps all goroutine
-	// stacks to stderr; the sandbox's stderr is /dev/null, which this
-	// shim pointed at /dev/console) - then dump our captured tail.
-	// Debug mode only, and never for `run`: a healthy one-shot container
-	// outlives 25s and must not be SIGQUIT'd.
+	// A hung runsc (deadlock waiting on gofer/sandbox sync) is otherwise
+	// invisible. In debug mode, SIGQUIT only the direct runtime child after
+	// the diagnostic interval so its Go runtime dumps all goroutine stacks.
+	// Never scan the guest-global process table: other runsc sessions share
+	// the VM PID namespace and must not be disrupted by this invocation.
+	// Do not arm the timer for `run`, where a healthy one-shot container may
+	// legitimately outlive the interval.
 	isRun := false
 	for _, a := range args[1:] {
 		if a == "run" {
@@ -339,21 +342,16 @@ func supervise(args []string, debug bool, runtimeStdio bool) int {
 	}
 	var timed *time.Timer
 	if debug && !isRun {
-		timed = time.AfterFunc(25*time.Second, func() {
+		timed = time.AfterFunc(hangDumpDelay, func() {
 			if c, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
-				for _, pid := range findRunsc() {
-					// /proc FIRST: a pre-runtime child dies silently on
-					// SIGQUIT, taking the evidence with it
-					dumpProcState(c, pid)
+				if cmd.Process != nil {
+					dumpProcState(c, cmd.Process.Pid)
 				}
-				_, _ = fmt.Fprintf(c, "\ncrunshim: runsc still running after 25s, sent SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", stdioTail(stdio))
+				_, _ = fmt.Fprintf(c, "\ncrunshim: runsc still running after %s, sent direct child SIGQUIT\n----- runsc output tail -----\n%s\n----- end -----\n", hangDumpDelay, stdioTail(stdio))
 				_ = c.Close()
 			}
 			if cmd.Process != nil {
 				_ = cmd.Process.Signal(syscall.SIGQUIT)
-			}
-			for _, pid := range findRunsc() {
-				_ = syscall.Kill(pid, syscall.SIGQUIT)
 			}
 		})
 		defer timed.Stop()
@@ -473,32 +471,6 @@ func fixDev(debug bool) {
 			fmt.Fprintf(os.Stderr, "crunshim: /dev/null -> /dev/console: %v\n", err)
 		}
 	}
-}
-
-// findRunsc returns PIDs of processes whose cmdline contains
-// "runsc-sandbox" or "runsc-gofer" (the re-exec'd grandchildren, which
-// are not signal-reachable through our direct child's process group).
-func findRunsc() []int {
-	var pids []int
-	ents, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil
-	}
-	for _, e := range ents {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid == os.Getpid() {
-			continue
-		}
-		cl, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
-		if err != nil {
-			continue
-		}
-		s := string(cl)
-		if strings.Contains(s, "runsc-sandbox") || strings.Contains(s, "runsc-gofer") {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
 }
 
 // dumpProcState writes a hung process's kernel-side state to w: what

@@ -34,6 +34,11 @@ const (
 	ociImageConfigMediaType   = "application/vnd.oci.image.config.v1+json"
 	ociLayerGzipMediaType     = "application/vnd.oci.image.layer.v1.tar+gzip"
 	ociRefNameAnnotation      = "org.opencontainers.image.ref.name"
+
+	// Managed writable layers cannot exceed 64 GiB. Apply the same absolute
+	// ceiling to caller-provided layers so sparse inode metadata cannot turn a
+	// small ext4 image into unbounded host work during export.
+	maxWritableLayerExportBytes = int64(64 << 30)
 )
 
 // ExportOptions describes one stopped sandbox filesystem. Base is either a
@@ -613,11 +618,37 @@ func writeExt4UpperLayer(writer *tar.Writer, layer *os.File) error {
 	if _, err := filesystem.Stat("upper"); err != nil {
 		return fmt.Errorf("writable layer has no /upper directory: %w", err)
 	}
+	budget := newWritableLayerExportBudget(info.Size())
 	hardlinks := map[uint32]string{}
-	return walkExt4Upper(writer, filesystem, fileReader, "upper", "", hardlinks)
+	return walkExt4Upper(writer, filesystem, fileReader, budget, "upper", "", hardlinks)
 }
 
-func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, fileReader *ext4view.Reader, sourceDir, archiveDir string, hardlinks map[uint32]string) error {
+type logicalExportBudget struct {
+	limit int64
+	used  int64
+}
+
+func newWritableLayerExportBudget(deviceSize int64) *logicalExportBudget {
+	if deviceSize > maxWritableLayerExportBytes {
+		deviceSize = maxWritableLayerExportBytes
+	}
+	return &logicalExportBudget{limit: deviceSize}
+}
+
+func (budget *logicalExportBudget) reserve(name string, size int64) error {
+	if size < 0 {
+		return fmt.Errorf("writable-layer file %s has negative size %d", name, size)
+	}
+	remaining := budget.limit - budget.used
+	if size > remaining {
+		return fmt.Errorf("writable-layer logical data exceeds the safe export budget of %s at %s (%s requested, %s remaining); remove or truncate oversized sparse files",
+			gutil.HumanSize(budget.limit), name, gutil.HumanSize(size), gutil.HumanSize(remaining))
+	}
+	budget.used += size
+	return nil
+}
+
+func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, fileReader *ext4view.Reader, budget *logicalExportBudget, sourceDir, archiveDir string, hardlinks map[uint32]string) error {
 	attributes, err := filesystem.GetXattr(sourceDir)
 	if err != nil {
 		return err
@@ -677,17 +708,17 @@ func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, fileReader *
 			}
 			header.Linkname = target
 		}
-		if entryInfo.Mode().IsRegular() && stat.Nlink > 1 {
-			if target, seen := hardlinks[stat.Ino]; seen {
-				header.Typeflag = tar.TypeLink
-				header.Linkname = target
-				header.Size = 0
+		if entryInfo.Mode().IsRegular() {
+			hardlink, err := prepareExt4RegularEntry(header, sourcePath, archivePath, stat, budget, hardlinks)
+			if err != nil {
+				return err
+			}
+			if hardlink {
 				if err := writeTarEntry(writer, header, nil); err != nil {
 					return err
 				}
 				continue
 			}
-			hardlinks[stat.Ino] = archivePath
 		}
 		var data io.ReadCloser
 		if entryInfo.Mode().IsRegular() {
@@ -701,12 +732,28 @@ func walkExt4Upper(writer *tar.Writer, filesystem *ext4.FileSystem, fileReader *
 			return err
 		}
 		if entryInfo.IsDir() {
-			if err := walkExt4Upper(writer, filesystem, fileReader, sourcePath, archivePath, hardlinks); err != nil {
+			if err := walkExt4Upper(writer, filesystem, fileReader, budget, sourcePath, archivePath, hardlinks); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func prepareExt4RegularEntry(header *tar.Header, sourcePath, archivePath string, stat *ext4.StatT, budget *logicalExportBudget, hardlinks map[uint32]string) (bool, error) {
+	if stat.Nlink > 1 {
+		if target, seen := hardlinks[stat.Ino]; seen {
+			header.Typeflag = tar.TypeLink
+			header.Linkname = target
+			header.Size = 0
+			return true, nil
+		}
+		hardlinks[stat.Ino] = archivePath
+	}
+	if err := budget.reserve(sourcePath, header.Size); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func overlayWhiteoutName(archivePath string, mode fs.FileMode, major, minor uint32) (string, bool) {
@@ -798,6 +845,24 @@ func tarHeader(name string, info fs.FileInfo) *tar.Header {
 	return header
 }
 
+type noProgressReader struct {
+	reader     io.Reader
+	emptyReads int
+}
+
+func (reader *noProgressReader) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	if count == 0 && err == nil {
+		reader.emptyReads++
+		if reader.emptyReads >= 100 {
+			return 0, io.ErrNoProgress
+		}
+	} else if count > 0 {
+		reader.emptyReads = 0
+	}
+	return count, err
+}
+
 func writeTarEntry(writer *tar.Writer, header *tar.Header, data io.ReadCloser) error {
 	if data != nil {
 		defer func() { _ = data.Close() }()
@@ -808,7 +873,7 @@ func writeTarEntry(writer *tar.Writer, header *tar.Header, data io.ReadCloser) e
 	if data == nil || header.Size == 0 {
 		return nil
 	}
-	written, err := io.CopyN(writer, data, header.Size)
+	written, err := io.CopyN(writer, &noProgressReader{reader: data}, header.Size)
 	if err != nil {
 		return fmt.Errorf("write tar content %s: %w", header.Name, err)
 	}

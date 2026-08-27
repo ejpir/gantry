@@ -152,6 +152,82 @@ func TestExportOCIRefusesOverwriteUnlessForced(t *testing.T) {
 	}
 }
 
+func TestExportOCIRejectsSparseUpperBeyondLogicalBudget(t *testing.T) {
+	baseLayer := writeLayer(t, tarEntry{Name: "base", Type: tar.TypeReg, Body: "base"})
+	base := filepath.Join(t.TempDir(), "base.erofs")
+	if _, err := Build(base, []*os.File{baseLayer}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	const layerSize = int64(16 << 20)
+	rwLayerPath := createSparseExportUpper(t, layerSize, []sparseExportFile{{name: "oversized", size: layerSize + 1}})
+	rwLayer, err := os.Open(rwLayerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputDir := t.TempDir()
+	output := filepath.Join(outputDir, "out.oci.tar")
+	_, err = ExportOCI(ExportOptions{
+		Output: output, Reference: "example/sparse:latest", Architecture: "amd64", Base: base, RWLayer: rwLayer,
+	})
+	if err == nil || !strings.Contains(err.Error(), "safe export budget") {
+		t.Fatalf("sparse export error = %v, want logical-data budget rejection", err)
+	}
+	if _, statErr := os.Stat(output); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed export output stat = %v, want not found", statErr)
+	}
+	staging, globErr := filepath.Glob(filepath.Join(outputDir, ".gantry-export-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(staging) != 0 {
+		t.Fatalf("failed export left staging paths: %v", staging)
+	}
+}
+
+func TestExt4UpperLogicalBudgetIsCumulativeAndCapped(t *testing.T) {
+	if limit := newWritableLayerExportBudget(maxWritableLayerExportBytes + 1).limit; limit != maxWritableLayerExportBytes {
+		t.Fatalf("absolute writable-layer export budget = %d, want %d", limit, maxWritableLayerExportBytes)
+	}
+	budget := newWritableLayerExportBudget(10)
+	if err := budget.reserve("upper/first", 6); err != nil {
+		t.Fatal(err)
+	}
+	if err := budget.reserve("upper/second", 5); err == nil || !strings.Contains(err.Error(), "4B remaining") {
+		t.Fatalf("cumulative budget error = %v", err)
+	}
+}
+
+func TestExt4UpperHardLinksConsumeLogicalBudgetOnce(t *testing.T) {
+	const fileSize = int64(10 << 20)
+	budget := &logicalExportBudget{limit: 16 << 20}
+	hardlinks := map[uint32]string{}
+	stat := &ext4.StatT{Ino: 42, Nlink: 2}
+	original := &tar.Header{Typeflag: tar.TypeReg, Size: fileSize}
+	if linked, err := prepareExt4RegularEntry(original, "upper/original", "original", stat, budget, hardlinks); err != nil || linked {
+		t.Fatalf("first hard link = linked %v, error %v", linked, err)
+	}
+	copyHeader := &tar.Header{Typeflag: tar.TypeReg, Size: fileSize}
+	if linked, err := prepareExt4RegularEntry(copyHeader, "upper/copy", "copy", stat, budget, hardlinks); err != nil || !linked {
+		t.Fatalf("second hard link = linked %v, error %v", linked, err)
+	}
+	if budget.used != fileSize || copyHeader.Typeflag != tar.TypeLink || copyHeader.Linkname != "original" || copyHeader.Size != 0 {
+		t.Fatalf("hard-link budget/header = used %d, header %+v", budget.used, copyHeader)
+	}
+}
+
+type stalledExportReader struct{}
+
+func (stalledExportReader) Read([]byte) (int, error) { return 0, nil }
+func (stalledExportReader) Close() error             { return nil }
+
+func TestWriteTarEntryRejectsReaderWithoutProgress(t *testing.T) {
+	writer := tar.NewWriter(io.Discard)
+	err := writeTarEntry(writer, &tar.Header{Name: "stalled", Typeflag: tar.TypeReg, Mode: 0o600, Size: 1}, stalledExportReader{})
+	if err == nil || !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("stalled reader error = %v, want io.ErrNoProgress", err)
+	}
+}
+
 func TestExportProgressReportsLongRunningPhases(t *testing.T) {
 	var messages []string
 	logf := func(format string, args ...any) {
@@ -228,6 +304,54 @@ func TestOverlayAttributesRejectRedirectAndRemovePrivateMetadata(t *testing.T) {
 	if _, err := overlayAttributes(map[string][]byte{"trusted.overlay.redirect": []byte("old")}); err == nil {
 		t.Fatal("redirect metadata was accepted")
 	}
+}
+
+type sparseExportFile struct {
+	name string
+	size int64
+}
+
+func createSparseExportUpper(t *testing.T, layerSize int64, files []sparseExportFile) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sparse-upper.ext4")
+	storage, err := backendfile.CreateFromPath(path, layerSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filesystem, err := ext4.Create(storage, layerSize, 0, 512, &ext4.Params{VolumeName: "sparse-export-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{"upper", "work"} {
+		if err := filesystem.Mkdir(directory); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sparse := range files {
+		name := "upper/" + sparse.name
+		file, err := filesystem.OpenFile(name, os.O_CREATE|os.O_RDWR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := filesystem.Truncate(name, sparse.size); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := filesystem.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := storage.Sys(); err == nil {
+		if err := file.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := storage.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func createExportUpper(t *testing.T) string {
