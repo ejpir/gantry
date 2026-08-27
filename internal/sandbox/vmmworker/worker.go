@@ -44,6 +44,7 @@ type vmmWorker struct {
 	bridgeE     chan error
 	share       net.Conn // fd 6 peer: supervisor side of the FUSE relay
 	shareE      chan error
+	diskE       chan error
 	lifecycle   *worker.Lifecycle
 	waitMu      sync.Mutex // protects lazy lifecycle-context initialization
 	waitCtx     context.Context
@@ -169,6 +170,52 @@ func (w *vmmWorker) startShareBroker(hub *sharefs.Hub) error {
 	return nil
 }
 
+type monitoredDiskRelay interface {
+	Done() <-chan struct{}
+	Err() error
+	ExpectedClose() bool
+}
+
+func (w *vmmWorker) monitorDiskRelay(relay monitoredDiskRelay, index int) {
+	<-relay.Done()
+	if relay.ExpectedClose() {
+		return
+	}
+	// Process exit closes the worker peer just before Child revokes relay
+	// capabilities and publishes Done. Give that ordered teardown a brief
+	// window so it is not mistaken for an independent protocol failure.
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-w.lifecycle.Stopping():
+		return
+	case <-w.Done():
+		return
+	case <-timer.C:
+	}
+	if relay.ExpectedClose() {
+		return
+	}
+	select {
+	case <-w.lifecycle.Stopping():
+		return
+	case <-w.Done():
+		return
+	default:
+	}
+	err := relay.Err()
+	if err == nil {
+		err = fmt.Errorf("writable disk broker %d closed unexpectedly", index)
+	} else {
+		err = fmt.Errorf("writable disk broker %d: %w", index, err)
+	}
+	select {
+	case w.diskE <- err:
+	default:
+	}
+	_ = w.Close()
+}
+
 func (w *vmmWorker) monitorShareServe(serve func() error, label string, closeImmediately bool) {
 	err := serve()
 	select {
@@ -210,6 +257,11 @@ func (w *vmmWorker) Wait() error {
 	var out vmmworkerapi.WaitResponse
 	if err := w.client.CallContext(ctx, "vm.wait", nil, &out); err != nil {
 		if errors.Is(err, context.Canceled) {
+			select {
+			case diskErr := <-w.diskE:
+				return diskErr
+			default:
+			}
 			// An unexpected share-relay failure initiates Close. Prefer its
 			// actionable cause over the lifecycle cancellation it triggered.
 			select {
@@ -270,6 +322,17 @@ func (w *vmmWorker) Close() error {
 			default:
 			}
 		}
+		if w.diskE != nil {
+			for {
+				select {
+				case err := <-w.diskE:
+					shutdownErr = errors.Join(shutdownErr, err)
+				default:
+					goto diskErrorsDrained
+				}
+			}
+		}
+	diskErrorsDrained:
 		if w.bridge != nil {
 			_ = w.bridge.Close()
 		}

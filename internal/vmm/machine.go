@@ -450,8 +450,8 @@ type Opts struct {
 	// and boot), and a confined VMM worker can boot without any path
 	// resolution rights at all. Prepare consumes every descriptor, NetConn,
 	// and non-nil Filesystem Owner on entry, even when preparation fails.
-	// Kernel/Initrd are loaded and closed; disks, KVM, NetConn, and owned
-	// filesystems remain owned by the Machine until Close.
+	// Kernel/Initrd are loaded and closed; disks, block backends, KVM, NetConn,
+	// and owned filesystems remain owned by the Machine until Close.
 	Kernel *os.File
 	Initrd *os.File // optional when Disks are set
 	Rootfs *os.File // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
@@ -475,8 +475,9 @@ type Opts struct {
 	WHPXMailbox      *os.File
 	WHPXRequestEvent *os.File
 	WHPXReplyEvents  []*os.File
-	DisksRO          []*os.File // extra virtio-blk images attached READ-ONLY (container images: vdb...)
-	Disks            []*os.File // extra virtio-blk images, writable (rwlayers, scratch disks)
+	DisksRO          []*os.File          // extra virtio-blk images attached READ-ONLY (container images: vdb...)
+	Disks            []*os.File          // local writable virtio-blk images (monolithic VMMs)
+	DiskBackends     []virtio.BlkBackend // bounded writable capabilities (split VMM brokers)
 	// DisksPrelocked means a trusted supervisor process owns the exclusive
 	// locks for Disks. Split workers use this so compromised children cannot
 	// unlock an rwlayer through their inherited disk descriptors.

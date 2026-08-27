@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
 	"github.com/ejpir/gantry/internal/workerproto"
@@ -59,22 +58,35 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	closeAfterAck = append(closeAfterAck, assets.DisksRO...)
 
-	// Each writable disk is locked on a private description the child never
-	// receives. These role capabilities transfer to Child only after Launch
-	// succeeds and are revoked by its process watcher.
-	var diskLocks []*os.File
-	keepDiskLocks := false
+	// Keep writable host files and their private locks in the trusted
+	// supervisor. Each inherited slot is a fixed-size disk-broker stream, not
+	// a file descriptor, so differently sized workload and IDE layers cannot
+	// be grown by a compromised VMM worker.
+	var (
+		diskLocks     []*os.File
+		diskRelays    []*diskRelay
+		diskPeerConns []net.Conn
+		diskPeerFiles []*os.File
+	)
+	keepDiskCapabilities := false
 	defer func() {
-		if !keepDiskLocks {
+		for _, conn := range diskPeerConns {
+			_ = conn.Close()
+		}
+		worker.CloseFiles(diskPeerFiles)
+		if !keepDiskCapabilities {
+			for _, relay := range diskRelays {
+				_ = relay.Close()
+			}
 			worker.CloseFiles(diskLocks)
 		}
 	}()
-	var maxWritableFileSize uint64
+	cfg.WritableDiskSizes = make([]uint64, 0, len(assets.Disks))
 	for index, disk := range assets.Disks {
 		if disk == nil {
 			return nil, fmt.Errorf("descriptor table: writable disk %d is nil", index)
 		}
-		lock, err := gutil.TryLockPrivate(disk)
+		lock, err := lockDiskForRelay(disk)
 		if err != nil {
 			return nil, fmt.Errorf("lock writable disk %s: %w", disk.Name(), err)
 		}
@@ -86,15 +98,24 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		if info.Size() <= 0 {
 			return nil, fmt.Errorf("writable disk %s has invalid size %d", disk.Name(), info.Size())
 		}
-		if size := uint64(info.Size()); size > maxWritableFileSize {
-			maxWritableFileSize = size
+		size := uint64(info.Size())
+		relay, peer, err := newDiskRelay(lock, size)
+		if err != nil {
+			return nil, err
 		}
+		diskRelays = append(diskRelays, relay)
+		diskPeerConns = append(diskPeerConns, peer)
+		peerFile, err := worker.ConnFile(peer)
+		if err != nil {
+			return nil, fmt.Errorf("writable disk %d broker descriptor: %w", index, err)
+		}
+		diskPeerFiles = append(diskPeerFiles, peerFile)
+		assetFiles = append(assetFiles, peerFile)
+		cfg.WritableDiskSizes = append(cfg.WritableDiskSizes, size)
 	}
 	if len(assets.Disks) != 0 {
-		cfg.DisksPrelocked = true
-		cfg.MaxWritableFileSize = maxWritableFileSize
+		cfg.DisksBrokered = true
 	}
-	assetFiles = append(assetFiles, assets.Disks...)
 	closeAfterAck = append(closeAfterAck, assets.Disks...)
 
 	var vhostPipes []*os.File
@@ -133,9 +154,13 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	for index, file := range childFiles {
 		inherited = append(inherited, worker.InheritedFile{Slot: 7 + index, File: file})
 	}
-	exitClosers := make([]io.Closer, len(diskLocks))
-	for index, lock := range diskLocks {
-		exitClosers[index] = lock
+	exitClosers := make([]io.Closer, 0, len(diskLocks)+len(diskRelays))
+	// Stop and sync every broker before releasing its exclusive disk lock.
+	for _, relay := range diskRelays {
+		exitClosers = append(exitClosers, relay)
+	}
+	for _, lock := range diskLocks {
+		exitClosers = append(exitClosers, lock)
 	}
 	logPath := ""
 	if dir != "" {
@@ -155,7 +180,7 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	if err != nil {
 		return nil, err
 	}
-	keepDiskLocks = true // Child now revokes them after every exit path.
+	keepDiskCapabilities = true // Child now revokes locks and relays on every exit path.
 
 	ctrlSup := child.Channels["control"]
 	bridgeSup := child.Channels["bridge"]
@@ -202,8 +227,12 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		bridge:     bridgeSup,
 		bridgeE:    make(chan error, 1),
 		share:      shareSup,
+		diskE:      make(chan error, max(1, len(diskRelays))),
 		lifecycle:  child.Lifecycle,
 		confReport: ack.Confinement,
+	}
+	for index, relay := range diskRelays {
+		go w.monitorDiskRelay(relay, index)
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{

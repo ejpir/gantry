@@ -103,6 +103,20 @@ func TestIRQWakeUnknownRouteUsesCPU0Only(t *testing.T) {
 	}
 }
 
+func TestHVFUnknownExitRetryIsBounded(t *testing.T) {
+	for attempt := 1; attempt <= hvfUnknownRetryLimit; attempt++ {
+		delay, retry := hvfUnknownRetryDelay(attempt)
+		if !retry || delay != time.Duration(attempt)*time.Millisecond {
+			t.Fatalf("attempt %d = delay %s retry %v", attempt, delay, retry)
+		}
+	}
+	for _, attempt := range []int{0, hvfUnknownRetryLimit + 1} {
+		if delay, retry := hvfUnknownRetryDelay(attempt); retry || delay != 0 {
+			t.Fatalf("out-of-range attempt %d = delay %s retry %v", attempt, delay, retry)
+		}
+	}
+}
+
 func TestRunStatsAggregatesVCPUs(t *testing.T) {
 	b := &hvfBackend{}
 	for range 2 {

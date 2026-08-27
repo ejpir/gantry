@@ -150,13 +150,29 @@ func loadWindowsAssets(config Config, share, fdChannel net.Conn) (Assets, error)
 		}
 		assets.DisksRO = append(assets.DisksRO, file)
 	}
-	assets.Disks = make([]*os.File, 0, config.NDisks)
-	for index := 0; index < config.NDisks; index++ {
-		file := next(fmt.Sprintf("disk-%d", index))
-		if file == nil {
-			return assets, fmt.Errorf("disk-%d: missing inherited handle", index)
+	if config.DisksBrokered {
+		assets.DiskConns = make([]net.Conn, 0, config.NDisks)
+		for index := 0; index < config.NDisks; index++ {
+			file := next(fmt.Sprintf("disk-broker-%d", index))
+			if file == nil {
+				return assets, fmt.Errorf("disk-broker-%d: missing inherited handle", index)
+			}
+			conn, err := net.FileConn(file)
+			_ = file.Close()
+			if err != nil {
+				return assets, fmt.Errorf("disk-broker-%d: %w", index, err)
+			}
+			assets.DiskConns = append(assets.DiskConns, conn)
 		}
-		assets.Disks = append(assets.Disks, file)
+	} else {
+		assets.Disks = make([]*os.File, 0, config.NDisks)
+		for index := 0; index < config.NDisks; index++ {
+			file := next(fmt.Sprintf("disk-%d", index))
+			if file == nil {
+				return assets, fmt.Errorf("disk-%d: missing inherited handle", index)
+			}
+			assets.Disks = append(assets.Disks, file)
+		}
 	}
 	if config.HasKVM || (config.HasSharedRAM && !config.WHPXBroker) {
 		return assets, fmt.Errorf("unexpected shared RAM or KVM handle in WHPX worker")

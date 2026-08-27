@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+
+	"github.com/ejpir/gantry/internal/virtio"
 )
 
 const (
@@ -146,6 +148,7 @@ func (m *Machine) releaseRAM() error {
 // borrowed; descriptors and non-nil Filesystem owners are consumed.
 type prepareInputs struct {
 	files            map[*os.File]string
+	diskBackends     map[virtio.BlkBackend]string
 	filesystemOwners []ownedFilesystem
 	netConn          net.Conn
 }
@@ -158,6 +161,7 @@ type ownedFilesystem struct {
 func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 	in := &prepareInputs{
 		files:            make(map[*os.File]string, 4+len(o.DisksRO)+len(o.Disks)),
+		diskBackends:     make(map[virtio.BlkBackend]string, len(o.DiskBackends)),
 		filesystemOwners: make([]ownedFilesystem, len(o.Filesystems)),
 		netConn:          o.NetConn,
 	}
@@ -192,6 +196,22 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 	for i, f := range o.Disks {
 		claim(f, fmt.Sprintf("writable disk %d", i), true)
 	}
+	for i, backend := range o.DiskBackends {
+		label := fmt.Sprintf("writable disk backend %d", i)
+		if backend == nil {
+			errs = append(errs, fmt.Errorf("vmm: %s is required", label))
+			continue
+		}
+		if !reflect.TypeOf(backend).Comparable() {
+			errs = append(errs, fmt.Errorf("vmm: %s has non-comparable type %T", label, backend))
+			continue
+		}
+		if previous, exists := in.diskBackends[backend]; exists {
+			errs = append(errs, fmt.Errorf("vmm: %s and %s reuse the same backend", previous, label))
+			continue
+		}
+		in.diskBackends[backend] = label
+	}
 	seenOwners := make(map[io.Closer]int, len(o.Filesystems))
 	for i, filesystem := range o.Filesystems {
 		owner := filesystem.Owner
@@ -219,6 +239,13 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 		in.filesystemOwners[i] = ownedFilesystem{tag: filesystem.Tag, closer: owner}
 	}
 	return in, errors.Join(errs...)
+}
+
+func (in *prepareInputs) takeDiskBackend(backend virtio.BlkBackend) virtio.BlkBackend {
+	if backend != nil {
+		delete(in.diskBackends, backend)
+	}
+	return backend
 }
 
 func (in *prepareInputs) takeFile(f *os.File) *os.File {
@@ -260,6 +287,12 @@ func (in *prepareInputs) Close() error {
 			errs = append(errs, fmt.Errorf("close %s: %w", label, err))
 		}
 		delete(in.files, f)
+	}
+	for backend, label := range in.diskBackends {
+		if err := backend.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close %s: %w", label, err))
+		}
+		delete(in.diskBackends, backend)
 	}
 	for index := range in.filesystemOwners {
 		filesystem := &in.filesystemOwners[index]

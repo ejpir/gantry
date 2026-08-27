@@ -54,10 +54,35 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	}
 	assetFiles = append(assetFiles, assets.DisksRO...)
 	closeAfterAck = append(closeAfterAck, assets.DisksRO...)
+	var (
+		diskLocks     []*os.File
+		diskRelays    []*diskRelay
+		diskPeerConns []net.Conn
+		diskPeerFiles []*os.File
+	)
+	keepDiskCapabilities := false
+	defer func() {
+		for _, conn := range diskPeerConns {
+			_ = conn.Close()
+		}
+		worker.CloseFiles(diskPeerFiles)
+		if !keepDiskCapabilities {
+			for _, relay := range diskRelays {
+				_ = relay.Close()
+			}
+			worker.CloseFiles(diskLocks)
+		}
+	}()
+	cfg.WritableDiskSizes = make([]uint64, 0, len(assets.Disks))
 	for index, disk := range assets.Disks {
 		if disk == nil {
 			return nil, fmt.Errorf("handle table: writable disk %d is nil", index)
 		}
+		lock, err := lockDiskForRelay(disk)
+		if err != nil {
+			return nil, fmt.Errorf("lock writable disk %s: %w", disk.Name(), err)
+		}
+		diskLocks = append(diskLocks, lock)
 		info, err := disk.Stat()
 		if err != nil {
 			return nil, fmt.Errorf("stat writable disk %s: %w", disk.Name(), err)
@@ -65,8 +90,24 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		if info.Size() <= 0 {
 			return nil, fmt.Errorf("writable disk %s has invalid size %d", disk.Name(), info.Size())
 		}
+		size := uint64(info.Size())
+		relay, peer, err := newDiskRelay(lock, size)
+		if err != nil {
+			return nil, err
+		}
+		diskRelays = append(diskRelays, relay)
+		diskPeerConns = append(diskPeerConns, peer)
+		peerFile, err := worker.ConnFile(peer)
+		if err != nil {
+			return nil, fmt.Errorf("writable disk %d broker handle: %w", index, err)
+		}
+		diskPeerFiles = append(diskPeerFiles, peerFile)
+		assetFiles = append(assetFiles, peerFile)
+		cfg.WritableDiskSizes = append(cfg.WritableDiskSizes, size)
 	}
-	assetFiles = append(assetFiles, assets.Disks...)
+	if len(assets.Disks) != 0 {
+		cfg.DisksBrokered = true
+	}
 	closeAfterAck = append(closeAfterAck, assets.Disks...)
 	if cfg.VhostShares || assets.KVM != nil {
 		return nil, fmt.Errorf("handle table: Unix vhost/KVM assets are unavailable with WHPX")
@@ -133,6 +174,13 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 	if dir != "" {
 		logPath = filepath.Join(dir, "worker-vmm.log")
 	}
+	exitClosers := make([]io.Closer, 0, len(diskRelays)+len(diskLocks))
+	for _, relay := range diskRelays {
+		exitClosers = append(exitClosers, relay)
+	}
+	for _, lock := range diskLocks {
+		exitClosers = append(exitClosers, lock)
+	}
 	child, err := worker.Launch(worker.LaunchSpec{
 		Role:             workerproto.RoleVMM,
 		EntryPoint:       "_vmm-worker",
@@ -141,6 +189,7 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		InheritedFiles:   inherited,
 		DiagnosticPath:   logPath,
 		Confinement:      cfg.Confinement,
+		ExitClosers:      exitClosers,
 		ConfigureProcess: vmmWorkerSpawnHook,
 	})
 	if err != nil {
@@ -149,6 +198,7 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		}
 		return nil, err
 	}
+	keepDiskCapabilities = true
 	ctrlSup := child.Channels["control"]
 	bridgeSup := child.Channels["bridge"]
 	fdSup := workerproto.ForProcess(child.Channels["fd"], uint32(child.Process.Pid))
@@ -198,7 +248,11 @@ func spawnVMMWorker(cfg vmmworkerapi.Config, assets vmmworkerapi.Assets, dir str
 		child: child, brokerChild: brokerChild, proc: child.Process,
 		client: workerproto.NewClient(ctrlSup), fdChan: fdSup,
 		bridge: bridgeSup, bridgeE: make(chan error, 1), share: shareSup,
+		diskE:     make(chan error, max(1, len(diskRelays))),
 		lifecycle: child.Lifecycle, confReport: ack.Confinement,
+	}
+	for index, relay := range diskRelays {
+		go w.monitorDiskRelay(relay, index)
 	}
 	go func() {
 		w.bridgeE <- workerproto.ServeRequests(bridgeSup, map[string]workerproto.Handler{

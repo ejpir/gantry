@@ -74,6 +74,7 @@ const (
 	hvExitReasonCanceled        = 0
 	hvExitReasonException       = 1
 	hvExitReasonVtimerActivated = 2
+	hvExitReasonUnknown         = 3
 
 	hvInterruptTypeIRQ = 0
 	hvInterruptTypeFIQ = 1

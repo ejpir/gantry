@@ -39,6 +39,8 @@ func TestConfigRejectsUnboundedDescriptorTables(t *testing.T) {
 		{NDisks: -1},
 		{NDisksRO: maxInheritedDisks, NDisks: 1},
 		{NDisks: 2, DisksPrelocked: true, MaxWritableFileSize: 1},
+		{DisksBrokered: true},
+		{NDisks: 2, DisksBrokered: true, WritableDiskSizes: []uint64{1}},
 		{NoNetwork: true, Policy: []byte(`{}`)},
 		{NoShares: true, VhostShares: true, HasSharedRAM: true},
 	} {
@@ -48,6 +50,9 @@ func TestConfigRejectsUnboundedDescriptorTables(t *testing.T) {
 	}
 	if err := (Config{NDisksRO: maxInheritedDisks - 1, NDisks: 1, DisksPrelocked: true, MaxWritableFileSize: 1}).validate(); err != nil {
 		t.Fatalf("valid descriptor table: %v", err)
+	}
+	if err := (Config{NDisks: 2, DisksBrokered: true, WritableDiskSizes: []uint64{1, 2}}).validate(); err != nil {
+		t.Fatalf("valid brokered descriptor table: %v", err)
 	}
 }
 

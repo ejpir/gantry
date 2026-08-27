@@ -149,12 +149,14 @@ map one anonymous RAM section and exchange validated exits through fixed
 shared-memory mailboxes/events; low-volume control uses authenticated pipes.
 The broker receives no disks, share roots, guest console, or network handles.
 
-The supervisor passes pre-opened files and authenticated channels, so a
-confined worker does not need general host-path access. On Linux its Landlock
-policy therefore allows no new path access. Shares remain
-in the supervisor and cross a path-neutral broker or vhost relay, so live
-share add/remove does not require changing the worker's Linux Landlock or
-macOS Seatbelt profile.
+The supervisor passes pre-opened read-only assets and authenticated channels,
+so a confined worker does not need general host-path access. Writable disk
+files and their exclusive locks remain in the supervisor; one fixed-size block
+broker per disk mediates workload and IDE layer I/O without allowing the
+worker to grow either host file. On Linux the worker's Landlock policy therefore
+allows no new path access. Shares likewise remain in the supervisor and cross
+a path-neutral broker or vhost relay, so live share add/remove does not require
+changing the worker's Linux Landlock or macOS Seatbelt profile.
 
 The VMM uses:
 

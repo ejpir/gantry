@@ -27,21 +27,40 @@ func (config Config) validate() error {
 	if config.NDisksRO > maxInheritedDisks || config.NDisks > maxInheritedDisks-config.NDisksRO {
 		return fmt.Errorf("disk count exceeds limit %d", maxInheritedDisks)
 	}
-	// RLIMIT_FSIZE is process-wide. Supporting multiple differently sized
-	// writable files would let the worker grow a smaller disk up to the
-	// largest disk's ceiling. Persistent sandboxes have one writable layer;
-	// reject wider tables until each write is mediated by an fd-specific cap.
-	if config.NDisks > 1 {
-		return fmt.Errorf("split VMM supports at most one writable disk")
-	}
-	if runtime.GOOS != "windows" && config.NDisks > 0 && (!config.DisksPrelocked || config.MaxWritableFileSize == 0) {
-		return fmt.Errorf("writable disks require a supervisor lock and file-size bound")
-	}
-	if config.NDisks == 0 && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
-		return fmt.Errorf("writable-disk lock metadata without writable disks")
-	}
-	if runtime.GOOS == "windows" && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
-		return fmt.Errorf("windows writable disks must be locked by the worker process")
+	if config.DisksBrokered {
+		if config.NDisks == 0 {
+			return fmt.Errorf("brokered writable disks require at least one disk")
+		}
+		if len(config.WritableDiskSizes) != config.NDisks {
+			return fmt.Errorf("brokered writable disk sizes %d do not match disk count %d", len(config.WritableDiskSizes), config.NDisks)
+		}
+		for index, size := range config.WritableDiskSizes {
+			if size == 0 || size > uint64(^uint64(0)>>1) {
+				return fmt.Errorf("brokered writable disk %d has invalid size %d", index, size)
+			}
+		}
+		if config.DisksPrelocked || config.MaxWritableFileSize != 0 {
+			return fmt.Errorf("brokered writable disks must not expose file lock metadata")
+		}
+	} else {
+		// RLIMIT_FSIZE is process-wide. Multiple direct writable descriptors
+		// with different sizes cannot be bounded safely, so Unix split workers
+		// use per-disk brokers and Windows retains the single-disk limit.
+		if config.NDisks > 1 {
+			return fmt.Errorf("direct split VMM supports at most one writable disk")
+		}
+		if len(config.WritableDiskSizes) != 0 {
+			return fmt.Errorf("writable disk sizes supplied without brokers")
+		}
+		if runtime.GOOS != "windows" && config.NDisks > 0 && (!config.DisksPrelocked || config.MaxWritableFileSize == 0) {
+			return fmt.Errorf("writable disks require a supervisor lock and file-size bound")
+		}
+		if config.NDisks == 0 && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
+			return fmt.Errorf("writable-disk lock metadata without writable disks")
+		}
+		if runtime.GOOS == "windows" && (config.DisksPrelocked || config.MaxWritableFileSize != 0) {
+			return fmt.Errorf("windows writable disks must be locked by the worker process")
+		}
 	}
 	if config.NoNetwork && len(config.Policy) != 0 {
 		return fmt.Errorf("network policy supplied without a network device")
@@ -72,6 +91,11 @@ func (assets Assets) close() {
 	for _, file := range assets.Disks {
 		if file != nil {
 			_ = file.Close()
+		}
+	}
+	for _, conn := range assets.DiskConns {
+		if conn != nil {
+			_ = conn.Close()
 		}
 	}
 	for _, queue := range assets.VhostQueue {
