@@ -1205,7 +1205,8 @@ func operationProgressLine(line string) (string, bool) {
 		// "gantry image <verb>: " (no space before the colon), so the two
 		// never collide.
 		if index := strings.Index(line, "gantry image: "); index >= 0 {
-			return strings.TrimSpace(line[index+len("gantry image: "):]), true
+			progress := strings.TrimSpace(line[index+len("gantry image: "):])
+			return progress, progress != ""
 		}
 		return "", false
 	}

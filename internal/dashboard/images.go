@@ -500,8 +500,12 @@ func (m sandboxTUIModel) renderImagePruneDialog(theme tuiTheme, width int) strin
 			bytesTotal += row.Size
 		}
 	}
+	countLabel := fmt.Sprintf("%d unused images", count)
+	if count == 1 {
+		countLabel = "1 unused image"
+	}
 	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(
-		fmt.Sprintf("%d unused images  •  %s", count, formatBytes(uint64(maxInt(0, int(bytesTotal))))))
+		countLabel + "  •  " + formatBytes(uint64(maxInt(0, int(bytesTotal)))))
 	warning := lipgloss.NewStyle().Foreground(theme.secondary).Render("Images referenced by a sandbox are kept.")
 	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Remove every unreferenced image?")
 	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
