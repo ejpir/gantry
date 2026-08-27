@@ -60,6 +60,9 @@ func vmmOpts(c config.RunConfig, n *Network, vsockFwd string, envExtra bool) (vm
 	if c.LayerSet != nil {
 		disksRO = c.LayerSet.DisksRO()
 	}
+	if c.DevContainers {
+		disksRO = append(disksRO, c.DevContainersImage)
+	}
 	for _, p := range disksRO {
 		if p == "" {
 			continue
@@ -70,10 +73,20 @@ func vmmOpts(c config.RunConfig, n *Network, vsockFwd string, envExtra bool) (vm
 		}
 		o.DisksRO = append(o.DisksRO, f)
 	}
-	if c.RW && c.RWLayer != "" {
-		f, err := os.OpenFile(c.RWLayer, os.O_RDWR, 0) // writable: /dev/vdc
+	for _, writable := range []struct {
+		enabled bool
+		path    string
+		label   string
+	}{
+		{enabled: c.RW && c.RWLayer != "", path: c.RWLayer, label: "workload rwlayer"},
+		{enabled: c.DevContainers, path: c.DevContainersRWLayer, label: "Dev Containers rwlayer"},
+	} {
+		if !writable.enabled {
+			continue
+		}
+		f, err := os.OpenFile(writable.path, os.O_RDWR, 0)
 		if err != nil {
-			return fail(fmt.Errorf("rwlayer %s: %w", c.RWLayer, err))
+			return fail(fmt.Errorf("%s %s: %w", writable.label, writable.path, err))
 		}
 		o.Disks = append(o.Disks, f)
 	}

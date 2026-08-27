@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -57,11 +59,15 @@ type Net struct {
 }
 
 // newUnixgramClientPath reserves a short, unique path and removes the
-// placeholder before the socket is bound. Keeping it under the system temp
-// directory avoids exceeding macOS's shorter AF_UNIX path limit when the peer
-// endpoint is nested under a long temporary directory.
-func newUnixgramClientPath() (string, error) {
-	f, err := os.CreateTemp("", "gantry-net-*.sock")
+// placeholder before the socket is bound. macOS uses its short system-temp
+// path to stay below the AF_UNIX limit. Windows keeps the client beside the
+// supervisor-owned peer endpoint rather than depending on account TEMP.
+func newUnixgramClientPath(endpoint string) (string, error) {
+	dir := ""
+	if runtime.GOOS == "windows" {
+		dir = filepath.Dir(endpoint)
+	}
+	f, err := os.CreateTemp(dir, "gantry-net-*.sock")
 	if err != nil {
 		return "", err
 	}
@@ -84,7 +90,7 @@ func NewNetUnixgram(endpoint string, mac [6]byte, vfkit bool) (*Net, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve network endpoint: %w", err)
 	}
-	localPath, err := newUnixgramClientPath()
+	localPath, err := newUnixgramClientPath(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("create local network socket path: %w", err)
 	}

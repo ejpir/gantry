@@ -73,7 +73,7 @@ Open the terminal dashboard:
 - Persistent sandboxes with configurable CPU, memory, disk, and runtime
 - `crun` by default, with optional in-VM gVisor (`-runtime runsc`)
 - Host shares, egress policy, proxy routing, traffic inspection, and ports
-- Local SSH and VS Code Dev Containers support
+- Local SSH and an optional in-VM IDE container for VS Code Dev Containers
 - In-memory secrets, OAuth custody, and a credential-injecting MCP gateway
 - Terminal dashboard and local HTTP/JSON manager API
 

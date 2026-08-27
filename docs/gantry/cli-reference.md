@@ -43,7 +43,7 @@ Common flags:
 | `-mcp-fs-user USER` | Run MCP local servers as this guest user (name, numeric UID from passwd, or explicit `UID:GID`; default `nobody`; root refused) |
 | `-mcp-remote SPEC` | Add a remote streamable-HTTP MCP server: `name=ID,url=URL[,auth=bearer:SECRET\|header:NAME:SECRET\|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET]`; repeatable |
 | `-ssh` | Enable the sandbox-local SSH protocol endpoint (off by default; no TCP listener) |
-| `-devcontainers` | Enable nested Podman/Dev Containers; uses development resource defaults unless overridden |
+| `-devcontainers` | Add the curated IDE peer container and nested Podman; preserves `-image` as the workload |
 | `-process-isolation MODE` | `auto`, `required`, or `off` |
 
 Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, `-layerset`, and
@@ -51,16 +51,15 @@ Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, `-layerset`, and
 
 ### `gantry configure`
 
-Persist settings on an existing sandbox and hot-apply SSH and Dev Containers
-to a running VM:
+Persist SSH, Dev Containers, and resource settings on an existing sandbox:
 
 ```text
 gantry configure NAME [--ssh[=BOOL]] [--devcontainers[=BOOL]]
                       [--mem MIB] [--cpus N] [--process-isolation MODE]
 ```
 
-Memory, CPU, and process-isolation changes apply on the next VM start. SSH and
-Dev Containers apply immediately to newly created sessions.
+SSH can apply immediately. Memory, CPU, process-isolation, and Dev Containers
+topology changes apply on the next VM start.
 
 ### `gantry exec`
 
@@ -149,7 +148,8 @@ gantry ssh setup [--remove]
 `gantry ssh` uses stock OpenSSH through the private per-sandbox socket. The
 hidden `ssh-proxy` and `ssh-known-hosts` commands are used by OpenSSH client
 configuration and should not normally be invoked directly. `-devcontainers`
-enables nested Podman inside the same sandbox VM and never exposes a host
+adds a curated IDE peer container with nested Podman inside the same sandbox
+VM; it preserves the workload selected by `-image` and never exposes a host
 container engine. See [SSH access](ssh-access.md).
 
 ## Images

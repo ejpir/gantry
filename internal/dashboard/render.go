@@ -1312,7 +1312,7 @@ func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
 	note := "Applied when the sandbox next starts."
 	if sandbox.State == tuiRunning {
-		note = "SSH and Dev Containers apply live; restart to apply allocation changes."
+		note = "SSH applies live; restart to apply Dev Containers or allocation changes."
 	}
 	noteLine := lipgloss.NewStyle().Foreground(theme.warning).Render(truncateText(note, width))
 	errorLine := ""

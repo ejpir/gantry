@@ -27,7 +27,7 @@ func TestWindowsVMMEnvironmentIsAnExplicitAllowlist(t *testing.T) {
 	t.Setenv("GANTRY_WHPX_PIC_NOPIT", "enabled")
 
 	want := []string{
-		`SystemRoot=C:\Windows`, `TEMP=C:\Temp`, "GANTRY_BOOT_PROFILE=1", "GANTRY_VHOST_STATS=1",
+		`SystemRoot=C:\Windows`, "GANTRY_BOOT_PROFILE=1", "GANTRY_VHOST_STATS=1",
 		"GANTRY_VIRTIO_MEM=1", "GANTRY_WHPX_PIC=1", "GANTRY_WHPX_PIC_NOPIT=1",
 	}
 	if got := vmmWorkerEnv(); !slices.Equal(got, want) {

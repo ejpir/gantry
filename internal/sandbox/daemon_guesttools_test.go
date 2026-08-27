@@ -27,7 +27,7 @@ func TestSSHWaitsForAsynchronousGuestToolsDelivery(t *testing.T) {
 	started := make(chan struct{})
 	go func() {
 		close(started)
-		result <- br.waitForGuestTools(context.Background())
+		result <- br.waitForGuestTools(context.Background(), false)
 	}()
 	<-started
 	select {
@@ -37,8 +37,8 @@ func TestSSHWaitsForAsynchronousGuestToolsDelivery(t *testing.T) {
 	}
 
 	br.guestToolsReady.Store(true)
-	br.finishGuestToolsDelivery()
-	br.finishGuestToolsDelivery() // completion is idempotent across shutdown paths
+	br.finishGuestToolsDelivery(false)
+	br.finishGuestToolsDelivery(false) // completion is idempotent across shutdown paths
 	if ready := <-result; !ready {
 		t.Fatal("SSH wait did not observe delivered guest tools")
 	}
@@ -46,16 +46,73 @@ func TestSSHWaitsForAsynchronousGuestToolsDelivery(t *testing.T) {
 
 func TestSSHGuestToolsWaitReportsFailureAndCancellation(t *testing.T) {
 	failed := &broker{guestToolsDone: make(chan struct{})}
-	failed.finishGuestToolsDelivery()
-	if failed.waitForGuestTools(context.Background()) {
+	failed.finishGuestToolsDelivery(false)
+	if failed.waitForGuestTools(context.Background(), false) {
 		t.Fatal("failed guest-tools delivery reported ready")
 	}
 
 	pending := &broker{guestToolsDone: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if pending.waitForGuestTools(ctx) {
+	if pending.waitForGuestTools(ctx, false) {
 		t.Fatal("canceled SSH request reported guest tools ready")
+	}
+}
+
+func TestMCPAndDevContainersSplitSynchronousAndAsyncHelperDelivery(t *testing.T) {
+	plan := planGuestToolsDelivery(config.RunConfig{SSH: true, DevContainers: true, MCP: true})
+	if !plan.workloadRequired || plan.workloadAsync || !plan.ideAsync {
+		t.Fatalf("MCP+IDE helper plan = %+v", plan)
+	}
+	sshOnly := planGuestToolsDelivery(config.RunConfig{SSH: true})
+	if sshOnly.workloadRequired || !sshOnly.workloadAsync || sshOnly.ideAsync {
+		t.Fatalf("SSH-only helper plan = %+v", sshOnly)
+	}
+}
+
+func TestGuestToolsReadinessIsIndependentPerOCIRoot(t *testing.T) {
+	br := &broker{guestToolsDone: make(chan struct{}), ideToolsDone: make(chan struct{})}
+	br.guestToolsReady.Store(true)
+	br.finishGuestToolsDelivery(false)
+	if !br.waitForGuestTools(context.Background(), false) {
+		t.Fatal("workload helper did not report ready")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if br.waitForGuestTools(ctx, true) {
+		t.Fatal("IDE helper inherited workload readiness")
+	}
+	br.ideToolsReady.Store(true)
+	br.finishGuestToolsDelivery(true)
+	if !br.waitForGuestTools(context.Background(), true) {
+		t.Fatal("IDE helper did not report ready")
+	}
+}
+
+func TestGuestToolsTargetsSeparateWorkloadAndIDE(t *testing.T) {
+	ideOnly := guestToolsTargets(config.RunConfig{SSH: true, DevContainers: true})
+	if len(ideOnly) != 1 || !ideOnly[0].ide {
+		t.Fatalf("IDE-only helper targets = %+v", ideOnly)
+	}
+	both := guestToolsTargets(config.RunConfig{
+		SSH: true, DevContainers: true, MCP: true,
+	})
+	if len(both) != 2 || both[0].ide || !both[1].ide {
+		t.Fatalf("workload+IDE helper targets = %+v", both)
+	}
+	workloadOnly := guestToolsTargets(config.RunConfig{SSH: true})
+	if len(workloadOnly) != 1 || workloadOnly[0].ide {
+		t.Fatalf("workload helper targets = %+v", workloadOnly)
+	}
+}
+
+func TestGuestToolsStageBaseAvoidsWindowsTemp(t *testing.T) {
+	const sandboxDir = `C:\Users\tester\.gantry\sandboxes\dev`
+	if got := guestToolsStageBase("windows", sandboxDir); got != sandboxDir {
+		t.Fatalf("Windows stage base = %q, want sandbox state %q", got, sandboxDir)
+	}
+	if got := guestToolsStageBase("linux", sandboxDir); got != "" {
+		t.Fatalf("Linux stage base = %q, want OS temporary directory", got)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -119,32 +120,62 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 }
 
 func TestResolveDevContainersDefaultsAndOverrides(t *testing.T) {
-	cfg, _, err := resolveSandbox(t, "-ssh", "-devcontainers", "-rwlayer", "debian-bookworm.erofs")
+	oldEnsureImage, oldEnsureLayer, oldCheckPairing := ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing
+	t.Cleanup(func() {
+		ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureImage, oldEnsureLayer, oldCheckPairing
+	})
+	ensureDevContainersImageAsset = func(path string, _ func(string, ...any)) (string, error) { return path, nil }
+	ensureDevContainersRWLayer = func(_ string, _ string, _ uint, _ func(string, ...any)) (string, []string, error) {
+		path := "devcontainers.ext4"
+		return path, nil, os.WriteFile(path, []byte("x"), 0o600)
+	}
+	checkDevContainersRWPairing = func(string, string) error { return nil }
+
+	cfg, _, err := resolveNamedSandbox(t, "dev", "-ssh", "-devcontainers", "-rwlayer", "debian-bookworm.erofs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || !cfg.RW {
 		t.Fatalf("devcontainers config = %+v", cfg)
 	}
-	if cfg.ImageCfg == nil || cfg.ImageCfg.User != "gantry" || cfg.ImageCfg.UID != 1000 ||
-		cfg.ImageCfg.GID != 1000 || cfg.ImageCfg.WorkingDir != "/home/gantry" {
-		t.Fatalf("curated development image config = %+v", cfg.ImageCfg)
+	if filepath.Base(cfg.Image) != "debian-bookworm.erofs" {
+		t.Fatalf("workload image was replaced by IDE image: %s", cfg.Image)
+	}
+	if cfg.DevContainersImageCfg == nil || cfg.DevContainersImageCfg.User != "gantry" || cfg.DevContainersImageCfg.UID != 1000 ||
+		cfg.DevContainersImageCfg.GID != 1000 || cfg.DevContainersImageCfg.WorkingDir != "/home/gantry" {
+		t.Fatalf("curated development image config = %+v", cfg.DevContainersImageCfg)
+	}
+	if cfg.DevContainersImage == "" || cfg.DevContainersRWLayer == "" {
+		t.Fatalf("Dev Containers peer root was not resolved: %+v", cfg)
 	}
 	if cfg.MemMB != config.DefaultDevContainersMemoryMiB ||
 		cfg.VCPUs != min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs()) ||
-		cfg.RWLayerSizeMiB != config.DefaultDevContainersDiskSizeMiB {
-		t.Fatalf("devcontainers defaults = %d MiB, %d CPU, %d MiB disk", cfg.MemMB, cfg.VCPUs, cfg.RWLayerSizeMiB)
+		cfg.DevContainersDiskMiB != config.DefaultDevContainersDiskSizeMiB ||
+		cfg.RWLayerSizeMiB != config.DefaultRWLayerSizeMiB {
+		t.Fatalf("devcontainers defaults = %d MiB, %d CPU, IDE disk %d MiB, workload disk %d MiB",
+			cfg.MemMB, cfg.VCPUs, cfg.DevContainersDiskMiB, cfg.RWLayerSizeMiB)
 	}
 
-	cfg, _, err = resolveSandbox(t, "-ssh", "-devcontainers", "-rwlayer", "debian-bookworm.erofs", "-mem", "2048", "-cpus", "1", "-disk-size", "8192")
+	cfg, _, err = resolveNamedSandbox(t, "dev", "-ssh", "-devcontainers", "-rwlayer", "debian-bookworm.erofs", "-mem", "2048", "-cpus", "1", "-disk-size", "8192")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MemMB != 2048 || cfg.VCPUs != 1 || cfg.RWLayerSizeMiB != 8192 {
+	if cfg.MemMB != 2048 || cfg.VCPUs != 1 || cfg.RWLayerSizeMiB != 8192 || cfg.DevContainersDiskMiB != 8192 {
 		t.Fatalf("explicit resources were replaced: %+v", cfg)
 	}
-	if _, _, err := resolveSandbox(t, "-devcontainers", "-rwlayer", "debian-bookworm.erofs"); err == nil || !strings.Contains(err.Error(), "requires -ssh") {
+	readOnlyWorkload, _, err := resolveNamedSandbox(t, "dev", "-ssh", "-devcontainers", "-rw=false")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readOnlyWorkload.RW || readOnlyWorkload.DevContainersRWLayer == "" {
+		t.Fatalf("read-only workload did not retain writable IDE peer: %+v", readOnlyWorkload)
+	}
+
+	if _, _, err := resolveNamedSandbox(t, "dev", "-devcontainers", "-rwlayer", "debian-bookworm.erofs"); err == nil || !strings.Contains(err.Error(), "requires -ssh") {
 		t.Fatalf("devcontainers without SSH error = %v", err)
+	}
+	if _, _, err := resolveNamedSandbox(t, "dev", "-ssh", "-devcontainers", "-runtime", "runsc"); err == nil || !strings.Contains(err.Error(), "requires -runtime crun") {
+		t.Fatalf("devcontainers with runsc error = %v", err)
 	}
 }
 
@@ -763,6 +794,38 @@ func TestOptsOpensBootAssets(t *testing.T) {
 	cfg.Image = filepath.Join(dir, "gone.erofs")
 	if _, err := vmmOpts(cfg, nil, "", false); err == nil {
 		t.Fatal("Opts with a missing layer succeeded")
+	}
+}
+
+func TestOptsAttachesWorkloadAndIDEImagesBeforeWritableLayers(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, payload []byte) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	kernelData := make([]byte, 0x40)
+	copy(kernelData[0x38:], []byte("ARM\x64"))
+	cfg := config.RunConfig{
+		Kernel: write("Image", kernelData), Rootfs: write("root.erofs", []byte("root")),
+		Image: write("work.erofs", []byte("work")), RW: true, RWLayer: write("work.ext4", []byte("work-rw")),
+		DevContainers: true, DevContainersImage: write("ide.erofs", []byte("ide")),
+		DevContainersRWLayer: write("ide.ext4", []byte("ide-rw")),
+		MemMB:                256, VCPUs: 1,
+	}
+	opts, err := vmmOpts(cfg, nil, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, file := range append(append([]*os.File{opts.Kernel, opts.Rootfs}, opts.DisksRO...), opts.Disks...) {
+			_ = file.Close()
+		}
+	}()
+	if got := []string{opts.DisksRO[0].Name(), opts.DisksRO[1].Name(), opts.Disks[0].Name(), opts.Disks[1].Name()}; !reflect.DeepEqual(got, []string{cfg.Image, cfg.DevContainersImage, cfg.RWLayer, cfg.DevContainersRWLayer}) {
+		t.Fatalf("disk attachment order = %v", got)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
@@ -140,11 +141,10 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 		cfg.SecretSources[i].Source.Argv = append([]string(nil), cfg.SecretSources[i].Source.Argv...)
 	}
 	if cfg.ImageCfg != nil {
-		imageCfg := *cfg.ImageCfg
-		imageCfg.Env = append([]string(nil), imageCfg.Env...)
-		imageCfg.Entrypoint = append([]string(nil), imageCfg.Entrypoint...)
-		imageCfg.Cmd = append([]string(nil), imageCfg.Cmd...)
-		cfg.ImageCfg = &imageCfg
+		cfg.ImageCfg = cloneImageConfig(cfg.ImageCfg)
+	}
+	if cfg.DevContainersImageCfg != nil {
+		cfg.DevContainersImageCfg = cloneImageConfig(cfg.DevContainersImageCfg)
 	}
 	if cfg.LayerSet != nil {
 		layerSet := *cfg.LayerSet
@@ -160,6 +160,17 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 		cfg.OAuthCustody = &enabled
 	}
 	return cfg
+}
+
+func cloneImageConfig(source *image.Config) *image.Config {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.Env = append([]string(nil), cloned.Env...)
+	cloned.Entrypoint = append([]string(nil), cloned.Entrypoint...)
+	cloned.Cmd = append([]string(nil), cloned.Cmd...)
+	return &cloned
 }
 
 var maxSandboxVCPUs = vmm.MaxSupportedVCPUs()
@@ -183,11 +194,13 @@ func ValidateDevContainers(cfg RunConfig) error {
 	if !cfg.SSH {
 		return fmt.Errorf("profile requires SSH")
 	}
-	if !cfg.RW || cfg.RWLayer == "" {
-		return fmt.Errorf("profile requires a private writable layer")
-	}
 	if NormalizeRuntime(cfg.Runtime) != "crun" {
 		return fmt.Errorf("profile requires the crun runtime")
+	}
+	if cfg.DevContainersDiskMiB != 0 {
+		if err := ValidateRWLayerSize(cfg.DevContainersDiskMiB); err != nil {
+			return fmt.Errorf("profile IDE disk: %w", err)
+		}
 	}
 	return nil
 }
@@ -212,7 +225,11 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 		cfg.SSH = *update.SSH
 	}
 	if update.DevContainers != nil {
+		enabling := *update.DevContainers && !cfg.DevContainers
 		cfg.DevContainers = *update.DevContainers
+		if enabling && cfg.DevContainersDiskMiB == 0 {
+			cfg.DevContainersDiskMiB = DefaultDevContainersDiskSizeMiB
+		}
 	}
 	if update.MemMB != nil {
 		cfg.MemMB = *update.MemMB

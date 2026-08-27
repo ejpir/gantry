@@ -66,6 +66,9 @@ type runtimeLinux struct {
 
 // RootfsMountsFor describes how the guest assembles the container rootfs.
 func (options SessionOptions) RootfsMountsFor() []*types.Mount {
+	if len(options.RootfsMountsOverride) != 0 {
+		return options.RootfsMountsOverride
+	}
 	if options.LayerSet != nil {
 		return RootfsMountsLayerSet(*options.LayerSet)
 	}

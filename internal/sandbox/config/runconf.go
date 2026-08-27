@@ -99,11 +99,16 @@ type RunConfig struct {
 	// SSH enables the per-sandbox local SSH protocol endpoint. It is opt-in;
 	// no ssh.sock exists when false.
 	SSH bool `json:"ssh,omitempty"`
-	// DevContainers enables the explicit nested-container OCI profile. It
-	// exposes no host container engine; inner runtimes remain inside this VM.
-	DevContainers bool `json:"devcontainers,omitempty"`
-	MemMB         uint `json:"memMB"`
-	VCPUs         int  `json:"vcpus,omitempty"`
+	// DevContainers adds a second, curated OCI environment to the same VM.
+	// Normal exec sessions use Image; SSH enters this IDE environment, whose
+	// Podman runtime creates the inner containers described by devcontainer.json.
+	DevContainers         bool          `json:"devcontainers,omitempty"`
+	DevContainersImage    string        `json:"devcontainers_image,omitempty"`
+	DevContainersImageCfg *image.Config `json:"devcontainers_image_config,omitempty"`
+	DevContainersRWLayer  string        `json:"devcontainers_rwlayer,omitempty"`
+	DevContainersDiskMiB  uint          `json:"devcontainers_disk_mib,omitempty"`
+	MemMB                 uint          `json:"memMB"`
+	VCPUs                 int           `json:"vcpus,omitempty"`
 	// SecretNames records WHICH secrets the sandbox injects. Names only:
 	// the values live in the daemon's memory for the VM's lifetime and
 	// are never written anywhere (docs/secrets.md rule 1). Source-backed
@@ -163,7 +168,7 @@ func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: release Alpine image; staged Debian/shell image in development)`),
 		RWLayer:          fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
-		RWLayerSizeMiB:   fs.Uint("disk-size", DefaultRWLayerSizeMiB, "persistent writable disk size in MiB (used only when creating the per-sandbox layer)"),
+		RWLayerSizeMiB:   fs.Uint("disk-size", DefaultRWLayerSizeMiB, "persistent writable disk size in MiB (also sets a newly created IDE layer when explicit)"),
 		LayerSet:         fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
 		RW:               fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
 		Net:              fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
@@ -180,7 +185,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		MCPFSUser:        fs.String("mcp-fs-user", "nobody", "unprivileged guest user or UID:GID the gateway's local servers run as"),
 		MCPRemotes:       &gutil.StrList{},
 		SSH:              fs.Bool("ssh", false, "enable SSH protocol access on the sandbox-local ssh.sock (no TCP listener)"),
-		DevContainers:    fs.Bool("devcontainers", false, "enable nested Podman/Dev Containers inside this VM (requires -ssh and crun)"),
+		DevContainers:    fs.Bool("devcontainers", false, "add the curated IDE container and nested Podman inside this VM (requires -ssh and crun)"),
 		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
 		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
 		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
@@ -378,8 +383,8 @@ const (
 	MaxRWLayerSizeMiB     = 64 << 10
 
 	// Dev Containers need room for an editor server, image layers, and builds.
-	// These replace ordinary defaults only when the corresponding start flag
-	// was not explicitly supplied.
+	// Memory and CPU raise the VM defaults; the disk default belongs to the
+	// separate IDE writable layer. Explicit resource flags still win.
 	DefaultDevContainersMemoryMiB   = 4 << 10
 	DefaultDevContainersVCPUs       = 4
 	DefaultDevContainersDiskSizeMiB = 32 << 10

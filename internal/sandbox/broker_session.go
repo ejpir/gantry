@@ -138,32 +138,29 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 	if br.oauth != nil {
 		stdout = br.oauth.SniffWriter(stdout)
 	}
-	err := client.Session(br.rpc, client.SessionOptions{
+	options := client.SessionOptions{
 		StreamSock:     br.streamSock,
 		StreamDial:     br.streamDial,
 		SetupLocker:    &br.sessionSetupMu,
 		Shares:         manifest.Shares,
 		ShareTransport: manifest.Transport,
-		RW:             br.cfg.RW,
-		LayerSet:       br.cfg.LayerSet,
 		Args:           req.Args,
 		Cwd:            req.Cwd,
 		Secrets:        br.secretEnv(),
 		Environment:    br.cfg.ProxyEnvironment(),
 		PathPrepend:    br.guestToolsPath(),
-		// The well-known base task owns the assembled writable root. Each
-		// concurrent session bind-mounts it into an isolated short-lived task.
-		ID:               "sb",
-		SandboxSession:   true,
-		NestedContainers: br.devContainers.Load(),
-		ImgCfg:           br.cfg.ImageCfg,
-		Cols:             req.Cols,
-		Rows:             req.Rows,
-		Terminal:         req.Terminal,
-		Quiet:            req.Quiet,
-		KillCh:           killCh,
-		ExitStatus:       &status,
-	}, stdin, stdout)
+		// The workload base task owns the -image root. Dev Containers adds a
+		// separate IDE base task; ordinary gantry exec never enters that root.
+		SandboxSession: true,
+		Cols:           req.Cols,
+		Rows:           req.Rows,
+		Terminal:       req.Terminal,
+		Quiet:          req.Quiet,
+		KillCh:         killCh,
+		ExitStatus:     &status,
+	}
+	applySessionTarget(&options, br.sessionTarget(false))
+	err := client.Session(br.rpc, options, stdin, stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
 		// The broker is the only process that still has the sandbox logs

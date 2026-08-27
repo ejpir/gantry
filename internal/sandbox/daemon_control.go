@@ -59,6 +59,7 @@ func (d *daemonRuntime) startControl() error {
 		netPolicy:      control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
 		capture:        packetCaptureBackendFor(d.network, d.runner),
 		guestToolsDone: make(chan struct{}),
+		ideToolsDone:   make(chan struct{}),
 		sessions:       map[string]chan struct{}{},
 		sessionCtl:     map[string]net.Conn{},
 		shutdown:       d.shutdown,

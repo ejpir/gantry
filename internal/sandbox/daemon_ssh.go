@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/sshgw"
@@ -43,6 +45,13 @@ func sshHostUser(current *user.User) string {
 	}
 }
 
+func sshImageConfig(cfg config.RunConfig) *image.Config {
+	if cfg.DevContainers && cfg.DevContainersImageCfg != nil {
+		return cfg.DevContainersImageCfg
+	}
+	return cfg.ImageCfg
+}
+
 func defaultSSHUser(cfgUser string, uid uint32) string {
 	if userName, _, ok := strings.Cut(cfgUser, ":"); ok {
 		cfgUser = userName
@@ -68,8 +77,9 @@ func (d *daemonRuntime) startSSHGateway() error {
 	}
 
 	defaultUser := "root"
-	if d.cfg.ImageCfg != nil {
-		defaultUser = defaultSSHUser(d.cfg.ImageCfg.User, d.cfg.ImageCfg.UID)
+	sshImageCfg := sshImageConfig(d.cfg)
+	if sshImageCfg != nil {
+		defaultUser = defaultSSHUser(sshImageCfg.User, sshImageCfg.UID)
 	}
 	hostUser := ""
 	if current, err := user.Current(); err == nil {
@@ -89,7 +99,7 @@ func (d *daemonRuntime) startSSHGateway() error {
 	d.sshListener, d.sshCancel = listener, cancel
 	d.broker.auditf("ssh: gateway enabled on sandbox-local socket")
 	if d.broker.devContainers.Load() {
-		d.broker.auditf("devcontainers: nested-runtime profile enabled inside sandbox VM")
+		d.broker.auditf("devcontainers: curated IDE container enabled inside sandbox VM")
 	}
 	go func() {
 		if err := gateway.Serve(ctx, listener); err != nil {
@@ -114,7 +124,8 @@ func (d *daemonRuntime) stopSSHGateway() {
 }
 
 func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int, error) {
-	if !br.waitForGuestTools(ctx) {
+	ide := br.devContainers.Load()
+	if !br.waitForGuestTools(ctx, ide) {
 		return 255, fmt.Errorf("SSH session refused")
 	}
 	if !br.limits.acquireSession() {
@@ -180,17 +191,20 @@ func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int
 	}
 
 	manifest := client.LoadShareManifest(br.dir)
-	rootImageCfg := mcpLauncherImageConfig(br.cfg.ImageCfg)
+	target := br.sessionTarget(ide)
 	var status int
-	err := client.Session(br.rpc, client.SessionOptions{
+	options := client.SessionOptions{
 		StreamSock: br.streamSock, StreamDial: br.streamDial, SetupLocker: &br.sessionSetupMu,
-		Shares: manifest.Shares, ShareTransport: manifest.Transport,
-		RW: br.cfg.RW, LayerSet: br.cfg.LayerSet, Args: args,
-		ID: "sb", SandboxSession: true, NestedContainers: br.devContainers.Load(), ImgCfg: rootImageCfg,
-		Environment: append(br.cfg.ProxyEnvironment(), request.Env...),
-		Terminal:    request.Terminal, Cols: request.Window.Width, Rows: request.Window.Height,
+		Shares: manifest.Shares, ShareTransport: manifest.Transport, Args: args,
+		SandboxSession: true,
+		Environment:    append(br.cfg.ProxyEnvironment(), request.Env...),
+		Terminal:       request.Terminal, Cols: request.Window.Width, Rows: request.Window.Height,
 		Resize: resize, Quiet: true, KillCh: killCh, ExitStatus: &status,
-	}, request.Stdin, request.Stdout)
+	}
+	applySessionTarget(&options, target)
+	// gantry-guest starts as root and validates/drops to request.User itself.
+	options.ImgCfg = mcpLauncherImageConfig(target.imageConfig)
+	err := client.Session(br.rpc, options, request.Stdin, request.Stdout)
 	if err != nil {
 		return 255, fmt.Errorf("SSH session refused")
 	}

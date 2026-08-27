@@ -4,6 +4,9 @@ package workerconf
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -11,7 +14,16 @@ import (
 // target for Verify.
 const probeReadPath = "/etc/passwd"
 
-func probeFSReadPath() string     { return probeReadPath }
+func probeFSReadPath() string { return probeReadPath }
+
+func probeFSWritePath(pid int) string {
+	dir := os.Getenv("HOME")
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, fmt.Sprintf(".workerconf-probe-%d", pid))
+}
+
 func probeNetDialAddress() string { return "127.0.0.1:1" }
 
 func isConnectionRefused(err error) bool {

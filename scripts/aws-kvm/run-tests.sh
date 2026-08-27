@@ -42,6 +42,13 @@ mv -f gantry-new '$a' && chmod +x '$a'"
 		DL="$DL
 for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o guest-new '$U' && break; sleep 3; done
 mv -f guest-new '$a' && chmod +x '$a'"
+	elif [ "$a" = gantry-ide-image-x86_64.erofs ]; then
+		# The orchestrator stages this image from the current source tree.
+		# Always replace a prior field artifact or nested-runtime changes
+		# would be tested against a stale curated image.
+		DL="$DL
+for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o ide-new '$U' && break; sleep 3; done
+mv -f ide-new '$a'"
 	else
 		DL="$DL
 [ -s '$a' ] || { for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done; }"

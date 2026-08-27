@@ -59,13 +59,15 @@ type broker struct {
 	// cred serves the guest credential broker on <dir>/1027.sock (nil until
 	// the listener is up).
 	cred *credhelper.Broker
-	// guestToolsReady records that gantry-guest was staged into the guest
-	// this boot; secretEnv wires git's credential.helper only when set.
-	// guestToolsDone lets an SSH request arriving immediately after VM
-	// readiness wait for asynchronous delivery instead of racing it.
-	guestToolsReady    atomic.Bool
+	// Workload and IDE roots track helper verification independently. Bound
+	// credentials consume the workload state; SSH waits on the root selected by
+	// the active Dev Containers topology.
+	guestToolsReady    atomic.Bool // workload OCI root
 	guestToolsDone     chan struct{}
 	guestToolsDoneOnce sync.Once
+	ideToolsReady      atomic.Bool // curated IDE OCI root
+	ideToolsDone       chan struct{}
+	ideToolsDoneOnce   sync.Once
 	// devContainers is live configuration: configure updates it without
 	// restarting the VM, and newly created user sessions read it atomically.
 	devContainers atomic.Bool

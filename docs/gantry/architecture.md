@@ -42,7 +42,8 @@ worker role.
   │ Linux microVM                │
   │ vminitd                      │
   │   └─ crun or runsc           │
-  │       └─ OCI workload        │
+  │       ├─ OCI workload        │
+  │       └─ OCI IDE (optional)  │
   └──────────────────────────────┘
 ```
 
@@ -229,15 +230,25 @@ OCI runtime.
 `crun` is the default runtime. `runsc` runs a gVisor sandbox inside the VM and
 uses compatible guest assets.
 
-For a persistent sandbox, Gantry keeps one long-lived base container to own
-the assembled image, writable layer, and guest share mounts. Each `gantry exec
+For a persistent sandbox, Gantry keeps a long-lived workload base container to
+own the `-image` root, writable layer, and guest share mounts. Each `gantry exec
 <name>` runs as PID 1 in a dedicated short-lived container whose rootfs is a
-bind mount of that base root. This preserves shared filesystem state and
-concurrent sessions, while giving every session an independent PID namespace
-and task lifecycle. Normal exit or an explicit kill tears down the entire
-session process tree, then deletes its task, rootfs bind, and bundle. The
-supervisor multiplexes these sessions over the VM's single ttrpc dial-back
-connection, while separate virtio-vsock streams carry their I/O.
+bind mount of that workload root.
+
+With Dev Containers enabled, the same VM receives a second curated EROFS image
+and writable layer. A separate long-lived IDE base container mounts those
+devices; SSH sessions bind-mount the IDE root and receive the nested-runtime
+OCI profile. Podman in that environment creates the containers described by
+`.devcontainer/devcontainer.json`. The workload root and IDE root are peer
+`crun` containers—enabling the profile never replaces `-image` and does not
+require Podman in the workload.
+
+This preserves shared filesystem state and concurrent sessions while giving
+every session an independent PID namespace and task lifecycle. Normal exit or
+an explicit kill tears down the entire session process tree, then deletes its
+task, rootfs bind, and bundle. The supervisor multiplexes both roots' sessions
+over the VM's single ttrpc dial-back connection, while separate virtio-vsock
+streams carry their I/O.
 
 ## Boot flow
 
@@ -247,8 +258,9 @@ start request
     ├─ validate resources, paths, shares, policy, and proxy
     ├─ locate or download verified guest assets
     ├─ resolve OCI image for the guest architecture
-    ├─ build/reuse digest-addressed EROFS
-    ├─ create and pair a private ext4 writable layer
+    ├─ build/reuse the workload EROFS
+    ├─ optionally stage the curated IDE EROFS
+    ├─ create and pair their private ext4 writable layers
     ├─ write durable sandbox.json
     └─ launch supervisor
            │
@@ -297,17 +309,19 @@ deferred CPU onlining completes. The HVF backend uses the same slot mapping to
 wake the assigned vCPU (plus CPU 0 for compatibility with custom system roots),
 rather than waking every vCPU for each filesystem completion.
 
-A sandbox created or live-configured with `-devcontainers` uses an explicit
-outer OCI profile for an inner Podman runtime in the same microVM. The profile
-exposes only FUSE, TUN, a read-only cgroup2 view, shared root propagation, and
-the namespace-administration capabilities needed by inner `crun`. New sessions
-observe live profile changes; existing sessions retain the OCI configuration
-with which they started.
+A sandbox started with `-devcontainers` uses an explicit outer OCI profile for
+an inner Podman runtime in the same microVM. The profile exposes only FUSE,
+TUN, a read-only cgroup2 view, shared root propagation, and the
+namespace-administration capabilities needed by inner `crun`. Enabling or
+disabling this profile on a running VM requires restart because its peer IDE
+block devices are part of the boot topology.
 
-The curated image exposes `/usr/local/bin/docker` as a rootful Podman wrapper.
-It discards inherited Docker/Podman endpoint and runtime-directory variables,
-preserves the configured proxy environment, and invokes Podman through
-passwordless `sudo`. Its containers configuration disables nested cgroup
+The curated image exposes `/usr/local/bin/podman` and
+`/usr/local/bin/docker` as rootful Podman launchers. They discard inherited
+Docker/Podman endpoint and runtime-directory variables, preserve the configured
+proxy environment, and invoke Podman through passwordless `sudo` when the
+session user is non-root. The SSH/IDE session remains UID 1000; only the nested
+runtime launcher elevates inside the microVM. Its containers configuration disables nested cgroup
 management and default sysctl writes and selects `slirp4netns`, avoiding guest
 bridge sysctls that the outer profile deliberately leaves read-only. No host
 container-engine socket or TCP endpoint crosses the microVM boundary.

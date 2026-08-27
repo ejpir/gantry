@@ -66,6 +66,14 @@ func (d *daemonRuntime) load() error {
 	if d.cfg.ImageDigest != "" && !gutil.FileExists(d.cfg.Image) {
 		return fmt.Errorf("image %s not in cache; run `gantry image pull %s`", d.cfg.ImageDigest, d.cfg.ImageRef)
 	}
+	if d.cfg.DevContainers {
+		if !gutil.FileExists(d.cfg.DevContainersImage) || d.cfg.DevContainersImageCfg == nil {
+			return fmt.Errorf("dev containers IDE image is not prepared; resume the sandbox through Gantry")
+		}
+		if !gutil.FileExists(d.cfg.DevContainersRWLayer) {
+			return fmt.Errorf("dev containers writable layer is not prepared; resume the sandbox through Gantry")
+		}
+	}
 	return nil
 }
 
