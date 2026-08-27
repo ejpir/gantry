@@ -111,8 +111,12 @@ sudo touch /run/libpod/gantry-field-stale/marker
 sudo touch /var/lib/containers/gantry-field-persistent-marker
 EOF
 )
+set +e
 nested=$("$G" ssh "$SANDBOX" -- sh -c "$build_script" 2>&1)
+nested_status=$?
+set -e
 printf '%s\n' "$nested"
+[ "$nested_status" -eq 0 ] || fail "offline nested Podman script exited $nested_status"
 grep -q GANTRY-NESTED-PODMAN <<<"$nested" || fail "offline nested Podman image did not run"
 pass "offline nested Podman build, run, and volume write"
 

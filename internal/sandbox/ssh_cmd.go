@@ -123,7 +123,13 @@ func CmdSSH(argv []string) int {
 		}
 	}
 	args = append(args, "-l", userName, name+".gantry")
-	args = append(args, command...)
+	if len(command) != 0 {
+		// OpenSSH concatenates every argv element after the host with spaces; it
+		// does not preserve argument boundaries. Pass one POSIX-shell-quoted
+		// command so `gantry ssh NAME -- sh -c "..."` reaches the guest intact
+		// on Windows and Unix alike.
+		args = append(args, remoteSSHCommand(command))
+	}
 	return runSSHProcess("ssh", args, os.Stdin, os.Stdout, os.Stderr)
 }
 
@@ -255,6 +261,14 @@ func CmdSSHKnownHosts(argv []string) int {
 	}
 	fmt.Println(line)
 	return 0
+}
+
+func remoteSSHCommand(argv []string) string {
+	quoted := make([]string, len(argv))
+	for index, value := range argv {
+		quoted[index] = "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 func sshShellQuote(value string) string {

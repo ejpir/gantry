@@ -150,6 +150,10 @@ try {
     $managed = Invoke-NativeCapture "ssh.exe" @("-o", "BatchMode=yes", "$Sandbox.gantry", "/bin/echo", "GANTRY-MANAGED-SSH")
     Assert-Contains "managed *.gantry OpenSSH connection" $managed "GANTRY-MANAGED-SSH"
 
+    $scriptProbe = Invoke-GuestScript "set -eux; exec 2>&1; id; command -v base64; echo GANTRY-SSH-SCRIPT-PROBE"
+    $scriptProbe
+    Assert-Contains "SSH script transport" $scriptProbe "GANTRY-SSH-SCRIPT-PROBE"
+
     $buildScript = @'
 set -eux
 exec 2>&1

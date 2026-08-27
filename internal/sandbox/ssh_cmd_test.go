@@ -9,6 +9,15 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
+func TestRemoteSSHCommandPreservesArgumentBoundaries(t *testing.T) {
+	got := remoteSSHCommand([]string{"", "a b", "it's", "line1\nline2"})
+	want := `'' 'a b' 'it'"'"'s' 'line1
+line2'`
+	if got != want {
+		t.Fatalf("remote SSH command = %q, want %q", got, want)
+	}
+}
+
 func TestSSHHostUserUsesOpenSSHNamesForWindowsServiceSIDs(t *testing.T) {
 	for _, test := range []struct {
 		uid, username, want string
