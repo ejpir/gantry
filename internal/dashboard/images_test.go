@@ -39,7 +39,7 @@ func TestSandboxTUIImagesPageRenderingAndNavigation(t *testing.T) {
 	m.imageCursor = 1
 	plain := ansi.Strip(m.View().Content)
 	for _, want := range []string{
-		"9 IMAGES 2", "REF", "DIGEST", "ARCH", "SIZE", "debian:bookworm-slim",
+		"[9] Images", "REF", "DIGEST", "ARCH", "SIZE", "debian:bookworm-slim",
 		"ghcr.io/org/app:latest", "in use by a sandbox",
 	} {
 		if !strings.Contains(plain, want) {
@@ -53,7 +53,7 @@ func TestSandboxTUIImagesPageRenderingAndNavigation(t *testing.T) {
 		t.Fatalf("section after s = %q", m.imageSection)
 	}
 	plain = ansi.Strip(m.View().Content)
-	for _, want := range []string{"REGISTRY", "USERNAME", "SECRET", "ghcr.io", "octocat", "2 registries  •  1 logins"} {
+	for _, want := range []string{"REGISTRY", "USERNAME", "SECRET", "ghcr.io", "octocat"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("credentials section missing %q:\n%s", want, plain)
 		}

@@ -20,39 +20,42 @@ const (
 )
 
 type Sandbox struct {
-	Name             string
-	State            SandboxState
-	PID              int
-	Image            string
-	Runtime          string
-	Kernel           string
-	Secrets          string
-	SecretCount      int
-	RW               bool
-	RWLayer          string
-	DiskSizeMiB      uint
-	Net              bool
-	GVProxy          string
-	NetPolicy        string
-	AllowLocal       bool
-	Proxy            string
-	NoProxy          string
-	ProxyEnforce     bool
-	Shares           int
-	Ports            int
-	MemMB            uint
-	VCPUs            int
-	ProcessIsolation string
-	SSH              bool
-	DevContainers    bool
-	Dir              string
-	ConfigPath       string
-	Updated          time.Time
-	ConfigError      bool
-	TXBytes          uint64
-	RXBytes          uint64
-	DroppedPackets   uint64
-	TrafficAvailable bool
+	Name                 string
+	State                SandboxState
+	PID                  int
+	Image                string
+	Runtime              string
+	Kernel               string
+	Secrets              string
+	SecretCount          int
+	RW                   bool
+	RWLayer              string
+	DiskSizeMiB          uint
+	Net                  bool
+	GVProxy              string
+	NetPolicy            string
+	AllowLocal           bool
+	Proxy                string
+	NoProxy              string
+	ProxyEnforce         bool
+	Shares               int
+	Ports                int
+	MemMB                uint
+	VCPUs                int
+	ProcessIsolation     string
+	SSH                  bool
+	DevContainers        bool
+	DevContainersImage   string
+	DevContainersRWLayer string
+	DevContainersDiskMiB uint
+	Dir                  string
+	ConfigPath           string
+	Updated              time.Time
+	ConfigError          bool
+	TXBytes              uint64
+	RXBytes              uint64
+	DroppedPackets       uint64
+	TrafficAvailable     bool
 }
 
 type Traffic struct {

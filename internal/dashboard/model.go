@@ -62,6 +62,7 @@ const (
 	tuiMCPPage
 	tuiPacketsPage
 	tuiImagesPage
+	tuiOverviewPage
 	tuiPageCount
 )
 
@@ -316,6 +317,10 @@ type sandboxTUIModel struct {
 
 	lastClickIndex int
 	lastClickAt    time.Time
+
+	// dashboardHits is emitted by the last render pass. Mouse events consume
+	// this map instead of independently reconstructing component positions.
+	dashboardHits []tuiHitTarget
 }
 
 func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
@@ -436,6 +441,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 
 	m := sandboxTUIModel{
 		service:         service,
+		page:            tuiOverviewPage,
 		limits:          limits,
 		width:           100,
 		height:          30,
@@ -702,6 +708,9 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if cmd, handled := m.updateGlobalKey(key); handled {
 		return m, cmd
 	}
+	if m.page == tuiOverviewPage {
+		return m, m.updateOverviewKey(key)
+	}
 	if m.page != tuiSandboxesPage {
 		m.updateTableKey(key)
 		return m, nil
@@ -891,6 +900,8 @@ func (m *sandboxTUIModel) updateGlobalKey(key string) (tea.Cmd, bool) {
 	switch key {
 	case "q", "ctrl+c":
 		return tea.Quit, true
+	case "n":
+		return m.openCreateDialog(), true
 	case "r":
 		return m.refreshCmd(), true
 	case "U":
@@ -939,6 +950,8 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 	case "?":
 		m.dialog = tuiHelpDialog
 		m.dialogScroll = 0
+	case "0":
+		m.setPage(tuiOverviewPage)
 	case "1":
 		m.setPage(tuiSandboxesPage)
 	case "2":
@@ -1011,18 +1024,64 @@ func (m *sandboxTUIModel) moveTableCursorToBoundary(end bool) {
 	m.ensureTableCursorVisible()
 }
 
-func (m *sandboxTUIModel) updateSandboxKey(key string) tea.Cmd {
+func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 	switch key {
-	case "n":
-		return m.openCreateDialog()
+	case "up", "k", "left", "h":
+		m.setCursor(m.cursor - 1)
+	case "down", "j", "right", "l":
+		m.setCursor(m.cursor + 1)
+	case "home", "g":
+		m.setCursor(0)
+	case "end", "G":
+		m.setCursor(m.entryCount() - 1)
+	case "enter", "o":
+		if m.onNewCard() {
+			return m.openCreateDialog()
+		}
+		m.setPage(tuiSandboxesPage)
+	case "s":
+		_, cmd := m.toggleSelected()
+		return cmd
+	case "e":
+		return m.openEditDialog()
+	case "i":
+		if m.selected() != nil {
+			m.dialog = tuiInfoDialog
+			m.dialogScroll = 0
+		}
+	case "d", "delete", "x":
+		if m.selected() != nil {
+			m.dialog = tuiRemoveDialog
+			m.dialogScroll = 0
+			m.confirmRemove = false
+		}
+	}
+	return nil
+}
+
+func (m *sandboxTUIModel) updateSandboxKey(key string) tea.Cmd {
+	masterDetail := m.usesMasterDetail(m.dashboardLayout())
+	switch key {
 	case "left", "h":
-		m.moveCursor(-1, 0)
+		if !masterDetail {
+			m.moveCursor(-1, 0)
+		}
 	case "right", "l":
-		m.moveCursor(1, 0)
+		if !masterDetail {
+			m.moveCursor(1, 0)
+		}
 	case "up", "k":
-		m.moveCursor(0, -1)
+		if masterDetail {
+			m.setCursor(m.cursor - 1)
+		} else {
+			m.moveCursor(0, -1)
+		}
 	case "down", "j":
-		m.moveCursor(0, 1)
+		if masterDetail {
+			m.setCursor(m.cursor + 1)
+		} else {
+			m.moveCursor(0, 1)
+		}
 	case "home", "g":
 		m.setCursor(0)
 	case "end", "G":
@@ -1561,6 +1620,28 @@ func (m *sandboxTUIModel) pageCursor(direction int) {
 
 func (m *sandboxTUIModel) ensureCursorVisible() {
 	layout := m.dashboardLayout()
+	if m.page == tuiOverviewPage {
+		visible := m.overviewNavigationCapacity(layout)
+		if m.cursor < m.scrollRow {
+			m.scrollRow = m.cursor
+		}
+		if m.cursor >= m.scrollRow+visible {
+			m.scrollRow = m.cursor - visible + 1
+		}
+		m.scrollRow = clampInt(m.scrollRow, 0, maxInt(0, m.entryCount()-visible))
+		return
+	}
+	if m.usesMasterDetail(layout) {
+		visible := m.masterVisibleItems(layout)
+		if m.cursor < m.scrollRow {
+			m.scrollRow = m.cursor
+		}
+		if m.cursor >= m.scrollRow+visible {
+			m.scrollRow = m.cursor - visible + 1
+		}
+		m.scrollRow = clampInt(m.scrollRow, 0, maxInt(0, m.entryCount()-visible))
+		return
+	}
 	row := m.cursor / layout.cols
 	if row < m.scrollRow {
 		m.scrollRow = row
@@ -1576,6 +1657,7 @@ func (m *sandboxTUIModel) setPage(page tuiPage) {
 		return
 	}
 	m.page = page
+	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 }
 

@@ -13,6 +13,8 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 		row.Image = safeUILine(row.Image)
 		row.Runtime = safeUILine(row.Runtime)
 		row.Kernel = safeUILine(row.Kernel)
+		row.DevContainersImage = safeUILine(row.DevContainersImage)
+		row.DevContainersRWLayer = safeUILine(row.DevContainersRWLayer)
 		row.Secrets = safeUILine(row.Secrets)
 		row.RWLayer = safeUILine(row.RWLayer)
 		row.GVProxy = safeUILine(row.GVProxy)

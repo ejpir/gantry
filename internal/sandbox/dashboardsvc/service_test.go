@@ -48,7 +48,8 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	writeDashboardTestConfig(t, "alpha", config.RunConfig{
 		Image: "/cache/alpine.erofs", ImageRef: "alpine:latest", Runtime: "crun", Kernel: "/cache/gantry-kernel-arm64",
 		RW: true, RWLayer: rwLayer, RWLayerSizeMiB: 1024, Net: true, MemMB: 768, VCPUs: 2,
-		SSH: true, DevContainers: true,
+		SSH: true, DevContainers: true, DevContainersImage: "gantry-ide:latest",
+		DevContainersRWLayer: "/layers/alpha@devcontainers.ext4", DevContainersDiskMiB: 32768,
 		Shares: []string{"code=/tmp"}, Ports: []string{"127.0.0.1:8080:80"}, SecretNames: []string{"TOKEN"},
 	})
 	traffic := netpol.TrafficSnapshot{
@@ -79,6 +80,9 @@ func TestDashboardSnapshotLoadsSandboxData(t *testing.T) {
 	}
 	if alpha.Runtime != "crun" || alpha.MemMB != 768 || alpha.VCPUs != 2 || alpha.Shares != 1 || !alpha.SSH || !alpha.DevContainers {
 		t.Fatalf("alpha runtime metadata = %#v", alpha)
+	}
+	if alpha.DevContainersImage != "gantry-ide:latest" || alpha.DevContainersRWLayer != "/layers/alpha@devcontainers.ext4" || alpha.DevContainersDiskMiB != 32768 {
+		t.Fatalf("alpha development metadata = %#v", alpha)
 	}
 	if alpha.Kernel != "/cache/gantry-kernel-arm64" || alpha.RWLayer != rwLayer || alpha.DiskSizeMiB != 2048 || alpha.Ports != 1 {
 		t.Fatalf("alpha storage metadata = %#v", alpha)

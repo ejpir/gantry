@@ -197,12 +197,16 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		case 3:
 			return defaultText(m.createKernelSelection(), "auto"), "kernel"
 		case 4:
-			return strconv.Itoa(m.createCPUs.Value), "CPU count"
+			return fmt.Sprint(m.createSSH), "SSH"
 		case 5:
-			return strconv.Itoa(m.createMemory.Value), "memory MiB"
+			return fmt.Sprint(m.createDevContainers), "Dev Containers"
 		case 6:
-			return strconv.Itoa(m.createDisk.Value), "disk MiB"
+			return strconv.Itoa(m.createCPUs.Value), "CPU count"
 		case 7:
+			return strconv.Itoa(m.createMemory.Value), "memory MiB"
+		case 8:
+			return strconv.Itoa(m.createDisk.Value), "disk MiB"
+		case 9:
 			return m.createIsolation, "process isolation"
 		}
 	case tuiEditDialog:
@@ -1696,7 +1700,7 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 	}
 	switch m.dialog {
 	case tuiCreateDialog:
-		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "SSH", "Dev Containers", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create"}), m.createFocus == 10
+		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "SSH", "Dev Containers", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create sandbox"}), m.createFocus == 10
 	case tuiEditDialog:
 		return choose(m.editFocus, []string{"SSH", "Dev Containers", "CPUs", "Memory", "Process isolation", "Save"}), m.editFocus == 5
 	case tuiShareAddDialog:
@@ -1836,24 +1840,21 @@ func (m sandboxTUIModel) dialogFormControlAt(mouse tea.Mouse, bounds tuiRect, co
 	if !ok {
 		return 0, false
 	}
+	_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	lines := strings.Split(ansi.Strip(content), "\n")
 	// Dialog borders and top padding consume two visual rows. The viewport's
 	// scroll offset maps the click back into the complete, untrimmed body.
 	clickedRow := mouse.Y - bounds.y - 2 + m.dialogScroll
 	for index, control := range controls {
-		last := rows[index]
+		last := len(lines) - 1
 		if index+1 < len(rows) {
 			last = rows[index+1] - 1
-		} else {
-			// The form footer starts after the first blank line following the
-			// last control. Buttons are resolved before controls by every caller.
-			_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
-			lines := strings.Split(ansi.Strip(content), "\n")
-			for row := rows[index] + 1; row < len(lines); row++ {
-				if strings.TrimSpace(lines[row]) == "" {
-					last = row - 1
-					break
-				}
-				last = row
+		}
+		for row := rows[index] + 1; row <= last && row < len(lines); row++ {
+			trimmed := strings.TrimSpace(lines[row])
+			if trimmed == "" || dialogSectionHeading(trimmed, controls) {
+				last = row - 1
+				break
 			}
 		}
 		if clickedRow >= rows[index] && clickedRow <= last {
@@ -1861,6 +1862,28 @@ func (m sandboxTUIModel) dialogFormControlAt(mouse tea.Mouse, bounds tuiRect, co
 		}
 	}
 	return 0, false
+}
+
+func dialogSectionHeading(line string, controls []tuiFormControl) bool {
+	if line == "" || line != strings.ToUpper(line) {
+		return false
+	}
+	for _, control := range controls {
+		if line == strings.ToUpper(control.label) {
+			return false
+		}
+	}
+	hasLetter := false
+	for _, r := range line {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasLetter = true
+		case r == ' ':
+		default:
+			return false
+		}
+	}
+	return hasLetter
 }
 
 func (m sandboxTUIModel) dialogFormControlRows(controls []tuiFormControl) ([]int, bool) {
@@ -2040,7 +2063,11 @@ func (m sandboxTUIModel) confirmationActionLabel() string {
 }
 
 func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	if m.dialogButtonHit(mouse, bounds, "Create") {
+	if m.dialogButtonHit(mouse, bounds, "Cancel") {
+		m.closeDialog()
+		return m, nil
+	}
+	if m.dialogButtonHit(mouse, bounds, "Create sandbox") {
 		m.createFocus = 10
 		return m.submitCreate()
 	}
@@ -2269,111 +2296,12 @@ func (m *sandboxTUIModel) updateSecretAddDialogMouse(mouse tea.Mouse, bounds tui
 }
 
 func (m *sandboxTUIModel) updateDashboardMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
-	previous := m.page
-	if m.updateTabMouseClick(mouse) {
-		if previous != tuiPacketsPage && m.page == tuiPacketsPage {
-			return m, m.refreshPacketsCmd()
-		}
-		return m, nil
-	}
-	if cmd, handled := m.updateMenuMouseClick(mouse); handled {
-		return m, cmd
-	}
-	if m.busyAction != "" {
-		return m, nil
-	}
-	if m.page != tuiSandboxesPage {
-		m.updateTableMouseClick(mouse)
-		return m, nil
-	}
-	return m.updateCardMouseClick(mouse)
-}
-
-func (m *sandboxTUIModel) updateTabMouseClick(mouse tea.Mouse) bool {
-	// Dashboard tabs are both keyboard-addressable and clickable.
-	if mouse.Y == tuiMenuHeight {
-		tabs := m.tabRects(m.dashboardLayout().width)
-		for _, tab := range tabs {
-			if mouse.X >= tab.x && mouse.X < tab.x+tab.w {
-				if len(tabs) == 1 {
-					if mouse.X < tab.x+tab.w/2 {
-						m.cyclePage(-1)
-					} else {
-						m.cyclePage(1)
-					}
-				} else {
-					m.setPage(tab.page)
-				}
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (m *sandboxTUIModel) updateMenuMouseClick(mouse tea.Mouse) (tea.Cmd, bool) {
-	// The menu bar exposes the same primary actions as the reference CLI:
-	// New and Help are both keyboard shortcuts and mouse targets.
-	if mouse.Y != 1 {
-		return nil, false
-	}
-	rects := m.menuItemRects(m.width)
-	if rects["help"].contains(mouse.X, mouse.Y) {
-		m.dialog = tuiHelpDialog
-		m.dialogScroll = 0
-		return nil, true
-	}
-	if rects["new"].contains(mouse.X, mouse.Y) && m.busyAction == "" {
-		return m.openCreateDialog(), true
-	}
-	if rects["update"].contains(mouse.X, mouse.Y) && m.busyAction == "" && m.updateStatus.Available {
-		m.dialog = tuiUpdateDialog
-		m.dialogScroll = 0
-		m.confirmRemove = false
-		return nil, true
-	}
-	return nil, false
-}
-
-func (m *sandboxTUIModel) updateTableMouseClick(mouse tea.Mouse) {
 	layout := m.dashboardLayout()
-	rowY := layout.contentY + tuiTableHeaderHeight
-	if mouse.Y < rowY || mouse.Y >= rowY+m.tableVisibleRows() {
-		return
-	}
-	index := mouse.Y - rowY
-	cursor, scroll, count := m.tableState()
-	if cursor == nil {
-		return
-	}
-	index += *scroll
-	if index >= 0 && index < count {
-		*cursor = index
-		m.ensureTableCursorVisible()
-	}
-}
-
-func (m *sandboxTUIModel) updateCardMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
-	layout := m.dashboardLayout()
-	index, card, ok := layout.cardAt(mouse.X, mouse.Y, m.scrollRow, m.entryCount())
+	target, ok := m.dashboardHitAt(layout, mouse.X, mouse.Y)
 	if !ok {
 		return m, nil
 	}
-
-	wasSelected := index == m.cursor
-	m.setCursor(index)
-	localY := mouse.Y - card.y
-	if wasSelected && localY == card.h-2 {
-		return m.cardActionAt(mouse.X, card)
-	}
-
-	doubleClick := index == m.lastClickIndex && time.Since(m.lastClickAt) <= 450*time.Millisecond
-	m.lastClickIndex, m.lastClickAt = index, time.Now()
-	if doubleClick {
-		m.lastClickAt = time.Time{}
-		return m.primaryAction()
-	}
-	return m, nil
+	return m.dispatchDashboardHit(target)
 }
 
 func (m *sandboxTUIModel) setSliderFromMouse(slider *resourceSlider, bounds tuiRect, mouseX int, suffix string) {
@@ -2383,36 +2311,6 @@ func (m *sandboxTUIModel) setSliderFromMouse(slider *resourceSlider, bounds tuiR
 	if position >= 0 && position < barWidth {
 		slider.SetFraction(position, barWidth)
 	}
-}
-
-func (m *sandboxTUIModel) cardActionAt(x int, card tuiRect) (tea.Model, tea.Cmd) {
-	if m.onNewCard() {
-		return m, m.openCreateDialog()
-	}
-	selected := m.selected()
-	if selected == nil {
-		return m, nil
-	}
-	actions := []string{"primary", "edit", "delete"}
-	if selected.State == tuiRunning {
-		actions = []string{"primary", "toggle", "edit", "delete"}
-	}
-	innerX := clampInt(x-card.x-2, 0, maxInt(0, card.w-5))
-	segment := maxInt(1, (card.w-4)/len(actions))
-	index := minInt(len(actions)-1, innerX/segment)
-	switch actions[index] {
-	case "primary":
-		return m.primaryAction()
-	case "toggle":
-		return m.toggleSelected()
-	case "edit":
-		return m, m.openEditDialog()
-	case "delete":
-		m.dialog = tuiRemoveDialog
-		m.dialogScroll = 0
-		m.confirmRemove = false
-	}
-	return m, nil
 }
 
 func (m *sandboxTUIModel) updateMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
@@ -2429,6 +2327,15 @@ func (m *sandboxTUIModel) updateMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	m.lastClickAt = time.Time{}
+	if m.page == tuiOverviewPage || m.usesMasterDetail(m.dashboardLayout()) {
+		switch mouse.Button {
+		case tea.MouseWheelUp:
+			m.setCursor(m.cursor - 1)
+		case tea.MouseWheelDown:
+			m.setCursor(m.cursor + 1)
+		}
+		return m, nil
+	}
 	if m.page != tuiSandboxesPage {
 		switch mouse.Button {
 		case tea.MouseWheelUp:

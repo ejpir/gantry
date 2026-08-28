@@ -14,12 +14,15 @@ import (
 )
 
 const (
-	tuiMenuHeight   = 3
-	tuiTabsHeight   = 3
-	tuiStatusHeight = 2
-	tuiCardHeight   = 10
-	tuiCardGapX     = 2
-	tuiCardGapY     = 1
+	tuiMenuHeight      = 3
+	tuiTabsHeight      = 3
+	tuiStatusHeight    = 2
+	tuiCardHeight      = 10
+	tuiCardGapX        = 2
+	tuiCardGapY        = 1
+	tuiSidebarMinWidth = 120
+	tuiSidebarWidth    = 26
+	tuiWideContentGap  = 1
 )
 
 type tuiTheme struct {
@@ -92,22 +95,39 @@ func (r tuiRect) contains(x, y int) bool {
 }
 
 type tuiDashboardLayout struct {
-	width, height       int
-	contentY            int
-	contentHeight       int
-	cols                int
-	cardWidth           int
-	cardHeight          int
-	marginX             int
-	gapX, gapY          int
-	visibleRows         int
-	emptyVerticalOffset int
+	// screenWidth is the complete terminal width. width is the page body width
+	// after the optional wide-screen navigation sidebar.
+	screenWidth, width, height int
+	contentX, contentY         int
+	contentHeight, contentGap  int
+	sidebarWidth               int
+	cols                       int
+	cardWidth                  int
+	cardHeight                 int
+	marginX                    int
+	gapX, gapY                 int
+	visibleRows                int
+	emptyVerticalOffset        int
 }
 
 func (m sandboxTUIModel) dashboardLayout() tuiDashboardLayout {
-	width := maxInt(24, m.width)
-	height := maxInt(tuiMenuHeight+tuiTabsHeight+tuiStatusHeight+1, m.height)
-	contentHeight := maxInt(1, height-tuiMenuHeight-tuiTabsHeight-tuiStatusHeight)
+	screenWidth := maxInt(24, m.width)
+	height := maxInt(tuiMenuHeight+tuiStatusHeight+1, m.height)
+	sidebarWidth := 0
+	navigationHeight := tuiTabsHeight
+	if screenWidth >= tuiSidebarMinWidth && height >= 20 {
+		sidebarWidth = minInt(tuiSidebarWidth, maxInt(20, screenWidth/4))
+		navigationHeight = 0
+	}
+	contentX, contentGap := 0, 0
+	width := screenWidth
+	if sidebarWidth > 0 {
+		contentX = sidebarWidth + 1
+		contentGap = tuiWideContentGap
+		width = maxInt(24, screenWidth-contentX)
+	}
+	contentY := tuiMenuHeight + navigationHeight + contentGap
+	contentHeight := maxInt(1, height-contentY-tuiStatusHeight)
 	cardHeight := minInt(tuiCardHeight, contentHeight)
 	cardHeight = maxInt(5, cardHeight)
 	if cardHeight > contentHeight {
@@ -133,10 +153,14 @@ func (m sandboxTUIModel) dashboardLayout() tuiDashboardLayout {
 		visibleRows = 1
 	}
 	return tuiDashboardLayout{
+		screenWidth:         screenWidth,
 		width:               width,
 		height:              height,
-		contentY:            tuiMenuHeight + tuiTabsHeight,
+		contentX:            contentX,
+		contentY:            contentY,
 		contentHeight:       contentHeight,
+		contentGap:          contentGap,
+		sidebarWidth:        sidebarWidth,
 		cols:                cols,
 		cardWidth:           cardWidth,
 		cardHeight:          cardHeight,
@@ -159,34 +183,18 @@ func (l tuiDashboardLayout) maxScrollRow(entries int) int {
 func (l tuiDashboardLayout) cardRect(index, scrollRow int) tuiRect {
 	row, col := index/l.cols, index%l.cols
 	return tuiRect{
-		x: l.marginX + col*(l.cardWidth+l.gapX),
+		x: l.contentX + l.marginX + col*(l.cardWidth+l.gapX),
 		y: l.contentY + l.emptyVerticalOffset + (row-scrollRow)*(l.cardHeight+l.gapY),
 		w: l.cardWidth,
 		h: l.cardHeight,
 	}
 }
 
-func (l tuiDashboardLayout) cardAt(x, y, scrollRow, entries int) (int, tuiRect, bool) {
-	for row := scrollRow; row < minInt(l.totalRows(entries), scrollRow+l.visibleRows); row++ {
-		for col := 0; col < l.cols; col++ {
-			index := row*l.cols + col
-			if index >= entries {
-				break
-			}
-			rect := l.cardRect(index, scrollRow)
-			if rect.contains(x, y) {
-				return index, rect, true
-			}
-		}
-	}
-	return 0, tuiRect{}, false
-}
-
-func (m sandboxTUIModel) View() tea.View {
+func (m *sandboxTUIModel) View() tea.View {
 	theme := tuiThemeFor(m.dark)
 	view := tea.NewView(m.renderScreen(theme))
 	view.AltScreen = true
-	view.WindowTitle = "Gantry — Sandboxes"
+	view.WindowTitle = "Gantry — " + pageDisplayTitle(m.page)
 	view.MouseMode = tea.MouseModeCellMotion
 	view.ReportFocus = true
 	view.BackgroundColor = theme.bg
@@ -194,12 +202,13 @@ func (m sandboxTUIModel) View() tea.View {
 	return view
 }
 
-func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
+func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 	layout := m.dashboardLayout()
-	header := m.renderMenuBar(theme, layout.width)
-	tabs := m.renderTabs(theme, layout.width)
+	header := m.renderMenuBar(theme, layout.screenWidth)
 	var body string
 	switch m.page {
+	case tuiOverviewPage:
+		body = m.renderOperationalDashboard(theme, layout)
 	case tuiTrafficPage:
 		body = m.renderTrafficView(theme, layout)
 	case tuiRulesPage:
@@ -217,15 +226,36 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 	case tuiImagesPage:
 		body = m.renderImagesView(theme, layout)
 	default:
-		body = m.renderCardGrid(theme, layout)
+		if m.usesMasterDetail(layout) {
+			body = m.renderSandboxMasterDetail(theme, layout)
+		} else {
+			body = m.renderCardGrid(theme, layout)
+		}
 	}
-	status := m.renderStatusBar(theme, layout.width)
+	middle := body
+	if layout.sidebarWidth > 0 {
+		sidebar := m.renderSidebar(theme, layout)
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, strings.Repeat(" ", maxInt(0, layout.contentX-layout.sidebarWidth)), body)
+	}
+	tabs := ""
+	if layout.sidebarWidth == 0 {
+		tabs = m.renderTabs(theme, layout.screenWidth)
+	}
+	status := m.renderStatusBar(theme, layout.screenWidth)
 
-	base := lipgloss.JoinVertical(lipgloss.Left, header, tabs, body, status)
+	sections := []string{header}
+	if tabs != "" {
+		sections = append(sections, tabs)
+	} else if layout.contentGap > 0 {
+		spacer := lipgloss.NewStyle().Background(theme.bg).Width(layout.screenWidth).Height(layout.contentGap).Render("")
+		sections = append(sections, spacer)
+	}
+	sections = append(sections, middle, status)
+	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
 	baseStyle := lipgloss.NewStyle().
 		Foreground(theme.text).
 		Background(theme.bg).
-		Width(layout.width).
+		Width(layout.screenWidth).
 		Height(layout.height).
 		MaxHeight(layout.height)
 	base = renderSurface(baseStyle, theme.text, theme.bg, base)
@@ -236,7 +266,7 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 	layers := []*lipgloss.Layer{lipgloss.NewLayer(base).X(0).Y(0).Z(0)}
 
 	if indicator := m.renderActiveScrollbar(theme, layout); indicator != "" {
-		layers = append(layers, lipgloss.NewLayer(indicator).X(layout.width-1).Y(layout.contentY).Z(1))
+		layers = append(layers, lipgloss.NewLayer(indicator).X(layout.contentX+layout.width-1).Y(layout.contentY).Z(1))
 	}
 	if m.toast != nil {
 		toast := m.renderToast(theme)
@@ -246,8 +276,13 @@ func (m sandboxTUIModel) renderScreen(theme tuiTheme) string {
 			z = 4
 		}
 		layers = append(layers, lipgloss.NewLayer(toast).
-			X(maxInt(0, layout.width-toastWidth-2)).Y(tuiMenuHeight+1).Z(z))
+			X(maxInt(0, layout.screenWidth-toastWidth-2)).Y(tuiMenuHeight+1).Z(z))
 	}
+	// Publish the hit map from this exact render pass. All geometry in the map
+	// is shared with the components rendered above, including responsive mode,
+	// scrolling, and the wide-screen sidebar offset.
+	m.dashboardHits = m.dashboardHitTargets(layout)
+
 	if m.dialog != tuiNoDialog {
 		dialog := m.renderDialog(theme)
 		bounds := m.dialogBounds(m.dialog)
@@ -266,7 +301,7 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 
 	left := brand
 	if width >= 48 {
-		left += "  " + lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Sandboxes")
+		left += "  " + lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(pageDisplayTitle(m.page))
 	}
 	if width >= 72 {
 		left += "  " + lipgloss.NewStyle().Foreground(theme.muted).Render("local microVM workspace")
@@ -308,6 +343,9 @@ func (m sandboxTUIModel) menuItems(width int) []tuiMenuItem {
 	if m.updateStatus.Available {
 		items = append(items, tuiMenuItem{id: "update", key: "U", label: "↑ " + m.updateStatus.Latest})
 	}
+	if m.dashboardLayout().sidebarWidth > 0 {
+		return items
+	}
 	if width >= 40 || !m.updateStatus.Available {
 		items = append(items, tuiMenuItem{id: "new", key: "n", label: "New"})
 	}
@@ -338,10 +376,12 @@ type tuiTabRect struct {
 }
 
 func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
+	pages := []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiMountsPage, tuiPortsPage, tuiSecretsPage, tuiMCPPage, tuiPacketsPage, tuiImagesPage}
 	labels := []string{
+		"0 OVERVIEW",
 		fmt.Sprintf("1 SANDBOXES %d", len(m.sandboxes)),
 		fmt.Sprintf("2 TRAFFIC %d", len(m.traffic)),
-		fmt.Sprintf("3 NET RULES %d", len(m.rules)),
+		fmt.Sprintf("3 RULES %d", len(m.rules)),
 		fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
 		fmt.Sprintf("5 PORTS %d", len(m.ports)),
 		fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
@@ -350,34 +390,21 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 		fmt.Sprintf("9 IMAGES %d", len(m.images)),
 	}
 	if width < 120 {
-		labels = []string{"1 SANDBOXES", "2 TRAFFIC", "3 RULES", "4 MOUNTS", "5 PORTS", "6 SECRETS", "7 MCP", "8 PACKETS", "9 IMAGES"}
+		labels = []string{"0 HOME", "1 VMS", "2 NET", "3 RULES", "4 MOUNTS", "5 PORTS", "6 SECRETS", "7 MCP", "8 PKTS", "9 IMAGES"}
 	}
-	if width < 82 {
-		labels = []string{
-			fmt.Sprintf("1 VMs %d", len(m.sandboxes)),
-			fmt.Sprintf("2 NET %d", len(m.traffic)),
-			fmt.Sprintf("3 RULES %d", len(m.rules)),
-			fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
-			fmt.Sprintf("5 PORTS %d", len(m.ports)),
-			fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
-			fmt.Sprintf("7 MCP %d", len(m.mcpServers)),
-			fmt.Sprintf("8 PKTS %d", len(m.packets)),
-			fmt.Sprintf("9 IMG %d", len(m.images)),
-		}
-	}
+	currentLabel := fmt.Sprintf("‹  %s %s %d  ›", pageShortcut(m.page), pageTitle(m.page), m.pageRowCount(m.page))
 	if width < 50 {
-		labels = []string{fmt.Sprintf("‹  %d %s %d  ›", int(m.page)+1, pageTitle(m.page), m.pageRowCount(m.page))}
-		return []tuiTabRect{{page: m.page, x: 2, w: lipgloss.Width(labels[0]), label: labels[0]}}
+		return []tuiTabRect{{page: m.page, x: 2, w: lipgloss.Width(currentLabel), label: currentLabel}}
 	}
-	rects := make([]tuiTabRect, 0, int(tuiPageCount))
+	rects := make([]tuiTabRect, 0, len(pages))
 	x := 2
-	for page, label := range labels {
-		rects = append(rects, tuiTabRect{page: tuiPage(page), x: x, w: lipgloss.Width(label), label: label})
+	for index, page := range pages {
+		label := labels[index]
+		rects = append(rects, tuiTabRect{page: page, x: x, w: lipgloss.Width(label), label: label})
 		x += lipgloss.Width(label) + 2
 	}
 	if x-2 > width {
-		label := fmt.Sprintf("‹  %d %s %d  ›", int(m.page)+1, pageTitle(m.page), m.pageRowCount(m.page))
-		return []tuiTabRect{{page: m.page, x: 2, w: lipgloss.Width(label), label: label}}
+		return []tuiTabRect{{page: m.page, x: 2, w: lipgloss.Width(currentLabel), label: currentLabel}}
 	}
 	return rects
 }
@@ -431,6 +458,14 @@ func (m sandboxTUIModel) renderTabs(theme tuiTheme, width int) string {
 
 func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	switch m.page {
+	case tuiOverviewPage:
+		running := 0
+		for _, sandbox := range m.sandboxes {
+			if sandbox.State == tuiRunning {
+				running++
+			}
+		}
+		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running", running))
 	case tuiTrafficPage:
 		var tx, rx, blocked uint64
 		for _, sandbox := range m.sandboxes {
@@ -689,17 +724,23 @@ func (m sandboxTUIModel) renderSandboxState(theme tuiTheme, sandbox tuiSandbox) 
 	}
 }
 
+type tuiCardAction struct {
+	key, label, action string
+}
+
+func sandboxCardActions(sandbox tuiSandbox) []tuiCardAction {
+	if sandbox.State == tuiRunning {
+		return []tuiCardAction{{"↵", "open", "primary"}, {"s", "top", "toggle"}, {"e", "dit", "edit"}, {"d", "elete", "delete"}}
+	}
+	return []tuiCardAction{{"↵", "start", "primary"}, {"e", "dit", "edit"}, {"d", "elete", "delete"}}
+}
+
 func (m sandboxTUIModel) renderCardActions(theme tuiTheme, sandbox tuiSandbox, selected bool, width int) string {
 	if m.busyName == sandbox.Name {
 		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.busyAction))+"…"), width)
 	}
-	type action struct{ key, label string }
-	actions := []action{{"↵", "start"}, {"e", "dit"}, {"d", "elete"}}
-	if sandbox.State == tuiRunning {
-		actions = []action{{"↵", "open"}, {"s", "top"}, {"e", "dit"}, {"d", "elete"}}
-	}
 	var rendered []string
-	for _, action := range actions {
+	for _, action := range sandboxCardActions(sandbox) {
 		keyColor := theme.muted
 		descColor := theme.muted
 		if selected {
@@ -764,6 +805,11 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 
 func (m sandboxTUIModel) contextHints() [][2]string {
 	switch m.page {
+	case tuiOverviewPage:
+		if m.onNewCard() {
+			return [][2]string{{"enter", "create"}, {"↑/↓", "select"}, {"r", "refresh"}, {"?", "help"}}
+		}
+		return [][2]string{{"enter", "inspect"}, {"↑/↓", "select"}, {"s", "start/stop"}, {"e", "edit"}, {"n", "new"}, {"?", "help"}}
 	case tuiTrafficPage:
 		return [][2]string{{"↑/↓", "inspect"}, {"a", "allow/block"}, {"r", "remove rule"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiRulesPage:
@@ -795,7 +841,7 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 }
 
 func (m sandboxTUIModel) pagePosition() string {
-	if m.page == tuiSandboxesPage {
+	if m.page == tuiSandboxesPage || m.page == tuiOverviewPage {
 		return fmt.Sprintf("%d/%d", m.cursor+1, m.entryCount())
 	}
 	cursor, _, count := m.tableState()
@@ -880,7 +926,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog, tuiImagePruneDialog, tuiRegistryLogoutDialog:
 		idealWidth = 54
 	case tuiCreateDialog:
-		idealWidth = 64
+		idealWidth = 72
 	case tuiEditDialog:
 		idealWidth = 64
 	case tuiPortPublishDialog:
@@ -1072,7 +1118,7 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"g / G", "first / last row"},
 		{"mouse wheel", "scroll the view"},
 		{"tab / S-tab", "switch views"},
-		{"1 … 9", "jump to a view"},
+		{"0 … 9", "jump to overview or a view"},
 	})
 	actions := column("SANDBOX ACTIONS", [][2]string{
 		{"enter", "open or start"},
@@ -1099,8 +1145,8 @@ func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
 		{"?", "toggle this help"},
 		{"q / ctrl+c", "quit"},
 		{"ctrl+c / ctrl+v", "copy / paste focused field"},
-		{"click", "select a card"},
-		{"double-click", "open or start"},
+		{"click", "select a navigation item, row, card, or visible action"},
+		{"double-click", "inspect, open, or start"},
 	}
 	if m.updateStatus.Available {
 		applicationRows = append([][2]string{{"U", "install " + m.updateStatus.Latest}}, applicationRows...)
@@ -1282,22 +1328,30 @@ func (m sandboxTUIModel) renderUpdateDialog(theme tuiTheme, width int) string {
 }
 
 func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
-	header := m.dialogHeader(theme, "New Sandbox", width)
+	header := m.dialogHeader(theme, "Create sandbox", width)
 	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Create and boot a persistent local microVM.")
+	section := func(title string) string {
+		return lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(strings.ToUpper(title))
+	}
 	nameLabel := formLabel(theme, "Name", m.createFocus == 0)
 	imageLabel := formLabel(theme, "OCI image", m.createFocus == 1) + lipgloss.NewStyle().Foreground(theme.muted).Render("  optional")
 	nameField := renderInputField(theme, m.createName.View(), width, m.createFocus == 0)
 	imageField := renderInputField(theme, m.createImage.View(), width, m.createFocus == 1)
 	runtimeLabel := formLabel(theme, "Runtime", m.createFocus == 2)
-	runtimeValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.createRuntime) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles crun/runsc)")
+	runtimeValue := lipgloss.NewStyle().Bold(m.createFocus == 2).Foreground(theme.text).Render(m.createRuntime) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  ←/→ or space to change")
 	kernelLabel := formLabel(theme, "Kernel", m.createFocus == 3)
-	kernelValue := lipgloss.NewStyle().Foreground(theme.text).Render(truncateText(m.createKernelLabel(), maxInt(12, width-16))) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles)")
+	kernelValue := lipgloss.NewStyle().Bold(m.createFocus == 3).Foreground(theme.text).Render(truncateText(m.createKernelLabel(), maxInt(12, width-16))) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  ←/→ to change")
 	sshLabel := formLabel(theme, "SSH", m.createFocus == 4)
 	sshValue := renderFeatureToggle(theme, m.createSSH)
 	devLabel := formLabel(theme, "Dev Containers", m.createFocus == 5)
 	devValue := renderFeatureToggle(theme, m.createDevContainers)
+	developmentNote := "Adds the curated IDE environment and nested Podman."
+	if m.createDevContainers {
+		developmentNote = fmt.Sprintf("SSH and crun enabled automatically · IDE disk follows Persistent disk (%s)", formatMiBHuman(uint(m.createDisk.Value)))
+	}
+	developmentHint := lipgloss.NewStyle().Foreground(theme.muted).Render(developmentNote)
 	cpuLabel := formLabel(theme, "CPUs", m.createFocus == 6)
 	cpuSlider := m.createCPUs.View(theme, width, m.createFocus == 6, "CPU")
 	memoryLabel := formLabel(theme, "Memory", m.createFocus == 7)
@@ -1305,12 +1359,9 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 	diskLabel := formLabel(theme, "Persistent disk", m.createFocus == 8)
 	diskSlider := m.createDisk.View(theme, width, m.createFocus == 8, "MiB")
 	isolationLabel := formLabel(theme, "Process isolation", m.createFocus == 9)
-	isolationValue := lipgloss.NewStyle().Foreground(theme.text).Render(m.createIsolation) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space cycles auto/required/off)")
-	create := renderDialogButton(theme, "Create", m.createFocus == 10, false)
-	buttons := alignRight(create, width)
-	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  enter continue  •  esc cancel")
-	gap := m.formSectionGap()
+	isolationValue := lipgloss.NewStyle().Bold(m.createFocus == 9).Foreground(theme.text).Render(m.createIsolation) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  ←/→ cycles auto / required / off")
+
 	fields := []string{
 		nameLabel + "\n" + nameField,
 		imageLabel + "\n" + imageField,
@@ -1324,12 +1375,23 @@ func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
 		isolationLabel + "\n" + isolationValue,
 	}
 	if m.formError != "" && m.createErrFocus >= 0 && m.createErrFocus < len(fields) {
-		errorLine := lipgloss.NewStyle().Foreground(theme.error).Render(
-			lipgloss.Wrap(safeUIBlock(m.formError), width, ""),
-		)
+		errorLine := lipgloss.NewStyle().Foreground(theme.error).Render(lipgloss.Wrap(safeUIBlock(m.formError), width, ""))
 		fields[m.createErrFocus] += "\n" + errorLine
 	}
-	return header + "\n" + description + gap + strings.Join(fields, gap) + "\n" + renderFormFooter("", buttons, hint)
+
+	cancel := renderDialogButton(theme, "Cancel", false, false)
+	create := renderDialogButton(theme, "Create sandbox", m.createFocus == 10, false)
+	buttons := alignRight(cancel+"  "+create, width)
+	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  ctrl+enter create  •  esc cancel")
+	gap := m.formSectionGap()
+	groups := []string{
+		section("Identity") + gap + strings.Join(fields[0:2], gap),
+		section("Runtime") + gap + strings.Join(fields[2:4], gap),
+		section("Development") + gap + strings.Join(fields[4:6], gap) + "\n" + developmentHint,
+		section("Resources") + gap + strings.Join(fields[6:9], gap),
+		section("Security") + gap + fields[9],
+	}
+	return header + "\n" + description + gap + strings.Join(groups, gap) + "\n" + renderFormFooter("", buttons, hint)
 }
 
 func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
@@ -1366,12 +1428,14 @@ func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
 }
 
 func renderFeatureToggle(theme tuiTheme, enabled bool) string {
-	value := "off"
+	box, value := "[ ]", "Disabled"
+	foreground := theme.secondary
 	if enabled {
-		value = "on"
+		box, value = "[✓]", "Enabled"
+		foreground = theme.success
 	}
-	return lipgloss.NewStyle().Foreground(theme.text).Render(value) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  (space toggles)")
+	return lipgloss.NewStyle().Bold(true).Foreground(foreground).Render(box+" "+value) +
+		lipgloss.NewStyle().Foreground(theme.muted).Render("  space toggles")
 }
 
 func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) string {

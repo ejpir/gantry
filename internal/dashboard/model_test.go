@@ -47,13 +47,16 @@ func TestSafeUITextStripsTerminalControls(t *testing.T) {
 
 func TestSanitizeSnapshotCoversServiceData(t *testing.T) {
 	snapshot := dashboardapi.Snapshot{
-		Sandboxes:  []dashboardapi.Sandbox{{Name: "dev", Image: "\x1b[31malpine\x1b[0m\nnext"}},
+		Sandboxes: []dashboardapi.Sandbox{{
+			Name: "dev", Image: "\x1b[31malpine\x1b[0m\nnext",
+			DevContainersImage: "ide\x1b[2J\nspoof", DevContainersRWLayer: "/layers/ide\nspoof",
+		}},
 		Mounts:     []dashboardapi.Mount{{Sandbox: "dev", Error: "first\nsecond"}},
 		Secrets:    []dashboardapi.Secret{{Sandbox: "dev", Name: "TOKEN\x1b[2J", State: "loaded\nspoof"}},
 		MCPServers: []dashboardapi.MCPServer{{Sandbox: "dev", Name: "api\x1b[2J", URL: "https://example.com/mcp\nspoof", Allow: []string{"read_*\x1b[31m"}}},
 	}
 	sanitizeSnapshot(&snapshot)
-	if snapshot.Sandboxes[0].Image != "alpine next" || snapshot.Mounts[0].Error != "first second" || snapshot.Secrets[0].Name != "TOKEN" || snapshot.Secrets[0].State != "loaded spoof" || snapshot.MCPServers[0].Name != "api" || snapshot.MCPServers[0].URL != "https://example.com/mcp spoof" || snapshot.MCPServers[0].Allow[0] != "read_*" {
+	if snapshot.Sandboxes[0].Image != "alpine next" || snapshot.Sandboxes[0].DevContainersImage != "ide spoof" || snapshot.Sandboxes[0].DevContainersRWLayer != "/layers/ide spoof" || snapshot.Mounts[0].Error != "first second" || snapshot.Secrets[0].Name != "TOKEN" || snapshot.Secrets[0].State != "loaded spoof" || snapshot.MCPServers[0].Name != "api" || snapshot.MCPServers[0].URL != "https://example.com/mcp spoof" || snapshot.MCPServers[0].Allow[0] != "read_*" {
 		t.Fatalf("snapshot was not sanitized: %#v", snapshot)
 	}
 }
@@ -614,7 +617,7 @@ func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 	}}
 	view := m.View()
 	plain := ansi.Strip(view.Content)
-	for _, want := range []string{"GANTRY", "SANDBOXES", "TRAFFIC", "RULES", "MOUNTS", "PORTS", "SECRETS", "dev", "RUNNING", "alpine:latest", "New Sandbox"} {
+	for _, want := range []string{"GANTRY", "Overview", "HOME", "VMS", "RULES", "MOUNTS", "PORTS", "SECRETS", "SANDBOX HEALTH", "dev", "RUNNING", "alpine:latest", "New sandbox"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, plain)
 		}
@@ -1011,6 +1014,7 @@ func TestSandboxTUISecretsAreListedAndWriteOnly(t *testing.T) {
 func TestSandboxTUIGridNavigationKeepsSelectionVisible(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
+	m.page = tuiSandboxesPage
 	m.width, m.height = 100, 20 // three columns, one visible row
 	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g"} {
 		m.sandboxes = append(m.sandboxes, tuiSandbox{Name: name})

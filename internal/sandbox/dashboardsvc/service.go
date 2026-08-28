@@ -730,6 +730,12 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			}
 			sandbox.SSH = cfg.SSH
 			sandbox.DevContainers = cfg.DevContainers
+			sandbox.DevContainersImage = cfg.DevContainersImage
+			sandbox.DevContainersRWLayer = cfg.DevContainersRWLayer
+			sandbox.DevContainersDiskMiB = cfg.DevContainersDiskMiB
+			if sandbox.DevContainers && sandbox.DevContainersDiskMiB == 0 {
+				sandbox.DevContainersDiskMiB = config.DefaultDevContainersDiskSizeMiB
+			}
 			sandbox.SecretCount = len(cfg.SecretNames)
 			if sandbox.SecretCount > 0 {
 				sandbox.Secrets = strings.Join(cfg.SecretNames, ", ")
