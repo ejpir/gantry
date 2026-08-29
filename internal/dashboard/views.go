@@ -12,31 +12,6 @@ import (
 
 const tuiTableHeaderHeight = 2
 
-func pageTitle(page tuiPage) string {
-	switch page {
-	case tuiOverviewPage:
-		return "OVERVIEW"
-	case tuiTrafficPage:
-		return "TRAFFIC"
-	case tuiRulesPage:
-		return "RULES"
-	case tuiMountsPage:
-		return "MOUNTS"
-	case tuiPortsPage:
-		return "PORTS"
-	case tuiSecretsPage:
-		return "SECRETS"
-	case tuiMCPPage:
-		return "MCP SERVERS"
-	case tuiPacketsPage:
-		return "PACKETS"
-	case tuiImagesPage:
-		return "IMAGES"
-	default:
-		return "SANDBOXES"
-	}
-}
-
 func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 	switch page {
 	case tuiOverviewPage:
@@ -717,7 +692,7 @@ func (m sandboxTUIModel) renderTableSeparator(theme tuiTheme, width int) string 
 
 func (m sandboxTUIModel) renderActiveScrollbar(theme tuiTheme, layout tuiDashboardLayout) string {
 	if m.page == tuiOverviewPage {
-		return renderListScrollbar(theme, layout.contentHeight, m.entryCount(), m.overviewNavigationCapacity(layout), m.scrollRow)
+		return renderListScrollbar(theme, layout.contentHeight, len(m.sandboxes), m.overviewNavigationCapacity(layout), m.scrollRow)
 	}
 	if m.page == tuiSandboxesPage {
 		if m.usesMasterDetail(layout) {

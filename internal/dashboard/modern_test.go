@@ -22,29 +22,38 @@ func modernDashboardTestModel() sandboxTUIModel {
 		{
 			Name: "codex-dev", State: tuiRunning, Image: "docker.io/library/codex-dev-pre-host-relays:v1", Runtime: "crun",
 			MemMB: 23905, VCPUs: 12, RW: true, RWLayer: "/layers/codex-dev.ext4", DiskSizeMiB: 60 << 10,
-			Net: true, TXBytes: 25 << 30, RXBytes: 22 << 30, Shares: 4, Ports: 1, SecretCount: 2,
+			Net: true, TXBytes: 25 << 30, RXBytes: 22 << 30, DroppedPackets: 19277, Shares: 4, Ports: 1, SecretCount: 2,
 			SSH: true, DevContainers: true, DevContainersImage: "gantry-ide:latest",
 			DevContainersRWLayer: "/layers/codex-dev@devcontainers.ext4", DevContainersDiskMiB: 32 << 10,
 			Updated: time.Now().Add(-time.Hour),
 		},
-		{Name: "testnick", State: tuiRunning, Image: "docker.io/library/ubuntu:latest", Runtime: "crun", MemMB: 4096, VCPUs: 4, RW: true, DiskSizeMiB: 32 << 10},
+		{Name: "testnick", State: tuiRunning, Image: "docker.io/library/ubuntu:latest", Runtime: "crun", MemMB: 4096, VCPUs: 4, RW: true, DiskSizeMiB: 32 << 10, DroppedPackets: 3, Shares: 1},
+	}
+	m.traffic = []tuiTrafficRow{
+		{Sandbox: "codex-dev", Host: "debian.org", Allowed: false, LastSeen: time.Now().Add(-time.Minute)},
+		{Sandbox: "codex-dev", Host: "nodejs.org", Allowed: false, LastSeen: time.Now().Add(-2 * time.Minute)},
+		{Sandbox: "testnick", Host: "ff02::2", Allowed: false, LastSeen: time.Now().Add(-3 * time.Minute)},
 	}
 	m.rules = make([]tuiRuleRow, 36)
-	m.mounts = make([]tuiMountRow, 4)
+	m.mounts = []tuiMountRow{
+		{Sandbox: "codex-dev", Tag: "code"}, {Sandbox: "codex-dev", Tag: "cache", ReadOnly: true},
+		{Sandbox: "codex-dev", Tag: "config", ReadOnly: true}, {Sandbox: "testnick", Tag: "code", ReadOnly: true},
+	}
 	m.ports = make([]tuiPortRow, 1)
 	m.images = make([]tuiImageRow, 5)
 	return m
 }
 
-func TestOperationalDashboardUsesWideSidebarAndHealthCards(t *testing.T) {
+func TestOperationalDashboardMatchesReferenceLayout(t *testing.T) {
 	m := modernDashboardTestModel()
 	m.page = tuiOverviewPage
 	view := m.View().Content
 	plain := ansi.Strip(view)
 	for _, want := range []string{
-		"Workspace", "[0] Overview", "[1] Sandboxes", "Network rules", "Overview",
-		"Sandboxes", "2 running", "Network", "Storage", "Security", "SANDBOX HEALTH",
-		"codex-dev", "23.3 GiB RAM", "60 GiB disk", "SSH · Dev Containers", "New sandbox",
+		"GANTRY", "overview", "sandboxes", "traffic", "rules", "ports", "packets", "mounts", "secrets", "mcp", "images",
+		"2 running", "host 16/", "codex-dev", "12c 23G", "codex-dev-pre-host-relays:v1",
+		"▁▁▁", "denied", "19,277", "exposure", "1 port · 3 mounts", "1 rw",
+		"recent denies:", "debian.org", "nodejs.org", "n new",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("operational dashboard missing %q:\n%s", want, plain)
@@ -55,6 +64,21 @@ func TestOperationalDashboardUsesWideSidebarAndHealthCards(t *testing.T) {
 	}
 	if got := lipgloss.Height(view); got != m.height {
 		t.Fatalf("overview height = %d, want %d", got, m.height)
+	}
+}
+
+func TestOperationalDashboardUsesEntireTerminalWidth(t *testing.T) {
+	for _, width := range []int{80, 140, 220, 300} {
+		m := modernDashboardTestModel()
+		m.width = width
+		view := m.View().Content
+		if got := lipgloss.Width(view); got != width {
+			t.Fatalf("dashboard width at %d columns = %d", width, got)
+		}
+		geometry := m.overviewGeometry(m.dashboardLayout())
+		if got, want := geometry.panelWidth, width-4; got != want {
+			t.Fatalf("panel width at %d columns = %d, want %d", width, got, want)
+		}
 	}
 }
 
@@ -73,6 +97,60 @@ func TestSandboxMasterDetailRendersWorkloadAndDevelopmentTopology(t *testing.T) 
 	}
 }
 
+func TestTrafficSparklineSamplesCounterDeltas(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.trafficHistory = nil
+	m.trafficTotals = nil
+	m.sampleSandboxTraffic([]tuiSandbox{{Name: "dev", TXBytes: 100}})
+	m.sampleSandboxTraffic([]tuiSandbox{{Name: "dev", TXBytes: 130}})
+	m.sampleSandboxTraffic([]tuiSandbox{{Name: "dev", TXBytes: 5}}) // counter reset
+	if got := m.trafficHistory["dev"]; len(got) != 3 || got[0] != 0 || got[1] != 30 || got[2] != 5 {
+		t.Fatalf("traffic samples = %v, want [0 30 5]", got)
+	}
+	for value := uint64(6); value < 30; value++ {
+		m.sampleSandboxTraffic([]tuiSandbox{{Name: "dev", TXBytes: value}})
+	}
+	if got := len(m.trafficHistory["dev"]); got != 15 {
+		t.Fatalf("retained traffic samples = %d, want 15", got)
+	}
+	if got := lipgloss.Width(m.sandboxTrafficSparkline("dev", 8)); got != 8 {
+		t.Fatalf("sparkline width = %d, want 8", got)
+	}
+	m.sampleSandboxTraffic(nil)
+	if _, ok := m.trafficHistory["dev"]; ok {
+		t.Fatal("traffic history retained a removed sandbox")
+	}
+}
+
+func TestSandboxMasterListSeparatesEntriesAndGapIsNotClickable(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.page = tuiSandboxesPage
+	layout := m.dashboardLayout()
+	geometry := m.masterDetailGeometry(layout)
+	first, second := geometry.entryRects[0], geometry.entryRects[1]
+	if got, want := second.y-first.y, tuiMasterItemHeight+tuiMasterItemGap; got != want {
+		t.Fatalf("master entry stride = %d, want %d", got, want)
+	}
+	_ = m.View()
+	if hit, ok := m.dashboardHitAt(layout, first.x+1, first.y+first.h); ok && hit.kind == "entry" {
+		t.Fatalf("blank row between master entries resolved to %s", hit.String())
+	}
+	plain := strings.Split(ansi.Strip(m.renderSandboxMasterList(tuiThemeFor(m.dark), geometry, layout.contentHeight)), "\n")
+	firstFeature, secondEntry := -1, -1
+	for row, line := range plain {
+		if strings.Contains(line, "SSH · Dev Containers") {
+			firstFeature = row
+		}
+		if firstFeature >= 0 && strings.Contains(line, "testnick") {
+			secondEntry = row
+			break
+		}
+	}
+	if firstFeature < 0 || secondEntry != firstFeature+2 || strings.Trim(plain[firstFeature+1], " │") != "" {
+		t.Fatalf("master entries are not separated by one blank row:\n%s", strings.Join(plain, "\n"))
+	}
+}
+
 func TestOverviewEnterOpensSelectedSandboxTopology(t *testing.T) {
 	m := modernDashboardTestModel()
 	m.page = tuiOverviewPage
@@ -84,7 +162,7 @@ func TestOverviewEnterOpensSelectedSandboxTopology(t *testing.T) {
 	}
 }
 
-func TestWideSidebarNavigationAndGlobalNewAction(t *testing.T) {
+func TestTopNavigationAndNewSandboxModal(t *testing.T) {
 	m := modernDashboardTestModel()
 	_ = m.View()
 	imagesTarget := tuiHitTarget{}
@@ -95,33 +173,65 @@ func TestWideSidebarNavigationAndGlobalNewAction(t *testing.T) {
 		}
 	}
 	if imagesTarget.rect.w == 0 {
-		t.Fatal("Images sidebar row has no render-produced target")
+		t.Fatal("Images navigation item has no render-produced target")
 	}
 	model, cmd := m.updateMouseClick(tea.Mouse{X: imagesTarget.rect.x + imagesTarget.rect.w/2, Y: imagesTarget.rect.y, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
 	if cmd != nil || m.page != tuiImagesPage {
-		t.Fatalf("sidebar image click = page %d cmd=%v", m.page, cmd)
+		t.Fatalf("top navigation image click = page %d cmd=%v", m.page, cmd)
 	}
-	model, cmd = m.updateKey(tea.KeyPressMsg{Code: 'n'})
+	m.setPage(tuiOverviewPage)
+	_ = m.View()
+	newTarget := tuiHitTarget{}
+	for _, target := range m.dashboardHits {
+		if target.kind == "shortcut" && target.action == "n" {
+			newTarget = target
+			break
+		}
+	}
+	if newTarget.rect.w == 0 {
+		t.Fatal("New sandbox footer action has no render-produced target")
+	}
+	model, cmd = m.updateMouseClick(tea.Mouse{X: newTarget.rect.x + newTarget.rect.w/2, Y: newTarget.rect.y, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
 	if cmd == nil || m.dialog != tuiCreateDialog {
-		t.Fatalf("global new = dialog %d cmd=%v", m.dialog, cmd)
+		t.Fatalf("New sandbox click = dialog %d cmd=%v", m.dialog, cmd)
 	}
 }
 
-func TestBusyDashboardIgnoresMouseCreationActions(t *testing.T) {
+func TestTopNavigationKeepsEveryViewDiscoverable(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.page = tuiOverviewPage
+	header := strings.Split(ansi.Strip(m.View().Content), "\n")[tuiTopPadding]
+	for _, label := range []string{"overview", "sandboxes", "traffic", "rules", "ports", "packets", "mounts", "secrets", "mcp", "images"} {
+		if !strings.Contains(header, label) {
+			t.Fatalf("top navigation missing %q:\n%s", label, header)
+		}
+	}
+}
+
+func TestPageCyclingFollowsTopNavigationOrder(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.page = tuiRulesPage
+	m.cyclePage(1)
+	if m.page != tuiPortsPage {
+		t.Fatalf("page after Rules = %d, want Ports", m.page)
+	}
+	m.page = tuiPacketsPage
+	m.cyclePage(1)
+	if m.page != tuiMountsPage {
+		t.Fatalf("page after Packets = %d, want Mounts", m.page)
+	}
+}
+
+func TestBusyDashboardDoesNotPublishCreationShortcut(t *testing.T) {
 	m := modernDashboardTestModel()
 	m.busyAction = "start"
 	m.busyName = "codex-dev"
 	_ = m.View()
 	for _, target := range m.dashboardHits {
-		if target.kind != "menu" || target.action != "new" {
-			continue
-		}
-		model, cmd := m.dispatchDashboardHit(target)
-		m = *model.(*sandboxTUIModel)
-		if cmd != nil || m.dialog != tuiNoDialog {
-			t.Fatalf("busy New click = dialog %d cmd=%v", m.dialog, cmd)
+		if target.kind == "shortcut" && target.action == "n" {
+			t.Fatalf("busy dashboard published New target %+v", target.rect)
 		}
 	}
 }
@@ -174,14 +284,14 @@ func TestDashboardHitMapUsesRenderedGeometry(t *testing.T) {
 	}
 }
 
-func TestWideLayoutSeparatesHeaderAndAlignsWorkspaceSection(t *testing.T) {
+func TestTopNavigationHasVerticalBreathingRoom(t *testing.T) {
 	m := modernDashboardTestModel()
 	m.page = tuiTrafficPage
 	m.traffic = []tuiTrafficRow{{Sandbox: "codex-dev", Host: "example.com", Protocol: "tcp", Allowed: true}}
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 	layout := m.dashboardLayout()
-	if got := layout.contentY - tuiMenuHeight; got != tuiWideContentGap {
-		t.Fatalf("wide header gap = %d, want %d", got, tuiWideContentGap)
+	if layout.contentY != tuiMenuHeight {
+		t.Fatalf("content row = %d, want top-bar height %d", layout.contentY, tuiMenuHeight)
 	}
 	rowOf := func(needle string) int {
 		t.Helper()
@@ -193,15 +303,20 @@ func TestWideLayoutSeparatesHeaderAndAlignsWorkspaceSection(t *testing.T) {
 		t.Fatalf("rendered screen missing %q", needle)
 		return -1
 	}
-	if got := rowOf("Workspace"); got != layout.contentY+1 {
-		t.Fatalf("Workspace row = %d, want panel title row %d", got, layout.contentY+1)
+	if strings.TrimSpace(lines[0]) != "" {
+		t.Fatalf("top padding row is not blank: %q", lines[0])
+	}
+	if got := rowOf("traffic"); got != tuiTopPadding {
+		t.Fatalf("Traffic tab row = %d, want top navigation row %d", got, tuiTopPadding)
+	}
+	if strings.TrimSpace(lines[tuiTopPadding+1]) != "" {
+		t.Fatalf("row below top navigation is not blank: %q", lines[tuiTopPadding+1])
 	}
 	if got := rowOf("STATUS"); got != layout.contentY {
 		t.Fatalf("table header row = %d, want content row %d", got, layout.contentY)
 	}
-	topBorder := lines[layout.contentY]
-	if !strings.Contains(topBorder, "╭") || !strings.Contains(topBorder, "╮") {
-		t.Fatalf("Workspace panel has no top border: %q", topBorder)
+	if strings.Contains(strings.Join(lines, "\n"), "Workspace") {
+		t.Fatal("wide layout still renders the removed Workspace navbar")
 	}
 }
 
@@ -212,8 +327,8 @@ func TestRenderedRowsAndHitMapShareTerminalCoordinates(t *testing.T) {
 	find := func(needle string) (int, int) {
 		t.Helper()
 		for y, line := range plain {
-			if x := strings.Index(line, needle); x >= 0 {
-				return x, y
+			if offset := strings.Index(line, needle); offset >= 0 {
+				return lipgloss.Width(line[:offset]), y
 			}
 		}
 		t.Fatalf("rendered screen does not contain %q", needle)
@@ -222,15 +337,15 @@ func TestRenderedRowsAndHitMapShareTerminalCoordinates(t *testing.T) {
 	assertTarget := func(needle, kind, action string, page tuiPage) {
 		t.Helper()
 		x, y := find(needle)
-		hit, ok := m.dashboardHitAt(m.dashboardLayout(), x+len(needle)/2, y)
+		hit, ok := m.dashboardHitAt(m.dashboardLayout(), x+lipgloss.Width(needle)/2, y)
 		if !ok || hit.kind != kind || hit.action != action || (kind == "page" && hit.page != page) {
 			t.Fatalf("rendered %q at (%d,%d) resolved to %#v, %t", needle, x, y, hit, ok)
 		}
 	}
-	assertTarget("[0] Overview", "page", "", tuiOverviewPage)
-	assertTarget("[1] Sandboxes", "page", "", tuiSandboxesPage)
-	assertTarget("enter inspect", "shortcut", "enter", 0)
-	assertTarget("n  New sandbox", "menu", "new", 0)
+	assertTarget("overview", "page", "", tuiOverviewPage)
+	assertTarget("traffic", "page", "", tuiTrafficPage)
+	assertTarget("enter open", "shortcut", "enter", 0)
+	assertTarget("n new", "shortcut", "n", 0)
 }
 
 func TestStatusBarActionsAreClickableAtTheirRenderedText(t *testing.T) {

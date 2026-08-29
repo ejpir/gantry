@@ -320,7 +320,9 @@ type sandboxTUIModel struct {
 
 	// dashboardHits is emitted by the last render pass. Mouse events consume
 	// this map instead of independently reconstructing component positions.
-	dashboardHits []tuiHitTarget
+	dashboardHits  []tuiHitTarget
+	trafficHistory map[string][]uint64
+	trafficTotals  map[string]uint64
 }
 
 func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
@@ -491,6 +493,8 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		imageSection:    tuiImageSectionImages,
 		lastClickIndex:  -1,
 		packetAfter:     make(map[string]uint64),
+		trafficHistory:  make(map[string][]uint64),
+		trafficTotals:   make(map[string]uint64),
 	}
 	m.applyInputTheme()
 	return m
@@ -606,6 +610,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 		selectedName = selected.Name
 	}
 	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey := m.selectedTableKeys()
+	m.sampleSandboxTraffic(msg.sandboxes)
 	m.sandboxes = msg.sandboxes
 	m.traffic = msg.traffic
 	m.rules = msg.rules
@@ -1033,12 +1038,24 @@ func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 	case "home", "g":
 		m.setCursor(0)
 	case "end", "G":
-		m.setCursor(m.entryCount() - 1)
+		m.setCursor(len(m.sandboxes) - 1)
 	case "enter", "o":
-		if m.onNewCard() {
+		if len(m.sandboxes) == 0 {
 			return m.openCreateDialog()
 		}
 		m.setPage(tuiSandboxesPage)
+	case "t":
+		selected := m.selected()
+		m.setPage(tuiTrafficPage)
+		if selected != nil {
+			for index, row := range m.traffic {
+				if row.Sandbox == selected.Name {
+					m.trafficCursor = index
+					m.ensureTableCursorVisible()
+					break
+				}
+			}
+		}
 	case "s":
 		_, cmd := m.toggleSelected()
 		return cmd
@@ -1585,7 +1602,11 @@ func (m *sandboxTUIModel) onNewCard() bool { return m.cursor == len(m.sandboxes)
 func (m *sandboxTUIModel) entryCount() int { return len(m.sandboxes) + 1 }
 
 func (m *sandboxTUIModel) setCursor(index int) {
-	m.cursor = clampInt(index, 0, m.entryCount()-1)
+	count := m.entryCount()
+	if m.page == tuiOverviewPage {
+		count = len(m.sandboxes)
+	}
+	m.cursor = clampInt(index, 0, maxInt(0, count-1))
 	m.ensureCursorVisible()
 }
 
@@ -1622,13 +1643,14 @@ func (m *sandboxTUIModel) ensureCursorVisible() {
 	layout := m.dashboardLayout()
 	if m.page == tuiOverviewPage {
 		visible := m.overviewNavigationCapacity(layout)
+		m.cursor = clampInt(m.cursor, 0, maxInt(0, len(m.sandboxes)-1))
 		if m.cursor < m.scrollRow {
 			m.scrollRow = m.cursor
 		}
 		if m.cursor >= m.scrollRow+visible {
 			m.scrollRow = m.cursor - visible + 1
 		}
-		m.scrollRow = clampInt(m.scrollRow, 0, maxInt(0, m.entryCount()-visible))
+		m.scrollRow = clampInt(m.scrollRow, 0, maxInt(0, len(m.sandboxes)-visible))
 		return
 	}
 	if m.usesMasterDetail(layout) {
@@ -1662,8 +1684,16 @@ func (m *sandboxTUIModel) setPage(page tuiPage) {
 }
 
 func (m *sandboxTUIModel) cyclePage(delta int) {
-	page := (int(m.page) + delta + int(tuiPageCount)) % int(tuiPageCount)
-	m.setPage(tuiPage(page))
+	pages := []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiPortsPage, tuiPacketsPage, tuiMountsPage, tuiSecretsPage, tuiMCPPage, tuiImagesPage}
+	current := 0
+	for index, page := range pages {
+		if page == m.page {
+			current = index
+			break
+		}
+	}
+	next := (current + delta%len(pages) + len(pages)) % len(pages)
+	m.setPage(pages[next])
 }
 
 func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {

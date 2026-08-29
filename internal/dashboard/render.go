@@ -14,15 +14,12 @@ import (
 )
 
 const (
-	tuiMenuHeight      = 3
-	tuiTabsHeight      = 3
-	tuiStatusHeight    = 2
-	tuiCardHeight      = 10
-	tuiCardGapX        = 2
-	tuiCardGapY        = 1
-	tuiSidebarMinWidth = 120
-	tuiSidebarWidth    = 26
-	tuiWideContentGap  = 1
+	tuiTopPadding   = 1
+	tuiMenuHeight   = tuiTopPadding + 2
+	tuiStatusHeight = 1
+	tuiCardHeight   = 10
+	tuiCardGapX     = 2
+	tuiCardGapY     = 1
 )
 
 type tuiTheme struct {
@@ -52,19 +49,19 @@ func tuiThemeFor(dark bool) tuiTheme {
 			panel:         lipgloss.Color("#1A1B26"),
 			panelSelected: lipgloss.Color("#202337"),
 			panelRaised:   lipgloss.Color("#292E42"),
-			text:          lipgloss.Color("#E5F2FC"),
-			secondary:     lipgloss.Color("#A9B1D6"),
-			muted:         lipgloss.Color("#737AA2"),
-			border:        lipgloss.Color("#414868"),
-			borderMuted:   lipgloss.Color("#2D334D"),
-			accent:        lipgloss.Color("#7AA2F7"),
-			accentFg:      lipgloss.Color("#16161E"),
-			brand:         lipgloss.Color("#7AA2F7"),
-			brandFg:       lipgloss.Color("#16161E"),
-			success:       lipgloss.Color("#9ECE6A"),
-			warning:       lipgloss.Color("#E0AF68"),
-			error:         lipgloss.Color("#F7768E"),
-			info:          lipgloss.Color("#7AA2F7"),
+			text:          lipgloss.Color("#E6E9F0"),
+			secondary:     lipgloss.Color("#C9CFDB"),
+			muted:         lipgloss.Color("#6B7386"),
+			border:        lipgloss.Color("#4A5266"),
+			borderMuted:   lipgloss.Color("#3A4152"),
+			accent:        lipgloss.Color("#7F77DD"),
+			accentFg:      lipgloss.Color("#EEEDFE"),
+			brand:         lipgloss.Color("#7F77DD"),
+			brandFg:       lipgloss.Color("#EEEDFE"),
+			success:       lipgloss.Color("#5DCAA5"),
+			warning:       lipgloss.Color("#EFA027"),
+			error:         lipgloss.Color("#D4537E"),
+			info:          lipgloss.Color("#7F77DD"),
 		}
 	}
 	return tuiTheme{
@@ -72,19 +69,19 @@ func tuiThemeFor(dark bool) tuiTheme {
 		panel:         lipgloss.Color("#FFFFFF"),
 		panelSelected: lipgloss.Color("#EDF3FF"),
 		panelRaised:   lipgloss.Color("#E4E9F2"),
-		text:          lipgloss.Color("#202330"),
-		secondary:     lipgloss.Color("#4B5568"),
-		muted:         lipgloss.Color("#7B8497"),
-		border:        lipgloss.Color("#B9C1D0"),
-		borderMuted:   lipgloss.Color("#D9DEE8"),
-		accent:        lipgloss.Color("#3451B2"),
-		accentFg:      lipgloss.Color("#FFFFFF"),
-		brand:         lipgloss.Color("#3451B2"),
-		brandFg:       lipgloss.Color("#FFFFFF"),
-		success:       lipgloss.Color("#18794E"),
-		warning:       lipgloss.Color("#946800"),
-		error:         lipgloss.Color("#CD2B31"),
-		info:          lipgloss.Color("#3451B2"),
+		text:          lipgloss.Color("#2C2C2A"),
+		secondary:     lipgloss.Color("#4B4B47"),
+		muted:         lipgloss.Color("#888780"),
+		border:        lipgloss.Color("#9D9B93"),
+		borderMuted:   lipgloss.Color("#B4B2A9"),
+		accent:        lipgloss.Color("#534AB7"),
+		accentFg:      lipgloss.Color("#EEEDFE"),
+		brand:         lipgloss.Color("#534AB7"),
+		brandFg:       lipgloss.Color("#EEEDFE"),
+		success:       lipgloss.Color("#0F6E56"),
+		warning:       lipgloss.Color("#854F0B"),
+		error:         lipgloss.Color("#993556"),
+		info:          lipgloss.Color("#534AB7"),
 	}
 }
 
@@ -95,12 +92,9 @@ func (r tuiRect) contains(x, y int) bool {
 }
 
 type tuiDashboardLayout struct {
-	// screenWidth is the complete terminal width. width is the page body width
-	// after the optional wide-screen navigation sidebar.
 	screenWidth, width, height int
 	contentX, contentY         int
-	contentHeight, contentGap  int
-	sidebarWidth               int
+	contentHeight              int
 	cols                       int
 	cardWidth                  int
 	cardHeight                 int
@@ -113,20 +107,9 @@ type tuiDashboardLayout struct {
 func (m sandboxTUIModel) dashboardLayout() tuiDashboardLayout {
 	screenWidth := maxInt(24, m.width)
 	height := maxInt(tuiMenuHeight+tuiStatusHeight+1, m.height)
-	sidebarWidth := 0
-	navigationHeight := tuiTabsHeight
-	if screenWidth >= tuiSidebarMinWidth && height >= 20 {
-		sidebarWidth = minInt(tuiSidebarWidth, maxInt(20, screenWidth/4))
-		navigationHeight = 0
-	}
-	contentX, contentGap := 0, 0
+	contentX := 0
 	width := screenWidth
-	if sidebarWidth > 0 {
-		contentX = sidebarWidth + 1
-		contentGap = tuiWideContentGap
-		width = maxInt(24, screenWidth-contentX)
-	}
-	contentY := tuiMenuHeight + navigationHeight + contentGap
+	contentY := tuiMenuHeight
 	contentHeight := maxInt(1, height-contentY-tuiStatusHeight)
 	cardHeight := minInt(tuiCardHeight, contentHeight)
 	cardHeight = maxInt(5, cardHeight)
@@ -159,8 +142,6 @@ func (m sandboxTUIModel) dashboardLayout() tuiDashboardLayout {
 		contentX:            contentX,
 		contentY:            contentY,
 		contentHeight:       contentHeight,
-		contentGap:          contentGap,
-		sidebarWidth:        sidebarWidth,
 		cols:                cols,
 		cardWidth:           cardWidth,
 		cardHeight:          cardHeight,
@@ -232,25 +213,9 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 			body = m.renderCardGrid(theme, layout)
 		}
 	}
-	middle := body
-	if layout.sidebarWidth > 0 {
-		sidebar := m.renderSidebar(theme, layout)
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, strings.Repeat(" ", maxInt(0, layout.contentX-layout.sidebarWidth)), body)
-	}
-	tabs := ""
-	if layout.sidebarWidth == 0 {
-		tabs = m.renderTabs(theme, layout.screenWidth)
-	}
 	status := m.renderStatusBar(theme, layout.screenWidth)
 
-	sections := []string{header}
-	if tabs != "" {
-		sections = append(sections, tabs)
-	} else if layout.contentGap > 0 {
-		spacer := lipgloss.NewStyle().Background(theme.bg).Width(layout.screenWidth).Height(layout.contentGap).Render("")
-		sections = append(sections, spacer)
-	}
-	sections = append(sections, middle, status)
+	sections := []string{header, body, status}
 	base := lipgloss.JoinVertical(lipgloss.Left, sections...)
 	baseStyle := lipgloss.NewStyle().
 		Foreground(theme.text).
@@ -280,7 +245,7 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 	}
 	// Publish the hit map from this exact render pass. All geometry in the map
 	// is shared with the components rendered above, including responsive mode,
-	// scrolling, and the wide-screen sidebar offset.
+	// scrolling, responsive navigation, and component composition.
 	m.dashboardHits = m.dashboardHitTargets(layout)
 
 	if m.dialog != tuiNoDialog {
@@ -292,44 +257,50 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 }
 
 func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
-	brand := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(theme.brandFg).
-		Background(theme.brand).
-		Padding(0, 1).
-		Render("◆ GANTRY")
-
-	left := brand
-	if width >= 48 {
-		left += "  " + lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(pageDisplayTitle(m.page))
-	}
-	if width >= 72 {
-		left += "  " + lipgloss.NewStyle().Foreground(theme.muted).Render("local microVM workspace")
-	}
-	items := m.menuItems(width)
-	rendered := make([]string, 0, len(items))
-	for _, item := range items {
-		keyColor, labelColor := theme.secondary, theme.text
-		if item.id == "update" {
-			keyColor, labelColor = theme.warning, theme.warning
+	brand := lipgloss.NewStyle().Bold(true).Foreground(theme.brandFg).Background(theme.brand).Padding(0, 1).Render("GANTRY")
+	var left strings.Builder
+	left.WriteString("  ")
+	left.WriteString(brand)
+	position := 2 + lipgloss.Width(brand)
+	tabs := m.tabRects(width)
+	for _, tab := range tabs {
+		if tab.x > position {
+			left.WriteString(strings.Repeat(" ", tab.x-position))
 		}
-		rendered = append(rendered,
-			lipgloss.NewStyle().Bold(item.id == "update").Foreground(keyColor).Render(item.key+" ")+
-				lipgloss.NewStyle().Bold(item.id == "update").Foreground(labelColor).Render(item.label))
+		style := lipgloss.NewStyle().Foreground(theme.muted)
+		if tab.active {
+			style = style.Foreground(theme.text).Bold(true).Underline(true)
+		}
+		left.WriteString(style.Render(tab.label))
+		position = tab.x + tab.w
 	}
-	right := strings.Join(rendered, "   ")
-	innerWidth := maxInt(1, width-4)
-	line := joinSides(left, right, innerWidth)
-	style := lipgloss.NewStyle().
-		Foreground(theme.text).
-		Background(theme.panel).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(theme.borderMuted).
-		Padding(0, 1).
-		Width(width).
-		Height(tuiMenuHeight).
-		MaxHeight(tuiMenuHeight)
-	return renderSurface(style, theme.text, theme.panel, line)
+
+	summary := m.tabSummary(theme)
+	if m.refreshVisible {
+		summary = m.spinner.View() + lipgloss.NewStyle().Foreground(theme.muted).Render(" syncing")
+	}
+	right := summary
+	if m.updateStatus.Available {
+		update := lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render("U ↑ " + m.updateStatus.Latest)
+		combined := update
+		if summary != "" {
+			combined = summary + lipgloss.NewStyle().Foreground(theme.muted).Render("  ·  ") + update
+		}
+		if lipgloss.Width(left.String())+lipgloss.Width(combined)+3 <= width {
+			right = combined
+		} else {
+			right = update
+		}
+	}
+	line := left.String()
+	if right != "" && lipgloss.Width(line)+lipgloss.Width(right)+3 <= width {
+		line = joinSides(line, right+"  ", width)
+	} else {
+		line = truncateANSI(line, width)
+	}
+	content := strings.Repeat("\n", tuiTopPadding) + line
+	style := lipgloss.NewStyle().Foreground(theme.text).Background(theme.bg).Width(width).Height(tuiMenuHeight).MaxHeight(tuiMenuHeight)
+	return renderSurface(style, theme.text, theme.bg, content)
 }
 
 type tuiMenuItem struct {
@@ -338,134 +309,88 @@ type tuiMenuItem struct {
 	label string
 }
 
-func (m sandboxTUIModel) menuItems(width int) []tuiMenuItem {
-	items := make([]tuiMenuItem, 0, 3)
-	if m.updateStatus.Available {
-		items = append(items, tuiMenuItem{id: "update", key: "U", label: "↑ " + m.updateStatus.Latest})
+func (m sandboxTUIModel) menuItems(_ int) []tuiMenuItem {
+	if !m.updateStatus.Available {
+		return nil
 	}
-	if m.dashboardLayout().sidebarWidth > 0 {
-		return items
-	}
-	if width >= 40 || !m.updateStatus.Available {
-		items = append(items, tuiMenuItem{id: "new", key: "n", label: "New"})
-	}
-	return append(items, tuiMenuItem{id: "help", key: "?", label: "Help"})
+	return []tuiMenuItem{{id: "update", key: "U", label: "↑ " + m.updateStatus.Latest}}
 }
 
 func (m sandboxTUIModel) menuItemRects(width int) map[string]tuiRect {
 	items := m.menuItems(width)
 	rects := make(map[string]tuiRect, len(items))
 	lines := strings.Split(ansi.Strip(m.renderMenuBar(tuiThemeFor(m.dark), width)), "\n")
-	if len(lines) <= 1 {
+	if len(lines) <= tuiTopPadding {
 		return rects
 	}
+	headerLine := lines[tuiTopPadding]
 	for _, item := range items {
 		label := item.key + " " + item.label
-		if offset := strings.LastIndex(lines[1], label); offset >= 0 {
-			x := lipgloss.Width(lines[1][:offset])
-			rects[item.id] = tuiRect{x: x, y: 1, w: lipgloss.Width(label), h: 1}
+		if offset := strings.LastIndex(headerLine, label); offset >= 0 {
+			x := lipgloss.Width(headerLine[:offset])
+			rects[item.id] = tuiRect{x: x, y: tuiTopPadding, w: lipgloss.Width(label), h: 1}
 		}
 	}
 	return rects
 }
 
 type tuiTabRect struct {
-	page  tuiPage
-	x, w  int
-	label string
+	page   tuiPage
+	x, w   int
+	label  string
+	active bool
 }
 
 func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
-	pages := []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiMountsPage, tuiPortsPage, tuiSecretsPage, tuiMCPPage, tuiPacketsPage, tuiImagesPage}
-	labels := []string{
-		"0 OVERVIEW",
-		fmt.Sprintf("1 SANDBOXES %d", len(m.sandboxes)),
-		fmt.Sprintf("2 TRAFFIC %d", len(m.traffic)),
-		fmt.Sprintf("3 RULES %d", len(m.rules)),
-		fmt.Sprintf("4 MOUNTS %d", len(m.mounts)),
-		fmt.Sprintf("5 PORTS %d", len(m.ports)),
-		fmt.Sprintf("6 SECRETS %d", len(m.secrets)),
-		fmt.Sprintf("7 MCP %d", len(m.mcpServers)),
-		fmt.Sprintf("8 PACKETS %d", len(m.packets)),
-		fmt.Sprintf("9 IMAGES %d", len(m.images)),
+	const navigationStart = 12 // two-cell inset, eight-cell brand, two-cell gap
+	currentLabel := "‹ " + strings.ToLower(pageDisplayTitle(m.page)) + " ›"
+	compactCurrent := func() []tuiTabRect {
+		label := truncateText(currentLabel, maxInt(1, width-navigationStart))
+		return []tuiTabRect{{page: m.page, x: navigationStart, w: lipgloss.Width(label), label: label, active: true}}
 	}
-	if width < 120 {
-		labels = []string{"0 HOME", "1 VMS", "2 NET", "3 RULES", "4 MOUNTS", "5 PORTS", "6 SECRETS", "7 MCP", "8 PKTS", "9 IMAGES"}
+	items := []tuiTabRect{
+		{page: tuiOverviewPage, label: "overview", active: m.page == tuiOverviewPage},
+		{page: tuiSandboxesPage, label: "sandboxes", active: m.page == tuiSandboxesPage},
+		{page: tuiTrafficPage, label: "traffic", active: m.page == tuiTrafficPage},
+		{page: tuiRulesPage, label: "rules", active: m.page == tuiRulesPage},
+		{page: tuiPortsPage, label: "ports", active: m.page == tuiPortsPage},
+		{page: tuiPacketsPage, label: "packets", active: m.page == tuiPacketsPage},
+		{page: tuiMountsPage, label: "mounts", active: m.page == tuiMountsPage},
+		{page: tuiSecretsPage, label: "secrets", active: m.page == tuiSecretsPage},
+		{page: tuiMCPPage, label: "mcp", active: m.page == tuiMCPPage},
+		{page: tuiImagesPage, label: "images", active: m.page == tuiImagesPage},
 	}
-	currentLabel := fmt.Sprintf("‹  %s %s %d  ›", pageShortcut(m.page), pageTitle(m.page), m.pageRowCount(m.page))
-	if width < 50 {
-		return []tuiTabRect{{page: m.page, x: 2, w: lipgloss.Width(currentLabel), label: currentLabel}}
+	x := navigationStart
+	for index := range items {
+		items[index].x = x
+		items[index].w = lipgloss.Width(items[index].label)
+		x += items[index].w + 2
 	}
-	rects := make([]tuiTabRect, 0, len(pages))
-	x := 2
-	for index, page := range pages {
-		label := labels[index]
-		rects = append(rects, tuiTabRect{page: page, x: x, w: lipgloss.Width(label), label: label})
-		x += lipgloss.Width(label) + 2
-	}
-	if x-2 > width {
-		return []tuiTabRect{{page: m.page, x: 2, w: lipgloss.Width(currentLabel), label: currentLabel}}
-	}
-	return rects
-}
-
-func (m sandboxTUIModel) renderTabs(theme tuiTheme, width int) string {
-	rects := m.tabRects(width)
-	var left strings.Builder
-	position := 0
-	for _, tab := range rects {
-		if tab.x > position {
-			left.WriteString(strings.Repeat(" ", tab.x-position))
+	actionWidth := 0
+	for index, item := range m.menuItems(width) {
+		if index > 0 {
+			actionWidth += 3
 		}
-		style := lipgloss.NewStyle().Foreground(theme.muted)
-		if tab.page == m.page {
-			style = style.Foreground(theme.text).Bold(true)
-		}
-		left.WriteString(style.Render(tab.label))
-		position = tab.x + tab.w
+		actionWidth += lipgloss.Width(item.key + " " + item.label)
 	}
-
-	right := m.tabSummary(theme)
-	if m.refreshVisible {
-		right = m.spinner.View() + lipgloss.NewStyle().Foreground(theme.muted).Render(" syncing")
+	if x+actionWidth+2 > width {
+		return compactCurrent()
 	}
-	line := left.String()
-	if width >= 96 && right != "" && lipgloss.Width(line)+lipgloss.Width(right)+4 <= width {
-		line = joinSides(line, "  "+right+"  ", width)
-	} else {
-		line = truncateANSI(line, width)
-	}
-
-	activeX, activeWidth := 2, 1
-	for _, tab := range rects {
-		if tab.page == m.page {
-			activeX, activeWidth = tab.x, tab.w
-			break
-		}
-	}
-	underline := lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", maxInt(0, activeX))) +
-		lipgloss.NewStyle().Foreground(theme.accent).Render(strings.Repeat("━", minInt(activeWidth, maxInt(1, width-activeX))))
-	underline += lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", maxInt(0, width-lipgloss.Width(underline))))
-	content := line + "\n" + underline
-	style := lipgloss.NewStyle().
-		Foreground(theme.text).
-		Background(theme.bg).
-		Width(width).
-		Height(tuiTabsHeight).
-		MaxHeight(tuiTabsHeight)
-	return renderSurface(style, theme.text, theme.bg, content)
+	return items
 }
 
 func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	switch m.page {
 	case tuiOverviewPage:
-		running := 0
+		running, allocatedVCPUs := 0, 0
 		for _, sandbox := range m.sandboxes {
+			allocatedVCPUs += maxInt(1, sandbox.VCPUs)
 			if sandbox.State == tuiRunning {
 				running++
 			}
 		}
-		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running", running))
+		hostVCPUs := maxInt(1, m.limits.MaxVCPUs)
+		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running · host %d/%d vCPU", running, allocatedVCPUs, hostVCPUs))
 	case tuiTrafficPage:
 		var tx, rx, blocked uint64
 		for _, sandbox := range m.sandboxes {
@@ -758,10 +683,14 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 	innerWidth := maxInt(1, width-4)
 	position := m.pagePosition()
 	updated := relativeUpdate(m.lastUpdate)
-	right := lipgloss.NewStyle().Foreground(theme.muted).Render("local  •  " + position)
-	if updated != "" && width >= 72 {
-		right = lipgloss.NewStyle().Foreground(theme.muted).Render(updated + "  •  local  •  " + position)
+	if updated == "" {
+		updated = "updated never"
 	}
+	rightText := updated
+	if m.page != tuiOverviewPage && width >= 72 {
+		rightText += "  ·  " + position
+	}
+	right := lipgloss.NewStyle().Foreground(theme.muted).Render(rightText)
 
 	var left string
 	budget := maxInt(1, innerWidth-lipgloss.Width(right)-1)
@@ -792,24 +721,21 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 	line := joinSides(left, right, innerWidth)
 	style := lipgloss.NewStyle().
 		Foreground(theme.secondary).
-		Background(theme.panel).
-		BorderTop(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(theme.borderMuted).
-		Padding(0, 1).
+		Background(theme.bg).
+		Padding(0, 2).
 		Width(width).
 		Height(tuiStatusHeight).
 		MaxHeight(tuiStatusHeight)
-	return renderSurface(style, theme.secondary, theme.panel, line)
+	return renderSurface(style, theme.secondary, theme.bg, line)
 }
 
 func (m sandboxTUIModel) contextHints() [][2]string {
 	switch m.page {
 	case tuiOverviewPage:
-		if m.onNewCard() {
-			return [][2]string{{"enter", "create"}, {"↑/↓", "select"}, {"r", "refresh"}, {"?", "help"}}
+		if len(m.sandboxes) == 0 {
+			return [][2]string{{"enter", "create"}, {"n", "new"}, {"r", "refresh"}, {"?", "help"}}
 		}
-		return [][2]string{{"enter", "inspect"}, {"↑/↓", "select"}, {"s", "start/stop"}, {"e", "edit"}, {"n", "new"}, {"?", "help"}}
+		return [][2]string{{"enter", "open"}, {"t", "traffic"}, {"n", "new"}, {"?", "help"}}
 	case tuiTrafficPage:
 		return [][2]string{{"↑/↓", "inspect"}, {"a", "allow/block"}, {"r", "remove rule"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiRulesPage:
@@ -841,7 +767,13 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 }
 
 func (m sandboxTUIModel) pagePosition() string {
-	if m.page == tuiSandboxesPage || m.page == tuiOverviewPage {
+	if m.page == tuiOverviewPage {
+		if len(m.sandboxes) == 0 {
+			return "0/0"
+		}
+		return fmt.Sprintf("%d/%d", m.cursor+1, len(m.sandboxes))
+	}
+	if m.page == tuiSandboxesPage {
 		return fmt.Sprintf("%d/%d", m.cursor+1, m.entryCount())
 	}
 	cursor, _, count := m.tableState()

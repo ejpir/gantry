@@ -39,7 +39,7 @@ func TestSandboxTUIImagesPageRenderingAndNavigation(t *testing.T) {
 	m.imageCursor = 1
 	plain := ansi.Strip(m.View().Content)
 	for _, want := range []string{
-		"[9] Images", "REF", "DIGEST", "ARCH", "SIZE", "debian:bookworm-slim",
+		"images", "REF", "DIGEST", "ARCH", "SIZE", "debian:bookworm-slim",
 		"ghcr.io/org/app:latest", "in use by a sandbox",
 	} {
 		if !strings.Contains(plain, want) {

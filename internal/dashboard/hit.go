@@ -25,32 +25,17 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 		targets = append(targets, tuiHitTarget{kind: "menu", action: action, rect: rect})
 	}
 
-	if layout.sidebarWidth > 0 {
-		for index, item := range m.sidebarItems() {
-			targets = append(targets, tuiHitTarget{
-				kind: "page", page: item.page,
-				rect: tuiRect{x: 1, y: layout.contentY + 3 + index, w: layout.sidebarWidth - 2, h: 1},
-			})
-		}
-		if m.sidebarActionsVisible(layout) {
+	tabs := m.tabRects(layout.screenWidth)
+	for _, tab := range tabs {
+		if len(tabs) == 1 {
+			half := maxInt(1, tab.w/2)
 			targets = append(targets,
-				tuiHitTarget{kind: "menu", action: "new", rect: tuiRect{x: 1, y: layout.contentY + layout.contentHeight - 3, w: layout.sidebarWidth - 2, h: 1}},
-				tuiHitTarget{kind: "menu", action: "help", rect: tuiRect{x: 1, y: layout.contentY + layout.contentHeight - 2, w: layout.sidebarWidth - 2, h: 1}},
+				tuiHitTarget{kind: "cycle-page", index: -1, rect: tuiRect{x: tab.x, y: tuiTopPadding, w: half, h: 1}},
+				tuiHitTarget{kind: "cycle-page", index: 1, rect: tuiRect{x: tab.x + half, y: tuiTopPadding, w: tab.w - half, h: 1}},
 			)
+			continue
 		}
-	} else {
-		tabs := m.tabRects(layout.screenWidth)
-		for _, tab := range tabs {
-			if len(tabs) == 1 {
-				half := maxInt(1, tab.w/2)
-				targets = append(targets,
-					tuiHitTarget{kind: "cycle-page", index: -1, rect: tuiRect{x: tab.x, y: tuiMenuHeight, w: half, h: 1}},
-					tuiHitTarget{kind: "cycle-page", index: 1, rect: tuiRect{x: tab.x + half, y: tuiMenuHeight, w: tab.w - half, h: 1}},
-				)
-				continue
-			}
-			targets = append(targets, tuiHitTarget{kind: "page", page: tab.page, rect: tuiRect{x: tab.x, y: tuiMenuHeight, w: tab.w, h: 1}})
-		}
+		targets = append(targets, tuiHitTarget{kind: "page", page: tab.page, rect: tuiRect{x: tab.x, y: tuiTopPadding, w: tab.w, h: 1}})
 	}
 
 	if m.busyAction != "" {
@@ -126,7 +111,7 @@ func (m sandboxTUIModel) statusBarHitTargets(layout tuiDashboardLayout) []tuiHit
 
 func clickableContextKey(key string) bool {
 	switch key {
-	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "space", "tab", "esc":
+	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc":
 		return true
 	default:
 		return false

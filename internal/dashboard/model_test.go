@@ -617,7 +617,7 @@ func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 	}}
 	view := m.View()
 	plain := ansi.Strip(view.Content)
-	for _, want := range []string{"GANTRY", "Overview", "HOME", "VMS", "RULES", "MOUNTS", "PORTS", "SECRETS", "SANDBOX HEALTH", "dev", "RUNNING", "alpine:latest", "New sandbox"} {
+	for _, want := range []string{"GANTRY", "overview", "dev", "alpine:latest", "traffic", "denied", "exposure", "recent denies", "n new"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, plain)
 		}
