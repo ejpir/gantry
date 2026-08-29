@@ -316,6 +316,7 @@ type sandboxTUIModel struct {
 	formError           string
 
 	lastClickIndex int
+	lastClickKind  string
 	lastClickAt    time.Time
 
 	// dashboardHits is emitted by the last render pass. Mouse events consume
@@ -600,6 +601,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	m.refreshVisible = false
 	m.lastUpdate = msg.at
 	m.lastClickAt = time.Time{}
+	m.lastClickKind = ""
 	if msg.err != nil {
 		return m, m.showToast(tuiToastError, "Refresh failed", msg.err.Error())
 	}

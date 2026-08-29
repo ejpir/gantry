@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	tuiTopPadding   = 1
-	tuiMenuHeight   = tuiTopPadding + 2
-	tuiStatusHeight = 1
-	tuiCardHeight   = 10
-	tuiCardGapX     = 2
-	tuiCardGapY     = 1
+	tuiTopPadding    = 1
+	tuiMenuHeight    = tuiTopPadding + 2
+	tuiFooterPadding = 1
+	tuiStatusHeight  = tuiFooterPadding + 1
+	tuiCardHeight    = 10
+	tuiCardGapX      = 2
+	tuiCardGapY      = 1
 )
 
 type tuiTheme struct {
@@ -719,6 +720,7 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 	}
 
 	line := joinSides(left, right, innerWidth)
+	content := strings.Repeat("\n", tuiFooterPadding) + line
 	style := lipgloss.NewStyle().
 		Foreground(theme.secondary).
 		Background(theme.bg).
@@ -726,7 +728,7 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 		Width(width).
 		Height(tuiStatusHeight).
 		MaxHeight(tuiStatusHeight)
-	return renderSurface(style, theme.secondary, theme.bg, line)
+	return renderSurface(style, theme.secondary, theme.bg, content)
 }
 
 func (m sandboxTUIModel) contextHints() [][2]string {

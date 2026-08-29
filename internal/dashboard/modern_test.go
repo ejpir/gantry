@@ -67,18 +67,27 @@ func TestOperationalDashboardMatchesReferenceLayout(t *testing.T) {
 	}
 }
 
-func TestOperationalDashboardUsesEntireTerminalWidth(t *testing.T) {
+func TestOperationalDashboardUsesContentSizedResponsivePanels(t *testing.T) {
+	m := modernDashboardTestModel()
+	preferred := m.overviewPreferredPanelWidth(tuiThemeFor(m.dark))
 	for _, width := range []int{80, 140, 220, 300} {
-		m := modernDashboardTestModel()
 		m.width = width
 		view := m.View().Content
 		if got := lipgloss.Width(view); got != width {
 			t.Fatalf("dashboard width at %d columns = %d", width, got)
 		}
 		geometry := m.overviewGeometry(m.dashboardLayout())
-		if got, want := geometry.panelWidth, width-4; got != want {
+		want := minInt(width-4, preferred)
+		if got := geometry.panelWidth; got != want {
 			t.Fatalf("panel width at %d columns = %d, want %d", width, got, want)
 		}
+	}
+	m.width = 300
+	layout := m.dashboardLayout()
+	_ = m.View()
+	panel := m.overviewGeometry(layout).entryRects[0]
+	if hit, ok := m.dashboardHitAt(layout, panel.x+panel.w+1, panel.y+1); ok && hit.kind == "entry" {
+		t.Fatalf("space to the right of content-sized panel resolved to %s", hit.String())
 	}
 }
 
@@ -119,6 +128,88 @@ func TestTrafficSparklineSamplesCounterDeltas(t *testing.T) {
 	m.sampleSandboxTraffic(nil)
 	if _, ok := m.trafficHistory["dev"]; ok {
 		t.Fatal("traffic history retained a removed sandbox")
+	}
+}
+
+func TestTopologyNodesAndFactsHaveBreathingRoom(t *testing.T) {
+	theme := tuiThemeFor(true)
+	node := strings.Split(ansi.Strip(renderTopologyNode(theme, 44, "Workload", []string{"running", "image", "runtime", "disk"})), "\n")
+	if len(node) != topologyNodeHeight(4) {
+		t.Fatalf("topology node height = %d, want %d", len(node), topologyNodeHeight(4))
+	}
+	if !strings.Contains(node[1], "Workload") || strings.Trim(node[2], " │") != "" || strings.Trim(node[len(node)-2], " │") != "" {
+		t.Fatalf("topology node lacks title/data separation and bottom padding:\n%s", strings.Join(node, "\n"))
+	}
+
+	m := modernDashboardTestModel()
+	m.page = tuiSandboxesPage
+	geometry := m.masterDetailGeometry(m.dashboardLayout())
+	detail := strings.Split(ansi.Strip(m.renderSandboxTopology(theme, geometry, m.dashboardLayout().contentHeight)), "\n")
+	networkRow := -1
+	for row, line := range detail {
+		if strings.Contains(line, "Network") {
+			networkRow = row
+			break
+		}
+	}
+	if networkRow < 2 || strings.Trim(detail[networkRow-2], " │") != "" {
+		t.Fatalf("facts section lacks top padding:\n%s", strings.Join(detail, "\n"))
+	}
+}
+
+func TestWorkloadDoubleClickRunsEnterAction(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.page = tuiSandboxesPage
+	m.cursor = 0
+	_ = m.View()
+	var workload tuiHitTarget
+	for _, target := range m.dashboardHits {
+		if target.kind == "workload" {
+			workload = target
+			break
+		}
+	}
+	if workload.rect.w == 0 {
+		t.Fatal("rendered Workload node has no mouse target")
+	}
+	mouse := tea.Mouse{X: workload.rect.x + workload.rect.w/2, Y: workload.rect.y + workload.rect.h/2, Button: tea.MouseLeft}
+	model, cmd := m.updateMouseClick(mouse)
+	m = *model.(*sandboxTUIModel)
+	if cmd != nil || m.busyAction != "" {
+		t.Fatalf("first Workload click = busy %q cmd=%v", m.busyAction, cmd)
+	}
+	model, cmd = m.updateMouseClick(mouse)
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.busyAction != "open" || m.busyName != "codex-dev" {
+		t.Fatalf("Workload double-click = busy %q name %q cmd=%v", m.busyAction, m.busyName, cmd)
+	}
+}
+
+func TestCreateAreaDoubleClickOpensCreateDialog(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.page = tuiSandboxesPage
+	m.cursor = len(m.sandboxes)
+	_ = m.View()
+	var create tuiHitTarget
+	for _, target := range m.dashboardHits {
+		if target.kind == "create" {
+			create = target
+			break
+		}
+	}
+	if create.rect.w == 0 {
+		t.Fatal("rendered create area has no mouse target")
+	}
+	mouse := tea.Mouse{X: create.rect.x + create.rect.w/2, Y: create.rect.y + create.rect.h/2, Button: tea.MouseLeft}
+	model, cmd := m.updateMouseClick(mouse)
+	m = *model.(*sandboxTUIModel)
+	if cmd != nil || m.dialog != tuiNoDialog {
+		t.Fatalf("first create-area click = dialog %d cmd=%v", m.dialog, cmd)
+	}
+	model, cmd = m.updateMouseClick(mouse)
+	m = *model.(*sandboxTUIModel)
+	if cmd == nil || m.dialog != tuiCreateDialog {
+		t.Fatalf("create-area double-click = dialog %d cmd=%v", m.dialog, cmd)
 	}
 }
 
@@ -346,6 +437,21 @@ func TestRenderedRowsAndHitMapShareTerminalCoordinates(t *testing.T) {
 	assertTarget("traffic", "page", "", tuiTrafficPage)
 	assertTarget("enter open", "shortcut", "enter", 0)
 	assertTarget("n new", "shortcut", "n", 0)
+}
+
+func TestStatusBarLeavesSpaceAboveKeyboardHints(t *testing.T) {
+	m := modernDashboardTestModel()
+	m.page = tuiRulesPage
+	lines := strings.Split(ansi.Strip(m.renderStatusBar(tuiThemeFor(m.dark), m.width)), "\n")
+	if len(lines) != tuiStatusHeight {
+		t.Fatalf("status height = %d, want %d", len(lines), tuiStatusHeight)
+	}
+	if strings.TrimSpace(lines[0]) != "" {
+		t.Fatalf("status padding row is not blank: %q", lines[0])
+	}
+	if !strings.Contains(lines[tuiFooterPadding], "inspect") {
+		t.Fatalf("keyboard hints missing from footer row: %q", lines[tuiFooterPadding])
+	}
 }
 
 func TestStatusBarActionsAreClickableAtTheirRenderedText(t *testing.T) {

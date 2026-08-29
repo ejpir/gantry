@@ -2327,6 +2327,7 @@ func (m *sandboxTUIModel) updateMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	m.lastClickAt = time.Time{}
+	m.lastClickKind = ""
 	if m.page == tuiOverviewPage || m.usesMasterDetail(m.dashboardLayout()) {
 		switch mouse.Button {
 		case tea.MouseWheelUp:

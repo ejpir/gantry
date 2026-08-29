@@ -50,6 +50,12 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 	case tuiSandboxesPage:
 		if m.usesMasterDetail(layout) {
 			geometry := m.masterDetailGeometry(layout)
+			if geometry.workloadRect.w > 0 && geometry.workloadRect.h > 0 {
+				targets = append(targets, tuiHitTarget{kind: "workload", index: m.cursor, rect: geometry.workloadRect})
+			}
+			if geometry.createRect.w > 0 && geometry.createRect.h > 0 {
+				targets = append(targets, tuiHitTarget{kind: "create", index: m.cursor, rect: geometry.createRect})
+			}
 			for index, rect := range geometry.entryRects {
 				targets = append(targets, tuiHitTarget{kind: "entry", index: index, rect: rect})
 			}
@@ -224,15 +230,23 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		return m, nil
 	case "shortcut":
 		return m.dispatchMouseShortcut(target.action)
+	case "workload":
+		if target.index != m.cursor || !m.dashboardDoubleClick("workload", target.index) {
+			return m, nil
+		}
+		return m.primaryAction()
+	case "create":
+		if target.index != m.cursor || !m.onNewCard() || !m.dashboardDoubleClick("create", target.index) {
+			return m, nil
+		}
+		return m, m.openCreateDialog()
 	case "entry":
 		wasSelected := target.index == m.cursor
 		m.setCursor(target.index)
-		doubleClick := wasSelected && target.index == m.lastClickIndex && time.Since(m.lastClickAt) <= 450*time.Millisecond
-		m.lastClickIndex, m.lastClickAt = target.index, time.Now()
+		doubleClick := m.dashboardDoubleClick("entry", target.index) && wasSelected
 		if !doubleClick {
 			return m, nil
 		}
-		m.lastClickAt = time.Time{}
 		if m.page == tuiOverviewPage {
 			if m.onNewCard() {
 				return m, m.openCreateDialog()
@@ -243,6 +257,21 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		return m.primaryAction()
 	}
 	return m, nil
+}
+
+func (m *sandboxTUIModel) dashboardDoubleClick(kind string, index int) bool {
+	now := time.Now()
+	doubleClick := kind == m.lastClickKind && index == m.lastClickIndex && now.Sub(m.lastClickAt) <= 450*time.Millisecond
+	if doubleClick {
+		m.lastClickKind = ""
+		m.lastClickIndex = -1
+		m.lastClickAt = time.Time{}
+		return true
+	}
+	m.lastClickKind = kind
+	m.lastClickIndex = index
+	m.lastClickAt = now
+	return false
 }
 
 func (m *sandboxTUIModel) dispatchMouseShortcut(key string) (tea.Model, tea.Cmd) {

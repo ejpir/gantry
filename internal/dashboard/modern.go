@@ -12,11 +12,21 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+const (
+	tuiOverviewTrafficWidth = 40
+	tuiOverviewDeniedWidth  = 30
+	tuiOverviewContentSlack = 2
+)
+
 type tuiOverviewGeometry struct {
 	panelWidth, panelHeight int
 	gap, visible            int
 	start, end              int
 	entryRects              map[int]tuiRect
+}
+
+type tuiOperationalPanelContent struct {
+	header, traffic, denied, exposure, recent string
 }
 
 const (
@@ -25,9 +35,11 @@ const (
 )
 
 type tuiMasterDetailGeometry struct {
-	listWidth, detailWidth int
-	visible, start, end    int
-	entryRects             map[int]tuiRect
+	listWidth, detailWidth          int
+	workloadWidth, developmentWidth int
+	visible, start, end             int
+	workloadRect, createRect        tuiRect
+	entryRects                      map[int]tuiRect
 }
 
 func pageDisplayTitle(page tuiPage) string {
@@ -56,17 +68,19 @@ func pageDisplayTitle(page tuiPage) string {
 }
 
 func (m sandboxTUIModel) usesMasterDetail(layout tuiDashboardLayout) bool {
-	return m.page == tuiSandboxesPage && layout.width >= 78 && layout.contentHeight >= 18 && !m.loading
+	return m.page == tuiSandboxesPage && layout.width >= 78 && layout.contentHeight >= 23 && !m.loading
 }
 
 func (m sandboxTUIModel) overviewGeometry(layout tuiDashboardLayout) tuiOverviewGeometry {
+	availableWidth := maxInt(20, layout.width-4)
+	preferredWidth := m.overviewPreferredPanelWidth(tuiThemeFor(m.dark))
 	geometry := tuiOverviewGeometry{
-		panelWidth:  maxInt(20, layout.width-4),
+		panelWidth:  minInt(availableWidth, preferredWidth),
 		panelHeight: 9,
 		gap:         1,
 		entryRects:  make(map[int]tuiRect),
 	}
-	if layout.width < 96 {
+	if geometry.panelWidth < 96 {
 		geometry.panelHeight = 11
 	}
 	geometry.visible = maxInt(1, (layout.contentHeight+geometry.gap)/(geometry.panelHeight+geometry.gap))
@@ -87,6 +101,27 @@ func (m sandboxTUIModel) masterDetailGeometry(layout tuiDashboardLayout) tuiMast
 	geometry := tuiMasterDetailGeometry{entryRects: make(map[int]tuiRect)}
 	geometry.listWidth = clampInt(layout.width/4, 30, 40)
 	geometry.detailWidth = maxInt(38, layout.width-geometry.listWidth-1)
+	detailInner := maxInt(12, geometry.detailWidth-4)
+	geometry.workloadWidth = detailInner
+	if selected := m.selected(); selected != nil && selected.DevContainers && detailInner >= 62 {
+		geometry.workloadWidth = (detailInner - 2) / 2
+		geometry.developmentWidth = detailInner - geometry.workloadWidth - 2
+	}
+	if m.selected() != nil {
+		geometry.workloadRect = tuiRect{
+			x: layout.contentX + geometry.listWidth + 3,
+			y: layout.contentY + 5,
+			w: geometry.workloadWidth,
+			h: topologyNodeHeight(4),
+		}
+	} else if m.onNewCard() {
+		geometry.createRect = tuiRect{
+			x: layout.contentX + geometry.listWidth + 1,
+			y: layout.contentY,
+			w: geometry.detailWidth,
+			h: layout.contentHeight,
+		}
+	}
 	available := maxInt(1, layout.contentHeight-4)
 	geometry.visible = maxInt(1, (available+tuiMasterItemGap)/(tuiMasterItemHeight+tuiMasterItemGap))
 	geometry.start = clampInt(m.scrollRow, 0, maxInt(0, m.entryCount()-geometry.visible))
@@ -137,11 +172,26 @@ func (m sandboxTUIModel) renderOperationalSandboxPanel(theme tuiTheme, width, he
 		border = theme.accent
 	}
 	inner := maxInt(12, width-4)
+	panel := m.operationalPanelContent(theme, sandbox)
+	lines := []string{truncateANSI(panel.header, inner), ""}
+	if width >= 96 {
+		trafficWidth := minInt(tuiOverviewTrafficWidth, maxInt(8, inner))
+		deniedWidth := minInt(tuiOverviewDeniedWidth, maxInt(8, inner-trafficWidth))
+		details := tableCell(panel.traffic, trafficWidth) + tableCell(panel.denied, deniedWidth) + truncateANSI(panel.exposure, maxInt(1, inner-trafficWidth-deniedWidth))
+		lines = append(lines, details, "", truncateANSI("  "+panel.recent, inner))
+	} else {
+		lines = append(lines, truncateANSI(panel.traffic, inner), truncateANSI(panel.denied, inner), truncateANSI(panel.exposure, inner), "", truncateANSI("  "+panel.recent, inner))
+	}
+	content := strings.Join(lines, "\n")
+	style := lipgloss.NewStyle().Foreground(theme.text).Background(background).Border(lipgloss.NormalBorder()).BorderForeground(border).Padding(1, 1).Width(width).Height(height).MaxHeight(height)
+	return renderSurface(style, theme.text, background, content)
+}
+
+func (m sandboxTUIModel) operationalPanelContent(theme tuiTheme, sandbox tuiSandbox) tuiOperationalPanelContent {
 	state := lipgloss.NewStyle().Foreground(sandboxStateColor(theme, sandbox.State)).Render("●")
 	name := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sandbox.Name)
 	metadata := fmt.Sprintf("%dc %s · %s · %s", maxInt(1, sandbox.VCPUs), formatOverviewMemory(sandbox.MemMB), defaultText(sandbox.Runtime, "runtime unknown"), shortImageRef(sandbox.Image))
-	header := truncateANSI(state+" "+name+"  "+lipgloss.NewStyle().Foreground(theme.muted).Render(metadata), inner)
-
+	header := state + " " + name + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(metadata)
 	traffic := lipgloss.NewStyle().Foreground(theme.muted).Render("traffic  ") +
 		lipgloss.NewStyle().Foreground(theme.success).Render(m.sandboxTrafficSparkline(sandbox.Name, 16)) +
 		lipgloss.NewStyle().Foreground(theme.secondary).Render("  ↑"+formatBytes(sandbox.TXBytes)+" ↓"+formatBytes(sandbox.RXBytes))
@@ -150,21 +200,25 @@ func (m sandboxTUIModel) renderOperationalSandboxPanel(theme tuiTheme, width, he
 	if last := m.lastDeniedAt(sandbox.Name); !last.IsZero() {
 		denied += lipgloss.NewStyle().Foreground(theme.muted).Render(" last " + formatOverviewDenyClock(last))
 	}
-	exposure := m.sandboxExposure(theme, sandbox)
-	recent := lipgloss.NewStyle().Foreground(theme.muted).Render("recent denies: ") + m.recentDeniedHosts(theme, sandbox.Name, 4)
-
-	lines := []string{header, ""}
-	if width >= 96 {
-		trafficWidth := minInt(40, maxInt(8, inner))
-		deniedWidth := minInt(30, maxInt(8, inner-trafficWidth))
-		details := tableCell(traffic, trafficWidth) + tableCell(denied, deniedWidth) + truncateANSI(exposure, maxInt(1, inner-trafficWidth-deniedWidth))
-		lines = append(lines, details, "", truncateANSI("  "+recent, inner))
-	} else {
-		lines = append(lines, truncateANSI(traffic, inner), truncateANSI(denied, inner), truncateANSI(exposure, inner), "", truncateANSI("  "+recent, inner))
+	return tuiOperationalPanelContent{
+		header:   header,
+		traffic:  traffic,
+		denied:   denied,
+		exposure: m.sandboxExposure(theme, sandbox),
+		recent:   lipgloss.NewStyle().Foreground(theme.muted).Render("recent denies: ") + m.recentDeniedHosts(theme, sandbox.Name, 4),
 	}
-	content := strings.Join(lines, "\n")
-	style := lipgloss.NewStyle().Foreground(theme.text).Background(background).Border(lipgloss.NormalBorder()).BorderForeground(border).Padding(1, 1).Width(width).Height(height).MaxHeight(height)
-	return renderSurface(style, theme.text, background, content)
+}
+
+func (m sandboxTUIModel) overviewPreferredPanelWidth(theme tuiTheme) int {
+	preferredInner := 92
+	for _, sandbox := range m.sandboxes {
+		panel := m.operationalPanelContent(theme, sandbox)
+		preferredInner = maxInt(preferredInner, lipgloss.Width(panel.header))
+		preferredInner = maxInt(preferredInner, tuiOverviewTrafficWidth+tuiOverviewDeniedWidth+lipgloss.Width(panel.exposure))
+		preferredInner = maxInt(preferredInner, lipgloss.Width("  "+panel.recent))
+	}
+	// Two border cells and two horizontal padding cells surround the content.
+	return preferredInner + tuiOverviewContentSlack + 4
 }
 
 func formatOverviewMemory(mib uint) string {
@@ -334,7 +388,7 @@ func formatDashboardCount(value uint64) string {
 func (m sandboxTUIModel) renderSandboxMasterDetail(theme tuiTheme, layout tuiDashboardLayout) string {
 	geometry := m.masterDetailGeometry(layout)
 	list := m.renderSandboxMasterList(theme, geometry, layout.contentHeight)
-	detail := m.renderSandboxTopology(theme, geometry.detailWidth, layout.contentHeight)
+	detail := m.renderSandboxTopology(theme, geometry, layout.contentHeight)
 	return lipgloss.JoinHorizontal(lipgloss.Top, list, " ", detail)
 }
 
@@ -382,7 +436,8 @@ func (m sandboxTUIModel) renderSandboxMasterList(theme tuiTheme, geometry tuiMas
 	return renderSurface(style, theme.secondary, theme.panel, content)
 }
 
-func (m sandboxTUIModel) renderSandboxTopology(theme tuiTheme, width, height int) string {
+func (m sandboxTUIModel) renderSandboxTopology(theme tuiTheme, geometry tuiMasterDetailGeometry, height int) string {
+	width := geometry.detailWidth
 	inner := maxInt(12, width-4)
 	selected := m.selected()
 	if selected == nil {
@@ -403,12 +458,8 @@ func (m sandboxTUIModel) renderSandboxTopology(theme tuiTheme, width, height int
 	vmSummary := fmt.Sprintf("microVM  ·  %d vCPU  ·  %s RAM  ·  %s", maxInt(1, selected.VCPUs), formatMiBHuman(selected.MemMB), defaultText(selected.Runtime, "runtime unknown"))
 	separator := lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", inner))
 
-	workloadWidth := inner
-	developmentWidth := 0
-	if selected.DevContainers && inner >= 62 {
-		workloadWidth = (inner - 2) / 2
-		developmentWidth = inner - workloadWidth - 2
-	}
+	workloadWidth := geometry.workloadWidth
+	developmentWidth := geometry.developmentWidth
 	workload := renderTopologyNode(theme, workloadWidth, "Workload", []string{
 		stateText(*selected),
 		shortImageRef(selected.Image),
@@ -443,16 +494,20 @@ func (m sandboxTUIModel) renderSandboxTopology(theme tuiTheme, width, height int
 	if selected.SSH {
 		access = featureState(selected.State, "SSH")
 	}
+	factsInner := maxInt(8, inner-4)
+	factsSeparator := lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", factsInner))
 	facts := []string{
-		separator,
-		joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Network"), lipgloss.NewStyle().Foreground(theme.secondary).Render(network), inner),
-		joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Access"), lipgloss.NewStyle().Foreground(theme.secondary).Render(access), inner),
-		joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Attached"), lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.Join([]string{pluralCount(selected.Shares, "mount"), pluralCount(selected.Ports, "port"), pluralCount(selected.SecretCount, "secret")}, " · ")), inner),
+		factsSeparator,
+		joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Network"), lipgloss.NewStyle().Foreground(theme.secondary).Render(network), factsInner),
+		joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Access"), lipgloss.NewStyle().Foreground(theme.secondary).Render(access), factsInner),
+		joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Attached"), lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.Join([]string{pluralCount(selected.Shares, "mount"), pluralCount(selected.Ports, "port"), pluralCount(selected.SecretCount, "secret")}, " · ")), factsInner),
 	}
 	if !selected.Updated.IsZero() {
-		facts = append(facts, joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Configured"), lipgloss.NewStyle().Foreground(theme.secondary).Render(formatConfigTime(selected.Updated)), inner))
+		facts = append(facts, joinSides(lipgloss.NewStyle().Foreground(theme.muted).Render("Configured"), lipgloss.NewStyle().Foreground(theme.secondary).Render(formatConfigTime(selected.Updated)), factsInner))
 	}
-	content := header + "\n" + separator + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText(vmSummary, inner)) + "\n\n" + topology + "\n\n" + strings.Join(facts, "\n")
+	factsStyle := lipgloss.NewStyle().Foreground(theme.secondary).Background(theme.panel).Padding(1, 2).Width(inner)
+	factsBlock := renderSurface(factsStyle, theme.secondary, theme.panel, strings.Join(facts, "\n"))
+	content := header + "\n" + separator + "\n" + lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText(vmSummary, inner)) + "\n\n" + topology + "\n" + factsBlock
 	content = sliceBlockLines(content, 0, maxInt(1, height-2))
 	style := lipgloss.NewStyle().Foreground(theme.text).Background(theme.panel).Border(lipgloss.RoundedBorder()).BorderForeground(theme.borderMuted).Padding(0, 1).Width(width).Height(height).MaxHeight(height)
 	return renderSurface(style, theme.text, theme.panel, content)
@@ -463,7 +518,7 @@ func renderTopologyNode(theme tuiTheme, width int, title string, rows []string) 
 		return ""
 	}
 	inner := maxInt(4, width-4)
-	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(truncateText(title, inner))}
+	lines := []string{lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(truncateText(title, inner)), ""}
 	for index, row := range rows {
 		style := lipgloss.NewStyle().Foreground(theme.secondary)
 		if index == 0 {
@@ -471,10 +526,15 @@ func renderTopologyNode(theme tuiTheme, width int, title string, rows []string) 
 		}
 		lines = append(lines, style.Render(truncateText(row, inner)))
 	}
+	lines = append(lines, "")
 	content := strings.Join(lines, "\n")
-	height := maxInt(7, len(lines)+2)
+	height := topologyNodeHeight(len(rows))
 	style := lipgloss.NewStyle().Foreground(theme.text).Background(theme.panelRaised).Border(lipgloss.RoundedBorder()).BorderForeground(theme.border).Padding(0, 1).Width(width).Height(height).MaxHeight(height)
 	return renderSurface(style, theme.text, theme.panelRaised, content)
+}
+
+func topologyNodeHeight(rows int) int {
+	return maxInt(9, rows+5) // title, rows, borders, and one padding row on each side
 }
 
 func sandboxStateColor(theme tuiTheme, state dashboardapi.SandboxState) color.Color {
