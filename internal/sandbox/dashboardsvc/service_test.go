@@ -569,7 +569,7 @@ func writeDashboardTestImage(t *testing.T, store, ref, arch, digest string, size
 
 func TestDashboardListsImagesAndRegistryCredentials(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setDashboardTestHome(t, home)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "xdg"))
 	t.Setenv("GANTRY_REGISTRY_AUTH", "")
 	t.Setenv("GANTRY_HOME", t.TempDir())
@@ -683,7 +683,7 @@ func TestDashboardRegistryLoginValidation(t *testing.T) {
 
 func TestDashboardRegistryLoginStoreAndErase(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setDashboardTestHome(t, home)
 	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(home, "xdg"))
 	t.Setenv("GANTRY_REGISTRY_AUTH", "")
 	t.Setenv("GANTRY_HOME", t.TempDir())
@@ -744,6 +744,14 @@ func TestDashboardRegistryLoginStoreAndErase(t *testing.T) {
 	if err := service.RemoveRegistryLogin("  "); err == nil {
 		t.Fatal("blank registry erase succeeded")
 	}
+}
+
+func setDashboardTestHome(t *testing.T, home string) {
+	t.Helper()
+	// os.UserHomeDir reads HOME on Unix and USERPROFILE on Windows. Isolate
+	// both so host Docker credentials never influence these tests.
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 }
 
 func dashboardErrorFieldForTest(err error) string {
