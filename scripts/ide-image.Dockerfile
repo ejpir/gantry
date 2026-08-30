@@ -1,16 +1,17 @@
 FROM debian:bookworm-slim
 
-# Keep the mirror explicit and overridable for proxied/corporate builds. The
-# German Debian mirror provides a stable European endpoint; Debian Security's
-# CDN remains the authoritative security archive.
-ARG DEBIAN_MIRROR=http://ftp.de.debian.org/debian
+# Keep the mirrors explicit and overridable for proxied/corporate builds. Use
+# Debian's CDN rather than a single regional mirror: a lagging mirror can
+# publish Release metadata ahead of its package tree and make reproducible
+# builds fail with "Release file is not valid yet".
+ARG DEBIAN_MIRROR=http://deb.debian.org/debian
 ARG DEBIAN_SECURITY_MIRROR=http://security.debian.org/debian-security
 RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -exec sed -i \
       -e "s|https\?://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
       -e "s|https\?://security.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
       -e "s|https\?://deb.debian.org/debian|${DEBIAN_MIRROR}|g" {} + \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    && apt-get -o Acquire::Retries=5 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
        bash buildah ca-certificates curl fuse-overlayfs git libnss-myhostname \
        libstdc++6 openssh-client podman slirp4netns sudo tar uidmap util-linux \
     && rm -rf /var/lib/apt/lists/* \

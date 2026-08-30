@@ -97,6 +97,53 @@ func TestDialStreamRejectsBoundedProtocolFailures(t *testing.T) {
 	})
 }
 
+func TestOpenSplitWorkerStreamsRetriesTransientSetupFailure(t *testing.T) {
+	calls := 0
+	options := SessionOptions{StreamDial: func() (net.Conn, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("transient reconstructed socket failure")
+		}
+		client, peer := net.Pipe()
+		t.Cleanup(func() { _ = peer.Close() })
+		go func() {
+			var header [4]byte
+			if _, err := io.ReadFull(peer, header[:]); err != nil {
+				return
+			}
+			id := make([]byte, binary.BigEndian.Uint32(header[:]))
+			if _, err := io.ReadFull(peer, id); err != nil {
+				return
+			}
+			_, _ = peer.Write(streamAck(string(id)))
+		}()
+		return client, nil
+	}}
+	streams, err := options.openStreams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	streams.close()
+	if calls != 3 {
+		t.Fatalf("split-worker stream dials = %d, want failed dial plus stdin/stdout", calls)
+	}
+}
+
+func TestOpenSplitWorkerStreamsBoundsRetries(t *testing.T) {
+	calls := 0
+	options := SessionOptions{StreamDial: func() (net.Conn, error) {
+		calls++
+		return nil, errors.New("worker unavailable")
+	}}
+	streams, err := options.openStreams()
+	if streams != nil || err == nil || !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("openStreams = (%v, %v), want bounded retry error", streams, err)
+	}
+	if calls != streamSetupAttempts {
+		t.Fatalf("split-worker stream dials = %d, want %d", calls, streamSetupAttempts)
+	}
+}
+
 func TestClaimStreamTimesOutWhenPeerWithholdsAck(t *testing.T) {
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
