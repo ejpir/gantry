@@ -16,6 +16,8 @@ import (
 const (
 	maxStreamHandshakeString = 4 << 10
 	streamHandshakeTimeout   = 10 * time.Second
+	streamSetupAttempts      = 3
+	streamSetupRetryDelay    = 25 * time.Millisecond
 )
 
 // startStream connects to the guest streaming service through its Unix
@@ -118,6 +120,25 @@ type sessionStreams struct {
 }
 
 func (options SessionOptions) openStreams() (*sessionStreams, error) {
+	streams, err := options.openStreamsOnce()
+	if err == nil || options.StreamDial == nil {
+		return streams, err
+	}
+	// Split workers transfer a fresh stream socket across a process boundary.
+	// Windows may transiently reject the reconstructed Winsock handle during
+	// setup (WSAEINVAL from getsockname). No task exists and stdin has not been
+	// consumed yet, so retrying the complete pair is safe and cannot duplicate
+	// guest execution. Keep the retry bounded so a dead worker still fails fast.
+	for attempt := 1; attempt < streamSetupAttempts; attempt++ {
+		time.Sleep(streamSetupRetryDelay)
+		if streams, err = options.openStreamsOnce(); err == nil {
+			return streams, nil
+		}
+	}
+	return nil, fmt.Errorf("open split-worker streams after %d attempts: %w", streamSetupAttempts, err)
+}
+
+func (options SessionOptions) openStreamsOnce() (*sessionStreams, error) {
 	open := func(prefix string) (sessionStream, error) {
 		id, err := streamID(prefix)
 		if err != nil {

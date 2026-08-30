@@ -22,7 +22,7 @@ func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, as
 	}
 	fileLimitNote := ""
 	if config.MaxWritableFileSize != 0 {
-		fileLimitNote = fmt.Sprintf("writable file growth capped at %d bytes; disk locks remain supervisor-owned", config.MaxWritableFileSize)
+		fileLimitNote = fmt.Sprintf("writable file growth capped process-wide at %d bytes; disk locks remain supervisor-owned", config.MaxWritableFileSize)
 		report.Notes = append(report.Notes, fileLimitNote)
 	}
 	if config.Confinement == "" || config.Confinement == "off" {

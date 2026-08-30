@@ -27,13 +27,9 @@ func (config Config) validate() error {
 	if config.NDisksRO > maxInheritedDisks || config.NDisks > maxInheritedDisks-config.NDisksRO {
 		return fmt.Errorf("disk count exceeds limit %d", maxInheritedDisks)
 	}
-	// RLIMIT_FSIZE is process-wide. Supporting multiple differently sized
-	// writable files would let the worker grow a smaller disk up to the
-	// largest disk's ceiling. Persistent sandboxes have one writable layer;
-	// reject wider tables until each write is mediated by an fd-specific cap.
-	if config.NDisks > 1 {
-		return fmt.Errorf("split VMM supports at most one writable disk")
-	}
+	// Writable descriptors are ordered capabilities with independent sizes in
+	// virtio-blk. On Unix, RLIMIT_FSIZE remains a process-wide defense-in-depth
+	// ceiling set to the largest writable disk; it is not a per-disk boundary.
 	if runtime.GOOS != "windows" && config.NDisks > 0 && (!config.DisksPrelocked || config.MaxWritableFileSize == 0) {
 		return fmt.Errorf("writable disks require a supervisor lock and file-size bound")
 	}

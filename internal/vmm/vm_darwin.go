@@ -804,13 +804,27 @@ const (
 	maxTracedExits    = 48
 	alwaysTracedExits = 12
 	longExitThreshold = 2 * time.Millisecond
+
+	// Hypervisor.framework may report a transient UNKNOWN exit after host
+	// scheduling or sleep/wake transitions. The exit does not describe guest
+	// state that Gantry can emulate, so retry the unchanged vCPU briefly. A
+	// persistent stream remains fatal instead of spinning a host core forever.
+	hvfUnknownRetryLimit = 3
 )
+
+func hvfUnknownRetryDelay(consecutive int) (time.Duration, bool) {
+	if consecutive < 1 || consecutive > hvfUnknownRetryLimit {
+		return 0, false
+	}
+	return time.Duration(consecutive) * time.Millisecond, true
+}
 
 func (vc *hvfVCPU) runLoop() error {
 	vc.inLoop.Store(true)
 	defer vc.inLoop.Store(false)
 	firstRun := true
 	traced, printed := 0, 0
+	unknownExits := 0
 	for {
 		if vc.b.lifecycle.isStopping() {
 			return nil
@@ -858,6 +872,9 @@ func (vc *hvfVCPU) runLoop() error {
 					vc.id, vc.exit.reason, ec, syn, pc)
 			}
 		}
+		if vc.exit.reason != hvExitReasonUnknown {
+			unknownExits = 0
+		}
 		switch vc.exit.reason {
 		case hvExitReasonVtimerActivated:
 			if vc.bootAccounting {
@@ -888,7 +905,23 @@ func (vc *hvfVCPU) runLoop() error {
 			if err := vc.handleException(); err != nil {
 				return err
 			}
+		case hvExitReasonUnknown:
+			if vc.bootAccounting {
+				vc.statOther.Add(1)
+			}
+			unknownExits++
+			delay, retry := hvfUnknownRetryDelay(unknownExits)
+			pc, _ := vc.getReg(hvRegPC)
+			if retry {
+				fmt.Printf("[cpu%d] Hypervisor.framework UNKNOWN exit at pc=%#x; retry %d/%d after %s\n",
+					vc.id, pc, unknownExits, hvfUnknownRetryLimit, delay)
+				time.Sleep(delay)
+				continue
+			}
+			vc.dumpFullState()
+			return fmt.Errorf("HVF vCPU %d: persistent UNKNOWN exit at pc=%#x after %d retries", vc.id, pc, hvfUnknownRetryLimit)
 		default:
+			vc.dumpFullState()
 			return fmt.Errorf("unexpected HVF exit reason %d", vc.exit.reason)
 		}
 	}

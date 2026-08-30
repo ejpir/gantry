@@ -50,12 +50,19 @@ cp scripts/gantry-podman "$WORK/gantry-podman"
 # not embedded in the Dockerfile or image metadata. Supplying --build-arg NAME
 # without a value makes Docker read the value from this process's environment.
 # Support both conventional casings because developer shells and CI systems
-# differ, and preserve NO_PROXY for local mirrors.
+# differ, and preserve NO_PROXY for local mirrors. An HTTP proxy commonly
+# arrives only as HTTPS_PROXY even though it handles both schemes; Debian's
+# package mirrors use HTTP, so mirror that value when HTTP_PROXY is absent.
 # BuildKit runs registry metadata resolution in a separate daemon. With remote
 # Podman behind an intercepting HTTPS proxy, that daemon may not have the
 # corporate CA even though Podman's native builder and image store do. Select
 # Podman's Docker-compatible build endpoint in that case; --pull=false also
 # lets it use a base image already mirrored into the remote engine.
+if [ -z "${HTTP_PROXY:-${http_proxy:-}}" ] && [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ]; then
+  HTTP_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
+  export HTTP_PROXY
+  export http_proxy="$HTTP_PROXY"
+fi
 PODMAN_BUILD=false
 if docker version --format '{{range .Server.Components}}{{println .Name}}{{end}}' 2>/dev/null \
     | grep -qx 'Podman Engine'; then

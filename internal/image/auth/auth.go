@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
@@ -353,6 +354,40 @@ func (r *Resolver) configuredHelper(key string) string {
 type Row struct {
 	Registry string
 	Credential
+}
+
+// Registries enumerates every registry the resolver knows a credential or
+// helper mapping for, normalized and deduplicated. It powers the dashboard's
+// credential view, where the user does not type a registry list.
+func (r *Resolver) Registries() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(registry string) {
+		key := normalize(registry)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	for key := range r.envCreds {
+		add(key)
+	}
+	configs := []*dockerConfig{r.gantryCfg, r.dockerCfg}
+	configs = append(configs, r.podmanCfgs...)
+	for _, cfg := range configs {
+		if cfg == nil {
+			continue
+		}
+		for key := range cfg.Auths {
+			add(key)
+		}
+		for key := range cfg.CredHelpers {
+			add(key)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Table describes the resolution for inspection (`gantry image

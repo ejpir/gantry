@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -168,6 +169,54 @@ func TestSuperviseMarkedCreateStdioPassthrough(t *testing.T) {
 	if !strings.Contains(string(output), "marked-create-output") {
 		t.Fatalf("marked create output did not reach runtime stdio: %q", output)
 	}
+}
+
+func TestHangDumpHelperProcess(t *testing.T) {
+	if os.Getenv("CRUNSHIM_HANG_DUMP_HELPER") == "" {
+		return
+	}
+	time.Sleep(60 * time.Second)
+}
+
+func TestSuperviseHangDumpDoesNotSignalUnrelatedRunscProcess(t *testing.T) {
+	helperArgs := []string{"-test.run=^TestHangDumpHelperProcess$"}
+	victim := exec.Command(os.Args[0], helperArgs...)
+	victim.Args[0] = "runsc-sandbox-unrelated"
+	victim.Env = replaceTestEnvironment("CRUNSHIM_HANG_DUMP_HELPER", "victim")
+	victim.Stdout, victim.Stderr = io.Discard, io.Discard
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = victim.Process.Kill()
+		_ = victim.Wait()
+	}()
+	if err := victim.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("unrelated runsc-like process did not start: %v", err)
+	}
+
+	oldRuntime, oldDelay := realRuntime, hangDumpDelay
+	realRuntime, hangDumpDelay = os.Args[0], 100*time.Millisecond
+	defer func() { realRuntime, hangDumpDelay = oldRuntime, oldDelay }()
+	t.Setenv("CRUNSHIM_HANG_DUMP_HELPER", "runtime")
+
+	if code := supervise(append([]string{"crun"}, helperArgs...), true, false); code == 0 {
+		t.Fatal("hang dump did not terminate the supervised runtime child")
+	}
+	if err := victim.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("hang dump signaled unrelated runsc-like process: %v", err)
+	}
+}
+
+func replaceTestEnvironment(name, value string) []string {
+	prefix := name + "="
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, prefix) {
+			environment = append(environment, entry)
+		}
+	}
+	return append(environment, prefix+value)
 }
 
 func TestInsertFlags(t *testing.T) {

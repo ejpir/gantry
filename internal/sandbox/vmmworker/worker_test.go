@@ -904,16 +904,31 @@ func TestVMMWorkerHelperProcess(t *testing.T) {
 	workertest.AssertStdinUnreadable()
 	runtime := vmmworkerapi.NewRuntime()
 	runtime.Boot = func(opts vmm.Opts) (vmmworkerapi.Runner, error) {
-		if os.Getenv("GANTRY_TEST_DISK_LIMIT") == "1" {
-			if len(opts.Disks) != 1 || !opts.DisksPrelocked {
-				return nil, fmt.Errorf("writable disk was not supervisor-prelocked")
+		if os.Getenv("GANTRY_TEST_DIRECT_DISKS") == "1" {
+			wantSizes := []int64{1 << 20, 2 << 20}
+			if len(opts.Disks) != len(wantSizes) || !opts.DisksPrelocked {
+				return nil, fmt.Errorf("writable disks = %d/prelocked %v, want %d/true", len(opts.Disks), opts.DisksPrelocked, len(wantSizes))
 			}
-			info, err := opts.Disks[0].Stat()
-			if err != nil {
-				return nil, err
+			for index, disk := range opts.Disks {
+				info, err := disk.Stat()
+				if err != nil {
+					return nil, err
+				}
+				if info.Size() != wantSizes[index] {
+					return nil, fmt.Errorf("writable disk %d size = %d, want %d", index, info.Size(), wantSizes[index])
+				}
+				marker := []byte{byte(index + 1)}
+				if _, err := syscall.Pwrite(int(disk.Fd()), marker, info.Size()-1); err != nil {
+					return nil, fmt.Errorf("write writable disk %d: %w", index, err)
+				}
+				readback := []byte{0}
+				if _, err := syscall.Pread(int(disk.Fd()), readback, info.Size()-1); err != nil || readback[0] != marker[0] {
+					return nil, fmt.Errorf("read writable disk %d = %x, %v", index, readback, err)
+				}
 			}
-			if _, err := syscall.Pwrite(int(opts.Disks[0].Fd()), []byte{1}, info.Size()); !errors.Is(err, syscall.EFBIG) {
-				return nil, fmt.Errorf("write beyond fixed disk size returned %v, want EFBIG", err)
+			largest := opts.Disks[len(opts.Disks)-1]
+			if _, err := syscall.Pwrite(int(largest.Fd()), []byte{1}, wantSizes[len(wantSizes)-1]); !errors.Is(err, syscall.EFBIG) {
+				return nil, fmt.Errorf("write beyond process-wide disk limit returned %v, want EFBIG", err)
 			}
 		}
 		return &fakeVMM{stop: make(chan struct{}), opts: opts}, nil
@@ -1042,7 +1057,7 @@ func TestDiskLockProbeHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestVMMWorkerKeepsWritableDiskLockInSupervisor(t *testing.T) {
+func TestVMMWorkerSupportsMultipleDirectWritableDisks(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -1053,7 +1068,7 @@ func TestVMMWorkerKeepsWritableDiskLockInSupervisor(t *testing.T) {
 		*env = append(*env,
 			"GANTRY_TEST_VMM_WORKER=1",
 			"GANTRY_TEST_WORKER_STDIN_UNREADABLE=1",
-			"GANTRY_TEST_DISK_LIMIT=1",
+			"GANTRY_TEST_DIRECT_DISKS=1",
 		)
 	}
 	t.Cleanup(func() { vmmWorkerSpawnHook = old })
@@ -1078,32 +1093,39 @@ func TestVMMWorkerKeepsWritableDiskLockInSupervisor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	diskPath := filepath.Join(t.TempDir(), "rwlayer.ext4")
-	if err := os.WriteFile(diskPath, make([]byte, 1<<20), 0o600); err != nil {
-		t.Fatal(err)
+	diskPaths := []string{
+		filepath.Join(t.TempDir(), "workload.ext4"),
+		filepath.Join(t.TempDir(), "ide.ext4"),
 	}
-	disk, err := os.OpenFile(diskPath, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
+	disks := make([]*os.File, 0, len(diskPaths))
+	for index, diskPath := range diskPaths {
+		if err := os.WriteFile(diskPath, make([]byte, (index+1)<<20), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		disk, err := os.OpenFile(diskPath, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disks = append(disks, disk)
 	}
 
-	vw, err := spawnVMMWorker(vmmworkerapi.Config{MemSize: 1 << 20, NDisks: 1}, vmmworkerapi.Assets{
+	vw, err := spawnVMMWorker(vmmworkerapi.Config{MemSize: 1 << 20, NDisks: len(disks)}, vmmworkerapi.Assets{
 		NetConn: netDev,
 		Console: consoleLog.Writer(),
 		Kernel:  kernel,
-		Disks:   []*os.File{disk},
+		Disks:   disks,
 	}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = vw.Close() })
-	if notes := strings.Join(vw.ConfinementReport().Notes, " "); !strings.Contains(notes, "disk locks remain supervisor-owned") {
-		t.Fatalf("worker report omits disk authority boundary: %q", notes)
+	if notes := strings.Join(vw.ConfinementReport().Notes, " "); !strings.Contains(notes, "disk locks remain supervisor-owned") || !strings.Contains(notes, "2097152") {
+		t.Fatalf("worker report omits multi-disk authority boundary: %q", notes)
 	}
-	probe := func(want int) {
+	probe := func(path string, want int) {
 		t.Helper()
 		cmd := exec.Command(exe, "-test.run", "^TestDiskLockProbeHelper$")
-		cmd.Env = append(os.Environ(), "GANTRY_TEST_DISK_LOCK_PATH="+diskPath)
+		cmd.Env = append(os.Environ(), "GANTRY_TEST_DISK_LOCK_PATH="+path)
 		err := cmd.Run()
 		got := 0
 		if err != nil {
@@ -1114,14 +1136,25 @@ func TestVMMWorkerKeepsWritableDiskLockInSupervisor(t *testing.T) {
 			got = exitErr.ExitCode()
 		}
 		if got != want {
-			t.Fatalf("disk lock probe exit = %d, want %d (err %v)", got, want, err)
+			t.Fatalf("disk lock probe for %s exit = %d, want %d (err %v)", path, got, want, err)
 		}
 	}
-	probe(42)
+	for index, path := range diskPaths {
+		probe(path, 42)
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := contents[len(contents)-1], byte(index+1); got != want {
+			t.Fatalf("direct disk %d final byte = %d, want %d", index, got, want)
+		}
+	}
 	if err := vw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	probe(0)
+	for _, path := range diskPaths {
+		probe(path, 0)
+	}
 }
 
 func TestNamespaceUnavailableClassification(t *testing.T) {

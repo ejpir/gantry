@@ -12,29 +12,10 @@ import (
 
 const tuiTableHeaderHeight = 2
 
-func pageTitle(page tuiPage) string {
-	switch page {
-	case tuiTrafficPage:
-		return "TRAFFIC"
-	case tuiRulesPage:
-		return "RULES"
-	case tuiMountsPage:
-		return "MOUNTS"
-	case tuiPortsPage:
-		return "PORTS"
-	case tuiSecretsPage:
-		return "SECRETS"
-	case tuiMCPPage:
-		return "MCP SERVERS"
-	case tuiPacketsPage:
-		return "PACKETS"
-	default:
-		return "SANDBOXES"
-	}
-}
-
 func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 	switch page {
+	case tuiOverviewPage:
+		return len(m.sandboxes)
 	case tuiTrafficPage:
 		return len(m.traffic)
 	case tuiRulesPage:
@@ -49,6 +30,11 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 		return len(m.mcpServers)
 	case tuiPacketsPage:
 		return len(m.packets)
+	case tuiImagesPage:
+		if m.imageSection == tuiImageSectionCredentials {
+			return len(m.registries)
+		}
+		return len(m.images)
 	default:
 		return len(m.sandboxes)
 	}
@@ -566,6 +552,11 @@ func (m sandboxTUIModel) tableRenderPosition(page tuiPage) (scroll, cursor int) 
 		return m.mcpScroll, m.mcpCursor
 	case tuiPacketsPage:
 		return m.packetScroll, m.packetCursor
+	case tuiImagesPage:
+		if m.imageSection == tuiImageSectionCredentials {
+			return m.registryScroll, m.registryCursor
+		}
+		return m.imageScroll, m.imageCursor
 	default:
 		return 0, 0
 	}
@@ -587,6 +578,11 @@ func (m sandboxTUIModel) renderTableHeader(theme tuiTheme, page tuiPage, width i
 		return m.renderMCPHeader(theme, width)
 	case tuiPacketsPage:
 		return m.renderPacketsHeader(theme, width)
+	case tuiImagesPage:
+		if m.imageSection == tuiImageSectionCredentials {
+			return m.renderRegistriesHeader(theme, width)
+		}
+		return m.renderImagesHeader(theme, width)
 	default:
 		return ""
 	}
@@ -608,6 +604,11 @@ func (m sandboxTUIModel) renderTableRow(theme tuiTheme, page tuiPage, index, wid
 		return m.renderMCPRow(theme, m.mcpServers[index], width)
 	case tuiPacketsPage:
 		return m.renderPacketRow(theme, m.packets[index], width)
+	case tuiImagesPage:
+		if m.imageSection == tuiImageSectionCredentials {
+			return m.renderRegistryRow(theme, m.registries[index], width)
+		}
+		return m.renderImageRow(theme, m.images[index], width)
 	default:
 		return ""
 	}
@@ -629,6 +630,11 @@ func (m sandboxTUIModel) renderTableDetail(theme tuiTheme, page tuiPage, width i
 		return m.renderMCPDetail(theme, width)
 	case tuiPacketsPage:
 		return m.renderPacketDetail(theme, width)
+	case tuiImagesPage:
+		if m.imageSection == tuiImageSectionCredentials {
+			return m.renderRegistryDetail(theme, width)
+		}
+		return m.renderImageDetail(theme, width)
 	default:
 		return nil
 	}
@@ -685,7 +691,13 @@ func (m sandboxTUIModel) renderTableSeparator(theme tuiTheme, width int) string 
 }
 
 func (m sandboxTUIModel) renderActiveScrollbar(theme tuiTheme, layout tuiDashboardLayout) string {
+	if m.page == tuiOverviewPage {
+		return renderListScrollbar(theme, layout.contentHeight, len(m.sandboxes), m.overviewNavigationCapacity(layout), m.scrollRow)
+	}
 	if m.page == tuiSandboxesPage {
+		if m.usesMasterDetail(layout) {
+			return renderListScrollbar(theme, layout.contentHeight, m.entryCount(), m.masterVisibleItems(layout), m.scrollRow)
+		}
 		return m.renderCardScrollbar(theme, layout)
 	}
 	_, scroll, count := m.tableState()

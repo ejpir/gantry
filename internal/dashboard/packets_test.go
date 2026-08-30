@@ -67,7 +67,7 @@ func TestRenderPacketsView(t *testing.T) {
 	}}
 
 	plain := ansi.Strip(m.View().Content)
-	for _, want := range []string{"PACKETS", "192.0.2.10:32123", "198.51.100.20:443", "Ethernet › IPv4 › TCP", "de ad be ef"} {
+	for _, want := range []string{"packets", "192.0.2.10:32123", "198.51.100.20:443", "Ethernet › IPv4 › TCP", "de ad be ef"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("packet view does not contain %q:\n%s", want, plain)
 		}

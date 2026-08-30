@@ -245,3 +245,34 @@ func TestResolverRefreshesCacheAfterCommittedDurabilityError(t *testing.T) {
 		t.Fatalf("resolver cache retained committed erase: %+v", credential)
 	}
 }
+
+func TestRegistriesEnumeratesKnownSources(t *testing.T) {
+	home := withHome(t)
+	t.Setenv("GANTRY_REGISTRY_AUTH", "env.example=envuser:envpass")
+
+	// gantry credentials: quay.io; docker config: ghcr.io plus a helper
+	// mapping; docker.io legacy key normalizes onto docker.io once.
+	gd := filepath.Join(home, ".gantry")
+	_ = os.MkdirAll(gd, 0o700)
+	q64 := base64.StdEncoding.EncodeToString([]byte("u:p"))
+	_ = os.WriteFile(filepath.Join(gd, "credentials.json"),
+		[]byte(fmt.Sprintf(`{"auths":{"quay.io":{"auth":%q}}}`, q64)), 0o600)
+	dockerDir := filepath.Join(home, ".docker")
+	_ = os.MkdirAll(dockerDir, 0o755)
+	_ = os.WriteFile(filepath.Join(dockerDir, "config.json"),
+		[]byte(fmt.Sprintf(`{"auths":{"https://index.docker.io/v1/":{"auth":%q}},"credHelpers":{"gcr.io":"gcr"}}`, q64)), 0o600)
+
+	got := Resolve().Registries()
+	want := []string{"docker.io", "env.example", "gcr.io", "quay.io"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("Registries() = %v, want %v", got, want)
+	}
+}
+
+func TestRegistriesEmptyWhenNothingKnown(t *testing.T) {
+	withHome(t)
+	t.Setenv("GANTRY_REGISTRY_AUTH", "")
+	if got := Resolve().Registries(); len(got) != 0 {
+		t.Fatalf("Registries() = %v, want empty", got)
+	}
+}

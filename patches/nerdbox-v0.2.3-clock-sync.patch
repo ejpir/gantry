@@ -1,9 +1,9 @@
 diff --git a/pkg/vminit/initd/clocksync.go b/pkg/vminit/initd/clocksync.go
 new file mode 100644
-index 0000000..0a66bd5
+index 0000000..0c5191f
 --- /dev/null
 +++ b/pkg/vminit/initd/clocksync.go
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,131 @@
 +//go:build linux
 +
 +/*
@@ -80,28 +80,32 @@ index 0000000..0a66bd5
 +	// host read, not a cached kernel value.
 +	clockid := ^int32(f.Fd())<<3 | 3
 +
++	// Host sleep can interrupt an in-flight virtio request and make one PHC
++	// read time out. Keep the descriptor and retry: permanently stopping here
++	// leaves wall time stale after every later suspend until the VM reboots.
 +	if err := stepClock(clockid); err != nil {
-+		f.Close()
-+		log.G(ctx).WithError(err).Error("clock sync disabled: virtio-rtc PHC unusable")
-+		return
++		log.G(ctx).WithError(err).Warn("clock sync: initial virtio-rtc PHC read failed; retrying")
 +	}
 +	go func() {
 +		defer f.Close()
 +		t := time.NewTicker(clockSyncInterval)
 +		defer t.Stop()
-+		for {
-+			select {
-+			case <-ctx.Done():
-+				return
-+			case <-t.C:
-+				if err := stepClock(clockid); err != nil {
-+					log.G(ctx).WithError(err).Error("clock sync stopped: virtio-rtc PHC read failed")
-+					return
-+				}
-+			}
-+		}
++		runClockSync(ctx, clockid, t.C, stepClock)
 +	}()
 +	log.G(ctx).Info("clock sync: disciplining system clock from virtio-rtc PHC")
++}
++
++func runClockSync(ctx context.Context, clockid int32, ticks <-chan time.Time, step func(int32) error) {
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticks:
++			if err := step(clockid); err != nil {
++				log.G(ctx).WithError(err).Error("clock sync: virtio-rtc PHC read failed; retrying")
++			}
++		}
++	}
 +}
 +
 +// stepClock steps CLOCK_REALTIME to the PHC reading when the offset exceeds
@@ -130,6 +134,59 @@ index 0000000..0a66bd5
 +		log.G(context.TODO()).WithField("step", delta.String()).Debug("clock sync: stepped system clock")
 +	}
 +	return nil
++}
+diff --git a/pkg/vminit/initd/clocksync_test.go b/pkg/vminit/initd/clocksync_test.go
+new file mode 100644
+index 0000000..4e7be3b
+--- /dev/null
++++ b/pkg/vminit/initd/clocksync_test.go
+@@ -0,0 +1,47 @@
++//go:build linux
++
++package initd
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++)
++
++func TestRunClockSyncRetriesTransientReadFailure(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	t.Cleanup(cancel)
++	ticks := make(chan time.Time, 2)
++	attempted := make(chan struct{}, 2)
++	results := make(chan error, 2)
++	results <- errors.New("transient PHC timeout")
++	results <- nil
++	done := make(chan struct{})
++	go func() {
++		runClockSync(ctx, 7, ticks, func(clockid int32) error {
++			if clockid != 7 {
++				t.Errorf("clockid = %d, want 7", clockid)
++			}
++			attempted <- struct{}{}
++			return <-results
++		})
++		close(done)
++	}()
++
++	ticks <- time.Time{}
++	ticks <- time.Time{}
++	for attempt := 0; attempt < 2; attempt++ {
++		select {
++		case <-attempted:
++		case <-time.After(time.Second):
++			t.Fatalf("clock sync stopped after %d attempts", attempt+1)
++		}
++	}
++	cancel()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("clock sync did not stop after cancellation")
++	}
 +}
 diff --git a/pkg/vminit/initd/initd.go b/pkg/vminit/initd/initd.go
 index ba7e92c..5c13952 100644

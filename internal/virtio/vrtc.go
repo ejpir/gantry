@@ -17,7 +17,8 @@ import (
 // the device is pull-only, so keeping wall time synced afterwards is the
 // guest's job: vminitd runs a clock-sync loop (patched in at rootfs build
 // by patches/nerdbox-v0.2.3-clock-sync.patch) that re-reads the driver's
-// /dev/ptp clock every 30s and steps CLOCK_REALTIME. Without that loop
+// /dev/ptp clock every 30s, retries transient reads after host wake, and steps
+// CLOCK_REALTIME. Without that loop
 // guest wall time is one probe reading plus raw counter elapsed — it drifts
 // at the counter crystal's ppm error and, on HVF/WHPX, skips entire
 // host-suspend intervals because the host physical counter stops across

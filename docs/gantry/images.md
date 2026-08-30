@@ -88,9 +88,13 @@ converts overlayfs whiteouts and opaque directories into their OCI layer
 equivalents and preserves ownership, modes, symlinks, sparse-file and
 unwritten-extent zero semantics, device metadata, and supported extended
 attributes. Host shares are separate mounts and are not copied into the image.
-Large exports
-continuously report processed and compressed sizes, throughput, elapsed time,
-archive-copy percentage, and the final disk-sync phase.
+Large exports continuously report processed and compressed sizes, throughput,
+elapsed time, archive-copy percentage, and the final disk-sync phase.
+
+To keep guest-created sparse files from causing unbounded host work, the
+writable layer's cumulative logical file data cannot exceed its provisioned
+ext4 device size or 64 GiB, whichever is smaller. Export fails atomically with
+an actionable error when that limit is exceeded.
 
 The archive defaults to the local image name
 `gantry-export/dev:latest`. Choose a team name or version at export time when

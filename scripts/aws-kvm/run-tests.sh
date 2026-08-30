@@ -49,6 +49,13 @@ mv -f guest-new '$a' && chmod +x '$a'"
 		DL="$DL
 for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o ide-new '$U' && break; sleep 3; done
 mv -f ide-new '$a'"
+	elif [ "$a" = nerdbox-rootfs-x86_64.erofs ]; then
+		# Guest-agent fixes live in the rootfs. Refresh it just like the host
+		# and helper binaries so a reusable instance cannot validate stale
+		# vminitd behavior from an earlier field run.
+		DL="$DL
+for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o rootfs-new '$U' && break; sleep 3; done
+mv -f rootfs-new '$a'"
 	else
 		DL="$DL
 [ -s '$a' ] || { for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$a' '$U' && break; sleep 3; done; }"

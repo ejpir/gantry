@@ -95,6 +95,30 @@ func TestConfirmationDialogMouseDispatch(t *testing.T) {
 			},
 			wantAction: "port unpublish",
 		},
+		{
+			name:   "image remove",
+			dialog: tuiImageRemoveDialog,
+			configure: func(m *sandboxTUIModel) {
+				m.images = []tuiImageRow{{Ref: "alpine:latest", Digest: "sha256:abc", Arch: "arm64"}}
+			},
+			wantAction: "image remove",
+		},
+		{
+			name:   "image prune",
+			dialog: tuiImagePruneDialog,
+			configure: func(m *sandboxTUIModel) {
+				m.images = []tuiImageRow{{Ref: "alpine:latest", Digest: "sha256:abc", Arch: "arm64"}}
+			},
+			wantAction: "image prune",
+		},
+		{
+			name:   "registry logout",
+			dialog: tuiRegistryLogoutDialog,
+			configure: func(m *sandboxTUIModel) {
+				m.registries = []tuiRegistryRow{{Registry: "ghcr.io", Username: "octocat", HasSecret: true}}
+			},
+			wantAction: "registry logout",
+		},
 	}
 
 	for _, test := range tests {
