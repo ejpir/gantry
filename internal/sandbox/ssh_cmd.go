@@ -112,7 +112,7 @@ func CmdSSH(argv []string) int {
 	}
 	args := []string{
 		"-o", "ProxyCommand=" + shellCommand(self, "ssh-proxy", name),
-		"-o", "KnownHostsCommand=" + shellCommand(self, "ssh-known-hosts", "%H"),
+		"-o", "KnownHostsCommand=" + shellCommand(self, "ssh-known-hosts"),
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + filepath.Join(sshInstallDir(), "known_hosts"),
 	}
@@ -281,11 +281,10 @@ func sshShellQuote(value string) string {
 func shellCommand(argv ...string) string {
 	quoted := make([]string, len(argv))
 	for index, value := range argv {
-		if strings.HasPrefix(value, "%") {
-			quoted[index] = value
-		} else {
-			quoted[index] = sshShellQuote(value)
-		}
+		// OpenSSH expands tokens such as %h before handing ProxyCommand and
+		// KnownHostsCommand to the user's shell. Keep the token inside shell
+		// quotes so a HostName override cannot become shell syntax first.
+		quoted[index] = sshShellQuote(value)
 	}
 	return strings.Join(quoted, " ")
 }
@@ -316,8 +315,10 @@ func managedSSHBlock(self string) string {
 	return strings.Join([]string{
 		sshConfigBegin,
 		"Host *.gantry",
-		"    ProxyCommand " + shellCommand(self, "ssh-proxy", "%h"),
-		"    KnownHostsCommand " + shellCommand(self, "ssh-known-hosts", "%H"),
+		// %n is the original alias that matched *.gantry. Unlike %h/%H, it is
+		// not replaced by a HostName override from another SSH config source.
+		"    ProxyCommand " + shellCommand(self, "ssh-proxy", "%n"),
+		"    KnownHostsCommand " + shellCommand(self, "ssh-known-hosts"),
 		"    UserKnownHostsFile " + quoteSSHConfigPath(filepath.Join(sshInstallDir(), "known_hosts")),
 		"    StrictHostKeyChecking accept-new",
 		sshConfigEnd,

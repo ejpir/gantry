@@ -9,6 +9,28 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
+func TestShellCommandQuotesOpenSSHTokens(t *testing.T) {
+	got := shellCommand("gantry executable", "ssh-proxy", "%h")
+	want := strings.Join([]string{
+		sshShellQuote("gantry executable"),
+		sshShellQuote("ssh-proxy"),
+		sshShellQuote("%h"),
+	}, " ")
+	if got != want {
+		t.Fatalf("shell command = %q, want %q", got, want)
+	}
+
+	block := managedSSHBlock("gantry executable")
+	wantProxy := "ProxyCommand " + shellCommand("gantry executable", "ssh-proxy", "%n")
+	wantKnownHosts := "KnownHostsCommand " + shellCommand("gantry executable", "ssh-known-hosts")
+	if !strings.Contains(block, wantProxy) || !strings.Contains(block, wantKnownHosts) {
+		t.Fatalf("managed SSH commands are not safely constructed:\n%s", block)
+	}
+	if strings.Contains(block, "%h") || strings.Contains(block, "%H") {
+		t.Fatalf("managed SSH block uses HostName-derived tokens:\n%s", block)
+	}
+}
+
 func TestRemoteSSHCommandPreservesArgumentBoundaries(t *testing.T) {
 	got := remoteSSHCommand([]string{"", "a b", "it's", "line1\nline2"})
 	want := `'' 'a b' 'it'"'"'s' 'line1
