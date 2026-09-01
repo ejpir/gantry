@@ -1,6 +1,7 @@
 package dashboardsvc
 
 import (
+	"archive/tar"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +13,12 @@ import (
 	"time"
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
+	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
 )
@@ -129,9 +133,46 @@ func TestDashboardDiskSizeFallsBackToConfiguredCapacity(t *testing.T) {
 	}
 }
 
+func writeDashboardDevContainersAssets(t *testing.T, name string) {
+	t.Helper()
+	artifacts := t.TempDir()
+	t.Setenv("GANTRY_ARTIFACTS", artifacts)
+	layer, err := os.CreateTemp(t.TempDir(), "ide-*.tar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := tar.NewWriter(layer)
+	for _, path := range []string{"usr/local/bin/podman", "usr/local/libexec/gantry-podman", "usr/bin/podman"} {
+		contents := []byte("#!/bin/sh\nexit 0\n")
+		if err := writer.WriteHeader(&tar.Header{Name: path, Mode: 0o755, Size: int64(len(contents)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(contents); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := layer.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = layer.Close() }()
+	if _, err := image.Build(guestasset.DefaultDevContainersImage(), []*os.File{layer}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rwlayer.Root(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rwlayer.Path(rwlayer.DevContainersName(name)), []byte("test layer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDashboardConfiguresStoppedSandboxFeatures(t *testing.T) {
 	t.Setenv("GANTRY_HOME", t.TempDir())
 	name := "dev"
+	writeDashboardDevContainersAssets(t, name)
 	if err := os.MkdirAll(layout.Dir(name), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +192,8 @@ func TestDashboardConfiguresStoppedSandboxFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || cfg.MemMB != request.MemMB || cfg.VCPUs != request.VCPUs {
+	if !cfg.SSH || !cfg.DevContainers || cfg.Runtime != "crun" || cfg.MemMB != request.MemMB || cfg.VCPUs != request.VCPUs ||
+		cfg.DevContainersImage == "" || cfg.DevContainersRWLayer == "" || cfg.DevContainersImageCfg == nil {
 		t.Fatalf("configured sandbox = %+v", cfg)
 	}
 }

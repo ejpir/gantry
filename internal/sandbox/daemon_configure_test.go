@@ -15,6 +15,20 @@ import (
 
 func TestConfigureDevContainersRequiresRestartAndKeepsLiveTarget(t *testing.T) {
 	dir := t.TempDir()
+	oldEnsureImage, oldVerifyImage := ensureDevContainersImageAsset, verifyDevContainersImageAsset
+	oldEnsureLayer, oldCheckPairing := ensureDevContainersRWLayer, checkDevContainersRWPairing
+	t.Cleanup(func() {
+		ensureDevContainersImageAsset, verifyDevContainersImageAsset = oldEnsureImage, oldVerifyImage
+		ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureLayer, oldCheckPairing
+	})
+	ideImage, ideLayer := filepath.Join(dir, "ide.erofs"), filepath.Join(dir, "ide.ext4")
+	ensureDevContainersImageAsset = func(string, func(string, ...any)) (string, error) { return ideImage, nil }
+	verifyDevContainersImageAsset = func(string) error { return nil }
+	ensureDevContainersRWLayer = func(string, string, uint, func(string, ...any)) (string, []string, error) {
+		return ideLayer, nil, nil
+	}
+	checkDevContainersRWPairing = func(string, string) error { return nil }
+
 	initial := config.RunConfig{SSH: true, Runtime: "crun", MemMB: 512, VCPUs: 1}
 	data, err := json.Marshal(initial)
 	if err != nil {
@@ -29,7 +43,7 @@ func TestConfigureDevContainersRequiresRestartAndKeepsLiveTarget(t *testing.T) {
 	}
 	enabled := true
 	br := &broker{}
-	daemon := &daemonRuntime{store: store, broker: br}
+	daemon := &daemonRuntime{name: "dev", store: store, broker: br}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{DevContainers: &enabled})
 	if err != nil {
 		t.Fatal(err)
@@ -40,8 +54,41 @@ func TestConfigureDevContainersRequiresRestartAndKeepsLiveTarget(t *testing.T) {
 	if br.devContainers.Load() {
 		t.Fatal("running broker switched to an IDE root that is not attached")
 	}
-	if persisted := store.Snapshot(); !persisted.DevContainers {
-		t.Fatal("Dev Containers setting was not persisted")
+	persisted := store.Snapshot()
+	if !persisted.DevContainers || persisted.DevContainersImage != ideImage ||
+		persisted.DevContainersRWLayer != ideLayer || persisted.DevContainersImageCfg == nil {
+		t.Fatalf("prepared Dev Containers profile was not persisted: %+v", persisted)
+	}
+}
+
+func TestConfigureDevContainersPreflightFailureDoesNotPersist(t *testing.T) {
+	dir := t.TempDir()
+	initial := config.RunConfig{SSH: true, Runtime: "crun", MemMB: 512, VCPUs: 1}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEnsureImage := ensureDevContainersImageAsset
+	t.Cleanup(func() { ensureDevContainersImageAsset = oldEnsureImage })
+	wantErr := errors.New("curated image unavailable")
+	ensureDevContainersImageAsset = func(string, func(string, ...any)) (string, error) { return "", wantErr }
+
+	enabled := true
+	daemon := &daemonRuntime{name: "dev", store: store, broker: &broker{}}
+	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{DevContainers: &enabled})
+	if restart || !errors.Is(err, wantErr) {
+		t.Fatalf("configure result = restart %t, err %v; want preflight failure", restart, err)
+	}
+	persisted := store.Snapshot()
+	if persisted.DevContainers || persisted.DevContainersImage != "" || persisted.DevContainersRWLayer != "" {
+		t.Fatalf("failed preflight persisted unusable profile: %+v", persisted)
 	}
 }
 

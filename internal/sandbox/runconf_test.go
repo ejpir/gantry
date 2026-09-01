@@ -150,11 +150,14 @@ func TestResolveCuratedIDEEROFSAttachesImageConfig(t *testing.T) {
 }
 
 func TestResolveDevContainersDefaultsAndOverrides(t *testing.T) {
-	oldEnsureImage, oldEnsureLayer, oldCheckPairing := ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing
+	oldEnsureImage, oldVerifyImage := ensureDevContainersImageAsset, verifyDevContainersImageAsset
+	oldEnsureLayer, oldCheckPairing := ensureDevContainersRWLayer, checkDevContainersRWPairing
 	t.Cleanup(func() {
-		ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureImage, oldEnsureLayer, oldCheckPairing
+		ensureDevContainersImageAsset, verifyDevContainersImageAsset = oldEnsureImage, oldVerifyImage
+		ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureLayer, oldCheckPairing
 	})
 	ensureDevContainersImageAsset = func(path string, _ func(string, ...any)) (string, error) { return path, nil }
+	verifyDevContainersImageAsset = func(string) error { return nil }
 	ensureDevContainersRWLayer = func(_ string, _ string, _ uint, _ func(string, ...any)) (string, []string, error) {
 		path := "devcontainers.ext4"
 		return path, nil, os.WriteFile(path, []byte("x"), 0o600)

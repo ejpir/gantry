@@ -16,7 +16,9 @@ const (
 	HandshakeTimeout = 5 * time.Second
 	OverloadTimeout  = time.Second
 	CallTimeout      = 30 * time.Second
-	ConfigureTimeout = 150 * time.Second // guest-helper delivery may use the bounded exec fallback
+	// Enabling Dev Containers can download and verify the curated IDE asset
+	// (the asset client itself is bounded at 15 minutes) before committing.
+	ConfigureTimeout = 20 * time.Minute
 )
 
 var ErrFrameTooLarge = errors.New("control frame too large")

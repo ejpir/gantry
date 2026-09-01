@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
@@ -143,6 +144,15 @@ func TestConfigureLiveSendsOnlyRequestedSettings(t *testing.T) {
 func TestConfigureStoppedPersistsFeaturesAndResources(t *testing.T) {
 	useShortGantryHome(t)
 	dir := writeSandboxConfig(t, "configure-stopped")
+	oldPrepare := prepareConfiguredDevContainersProfile
+	t.Cleanup(func() { prepareConfiguredDevContainersProfile = oldPrepare })
+	ideImage, ideLayer := filepath.Join(dir, "ide.erofs"), filepath.Join(dir, "ide.ext4")
+	prepareConfiguredDevContainersProfile = func(_ string, cfg config.RunConfig, _ func(string, ...any)) (config.RunConfig, bool, []string, error) {
+		cfg.DevContainersImage = ideImage
+		cfg.DevContainersImageCfg = &image.Config{User: "gantry", UID: 1000, GID: 1000}
+		cfg.DevContainersRWLayer = ideLayer
+		return cfg, true, nil, nil
+	}
 	store, err := config.LoadConfigStore(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -164,8 +174,41 @@ func TestConfigureStoppedPersistsFeaturesAndResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != memMB || cfg.VCPUs != vcpus {
+	if !cfg.SSH || !cfg.DevContainers || cfg.MemMB != memMB || cfg.VCPUs != vcpus ||
+		cfg.DevContainersImage != ideImage || cfg.DevContainersRWLayer != ideLayer || cfg.DevContainersImageCfg == nil {
 		t.Fatalf("persisted configure = %+v", cfg)
+	}
+}
+
+func TestConfigureStoppedDevContainersPreflightFailureDoesNotPersist(t *testing.T) {
+	useShortGantryHome(t)
+	dir := writeSandboxConfig(t, "configure-preflight")
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Mutate(func(cfg *config.RunConfig) error {
+		cfg.SSH, cfg.Runtime = true, "crun"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldPrepare := prepareConfiguredDevContainersProfile
+	t.Cleanup(func() { prepareConfiguredDevContainersProfile = oldPrepare })
+	prepareConfiguredDevContainersProfile = func(string, config.RunConfig, func(string, ...any)) (config.RunConfig, bool, []string, error) {
+		return config.RunConfig{}, false, nil, fmt.Errorf("curated Podman image unavailable")
+	}
+	enabled := true
+	if _, err := Configure("configure-preflight", controlproto.ConfigureRequest{DevContainers: &enabled}); err == nil ||
+		!strings.Contains(err.Error(), "curated Podman image unavailable") {
+		t.Fatalf("Configure error = %v, want profile preflight failure", err)
+	}
+	persisted, err := config.ReadSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.DevContainers || persisted.DevContainersImage != "" || persisted.DevContainersRWLayer != "" {
+		t.Fatalf("failed preflight persisted unusable profile: %+v", persisted)
 	}
 }
 

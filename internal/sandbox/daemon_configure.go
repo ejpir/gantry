@@ -7,6 +7,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	devcontainersprofile "github.com/ejpir/gantry/internal/sandbox/devcontainers"
 )
 
 func sandboxUpdate(request controlproto.ConfigureRequest) config.SandboxUpdate {
@@ -25,8 +26,27 @@ func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) 
 	d.configureMu.Lock()
 	defer d.configureMu.Unlock()
 
+	update := sandboxUpdate(request)
+	if request.DevContainers != nil && *request.DevContainers {
+		before := d.store.Snapshot()
+		if !before.DevContainers {
+			candidate := before
+			if err := config.ApplySandboxUpdate(&candidate, update); err != nil {
+				return false, err
+			}
+			prepared, _, warnings, err := prepareDevContainersProfile(d.name, candidate, nil)
+			if err != nil {
+				return false, fmt.Errorf("enable Dev Containers: %w", err)
+			}
+			for _, warning := range warnings {
+				d.broker.auditf("devcontainers: %s", warning)
+			}
+			update.DevContainersProfile = devcontainersprofile.ProfileUpdate(prepared)
+		}
+	}
+
 	restartRequired := false
-	_, _, err := d.store.ConfigureTransaction(sandboxUpdate(request), func(before, after config.RunConfig) error {
+	_, _, err := d.store.ConfigureTransaction(update, func(before, after config.RunConfig) error {
 		restartRequired = before.MemMB != after.MemMB || before.VCPUs != after.VCPUs ||
 			before.ProcessIsolation != after.ProcessIsolation || before.DevContainers != after.DevContainers
 		changed := restartRequired || before.SSH != after.SSH || before.DevContainers != after.DevContainers ||

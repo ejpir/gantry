@@ -126,6 +126,27 @@ func TestConfigureTransactionSkipsExactNoop(t *testing.T) {
 	}
 }
 
+func TestConfigureTransactionRollsBackPreparedDevContainersProfile(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{SSH: true, Runtime: "crun", MemMB: 512, VCPUs: 1})
+	enabled := true
+	profileConfig := &image.Config{User: "gantry", Env: []string{"HOME=/home/gantry"}}
+	liveErr := errors.New("live configuration failed")
+	_, _, err := store.ConfigureTransaction(SandboxUpdate{
+		DevContainers: &enabled,
+		DevContainersProfile: &DevContainersProfileUpdate{
+			Image: "/ide.erofs", ImageCfg: profileConfig, RWLayer: "/ide.ext4", DiskMiB: 8192,
+		},
+	}, func(_, _ RunConfig) error { return liveErr })
+	if !errors.Is(err, liveErr) {
+		t.Fatalf("ConfigureTransaction error = %v, want %v", err, liveErr)
+	}
+	got := store.Snapshot()
+	if got.DevContainers || got.DevContainersImage != "" || got.DevContainersImageCfg != nil ||
+		got.DevContainersRWLayer != "" || got.DevContainersDiskMiB != 0 {
+		t.Fatalf("rollback retained prepared profile: %+v", got)
+	}
+}
+
 func TestConfigureTransactionSerializesOwnedFieldsAndPreservesUnrelatedMutations(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})

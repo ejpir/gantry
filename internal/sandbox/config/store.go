@@ -211,13 +211,24 @@ func ValidateDevContainers(cfg RunConfig) error {
 	return nil
 }
 
+// DevContainersProfileUpdate is a host-prepared curated IDE root and its
+// paired writable layer. Configure callers attach it to the same transaction
+// that enables the profile, so an unusable placeholder is never persisted.
+type DevContainersProfileUpdate struct {
+	Image    string
+	ImageCfg *image.Config
+	RWLayer  string
+	DiskMiB  uint
+}
+
 // SandboxUpdate contains only explicitly requested mutable settings.
 type SandboxUpdate struct {
-	SSH              *bool
-	DevContainers    *bool
-	MemMB            *uint
-	VCPUs            *int
-	ProcessIsolation *string
+	SSH                  *bool
+	DevContainers        *bool
+	DevContainersProfile *DevContainersProfileUpdate
+	MemMB                *uint
+	VCPUs                *int
+	ProcessIsolation     *string
 }
 
 func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
@@ -237,6 +248,18 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 			cfg.DevContainersDiskMiB = DefaultDevContainersDiskSizeMiB
 		}
 	}
+	if profile := update.DevContainersProfile; profile != nil {
+		if !cfg.DevContainers {
+			return fmt.Errorf("prepared Dev Containers profile requires the feature to be enabled")
+		}
+		if profile.Image == "" || profile.ImageCfg == nil || profile.RWLayer == "" || profile.DiskMiB == 0 {
+			return fmt.Errorf("prepared Dev Containers profile is incomplete")
+		}
+		cfg.DevContainersImage = profile.Image
+		cfg.DevContainersImageCfg = cloneImageConfig(profile.ImageCfg)
+		cfg.DevContainersRWLayer = profile.RWLayer
+		cfg.DevContainersDiskMiB = profile.DiskMiB
+	}
 	if update.MemMB != nil {
 		cfg.MemMB = *update.MemMB
 	}
@@ -255,6 +278,8 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 	return ValidateDevContainers(*cfg)
 }
 
+var errConfigurationUnchanged = errors.New("sandbox configuration unchanged")
+
 // ConfigureTransaction persists one sandbox-settings transition, applies its
 // live side effects, and rolls back only the fields owned by update if live
 // application fails. SSH/Dev Containers/resource transitions are serialized
@@ -265,8 +290,6 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 // visible. In that case apply still runs so memory, disk, and live state agree;
 // the committed error is returned only after live application completes.
 // apply must not call Configure, ConfigureTransaction, or SetResources.
-var errConfigurationUnchanged = errors.New("sandbox configuration unchanged")
-
 func (s *ConfigStore) ConfigureTransaction(update SandboxUpdate, apply func(before, after RunConfig) error) (before, after RunConfig, err error) {
 	s.configureMu.Lock()
 	defer s.configureMu.Unlock()
@@ -325,6 +348,12 @@ func restoreSandboxUpdate(current *RunConfig, before RunConfig, update SandboxUp
 	}
 	if update.DevContainers != nil {
 		current.DevContainers = before.DevContainers
+		current.DevContainersDiskMiB = before.DevContainersDiskMiB
+	}
+	if update.DevContainersProfile != nil {
+		current.DevContainersImage = before.DevContainersImage
+		current.DevContainersImageCfg = cloneImageConfig(before.DevContainersImageCfg)
+		current.DevContainersRWLayer = before.DevContainersRWLayer
 		current.DevContainersDiskMiB = before.DevContainersDiskMiB
 	}
 	if update.MemMB != nil {
