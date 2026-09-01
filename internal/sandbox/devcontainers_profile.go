@@ -29,6 +29,18 @@ func defaultDevContainersImageConfig() *image.Config {
 	}
 }
 
+// curatedDevContainersImageConfig restores the OCI metadata that docker
+// export necessarily drops when scripts/mkideimage.sh flattens the curated
+// image to EROFS. Match the canonical release-asset basename so the same
+// artifact behaves correctly when supplied directly through -image as well as
+// when prepareDevContainersProfile attaches it as the IDE peer root.
+func curatedDevContainersImageConfig(path string) *image.Config {
+	if filepath.Base(path) != filepath.Base(guestasset.DefaultDevContainersImage()) {
+		return nil
+	}
+	return defaultDevContainersImageConfig()
+}
+
 // prepareDevContainersProfile resolves the second OCI root attached to a
 // sandbox VM. The workload image remains untouched: normal exec sessions use
 // it, while SSH and nested Podman sessions use this curated IDE root.
