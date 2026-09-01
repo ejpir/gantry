@@ -70,15 +70,21 @@ func supplementaryGroups(user guestUser) []int {
 		return nil
 	}
 	defer func() { _ = file.Close() }()
+	return parseSupplementaryGroups(file, user)
+}
+
+func parseSupplementaryGroups(reader io.Reader, user guestUser) []int {
 	seen := map[int]bool{user.GID: true}
 	var groups []int
-	scanner := bufio.NewScanner(io.LimitReader(file, 4<<20))
+	scanner := bufio.NewScanner(io.LimitReader(reader, 4<<20))
 	for scanner.Scan() {
 		fields := strings.Split(scanner.Text(), ":")
 		if len(fields) < 4 {
 			continue
 		}
-		gid, err := strconv.ParseUint(fields[2], 10, 31)
+		// Linux gid_t is uint32, matching the passwd parser above. Using 31
+		// bits here silently discarded valid supplementary groups >= 2^31.
+		gid, err := strconv.ParseUint(fields[2], 10, 32)
 		if err != nil || seen[int(gid)] {
 			continue
 		}

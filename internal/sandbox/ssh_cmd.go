@@ -298,17 +298,35 @@ func ensureSSHKnownHostsFile() error {
 		return err
 	}
 	path := filepath.Join(sshInstallDir(), "known_hosts")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
+	for {
+		info, err := os.Lstat(path)
+		if err == nil {
+			// Reject links and special files before OpenFile or Chmod can follow
+			// them and mutate an attacker-selected target.
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return fmt.Errorf("%q is not a real regular file", path)
+			}
+			if err := localsec.SecureRegularFile(path); err != nil {
+				return err
+			}
+			return os.Chmod(path, 0o600)
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// O_EXCL turns a symlink planted after Lstat into EEXIST rather than
+		// following it. Retry so the new object is validated without side effects.
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
 	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return err
-	}
-	return localsec.SecureRegularFile(path)
 }
 
 func managedSSHBlock(self string) string {
