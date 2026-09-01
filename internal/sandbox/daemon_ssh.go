@@ -199,7 +199,7 @@ func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int
 		SandboxSession: true,
 		Environment:    append(br.cfg.ProxyEnvironment(), request.Env...),
 		Terminal:       request.Terminal, Cols: request.Window.Width, Rows: request.Window.Height,
-		Resize: resize, Quiet: true, KillCh: killCh, ExitStatus: &status,
+		Resize: resize, Quiet: true, KillCh: killCh, WaitContext: ctx, ExitStatus: &status,
 	}
 	applySessionTarget(&options, target)
 	// gantry-guest starts as root and validates/drops to request.User itself.

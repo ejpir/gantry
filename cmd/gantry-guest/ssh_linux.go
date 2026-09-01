@@ -229,6 +229,9 @@ func runTCPRelay(args []string) int {
 	done := make(chan struct{}, 1)
 	go func() {
 		_, _ = io.Copy(conn, os.Stdin)
+		// stdin EOF is an SSH channel half-close: preserve target responses by
+		// closing only its write side. A full SSH channel close is distinguished
+		// by the host gateway and cancels this guest task.
 		if tcp, ok := conn.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}

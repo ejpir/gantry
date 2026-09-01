@@ -239,7 +239,6 @@ func (g *Gateway) handleDirectTCPIP(parent context.Context, user string, newChan
 		return
 	}
 	defer func() { _ = channel.Close() }()
-	go ssh.DiscardRequests(requests)
 	g.auditf("channel open user=%s type=direct-tcpip target=%s:%d", user, payload.Host, payload.Port)
 	defer g.auditf("channel close user=%s type=direct-tcpip target=%s:%d", user, payload.Host, payload.Port)
 	g.auditf("forward open user=%s target=%s:%d", user, payload.Host, payload.Port)
@@ -247,6 +246,13 @@ func (g *Gateway) handleDirectTCPIP(parent context.Context, user string, newChan
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// The request stream closes on SSH_MSG_CHANNEL_CLOSE, but remains open for
+	// SSH_MSG_CHANNEL_EOF. This preserves TCP half-close semantics while making
+	// a full close cancel the guest relay even when its target never sends EOF.
+	go func() {
+		ssh.DiscardRequests(requests)
+		cancel()
+	}()
 	status, spawnErr := g.cfg.Spawner.Spawn(ctx, SpawnRequest{
 		User: user, Forward: &Forward{Host: payload.Host, Port: payload.Port},
 		Stdin: channel, Stdout: channel,
