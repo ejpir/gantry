@@ -221,6 +221,25 @@ type DevContainersProfileUpdate struct {
 	DiskMiB  uint
 }
 
+// MutableSandboxSettings is the complete user-facing settings set shared by
+// CLI, dashboard, and control-protocol conversion layers.
+type MutableSandboxSettings struct {
+	SSH              bool
+	DevContainers    bool
+	MemMB            uint
+	VCPUs            int
+	ProcessIsolation string
+}
+
+// Update returns an update in which every mutable setting is explicit.
+func (settings MutableSandboxSettings) Update() SandboxUpdate {
+	return SandboxUpdate{
+		SSH: &settings.SSH, DevContainers: &settings.DevContainers,
+		MemMB: &settings.MemMB, VCPUs: &settings.VCPUs,
+		ProcessIsolation: &settings.ProcessIsolation,
+	}
+}
+
 // SandboxUpdate contains only explicitly requested mutable settings.
 type SandboxUpdate struct {
 	SSH                  *bool

@@ -10,14 +10,6 @@ import (
 	devcontainersprofile "github.com/ejpir/gantry/internal/sandbox/devcontainers"
 )
 
-func sandboxUpdate(request controlproto.ConfigureRequest) config.SandboxUpdate {
-	return config.SandboxUpdate{
-		SSH: request.SSH, DevContainers: request.DevContainers,
-		MemMB: request.MemMB, VCPUs: request.VCPUs,
-		ProcessIsolation: request.ProcessIsolation,
-	}
-}
-
 // configureSandbox applies SSH immediately when possible and persists VM
 // allocation or Dev Containers topology changes for the next boot. The IDE
 // image is a second block-backed OCI root and therefore cannot be toggled on a
@@ -26,7 +18,7 @@ func (d *daemonRuntime) configureSandbox(request controlproto.ConfigureRequest) 
 	d.configureMu.Lock()
 	defer d.configureMu.Unlock()
 
-	update := sandboxUpdate(request)
+	update := request.SandboxUpdate()
 	if request.DevContainers != nil && *request.DevContainers {
 		before := d.store.Snapshot()
 		if !before.DevContainers {

@@ -102,6 +102,14 @@ func (dashboardService) SetResources(name string, memMB uint, vcpus int, process
 	return controlcmd.SetResources(name, memMB, vcpus, processIsolation)
 }
 
+func mutableSandboxSettings(request dashboardapi.SandboxConfigRequest) config.MutableSandboxSettings {
+	return config.MutableSandboxSettings{
+		SSH: request.SSH, DevContainers: request.DevContainers,
+		MemMB: request.MemMB, VCPUs: request.VCPUs,
+		ProcessIsolation: request.ProcessIsolation,
+	}
+}
+
 func (service dashboardService) ValidateSandboxConfig(request dashboardapi.SandboxConfigRequest) error {
 	if request.DevContainers && !request.SSH {
 		return dashboardapi.Invalid("devcontainers", errors.New("devcontainers requires SSH"))
@@ -110,12 +118,7 @@ func (service dashboardService) ValidateSandboxConfig(request dashboardapi.Sandb
 		return err
 	}
 	if cfg, err := config.ReadSandboxConfig(layout.Dir(request.Name)); err == nil {
-		ssh, devContainers := request.SSH, request.DevContainers
-		memMB, vcpus, isolation := request.MemMB, request.VCPUs, request.ProcessIsolation
-		if err := config.ApplySandboxUpdate(&cfg, config.SandboxUpdate{
-			SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB, VCPUs: &vcpus,
-			ProcessIsolation: &isolation,
-		}); err != nil {
+		if err := config.ApplySandboxUpdate(&cfg, mutableSandboxSettings(request).Update()); err != nil {
 			return dashboardapi.Invalid("devcontainers", err)
 		}
 	}
@@ -126,12 +129,7 @@ func (service dashboardService) ConfigureSandbox(request dashboardapi.SandboxCon
 	if err := service.ValidateSandboxConfig(request); err != nil {
 		return false, err
 	}
-	ssh, devContainers := request.SSH, request.DevContainers
-	memMB, vcpus, isolation := request.MemMB, request.VCPUs, request.ProcessIsolation
-	return controlcmd.Configure(request.Name, controlproto.ConfigureRequest{
-		SSH: &ssh, DevContainers: &devContainers, MemMB: &memMB, VCPUs: &vcpus,
-		ProcessIsolation: &isolation,
-	})
+	return controlcmd.Configure(request.Name, controlproto.ConfigureRequestFor(mutableSandboxSettings(request)))
 }
 
 func (dashboardService) ValidateNetworkPolicy(path string, allowLocal bool) error {

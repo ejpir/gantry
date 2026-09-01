@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sshpolicy"
 	"github.com/pkg/sftp"
 )
 
@@ -215,16 +216,12 @@ func runTCPRelay(args []string) int {
 		fmt.Fprintln(os.Stderr, "tcp-relay requires HOST PORT")
 		return 2
 	}
-	ip := net.ParseIP(args[0])
-	loopback := ip != nil && ip.Equal(net.IPv4(127, 0, 0, 1))
-	if strings.Contains(args[0], ":") {
-		loopback = ip != nil && ip.Equal(net.IPv6loopback)
-	}
 	port, err := strconv.ParseUint(args[1], 10, 16)
-	if !loopback || port == 0 || err != nil {
+	if err != nil || !sshpolicy.ExactLoopbackTarget(args[0], port) {
 		fmt.Fprintln(os.Stderr, "tcp-relay target refused")
 		return 1
 	}
+	ip := net.ParseIP(args[0]) // validated by ExactLoopbackTarget
 	address := net.JoinHostPort(ip.String(), strconv.FormatUint(port, 10))
 	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {

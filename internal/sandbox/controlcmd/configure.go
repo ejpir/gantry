@@ -80,14 +80,6 @@ func configureRequestEmpty(request controlproto.ConfigureRequest) bool {
 
 var prepareConfiguredDevContainersProfile = devcontainersprofile.Prepare
 
-func requestedSandboxUpdate(request controlproto.ConfigureRequest) config.SandboxUpdate {
-	return config.SandboxUpdate{
-		SSH: request.SSH, DevContainers: request.DevContainers,
-		MemMB: request.MemMB, VCPUs: request.VCPUs,
-		ProcessIsolation: request.ProcessIsolation,
-	}
-}
-
 func Configure(name string, request controlproto.ConfigureRequest) (bool, error) {
 	if err := layout.ValidateName(name); err != nil {
 		return false, err
@@ -116,7 +108,7 @@ func Configure(name string, request controlproto.ConfigureRequest) (bool, error)
 			if err != nil {
 				return false, err
 			}
-			update := requestedSandboxUpdate(request)
+			update := request.SandboxUpdate()
 			if request.DevContainers != nil && *request.DevContainers {
 				before := store.Snapshot()
 				if !before.DevContainers {
