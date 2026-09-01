@@ -2,6 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -113,6 +116,104 @@ func TestGuestToolsStageBaseAvoidsWindowsTemp(t *testing.T) {
 	}
 	if got := guestToolsStageBase("linux", sandboxDir); got != "" {
 		t.Fatalf("Linux stage base = %q, want OS temporary directory", got)
+	}
+}
+
+func TestStopGuestToolsDeliveryCancelsAndJoinsOwners(t *testing.T) {
+	d := &daemonRuntime{}
+	ctx, done, ok := d.beginGuestToolsDelivery()
+	if !ok {
+		t.Fatal("first guest-tools delivery was refused")
+	}
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	ownerExited := make(chan struct{})
+	go func() {
+		defer close(ownerExited)
+		defer done()
+		<-ctx.Done()
+		close(canceled)
+		<-release
+	}()
+
+	stopReturned := make(chan struct{})
+	go func() {
+		d.stopGuestToolsDelivery()
+		close(stopReturned)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("teardown did not cancel guest-tools delivery")
+	}
+	select {
+	case <-stopReturned:
+		t.Fatal("teardown returned before guest-tools owner exited")
+	default:
+	}
+	close(release)
+	select {
+	case <-ownerExited:
+	case <-time.After(time.Second):
+		t.Fatal("guest-tools owner did not exit")
+	}
+	select {
+	case <-stopReturned:
+	case <-time.After(time.Second):
+		t.Fatal("teardown did not join guest-tools owner")
+	}
+	if _, _, ok := d.beginGuestToolsDelivery(); ok {
+		t.Fatal("delivery began after teardown started")
+	}
+
+	// Deferred close calls stop a second time; idempotence must not block.
+	secondStop := make(chan struct{})
+	go func() {
+		d.stopGuestToolsDelivery()
+		close(secondStop)
+	}()
+	select {
+	case <-secondStop:
+	case <-time.After(time.Second):
+		t.Fatal("second guest-tools stop blocked")
+	}
+}
+
+func TestGuestToolsStagingIsAttemptScoped(t *testing.T) {
+	base := t.TempDir()
+	payload := []byte("guest-helper")
+	wantErr := errors.New("injected delivery failure")
+	var attempts []string
+	for range 2 {
+		var stageDir string
+		err := withGuestToolsStage(base, payload, func(dir string) error {
+			stageDir = dir
+			attempts = append(attempts, dir)
+			got, err := os.ReadFile(filepath.Join(dir, "gantry-guest"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(payload) {
+				t.Fatalf("staged payload = %q, want %q", got, payload)
+			}
+			return wantErr
+		})
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("staging callback error = %v, want %v", err, wantErr)
+		}
+		if _, err := os.Stat(stageDir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("attempt staging directory still exists: %s (%v)", stageDir, err)
+		}
+	}
+	if len(attempts) != 2 || attempts[0] == attempts[1] {
+		t.Fatalf("retry staging directories = %v, want two distinct attempts", attempts)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("staging base retained retry artifacts: %v", entries)
 	}
 }
 

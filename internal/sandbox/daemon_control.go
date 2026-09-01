@@ -184,6 +184,10 @@ func closedWhenVMMWorkerExits(runner vmmworker.Runner) <-chan struct{} {
 func (d *daemonRuntime) gracefulStop(reason string) int {
 	fmt.Println("daemon:", reason, "— shutting down")
 	_ = d.control.Close() // no new broker sessions
+	// Guest-tool delivery owns internal RPC sessions and temporary shares.
+	// Stop it before syncing or closing VM devices; deferred close repeats this
+	// safely before releasing the RPC and share-manager objects themselves.
+	d.stopGuestToolsDelivery()
 
 	// Process exit is a power cut for the guest. Flush while the RPC
 	// connection is still held: guest filesystem first (bounded because it
