@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/client"
@@ -101,6 +102,89 @@ func TestConfigStoreKeepsPostCommitState(t *testing.T) {
 	cfg, readErr := ReadSandboxConfig(dir)
 	if readErr != nil || len(cfg.Ports) != 2 {
 		t.Fatalf("committed on-disk config = %+v, err = %v", cfg, readErr)
+	}
+}
+
+func TestConfigureTransactionSkipsExactNoop(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})
+	writes, applies := 0, 0
+	store.SetWriter(func(string, []byte, os.FileMode) error {
+		writes++
+		return nil
+	})
+	disabled := false
+	before, after, err := store.ConfigureTransaction(SandboxUpdate{SSH: &disabled}, func(_, _ RunConfig) error {
+		applies++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writes != 0 || applies != 0 || before.SSH || after.SSH {
+		t.Fatalf("no-op transaction = writes %d applies %d before SSH %t after SSH %t",
+			writes, applies, before.SSH, after.SSH)
+	}
+}
+
+func TestConfigureTransactionSerializesOwnedFieldsAndPreservesUnrelatedMutations(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})
+	enableSSH := true
+	requestedMemory := uint(1024)
+	applyErr := errors.New("live SSH setup failed")
+	resourceStarted := make(chan struct{})
+	resourceDone := make(chan error, 1)
+
+	_, _, err := store.ConfigureTransaction(SandboxUpdate{SSH: &enableSSH, MemMB: &requestedMemory}, func(_, _ RunConfig) error {
+		// Unrelated mutations remain available while live work is in flight and
+		// must survive rollback.
+		if err := store.Mutate(func(cfg *RunConfig) error {
+			cfg.Ports = append(cfg.Ports, "127.0.0.1:8080:80")
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// This independent resource update deliberately selects the same memory
+		// value as the failing transaction. It must wait for transaction
+		// ownership instead of being mistaken for the transaction during rollback.
+		go func() {
+			close(resourceStarted)
+			resourceDone <- store.SetResources(requestedMemory, 2, "auto")
+		}()
+		<-resourceStarted
+		select {
+		case err := <-resourceDone:
+			t.Fatalf("resource update escaped configuration transaction: %v", err)
+		case <-time.After(20 * time.Millisecond):
+		}
+		return applyErr
+	})
+	if !errors.Is(err, applyErr) {
+		t.Fatalf("ConfigureTransaction error = %v, want %v", err, applyErr)
+	}
+	select {
+	case err := <-resourceDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serialized resource update did not complete")
+	}
+
+	got := store.Snapshot()
+	if got.SSH || got.MemMB != requestedMemory || got.VCPUs != 2 || got.ProcessIsolation != "auto" {
+		t.Fatalf("final owned settings = SSH %t, memory %d, CPUs %d, isolation %q",
+			got.SSH, got.MemMB, got.VCPUs, got.ProcessIsolation)
+	}
+	if len(got.Ports) != 1 || got.Ports[0] != "127.0.0.1:8080:80" {
+		t.Fatalf("rollback erased unrelated mutation: %+v", got.Ports)
+	}
+	persisted, readErr := ReadSandboxConfig(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if persisted.SSH != got.SSH || persisted.MemMB != got.MemMB || persisted.VCPUs != got.VCPUs || len(persisted.Ports) != 1 {
+		t.Fatalf("memory/disk transaction state diverged: memory=%+v disk=%+v", got, persisted)
 	}
 }
 

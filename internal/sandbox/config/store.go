@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -29,10 +31,14 @@ import (
 // callers can use atomicfile.Committed to avoid rolling back live state that
 // now agrees with the on-disk file.
 type ConfigStore struct {
-	path  string
-	mu    sync.Mutex
-	cfg   RunConfig
-	write func(string, []byte, os.FileMode) error
+	path string
+	// configureMu owns the SSH/Dev Containers/resource transition domain. It
+	// remains held across a live-apply callback while mu is released, allowing
+	// unrelated share/port mutations without surrendering rollback ownership.
+	configureMu sync.Mutex
+	mu          sync.Mutex
+	cfg         RunConfig
+	write       func(string, []byte, os.FileMode) error
 }
 
 // ReadSandboxConfig is the canonical sandbox.json reader.
@@ -249,8 +255,92 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 	return ValidateDevContainers(*cfg)
 }
 
+// ConfigureTransaction persists one sandbox-settings transition, applies its
+// live side effects, and rolls back only the fields owned by update if live
+// application fails. SSH/Dev Containers/resource transitions are serialized
+// for the whole state machine, including same-value updates; unrelated store
+// mutations remain free to proceed while apply runs.
+//
+// A post-replacement durability error means the new configuration is already
+// visible. In that case apply still runs so memory, disk, and live state agree;
+// the committed error is returned only after live application completes.
+// apply must not call Configure, ConfigureTransaction, or SetResources.
+var errConfigurationUnchanged = errors.New("sandbox configuration unchanged")
+
+func (s *ConfigStore) ConfigureTransaction(update SandboxUpdate, apply func(before, after RunConfig) error) (before, after RunConfig, err error) {
+	s.configureMu.Lock()
+	defer s.configureMu.Unlock()
+
+	persistErr := s.Mutate(func(cfg *RunConfig) error {
+		before = cloneRunConfig(*cfg)
+		if err := ApplySandboxUpdate(cfg, update); err != nil {
+			return err
+		}
+		after = cloneRunConfig(*cfg)
+		if reflect.DeepEqual(before, after) {
+			return errConfigurationUnchanged
+		}
+		return nil
+	})
+	if errors.Is(persistErr, errConfigurationUnchanged) {
+		return before, before, nil
+	}
+	if persistErr != nil && !atomicfile.Committed(persistErr) {
+		return before, after, persistErr
+	}
+	if apply == nil {
+		return before, after, persistErr
+	}
+	if applyErr := apply(cloneRunConfig(before), cloneRunConfig(after)); applyErr != nil {
+		rollbackErr := s.Mutate(func(current *RunConfig) error {
+			restoreSandboxUpdate(current, before, update)
+			if err := ValidateSandboxResources(current.MemMB, current.VCPUs); err != nil {
+				return err
+			}
+			if err := ValidateProcessIsolation(current.ProcessIsolation); err != nil {
+				return err
+			}
+			return ValidateDevContainers(*current)
+		})
+		// The first write's committed marker describes a transient state that a
+		// successful rollback has now replaced. Preserve it as diagnostic text,
+		// not as atomicfile.Committed ownership of the final result.
+		if persistErr != nil {
+			applyErr = errors.Join(applyErr, fmt.Errorf("configuration durability was uncertain before live rollback: %v", persistErr))
+		}
+		if rollbackErr != nil {
+			applyErr = errors.Join(applyErr, fmt.Errorf("roll back sandbox configuration: %w", rollbackErr))
+		}
+		return before, after, applyErr
+	}
+	return before, after, persistErr
+}
+
+func restoreSandboxUpdate(current *RunConfig, before RunConfig, update SandboxUpdate) {
+	// ApplySandboxUpdate normalizes Runtime on every settings write, so the
+	// transaction owns that normalization along with its explicit fields.
+	current.Runtime = before.Runtime
+	if update.SSH != nil {
+		current.SSH = before.SSH
+	}
+	if update.DevContainers != nil {
+		current.DevContainers = before.DevContainers
+		current.DevContainersDiskMiB = before.DevContainersDiskMiB
+	}
+	if update.MemMB != nil {
+		current.MemMB = before.MemMB
+	}
+	if update.VCPUs != nil {
+		current.VCPUs = before.VCPUs
+	}
+	if update.ProcessIsolation != nil {
+		current.ProcessIsolation = before.ProcessIsolation
+	}
+}
+
 func (s *ConfigStore) Configure(update SandboxUpdate) error {
-	return s.Mutate(func(cfg *RunConfig) error { return ApplySandboxUpdate(cfg, update) })
+	_, _, err := s.ConfigureTransaction(update, nil)
+	return err
 }
 
 func ValidateSandboxResources(memMB uint, vcpus int) error {
@@ -276,6 +366,8 @@ func (s *ConfigStore) SetResources(memMB uint, vcpus int, processIsolation strin
 			return err
 		}
 	}
+	s.configureMu.Lock()
+	defer s.configureMu.Unlock()
 	return s.Mutate(func(cfg *RunConfig) error {
 		// An omitted/empty mode comes from resource-control clients that
 		// predate this field. Preserve their configured posture. The TUI sends
