@@ -34,7 +34,11 @@ const MCPRestartMarker = "mcp-restart-required"
 // RunConfig is the fully-resolved description of one gantry VM run.
 // sandbox.json is this struct.
 type RunConfig struct {
-	Kernel string `json:"kernel"`
+	// SettingsRevision is a monotonic generation for the mutable service and
+	// VM settings managed by configuration transactions. Unrelated shares,
+	// ports, secrets, and policy mutations deliberately do not advance it.
+	SettingsRevision uint64 `json:"settings_revision,omitempty"`
+	Kernel           string `json:"kernel"`
 	// KernelPolicy records whether Kernel follows Gantry releases or was
 	// explicitly selected by the user. Release-managed kernels are refreshed
 	// when a stopped sandbox is started by a newer Gantry binary; pinned

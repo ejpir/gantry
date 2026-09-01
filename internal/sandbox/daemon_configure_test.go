@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
@@ -41,9 +42,14 @@ func TestConfigureDevContainersRequiresRestartAndKeepsLiveTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
 	enabled := true
 	br := &broker{}
-	daemon := &daemonRuntime{name: "dev", store: store, broker: br}
+	daemon := &daemonRuntime{name: "dev", store: store, broker: br, sshListener: listener}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{DevContainers: &enabled})
 	if err != nil {
 		t.Fatal(err)
@@ -141,6 +147,71 @@ func TestConfigureAppliesLiveStateAfterCommittedDurabilityError(t *testing.T) {
 	}
 }
 
+func TestConfigureReconcilesServiceOnSettingsNoop(t *testing.T) {
+	dir := t.TempDir()
+	initial := config.RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	daemon := &daemonRuntime{dir: dir, store: store, broker: &broker{}, sshListener: listener}
+	if restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{SSH: &disabled}); err != nil || restart {
+		t.Fatalf("configure result = restart %t, err %v", restart, err)
+	}
+	if daemon.sshListener != nil {
+		t.Fatal("no-op desired settings did not stop the divergent SSH service")
+	}
+	if got := store.Snapshot(); got.SSH || got.SettingsRevision != 0 {
+		t.Fatalf("service-only reconciliation rewrote desired settings: %+v", got)
+	}
+}
+
+func TestConfigureRollsBackRevisionWhenServiceReconciliationFails(t *testing.T) {
+	dir := t.TempDir()
+	initial := config.RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	daemon := &daemonRuntime{
+		dir: dir, store: store, broker: &broker{}, guestToolsStopping: true,
+	}
+	if restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{SSH: &enabled}); restart || err == nil ||
+		!strings.Contains(err.Error(), "verified guest tools") {
+		t.Fatalf("configure result = restart %t, err %v; want reconciliation failure", restart, err)
+	}
+	if got := store.Snapshot(); got.SSH || got.SettingsRevision != 2 {
+		t.Fatalf("failed service reconciliation left desired settings committed: %+v", got)
+	}
+	persisted, err := config.ReadSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.SSH || persisted.SettingsRevision != 2 {
+		t.Fatalf("rollback did not converge memory and disk: %+v", persisted)
+	}
+}
+
 func TestConfigurePersistsRuntimeNormalizationOnOtherwiseNoopUpdate(t *testing.T) {
 	dir := t.TempDir()
 	initial := config.RunConfig{
@@ -158,8 +229,13 @@ func TestConfigurePersistsRuntimeNormalizationOnOtherwiseNoopUpdate(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
 	enabled := true
-	daemon := &daemonRuntime{store: store, broker: &broker{}}
+	daemon := &daemonRuntime{store: store, broker: &broker{}, sshListener: listener}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{
 		SSH: &enabled, DevContainers: &enabled,
 	})

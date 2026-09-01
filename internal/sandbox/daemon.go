@@ -61,7 +61,6 @@ type daemonRuntime struct {
 	rpc                *ttrpc.Client
 	control            net.Listener
 	broker             *broker
-	configureMu        sync.Mutex
 	sshMu              sync.Mutex
 	sshListener        net.Listener
 	sshCancel          func()

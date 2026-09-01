@@ -108,22 +108,23 @@ func Configure(name string, request controlproto.ConfigureRequest) (bool, error)
 			if err != nil {
 				return false, err
 			}
-			update := request.SandboxUpdate()
-			if request.DevContainers != nil && *request.DevContainers {
-				before := store.Snapshot()
-				if !before.DevContainers {
-					candidate := before
-					if err := config.ApplySandboxUpdate(&candidate, update); err != nil {
-						return false, err
-					}
-					prepared, _, _, err := prepareConfiguredDevContainersProfile(name, candidate, nil)
-					if err != nil {
-						return false, fmt.Errorf("enable Dev Containers: %w", err)
-					}
-					update.DevContainersProfile = devcontainersprofile.ProfileUpdate(prepared)
+			tx, err := store.BeginConfiguration(request.SandboxUpdate())
+			if err != nil {
+				return false, err
+			}
+			defer tx.Close()
+			if request.DevContainers != nil && *request.DevContainers && !tx.Before().DevContainers {
+				prepared, _, _, err := prepareConfiguredDevContainersProfile(name, tx.Desired(), nil)
+				if err != nil {
+					return false, fmt.Errorf("enable Dev Containers: %w", err)
+				}
+				if err := tx.Amend(config.SandboxUpdate{
+					DevContainersProfile: devcontainersprofile.ProfileUpdate(prepared),
+				}); err != nil {
+					return false, err
 				}
 			}
-			return false, store.Configure(update)
+			return false, tx.Commit()
 		},
 	)
 }
