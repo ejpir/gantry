@@ -9,7 +9,7 @@ import (
 func TestConfigureRequestSettingsRoundTrip(t *testing.T) {
 	settings := config.MutableSandboxSettings{
 		SSH: true, DevContainers: true, MemMB: 4096,
-		VCPUs: 4, ProcessIsolation: "required",
+		VCPUs: min(4, config.MaxSandboxVCPUs()), ProcessIsolation: "required",
 	}
 	request := ConfigureRequestFor(settings)
 	update := request.SandboxUpdate()
