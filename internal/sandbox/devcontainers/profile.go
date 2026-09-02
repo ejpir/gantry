@@ -1,7 +1,10 @@
 package devcontainers
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -56,15 +59,57 @@ func CuratedImageConfig(path string) *image.Config {
 	return ImageConfig()
 }
 
+const (
+	erofsSuperBlockOffset      = int64(1024)
+	erofsSuperBlockSize        = 128
+	erofsFeatureIncompatOffset = 80
+	erofsCompressionAlgsOffset = 84
+	erofsFeatureLZ4ZeroPadding = uint32(0x1)
+)
+
+// erofsMetadataReaderAt lets go-erofs traverse metadata in an image containing
+// compressed regular files. go-erofs can decode those inodes and directories
+// for Stat, but currently rejects the whole filesystem at Open because it
+// cannot read compressed file contents. Present a copy of the superblock with
+// only the compression indicators hidden; every metadata/data read after Open
+// still comes from the original image. A compressed directory remains
+// unreadable and therefore fails verification closed.
+type erofsMetadataReaderAt struct{ io.ReaderAt }
+
+func (reader erofsMetadataReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
+	n, err := reader.ReaderAt.ReadAt(buffer, offset)
+	if offset != erofsSuperBlockOffset || len(buffer) != erofsSuperBlockSize || n != erofsSuperBlockSize {
+		return n, err
+	}
+	incompat := binary.LittleEndian.Uint32(buffer[erofsFeatureIncompatOffset:])
+	binary.LittleEndian.PutUint32(buffer[erofsFeatureIncompatOffset:], incompat&^erofsFeatureLZ4ZeroPadding)
+	binary.LittleEndian.PutUint16(buffer[erofsCompressionAlgsOffset:], 0)
+	return n, err
+}
+
+func openEROFSMetadata(file *os.File) (fs.FS, error) {
+	root, err := erofs.Open(file)
+	if err == nil || !errors.Is(err, erofs.ErrNotImplemented) {
+		return root, err
+	}
+	metadataRoot, metadataErr := erofs.Open(erofsMetadataReaderAt{ReaderAt: file})
+	if metadataErr != nil {
+		return nil, fmt.Errorf("%v; metadata-only open: %w", err, metadataErr)
+	}
+	return metadataRoot, nil
+}
+
 // VerifyImage confirms that the flattened curated root actually carries the
 // Podman wrapper, its privileged launcher, and the packaged Podman binary.
+// Verification only needs inode names, types, and modes, so compressed release
+// images do not require host-side decompression support.
 func VerifyImage(path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = file.Close() }()
-	root, err := erofs.Open(file)
+	root, err := openEROFSMetadata(file)
 	if err != nil {
 		return fmt.Errorf("open curated image: %w", err)
 	}
