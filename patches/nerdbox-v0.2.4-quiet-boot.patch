@@ -1,5 +1,5 @@
 diff --git a/internal/vminit/vmnetworking/dhcp.go b/internal/vminit/vmnetworking/dhcp.go
-index 6135229..3bd3322 100644
+index 2e53e72..1cd6482 100644
 --- a/internal/vminit/vmnetworking/dhcp.go
 +++ b/internal/vminit/vmnetworking/dhcp.go
 @@ -42,4 +42 @@ func configureDHCP(ctx context.Context, iface netlink.Link, nw Network, debug bo
@@ -9,7 +9,7 @@ index 6135229..3bd3322 100644
 -	}
 +	copts := []nclient4.ClientOpt{nclient4.WithLogger(dhcpLogger{})}
 diff --git a/pkg/vminit/initd/initd.go b/pkg/vminit/initd/initd.go
-index ba7e92c..0d92875 100644
+index 5c13952..6ecda89 100644
 --- a/pkg/vminit/initd/initd.go
 +++ b/pkg/vminit/initd/initd.go
 @@ -55,0 +56,2 @@ var logLevel = &slog.LevelVar{}

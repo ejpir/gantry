@@ -10,7 +10,7 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/containerd/containerd/api v1.11.1
-	github.com/containerd/nerdbox v0.2.3
+	github.com/containerd/nerdbox v0.2.4
 	github.com/containerd/ttrpc v1.2.9
 	github.com/containerd/typeurl/v2 v2.3.0
 	github.com/containers/gvisor-tap-vsock v0.8.9

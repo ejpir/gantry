@@ -37,8 +37,8 @@ github.com/containerd/containerd/api v1.11.1 h1:h8nfoDW9+fNsC/9TwiAHj8B1GzXKtR4e
 github.com/containerd/containerd/api v1.11.1/go.mod h1:CaQFRu+N1MtbgL6JDOJLUB1hCKESU1lD6MuTJhgtdlw=
 github.com/containerd/log v0.1.1-0.20260403072107-cb1839ebf76b h1:VT47r68OzwhsTu84qAaG6Dv7xQVRmMvt7yotn9auLtI=
 github.com/containerd/log v0.1.1-0.20260403072107-cb1839ebf76b/go.mod h1:VRRf09a7mHDIRezVKTRCrOq78v577GXq3bSa3EhrzVo=
-github.com/containerd/nerdbox v0.2.3 h1:aJthKtNyqmqueYFasw8/kb48UOjWQ4BadU1+smVpzW8=
-github.com/containerd/nerdbox v0.2.3/go.mod h1:VQvosDEVHplTe+1tK6BOT4rLN6Kf/ddfKeJ3yQUKRCQ=
+github.com/containerd/nerdbox v0.2.4 h1:MnPXa5wpgCBmjTVo7s9g6rz4EQVngSjwkDTcCg+rbsM=
+github.com/containerd/nerdbox v0.2.4/go.mod h1:VQvosDEVHplTe+1tK6BOT4rLN6Kf/ddfKeJ3yQUKRCQ=
 github.com/containerd/ttrpc v1.2.9 h1:ha0ak962T0s3CA/RoZ6S6xiWZQF24GrBaEpiGX1uihg=
 github.com/containerd/ttrpc v1.2.9/go.mod h1:jjtQRwXm4DL3KsHKW8vDiUOV6wO0hi6IPhmJhxU7aEs=
 github.com/containerd/typeurl/v2 v2.3.0 h1:HZHPhRWo5XMy3QGQoPrUzbW/2ckwjfweHmOwlkIrPAQ=

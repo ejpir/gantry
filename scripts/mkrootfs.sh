@@ -27,8 +27,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 SRC="$WORK/nerdbox"
-NERDBOX_VERSION=v0.2.3
-NERDBOX_COMMIT=cd2c23fe413cdea8176760d63375d3271aa7e611
+NERDBOX_VERSION=v0.2.4
+NERDBOX_COMMIT=a842ff1395290e1ae595f272ae9a698c0b9ca055
 
 git clone --quiet --filter=blob:none --no-checkout https://github.com/containerd/nerdbox.git "$SRC"
 git -C "$SRC" fetch --quiet --depth 1 origin "$NERDBOX_COMMIT"

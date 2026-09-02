@@ -154,7 +154,7 @@ index 3e944fd..04f4f2f 100644
 +		return
 +	}
 diff --git a/internal/vminit/task/service.go b/internal/vminit/task/service.go
-index 13877a8..5837ce4 100644
+index a379fa5..a7cc7b7 100644
 --- a/internal/vminit/task/service.go
 +++ b/internal/vminit/task/service.go
 @@ -258 +258,3 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (_ *

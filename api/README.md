@@ -7,12 +7,12 @@ them by hand.
 
 ## Provenance
 
-The service definition is vendored verbatim from
-[containerd/nerdbox](https://github.com/containerd/nerdbox) v0.2.3
+The service definition is based on
+[containerd/nerdbox](https://github.com/containerd/nerdbox) v0.2.4
 (`api/proto/nerdbox/services/system/v1/info.proto`, Apache-2.0, copyright
-The containerd Authors), including its `go_package` option: keeping the
-upstream package path is what makes our checked-in copies byte-identical
-to upstream's and lets either side interop with the other's vminitd.
+The containerd Authors), plus Gantry's trusted `Sync` RPC extension. Its
+upstream `go_package` option is retained so the standard services remain wire
+compatible while Gantry and its patched `vminitd` share the generated binding.
 
 ## Regenerating
 
