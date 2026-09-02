@@ -15,10 +15,6 @@ var (
 	checkDevContainersRWPairing   = rwlayer.CheckPairing
 )
 
-func defaultDevContainersImageConfig() *image.Config {
-	return devcontainersprofile.ImageConfig()
-}
-
 // curatedDevContainersImageConfig restores the OCI metadata that docker
 // export necessarily drops when scripts/mkideimage.sh flattens the curated
 // image to EROFS. Match the canonical release-asset basename so the same

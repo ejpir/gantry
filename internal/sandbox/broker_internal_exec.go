@@ -73,18 +73,10 @@ func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Dura
 	return br.internalExecWithImageConfigContext(context.Background(), stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg, false, false)
 }
 
-func (br *broker) internalExecAsRootTarget(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, ide bool) ([]byte, int, error) {
-	return br.internalExecAsRootTargetContext(context.Background(), stdin, args, timeout, maxResponse, op, ide)
-}
-
 func (br *broker) internalExecAsRootTargetContext(ctx context.Context, stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, ide bool) ([]byte, int, error) {
 	target := br.sessionTarget(ide)
 	return br.internalExecWithImageConfigContext(ctx, stdin, args, timeout, maxResponse, op,
 		mcpLauncherImageConfig(target.imageConfig), true, ide)
-}
-
-func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker, ide bool) ([]byte, int, error) {
-	return br.internalExecWithImageConfigContext(context.Background(), stdin, args, timeout, maxResponse, op, imageConfig, holdSetupLocker, ide)
 }
 
 func (br *broker) internalExecWithImageConfigContext(ctx context.Context, stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker, ide bool) ([]byte, int, error) {
