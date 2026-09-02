@@ -1,5 +1,5 @@
 diff --git a/fs/fuse/dev.c b/fs/fuse/dev.c
-index 5763a7cd3..127e62cb7 100644
+index 5763a7c..127e62c 100644
 --- a/fs/fuse/dev.c
 +++ b/fs/fuse/dev.c
 @@ -1965,6 +1965,30 @@ static ssize_t fuse_dev_do_write(struct fuse_dev *fud,
@@ -34,7 +34,7 @@ index 5763a7cd3..127e62cb7 100644
  {
  	struct fuse_copy_state cs;
 diff --git a/fs/fuse/dev.h b/fs/fuse/dev.h
-index aed69fd14..1333ab2e7 100644
+index aed69fd..1333ab2 100644
 --- a/fs/fuse/dev.h
 +++ b/fs/fuse/dev.h
 @@ -59,6 +59,7 @@ void fuse_dev_cleanup(void);
@@ -46,7 +46,7 @@ index aed69fd14..1333ab2e7 100644
  bool fuse_dev_is_sync_init(struct fuse_dev *fud);
  struct fuse_dev *fuse_dev_grab(struct file *file);
 diff --git a/fs/fuse/virtio_fs.c b/fs/fuse/virtio_fs.c
-index df25d4fac..5c4c90cd9 100644
+index df25d4f..5c4c90c 100644
 --- a/fs/fuse/virtio_fs.c
 +++ b/fs/fuse/virtio_fs.c
 @@ -40,10 +40,13 @@ static struct kset *virtio_fs_kset;
@@ -324,7 +324,7 @@ index df25d4fac..5c4c90cd9 100644
  	mutex_unlock(&virtio_fs_mutex);
  	return 0;
 diff --git a/include/uapi/linux/virtio_fs.h b/include/uapi/linux/virtio_fs.h
-index bea382914..50601300b 100644
+index bea3829..5060130 100644
 --- a/include/uapi/linux/virtio_fs.h
 +++ b/include/uapi/linux/virtio_fs.h
 @@ -16,6 +16,9 @@ struct virtio_fs_config {

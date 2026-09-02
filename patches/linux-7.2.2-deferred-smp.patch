@@ -1,5 +1,5 @@
 diff --git a/net/vmw_vsock/virtio_transport.c b/net/vmw_vsock/virtio_transport.c
-index 96c9fe8d3..7580c7937 100644
+index 96c9fe8..7580c79 100644
 --- a/net/vmw_vsock/virtio_transport.c
 +++ b/net/vmw_vsock/virtio_transport.c
 @@ -13,6 +13,10 @@
