@@ -1,12 +1,185 @@
 #!/bin/sh
-# Run the complete AWS x86_64 field validation on the repository's reusable
-# Linux KVM and Windows WHPX hosts. The script starts stopped instances, waits
-# for SSM, stages fresh binaries, runs every maintained battery, and stops the
-# hosts on exit unless GANTRY_KEEP_INSTANCES=1.
+# Run the complete field validation. With no arguments this drives the
+# repository's reusable AWS Linux KVM and Windows WHPX hosts. `macos` instead
+# runs the maintained cross-platform batteries locally on Apple silicon HVF
+# without loading AWS credentials or touching EC2 instances.
+#
+#   sh scripts/aws-e2e-validation.sh          # AWS Linux + Windows
+#   sh scripts/aws-e2e-validation.sh macos    # local Apple-silicon macOS
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
+
+usage() {
+	cat <<'EOF'
+usage: scripts/aws-e2e-validation.sh [aws|macos]
+
+  aws      validate the reusable AWS Linux KVM and Windows WHPX hosts (default)
+  macos    validate the local Apple-silicon macOS HVF backend
+
+macOS overrides:
+  GANTRY_ARTIFACTS               artifact directory (default: ./artifacts)
+  GANTRY_TEST_KERNEL             arm64 guest kernel
+  GANTRY_TEST_ROOTFS             arm64 Nerdbox rootfs
+  GANTRY_TEST_WORKLOAD_IMAGE     workload EROFS image (default: downloaded test image)
+  GANTRY_TEST_IDE_IMAGE          curated Dev Containers EROFS image
+  GANTRY_SKIP_DEVCONTAINERS=1    skip SSH/Dev Containers and directory batteries
+EOF
+}
+
+MODE=${GANTRY_E2E_TARGET:-aws}
+if [ "$#" -gt 1 ]; then
+	usage >&2
+	exit 2
+fi
+if [ "$#" -eq 1 ]; then
+	case "$1" in
+	aws|--aws) MODE=aws ;;
+	macos|darwin|--macos) MODE=macos ;;
+	-h|--help) usage; exit 0 ;;
+	*) usage >&2; exit 2 ;;
+	esac
+fi
+
+run_macos_validation() {
+	[ "$(uname -s)" = Darwin ] || {
+		echo "macos validation must run on macOS" >&2
+		exit 1
+	}
+	case $(uname -m) in
+	arm64|aarch64) ;;
+	*) echo "macos validation requires Apple silicon (found $(uname -m))" >&2; exit 1 ;;
+	esac
+	for command_name in go codesign python3 ssh sftp; do
+		command -v "$command_name" >/dev/null 2>&1 || {
+			echo "required command not found: $command_name" >&2
+			exit 1
+		}
+	done
+	[ -n "${HOME:-}" ] || { echo "HOME must be set for macOS validation" >&2; exit 1; }
+
+	# Keep Unix-domain endpoints below Darwin's 104-byte sockaddr_un limit.
+	MAC_TMP=$(mktemp -d /tmp/gantry-me2e.XXXXXX)
+	MAC_ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+	mkdir -p "$MAC_ARTIFACTS"
+	MAC_ARTIFACTS=$(CDPATH= cd -- "$MAC_ARTIFACTS" && pwd)
+	cleanup_macos() {
+		status=$?
+		trap - EXIT HUP INT TERM
+		rm -rf -- "$MAC_TMP"
+		exit "$status"
+	}
+	trap cleanup_macos EXIT
+	trap 'exit 130' HUP INT TERM
+
+	echo "===== macOS HVF: build and sign current host/guest binaries ====="
+	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" sh scripts/build.sh
+	MAC_GANTRY=$MAC_ARTIFACTS/gantry-darwin-arm64
+	MAC_GUEST=$MAC_ARTIFACTS/gantry-guest-arm64
+	[ -x "$MAC_GANTRY" ] || { echo "missing host binary: $MAC_GANTRY" >&2; exit 1; }
+	[ -s "$MAC_GUEST" ] || { echo "missing guest helper: $MAC_GUEST" >&2; exit 1; }
+
+	MAC_KERNEL=${GANTRY_TEST_KERNEL:-$MAC_ARTIFACTS/gantry-kernel-arm64}
+	MAC_ROOTFS=${GANTRY_TEST_ROOTFS:-$MAC_ARTIFACTS/nerdbox-rootfs-arm64.erofs}
+	MAC_WORKLOAD=${GANTRY_TEST_WORKLOAD_IMAGE:-builtin}
+	echo "===== macOS HVF: manager API lifecycle battery ====="
+	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" sh scripts/test-manager-api-e2e.sh \
+		-gantry "$MAC_GANTRY" \
+		-artifacts "$MAC_ARTIFACTS" \
+		-kernel "$MAC_KERNEL" \
+		-rootfs "$MAC_ROOTFS" \
+		-image "$MAC_WORKLOAD" \
+		-work-dir "$MAC_TMP/manager"
+	if [ "$MAC_WORKLOAD" = builtin ]; then
+		MAC_WORKLOAD=$HOME/Library/Caches/gantry/e2e-assets/gantry-default-image-arm64.erofs
+	fi
+	[ -s "$MAC_WORKLOAD" ] || {
+		echo "macOS workload image missing after manager battery: $MAC_WORKLOAD" >&2
+		exit 1
+	}
+
+	echo "===== macOS HVF: credential-broker battery ====="
+	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" \
+		GANTRY_TEST_EXE="$MAC_GANTRY" \
+		GANTRY_TEST_GUEST="$MAC_GUEST" \
+		IMAGE="$MAC_WORKLOAD" \
+		bash scripts/test-credhelper-local.sh
+
+	if [ "${GANTRY_SKIP_DEVCONTAINERS:-0}" = 1 ]; then
+		echo "===== macOS HVF: SSH/Dev Containers and directory batteries skipped ====="
+	else
+		MAC_IDE_IMAGE=${GANTRY_TEST_IDE_IMAGE:-}
+		if [ -z "$MAC_IDE_IMAGE" ] && [ -s "$MAC_ARTIFACTS/gantry-ide-image-arm64.erofs" ]; then
+			MAC_IDE_IMAGE=$MAC_ARTIFACTS/gantry-ide-image-arm64.erofs
+		fi
+		if [ -z "$MAC_IDE_IMAGE" ]; then
+			for command_name in docker mkfs.erofs; do
+				command -v "$command_name" >/dev/null 2>&1 || {
+					echo "required to build the curated IDE image: $command_name" >&2
+					echo "set GANTRY_TEST_IDE_IMAGE or GANTRY_SKIP_DEVCONTAINERS=1 to continue without building it" >&2
+					exit 1
+				}
+			done
+			MAC_IDE_IMAGE=$MAC_TMP/gantry-ide-image-arm64.erofs
+			echo "===== macOS HVF: build current curated IDE image ====="
+			sh scripts/mkideimage.sh "$MAC_IDE_IMAGE" linux/arm64
+		fi
+		[ -s "$MAC_IDE_IMAGE" ] || { echo "curated IDE image missing: $MAC_IDE_IMAGE" >&2; exit 1; }
+
+		# Default Dev Containers resolution uses a canonical basename below
+		# GANTRY_ARTIFACTS. Stage regular files in the private test tree so a
+		# caller-provided image is the image actually exercised, without
+		# overwriting the caller's artifact directory.
+		MAC_FIELD_ASSETS=$MAC_TMP/field-assets
+		mkdir -p "$MAC_FIELD_ASSETS"
+		stage_macos_asset() {
+			source_path=$1
+			destination_path=$2
+			ln "$source_path" "$destination_path" 2>/dev/null || cp "$source_path" "$destination_path"
+		}
+		stage_macos_asset "$MAC_IDE_IMAGE" "$MAC_FIELD_ASSETS/gantry-ide-image-arm64.erofs"
+		stage_macos_asset "$MAC_GUEST" "$MAC_FIELD_ASSETS/gantry-guest-arm64"
+		MAC_IDE_IMAGE=$MAC_FIELD_ASSETS/gantry-ide-image-arm64.erofs
+
+		for required_path in "$MAC_KERNEL" "$MAC_ROOTFS"; do
+			[ -s "$required_path" ] || { echo "required guest asset missing: $required_path" >&2; exit 1; }
+		done
+
+		echo "===== macOS HVF: SSH/Dev Containers battery ====="
+		GANTRY_TEST_ROOT="$MAC_FIELD_ASSETS" \
+			GANTRY_TEST_EXE="$MAC_GANTRY" \
+			GANTRY_TEST_KERNEL="$MAC_KERNEL" \
+			GANTRY_TEST_ROOTFS="$MAC_ROOTFS" \
+			GANTRY_TEST_IDE_IMAGE="$MAC_IDE_IMAGE" \
+			GANTRY_TEST_WORKLOAD_IMAGE="$MAC_WORKLOAD" \
+			GANTRY_TEST_GUEST="$MAC_GUEST" \
+			GANTRY_TEST_SANDBOX=ssh-devcontainers-hvf \
+			GANTRY_TEST_PLATFORM='macOS HVF' \
+			GANTRY_HOME="$MAC_TMP/ssh/sandboxes" \
+			bash scripts/aws-kvm/ssh-devcontainers-validation.sh
+
+		echo "===== macOS HVF: large-directory battery ====="
+		GANTRY_TEST_ARCH=arm64 \
+			GANTRY_TEST_ROOT="$MAC_FIELD_ASSETS" \
+			GANTRY_TEST_EXE="$MAC_GANTRY" \
+			GANTRY_TEST_KERNEL="$MAC_KERNEL" \
+			GANTRY_TEST_ROOTFS="$MAC_ROOTFS" \
+			GANTRY_TEST_IMAGE="$MAC_IDE_IMAGE" \
+			GANTRY_TEST_GUEST_DIR=/home/gantry/gantry-dirscan \
+			GANTRY_TEST_SANDBOX=dirscan-arm64-hvf \
+			GANTRY_HOME="$MAC_TMP/directory/sandboxes" \
+			sh scripts/aws-kvm/directory-validation.sh
+	fi
+
+	echo "===== macOS E2E VALIDATION PASSED ====="
+}
+
+case "$MODE" in
+aws) ;;
+macos) run_macos_validation; exit 0 ;;
+*) echo "unknown GANTRY_E2E_TARGET: $MODE" >&2; usage >&2; exit 2 ;;
+esac
 
 KEYS_FILE=${GANTRY_KEYS_FILE:-$HOME/keys}
 if [ -z "${AWS_ACCESS_KEY_ID:-}" ] && [ -f "$KEYS_FILE" ]; then

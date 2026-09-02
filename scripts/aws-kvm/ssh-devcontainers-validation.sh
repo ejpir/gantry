@@ -1,7 +1,7 @@
 #!/bin/bash
-# Validate the SSH gateway and nested Dev Containers profile on a real KVM host.
-# The runner stages fresh host/guest binaries and the current curated IDE image
-# under /opt/gantry before invoking this script through SSM.
+# Validate the SSH gateway and nested Dev Containers profile on a real KVM or
+# local Apple-silicon HVF host. Remote runners stage assets under /opt/gantry;
+# local callers override the GANTRY_TEST_* paths.
 set -euo pipefail
 
 ROOT=${GANTRY_TEST_ROOT:-/opt/gantry}
@@ -15,8 +15,9 @@ SANDBOX=${GANTRY_TEST_SANDBOX:-ssh-devcontainers-kvm}
 STATE_ROOT=${GANTRY_HOME:-$ROOT/state-ssh-devcontainers}
 CONFIG=$STATE_ROOT/$SANDBOX/sandbox.json
 LOG=$STATE_ROOT/$SANDBOX/daemon.log
-PADDED_GUEST=$ROOT/gantry-guest-x86_64-padded
+PADDED_GUEST=$ROOT/gantry-guest-padded-$$
 SFTP_OUT=$(mktemp /tmp/gantry-sftp.XXXXXX)
+PLATFORM=${GANTRY_TEST_PLATFORM:-Linux KVM}
 
 export HOME=${HOME:-/root}
 export GANTRY_HOME=$STATE_ROOT
@@ -26,6 +27,20 @@ export GANTRY_BOOT_TIMING=1
 pass() { echo "PASS ssh/devcontainers: $*"; }
 fail() { echo "FAIL ssh/devcontainers: $*" >&2; exit 1; }
 run() { echo "+ $*"; "$@"; }
+now_ms() {
+  python3 -c 'import time; print(time.time_ns() // 1000000)'
+}
+resize_file() {
+  size=$1
+  path=$2
+  if command -v truncate >/dev/null 2>&1; then
+    truncate -s "$size" "$path"
+  else
+    # BSD/macOS has no truncate(1). A zero-count dd creates the same sparse
+    # logical length without writing the 60 MiB payload.
+    dd if=/dev/zero of="$path" bs=1 count=0 seek="$size" 2>/dev/null
+  fi
+}
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
@@ -124,7 +139,7 @@ boot_before=$("$G" exec "$SANDBOX" -- cat /proc/sys/kernel/random/boot_id | grep
 [ -n "$boot_before" ] || fail "could not read the initial VM boot ID"
 run "$G" stop "$SANDBOX"
 cp "$GUEST" "$PADDED_GUEST"
-truncate -s $((60 * 1024 * 1024)) "$PADDED_GUEST"
+resize_file $((60 * 1024 * 1024)) "$PADDED_GUEST"
 chmod 0755 "$PADDED_GUEST"
 python3 - "$CONFIG" "$PADDED_GUEST" <<'PY'
 import json, os, sys
@@ -139,9 +154,9 @@ with open(temporary, "w", encoding="utf-8") as stream:
 os.replace(temporary, path)
 PY
 : >"$LOG"
-start_ms=$(date +%s%3N)
+start_ms=$(now_ms)
 run "$G" resume "$SANDBOX"
-ready_ms=$(date +%s%3N)
+ready_ms=$(now_ms)
 early=$("$G" ssh "$SANDBOX" -- /bin/echo GANTRY-EARLY-SSH 2>&1)
 printf '%s\n' "$early"
 grep -q GANTRY-EARLY-SSH <<<"$early" || fail "early SSH request did not wait for helper delivery"
@@ -202,4 +217,4 @@ printf '%s\n' "$final_nested"
 grep -q GANTRY-FINAL-NESTED <<<"$final_nested" || fail "nested runtime failed after legacy-profile resume"
 pass "legacy runtime normalization and cwd-independent guest-helper fallback"
 
-pass "Linux KVM SSH and Dev Containers field validation complete"
+pass "$PLATFORM SSH and Dev Containers field validation complete"
