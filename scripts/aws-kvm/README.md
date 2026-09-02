@@ -42,9 +42,12 @@ Instance IDs and the bucket can be overridden with `GANTRY_LINUX_IID`,
 compatible builder for the x86-64 curated image; set `GANTRY_TEST_IDE_IMAGE` to
 an already-built EROFS image to skip that build.
 
-On Apple-silicon macOS, the same entry point can run the local HVF manager,
-credential-broker, SSH/Dev Containers, and large-directory batteries without
-loading AWS credentials or touching EC2:
+On Apple-silicon macOS, the same entry point can run the local HVF manager and
+a broad functional battery without loading AWS credentials or touching EC2. It
+covers crun/runsc, lifecycle and revisioned resource configuration, OCI
+pull/import/export/prune, shares, live ports and network policy, secrets and
+OAuth custody, MCP, verified worker confinement, SSH/Dev Containers, and large
+directories:
 
 ```sh
 sh scripts/aws-e2e-validation.sh macos
@@ -53,8 +56,9 @@ sh scripts/aws-e2e-validation.sh macos
 It builds and ad-hoc signs the current host and guest-helper binaries. Existing
 arm64 kernel, rootfs, and curated IDE assets are reused from `artifacts/`;
 missing release assets are downloaded and a missing curated image is built.
-Set `GANTRY_SKIP_DEVCONTAINERS=1` when only the core manager and credential
-batteries are needed.
+Set `GANTRY_SKIP_DEVCONTAINERS=1` to skip only the curated-image SSH/Dev
+Containers and large-directory checks; the core runtime, networking,
+credentials, MCP, confinement, and manager batteries still run.
 
 ## Quick start
 

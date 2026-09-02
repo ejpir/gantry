@@ -51,7 +51,7 @@ run_macos_validation() {
 	arm64|aarch64) ;;
 	*) echo "macos validation requires Apple silicon (found $(uname -m))" >&2; exit 1 ;;
 	esac
-	for command_name in go codesign python3 ssh sftp; do
+	for command_name in go codesign python3 curl perl ssh sftp; do
 		command -v "$command_name" >/dev/null 2>&1 || {
 			echo "required command not found: $command_name" >&2
 			exit 1
@@ -99,12 +99,18 @@ run_macos_validation() {
 		exit 1
 	}
 
-	echo "===== macOS HVF: credential-broker battery ====="
+	echo "===== macOS HVF: core CLI, runtime, networking, credentials, and MCP battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" \
+		GANTRY_TEST_ROOT="$ROOT" \
 		GANTRY_TEST_EXE="$MAC_GANTRY" \
-		GANTRY_TEST_GUEST="$MAC_GUEST" \
-		IMAGE="$MAC_WORKLOAD" \
-		bash scripts/test-credhelper-local.sh
+		GANTRY_TEST_KERNEL="$MAC_KERNEL" \
+		GANTRY_TEST_ROOTFS="$MAC_ROOTFS" \
+		GANTRY_TEST_IMAGE="$MAC_WORKLOAD" \
+		GANTRY_TEST_EXPECTED_ARCH=aarch64 \
+		GANTRY_HOME="$MAC_TMP/functional/sandboxes" \
+		GANTRY_IMAGES="$MAC_TMP/functional/images" \
+		GANTRY_STORE_URL='' \
+		bash scripts/aws-kvm/test-battery.sh
 
 	if [ "${GANTRY_SKIP_DEVCONTAINERS:-0}" = 1 ]; then
 		echo "===== macOS HVF: SSH/Dev Containers and directory batteries skipped ====="
