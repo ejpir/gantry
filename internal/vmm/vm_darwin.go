@@ -77,6 +77,13 @@ type hvfVCPU struct {
 	// inLoop is true while the vCPU is inside its run loop; IRQ kicks skip
 	// parked vCPUs (hv_vcpus_exit on a never-run vCPU is pointless).
 	inLoop atomic.Bool
+	// inHVF narrows liveness kicks to a vCPU actually blocked in
+	// hv_vcpu_run, excluding the short host-side WFI park and exit handling.
+	inHVF atomic.Bool
+	// lastRunEntry is host wall time at the most recent entry to hv_vcpu_run.
+	// The liveness kicker uses it to distinguish a healthy compute-bound vCPU
+	// receiving timer exits from one stuck inside HVF.
+	lastRunEntry atomic.Int64
 	// wake releases a vCPU parked on WFI. hv_vcpus_exit only breaks
 	// hv_vcpu_run, so an idling vCPU — which is NOT inside the hypervisor —
 	// needs its own wakeup path or it sits out the whole idle bound while
@@ -379,6 +386,51 @@ func (m *Machine) codeAtPC(pc uint64) string {
 	return out
 }
 
+const (
+	vcpuLivenessInterval = 50 * time.Millisecond
+	vcpuLivenessLimit    = 250 * time.Millisecond
+)
+
+func stalledVCPUHandles(vcpus []*hvfVCPU, now int64) []uint64 {
+	handles := make([]uint64, 0, len(vcpus))
+	for _, vc := range vcpus {
+		lastEntry := vc.lastRunEntry.Load()
+		if vc.inHVF.Load() && lastEntry > 0 && time.Duration(now-lastEntry) >= vcpuLivenessLimit {
+			handles = append(handles, vc.vcpu)
+		}
+	}
+	return handles
+}
+
+// livenessKicker is a production backstop for lost Hypervisor.framework
+// virtual-timer delivery. A compute-bound guest normally returns from
+// hv_vcpu_run on every timer interrupt. If it does not return for the bounded
+// interval, force only that vCPU out; re-entering HVF makes it re-evaluate the
+// expired timer. This prevents all-host-CPU workloads from turning a missed
+// timer into Linux RCU starvation without perturbing healthy run loops.
+func (b *hvfBackend) livenessKicker(stop <-chan struct{}) error {
+	ticker := time.NewTicker(vcpuLivenessInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return nil
+		case now := <-ticker.C:
+			b.vcpuMu.Lock()
+			handles := stalledVCPUHandles(b.vcpus, now.UnixNano())
+			if len(handles) == 0 {
+				b.vcpuMu.Unlock()
+				continue
+			}
+			ret := hvVcpusExit(&handles[0], uint32(len(handles)))
+			b.vcpuMu.Unlock()
+			if ret != hvSuccess {
+				return fmt.Errorf("hv_vcpus_exit stalled vCPUs: %s", hvReturnString(ret))
+			}
+		}
+	}
+}
+
 // periodicKicker kicks all vCPUs out of hv_vcpu_run every 3s in debug mode
 // (hv_vcpus_exit -> HV_EXIT_REASON_CANCELED), giving deterministic state
 // dumps even when the guest spins without exiting.
@@ -447,7 +499,7 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		return err
 	}
 	debug := os.Getenv("GANTRY_DEBUG") != ""
-	workerCount := m.vcpus
+	workerCount := m.vcpus + 1 // production vCPU liveness kicker
 	if debug {
 		workerCount += 2 // SIGINFO dumper and periodic kicker
 	}
@@ -662,6 +714,13 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		go m.uart.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
+	go b.lifecycle.runWorker(func(stop <-chan struct{}) {
+		if err := b.livenessKicker(stop); err != nil && !b.lifecycle.isStopping() {
+			b.lifecycle.recordError(err)
+			b.lifecycle.stop()
+			b.lifecycle.recordError(b.kickVCPUs())
+		}
+	})
 	if m.bootTracer().profiling() {
 		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
 			b.lifecycle.recordError(b.bootProfiler(stop))
@@ -841,7 +900,11 @@ func (vc *hvfVCPU) runLoop() error {
 		if timing {
 			entered = time.Now()
 		}
-		if ret := hvVcpuRun(vc.vcpu); ret != hvSuccess {
+		vc.lastRunEntry.Store(time.Now().UnixNano())
+		vc.inHVF.Store(true)
+		ret := hvVcpuRun(vc.vcpu)
+		vc.inHVF.Store(false)
+		if ret != hvSuccess {
 			if vc.b.lifecycle.isStopping() {
 				return nil
 			}
