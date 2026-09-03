@@ -9,13 +9,16 @@ import (
 )
 
 func TestPrepareDevContainersProfileAddsPeerWithoutReplacingWorkload(t *testing.T) {
-	oldEnsureImage, oldEnsureLayer, oldCheckPairing := ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing
+	oldEnsureImage, oldVerifyImage := ensureDevContainersImageAsset, verifyDevContainersImageAsset
+	oldEnsureLayer, oldCheckPairing := ensureDevContainersRWLayer, checkDevContainersRWPairing
 	t.Cleanup(func() {
-		ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureImage, oldEnsureLayer, oldCheckPairing
+		ensureDevContainersImageAsset, verifyDevContainersImageAsset = oldEnsureImage, oldVerifyImage
+		ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureLayer, oldCheckPairing
 	})
 	ideImage := filepath.Join(t.TempDir(), "ide.erofs")
 	ideLayer := filepath.Join(t.TempDir(), "ide.ext4")
 	ensureDevContainersImageAsset = func(string, func(string, ...any)) (string, error) { return ideImage, nil }
+	verifyDevContainersImageAsset = func(string) error { return nil }
 	ensureDevContainersRWLayer = func(name, imageID string, size uint, _ func(string, ...any)) (string, []string, error) {
 		if name != "dev@devcontainers" || imageID != ideImage || size != 8192 {
 			t.Fatalf("IDE layer request = name %q image %q size %d", name, imageID, size)

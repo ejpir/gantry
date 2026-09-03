@@ -1,6 +1,7 @@
 #!/bin/sh
 # Measure large single-directory lookup/scan behavior in the guest writable
-# layer and through a live host share. Runs on Linux amd64 or arm64 KVM hosts.
+# layer and through a live host share. Runs on Linux KVM or Apple-silicon HVF
+# hosts with Linux amd64 or arm64 guests.
 set -eu
 
 ARCH=${GANTRY_TEST_ARCH:-$(uname -m)}
@@ -31,8 +32,8 @@ NAME=${GANTRY_TEST_SANDBOX:-dirscan-$ARCH}
 SMALL=${GANTRY_TEST_SMALL_DIR_FILES:-5000}
 LARGE=${GANTRY_TEST_LARGE_DIR_FILES:-25000}
 ROUNDS=${GANTRY_TEST_FIND_ROUNDS:-10}
-HOST_BASE=/tmp/gantry-dirscan-$ARCH
-GUEST_BASE=/root/gantry-dirscan
+HOST_BASE=${GANTRY_TEST_HOST_DIR:-/tmp/gantry-dirscan-$ARCH}
+GUEST_BASE=${GANTRY_TEST_GUEST_DIR:-/root/gantry-dirscan}
 
 for path in "$G" "$KERNEL" "$ROOTFS" "$IMAGE"; do
 	[ -f "$path" ] || { echo "required file missing: $path" >&2; exit 1; }

@@ -133,21 +133,77 @@ func guestToolsTargets(cfg config.RunConfig) []guestToolsTarget {
 	return targets
 }
 
-func (d *daemonRuntime) ensureGuestToolsTargetsAndSignal(cfg config.RunConfig, targets []guestToolsTarget) bool {
-	defer func() {
-		for _, target := range targets {
-			d.broker.finishGuestToolsDelivery(target.ide)
-		}
-	}()
-	return d.ensureGuestToolsTargets(cfg, targets)
+// beginGuestToolsDelivery joins one delivery to the daemon lifetime. Add and
+// stop are serialized so a Wait can never race a zero-to-one WaitGroup edge.
+func (d *daemonRuntime) beginGuestToolsDelivery() (context.Context, func(), bool) {
+	d.guestToolsLifeMu.Lock()
+	defer d.guestToolsLifeMu.Unlock()
+	if d.guestToolsStopping {
+		return nil, nil, false
+	}
+	if d.guestToolsCtx == nil {
+		d.guestToolsCtx, d.guestToolsCancel = context.WithCancel(context.Background())
+	}
+	d.guestToolsWG.Add(1)
+	return d.guestToolsCtx, d.guestToolsWG.Done, true
 }
 
-func (d *daemonRuntime) ensureGuestToolsTargets(cfg config.RunConfig, targets []guestToolsTarget) bool {
-	if d.broker == nil {
+// stopGuestToolsDelivery prevents new deliveries, cancels current internal
+// execs, and joins all synchronous or asynchronous owners. It is safe to call
+// from gracefulStop and again from deferred close.
+func (d *daemonRuntime) stopGuestToolsDelivery() {
+	d.guestToolsLifeMu.Lock()
+	d.guestToolsStopping = true
+	cancel := d.guestToolsCancel
+	d.guestToolsLifeMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	d.guestToolsWG.Wait()
+}
+
+func (d *daemonRuntime) finishGuestToolsTargets(targets []guestToolsTarget) {
+	for _, target := range targets {
+		d.broker.finishGuestToolsDelivery(target.ide)
+	}
+}
+
+func (d *daemonRuntime) ensureGuestToolsTargetsAndSignal(cfg config.RunConfig, targets []guestToolsTarget) bool {
+	ctx, done, ok := d.beginGuestToolsDelivery()
+	if !ok {
+		d.finishGuestToolsTargets(targets)
+		return false
+	}
+	defer done()
+	return d.ensureGuestToolsTargetsAndSignalContext(ctx, cfg, targets)
+}
+
+func (d *daemonRuntime) startAsyncGuestToolsDelivery(cfg config.RunConfig, targets []guestToolsTarget) {
+	ctx, done, ok := d.beginGuestToolsDelivery()
+	if !ok {
+		d.finishGuestToolsTargets(targets)
+		return
+	}
+	go func() {
+		defer done()
+		d.ensureGuestToolsTargetsAndSignalContext(ctx, cfg, targets)
+	}()
+}
+
+func (d *daemonRuntime) ensureGuestToolsTargetsAndSignalContext(ctx context.Context, cfg config.RunConfig, targets []guestToolsTarget) bool {
+	defer d.finishGuestToolsTargets(targets)
+	return d.ensureGuestToolsTargets(ctx, cfg, targets)
+}
+
+func (d *daemonRuntime) ensureGuestToolsTargets(ctx context.Context, cfg config.RunConfig, targets []guestToolsTarget) bool {
+	if d.broker == nil || ctx.Err() != nil {
 		return false
 	}
 	d.guestToolsMu.Lock()
 	defer d.guestToolsMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
 	pending := make([]guestToolsTarget, 0, len(targets))
 	for _, target := range targets {
 		ready, _, _ := d.broker.guestToolsState(target.ide)
@@ -167,17 +223,24 @@ func (d *daemonRuntime) ensureGuestToolsTargets(cfg config.RunConfig, targets []
 	}
 	path, err := guestasset.EnsureGuestTools(assetPath, progress)
 	if err != nil {
-		d.guestToolsFailed(targets, "guest tools unavailable: %v", err)
+		if ctx.Err() == nil {
+			d.guestToolsFailed(ctx, targets, "guest tools unavailable: %v", err)
+		}
+		return false
+	}
+	if ctx.Err() != nil {
 		return false
 	}
 	data, err := readCapped(path, guestToolsMaxBytes)
 	if err != nil {
-		d.guestToolsFailed(targets, "read guest tools: %v", err)
+		if ctx.Err() == nil {
+			d.guestToolsFailed(ctx, targets, "read guest tools: %v", err)
+		}
 		return false
 	}
 	sum := sha256.Sum256(data)
 
-	if err := d.deliverGuestToolsViaShare(data, sum, targets); err == nil {
+	if err := d.deliverGuestToolsViaShare(ctx, data, sum, targets); err == nil {
 		for _, target := range targets {
 			ready, _, _ := d.broker.guestToolsState(target.ide)
 			ready.Store(true)
@@ -185,9 +248,12 @@ func (d *daemonRuntime) ensureGuestToolsTargets(cfg config.RunConfig, targets []
 		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via share")
 		return true
 	} else {
+		if ctx.Err() != nil {
+			return false
+		}
 		fmt.Fprintf(os.Stderr, "daemon: share delivery unavailable (%v); trying exec channel\n", err)
 	}
-	if err := d.deliverGuestToolsViaExec(data, sum, targets); err == nil {
+	if err := d.deliverGuestToolsViaExec(ctx, data, sum, targets); err == nil {
 		for _, target := range targets {
 			ready, _, _ := d.broker.guestToolsState(target.ide)
 			ready.Store(true)
@@ -195,23 +261,44 @@ func (d *daemonRuntime) ensureGuestToolsTargets(cfg config.RunConfig, targets []
 		fmt.Fprintln(os.Stderr, "daemon: guest tools delivered via exec channel")
 		return true
 	} else {
-		d.guestToolsFailed(targets, "exec-channel delivery: %v", err)
+		if ctx.Err() == nil {
+			d.guestToolsFailed(ctx, targets, "exec-channel delivery: %v", err)
+		}
 		return false
 	}
 }
 
-func (d *daemonRuntime) guestToolsFailed(targets []guestToolsTarget, format string, a ...any) {
+func (d *daemonRuntime) guestToolsFailed(ctx context.Context, targets []guestToolsTarget, format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "daemon: WARNING: "+format+"\n", a...)
 	fmt.Fprintln(os.Stderr, "daemon: guest-tool-backed features will NOT be usable in the guest this boot")
 	for _, target := range targets {
-		_, _, _ = d.broker.internalExecAsRootTarget(strings.NewReader(""), []string{"sh", "-c",
+		_, _, _ = d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""), []string{"sh", "-c",
 			fmt.Sprintf("rm -rf %[1]s", guestToolsDirGuest)}, 15*time.Second, 4<<10, guestToolsVerifyOp, target.ide)
 	}
 }
 
+// withGuestToolsStage owns one attempt's temporary payload. Cleanup is local
+// rather than deferred to daemon shutdown, so retries cannot overwrite or
+// accumulate staging-directory state.
+func withGuestToolsStage(base string, data []byte, use func(string) error) error {
+	stageDir, err := os.MkdirTemp(base, "gantry-guest-tools-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := os.RemoveAll(stageDir); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: guest tools staging cleanup: %v\n", err)
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(stageDir, "gantry-guest"), data, 0o755); err != nil {
+		return err
+	}
+	return use(stageDir)
+}
+
 // deliverGuestToolsViaShare exposes one verified host payload and installs it
 // independently into every OCI root that advertises helper-backed features.
-func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte, targets []guestToolsTarget) error {
+func (d *daemonRuntime) deliverGuestToolsViaShare(ctx context.Context, data []byte, sum [32]byte, targets []guestToolsTarget) error {
 	if d.shares == nil {
 		return fmt.Errorf("share manager unavailable")
 	}
@@ -219,49 +306,45 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(data []byte, sum [32]byte, tar
 	if runtime.GOOS == "windows" && stageBase == "" {
 		return fmt.Errorf("sandbox state directory unavailable for guest-tools staging")
 	}
-	stageDir, err := os.MkdirTemp(stageBase, "gantry-guest-tools-*")
-	if err != nil {
-		return err
-	}
-	d.guestToolsStageDirs = append(d.guestToolsStageDirs, stageDir)
-	stagePath := filepath.Join(stageDir, "gantry-guest")
-	if err := os.WriteFile(stagePath, data, 0o755); err != nil {
-		return err
-	}
-	entry, err := d.shares.Add(guestToolsShareTag+"="+stageDir+",ro", false, true)
-	if err != nil {
-		return fmt.Errorf("share hot-add: %w", err)
-	}
-	ctrPath := entry.CtrPath
-	if ctrPath == "" {
-		ctrPath = shares.HubHostPath + "/" + guestToolsShareTag
-	}
-	defer func() {
-		if _, err := d.shares.Remove(guestToolsShareTag, false, true); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: guest tools share cleanup: %v\n", err)
+	return withGuestToolsStage(stageBase, data, func(stageDir string) error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	}()
-	for _, target := range targets {
-		if err := d.installGuestToolsFromShare(ctrPath, sum, int64(len(data)), target); err != nil {
-			return fmt.Errorf("%s helper install: %w", target.label, err)
+		entry, err := d.shares.Add(guestToolsShareTag+"="+stageDir+",ro", false, true)
+		if err != nil {
+			return fmt.Errorf("share hot-add: %w", err)
 		}
-	}
-	return nil
+		ctrPath := entry.CtrPath
+		if ctrPath == "" {
+			ctrPath = shares.HubHostPath + "/" + guestToolsShareTag
+		}
+		defer func() {
+			if _, err := d.shares.Remove(guestToolsShareTag, false, true); err != nil {
+				fmt.Fprintf(os.Stderr, "daemon: guest tools share cleanup: %v\n", err)
+			}
+		}()
+		for _, target := range targets {
+			if err := d.installGuestToolsFromShare(ctx, ctrPath, sum, int64(len(data)), target); err != nil {
+				return fmt.Errorf("%s helper install: %w", target.label, err)
+			}
+		}
+		return nil
+	})
 }
 
-func (d *daemonRuntime) installGuestToolsFromShare(ctrPath string, sum [32]byte, size int64, target guestToolsTarget) error {
+func (d *daemonRuntime) installGuestToolsFromShare(ctx context.Context, ctrPath string, sum [32]byte, size int64, target guestToolsTarget) error {
 	status := -1
 	directErr := fmt.Errorf("host share does not expose executable mode")
 	if runtime.GOOS != "windows" {
-		_, status, directErr = d.broker.internalExecAsRootTarget(strings.NewReader(""),
+		_, status, directErr = d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
 			[]string{ctrPath + "/gantry-guest", "install-self"},
 			15*time.Second, 4<<10, guestToolsInstallOp, target.ide)
 		if directErr == nil && status == 0 {
-			return d.verifyGuestTools(sum, size, target)
+			return d.verifyGuestTools(ctx, sum, size, target)
 		}
 	}
 	copyScript := fmt.Sprintf("mkdir -p %[1]s && rm -f %[1]s/gantry-guest.share %[1]s/gantry-guest %[1]s/credhelper && cp \"$1\" %[1]s/gantry-guest.share && chmod 755 %[1]s/gantry-guest.share && mv %[1]s/gantry-guest.share %[1]s/gantry-guest && ln %[1]s/gantry-guest %[1]s/credhelper", guestToolsDirGuest)
-	copyOut, copyStatus, copyErr := d.broker.internalExecAsRootTarget(strings.NewReader(""),
+	copyOut, copyStatus, copyErr := d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
 		[]string{"sh", "-c", copyScript, "gantry-guest-share-copy", ctrPath + "/gantry-guest"},
 		guestToolsShareTimeout, 4<<10, guestToolsInstallOp, target.ide)
 	if copyErr != nil {
@@ -270,10 +353,10 @@ func (d *daemonRuntime) installGuestToolsFromShare(ctrPath string, sum [32]byte,
 	if copyStatus != 0 {
 		return fmt.Errorf("execute shared helper status %d; copy shared helper exited with status %d (output %q)", status, copyStatus, copyOut)
 	}
-	return d.verifyGuestTools(sum, size, target)
+	return d.verifyGuestTools(ctx, sum, size, target)
 }
 
-func (d *daemonRuntime) deliverGuestToolsViaExec(data []byte, sum [32]byte, targets []guestToolsTarget) error {
+func (d *daemonRuntime) deliverGuestToolsViaExec(ctx context.Context, data []byte, sum [32]byte, targets []guestToolsTarget) error {
 	var encoded bytes.Buffer
 	enc := base64.NewEncoder(base64.StdEncoding, &encoded)
 	if _, err := enc.Write(data); err != nil {
@@ -282,19 +365,19 @@ func (d *daemonRuntime) deliverGuestToolsViaExec(data []byte, sum [32]byte, targ
 	_ = enc.Close()
 	script := fmt.Sprintf("mkdir -p %[1]s && base64 -d > %[1]s/gantry-guest.tmp && chmod 755 %[1]s/gantry-guest.tmp && mv %[1]s/gantry-guest.tmp %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper", guestToolsDirGuest)
 	for _, target := range targets {
-		if _, _, err := d.broker.internalExecAsRootTarget(bytes.NewReader(encoded.Bytes()), []string{"sh", "-c", script},
+		if _, _, err := d.broker.internalExecAsRootTargetContext(ctx, bytes.NewReader(encoded.Bytes()), []string{"sh", "-c", script},
 			guestToolsTimeout, 4<<10, guestToolsDeliverOp, target.ide); err != nil {
 			return fmt.Errorf("%s helper stream: %w", target.label, err)
 		}
-		if err := d.verifyGuestTools(sum, int64(len(data)), target); err != nil {
+		if err := d.verifyGuestTools(ctx, sum, int64(len(data)), target); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (d *daemonRuntime) verifyGuestTools(sum [32]byte, size int64, target guestToolsTarget) error {
-	out, _, err := d.broker.internalExecAsRootTarget(strings.NewReader(""),
+func (d *daemonRuntime) verifyGuestTools(ctx context.Context, sum [32]byte, size int64, target guestToolsTarget) error {
+	out, _, err := d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
 		[]string{guestToolsDirGuest + "/gantry-guest", "verify-self"},
 		15*time.Second, 4<<10, guestToolsVerifyOp, target.ide)
 	gotSize, gotSum := parseGuestToolsVerification(out)

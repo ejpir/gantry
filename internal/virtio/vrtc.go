@@ -16,7 +16,7 @@ import (
 // kernel sets the system time from it exactly once, at probe (hctosys);
 // the device is pull-only, so keeping wall time synced afterwards is the
 // guest's job: vminitd runs a clock-sync loop (patched in at rootfs build
-// by patches/nerdbox-v0.2.3-clock-sync.patch) that re-reads the driver's
+// by patches/nerdbox-v0.2.4-clock-sync.patch) that re-reads the driver's
 // /dev/ptp clock every 30s, retries transient reads after host wake, and steps
 // CLOCK_REALTIME. Without that loop
 // guest wall time is one probe reading plus raw counter elapsed — it drifts

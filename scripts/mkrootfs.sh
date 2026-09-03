@@ -27,8 +27,8 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 SRC="$WORK/nerdbox"
-NERDBOX_VERSION=v0.2.3
-NERDBOX_COMMIT=cd2c23fe413cdea8176760d63375d3271aa7e611
+NERDBOX_VERSION=v0.2.4
+NERDBOX_COMMIT=a842ff1395290e1ae595f272ae9a698c0b9ca055
 
 git clone --quiet --filter=blob:none --no-checkout https://github.com/containerd/nerdbox.git "$SRC"
 git -C "$SRC" fetch --quiet --depth 1 origin "$NERDBOX_COMMIT"
@@ -54,6 +54,14 @@ HTTPS_PROXY_VALUE=${HTTPS_PROXY:-${https_proxy:-}}
 HTTP_PROXY_VALUE=${HTTP_PROXY:-${http_proxy:-$HTTPS_PROXY_VALUE}}
 NO_PROXY_VALUE=${NO_PROXY:-${no_proxy:-}}
 ALL_PROXY_VALUE=${ALL_PROXY:-${all_proxy:-}}
+# buildx parses each --driver-opt value as CSV even when the shell supplies it
+# as one argument. Quote the complete key=value field so commas in NO_PROXY (or
+# credentials in another proxy URL) remain part of the environment value.
+buildx_driver_opt() {
+	printf '"'
+	printf '%s' "$1" | sed 's/"/""/g'
+	printf '"'
+}
 BUILD="docker buildx build"
 BUILDER_ARG=
 if ! docker buildx build --help 2>&1 | grep -q -- "--output"; then
@@ -72,10 +80,10 @@ elif [ -z "${BUILDX_BUILDER:-}" ]; then
 	if [ -n "$HTTP_PROXY_VALUE$HTTPS_PROXY_VALUE$ALL_PROXY_VALUE" ]; then
 		BUILDER="gantry-rootfs-$$"
 		set -- docker buildx create --name "$BUILDER" --driver docker-container
-		[ -z "$HTTP_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.HTTP_PROXY=$HTTP_PROXY_VALUE"
-		[ -z "$HTTPS_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.HTTPS_PROXY=$HTTPS_PROXY_VALUE"
-		[ -z "$NO_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.NO_PROXY=$NO_PROXY_VALUE"
-		[ -z "$ALL_PROXY_VALUE" ] || set -- "$@" --driver-opt "env.ALL_PROXY=$ALL_PROXY_VALUE"
+		[ -z "$HTTP_PROXY_VALUE" ] || set -- "$@" --driver-opt "$(buildx_driver_opt "env.HTTP_PROXY=$HTTP_PROXY_VALUE")"
+		[ -z "$HTTPS_PROXY_VALUE" ] || set -- "$@" --driver-opt "$(buildx_driver_opt "env.HTTPS_PROXY=$HTTPS_PROXY_VALUE")"
+		[ -z "$NO_PROXY_VALUE" ] || set -- "$@" --driver-opt "$(buildx_driver_opt "env.NO_PROXY=$NO_PROXY_VALUE")"
+		[ -z "$ALL_PROXY_VALUE" ] || set -- "$@" --driver-opt "$(buildx_driver_opt "env.ALL_PROXY=$ALL_PROXY_VALUE")"
 		"$@" --bootstrap >/dev/null
 		BUILDER_ARG="--builder $BUILDER"
 	fi

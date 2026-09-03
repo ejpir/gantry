@@ -119,12 +119,45 @@ func TestResolveRuntimeSwitch(t *testing.T) {
 	}
 }
 
+func TestResolveCuratedIDEEROFSAttachesImageConfig(t *testing.T) {
+	curated := filepath.Base(guestasset.DefaultDevContainersImage())
+	cfg, _, err := resolveSandbox(t, "-image", curated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ImageCfg == nil {
+		t.Fatal("curated IDE EROFS has no image config")
+	}
+	if cfg.ImageCfg.User != "gantry" || cfg.ImageCfg.UID != 1000 || cfg.ImageCfg.GID != 1000 ||
+		cfg.ImageCfg.WorkingDir != "/home/gantry" || !reflect.DeepEqual(cfg.ImageCfg.Cmd, []string{"/bin/bash"}) ||
+		!reflect.DeepEqual(cfg.ImageCfg.Env, []string{
+			"HOME=/home/gantry",
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		}) {
+		t.Fatalf("curated IDE image config = %+v", cfg.ImageCfg)
+	}
+	if got := defaultSSHUser(sshImageConfig(cfg).User, sshImageConfig(cfg).UID); got != "gantry" {
+		t.Fatalf("curated IDE SSH user = %q, want gantry", got)
+	}
+
+	ordinary, _, err := resolveSandbox(t, "-image", "debian-bookworm.erofs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.ImageCfg != nil {
+		t.Fatalf("ordinary EROFS unexpectedly received curated metadata: %+v", ordinary.ImageCfg)
+	}
+}
+
 func TestResolveDevContainersDefaultsAndOverrides(t *testing.T) {
-	oldEnsureImage, oldEnsureLayer, oldCheckPairing := ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing
+	oldEnsureImage, oldVerifyImage := ensureDevContainersImageAsset, verifyDevContainersImageAsset
+	oldEnsureLayer, oldCheckPairing := ensureDevContainersRWLayer, checkDevContainersRWPairing
 	t.Cleanup(func() {
-		ensureDevContainersImageAsset, ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureImage, oldEnsureLayer, oldCheckPairing
+		ensureDevContainersImageAsset, verifyDevContainersImageAsset = oldEnsureImage, oldVerifyImage
+		ensureDevContainersRWLayer, checkDevContainersRWPairing = oldEnsureLayer, oldCheckPairing
 	})
 	ensureDevContainersImageAsset = func(path string, _ func(string, ...any)) (string, error) { return path, nil }
+	verifyDevContainersImageAsset = func(string) error { return nil }
 	ensureDevContainersRWLayer = func(_ string, _ string, _ uint, _ func(string, ...any)) (string, []string, error) {
 		path := "devcontainers.ext4"
 		return path, nil, os.WriteFile(path, []byte("x"), 0o600)

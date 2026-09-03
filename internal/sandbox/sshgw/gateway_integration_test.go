@@ -40,11 +40,16 @@ func (s *recordingSpawner) Spawn(_ context.Context, request SpawnRequest) (int, 
 
 func startTestGateway(t *testing.T) (*ssh.Client, *recordingSpawner) {
 	t.Helper()
+	spawner := &recordingSpawner{requests: make(chan SpawnRequest, 8)}
+	return startTestGatewayWithSpawner(t, spawner), spawner
+}
+
+func startTestGatewayWithSpawner(t *testing.T, spawner Spawner) *ssh.Client {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	spawner := &recordingSpawner{requests: make(chan SpawnRequest, 8)}
 	gateway, err := New(Config{
 		Name: "test", HostKeyPath: filepath.Join(t.TempDir(), "host_ed25519"),
 		DefaultUser: "root", Spawner: spawner,
@@ -67,7 +72,7 @@ func startTestGateway(t *testing.T) (*ssh.Client, *recordingSpawner) {
 	}
 	client := ssh.NewClient(conn, channels, requests)
 	t.Cleanup(func() { _ = client.Close() })
-	return client, spawner
+	return client
 }
 
 func TestGatewayExecEnvironmentAndExitStatus(t *testing.T) {
@@ -124,6 +129,98 @@ func TestGatewayPTYAndResize(t *testing.T) {
 	}
 	if output.String() != "120x40" {
 		t.Fatalf("resize output = %q", output.String())
+	}
+}
+
+type blockingForwardSpawner struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+func (s *blockingForwardSpawner) Spawn(ctx context.Context, request SpawnRequest) (int, error) {
+	if request.Forward == nil {
+		return 0, nil
+	}
+	close(s.started)
+	<-ctx.Done()
+	close(s.canceled)
+	return 255, ctx.Err()
+}
+
+func TestGatewayClosedDirectTCPIPChannelCancelsRelay(t *testing.T) {
+	spawner := &blockingForwardSpawner{started: make(chan struct{}), canceled: make(chan struct{})}
+	client := startTestGatewayWithSpawner(t, spawner)
+	forward, err := client.Dial("tcp", "127.0.0.1:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-spawner.started:
+	case <-time.After(time.Second):
+		t.Fatal("guest relay did not start")
+	}
+	if err := forward.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-spawner.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("closed forwarding channel did not cancel guest relay")
+	}
+
+	// Closing one channel must not close the parent SSH connection.
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("open session after forwarding close: %v", err)
+	}
+	defer func() { _ = session.Close() }()
+	if err := session.Run("still-alive"); err != nil {
+		t.Fatalf("run session after forwarding close: %v", err)
+	}
+}
+
+type halfCloseForwardSpawner struct{}
+
+func (halfCloseForwardSpawner) Spawn(ctx context.Context, request SpawnRequest) (int, error) {
+	if request.Forward == nil {
+		return 0, nil
+	}
+	payload, err := io.ReadAll(request.Stdin)
+	if err != nil {
+		return 255, err
+	}
+	select {
+	case <-ctx.Done():
+		return 255, errors.New("half-close canceled relay")
+	default:
+	}
+	_, err = io.WriteString(request.Stdout, "response:"+string(payload))
+	return 0, err
+}
+
+func TestGatewayDirectTCPIPHalfClosePreservesResponse(t *testing.T) {
+	client := startTestGatewayWithSpawner(t, halfCloseForwardSpawner{})
+	forward, err := client.Dial("tcp", "127.0.0.1:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = forward.Close() }()
+	if _, err := io.WriteString(forward, "request"); err != nil {
+		t.Fatal(err)
+	}
+	half, ok := forward.(interface{ CloseWrite() error })
+	if !ok {
+		t.Fatal("SSH forwarding connection does not support CloseWrite")
+	}
+	if err := half.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	response, err := io.ReadAll(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != "response:request" {
+		t.Fatalf("response after half-close = %q", response)
 	}
 }
 

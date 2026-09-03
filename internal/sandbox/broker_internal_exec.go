@@ -70,16 +70,16 @@ func (c *execCapture) snapshot() ([]byte, bool) {
 // retained stdout; op names the caller for error attribution. User secrets
 // are deliberately NOT injected into this internal process.
 func (br *broker) internalExec(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string) ([]byte, int, error) {
-	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg, false, false)
+	return br.internalExecWithImageConfigContext(context.Background(), stdin, args, timeout, maxResponse, op, br.cfg.ImageCfg, false, false)
 }
 
-func (br *broker) internalExecAsRootTarget(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, ide bool) ([]byte, int, error) {
+func (br *broker) internalExecAsRootTargetContext(ctx context.Context, stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, ide bool) ([]byte, int, error) {
 	target := br.sessionTarget(ide)
-	return br.internalExecWithImageConfig(stdin, args, timeout, maxResponse, op,
+	return br.internalExecWithImageConfigContext(ctx, stdin, args, timeout, maxResponse, op,
 		mcpLauncherImageConfig(target.imageConfig), true, ide)
 }
 
-func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker, ide bool) ([]byte, int, error) {
+func (br *broker) internalExecWithImageConfigContext(ctx context.Context, stdin io.Reader, args []string, timeout time.Duration, maxResponse int, op string, imageConfig *image.Config, holdSetupLocker, ide bool) ([]byte, int, error) {
 	if !br.limits.acquireSession() {
 		return nil, 0, fmt.Errorf("sandbox session limit reached")
 	}
@@ -93,13 +93,24 @@ func (br *broker) internalExecWithImageConfig(stdin io.Reader, args []string, ti
 	if stdin == nil {
 		stdin = strings.NewReader("")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	killCh := make(chan struct{}, 1)
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), timeout+5*time.Second)
+	requestKill := func() {
+		select {
+		case killCh <- struct{}{}:
+		default:
+		}
+	}
+	waitCtx, waitCancel := context.WithTimeout(ctx, timeout+5*time.Second)
 	defer waitCancel()
+	stopContextKill := context.AfterFunc(ctx, requestKill)
+	defer stopContextKill()
 	var expired atomic.Bool
 	timer := time.AfterFunc(timeout, func() {
 		expired.Store(true)
-		killCh <- struct{}{}
+		requestKill()
 	})
 	manifest := client.LoadShareManifest(br.dir)
 	options := client.SessionOptions{

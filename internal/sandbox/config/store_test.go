@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/client"
@@ -101,6 +102,173 @@ func TestConfigStoreKeepsPostCommitState(t *testing.T) {
 	cfg, readErr := ReadSandboxConfig(dir)
 	if readErr != nil || len(cfg.Ports) != 2 {
 		t.Fatalf("committed on-disk config = %+v, err = %v", cfg, readErr)
+	}
+}
+
+func TestConfigurationTransactionSkipsExactNoop(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})
+	writes := 0
+	store.SetWriter(func(string, []byte, os.FileMode) error {
+		writes++
+		return nil
+	})
+	disabled := false
+	tx, err := store.BeginConfiguration(SandboxUpdate{SSH: &disabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 0 || tx.Changed() || tx.Before().SSH || tx.After().SSH || tx.After().SettingsRevision != 0 {
+		t.Fatalf("no-op transaction = writes %d changed %t before %+v after %+v",
+			writes, tx.Changed(), tx.Before(), tx.After())
+	}
+}
+
+func TestConfigurationTransactionRollsBackCompleteSettingsRevision(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{SSH: true, Runtime: "crun", MemMB: 512, VCPUs: 1})
+	enabled := true
+	profileConfig := &image.Config{User: "gantry", Env: []string{"HOME=/home/gantry"}}
+	tx, err := store.BeginConfiguration(SandboxUpdate{
+		DevContainers: &enabled,
+		DevContainersProfile: &DevContainersProfileUpdate{
+			Image: "/ide.erofs", ImageCfg: profileConfig, RWLayer: "/ide.ext4", DiskMiB: 8192,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot(); !got.DevContainers || got.SettingsRevision != 1 {
+		t.Fatalf("committed settings = %+v", got)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	got := store.Snapshot()
+	if got.DevContainers || got.DevContainersImage != "" || got.DevContainersImageCfg != nil ||
+		got.DevContainersRWLayer != "" || got.DevContainersDiskMiB != 0 || got.SettingsRevision != 2 {
+		t.Fatalf("rollback retained prepared profile or stale revision: %+v", got)
+	}
+}
+
+func TestConfigurationTransactionSerializesSettingsAndPreservesUnrelatedMutations(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})
+	enableSSH := true
+	requestedMemory := uint(1024)
+	resourceStarted := make(chan struct{})
+	resourceDone := make(chan error, 1)
+
+	tx, err := store.BeginConfiguration(SandboxUpdate{SSH: &enableSSH, MemMB: &requestedMemory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Unrelated mutations remain available while service reconciliation is in
+	// flight and must survive a complete settings rollback.
+	if err := store.Mutate(func(cfg *RunConfig) error {
+		cfg.Ports = append(cfg.Ports, "127.0.0.1:8080:80")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Independent resource settings wait for transaction ownership even when
+	// they select the same value as the revision being rolled back.
+	go func() {
+		close(resourceStarted)
+		resourceDone <- store.SetResources(requestedMemory, 2, "auto")
+	}()
+	<-resourceStarted
+	select {
+	case err := <-resourceDone:
+		t.Fatalf("resource update escaped configuration transaction: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	tx.Close()
+
+	select {
+	case err := <-resourceDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("serialized resource update did not complete")
+	}
+
+	got := store.Snapshot()
+	if got.SSH || got.MemMB != requestedMemory || got.VCPUs != 2 || got.ProcessIsolation != "auto" || got.SettingsRevision != 3 {
+		t.Fatalf("final settings = SSH %t, memory %d, CPUs %d, isolation %q, revision %d",
+			got.SSH, got.MemMB, got.VCPUs, got.ProcessIsolation, got.SettingsRevision)
+	}
+	if len(got.Ports) != 1 || got.Ports[0] != "127.0.0.1:8080:80" {
+		t.Fatalf("rollback erased unrelated mutation: %+v", got.Ports)
+	}
+	persisted, readErr := ReadSandboxConfig(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if persisted.SSH != got.SSH || persisted.MemMB != got.MemMB || persisted.VCPUs != got.VCPUs ||
+		persisted.SettingsRevision != got.SettingsRevision || len(persisted.Ports) != 1 {
+		t.Fatalf("memory/disk transaction state diverged: memory=%+v disk=%+v", got, persisted)
+	}
+}
+
+func TestConfigurationTransactionCommitMergesUnrelatedPreparationMutation(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})
+	enabled := true
+	tx, err := store.BeginConfiguration(SandboxUpdate{SSH: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	if err := store.Mutate(func(cfg *RunConfig) error {
+		cfg.Ports = append(cfg.Ports, "127.0.0.1:8080:80")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	got := store.Snapshot()
+	if !got.SSH || got.SettingsRevision != 1 || len(got.Ports) != 1 || got.Ports[0] != "127.0.0.1:8080:80" {
+		t.Fatalf("merged transaction = %+v", got)
+	}
+}
+
+func TestConfigurationTransactionRejectsStaleSettingsRevision(t *testing.T) {
+	store := newTestConfigStore(t, t.TempDir(), RunConfig{Runtime: "crun", MemMB: 512, VCPUs: 1})
+	enabled := true
+	tx, err := store.BeginConfiguration(SandboxUpdate{SSH: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Close()
+	// General mutations are allowed during preparation, but changing a setting
+	// through that legacy path advances the revision and invalidates the plan.
+	if err := store.Mutate(func(cfg *RunConfig) error {
+		cfg.MemMB = 1024
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); !errors.Is(err, ErrConfigurationConflict) {
+		t.Fatalf("Commit error = %v, want revision conflict", err)
+	}
+	if got := store.Snapshot(); got.SSH || got.MemMB != 1024 || got.SettingsRevision != 1 {
+		t.Fatalf("stale commit changed settings: %+v", got)
 	}
 }
 

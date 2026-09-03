@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sshpolicy"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -218,18 +219,9 @@ type directTCPIPPayload struct {
 	OriginPort uint32
 }
 
-func loopbackTarget(host string, port uint32) bool {
-	ip := net.ParseIP(host)
-	exactLoopback := ip != nil && ip.Equal(net.IPv4(127, 0, 0, 1))
-	if strings.Contains(host, ":") {
-		exactLoopback = ip != nil && ip.Equal(net.IPv6loopback)
-	}
-	return exactLoopback && port >= 1 && port <= 65535
-}
-
 func (g *Gateway) handleDirectTCPIP(parent context.Context, user string, newChannel ssh.NewChannel) {
 	var payload directTCPIPPayload
-	if err := ssh.Unmarshal(newChannel.ExtraData(), &payload); err != nil || !loopbackTarget(payload.Host, payload.Port) {
+	if err := ssh.Unmarshal(newChannel.ExtraData(), &payload); err != nil || !sshpolicy.ExactLoopbackTarget(payload.Host, uint64(payload.Port)) {
 		g.auditf("forward refused user=%s target=%s:%d", user, payload.Host, payload.Port)
 		_ = newChannel.Reject(ssh.Prohibited, genericChannelRefusal)
 		return
@@ -239,7 +231,6 @@ func (g *Gateway) handleDirectTCPIP(parent context.Context, user string, newChan
 		return
 	}
 	defer func() { _ = channel.Close() }()
-	go ssh.DiscardRequests(requests)
 	g.auditf("channel open user=%s type=direct-tcpip target=%s:%d", user, payload.Host, payload.Port)
 	defer g.auditf("channel close user=%s type=direct-tcpip target=%s:%d", user, payload.Host, payload.Port)
 	g.auditf("forward open user=%s target=%s:%d", user, payload.Host, payload.Port)
@@ -247,6 +238,13 @@ func (g *Gateway) handleDirectTCPIP(parent context.Context, user string, newChan
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	// The request stream closes on SSH_MSG_CHANNEL_CLOSE, but remains open for
+	// SSH_MSG_CHANNEL_EOF. This preserves TCP half-close semantics while making
+	// a full close cancel the guest relay even when its target never sends EOF.
+	go func() {
+		ssh.DiscardRequests(requests)
+		cancel()
+	}()
 	status, spawnErr := g.cfg.Spawner.Spawn(ctx, SpawnRequest{
 		User: user, Forward: &Forward{Host: payload.Host, Port: payload.Port},
 		Stdin: channel, Stdout: channel,
@@ -437,7 +435,7 @@ func GenericChannelRefusal() string { return genericChannelRefusal }
 
 // ValidateLoopbackTarget is the direct-tcpip policy seam used by tests.
 func ValidateLoopbackTarget(host string, port uint32) error {
-	if !loopbackTarget(host, port) {
+	if !sshpolicy.ExactLoopbackTarget(host, uint64(port)) {
 		return fmt.Errorf("%s", genericChannelRefusal)
 	}
 	return nil

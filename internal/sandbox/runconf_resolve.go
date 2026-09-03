@@ -240,7 +240,16 @@ func (r *runResolver) resolveImage() error {
 		}
 		r.cfg.LayerSet = layers
 	}
-	if r.cfg.LayerSet != nil || config.IsErofsFile(r.cfg.Image) {
+	if r.cfg.LayerSet != nil {
+		return nil
+	}
+	if config.IsErofsFile(r.cfg.Image) {
+		// EROFS contains only the flattened filesystem. Restore the curated
+		// IDE asset's known OCI metadata so direct -image use honors USER,
+		// ENV, WORKDIR, and CMD instead of silently running SSH as root.
+		if imageConfig := curatedDevContainersImageConfig(r.cfg.Image); imageConfig != nil {
+			r.cfg.ImageCfg = imageConfig
+		}
 		return nil
 	}
 

@@ -74,7 +74,8 @@ type SessionOptions struct {
 	// preserves an interactive user's unbounded session lifetime.
 	WaitContext context.Context
 	Quiet       bool
-	// ExitStatus receives a successfully waited process's numeric status.
+	// ExitStatus receives the process's numeric status, or 255 when the Wait
+	// RPC fails and no trustworthy guest exit status is available.
 	ExitStatus *int
 	// SandboxSession shares the persistent sandbox rootfs while giving this
 	// command an isolated task and PID namespace.
@@ -278,6 +279,20 @@ func (s *mountSetup) rollback() {
 
 func sessionKillRequest(id string) *v3.KillRequest {
 	return &v3.KillRequest{ID: id, Signal: uint32(syscall.SIGKILL), All: true}
+}
+
+func recordSessionExitStatus(destination *int, response *v3.WaitResponse, waitErr error) {
+	if destination == nil {
+		return
+	}
+	if waitErr != nil {
+		// 255 is OpenSSH's conventional transport/infrastructure failure code.
+		// Never leave a caller-provided status at its zero value after a failed
+		// Wait, even when Quiet suppresses the diagnostic.
+		*destination = 255
+		return
+	}
+	*destination = int(response.ExitStatus)
 }
 
 func runtimeStdioPassthroughConfig(encoded string) (string, error) {
@@ -535,17 +550,16 @@ func Session(client *ttrpc.Client, options SessionOptions, stdin io.Reader, stdo
 		waitCtx = context.Background()
 	}
 	response, waitErr := taskClient.Wait(waitCtx, &v3.WaitRequest{ID: options.ID})
+	if waitErr == nil && response == nil {
+		waitErr = errors.New("task Wait returned no response")
+	}
+	recordSessionExitStatus(options.ExitStatus, response, waitErr)
 	if waitErr != nil {
 		if !options.Quiet {
 			_, _ = fmt.Fprintf(stdout, "\nclient: Wait: %v\n", waitErr)
 		}
-	} else {
-		if !options.Quiet {
-			_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", response.ExitStatus)
-		}
-		if options.ExitStatus != nil {
-			*options.ExitStatus = int(response.ExitStatus)
-		}
+	} else if !options.Quiet {
+		_, _ = fmt.Fprintf(stdout, "\nclient: task exited, status %d\n", response.ExitStatus)
 	}
 
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 8*time.Second)

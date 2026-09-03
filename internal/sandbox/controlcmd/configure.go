@@ -7,6 +7,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	devcontainersprofile "github.com/ejpir/gantry/internal/sandbox/devcontainers"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
@@ -77,6 +78,8 @@ func configureRequestEmpty(request controlproto.ConfigureRequest) bool {
 		request.VCPUs == nil && request.ProcessIsolation == nil
 }
 
+var prepareConfiguredDevContainersProfile = devcontainersprofile.Prepare
+
 func Configure(name string, request controlproto.ConfigureRequest) (bool, error) {
 	if err := layout.ValidateName(name); err != nil {
 		return false, err
@@ -105,12 +108,23 @@ func Configure(name string, request controlproto.ConfigureRequest) (bool, error)
 			if err != nil {
 				return false, err
 			}
-			err = store.Configure(config.SandboxUpdate{
-				SSH: request.SSH, DevContainers: request.DevContainers,
-				MemMB: request.MemMB, VCPUs: request.VCPUs,
-				ProcessIsolation: request.ProcessIsolation,
-			})
-			return false, err
+			tx, err := store.BeginConfiguration(request.SandboxUpdate())
+			if err != nil {
+				return false, err
+			}
+			defer tx.Close()
+			if request.DevContainers != nil && *request.DevContainers && !tx.Before().DevContainers {
+				prepared, _, _, err := prepareConfiguredDevContainersProfile(name, tx.Desired(), nil)
+				if err != nil {
+					return false, fmt.Errorf("enable Dev Containers: %w", err)
+				}
+				if err := tx.Amend(config.SandboxUpdate{
+					DevContainersProfile: devcontainersprofile.ProfileUpdate(prepared),
+				}); err != nil {
+					return false, err
+				}
+			}
+			return false, tx.Commit()
 		},
 	)
 }

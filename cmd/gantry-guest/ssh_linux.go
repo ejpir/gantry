@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ejpir/gantry/internal/sshpolicy"
 	"github.com/pkg/sftp"
 )
 
@@ -70,15 +71,21 @@ func supplementaryGroups(user guestUser) []int {
 		return nil
 	}
 	defer func() { _ = file.Close() }()
+	return parseSupplementaryGroups(file, user)
+}
+
+func parseSupplementaryGroups(reader io.Reader, user guestUser) []int {
 	seen := map[int]bool{user.GID: true}
 	var groups []int
-	scanner := bufio.NewScanner(io.LimitReader(file, 4<<20))
+	scanner := bufio.NewScanner(io.LimitReader(reader, 4<<20))
 	for scanner.Scan() {
 		fields := strings.Split(scanner.Text(), ":")
 		if len(fields) < 4 {
 			continue
 		}
-		gid, err := strconv.ParseUint(fields[2], 10, 31)
+		// Linux gid_t is uint32, matching the passwd parser above. Using 31
+		// bits here silently discarded valid supplementary groups >= 2^31.
+		gid, err := strconv.ParseUint(fields[2], 10, 32)
 		if err != nil || seen[int(gid)] {
 			continue
 		}
@@ -209,16 +216,12 @@ func runTCPRelay(args []string) int {
 		fmt.Fprintln(os.Stderr, "tcp-relay requires HOST PORT")
 		return 2
 	}
-	ip := net.ParseIP(args[0])
-	loopback := ip != nil && ip.Equal(net.IPv4(127, 0, 0, 1))
-	if strings.Contains(args[0], ":") {
-		loopback = ip != nil && ip.Equal(net.IPv6loopback)
-	}
 	port, err := strconv.ParseUint(args[1], 10, 16)
-	if !loopback || port == 0 || err != nil {
+	if err != nil || !sshpolicy.ExactLoopbackTarget(args[0], port) {
 		fmt.Fprintln(os.Stderr, "tcp-relay target refused")
 		return 1
 	}
+	ip := net.ParseIP(args[0]) // validated by ExactLoopbackTarget
 	address := net.JoinHostPort(ip.String(), strconv.FormatUint(port, 10))
 	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
 	if err != nil {
@@ -229,6 +232,9 @@ func runTCPRelay(args []string) int {
 	done := make(chan struct{}, 1)
 	go func() {
 		_, _ = io.Copy(conn, os.Stdin)
+		// stdin EOF is an SSH channel half-close: preserve target responses by
+		// closing only its write side. A full SSH channel close is distinguished
+		// by the host gateway and cancels this guest task.
 		if tcp, ok := conn.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}

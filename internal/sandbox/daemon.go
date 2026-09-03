@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -42,23 +43,29 @@ type daemonRuntime struct {
 	console *os.File
 	// consoleLog owns the regular console.log file and drains console through
 	// a bounded stream. console is only its write-side capability.
-	consoleLog          *boundedlog.Pipe
-	network             *Network
-	shares              *control.ShareManager
-	guestToolsMu        sync.Mutex
-	guestToolsStageDirs []string
-	ports               *control.PortManager
-	runner              vmmworker.Runner
-	machine             *vmm.Machine
-	rpc                 *ttrpc.Client
-	control             net.Listener
-	broker              *broker
-	configureMu         sync.Mutex
-	sshMu               sync.Mutex
-	sshListener         net.Listener
-	sshCancel           func()
-	mcpListener         net.Listener
-	mcpWorker           *mcpworkersup.Worker
+	consoleLog *boundedlog.Pipe
+	network    *Network
+	shares     *control.ShareManager
+	// Guest-tool delivery uses RPC and shares. The lifecycle gate prevents new
+	// deliveries once teardown starts and lets close cancel/join every owner
+	// before either dependency is released; guestToolsMu serializes retries.
+	guestToolsMu       sync.Mutex
+	guestToolsLifeMu   sync.Mutex
+	guestToolsCtx      context.Context
+	guestToolsCancel   context.CancelFunc
+	guestToolsStopping bool
+	guestToolsWG       sync.WaitGroup
+	ports              *control.PortManager
+	runner             vmmworker.Runner
+	machine            *vmm.Machine
+	rpc                *ttrpc.Client
+	control            net.Listener
+	broker             *broker
+	sshMu              sync.Mutex
+	sshListener        net.Listener
+	sshCancel          func()
+	mcpListener        net.Listener
+	mcpWorker          *mcpworkersup.Worker
 
 	guestErr <-chan error
 	signals  chan os.Signal
@@ -111,10 +118,10 @@ func (d *daemonRuntime) run() int {
 			return daemonFailure(fmt.Errorf("required guest helper delivery failed"))
 		}
 	} else if plan.workloadAsync {
-		go d.ensureGuestToolsTargetsAndSignal(d.cfg, []guestToolsTarget{workloadTarget})
+		d.startAsyncGuestToolsDelivery(d.cfg, []guestToolsTarget{workloadTarget})
 	}
 	if plan.ideAsync {
-		go d.ensureGuestToolsTargetsAndSignal(d.cfg, []guestToolsTarget{ideTarget})
+		d.startAsyncGuestToolsDelivery(d.cfg, []guestToolsTarget{ideTarget})
 	}
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in
@@ -142,6 +149,10 @@ func (d *daemonRuntime) bootLog(phase string) {
 }
 
 func (d *daemonRuntime) close() {
+	// Delivery owns RPC sessions and temporary shares. Cancel and join it
+	// before closing any of those resources. gracefulStop may already have
+	// done this; stopGuestToolsDelivery is deliberately idempotent.
+	d.stopGuestToolsDelivery()
 	d.stopSSHGateway()
 	if d.mcpListener != nil {
 		_ = d.mcpListener.Close()
@@ -165,13 +176,6 @@ func (d *daemonRuntime) close() {
 	}
 	if d.shares != nil {
 		_ = d.shares.Close()
-	}
-	d.guestToolsMu.Lock()
-	stageDirs := append([]string(nil), d.guestToolsStageDirs...)
-	d.guestToolsStageDirs = nil
-	d.guestToolsMu.Unlock()
-	for _, stageDir := range stageDirs {
-		_ = os.RemoveAll(stageDir)
 	}
 	if d.network != nil {
 		d.network.Close()

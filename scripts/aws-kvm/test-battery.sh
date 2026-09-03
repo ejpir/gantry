@@ -1,49 +1,152 @@
 #!/bin/bash
-# test-battery.sh — the gantry x86_64 test suite. Runs ON the test
-# instance (via ssm.py / run-tests.sh). Expects /opt/gantry populated;
-# if GANTRY_ASSET_URL is set, (re)downloads the gantry binary first —
-# NOTE: the sandbox daemons hold the ttrpc client, so sandboxes are
-# always restarted after a binary swap (this script stops them).
+# Cross-platform functional battery for Gantry's public VM/CLI surface. AWS
+# invokes it through SSM on Linux KVM; the repository-level orchestrator also
+# runs it directly on Apple-silicon macOS HVF. All paths and architecture-
+# specific assets can be supplied through GANTRY_TEST_* variables.
 set +e
-cd /opt/gantry || exit 1
 
-G=./gantry-linux-amd64
+BASE=${GANTRY_TEST_ROOT:-/opt/gantry}
+cd "$BASE" || exit 1
+G=${GANTRY_TEST_EXE:-./gantry-linux-amd64}
+KERNEL=${GANTRY_TEST_KERNEL:-$BASE/nerdbox-kernel-x86_64}
+ROOTFS=${GANTRY_TEST_ROOTFS:-$BASE/nerdbox-rootfs-x86_64.erofs}
+WORKLOAD=${GANTRY_TEST_IMAGE:-$BASE/debian-bookworm-amd64.erofs}
+RUNSC_KERNEL=${GANTRY_TEST_RUNSC_KERNEL:-}
+RUNSC_ROOTFS=${GANTRY_TEST_RUNSC_ROOTFS:-}
+CACHE_IMAGE=${GANTRY_TEST_CACHE_IMAGE:-alpine:latest}
+EXPECTED_ARCH=${GANTRY_TEST_EXPECTED_ARCH:-x86_64}
+PUBLIC_EGRESS=${GANTRY_TEST_PUBLIC_EGRESS:-required}
+case "$PUBLIC_EGRESS" in
+required|skip) ;;
+*) echo "GANTRY_TEST_PUBLIC_EGRESS must be required or skip" >&2; exit 2 ;;
+esac
+if { [ -n "$RUNSC_KERNEL" ] && [ -z "$RUNSC_ROOTFS" ]; } || \
+   { [ -z "$RUNSC_KERNEL" ] && [ -n "$RUNSC_ROOTFS" ]; }; then
+  echo "GANTRY_TEST_RUNSC_KERNEL and GANTRY_TEST_RUNSC_ROOTFS must be set together" >&2
+  exit 2
+fi
 # Pin the state roots: under SSM HOME is unset, and layout.Root() /
-# image.DefaultStore() fall back to DIFFERENT directories (/tmp/gantry-0
-# vs /tmp/.gantry), which would make every sandbox.json/ctl.sock check
-# below silently probe the wrong tree.
+# image.DefaultStore() otherwise fall back to different directories.
 export GANTRY_HOME="${GANTRY_HOME:-/tmp/.gantry/sandboxes}"
 export GANTRY_IMAGES="${GANTRY_IMAGES:-/tmp/.gantry/images}"
 RWDIR="$(dirname "$GANTRY_HOME")/rwlayers"
-KERNEL=${GANTRY_TEST_KERNEL:-nerdbox-kernel-x86_64}
-PASS=0; FAIL=0
-ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
-bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+PASS=0
+FAIL=0
+SKIPPED=0
+MOCKPID=
+MOCKMCP=
+HTTP_SESSION=
+PORT_SPEC=
+EXPORT_ARCHIVE=/tmp/gantry-functional-export-$$.oci.tar
+ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
+bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+skip() { echo "SKIP: $1"; SKIPPED=$((SKIPPED+1)); }
 chk() { local n="$1" want="$2" got="$3"; if printf '%s' "$got" | grep -qa -- "$want"; then ok "$n"; else bad "$n"; printf '%s\n' "$got" | tail -4; fi; }
 # empty_cred asserts the helper emitted NO credential. `gantry exec`
 # prints its own client-noise lines, so the test is "no password=" (never
 # "no output").
 empty_cred() { local n="$1" got="$2"; if printf '%s' "$got" | grep -qa '^password='; then bad "$n"; printf '%s\n' "$got" | tail -3; else ok "$n"; fi; }
-xe() { printf '%s\nexit\n' "$2" | timeout 90 $G exec "$1" 2>&1; }
+run_with_timeout() {
+  local seconds=$1
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+xe() { printf '%s\nexit\n' "$2" | run_with_timeout 90 "$G" exec "$1" 2>&1; }
+start_runsc() {
+  local name=$1
+  shift
+  set -- "$G" start "$name" -runtime runsc -image "$WORKLOAD" "$@"
+  if [ -n "$RUNSC_KERNEL" ]; then
+    set -- "$@" -kernel "$RUNSC_KERNEL" -rootfs "$RUNSC_ROOTFS"
+  fi
+  "$@"
+}
+new_uuid() { uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || printf fixed; }
+file_mode() {
+  if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+}
+host_process_contains() {
+  local pid=$1 value=$2
+  if [ -r "/proc/$pid/environ" ]; then
+    { tr '\0' '\n' < "/proc/$pid/environ"; tr '\0' ' ' < "/proc/$pid/cmdline"; } | grep -qs "$value"
+  else
+    ps eww -p "$pid" -o command= 2>/dev/null | grep -qs "$value"
+  fi
+}
+check_isolation() {
+  local path=$1 mode=$2 topology=$3
+  shift 3
+  python3 - "$path" "$mode" "$topology" "$@" <<'PY'
+import json
+import sys
+
+path, mode, topology, *roles = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+if state.get("topology") != topology:
+    raise SystemExit(f"topology={state.get('topology')!r}, want {topology!r}")
+for role in roles:
+    report = state.get(role) or {}
+    if not report.get("applied") or report.get("mode") != mode:
+        raise SystemExit(f"{role} not applied in {mode} mode: {report}")
+for boundary in ("filesystemBoundary", "networkBoundary"):
+    if state.get(boundary) != "enforced":
+        raise SystemExit(f"{boundary}={state.get(boundary)!r}, want 'enforced'")
+PY
+}
+stop_background() {
+  local pid=${1:-}
+  [ -z "$pid" ] || { kill "$pid" >/dev/null 2>&1; wait "$pid" >/dev/null 2>&1; }
+}
+cleanup() {
+  trap - EXIT HUP INT TERM
+  [ -z "$PORT_SPEC" ] || "$G" ports unpublish --ephemeral t4 "$PORT_SPEC" >/dev/null 2>&1
+  stop_background "$HTTP_SESSION"
+  stop_background "$MOCKPID"
+  stop_background "$MOCKMCP"
+  for sandbox in t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 t13 t14 t10bad t12bad1 t12bad2; do
+    "$G" stop "$sandbox" >/dev/null 2>&1
+    "$G" delete "$sandbox" >/dev/null 2>&1
+  done
+  rm -rf /tmp/sharetest
+  rm -f "$EXPORT_ARCHIVE"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 
 echo "== environment =="
-uname -m; ls -la /dev/kvm || echo "NO /dev/kvm!"
+uname -a
+[ ! -e /dev/kvm ] || ls -la /dev/kvm
 
-for s in $(seq 1 12 | sed 's/^/t/') t10bad; do $G stop "$s" >/dev/null 2>&1; done
+for sandbox in t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 t13 t14 t10bad t12bad1 t12bad2; do
+  "$G" stop "$sandbox" >/dev/null 2>&1
+  "$G" delete "$sandbox" >/dev/null 2>&1
+done
 rm -rf "$GANTRY_HOME"/t* "$GANTRY_IMAGES" "$RWDIR"
-# rwlayers are per-sandbox defaults now (auto-created, flock'd, image-paired)
+# rwlayers are per-sandbox defaults now (auto-created, lock-protected, image-paired)
 
 echo "===== crun (t1) ====="
-$G start t1 -kernel "$KERNEL" -rootfs nerdbox-rootfs-x86_64.erofs \
-  -image debian-bookworm-amd64.erofs >/dev/null 2>&1
+"$G" start t1 -kernel "$KERNEL" -rootfs "$ROOTFS" \
+  -image "$WORKLOAD" >/dev/null 2>&1
 sleep 1
-R=$(xe t1 'uname -m; echo M1');            chk "crun: boot+exec"        "x86_64"  "$R"
+R=$(xe t1 'uname -m; echo M1');            chk "crun: boot+exec"        "$EXPECTED_ARCH" "$R"
 R=$(xe t1 'exit 7');                        chk "crun: exit status"     "status 7" "$R"
 R=$(xe t1 'echo SEQ2');                     chk "crun: sequential"      "SEQ2"    "$R"
-R=$(xe t1 'getent hosts deb.debian.org');   chk "crun: DNS"             "debian.org" "$R"
-R=$(xe t1 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443" && echo EGRESS-OK')
+R=$(xe t1 'if command -v getent >/dev/null; then getent hosts deb.debian.org; else nslookup deb.debian.org; fi')
+                                            chk "crun: DNS"             "debian.org" "$R"
+if [ "$PUBLIC_EGRESS" = required ]; then
+  R=$(xe t1 'if command -v bash >/dev/null; then timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443"; elif command -v nc >/dev/null; then timeout 8 nc -z -w 5 1.1.1.1 443; else timeout 8 wget -qO /dev/null https://example.com; fi && echo EGRESS-OK')
                                             chk "crun: egress"          "EGRESS-OK" "$R"
-R=$(xe t1 'timeout 3 bash -c "echo > /dev/tcp/192.168.127.254/80" && echo WB || echo WALL-OK')
+else
+                                            skip "crun: public egress (host has no direct public TCP path)"
+fi
+R=$(xe t1 'if command -v bash >/dev/null; then timeout 3 bash -c "echo > /dev/tcp/192.168.127.254/80"; else timeout 3 wget -qO /dev/null http://192.168.127.254/; fi && echo WB || echo WALL-OK')
                                             chk "crun: local-net wall"  "WALL-OK" "$R"
 ( xe t1 'sleep 5; echo CC1-ALIVE' > /tmp/cc1.log 2>&1 ) &
 sleep 2
@@ -54,17 +157,62 @@ xe t1 'rm -f /session-survivor; (while :; do echo x >> /session-survivor; sleep 
 R=$(xe t1 'n=$(wc -c < /session-survivor); sleep 2; test "$(wc -c < /session-survivor)" = "$n" && echo TREE-GONE')
                                             chk "crun: session descendants reaped" "TREE-GONE" "$R"
 
+# Exercise revisioned settings persistence on a stopped VM, then verify the
+# next boot observes the complete CPU/memory projection.
+R=$(xe t1 'printf GANTRY-EXPORT-PERSISTED > /gantry-export-marker && echo MARKER-WRITTEN')
+                                            chk "configure/export: writable marker" "MARKER-WRITTEN" "$R"
+"$G" stop t1 >/dev/null 2>&1
+R=$("$G" configure t1 --cpus=2 --mem=1024 --process-isolation=auto 2>&1)
+                                            chk "configure: stopped settings accepted" "updated" "$R"
+"$G" resume t1 >/dev/null 2>&1
+R=$(xe t1 'n=$(grep -c "^processor" /proc/cpuinfo); m=$(awk "/^MemTotal:/{print \$2}" /proc/meminfo); echo CPUS=$n MEM=$m')
+                                            chk "configure: vCPU setting applied" "CPUS=2" "$R"
+MEMTOTAL=$(printf '%s\n' "$R" | sed -n 's/.*MEM=\([0-9][0-9]*\).*/\1/p' | tail -1)
+[ -n "$MEMTOTAL" ] && [ "$MEMTOTAL" -ge 700000 ] \
+  && ok "configure: memory setting applied" || bad "configure: memory setting applied"
+if check_isolation "$GANTRY_HOME/t1/isolation.json" auto split-net+split-vmm \
+  vmmConfinement networkConfinement; then
+  ok "configure: auto confinement roles verified"
+else
+  bad "configure: auto confinement roles verified"
+fi
+
+# A stopped sandbox can be exported, imported through the public image store,
+# and booted elsewhere with private-overlay data flattened into its OCI root.
+"$G" stop t1 >/dev/null 2>&1
+rm -f "$EXPORT_ARCHIVE"
+R=$("$G" export --name gantry-e2e/export:latest -o "$EXPORT_ARCHIVE" t1 2>&1)
+                                            chk "export: stopped sandbox archived" "gantry export: wrote" "$R"
+[ -s "$EXPORT_ARCHIVE" ] && ok "export: archive created" || bad "export: archive created"
+[ "$(file_mode "$EXPORT_ARCHIVE" 2>/dev/null)" = 600 ] \
+  && ok "export: archive mode is 0600" || bad "export: archive mode is 0600"
+R=$("$G" image import --name gantry-e2e/import:latest "$EXPORT_ARCHIVE" 2>&1)
+                                            chk "import: OCI archive accepted" "gantry-e2e/import:latest" "$R"
+"$G" start t13 -kernel "$KERNEL" -rootfs "$ROOTFS" -image gantry-e2e/import:latest >/dev/null 2>&1
+R=$(xe t13 'cat /gantry-export-marker');    chk "import: overlay contents preserved" "GANTRY-EXPORT-PERSISTED" "$R"
+"$G" image prune >/dev/null 2>&1
+R=$("$G" image ls 2>&1);                   chk "image prune: referenced import preserved" "gantry-e2e/import:latest" "$R"
+"$G" stop t13 >/dev/null 2>&1
+"$G" delete t13 >/dev/null 2>&1
+R=$("$G" image rm gantry-e2e/import:latest 2>&1)
+                                            chk "image rm: imported reference removable" "removed" "$R"
+"$G" delete t1 >/dev/null 2>&1
+
 echo "===== runsc (t2) ====="
-$G start t2 -runtime runsc -kernel "$KERNEL" \
-  -image debian-bookworm-amd64.erofs >/dev/null 2>&1
+start_runsc t2 >/dev/null 2>&1
 sleep 1
 R=$(xe t2 'uname -r; cat /proc/1/comm');    chk "runsc: sentry boot"    "4.19.0-gvisor" "$R"
 R=$(xe t2 'exit 7');                        chk "runsc: exit status"    "status 7" "$R"
 R=$(xe t2 'echo SEQ2');                     chk "runsc: sequential"     "SEQ2"    "$R"
-R=$(xe t2 'getent hosts deb.debian.org');   chk "runsc: DNS"            "debian.org" "$R"
-R=$(xe t2 'timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443" && echo EGRESS-OK')
+R=$(xe t2 'if command -v getent >/dev/null; then getent hosts deb.debian.org; else nslookup deb.debian.org; fi')
+                                            chk "runsc: DNS"            "debian.org" "$R"
+if [ "$PUBLIC_EGRESS" = required ]; then
+  R=$(xe t2 'if command -v bash >/dev/null; then timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443"; elif command -v nc >/dev/null; then timeout 8 nc -z -w 5 1.1.1.1 443; else timeout 8 wget -qO /dev/null https://example.com; fi && echo EGRESS-OK')
                                             chk "runsc: egress"         "EGRESS-OK" "$R"
-R=$(xe t2 'timeout 3 bash -c "echo > /dev/tcp/192.168.127.254/80" && echo WB || echo WALL-OK')
+else
+                                            skip "runsc: public egress (host has no direct public TCP path)"
+fi
+R=$(xe t2 'if command -v bash >/dev/null; then timeout 3 bash -c "echo > /dev/tcp/192.168.127.254/80"; else timeout 3 wget -qO /dev/null http://192.168.127.254/; fi && echo WB || echo WALL-OK')
                                             chk "runsc: local-net wall" "WALL-OK" "$R"
 ( xe t2 'sleep 5; echo S1-ALIVE' > /tmp/s1.log 2>&1 ) &
 sleep 2
@@ -74,39 +222,120 @@ chk "runsc: concurrent (s1)" "S1-ALIVE" "$(cat /tmp/s1.log)"
 xe t2 'rm -f /session-survivor; (while :; do echo x >> /session-survivor; sleep 0.1; done) &' >/dev/null
 R=$(xe t2 'n=$(wc -c < /session-survivor); sleep 2; test "$(wc -c < /session-survivor)" = "$n" && echo TREE-GONE')
                                             chk "runsc: session descendants reaped" "TREE-GONE" "$R"
+"$G" stop t2 >/dev/null 2>&1
+"$G" delete t2 >/dev/null 2>&1
 
 echo "===== shares (runsc, t3) ====="
 rm -rf /tmp/sharetest && mkdir -p /tmp/sharetest && echo hostfile > /tmp/sharetest/existing.txt
-$G start t3 -runtime runsc -kernel "$KERNEL" \
-  -image debian-bookworm-amd64.erofs \
-  -share code=/tmp/sharetest >/dev/null 2>&1
+start_runsc t3 -share code=/tmp/sharetest >/dev/null 2>&1
 sleep 1
 R=$(xe t3 'ls /host/code');                             chk "share: read"   "existing.txt" "$R"
 R=$(xe t3 'mkdir /host/code/d2 && echo MK-OK');         chk "share: mkdir"  "MK-OK" "$R"
 R=$(xe t3 'echo x > /host/code/f2 && echo WR-OK');      chk "share: write"  "WR-OK" "$R"
 [ -f /tmp/sharetest/f2 ] && [ -d /tmp/sharetest/d2 ] && ok "share: visible on host" || bad "share: visible on host"
+"$G" stop t3 >/dev/null 2>&1
+"$G" delete t3 >/dev/null 2>&1
 
-echo "===== OCI image (t4: alpine, offline cache hit) ====="
-# the corporate network blocks registry-1.docker.io from the instance;
-# the store is pre-seeded from S3 and Resolve must hit it offline
+echo "===== required process isolation (t14) ====="
+if "$G" start t14 -process-isolation=required -kernel "$KERNEL" -rootfs "$ROOTFS" \
+  -image "$WORKLOAD" >/tmp/t14-start.log 2>&1; then
+  if check_isolation "$GANTRY_HOME/t14/isolation.json" required split-net+split-vmm \
+    vmmConfinement networkConfinement; then
+    ok "isolation: required VMM and network workers verified"
+  else
+    bad "isolation: required VMM and network workers verified"
+  fi
+  R=$(xe t14 'echo REQUIRED-VM-ALIVE');     chk "isolation: required VM remains usable" "REQUIRED-VM-ALIVE" "$R"
+else
+  bad "isolation: required sandbox starts"
+  tail -20 /tmp/t14-start.log
+fi
+"$G" stop t14 >/dev/null 2>&1
+"$G" delete t14 >/dev/null 2>&1
+
+echo "===== OCI image (t4: registry/cache resolution) ====="
 mkdir -p "$GANTRY_IMAGES"
-for _ in 1 2 3; do curl -fSL --retry 3 -o /tmp/alpine-store.tar.gz "$GANTRY_STORE_URL" && break; sleep 3; done
-tar xzf /tmp/alpine-store.tar.gz -C "$GANTRY_IMAGES"
-$G image ls
-$G start t4 -image alpine:latest 2>&1 | tail -2
+if [ -n "${GANTRY_STORE_ARCHIVE:-}" ]; then
+  tar xzf "$GANTRY_STORE_ARCHIVE" -C "$GANTRY_IMAGES"
+elif [ -n "${GANTRY_STORE_URL:-}" ]; then
+  # AWS field hosts cannot reach Docker Hub; Resolve must hit this pre-seeded
+  # archive offline. Local macOS runs exercise the registry pull path instead.
+  for _ in 1 2 3; do curl -fSL --retry 3 -o /tmp/alpine-store.tar.gz "$GANTRY_STORE_URL" && break; sleep 3; done
+  tar xzf /tmp/alpine-store.tar.gz -C "$GANTRY_IMAGES"
+else
+  "$G" image pull "$CACHE_IMAGE"
+fi
+"$G" image ls
+"$G" start t4 -image "$CACHE_IMAGE" 2>&1 | tail -2
 sleep 1
 R=$(xe t4 'head -1 /etc/os-release');             chk "image: alpine runs"     "Alpine" "$R"
 R=$(xe t4 'echo PATH=$PATH');                     chk "image: config env"     "PATH=/usr/local/sbin" "$R"
 R=$(xe t4 'busybox | head -1');                   chk "image: busybox links"  "BusyBox" "$R"
-R=$($G image ls 2>&1);                            chk "image: ls shows pull"  "alpine" "$R"
+R=$("$G" image ls 2>&1);                         chk "image: ls shows cached reference" "$CACHE_IMAGE" "$R"
 
-echo "===== secrets (t5: alpine, offline) ====="
+# Keep one exec session alive as a guest HTTP service while publishing and
+# withdrawing a live host port. Alpine's minimal BusyBox does not include the
+# httpd applet, so use its persistent netcat listener with a tiny HTTP handler.
+# The chosen loopback port is intentionally ephemeral so local developer runs
+# do not need a reserved port.
+PORT_FIXTURE=$(cat <<'GUEST_HTTP'
+printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK"' > /tmp/gantry-http-handler
+chmod 700 /tmp/gantry-http-handler
+exec busybox nc -lk -p 18080 -e /tmp/gantry-http-handler
+GUEST_HTTP
+)
+run_with_timeout 120 "$G" exec t4 -- sh -c "$PORT_FIXTURE" </dev/null >/tmp/gantry-t4-http.log 2>&1 &
+HTTP_SESSION=$!
+PORT_FIXTURE_READY=
+for _ in {1..60}; do
+  if grep -qa 'task started' /tmp/gantry-t4-http.log; then
+    PORT_FIXTURE_READY=1
+    break
+  fi
+  kill -0 "$HTTP_SESSION" 2>/dev/null || break
+  sleep 1
+done
+if [ -z "$PORT_FIXTURE_READY" ]; then
+  echo "guest port fixture did not reach task start before publication:" >&2
+  tail -20 /tmp/gantry-t4-http.log >&2
+fi
+R=$("$G" ports publish --ephemeral t4 18080 2>&1)
+                                            chk "ports: ephemeral host allocation accepted" "published" "$R"
+PORTS=$("$G" ports ls t4 2>&1)
+HOST_PORT=$(printf '%s\n' "$PORTS" | awk '$2 == 18080 { n=split($1, part, ":"); print part[n]; exit }')
+if [ -n "$HOST_PORT" ]; then
+  ok "ports: allocated host port listed"
+else
+  bad "ports: allocated host port listed"
+fi
+PORT_SPEC=$HOST_PORT:18080
+PORT_BODY=
+for _ in 1 2 3 4 5; do
+  PORT_BODY=$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>/dev/null) && break
+  sleep 1
+done
+                                            chk "ports: guest service reachable" "GANTRY-PORT-OK" "$PORT_BODY"
+if ! printf '%s' "$PORT_BODY" | grep -qa 'GANTRY-PORT-OK'; then
+  tail -20 /tmp/gantry-t4-http.log >&2
+fi
+                                            chk "ports: live mapping listed" "$HOST_PORT" "$PORTS"
+"$G" ports unpublish --ephemeral t4 "$PORT_SPEC" >/dev/null 2>&1
+PORT_SPEC=
+if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$HOST_PORT/" >/dev/null 2>&1; then
+  bad "ports: unpublish closes listener"
+else
+  ok "ports: unpublish closes listener"
+fi
+stop_background "$HTTP_SESSION"
+HTTP_SESSION=
+
+echo "===== secrets (t5: cached OCI image) ====="
 # docs/secrets.md acceptance test: a canary value must appear in the
 # workload's environment inside the guest and NOWHERE in host state.
-CANARY="sk-canary-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
-FILECANARY="sk-file-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
+CANARY="sk-canary-$(new_uuid)"
+FILECANARY="sk-file-$(new_uuid)"
 printf '%s\n' "$FILECANARY" > /tmp/canary-file
-CANARY="$CANARY" $G start t5 -secret CANARY -secret FROM_FILE=@/tmp/canary-file -image alpine:latest >/dev/null 2>&1
+CANARY="$CANARY" "$G" start t5 -secret CANARY -secret FROM_FILE=@/tmp/canary-file -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 2
 R=$(xe t5 'printenv CANARY');     chk "secrets: env value in guest"   "$CANARY" "$R"
 R=$(xe t5 'printenv FROM_FILE');  chk "secrets: @file value in guest" "$FILECANARY" "$R"
@@ -121,22 +350,21 @@ grep -rqs "$CANARY" "$GANTRY_HOME"/t5/ && leak="$leak sandbox-dir"
 grep -rqs "$CANARY" "$GANTRY_IMAGES"/ 2>/dev/null && leak="$leak image-store"
 [ -f "$RWDIR/t5.ext4" ] && grep -qs "$CANARY" "$RWDIR/t5.ext4" && leak="$leak rwlayer"
 VPID=$(cat "$GANTRY_HOME"/t5/vmm.pid 2>/dev/null)
-[ -n "$VPID" ] && tr '\0' '\n' < /proc/$VPID/environ 2>/dev/null | grep -qs "$CANARY" && leak="$leak environ"
-[ -n "$VPID" ] && tr '\0' ' ' < /proc/$VPID/cmdline 2>/dev/null | grep -qs "$CANARY" && leak="$leak cmdline"
+[ -n "$VPID" ] && host_process_contains "$VPID" "$CANARY" && leak="$leak process"
 [ -z "$leak" ] && ok "secrets: canary absent from host state" || { bad "secrets: canary absent from host state"; echo "  leaked into:$leak"; }
 
-R=$($G start t6 -secret TOKEN=literal-value -image alpine:latest 2>&1)
+R=$("$G" start t6 -secret TOKEN=literal-value -image "$CACHE_IMAGE" 2>&1)
 chk "secrets: literal refused" "refusing" "$R"
 # Secret specs validate before any on-disk artifacts: the refused start
 # must not leave a fresh per-sandbox rwlayer behind.
 [ ! -e "$RWDIR/t6.ext4" ] && ok "resolver: bad spec leaves no rwlayer" || bad "resolver: bad spec leaves no rwlayer"
 
-echo "===== bound secrets + credential helper (t7/t8: alpine, offline) ====="
+echo "===== bound secrets + credential helper (t7/t8: cached OCI image) ====="
 # docs/credential-brokering.md workstream 1: a NAME@host secret is held
 # host-side only, delivered per-use through the vsock broker behind three
 # gates (binding → egress → presence), and revocable without a restart.
-BOUNDCANARY="sk-bound-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
-BOUND_TOKEN="$BOUNDCANARY" $G start t7 -secret BOUND_TOKEN@git.test -image alpine:latest >/dev/null 2>&1
+BOUNDCANARY="sk-bound-$(new_uuid)"
+BOUND_TOKEN="$BOUNDCANARY" "$G" start t7 -secret BOUND_TOKEN@git.test -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 3   # guest-tools delivery races readiness; give the async push a moment
 
 R=$(xe t7 'printenv BOUND_TOKEN || echo ABSENT'); chk "binding: bound secret NOT ambient" "ABSENT" "$R"
@@ -177,9 +405,12 @@ grep -q "BOUND_TOKEN" "$GANTRY_HOME"/t7/sandbox.json 2>/dev/null \
 cat > /tmp/netpol-t8.json <<'EOF'
 {"default":"deny","allowLocal":true,"allowDomains":["example.com"]}
 EOF
-BOUND_TOKEN="$BOUNDCANARY" $G start t8 -secret BOUND_TOKEN@git.test -net-policy /tmp/netpol-t8.json -image alpine:latest >/dev/null 2>&1
+BOUND_TOKEN="$BOUNDCANARY" "$G" start t8 -secret BOUND_TOKEN@git.test -net-policy /tmp/netpol-t8.json -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 3
 R=$(xe t8 "$QB"); empty_cred "broker: egress policy denies out-of-allowlist host" "$R"
+R=$("$G" net-policy show t8 2>&1);          chk "net policy: persisted allowlist visible" "example.com" "$R"
+"$G" net-policy default t8 >/dev/null 2>&1
+R=$(xe t8 "$QB");                         chk "net policy: live default restores credential gate" "password=$BOUNDCANARY" "$R"
 
 echo "===== secret sources with TTL (t9: file rotation, fail-closed) ====="
 # docs/credential-brokering.md workstream 2: a file-backed bound secret
@@ -187,7 +418,7 @@ echo "===== secret sources with TTL (t9: file rotation, fail-closed) ====="
 # file is picked up without a sandbox restart, and a broken source fails
 # closed (empty answer, never a stale value).
 echo "file-token-v1" > /tmp/t9-token
-$G start t9 -secret 'FILE_TOKEN@git.test=@/tmp/t9-token,ttl=2s' -image alpine:latest >/dev/null 2>&1
+"$G" start t9 -secret 'FILE_TOKEN@git.test=@/tmp/t9-token,ttl=2s' -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 4
 QF='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
 R=$(xe t9 "$QF"); chk "source: file value delivered" "password=file-token-v1" "$R"
@@ -201,7 +432,7 @@ R=$(xe t9 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
 echo "===== OAuth custody (t10: mock provider, refresh token held on host) ====="
 # Custody depends on the callback bridge and must fail during resolution,
 # before creating any sandbox state, when an operator disables that bridge.
-R=$($G start t10bad -oauth-custody -oauth-bridge=false -image alpine:latest 2>&1)
+R=$("$G" start t10bad -oauth-custody -oauth-bridge=false -image "$CACHE_IMAGE" 2>&1)
 chk "custody: disabled callback bridge refused" "requires -oauth-bridge=true" "$R"
 [ ! -e "$GANTRY_HOME/t10bad" ] && ok "custody: refused config leaves no sandbox state" || bad "custody: refused config leaves no sandbox state"
 # docs/credential-brokering.md workstream 3: with -oauth-custody the guest
@@ -211,6 +442,7 @@ chk "custody: disabled callback bridge refused" "requires -oauth-bridge=true" "$
 # instance loopback stands in for the real provider.
 cat > /tmp/mock-as.py <<'PYEOF'
 import json
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -230,28 +462,35 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(out)
     def log_message(self, *a): pass
-HTTPServer(("127.0.0.1", 18999), H).serve_forever()
+HTTPServer(("127.0.0.1", int(os.environ["MOCK_AS_PORT"])), H).serve_forever()
 PYEOF
-pkill -f mock-as.py 2>/dev/null; sleep 1  # a crashed prior run may still hold the port
 rm -f /tmp/mock-as-grants.log
-python3 /tmp/mock-as.py &
+MOCK_AS_PORT=$(python3 - <<'PY'
+import socket
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+print(sock.getsockname()[1])
+sock.close()
+PY
+)
+MOCK_AS_PORT=$MOCK_AS_PORT python3 /tmp/mock-as.py &
 MOCKPID=$!
 sleep 1
-export GANTRY_OAUTH_TOKEN_URL_CLAUDE=http://127.0.0.1:18999/token
-$G start t10 -oauth-custody -image alpine:latest >/dev/null 2>&1
+export GANTRY_OAUTH_TOKEN_URL_CLAUDE=http://127.0.0.1:$MOCK_AS_PORT/token
+"$G" start t10 -oauth-custody -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 4
 # The login blocks until the callback lands: run it in the background,
 # scrape the authorize URL for its dynamic port + state, and play the
 # browser redirect with curl.
-( printf '/run/gantry/bin/gantry-guest oauth login claude\nexit\n' | timeout 60 $G exec t10 > /tmp/t10-login.log 2>&1 ) &
+( printf '/run/gantry/bin/gantry-guest oauth login claude\nexit\n' | run_with_timeout 60 "$G" exec t10 > /tmp/t10-login.log 2>&1 ) &
 sleep 4
 URL=$(grep -oa 'https://claude.ai/oauth/authorize[^ ]*' /tmp/t10-login.log | head -1)
 CPORT=$(printf '%s' "$URL" | sed -n 's/.*127\.0\.0\.1%3A\([0-9]*\)%2Fcallback.*/\1/p')
 CSTATE=$(printf '%s' "$URL" | sed -n 's/.*[?&]state=\([A-Za-z0-9_-]*\).*/\1/p')
-curl -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
+curl --noproxy '*' -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
 # The guest helper polls oauth.status on a ~1s cadence; give the
 # completion line time to land in the session log instead of racing it.
-for _ in $(seq 1 15); do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
 R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "OAuth callback received" "$R"
 R=$(cat /tmp/t10-login.log);                chk "custody: login completed in guest"            "tokens held on host" "$R"
 R=$(xe t10 'cat /root/.claude/.credentials.json')
@@ -259,7 +498,7 @@ R=$(xe t10 'cat /root/.claude/.credentials.json')
                                             chk "custody: guest refresh token is a sentinel"  "gantry-custody-refresh-held-on-host" "$R"
 R=$(cat "$GANTRY_HOME/t10/oauth-tokens.json")
                                             chk "custody: refresh token held host-side"       "rt-mock-1" "$R"
-M=$(stat -c %a "$GANTRY_HOME/t10/oauth-tokens.json")
+M=$(file_mode "$GANTRY_HOME/t10/oauth-tokens.json")
                                             chk "custody: host token file is 0600"            "^600$" "$M"
 sleep 3
 R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
@@ -275,14 +514,21 @@ R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
                                             chk "custody: session restored after restart"     "session restored and access token pushed" "$R"
 R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
                                             chk "custody: unknown provider refused"           "no custody login" "$R"
-kill $MOCKPID 2>/dev/null
+stop_background "$MOCKPID"
+MOCKPID=
 
 echo "===== MCP gateway (t11: fs server via mcp-proxy, containment) ====="
 # docs/mcp-gateway.md milestone 1: the agent speaks MCP (NDJSON stdio) to
 # gantry-guest mcp-proxy, the host gateway muxes to a contained fs server
 # spawned guest-side as an unprivileged user (never root).
-$G start t11 -mcp -mcp-fs-root /work -mcp-fs-user nobody -image alpine:latest >/dev/null 2>&1
+"$G" start t11 -mcp -mcp-fs-root /work -mcp-fs-user nobody -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 4
+if check_isolation "$GANTRY_HOME/t11/isolation.json" auto split-net+split-vmm+split-mcp \
+  vmmConfinement networkConfinement mcpConfinement; then
+  ok "mcp: auto confinement roles verified end to end"
+else
+  bad "mcp: auto confinement roles verified end to end"
+fi
 xe t11 'mkdir -p /work/sub && echo hello-mcp > /work/notes.txt && ln -s /etc/passwd /work/evil && chmod 755 /work /work/sub && chmod 644 /work/notes.txt' >/dev/null 2>&1
 # The request transcript is built on the instance and heredoc'd into the
 # guest — nested JSON quoting through xe is unmaintainable otherwise.
@@ -295,8 +541,8 @@ cat > /tmp/t11-reqs.ndjson <<'EOF'
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"fs__write_file","arguments":{"path":"/work/x"}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"fs__github-authorize","arguments":{}}}
 EOF
-{ echo 'cat > /work/.gantry-mcp-requests <<MEOF'; cat /tmp/t11-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t11 >/dev/null 2>&1
-R=$(printf '{ cat /work/.gantry-mcp-requests; sleep 4; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t11 2>&1)
+{ echo 'cat > /work/.gantry-mcp-requests <<MEOF'; cat /tmp/t11-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | run_with_timeout 90 "$G" exec t11 >/dev/null 2>&1
+R=$(printf '{ cat /work/.gantry-mcp-requests; sleep 4; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | run_with_timeout 60 "$G" exec t11 2>&1)
 L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: tools/list exposes fs__read_file"      "fs__read_file" "$L2"
 if printf '%s' "$L2" | grep -qa 'github-authorize'; then bad "mcp: auth tool hidden from listing"; else ok "mcp: auth tool hidden from listing"; fi
 L3=$(printf '%s' "$R" | grep -a '"id":3');  chk "mcp: read_file round trip"                 "hello-mcp" "$L3"
@@ -309,10 +555,11 @@ R=$($G audit t11);                          chk "mcp: calls audited host-side"  
 
 echo "===== MCP remote upstreams (t12: injection, redaction, SSRF) ====="
 # Milestone 2: remote streamable-HTTP upstreams with host-side credential
-# injection. The mock remote runs on the INSTANCE loopback — upstream
-# traffic exits from the host gateway process, never the guest netns.
+# injection. The mock remote runs on host loopback — upstream traffic exits
+# from the host gateway process, never the guest netns.
 cat > /tmp/mock-mcp.py <<'PYEOF'
 import json
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 LOG = "/tmp/mock-mcp-auth.log"
 TOOLS = [
@@ -371,16 +618,24 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
-HTTPServer(("127.0.0.1", 18998), H).serve_forever()
+HTTPServer(("127.0.0.1", int(os.environ["MOCK_MCP_PORT"])), H).serve_forever()
 PYEOF
-pkill -f mock-mcp.py 2>/dev/null; sleep 1
 rm -f /tmp/mock-mcp-auth.log
-python3 /tmp/mock-mcp.py &
+MOCK_MCP_PORT=$(python3 - <<'PY'
+import socket
+sock = socket.socket()
+sock.bind(("127.0.0.1", 0))
+print(sock.getsockname()[1])
+sock.close()
+PY
+)
+MOCK_MCP_PORT=$MOCK_MCP_PORT python3 /tmp/mock-mcp.py &
 MOCKMCP=$!
 sleep 1
 export T12_MCP_TOKEN=t12-secret-token  # -secret NAME=value is refused (ps/history leak); env-source it
-$G start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN \
-  -mcp-remote 'name=mock,url=http://127.0.0.1:18998/mcp,auth=bearer:T12_MCP_TOKEN,allow=*,deny=dang*' -image alpine:latest >/dev/null 2>&1
+MCP_REMOTE="name=mock,url=http://127.0.0.1:$MOCK_MCP_PORT/mcp,auth=bearer:T12_MCP_TOKEN,allow=*,deny=dang*"
+"$G" start t12 -mcp -mcp-fs-root /work -secret T12_MCP_TOKEN \
+  -mcp-remote "$MCP_REMOTE" -image "$CACHE_IMAGE" >/dev/null 2>&1
 sleep 4
 xe t12 'mkdir -p /work && chmod 755 /work' >/dev/null 2>&1  # creates container "sb" the fs server spawns into
 cat > /tmp/t12-reqs.ndjson <<'EOF'
@@ -394,8 +649,8 @@ cat > /tmp/t12-reqs.ndjson <<'EOF'
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"mock__leak_sse","arguments":{}}}
 {"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"mock__err_http","arguments":{}}}
 EOF
-{ echo 'cat > /work/.gantry-mcp-requests <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | timeout 90 $G exec t12 >/dev/null 2>&1
-R=$(printf '{ cat /work/.gantry-mcp-requests; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | timeout 60 $G exec t12 2>&1)
+{ echo 'cat > /work/.gantry-mcp-requests <<MEOF'; cat /tmp/t12-reqs.ndjson; echo 'MEOF'; echo 'exit'; } | run_with_timeout 90 "$G" exec t12 >/dev/null 2>&1
+R=$(printf '{ cat /work/.gantry-mcp-requests; sleep 5; } | /run/gantry/bin/gantry-guest mcp-proxy\nexit\n' | run_with_timeout 60 "$G" exec t12 2>&1)
 L2=$(printf '%s' "$R" | grep -a '"id":2');  chk "mcp: remote tools listed alongside fs"         "mock__echo_auth" "$L2"
                                             chk "mcp: fs server still listed"                 "fs__read_file" "$L2"
 chk "mcp: injected credential reached the upstream" "Bearer t12-secret-token" "$(cat /tmp/mock-mcp-auth.log 2>/dev/null)"
@@ -423,12 +678,13 @@ chk "mcp cli: live probe lists fs tools"          "fs: list_directory, read_file
 chk "mcp cli: live probe lists remote tools"      "mock: big, echo_auth, err_http, leak, leak_sse" "$R"
 if printf '%s' "$R" | grep -qa 'danger'; then bad "mcp cli: probe honors deny policy"; else ok "mcp cli: probe honors deny policy"; fi
 # Loud refusals at start time (fail closed, never silent degrade):
-OUT=$($G start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' -image alpine:latest 2>&1)
+OUT=$("$G" start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/latest,allow=*' -image "$CACHE_IMAGE" 2>&1)
 chk "mcp: cloud metadata target refused" "non-public" "$OUT"
-OUT=$($G start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' -image alpine:latest 2>&1)
+OUT=$("$G" start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' -image "$CACHE_IMAGE" 2>&1)
 chk "mcp: plain HTTP to a public host refused" "plain HTTP" "$OUT"
-kill $MOCKMCP 2>/dev/null
+stop_background "$MOCKMCP"
+MOCKMCP=
 
 echo "==============================="
-echo "RESULT: $PASS passed, $FAIL failed"
+echo "RESULT: $PASS passed, $FAIL failed, $SKIPPED skipped"
 [ "$FAIL" = 0 ]

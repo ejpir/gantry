@@ -450,6 +450,36 @@ func (m *sandboxTUIModel) updateCreateDialogKey(msg tea.KeyPressMsg) (tea.Model,
 	return m, cmd
 }
 
+func toggleSandboxSSH(ssh, devContainers *bool) {
+	*ssh = !*ssh
+	if !*ssh {
+		*devContainers = false
+	}
+}
+
+func (m *sandboxTUIModel) toggleSandboxDevContainers(ssh, devContainers *bool, cpus, memory, disk *resourceSlider, runtime *string) {
+	*devContainers = !*devContainers
+	if !*devContainers {
+		return
+	}
+	*ssh = true
+	cpus.Set(maxInt(cpus.Value, m.limits.DefaultDevContainersVCPUs))
+	memory.Set(maxInt(memory.Value, int(m.limits.DefaultDevContainersMemoryMiB)))
+	if disk != nil {
+		disk.Set(maxInt(disk.Value, int(m.limits.DefaultDevContainersDiskMiB)))
+	}
+	if runtime != nil {
+		*runtime = "crun"
+	}
+}
+
+func sandboxConfigRequest(name string, ssh, devContainers bool, memory, cpus resourceSlider, isolation string) dashboardapi.SandboxConfigRequest {
+	return dashboardapi.SandboxConfigRequest{
+		Name: name, SSH: ssh, DevContainers: devContainers,
+		MemMB: uint(memory.Value), VCPUs: cpus.Value, ProcessIsolation: isolation,
+	}
+}
+
 func (m *sandboxTUIModel) adjustCreateChoice(delta int) bool {
 	switch m.createFocus {
 	case 2:
@@ -464,20 +494,11 @@ func (m *sandboxTUIModel) adjustCreateChoice(delta int) bool {
 		m.cycleCreateKernel(delta)
 		return true
 	case 4:
-		m.createSSH = !m.createSSH
-		if !m.createSSH {
-			m.createDevContainers = false
-		}
+		toggleSandboxSSH(&m.createSSH, &m.createDevContainers)
 		return true
 	case 5:
-		m.createDevContainers = !m.createDevContainers
-		if m.createDevContainers {
-			m.createSSH = true
-			m.createRuntime = "crun"
-			m.createCPUs.Set(maxInt(m.createCPUs.Value, m.limits.DefaultDevContainersVCPUs))
-			m.createMemory.Set(maxInt(m.createMemory.Value, int(m.limits.DefaultDevContainersMemoryMiB)))
-			m.createDisk.Set(maxInt(m.createDisk.Value, int(m.limits.DefaultDevContainersDiskMiB)))
-		}
+		m.toggleSandboxDevContainers(&m.createSSH, &m.createDevContainers,
+			&m.createCPUs, &m.createMemory, &m.createDisk, &m.createRuntime)
 		return true
 	case 9:
 		m.createIsolation = cycleIsolation(m.createIsolation, delta)
@@ -637,10 +658,8 @@ func (m *sandboxTUIModel) submitCreate() (tea.Model, tea.Cmd) {
 			return m, m.focusCreate(0)
 		}
 	}
-	if err := m.service.ValidateSandboxConfig(dashboardapi.SandboxConfigRequest{
-		Name: name, MemMB: uint(m.createMemory.Value), VCPUs: m.createCPUs.Value,
-		ProcessIsolation: m.createIsolation, SSH: m.createSSH, DevContainers: m.createDevContainers,
-	}); err != nil {
+	if err := m.service.ValidateSandboxConfig(sandboxConfigRequest(name, m.createSSH, m.createDevContainers,
+		m.createMemory, m.createCPUs, m.createIsolation)); err != nil {
 		m.formError = err.Error()
 		m.createErrFocus = 5
 		return m, m.focusCreate(5)
@@ -724,18 +743,11 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 func (m *sandboxTUIModel) adjustEditChoice(delta int) bool {
 	switch m.editFocus {
 	case 0:
-		m.editSSH = !m.editSSH
-		if !m.editSSH {
-			m.editDevContainers = false
-		}
+		toggleSandboxSSH(&m.editSSH, &m.editDevContainers)
 		return true
 	case 1:
-		m.editDevContainers = !m.editDevContainers
-		if m.editDevContainers {
-			m.editSSH = true
-			m.editCPUs.Set(maxInt(m.editCPUs.Value, m.limits.DefaultDevContainersVCPUs))
-			m.editMemory.Set(maxInt(m.editMemory.Value, int(m.limits.DefaultDevContainersMemoryMiB)))
-		}
+		m.toggleSandboxDevContainers(&m.editSSH, &m.editDevContainers,
+			&m.editCPUs, &m.editMemory, nil, nil)
 		return true
 	case 4:
 		m.editIsolation = cycleIsolation(m.editIsolation, delta)
@@ -789,10 +801,8 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	request := dashboardapi.SandboxConfigRequest{
-		Name: selected.Name, MemMB: uint(m.editMemory.Value), VCPUs: m.editCPUs.Value,
-		ProcessIsolation: m.editIsolation, SSH: m.editSSH, DevContainers: m.editDevContainers,
-	}
+	request := sandboxConfigRequest(selected.Name, m.editSSH, m.editDevContainers,
+		m.editMemory, m.editCPUs, m.editIsolation)
 	if err := m.service.ValidateSandboxConfig(request); err != nil {
 		m.formError = err.Error()
 		if dashboardErrorField(err) == "devcontainers" {

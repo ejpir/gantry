@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -29,10 +31,14 @@ import (
 // callers can use atomicfile.Committed to avoid rolling back live state that
 // now agrees with the on-disk file.
 type ConfigStore struct {
-	path  string
-	mu    sync.Mutex
-	cfg   RunConfig
-	write func(string, []byte, os.FileMode) error
+	path string
+	// configureMu owns the revisioned SSH/Dev Containers/resource transition
+	// domain across preparation, persistence, and explicit service
+	// reconciliation. The general mutex remains available to unrelated writes.
+	configureMu sync.Mutex
+	mu          sync.Mutex
+	cfg         RunConfig
+	write       func(string, []byte, os.FileMode) error
 }
 
 // ReadSandboxConfig is the canonical sandbox.json reader.
@@ -118,9 +124,22 @@ func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	backup := cloneRunConfig(s.cfg)
+	beforeSettings := sandboxSettingsOf(backup)
 	if err := fn(&s.cfg); err != nil {
 		s.cfg = backup
 		return err
+	}
+	// The revision belongs to the store, not mutation callbacks. This also
+	// detects legacy/general Mutate callers that accidentally change a setting
+	// while a revisioned configuration transaction is preparing live work.
+	s.cfg.SettingsRevision = backup.SettingsRevision
+	if !reflect.DeepEqual(beforeSettings, sandboxSettingsOf(s.cfg)) {
+		revision, err := nextSettingsRevision(backup.SettingsRevision)
+		if err != nil {
+			s.cfg = backup
+			return err
+		}
+		s.cfg.SettingsRevision = revision
 	}
 	if err := s.writeLocked(); err != nil {
 		if !atomicfile.Committed(err) {
@@ -205,13 +224,43 @@ func ValidateDevContainers(cfg RunConfig) error {
 	return nil
 }
 
+// DevContainersProfileUpdate is a host-prepared curated IDE root and its
+// paired writable layer. Configure callers attach it to the same transaction
+// that enables the profile, so an unusable placeholder is never persisted.
+type DevContainersProfileUpdate struct {
+	Image    string
+	ImageCfg *image.Config
+	RWLayer  string
+	DiskMiB  uint
+}
+
+// MutableSandboxSettings is the complete user-facing settings set shared by
+// CLI, dashboard, and control-protocol conversion layers.
+type MutableSandboxSettings struct {
+	SSH              bool
+	DevContainers    bool
+	MemMB            uint
+	VCPUs            int
+	ProcessIsolation string
+}
+
+// Update returns an update in which every mutable setting is explicit.
+func (settings MutableSandboxSettings) Update() SandboxUpdate {
+	return SandboxUpdate{
+		SSH: &settings.SSH, DevContainers: &settings.DevContainers,
+		MemMB: &settings.MemMB, VCPUs: &settings.VCPUs,
+		ProcessIsolation: &settings.ProcessIsolation,
+	}
+}
+
 // SandboxUpdate contains only explicitly requested mutable settings.
 type SandboxUpdate struct {
-	SSH              *bool
-	DevContainers    *bool
-	MemMB            *uint
-	VCPUs            *int
-	ProcessIsolation *string
+	SSH                  *bool
+	DevContainers        *bool
+	DevContainersProfile *DevContainersProfileUpdate
+	MemMB                *uint
+	VCPUs                *int
+	ProcessIsolation     *string
 }
 
 func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
@@ -231,6 +280,18 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 			cfg.DevContainersDiskMiB = DefaultDevContainersDiskSizeMiB
 		}
 	}
+	if profile := update.DevContainersProfile; profile != nil {
+		if !cfg.DevContainers {
+			return fmt.Errorf("prepared Dev Containers profile requires the feature to be enabled")
+		}
+		if profile.Image == "" || profile.ImageCfg == nil || profile.RWLayer == "" || profile.DiskMiB == 0 {
+			return fmt.Errorf("prepared Dev Containers profile is incomplete")
+		}
+		cfg.DevContainersImage = profile.Image
+		cfg.DevContainersImageCfg = cloneImageConfig(profile.ImageCfg)
+		cfg.DevContainersRWLayer = profile.RWLayer
+		cfg.DevContainersDiskMiB = profile.DiskMiB
+	}
 	if update.MemMB != nil {
 		cfg.MemMB = *update.MemMB
 	}
@@ -249,8 +310,259 @@ func ApplySandboxUpdate(cfg *RunConfig, update SandboxUpdate) error {
 	return ValidateDevContainers(*cfg)
 }
 
+// ErrConfigurationConflict means settings changed after a transaction took
+// its revisioned snapshot. Callers must start a fresh transaction rather than
+// applying or rolling back a stale service plan.
+var ErrConfigurationConflict = errors.New("sandbox settings revision conflict")
+
+// sandboxSettings is the complete persistence and rollback domain for live
+// services and restart-required VM settings. Keeping this projection in one
+// place means a future mutable setting cannot require field-by-field rollback
+// logic at every service call site.
+type sandboxSettings struct {
+	Runtime               string
+	SSH                   bool
+	DevContainers         bool
+	DevContainersImage    string
+	DevContainersImageCfg *image.Config
+	DevContainersRWLayer  string
+	DevContainersDiskMiB  uint
+	MemMB                 uint
+	VCPUs                 int
+	ProcessIsolation      string
+}
+
+func sandboxSettingsOf(cfg RunConfig) sandboxSettings {
+	return sandboxSettings{
+		Runtime: cfg.Runtime, SSH: cfg.SSH, DevContainers: cfg.DevContainers,
+		DevContainersImage:    cfg.DevContainersImage,
+		DevContainersImageCfg: cloneImageConfig(cfg.DevContainersImageCfg),
+		DevContainersRWLayer:  cfg.DevContainersRWLayer,
+		DevContainersDiskMiB:  cfg.DevContainersDiskMiB,
+		MemMB:                 cfg.MemMB, VCPUs: cfg.VCPUs, ProcessIsolation: cfg.ProcessIsolation,
+	}
+}
+
+func applySandboxSettings(cfg *RunConfig, settings sandboxSettings) {
+	cfg.Runtime = settings.Runtime
+	cfg.SSH = settings.SSH
+	cfg.DevContainers = settings.DevContainers
+	cfg.DevContainersImage = settings.DevContainersImage
+	cfg.DevContainersImageCfg = cloneImageConfig(settings.DevContainersImageCfg)
+	cfg.DevContainersRWLayer = settings.DevContainersRWLayer
+	cfg.DevContainersDiskMiB = settings.DevContainersDiskMiB
+	cfg.MemMB = settings.MemMB
+	cfg.VCPUs = settings.VCPUs
+	cfg.ProcessIsolation = settings.ProcessIsolation
+}
+
+func validateSandboxSettings(cfg RunConfig) error {
+	if err := ValidateSandboxResources(cfg.MemMB, cfg.VCPUs); err != nil {
+		return err
+	}
+	if err := ValidateProcessIsolation(cfg.ProcessIsolation); err != nil {
+		return err
+	}
+	return ValidateDevContainers(cfg)
+}
+
+func nextSettingsRevision(revision uint64) (uint64, error) {
+	if revision == ^uint64(0) {
+		return 0, fmt.Errorf("sandbox settings revision exhausted")
+	}
+	return revision + 1, nil
+}
+
+// ConfigurationTransaction owns one revisioned settings transition. It holds
+// the settings domain lock until Close, but never holds the general store lock
+// while callers prepare assets or reconcile services. Unrelated store
+// mutations can therefore continue and are merged into Commit and Rollback.
+type ConfigurationTransaction struct {
+	store             *ConfigStore
+	before            RunConfig
+	desired           RunConfig
+	after             RunConfig
+	baseRevision      uint64
+	committedRevision uint64
+	changed           bool
+	completed         bool
+	committed         bool
+	rolledBack        bool
+	closed            bool
+}
+
+// BeginConfiguration snapshots and validates a settings update while taking
+// exclusive ownership of the settings revision. The caller must Close the
+// transaction, normally with defer, after persistence and service
+// reconciliation finish.
+func (s *ConfigStore) BeginConfiguration(update SandboxUpdate) (*ConfigurationTransaction, error) {
+	s.configureMu.Lock()
+	s.mu.Lock()
+	before := cloneRunConfig(s.cfg)
+	s.mu.Unlock()
+	tx := &ConfigurationTransaction{
+		store: s, before: before, desired: cloneRunConfig(before),
+		baseRevision: before.SettingsRevision,
+	}
+	if err := tx.Amend(update); err != nil {
+		tx.Close()
+		return nil, err
+	}
+	return tx, nil
+}
+
+// Amend adds a prepared part of the same transition before it is committed.
+// Dev Containers preflight uses this to attach verified image and writable
+// layer metadata without taking a second, racy configuration snapshot.
+func (tx *ConfigurationTransaction) Amend(update SandboxUpdate) error {
+	if tx == nil || tx.store == nil || tx.closed {
+		return fmt.Errorf("configuration transaction is closed")
+	}
+	if tx.completed {
+		return fmt.Errorf("configuration transaction is already committed")
+	}
+	candidate := cloneRunConfig(tx.desired)
+	if err := ApplySandboxUpdate(&candidate, update); err != nil {
+		return err
+	}
+	tx.desired = candidate
+	tx.changed = !reflect.DeepEqual(sandboxSettingsOf(tx.before), sandboxSettingsOf(tx.desired))
+	return nil
+}
+
+func (tx *ConfigurationTransaction) Before() RunConfig {
+	if tx == nil {
+		return RunConfig{}
+	}
+	return cloneRunConfig(tx.before)
+}
+
+func (tx *ConfigurationTransaction) Desired() RunConfig {
+	if tx == nil {
+		return RunConfig{}
+	}
+	return cloneRunConfig(tx.desired)
+}
+
+func (tx *ConfigurationTransaction) After() RunConfig {
+	if tx == nil {
+		return RunConfig{}
+	}
+	return cloneRunConfig(tx.after)
+}
+
+func (tx *ConfigurationTransaction) Changed() bool { return tx != nil && tx.changed }
+
+// Commit merges the desired settings into the latest full configuration and
+// advances SettingsRevision. A conflicting settings mutation is rejected;
+// unrelated shares, ports, secrets, and policy changes survive the merge.
+func (tx *ConfigurationTransaction) Commit() error {
+	if tx == nil || tx.store == nil || tx.closed {
+		return fmt.Errorf("configuration transaction is closed")
+	}
+	if tx.completed {
+		return fmt.Errorf("configuration transaction is already committed")
+	}
+	tx.store.mu.Lock()
+	defer tx.store.mu.Unlock()
+	if tx.store.cfg.SettingsRevision != tx.baseRevision {
+		return fmt.Errorf("%w: expected %d, found %d", ErrConfigurationConflict,
+			tx.baseRevision, tx.store.cfg.SettingsRevision)
+	}
+	if !tx.changed {
+		tx.after = cloneRunConfig(tx.store.cfg)
+		tx.completed = true
+		return nil
+	}
+
+	backup := cloneRunConfig(tx.store.cfg)
+	applySandboxSettings(&tx.store.cfg, sandboxSettingsOf(tx.desired))
+	revision, err := nextSettingsRevision(tx.baseRevision)
+	if err != nil {
+		tx.store.cfg = backup
+		return err
+	}
+	tx.store.cfg.SettingsRevision = revision
+	if err := validateSandboxSettings(tx.store.cfg); err != nil {
+		tx.store.cfg = backup
+		return err
+	}
+	tx.after = cloneRunConfig(tx.store.cfg)
+	if err := tx.store.writeLocked(); err != nil {
+		if !atomicfile.Committed(err) {
+			tx.store.cfg = backup
+			tx.after = RunConfig{}
+			return err
+		}
+		tx.completed, tx.committed = true, true
+		tx.committedRevision = revision
+		return err
+	}
+	tx.completed, tx.committed = true, true
+	tx.committedRevision = revision
+	return nil
+}
+
+// Rollback restores the complete settings snapshot only when the committed
+// revision still owns the desired state. It preserves unrelated mutations and
+// advances the revision again so stale plans can never become valid later.
+func (tx *ConfigurationTransaction) Rollback() error {
+	if tx == nil || tx.store == nil || tx.closed {
+		return fmt.Errorf("configuration transaction is closed")
+	}
+	if !tx.committed {
+		return fmt.Errorf("configuration transaction was not committed")
+	}
+	if tx.rolledBack {
+		return fmt.Errorf("configuration transaction was already rolled back")
+	}
+	tx.store.mu.Lock()
+	defer tx.store.mu.Unlock()
+	if tx.store.cfg.SettingsRevision != tx.committedRevision {
+		return fmt.Errorf("%w: expected %d, found %d", ErrConfigurationConflict,
+			tx.committedRevision, tx.store.cfg.SettingsRevision)
+	}
+	backup := cloneRunConfig(tx.store.cfg)
+	applySandboxSettings(&tx.store.cfg, sandboxSettingsOf(tx.before))
+	revision, err := nextSettingsRevision(tx.committedRevision)
+	if err != nil {
+		tx.store.cfg = backup
+		return err
+	}
+	tx.store.cfg.SettingsRevision = revision
+	if err := validateSandboxSettings(tx.store.cfg); err != nil {
+		tx.store.cfg = backup
+		return err
+	}
+	if err := tx.store.writeLocked(); err != nil {
+		if !atomicfile.Committed(err) {
+			tx.store.cfg = backup
+			return err
+		}
+		tx.rolledBack = true
+		return err
+	}
+	tx.rolledBack = true
+	return nil
+}
+
+// Close releases the settings transition domain. It is idempotent so callers
+// can safely defer it immediately after BeginConfiguration.
+func (tx *ConfigurationTransaction) Close() {
+	if tx == nil || tx.store == nil || tx.closed {
+		return
+	}
+	tx.closed = true
+	tx.store.configureMu.Unlock()
+}
+
 func (s *ConfigStore) Configure(update SandboxUpdate) error {
-	return s.Mutate(func(cfg *RunConfig) error { return ApplySandboxUpdate(cfg, update) })
+	tx, err := s.BeginConfiguration(update)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	return tx.Commit()
 }
 
 func ValidateSandboxResources(memMB uint, vcpus int) error {
@@ -270,27 +582,30 @@ func (s *ConfigStore) SetResources(memMB uint, vcpus int, processIsolation strin
 	if err := ValidateSandboxResources(memMB, vcpus); err != nil {
 		return err
 	}
-	mode := processIsolation
-	if mode != "" {
-		if err := ValidateProcessIsolation(mode); err != nil {
+	if processIsolation != "" {
+		if err := ValidateProcessIsolation(processIsolation); err != nil {
+			return err
+		}
+		processIsolation = NormalizeProcessIsolation(processIsolation)
+	}
+	update := SandboxUpdate{MemMB: &memMB, VCPUs: &vcpus}
+	if processIsolation != "" {
+		update.ProcessIsolation = &processIsolation
+	}
+	tx, err := s.BeginConfiguration(update)
+	if err != nil {
+		return err
+	}
+	defer tx.Close()
+	if processIsolation == "" {
+		// Older resource clients omit this setting. Preserve its posture while
+		// canonicalizing the legacy empty spelling inside the same revision.
+		mode := NormalizeProcessIsolation(tx.Desired().ProcessIsolation)
+		if err := tx.Amend(SandboxUpdate{ProcessIsolation: &mode}); err != nil {
 			return err
 		}
 	}
-	return s.Mutate(func(cfg *RunConfig) error {
-		// An omitted/empty mode comes from resource-control clients that
-		// predate this field. Preserve their configured posture. The TUI sends
-		// the explicit spelling "auto" when that is what the user selects.
-		if mode == "" {
-			mode = cfg.ProcessIsolation
-		}
-		if err := ValidateProcessIsolation(mode); err != nil {
-			return err
-		}
-		cfg.MemMB = memMB
-		cfg.VCPUs = vcpus
-		cfg.ProcessIsolation = NormalizeProcessIsolation(mode)
-		return nil
-	})
+	return tx.Commit()
 }
 
 func (s *ConfigStore) SetNetworkPolicy(path string, allowLocal bool) error {

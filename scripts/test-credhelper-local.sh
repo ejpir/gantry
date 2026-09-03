@@ -34,21 +34,37 @@ done
 [ -z "$IMAGE" ] && IMAGE="alpine:latest"
 echo "== using image: $IMAGE =="
 
-echo "== building gantry + gantry-guest ($GUESTARCH) =="
-BIN=$(mktemp "${TMPDIR:-/tmp}/gantry-local.XXXXXX")
-trap 'rm -f -- "$BIN"' EXIT HUP INT TERM
-go build -o "$BIN" ./cmd/gantry || exit 1
-# macOS refuses VM creation (HV_DENIED) from a binary without the
-# hypervisor entitlement; ad-hoc sign like scripts/build.sh does.
-if [ "$(uname -s)" = Darwin ]; then
-	codesign --sign - --entitlements "$ROOT/config/entitlements.plist" -f "$BIN" 2>&1 \
-		| grep -v 'replacing existing signature' || true
+ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
+mkdir -p "$ARTIFACTS"
+BIN=${GANTRY_TEST_EXE:-}
+OWN_BIN=0
+if [ -z "$BIN" ]; then
+	echo "== building gantry ($GUESTARCH) =="
+	BIN=$(mktemp "${TMPDIR:-/tmp}/gantry-local.XXXXXX")
+	OWN_BIN=1
+	go build -o "$BIN" ./cmd/gantry || exit 1
+	# macOS refuses VM creation (HV_DENIED) from a binary without the
+	# hypervisor entitlement; ad-hoc sign like scripts/build.sh does.
+	if [ "$(uname -s)" = Darwin ]; then
+		codesign --sign - --entitlements "$ROOT/config/entitlements.plist" -f "$BIN" 2>&1 \
+			| grep -v 'replacing existing signature' || true
+	fi
+else
+	echo "== using existing gantry: $BIN =="
+	[ -x "$BIN" ] || { echo "gantry binary is not executable: $BIN" >&2; exit 1; }
 fi
-mkdir -p artifacts
-GOOS=linux CGO_ENABLED=0 go build -ldflags "-s -w" \
-	-o "artifacts/gantry-guest-$GUESTARCH" ./cmd/gantry-guest || exit 1
-# Dev builds resolve guest assets via GANTRY_ARTIFACTS/artifacts/ lookup;
-# building into artifacts/ above is the staging step.
+GUEST=${GANTRY_TEST_GUEST:-$ARTIFACTS/gantry-guest-$GUESTARCH}
+if [ -z "${GANTRY_TEST_GUEST:-}" ]; then
+	echo "== building gantry-guest ($GUESTARCH) =="
+	GOOS=linux CGO_ENABLED=0 go build -ldflags "-s -w" \
+		-o "$GUEST" ./cmd/gantry-guest || exit 1
+else
+	echo "== using existing guest helper: $GUEST =="
+	[ -s "$GUEST" ] || { echo "guest helper is missing: $GUEST" >&2; exit 1; }
+fi
+# Dev builds resolve guest assets via GANTRY_ARTIFACTS. Keep the host binary
+# and helper in one explicit staging directory when a caller supplied it.
+export GANTRY_ARTIFACTS="$ARTIFACTS"
 
 TD=$(mktemp -d "${TMPDIR:-/tmp}/gantry-chtest.XXXXXX")
 # GANTRY_HOME is the sandboxes root itself; nesting it keeps the rwlayer
@@ -69,11 +85,14 @@ xe() { printf '%s\nexit\n' "$2" | timeout 90 "$BIN" exec "$1" 2>&1; }
 if ! command -v timeout >/dev/null 2>&1; then xe() { printf '%s\nexit\n' "$2" | "$BIN" exec "$1" 2>&1; }; fi
 
 cleanup() {
-	"$BIN" stop ch1 >/dev/null 2>&1; "$BIN" stop ch2 >/dev/null 2>&1
-	"$BIN" delete ch1 >/dev/null 2>&1; "$BIN" delete ch2 >/dev/null 2>&1
+	for sandbox in ch1 ch2 ch3 chbad; do
+		"$BIN" stop "$sandbox" >/dev/null 2>&1
+		"$BIN" delete "$sandbox" >/dev/null 2>&1
+	done
 	rm -rf "$TD"
+	[ "$OWN_BIN" = 0 ] || rm -f -- "$BIN"
 }
-trap 'cleanup; rm -f -- "$BIN"' EXIT HUP INT TERM
+trap cleanup EXIT HUP INT TERM
 
 CANARY="sk-bound-$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo fixed)"
 QB='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
@@ -102,9 +121,9 @@ fi
 # runtime crash; `version` separates binary startup from the vsock path.
 DL=$(find "$GANTRY_HOME/ch1" -name daemon.log 2>/dev/null | head -1)
 [ -n "$DL" ] && { echo "---- $DL (guest-tools lines) ----"; grep -a "guest" "$DL" | tail -6; }
-HOSTSUM=$(shasum -a 256 "artifacts/gantry-guest-$GUESTARCH" 2>/dev/null | awk '{print $1}')
-[ -z "$HOSTSUM" ] && HOSTSUM=$(sha256sum "artifacts/gantry-guest-$GUESTARCH" 2>/dev/null | awk '{print $1}')
-HOSTSIZE=$(wc -c < "artifacts/gantry-guest-$GUESTARCH" | tr -d ' ')
+HOSTSUM=$(shasum -a 256 "$GUEST" 2>/dev/null | awk '{print $1}')
+[ -z "$HOSTSUM" ] && HOSTSUM=$(sha256sum "$GUEST" 2>/dev/null | awk '{print $1}')
+HOSTSIZE=$(wc -c < "$GUEST" | tr -d ' ')
 R=$(xe ch1 'wc -c < /run/gantry/bin/gantry-guest 2>/dev/null; sha256sum /run/gantry/bin/gantry-guest 2>/dev/null || shasum -a 256 /run/gantry/bin/gantry-guest 2>/dev/null')
 GUESTSUM=$(printf '%s' "$R" | grep -o '[0-9a-f]\{64\}' | head -1)
 GUESTSIZE=$(printf '%s' "$R" | grep -o '^[0-9]\+' | head -1)

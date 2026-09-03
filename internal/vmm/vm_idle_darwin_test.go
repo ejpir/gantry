@@ -103,6 +103,29 @@ func TestIRQWakeUnknownRouteUsesCPU0Only(t *testing.T) {
 	}
 }
 
+func TestStalledVCPUHandlesSelectsOnlyRunningStalls(t *testing.T) {
+	now := time.Now().UnixNano()
+	vcpus := []*hvfVCPU{
+		{id: 0, vcpu: 100},
+		{id: 1, vcpu: 101},
+		{id: 2, vcpu: 102},
+		{id: 3, vcpu: 103},
+	}
+	for _, vc := range vcpus {
+		vc.inHVF.Store(true)
+	}
+	vcpus[0].lastRunEntry.Store(now - int64(vcpuLivenessLimit))
+	vcpus[1].lastRunEntry.Store(now - int64(vcpuLivenessLimit/2))
+	vcpus[2].inHVF.Store(false)
+	vcpus[2].lastRunEntry.Store(now - int64(2*vcpuLivenessLimit))
+	// vCPU 3 has entered no run loop yet and therefore has no timestamp.
+
+	handles := stalledVCPUHandles(vcpus, now)
+	if len(handles) != 1 || handles[0] != 100 {
+		t.Fatalf("stalled handles = %v, want [100]", handles)
+	}
+}
+
 func TestHVFUnknownExitRetryIsBounded(t *testing.T) {
 	for attempt := 1; attempt <= hvfUnknownRetryLimit; attempt++ {
 		delay, retry := hvfUnknownRetryDelay(attempt)

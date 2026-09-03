@@ -93,6 +93,21 @@ func (s *sandboxSetupTask) calls() (creates, starts, deletes int) {
 	return s.creates, s.starts, s.deletes
 }
 
+func TestRecordSessionExitStatus(t *testing.T) {
+	status := 0
+	recordSessionExitStatus(&status, nil, errors.New("Wait transport failed"))
+	if status != 255 {
+		t.Fatalf("failed Wait status = %d, want 255", status)
+	}
+
+	recordSessionExitStatus(&status, &v3.WaitResponse{ExitStatus: 7}, nil)
+	if status != 7 {
+		t.Fatalf("successful Wait status = %d, want 7", status)
+	}
+	// A caller that does not request status propagation remains supported.
+	recordSessionExitStatus(nil, nil, errors.New("ignored"))
+}
+
 func TestBeginMountSetupRollsBackPartialMountFailure(t *testing.T) {
 	service := &mountSetupService{mountErr: errors.New("partial mount")}
 	options := SessionOptions{
