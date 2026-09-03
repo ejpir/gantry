@@ -24,6 +24,7 @@ macOS overrides:
   GANTRY_TEST_ROOTFS             arm64 Nerdbox rootfs
   GANTRY_TEST_WORKLOAD_IMAGE     workload EROFS image (default: downloaded test image)
   GANTRY_TEST_IDE_IMAGE          curated Dev Containers EROFS image
+  GANTRY_TEST_PUBLIC_EGRESS      required or skip (default: probe host capability)
   GANTRY_SKIP_DEVCONTAINERS=1    skip SSH/Dev Containers and directory batteries
 EOF
 }
@@ -58,6 +59,22 @@ run_macos_validation() {
 		}
 	done
 	[ -n "${HOME:-}" ] || { echo "HOME must be set for macOS validation" >&2; exit 1; }
+
+	# The field battery normally requires direct public TCP egress. Corporate
+	# macOS hosts may expose the Internet only through an application proxy,
+	# which is a host-policy limitation rather than a Gantry failure. Probe the
+	# exact direct endpoint without consulting proxy variables; callers can set
+	# GANTRY_TEST_PUBLIC_EGRESS=required to force the assertion.
+	MAC_PUBLIC_EGRESS=${GANTRY_TEST_PUBLIC_EGRESS:-}
+	if [ -z "$MAC_PUBLIC_EGRESS" ]; then
+		if python3 -c 'import socket; s = socket.create_connection(("1.1.1.1", 443), 5); s.close()' \
+			>/dev/null 2>&1; then
+			MAC_PUBLIC_EGRESS=required
+		else
+			MAC_PUBLIC_EGRESS=skip
+			echo "macOS host has no direct public TCP path; public guest egress checks will be skipped" >&2
+		fi
+	fi
 
 	# Keep Unix-domain endpoints below Darwin's 104-byte sockaddr_un limit.
 	MAC_TMP=$(mktemp -d /tmp/gantry-me2e.XXXXXX)
@@ -101,6 +118,7 @@ run_macos_validation() {
 
 	echo "===== macOS HVF: core CLI, runtime, networking, credentials, and MCP battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" \
+		GANTRY_TEST_PUBLIC_EGRESS="$MAC_PUBLIC_EGRESS" \
 		GANTRY_TEST_ROOT="$ROOT" \
 		GANTRY_TEST_EXE="$MAC_GANTRY" \
 		GANTRY_TEST_KERNEL="$MAC_KERNEL" \

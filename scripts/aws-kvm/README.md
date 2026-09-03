@@ -58,7 +58,10 @@ arm64 kernel, rootfs, and curated IDE assets are reused from `artifacts/`;
 missing release assets are downloaded and a missing curated image is built.
 Set `GANTRY_SKIP_DEVCONTAINERS=1` to skip only the curated-image SSH/Dev
 Containers and large-directory checks; the core runtime, networking,
-credentials, MCP, confinement, and manager batteries still run.
+credentials, MCP, confinement, and manager batteries still run. The macOS
+orchestrator skips the two direct-public-egress assertions when a socket probe
+confirms that host policy permits Internet access only through a proxy; set
+`GANTRY_TEST_PUBLIC_EGRESS=required` to force those assertions.
 
 ## Quick start
 

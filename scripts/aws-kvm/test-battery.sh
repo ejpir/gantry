@@ -15,6 +15,11 @@ RUNSC_KERNEL=${GANTRY_TEST_RUNSC_KERNEL:-}
 RUNSC_ROOTFS=${GANTRY_TEST_RUNSC_ROOTFS:-}
 CACHE_IMAGE=${GANTRY_TEST_CACHE_IMAGE:-alpine:latest}
 EXPECTED_ARCH=${GANTRY_TEST_EXPECTED_ARCH:-x86_64}
+PUBLIC_EGRESS=${GANTRY_TEST_PUBLIC_EGRESS:-required}
+case "$PUBLIC_EGRESS" in
+required|skip) ;;
+*) echo "GANTRY_TEST_PUBLIC_EGRESS must be required or skip" >&2; exit 2 ;;
+esac
 if { [ -n "$RUNSC_KERNEL" ] && [ -z "$RUNSC_ROOTFS" ]; } || \
    { [ -z "$RUNSC_KERNEL" ] && [ -n "$RUNSC_ROOTFS" ]; }; then
   echo "GANTRY_TEST_RUNSC_KERNEL and GANTRY_TEST_RUNSC_ROOTFS must be set together" >&2
@@ -27,13 +32,15 @@ export GANTRY_IMAGES="${GANTRY_IMAGES:-/tmp/.gantry/images}"
 RWDIR="$(dirname "$GANTRY_HOME")/rwlayers"
 PASS=0
 FAIL=0
+SKIPPED=0
 MOCKPID=
 MOCKMCP=
 HTTP_SESSION=
 PORT_SPEC=
 EXPORT_ARCHIVE=/tmp/gantry-functional-export-$$.oci.tar
-ok()  { echo "PASS: $1"; PASS=$((PASS+1)); }
-bad() { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
+bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+skip() { echo "SKIP: $1"; SKIPPED=$((SKIPPED+1)); }
 chk() { local n="$1" want="$2" got="$3"; if printf '%s' "$got" | grep -qa -- "$want"; then ok "$n"; else bad "$n"; printf '%s\n' "$got" | tail -4; fi; }
 # empty_cred asserts the helper emitted NO credential. `gantry exec`
 # prints its own client-noise lines, so the test is "no password=" (never
@@ -93,12 +100,16 @@ for boundary in ("filesystemBoundary", "networkBoundary"):
         raise SystemExit(f"{boundary}={state.get(boundary)!r}, want 'enforced'")
 PY
 }
+stop_background() {
+  local pid=${1:-}
+  [ -z "$pid" ] || { kill "$pid" >/dev/null 2>&1; wait "$pid" >/dev/null 2>&1; }
+}
 cleanup() {
   trap - EXIT HUP INT TERM
   [ -z "$PORT_SPEC" ] || "$G" ports unpublish --ephemeral t4 "$PORT_SPEC" >/dev/null 2>&1
-  [ -z "$HTTP_SESSION" ] || kill "$HTTP_SESSION" >/dev/null 2>&1
-  [ -z "$MOCKPID" ] || kill "$MOCKPID" >/dev/null 2>&1
-  [ -z "$MOCKMCP" ] || kill "$MOCKMCP" >/dev/null 2>&1
+  stop_background "$HTTP_SESSION"
+  stop_background "$MOCKPID"
+  stop_background "$MOCKMCP"
   for sandbox in t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 t13 t14 t10bad t12bad1 t12bad2; do
     "$G" stop "$sandbox" >/dev/null 2>&1
     "$G" delete "$sandbox" >/dev/null 2>&1
@@ -129,8 +140,12 @@ R=$(xe t1 'exit 7');                        chk "crun: exit status"     "status 
 R=$(xe t1 'echo SEQ2');                     chk "crun: sequential"      "SEQ2"    "$R"
 R=$(xe t1 'if command -v getent >/dev/null; then getent hosts deb.debian.org; else nslookup deb.debian.org; fi')
                                             chk "crun: DNS"             "debian.org" "$R"
-R=$(xe t1 'if command -v bash >/dev/null; then timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443"; else timeout 8 wget -qO /dev/null https://example.com; fi && echo EGRESS-OK')
+if [ "$PUBLIC_EGRESS" = required ]; then
+  R=$(xe t1 'if command -v bash >/dev/null; then timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443"; elif command -v nc >/dev/null; then timeout 8 nc -z -w 5 1.1.1.1 443; else timeout 8 wget -qO /dev/null https://example.com; fi && echo EGRESS-OK')
                                             chk "crun: egress"          "EGRESS-OK" "$R"
+else
+                                            skip "crun: public egress (host has no direct public TCP path)"
+fi
 R=$(xe t1 'if command -v bash >/dev/null; then timeout 3 bash -c "echo > /dev/tcp/192.168.127.254/80"; else timeout 3 wget -qO /dev/null http://192.168.127.254/; fi && echo WB || echo WALL-OK')
                                             chk "crun: local-net wall"  "WALL-OK" "$R"
 ( xe t1 'sleep 5; echo CC1-ALIVE' > /tmp/cc1.log 2>&1 ) &
@@ -181,6 +196,7 @@ R=$("$G" image ls 2>&1);                   chk "image prune: referenced import p
 "$G" delete t13 >/dev/null 2>&1
 R=$("$G" image rm gantry-e2e/import:latest 2>&1)
                                             chk "image rm: imported reference removable" "removed" "$R"
+"$G" delete t1 >/dev/null 2>&1
 
 echo "===== runsc (t2) ====="
 start_runsc t2 >/dev/null 2>&1
@@ -190,8 +206,12 @@ R=$(xe t2 'exit 7');                        chk "runsc: exit status"    "status 
 R=$(xe t2 'echo SEQ2');                     chk "runsc: sequential"     "SEQ2"    "$R"
 R=$(xe t2 'if command -v getent >/dev/null; then getent hosts deb.debian.org; else nslookup deb.debian.org; fi')
                                             chk "runsc: DNS"            "debian.org" "$R"
-R=$(xe t2 'if command -v bash >/dev/null; then timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443"; else timeout 8 wget -qO /dev/null https://example.com; fi && echo EGRESS-OK')
+if [ "$PUBLIC_EGRESS" = required ]; then
+  R=$(xe t2 'if command -v bash >/dev/null; then timeout 5 bash -c "echo > /dev/tcp/1.1.1.1/443"; elif command -v nc >/dev/null; then timeout 8 nc -z -w 5 1.1.1.1 443; else timeout 8 wget -qO /dev/null https://example.com; fi && echo EGRESS-OK')
                                             chk "runsc: egress"         "EGRESS-OK" "$R"
+else
+                                            skip "runsc: public egress (host has no direct public TCP path)"
+fi
 R=$(xe t2 'if command -v bash >/dev/null; then timeout 3 bash -c "echo > /dev/tcp/192.168.127.254/80"; else timeout 3 wget -qO /dev/null http://192.168.127.254/; fi && echo WB || echo WALL-OK')
                                             chk "runsc: local-net wall" "WALL-OK" "$R"
 ( xe t2 'sleep 5; echo S1-ALIVE' > /tmp/s1.log 2>&1 ) &
@@ -202,6 +222,8 @@ chk "runsc: concurrent (s1)" "S1-ALIVE" "$(cat /tmp/s1.log)"
 xe t2 'rm -f /session-survivor; (while :; do echo x >> /session-survivor; sleep 0.1; done) &' >/dev/null
 R=$(xe t2 'n=$(wc -c < /session-survivor); sleep 2; test "$(wc -c < /session-survivor)" = "$n" && echo TREE-GONE')
                                             chk "runsc: session descendants reaped" "TREE-GONE" "$R"
+"$G" stop t2 >/dev/null 2>&1
+"$G" delete t2 >/dev/null 2>&1
 
 echo "===== shares (runsc, t3) ====="
 rm -rf /tmp/sharetest && mkdir -p /tmp/sharetest && echo hostfile > /tmp/sharetest/existing.txt
@@ -211,6 +233,8 @@ R=$(xe t3 'ls /host/code');                             chk "share: read"   "exi
 R=$(xe t3 'mkdir /host/code/d2 && echo MK-OK');         chk "share: mkdir"  "MK-OK" "$R"
 R=$(xe t3 'echo x > /host/code/f2 && echo WR-OK');      chk "share: write"  "WR-OK" "$R"
 [ -f /tmp/sharetest/f2 ] && [ -d /tmp/sharetest/d2 ] && ok "share: visible on host" || bad "share: visible on host"
+"$G" stop t3 >/dev/null 2>&1
+"$G" delete t3 >/dev/null 2>&1
 
 echo "===== required process isolation (t14) ====="
 if "$G" start t14 -process-isolation=required -kernel "$KERNEL" -rootfs "$ROOTFS" \
@@ -226,6 +250,8 @@ else
   bad "isolation: required sandbox starts"
   tail -20 /tmp/t14-start.log
 fi
+"$G" stop t14 >/dev/null 2>&1
+"$G" delete t14 >/dev/null 2>&1
 
 echo "===== OCI image (t4: registry/cache resolution) ====="
 mkdir -p "$GANTRY_IMAGES"
@@ -248,12 +274,31 @@ R=$(xe t4 'busybox | head -1');                   chk "image: busybox links"  "B
 R=$("$G" image ls 2>&1);                         chk "image: ls shows cached reference" "$CACHE_IMAGE" "$R"
 
 # Keep one exec session alive as a guest HTTP service while publishing and
-# withdrawing a live host port. The chosen loopback port is intentionally
-# ephemeral so local developer runs do not need a reserved port.
-printf '%s\n' 'mkdir -p /tmp/gantry-http; printf GANTRY-PORT-OK > /tmp/gantry-http/index.html; exec busybox httpd -f -p 18080 -h /tmp/gantry-http' \
-  | run_with_timeout 120 "$G" exec t4 >/tmp/gantry-t4-http.log 2>&1 &
+# withdrawing a live host port. Alpine's minimal BusyBox does not include the
+# httpd applet, so use its persistent netcat listener with a tiny HTTP handler.
+# The chosen loopback port is intentionally ephemeral so local developer runs
+# do not need a reserved port.
+PORT_FIXTURE=$(cat <<'GUEST_HTTP'
+printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK"' > /tmp/gantry-http-handler
+chmod 700 /tmp/gantry-http-handler
+exec busybox nc -lk -p 18080 -e /tmp/gantry-http-handler
+GUEST_HTTP
+)
+run_with_timeout 120 "$G" exec t4 -- sh -c "$PORT_FIXTURE" </dev/null >/tmp/gantry-t4-http.log 2>&1 &
 HTTP_SESSION=$!
-sleep 2
+PORT_FIXTURE_READY=
+for _ in {1..60}; do
+  if grep -qa 'task started' /tmp/gantry-t4-http.log; then
+    PORT_FIXTURE_READY=1
+    break
+  fi
+  kill -0 "$HTTP_SESSION" 2>/dev/null || break
+  sleep 1
+done
+if [ -z "$PORT_FIXTURE_READY" ]; then
+  echo "guest port fixture did not reach task start before publication:" >&2
+  tail -20 /tmp/gantry-t4-http.log >&2
+fi
 R=$("$G" ports publish --ephemeral t4 18080 2>&1)
                                             chk "ports: ephemeral host allocation accepted" "published" "$R"
 PORTS=$("$G" ports ls t4 2>&1)
@@ -266,20 +311,22 @@ fi
 PORT_SPEC=$HOST_PORT:18080
 PORT_BODY=
 for _ in 1 2 3 4 5; do
-  PORT_BODY=$(curl -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>/dev/null) && break
+  PORT_BODY=$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>/dev/null) && break
   sleep 1
 done
                                             chk "ports: guest service reachable" "GANTRY-PORT-OK" "$PORT_BODY"
+if ! printf '%s' "$PORT_BODY" | grep -qa 'GANTRY-PORT-OK'; then
+  tail -20 /tmp/gantry-t4-http.log >&2
+fi
                                             chk "ports: live mapping listed" "$HOST_PORT" "$PORTS"
 "$G" ports unpublish --ephemeral t4 "$PORT_SPEC" >/dev/null 2>&1
 PORT_SPEC=
-if curl -fsS --max-time 1 "http://127.0.0.1:$HOST_PORT/" >/dev/null 2>&1; then
+if curl --noproxy '*' -fsS --max-time 1 "http://127.0.0.1:$HOST_PORT/" >/dev/null 2>&1; then
   bad "ports: unpublish closes listener"
 else
   ok "ports: unpublish closes listener"
 fi
-kill "$HTTP_SESSION" >/dev/null 2>&1
-wait "$HTTP_SESSION" 2>/dev/null
+stop_background "$HTTP_SESSION"
 HTTP_SESSION=
 
 echo "===== secrets (t5: cached OCI image) ====="
@@ -440,7 +487,7 @@ sleep 4
 URL=$(grep -oa 'https://claude.ai/oauth/authorize[^ ]*' /tmp/t10-login.log | head -1)
 CPORT=$(printf '%s' "$URL" | sed -n 's/.*127\.0\.0\.1%3A\([0-9]*\)%2Fcallback.*/\1/p')
 CSTATE=$(printf '%s' "$URL" | sed -n 's/.*[?&]state=\([A-Za-z0-9_-]*\).*/\1/p')
-curl -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
+curl --noproxy '*' -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
 # The guest helper polls oauth.status on a ~1s cadence; give the
 # completion line time to land in the session log instead of racing it.
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
@@ -467,7 +514,7 @@ R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
                                             chk "custody: session restored after restart"     "session restored and access token pushed" "$R"
 R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
                                             chk "custody: unknown provider refused"           "no custody login" "$R"
-kill "$MOCKPID" 2>/dev/null
+stop_background "$MOCKPID"
 MOCKPID=
 
 echo "===== MCP gateway (t11: fs server via mcp-proxy, containment) ====="
@@ -635,9 +682,9 @@ OUT=$("$G" start t12bad1 -mcp-remote 'name=evil,url=https://169.254.169.254/late
 chk "mcp: cloud metadata target refused" "non-public" "$OUT"
 OUT=$("$G" start t12bad2 -mcp-remote 'name=plain,url=http://1.2.3.4/mcp,allow=*' -image "$CACHE_IMAGE" 2>&1)
 chk "mcp: plain HTTP to a public host refused" "plain HTTP" "$OUT"
-kill "$MOCKMCP" 2>/dev/null
+stop_background "$MOCKMCP"
 MOCKMCP=
 
 echo "==============================="
-echo "RESULT: $PASS passed, $FAIL failed"
+echo "RESULT: $PASS passed, $FAIL failed, $SKIPPED skipped"
 [ "$FAIL" = 0 ]
