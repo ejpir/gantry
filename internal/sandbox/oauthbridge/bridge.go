@@ -471,12 +471,13 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			// Codex answers /auth/callback with a 302 to its result page.
 			// Keep that navigation on this loopback bridge: the guest must
 			// not turn the host browser into an egress or localhost proxy.
-			if err := validateReplayLocation(res.location); err != nil {
+			location, err := normalizeReplayLocation(res.location, l.port)
+			if err != nil {
 				b.logf("replay response from sandbox port %d used unsafe Location: %v", l.port, err)
 				http.Error(w, "gantry oauth bridge: unsafe callback redirect", http.StatusBadGateway)
 				return
 			}
-			w.Header().Set("Location", res.location)
+			w.Header().Set("Location", location)
 		}
 		w.WriteHeader(res.status)
 		_, _ = w.Write(res.body)
@@ -495,7 +496,7 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 type replayResult struct {
 	status      int
 	contentType string // guest Content-Type; the handler default applies when empty
-	location    string // validated origin-relative guest redirect target
+	location    string // normalized to an origin-relative target before browser relay
 	body        []byte
 }
 
@@ -533,29 +534,29 @@ func (b *Bridge) replayViaDevTCP(port int, requestURI string) (replayResult, err
 	if status != 0 {
 		return replayResult{}, fmt.Errorf("in-sandbox replay exited %d: %s", status, strings.TrimSpace(string(tailBytes(stdout, 512))))
 	}
-	// The isolated session task appends a "client: task exited, status N"
-	// trailer to stdout (it is not Quiet-gated); strip it so it can never
-	// corrupt close-delimited response bodies.
-	stdout = bytes.TrimRight(stdout, "\n")
+	// The isolated session task may append a "client: task exited, status N"
+	// trailer to stdout. Strip only that trailer: trimming newlines generally
+	// destroys the CRLFCRLF terminator of an empty 302 response.
 	if i := bytes.LastIndex(stdout, []byte("\nclient: task exited, status ")); i >= 0 {
-		stdout = stdout[:i+1]
+		stdout = stdout[:i]
 	}
-	return parseRawHTTPResponse(stdout)
+	return parseRawHTTPResponse(stdout, port)
 }
 
 // parseRawHTTPResponse splits a raw HTTP/1.x response (as printed by cat)
 // into status, the headers worth relaying (Content-Type, Location), and
-// body. Content-Length bodies are sliced exactly; chunked bodies are
+// body. Session transports can canonicalize CRLF to LF, so both forms are
+// accepted. Content-Length bodies are sliced exactly; chunked bodies are
 // unfolded.
-func parseRawHTTPResponse(raw []byte) (replayResult, error) {
+func parseRawHTTPResponse(raw []byte, callbackPort int) (replayResult, error) {
 	if len(raw) > MaxReplayResponseSize {
 		return replayResult{}, fmt.Errorf("HTTP response exceeds %d bytes", MaxReplayResponseSize)
 	}
-	head, body, ok := bytes.Cut(raw, []byte("\r\n\r\n"))
+	head, body, lineEnding, ok := splitHTTPResponseHead(raw)
 	if !ok {
 		return replayResult{}, fmt.Errorf("no HTTP response from the in-sandbox listener: %.200s", raw)
 	}
-	statusLine, headers, _ := bytes.Cut(head, []byte("\r\n"))
+	statusLine, headers, _ := bytes.Cut(head, lineEnding)
 	fields := bytes.Fields(statusLine)
 	if len(fields) < 2 || !bytes.HasPrefix(fields[0], []byte("HTTP/")) {
 		return replayResult{}, fmt.Errorf("malformed HTTP status line: %.100s", statusLine)
@@ -569,7 +570,7 @@ func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 	}
 	res := replayResult{status: status, body: body}
 	var chunked bool
-	for _, line := range bytes.Split(headers, []byte("\r\n")) {
+	for _, line := range bytes.Split(headers, lineEnding) {
 		k, v, ok := bytes.Cut(line, []byte(":"))
 		if !ok {
 			continue
@@ -591,8 +592,8 @@ func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Type")):
 			res.contentType = string(v)
 		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Location")):
-			location := string(v)
-			if err := validateReplayLocation(location); err != nil {
+			location, err := normalizeReplayLocation(string(v), callbackPort)
+			if err != nil {
 				return replayResult{}, fmt.Errorf("unsafe HTTP Location: %w", err)
 			}
 			res.location = location
@@ -606,6 +607,53 @@ func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 		res.body = decoded
 	}
 	return res, nil
+}
+
+func splitHTTPResponseHead(raw []byte) (head, body, lineEnding []byte, ok bool) {
+	crlfIndex := bytes.Index(raw, []byte("\r\n\r\n"))
+	lfIndex := bytes.Index(raw, []byte("\n\n"))
+	switch {
+	case crlfIndex >= 0 && (lfIndex < 0 || crlfIndex < lfIndex):
+		return raw[:crlfIndex], raw[crlfIndex+4:], []byte("\r\n"), true
+	case lfIndex >= 0:
+		return raw[:lfIndex], raw[lfIndex+2:], []byte("\n"), true
+	default:
+		return nil, nil, nil, false
+	}
+}
+
+// normalizeReplayLocation accepts origin-relative redirects and the absolute
+// same-origin form emitted by newer Codex tiny-http listeners. Absolute
+// localhost redirects are rewritten to relative form before reaching the host
+// browser; a different port could target an unrelated host-local service.
+func normalizeReplayLocation(location string, callbackPort int) (string, error) {
+	if err := validateReplayLocation(location); err == nil {
+		return location, nil
+	}
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return "", fmt.Errorf("parse redirect: %w", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil || callbackPort <= 0 || port != callbackPort || parsed.Scheme != "http" ||
+		(parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1") ||
+		parsed.User != nil || parsed.Opaque != "" {
+		return "", fmt.Errorf("redirect must stay on bridge origin 127.0.0.1:%d", callbackPort)
+	}
+	relative := parsed.EscapedPath()
+	if relative == "" {
+		relative = "/"
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" {
+		relative += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		relative += "#" + parsed.EscapedFragment()
+	}
+	if err := validateReplayLocation(relative); err != nil {
+		return "", err
+	}
+	return relative, nil
 }
 
 // validateReplayLocation permits only absolute-path references on the bridge
@@ -643,10 +691,12 @@ func decodeChunkedBody(raw []byte) ([]byte, error) {
 	var out []byte
 	rest := raw
 	for {
-		line, tail, ok := bytes.Cut(rest, []byte("\r\n"))
-		if !ok {
+		lineEnd := bytes.IndexByte(rest, '\n')
+		if lineEnd < 0 {
 			return nil, fmt.Errorf("truncated chunk header")
 		}
+		line := bytes.TrimSuffix(rest[:lineEnd], []byte{'\r'})
+		tail := rest[lineEnd+1:]
 		// Chunk sizes are hex, optionally followed by ;extensions.
 		sizeText, _, _ := bytes.Cut(line, []byte(";"))
 		n, err := strconv.ParseInt(strings.TrimSpace(string(sizeText)), 16, 64)
@@ -656,16 +706,19 @@ func decodeChunkedBody(raw []byte) ([]byte, error) {
 		if n == 0 {
 			return out, nil // last-chunk; trailers ignored
 		}
-		// Spell this without n+2: a malicious MaxInt64 chunk size would
-		// overflow that addition and turn the subsequent slice into a panic.
-		if len(tail) < 2 || n > int64(len(tail)-2) {
+		if n > int64(len(tail)) {
 			return nil, fmt.Errorf("truncated chunk data")
 		}
 		out = append(out, tail[:n]...)
-		if !bytes.Equal(tail[n:n+2], []byte("\r\n")) {
+		terminator := tail[n:]
+		switch {
+		case bytes.HasPrefix(terminator, []byte("\r\n")):
+			rest = terminator[2:]
+		case bytes.HasPrefix(terminator, []byte("\n")):
+			rest = terminator[1:]
+		default:
 			return nil, fmt.Errorf("malformed chunk terminator")
 		}
-		rest = tail[n+2:] // skip data + CRLF
 	}
 }
 

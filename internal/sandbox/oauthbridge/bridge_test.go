@@ -249,6 +249,24 @@ func TestBridgeForwardsGuestRedirect(t *testing.T) {
 	}
 }
 
+func TestBridgeNormalizesAbsoluteSameOriginGuestRedirect(t *testing.T) {
+	b := testBridge(t, func(port int, uri string) (replayResult, error) {
+		return replayResult{
+			status:   http.StatusFound,
+			location: "http://localhost:1455/success?id_token=opaque",
+		}, nil
+	})
+	rec := httptest.NewRecorder()
+	b.handleCallback(&listener{port: 1455})(rec,
+		httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc", nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if got := rec.Header().Get("Location"); got != "/success?id_token=opaque" {
+		t.Fatalf("Location = %q, want same-origin relative redirect", got)
+	}
+}
+
 func TestBridgeRejectsGuestRedirectOffBridgeOrigin(t *testing.T) {
 	for _, location := range []string{
 		"https://attacker.example/exfil?oauth_code=abc123",
@@ -406,7 +424,7 @@ func TestBridgeRejectsOversizeReplayResponse(t *testing.T) {
 	}
 
 	payload := []byte(strings.Repeat("y", MaxReplayResponseSize+4096))
-	if _, err := parseRawHTTPResponse(payload); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := parseRawHTTPResponse(payload, 1455); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversize raw response error = %v", err)
 	}
 }
@@ -450,9 +468,29 @@ func (closedTestListener) Accept() (net.Conn, error) { return nil, net.ErrClosed
 func (closedTestListener) Close() error              { return nil }
 func (closedTestListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
+func TestReplayViaDevTCPPreservesEmptyRedirectTerminator(t *testing.T) {
+	response := "HTTP/1.0 302 Found\r\n" +
+		"Server: tiny-http (Rust)\r\n" +
+		"Location: http://localhost:1455/success?id_token=opaque\r\n\r\n"
+	for _, suffix := range []string{"", "\nclient: task exited, status 0\n"} {
+		b := &Bridge{
+			exec: func([]string, time.Duration) ([]byte, int, error) {
+				return []byte(response + suffix), 0, nil
+			},
+		}
+		res, err := b.replayViaDevTCP(1455, "/auth/callback?code=abc")
+		if err != nil {
+			t.Fatalf("suffix %q: %v", suffix, err)
+		}
+		if res.status != http.StatusFound || res.location != "/success?id_token=opaque" {
+			t.Fatalf("suffix %q: response = %+v", suffix, res)
+		}
+	}
+}
+
 func TestParseRawHTTPResponse(t *testing.T) {
 	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: task exited, status 0\n"
-	res, err := parseRawHTTPResponse([]byte(raw))
+	res, err := parseRawHTTPResponse([]byte(raw), 1455)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,20 +506,38 @@ func TestParseRawHTTPResponse(t *testing.T) {
 
 	// Close-delimited body without Content-Length.
 	raw2 := "HTTP/1.0 302 Found\r\nLocation: /auth/success\r\n\r\n"
-	res, err = parseRawHTTPResponse([]byte(raw2))
+	res, err = parseRawHTTPResponse([]byte(raw2), 1455)
 	if err != nil || res.status != 302 {
 		t.Fatalf("status %d err %v", res.status, err)
 	}
 	if res.location != "/auth/success" {
 		t.Fatalf("location = %q (redirect target lost)", res.location)
 	}
+
+	// Session stream transports can turn tiny-http's CRLF response into LF.
+	// Newer Codex listeners also return an absolute redirect to their own
+	// callback origin; normalize it before returning it to the host browser.
+	tinyHTTP := "HTTP/1.0 302 Found\n" +
+		"Server: tiny-http (Rust)\n" +
+		"Location: http://localhost:1455/success?id_token=opaque\n\n"
+	res, err = parseRawHTTPResponse([]byte(tinyHTTP), 1455)
+	if err != nil || res.status != http.StatusFound {
+		t.Fatalf("tiny-http LF response: status %d err %v", res.status, err)
+	}
+	if res.location != "/success?id_token=opaque" {
+		t.Fatalf("tiny-http Location = %q, want normalized same-origin path", res.location)
+	}
+	if _, err := parseRawHTTPResponse([]byte(tinyHTTP), 53692); err == nil {
+		t.Fatal("same-host redirect to a different callback port must be rejected")
+	}
+
 	for _, location := range []string{
 		"https://attacker.example/exfil",
 		"//attacker.example/from-guest",
 		"/%2f%2fattacker.example/from-guest",
 	} {
 		raw := "HTTP/1.0 302 Found\r\nLocation: " + location + "\r\n\r\n"
-		if _, err := parseRawHTTPResponse([]byte(raw)); err == nil || !strings.Contains(err.Error(), "unsafe HTTP Location") {
+		if _, err := parseRawHTTPResponse([]byte(raw), 1455); err == nil || !strings.Contains(err.Error(), "unsafe HTTP Location") {
 			t.Errorf("Location %q error = %v", location, err)
 		}
 	}
@@ -489,7 +545,7 @@ func TestParseRawHTTPResponse(t *testing.T) {
 	// Node-style chunked response (claude/pi listeners).
 	raw3 := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n" +
 		"8\r\nSign-in \r\n8\r\ncomplete\r\n0\r\n\r\n"
-	res, err = parseRawHTTPResponse([]byte(raw3))
+	res, err = parseRawHTTPResponse([]byte(raw3), 1455)
 	if err != nil || res.status != 200 {
 		t.Fatalf("chunked: status %d err %v", res.status, err)
 	}
@@ -497,10 +553,17 @@ func TestParseRawHTTPResponse(t *testing.T) {
 		t.Fatalf("chunked body = %q", res.body)
 	}
 
-	if _, err := parseRawHTTPResponse([]byte("garbage")); err == nil {
+	lfChunked := "HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n" +
+		"8\nSign-in \n8\ncomplete\n0\n\n"
+	res, err = parseRawHTTPResponse([]byte(lfChunked), 1455)
+	if err != nil || string(res.body) != "Sign-in complete" {
+		t.Fatalf("LF chunked body = %q, err %v", res.body, err)
+	}
+
+	if _, err := parseRawHTTPResponse([]byte("garbage"), 1455); err == nil {
 		t.Fatal("expected error for non-HTTP input")
 	}
-	if _, err := parseRawHTTPResponse([]byte("oops\r\n\r\nbody")); err == nil {
+	if _, err := parseRawHTTPResponse([]byte("oops\r\n\r\nbody"), 1455); err == nil {
 		t.Fatal("expected error for malformed status line")
 	}
 }
@@ -510,7 +573,7 @@ func TestDecodeChunkedBodyRejectsOverflowSize(t *testing.T) {
 		t.Fatal("MaxInt64 chunk size must be rejected")
 	}
 	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffffffffffff\r\nx\r\n"
-	if _, err := parseRawHTTPResponse([]byte(raw)); err == nil || !strings.Contains(err.Error(), "decode chunked") {
+	if _, err := parseRawHTTPResponse([]byte(raw), 1455); err == nil || !strings.Contains(err.Error(), "decode chunked") {
 		t.Fatalf("malformed chunked response error = %v", err)
 	}
 }
