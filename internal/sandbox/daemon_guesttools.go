@@ -389,11 +389,15 @@ func (d *daemonRuntime) verifyGuestTools(ctx context.Context, sum [32]byte, size
 	return nil
 }
 
-// guestToolsStageBase keeps Windows staging in Gantry-owned sandbox state.
+// guestToolsStageBase keeps Windows staging in the Gantry-owned state root,
+// but outside the per-sandbox directory that must never be guest-visible.
 // An empty base deliberately selects the OS temporary directory on Unix.
 func guestToolsStageBase(goos, sandboxDir string) string {
 	if goos == "windows" {
-		return sandboxDir
+		if sandboxDir == "" {
+			return ""
+		}
+		return filepath.Dir(sandboxDir)
 	}
 	return ""
 }

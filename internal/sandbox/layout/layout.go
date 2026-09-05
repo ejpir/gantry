@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
@@ -36,6 +37,26 @@ import (
 func Root() string {
 	paths := rootSecurityPath()
 	return paths[len(paths)-1]
+}
+
+// ProtectionRoot returns the application-owned state tree that a guest share
+// must never overlap. Production sandbox directories are direct children of
+// Root, while other security-sensitive state (SSH include files, writable
+// disks, network policies, and the manager socket) is stored beside Root.
+// Protecting only one sandbox—or only Root—would therefore leave both
+// cross-sandbox poisoning and host configuration injection paths open.
+//
+// Tests and embedders may construct standalone state directories outside
+// Root; for those, retain the narrower directory boundary. EqualFold is
+// deliberately conservative here so a differently cased Windows spelling
+// cannot evade production-layout recognition.
+func ProtectionRoot(sandboxDir string) string {
+	root := filepath.Clean(Root())
+	sandboxDir = filepath.Clean(sandboxDir)
+	if parent := filepath.Dir(sandboxDir); parent == root || strings.EqualFold(parent, root) {
+		return filepath.Dir(root)
+	}
+	return sandboxDir
 }
 
 // EnsureRoot creates and secures each application-owned component separately.

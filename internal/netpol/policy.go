@@ -15,8 +15,8 @@
 //     resolved IPs added to a dynamic allow table (TTL-capped). Classic
 //     sandbox use: "only deb.debian.org and *.docker.io".
 //
-// Link-local services (ARP, DHCP, the gateway's DNS/service address) are
-// always permitted so the network stays functional. A guest can still reach
+// Link-local services (ARP, DHCP, and the gateway's DNS address) are always
+// permitted so the network stays functional. A guest can still reach
 // IPs it already knows without DNS (inherent to DNS-based filtering) — the
 // rules layer is the hard guarantee, domains the convenient one.
 package netpol
@@ -695,23 +695,32 @@ func (p *Policy) MatchTX(frame []byte) bool {
 		return false
 	}
 	dst := net.IP(pp.dst[:])
-	// Only the sandbox's own gateway and broadcast (DHCP) get the
-	// link-services pass; multicast is NOT exempt — mDNS/SSDP probes are
-	// LAN discovery and belong behind the local-network wall.
-	if dst.Equal(net.ParseIP(gatewayIP)) ||
-		dst.Equal(net.IPv4bcast) || dst.Equal(net.ParseIP(subnetBroadcast)) {
-		return p.matchGatewayService(pp)
+	isGateway := dst.Equal(net.ParseIP(gatewayIP))
+	isBroadcast := dst.Equal(net.IPv4bcast) || dst.Equal(net.ParseIP(subnetBroadcast))
+	// A DHCP client request is consumed by the embedded server bound to UDP
+	// port 67. Nothing else gets a broadcast bypass: the default gVisor UDP
+	// forwarder would otherwise turn it into host/LAN traffic.
+	if isGateway || isBroadcast {
+		if pp.proto == protoUDP && pp.sport == 68 && pp.dport == 67 {
+			return true
+		}
+		if isBroadcast {
+			return false
+		}
+		// DNS is the only other service hosted on the virtual gateway. Unknown
+		// ports must follow ordinary policy because the embedded TCP/UDP
+		// forwarders dial the destination from the host network namespace.
+		if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 {
+			return p.matchGatewayDNS(pp)
+		}
+		return p.Allows(pp.dst, pp.proto, pp.dport)
 	}
 	return p.Allows(pp.dst, pp.proto, pp.dport)
 }
 
-// matchGatewayService keeps the link functional: DHCP always, DNS filtered
-// by name when a domain allowlist exists, everything else to the gateway
-// address (its captive services) allowed.
-func (p *Policy) matchGatewayService(pp parsedPacket) bool {
-	if pp.proto == protoUDP && (pp.dport == 67 || pp.dport == 68) {
-		return true // DHCP
-	}
+// matchGatewayDNS keeps the embedded resolver reachable, filtering by name
+// when a domain allowlist exists.
+func (p *Policy) matchGatewayDNS(pp parsedPacket) bool {
 	// Policy inspects single frames; the netstack reassembles. Under a
 	// domain allowlist no single frame of a fragmented datagram can be
 	// attributed to a query name — and non-first fragments carry no ports
@@ -719,7 +728,7 @@ func (p *Policy) matchGatewayService(pp parsedPacket) bool {
 	if pp.fragmented && p.dnsFilterActive() && (pp.proto == protoUDP || pp.proto == protoTCP) {
 		return false
 	}
-	if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 && p.dnsFilterActive() {
+	if p.dnsFilterActive() {
 		return p.dnsQueryAllowed(pp)
 	}
 	return true

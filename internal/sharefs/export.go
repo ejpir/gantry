@@ -20,6 +20,18 @@ const (
 	ExportGone
 )
 
+// FUSE carries Linux renameat2 flags on every host. NOREPLACE and EXCHANGE
+// only rename existing directory entries; WHITEOUT can create a privileged
+// character device and therefore bypass the share's Mknod denial.
+const allowedGuestRenameFlags = uint32(1 | 2)
+
+func validateGuestRenameFlags(flags uint32) syscall.Errno {
+	if flags & ^allowedGuestRenameFlags != 0 {
+		return syscall.EPERM
+	}
+	return 0
+}
+
 func (s ExportState) String() string {
 	switch s {
 	case ExportActive:
@@ -51,14 +63,24 @@ type Export struct {
 	coherence       *exportCoherence
 
 	state atomic.Int32
+	// namespace serializes guest-originated name mutations with the
+	// lstat/open policy check. The host is trusted, but concurrent FUSE
+	// requests must not swap a FIFO or device into place between those steps.
+	namespace sync.Mutex
 	// node is the platform backend's root node, presented at /<tag>.
 	node  fs.InodeEmbedder
 	inode *fs.Inode
 	// release drops the platform backend's pinned host resources (root
 	// FD or handle). It runs at most once, from finish.
-	release   func()
-	onFinish  func(*Export)
-	finishOne sync.Once
+	release  func()
+	onFinish func(*Export)
+	// finishDrain schedules final resource release behind the serving
+	// owner's exclusive request gate. OnForget runs inside a FUSE request,
+	// so it cannot synchronously upgrade that gate without deadlocking.
+	finishDrain     func(func())
+	finishScheduled atomic.Bool
+	finishSchedule  sync.Once
+	finishOne       sync.Once
 }
 
 // State reports the export lifecycle for the control plane and dashboard.
@@ -109,7 +131,27 @@ func (e *Export) longCacheHealthy() bool {
 		e.coherence != nil && e.coherence.Healthy()
 }
 
+// finish is the OnForget path. It revokes new operations immediately, then
+// schedules the actual root-capability release after every request which may
+// already have passed its lifecycle check has drained.
 func (e *Export) finish() {
+	if e == nil {
+		return
+	}
+	e.finishSchedule.Do(func() {
+		e.finishScheduled.Store(true)
+		e.advanceState(ExportRevoked)
+		if e.finishDrain != nil {
+			e.finishDrain(e.finishNow)
+			return
+		}
+		e.finishNow()
+	})
+}
+
+// finishNow releases the pinned root while the caller either owns the
+// serving request writer gate or knows the export was never published.
+func (e *Export) finishNow() {
 	if e == nil {
 		return
 	}
@@ -140,7 +182,7 @@ func (p *Prepared) Close() {
 	if p != nil && p.export != nil {
 		export := p.export
 		p.export = nil
-		export.finish()
+		export.finishNow()
 	}
 }
 

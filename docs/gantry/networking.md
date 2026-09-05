@@ -15,8 +15,9 @@ in. The denied ranges include:
 - loopback, CGNAT, multicast, and reserved ranges;
 - the host alias used by the userspace network.
 
-The guest's ARP, DHCP, DNS, and gateway traffic remains available so the link
-can operate.
+The guest's ARP, valid DHCP client traffic, and DNS to the embedded gateway
+remain available so the link can operate. Other gateway ports follow the
+ordinary local-network policy, and non-DHCP broadcast traffic is denied.
 
 To disable the network completely:
 
@@ -139,8 +140,9 @@ $ gantry ports unpublish web 8081:80
 Live changes are saved to `sandbox.json` and re-applied after restart. Add
 `--ephemeral` to change only the current boot.
 
-Port publishing requires the embedded network stack. It is unavailable with
-`-net=false` or an external `-gvproxy` backend.
+Port publishing requires networking and the embedded network stack. It is
+unavailable with `-net=false`; the legacy external `-gvproxy` backend is
+disabled.
 
 ## Use an upstream proxy
 
@@ -184,4 +186,3 @@ policy overrides.
 The Packets view starts a bounded, in-memory capture at the virtual Ethernet
 boundary. Captures are for live diagnosis and are not written as a general
 packet log.
-

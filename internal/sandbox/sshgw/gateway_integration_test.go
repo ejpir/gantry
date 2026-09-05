@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 type recordingSpawner struct{ requests chan SpawnRequest }
@@ -73,6 +74,45 @@ func startTestGatewayWithSpawner(t *testing.T, spawner Spawner) *ssh.Client {
 	client := ssh.NewClient(conn, channels, requests)
 	t.Cleanup(func() { _ = client.Close() })
 	return client
+}
+
+func TestGatewayCancellationClosesAcceptedConnections(t *testing.T) {
+	listener := bufconn.Listen(1 << 20)
+	gateway, err := New(Config{
+		Name: "test", HostKeyPath: filepath.Join(t.TempDir(), "host_ed25519"),
+		Spawner: SpawnFunc(func(context.Context, SpawnRequest) (int, error) { return 0, nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = gateway.Serve(ctx, listener) }()
+	raw, err := listener.Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, channels, requests, err := ssh.NewClientConn(raw, "test", &ssh.ClientConfig{
+		User: "dev", HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := ssh.NewClient(conn, channels, requests)
+	t.Cleanup(func() { _ = client.Close() })
+
+	done := make(chan error, 1)
+	go func() { done <- client.Wait() }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("accepted SSH connection remained open after gateway cancellation")
+	}
+	if session, err := client.NewSession(); err == nil {
+		_ = session.Close()
+		t.Fatal("new SSH channel succeeded after gateway cancellation")
+	}
 }
 
 func TestGatewayExecEnvironmentAndExitStatus(t *testing.T) {

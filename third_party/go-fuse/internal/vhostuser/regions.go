@@ -101,6 +101,35 @@ func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
 		return fmt.Errorf("huge pages")
 	}
 
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	old := d.load()
+	if len(old) == int(d.GetMaxMemslots()) {
+		return fmt.Errorf("out of memory slots")
+	}
+	newEnd := reg.GuestPhysAddr + reg.MemorySize
+	newDriverEnd := reg.DriverAddr + reg.MemorySize
+	total := reg.MemorySize
+	if total > maxMappedMemoryBytes {
+		return fmt.Errorf("mapped memory exceeds %d bytes", maxMappedMemoryBytes)
+	}
+	for index := range old {
+		oldEnd := old[index].GuestPhysAddr + old[index].MemorySize
+		if reg.GuestPhysAddr < oldEnd && old[index].GuestPhysAddr < newEnd {
+			return fmt.Errorf("overlapping guest memory region")
+		}
+		oldDriverEnd := old[index].DriverAddr + old[index].MemorySize
+		if reg.DriverAddr < oldDriverEnd && old[index].DriverAddr < newDriverEnd {
+			return fmt.Errorf("overlapping driver memory region")
+		}
+		if old[index].MemorySize > maxMappedMemoryBytes-total {
+			return fmt.Errorf("mapped memory exceeds %d bytes", maxMappedMemoryBytes)
+		}
+		total += old[index].MemorySize
+	}
+	// Validate policy and ranges before mmap so rejected registrations cannot
+	// consume address space or leave a latent SIGBUS beyond the fd extent.
 	var dr deviceRegion
 	if err := dr.configure(fd, reg); err != nil {
 		return err
@@ -112,21 +141,6 @@ func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
 		}
 	}()
 
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	old := d.load()
-	if len(old) == int(d.GetMaxMemslots()) {
-		return fmt.Errorf("out of memory slots")
-	}
-	newEnd := reg.GuestPhysAddr + reg.MemorySize
-	for index := range old {
-		oldEnd := old[index].GuestPhysAddr + old[index].MemorySize
-		if reg.GuestPhysAddr < oldEnd && old[index].GuestPhysAddr < newEnd {
-			return fmt.Errorf("overlapping guest memory region")
-		}
-	}
-
 	idx := findRegionByGuestAddr(old, reg.GuestPhysAddr)
 	newRegs := make([]deviceRegion, len(old)+1)
 	copy(newRegs, old[:idx])
@@ -137,10 +151,13 @@ func (d *deviceRegions) AddMemReg(fd int, reg *VhostUserMemoryRegion) error {
 	return nil
 }
 
-// MAX_MEM_SLOTS is the maximum number of memory regions the device accepts.
-// 509 matches QEMU's VHOST_USER_MAX_RAM_SLOTS; when CONFIGURE_MEM_SLOTS is
-// negotiated the limit is communicated to the driver via GET_MAX_MEM_SLOTS.
-const MAX_MEM_SLOTS = 509
+// Gantry creates one supervisor-owned shared-RAM object and its in-tree vhost
+// frontend registers that object as a single region. Advertising additional
+// slots would only give a compromised VMM worker more mapping authority.
+const (
+	MAX_MEM_SLOTS        = 1
+	maxMappedMemoryBytes = uint64(1 << 40) // Gantry's VM-wide 1 TiB ceiling.
+)
 
 func (d *deviceRegions) GetMaxMemslots() uint64 {
 	return MAX_MEM_SLOTS

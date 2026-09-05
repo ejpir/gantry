@@ -32,9 +32,9 @@ package oauthbridge
 //     no helper binary, no image/rootfs changes, no MITM, no new egress:
 //     the request is made by a process inside the guest netns, which is
 //     exactly what the CLI's loopback listener expects;
-//  4. relays the CLI's HTTP response (its "sign-in complete" page) back
-//     to the browser and closes the listener once a callback carrying
-//     code=/error= has been delivered.
+//  4. returns a host-authored completion page and closes the listener once a
+//     callback carrying code=/error= has been delivered. Guest response bytes
+//     are never rendered in the host browser.
 //
 // Security posture: the bridge is enabled by default, with per-sandbox and
 // global opt-outs. Host listeners bind 127.0.0.1 only and are restricted to
@@ -50,7 +50,6 @@ package oauthbridge
 import (
 	"bytes"
 	"fmt"
-	"html"
 	"io"
 	"net"
 	"net/http"
@@ -72,6 +71,9 @@ const (
 	MaxReplayResponseSize = 256 << 10
 	ReplayTimeout         = 15 * time.Second
 	listenerLifetime      = 10 * time.Minute
+	completionPage        = "<!doctype html><meta charset=utf-8><title>OAuth callback delivered</title><h2>OAuth callback delivered</h2><p>Return to the sandbox CLI for the final sign-in result.</p>"
+	custodyPage           = "<!doctype html><meta charset=utf-8><title>OAuth callback received</title><h2>OAuth callback received</h2><p>Gantry is completing token custody on the host. Return to the sandbox CLI for the final result.</p>"
+	failurePage           = "<!doctype html><meta charset=utf-8><title>OAuth callback failed</title><h2>Sign-in could not be completed</h2><p>Gantry could not deliver the OAuth callback to the CLI inside the sandbox.</p><p>Check that the CLI is still waiting for sign-in, then retry. Details are in the sandbox daemon log.</p>"
 )
 
 // Bridge owns the host-side listeners for one sandbox daemon.
@@ -108,9 +110,22 @@ type Bridge struct {
 
 // listener is one bound host port.
 type listener struct {
-	port int
-	ln   net.Listener
-	ttl  *time.Timer
+	port          int
+	expectedPath  string
+	expectedState string
+	validateState bool
+	custody       bool
+	ln            net.Listener
+	ttl           *time.Timer
+	ttlGeneration uint64
+}
+
+type callbackTarget struct {
+	port          int
+	path          string
+	state         string
+	validateState bool
+	custody       bool
 }
 
 var (
@@ -118,10 +133,12 @@ var (
 	// printed authorize URL, URL-encoded or not:
 	//   redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback
 	//   redirect_uri=http://localhost:53692/callback
-	reOAuthRedirectURI = regexp.MustCompile(`redirect_uri=([^&\s"'\)]+)`)
+	reOAuthRedirectURI = regexp.MustCompile(`redirect_uri=([^&\s"'()<>\[\]{}\x1b]+)`)
 	// reOAuthLoopbackURL matches a directly printed callback URL:
 	//   http://localhost:53692/callback  http://127.0.0.1:1455/auth/callback
-	reOAuthLoopbackURL = regexp.MustCompile(`http://(?:localhost|127\.0\.0\.1):(\d{1,5})/[^\s"'\)]*callback`)
+	// Match the whole printed URL token, then inspect its parsed path. Keeping
+	// the suffix and query is necessary for /callback/suffix and ?state= flows.
+	reOAuthLoopbackURL = regexp.MustCompile(`http://(?:localhost|127\.0\.0\.1):(\d{1,5})/[^\s"'()<>\[\]{}\x1b]*`)
 )
 
 // New creates the default-on, resource-bounded bridge. enabled is the
@@ -163,16 +180,31 @@ func allowedCallbackPort(port int) bool {
 // targets from CLI output. It is the pure scanner core, kept separate for
 // tests.
 func callbackPorts(text string) []int {
-	seen := map[int]bool{}
-	add := func(p int) {
-		if allowedCallbackPort(p) {
-			seen[p] = true
-		}
+	targets := callbackTargets(text)
+	out := make([]int, 0, len(targets))
+	for _, target := range targets {
+		out = append(out, target.port)
 	}
-	for _, m := range reOAuthRedirectURI.FindAllStringSubmatch(text, -1) {
-		raw, err := url.QueryUnescape(m[1])
+	return out
+}
+
+func callbackTargets(text string) []callbackTarget {
+	byPort := map[int]callbackTarget{}
+	add := func(target callbackTarget) {
+		if !allowedCallbackPort(target.port) {
+			return
+		}
+		if old, ok := byPort[target.port]; ok {
+			merged, _ := mergeCallbackTarget(old, target)
+			byPort[target.port] = merged
+			return
+		}
+		byPort[target.port] = target
+	}
+	for _, m := range reOAuthRedirectURI.FindAllStringSubmatchIndex(text, -1) {
+		raw, err := url.QueryUnescape(trimPrintedURLToken(text[m[2]:m[3]]))
 		if err != nil {
-			raw = m[1]
+			raw = text[m[2]:m[3]]
 		}
 		u, err := url.Parse(raw)
 		if err != nil || u.Scheme != "http" {
@@ -185,19 +217,72 @@ func callbackPorts(text string) []int {
 			continue
 		}
 		if p, err := strconv.Atoi(u.Port()); err == nil {
-			add(p)
+			add(callbackTarget{port: p, path: u.Path, state: callbackStateNear(text, m[0], m[1]), validateState: true})
 		}
 	}
-	for _, m := range reOAuthLoopbackURL.FindAllStringSubmatch(text, -1) {
-		if p, err := strconv.Atoi(m[1]); err == nil {
-			add(p)
+	for _, m := range reOAuthLoopbackURL.FindAllStringSubmatchIndex(text, -1) {
+		u, parseErr := url.Parse(trimPrintedURLToken(text[m[0]:m[1]]))
+		if parseErr != nil || !strings.Contains(strings.ToLower(u.Path), "callback") {
+			continue
+		}
+		if p, err := strconv.Atoi(text[m[2]:m[3]]); err == nil {
+			add(callbackTarget{port: p, path: u.Path, state: u.Query().Get("state"), validateState: true})
 		}
 	}
-	out := make([]int, 0, len(seen))
-	for p := range seen {
-		out = append(out, p)
+	out := make([]callbackTarget, 0, len(byPort))
+	for _, target := range byPort {
+		out = append(out, target)
 	}
 	return out
+}
+
+func trimPrintedURLToken(raw string) string {
+	return strings.TrimRight(raw, ".,;:")
+}
+
+// mergeCallbackTarget enriches a target only with observations for the same
+// port and path. It never replaces an established non-empty expectation.
+func mergeCallbackTarget(old, next callbackTarget) (callbackTarget, bool) {
+	merged := old
+	if old.port != next.port || old.custody != next.custody {
+		return merged, false
+	}
+	if merged.path == "" || (next.path != "" && strings.HasPrefix(next.path, merged.path)) {
+		merged.path = next.path
+	}
+	samePath := next.path == "" || merged.path == "" || merged.path == next.path
+	if samePath && (merged.state == "" || (next.state != "" && strings.HasPrefix(next.state, merged.state))) {
+		merged.state = next.state
+	}
+	if samePath && next.validateState {
+		merged.validateState = true
+	}
+	return merged, merged != old
+}
+
+// callbackStateNear extracts state from the same printed authorization URL
+// that carried redirect_uri. It also handles a bare query fragment used by a
+// few CLIs. An unavailable state stays empty and is not guessed.
+func callbackStateNear(text string, start, end int) string {
+	isBoundary := func(b byte) bool { return strings.ContainsRune(" \t\r\n\"'()<>[]{}\x1b", rune(b)) }
+	left := start
+	for left > 0 && !isBoundary(text[left-1]) {
+		left--
+	}
+	right := end
+	for right < len(text) && !isBoundary(text[right]) {
+		right++
+	}
+	token := trimPrintedURLToken(text[left:right])
+	if u, err := url.Parse(token); err == nil {
+		if state := u.Query().Get("state"); state != "" {
+			return state
+		}
+	}
+	if values, err := url.ParseQuery(text[start:right]); err == nil {
+		return values.Get("state")
+	}
+	return ""
 }
 
 // SetCustodyConsumer installs the custody-mode interception hook: when
@@ -212,44 +297,63 @@ func (b *Bridge) SetCustodyConsumer(consume func(port int, u *url.URL) bool) {
 // EnsureCallbackPort opens the host loopback listener for a custody flow
 // before any authorize URL has been sniffed (the guest helper declares
 // its redirect port up front). It reports whether the allowed port was
-// actually opened (or was already active); the caller fails loudly on bind
-// or listener-limit errors rather than stranding the browser.
+// actually opened (or was already custody-owned); the caller fails loudly on
+// bind, listener-kind conflict, or listener-limit errors rather than stranding
+// the browser.
 func (b *Bridge) EnsureCallbackPort(port int) bool {
 	if !allowedCallbackPort(port) {
 		return false
 	}
-	return b.ensureListener(port)
+	// Custody validates its nonce in custodyConsume. Mark its listener as
+	// custody-owned so stdout sniffing cannot weaken or replace that check and
+	// an unknown-state callback can never fall through to guest replay.
+	return b.ensureListenerTarget(callbackTarget{port: port, custody: true})
 }
 
 // SniffWriter returns a writer that forwards every byte unchanged while
-// scanning for OAuth callback URLs. Safe for terminal byte streams: the scan
-// is read-only over a rolling window.
+// scanning for OAuth callback URLs. Writes are serialized so concurrent relay
+// and status output cannot race its rolling buffer or wrapped writer.
 func (b *Bridge) SniffWriter(w io.Writer) io.Writer {
-	return &sniffWriter{w: w, b: b, seen: map[int]bool{}}
+	return &sniffWriter{w: w, b: b, seen: map[int]callbackTarget{}}
 }
 
 type sniffWriter struct {
+	mu  sync.Mutex
 	w   io.Writer
 	b   *Bridge
 	buf []byte // rolling tail window for URLs split across writes
 	// A declared session may arm a small number of flows, not walk the
 	// entire dynamic port range by printing synthetic authorize URLs.
-	seen map[int]bool
+	seen map[int]callbackTarget
 }
 
 func (s *sniffWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n, err := s.w.Write(p)
 	if n > 0 {
 		s.buf = append(s.buf, p[:n]...)
 		if len(s.buf) > 16384 {
 			s.buf = s.buf[len(s.buf)-16384:]
 		}
-		for _, port := range callbackPorts(string(s.buf)) {
-			if s.seen[port] || len(s.seen) >= maxPortsPerSession {
+		for _, target := range callbackTargets(string(s.buf)) {
+			old, ok := s.seen[target.port]
+			if !ok && len(s.seen) >= maxPortsPerSession {
 				continue
 			}
-			s.seen[port] = true
-			s.b.ensureListener(port)
+			if !ok {
+				s.seen[target.port] = target
+				s.b.ensureListenerTarget(target)
+				continue
+			}
+			merged, changed := mergeCallbackTarget(old, target)
+			if changed {
+				s.seen[target.port] = merged
+				// Enrichment is allowed only while the original listener is
+				// still active. Old bytes in the rolling window must never
+				// reopen a one-shot or expired flow.
+				s.b.enrichListenerTarget(merged)
+			}
 		}
 	}
 	return n, err
@@ -258,13 +362,53 @@ func (s *sniffWriter) Write(p []byte) (int, error) {
 // ensureListener binds 127.0.0.1:port on the host once. Bind failures are
 // remembered so repeated prints of the same URL don't spam.
 func (b *Bridge) ensureListener(port int) bool {
+	return b.ensureListenerTarget(callbackTarget{port: port})
+}
+
+func (b *Bridge) ensureListenerTarget(target callbackTarget) bool {
+	return b.ensureListenerTargetMode(target, true)
+}
+
+func (b *Bridge) enrichListenerTarget(target callbackTarget) bool {
+	return b.ensureListenerTargetMode(target, false)
+}
+
+func (b *Bridge) ensureListenerTargetMode(target callbackTarget, allowCreate bool) bool {
+	port := target.port
 	if !allowedCallbackPort(port) {
 		return false
 	}
 	b.mu.Lock()
-	if _, ok := b.listeners[port]; ok {
+	if existing, ok := b.listeners[port]; ok {
+		// Custody and transparent replay have different trust semantics. Never
+		// reuse or enrich one kind of listener as the other kind.
+		if existing.custody != target.custody {
+			b.mu.Unlock()
+			return false
+		}
+		if existing.custody {
+			// Multiple custody flows may share a callback port. Keep the
+			// listener alive for a full flow lifetime after the latest one is
+			// registered; a generation check prevents an old timer callback
+			// from closing the refreshed listener.
+			b.resetListenerLifetimeLocked(existing)
+			b.mu.Unlock()
+			return true
+		}
+		// A URL split across terminal writes may reveal the path first and
+		// state later. Enrich an existing listener, but never replace one
+		// flow's non-empty expectation with a different value.
+		current := callbackTarget{port: port, path: existing.expectedPath, state: existing.expectedState, validateState: existing.validateState}
+		merged, _ := mergeCallbackTarget(current, target)
+		existing.expectedPath = merged.path
+		existing.expectedState = merged.state
+		existing.validateState = merged.validateState
 		b.mu.Unlock()
 		return true
+	}
+	if !allowCreate {
+		b.mu.Unlock()
+		return false
 	}
 	if b.failed[port] {
 		b.mu.Unlock()
@@ -287,10 +431,17 @@ func (b *Bridge) ensureListener(port int) bool {
 		b.logf("cannot bind host 127.0.0.1:%d (%v) — is something already using it?", port, err)
 		return false
 	}
-	l := &listener{port: port, ln: ln}
-	// A flow the user abandons must not hold the host port forever.
-	l.ttl = time.AfterFunc(b.lifetime(), func() { b.closeExactListener(l) })
+	l := &listener{
+		port:          port,
+		expectedPath:  target.path,
+		expectedState: target.state,
+		validateState: target.validateState,
+		custody:       target.custody,
+		ln:            ln,
+	}
 	b.listeners[port] = l
+	// A flow the user abandons must not hold the host port forever.
+	b.resetListenerLifetimeLocked(l)
 	b.mu.Unlock()
 	b.logf("OAuth callback detected: listening on host http://127.0.0.1:%d (replaying into the sandbox)", port)
 	go b.serve(l)
@@ -330,6 +481,12 @@ func (b *Bridge) closeExactListener(l *listener) {
 		b.mu.Unlock()
 		return
 	}
+	b.closeExactListenerLocked(l)
+	b.mu.Unlock()
+	b.logf("closed host listener on 127.0.0.1:%d", l.port)
+}
+
+func (b *Bridge) closeExactListenerLocked(l *listener) {
 	// Close before making the port available for reuse. Otherwise a scanner
 	// can observe the deleted map entry, race the still-open socket, and
 	// permanently cache an EADDRINUSE failure for this bridge.
@@ -338,6 +495,24 @@ func (b *Bridge) closeExactListener(l *listener) {
 	}
 	_ = l.ln.Close()
 	delete(b.listeners, l.port)
+}
+
+func (b *Bridge) resetListenerLifetimeLocked(l *listener) {
+	if l.ttl != nil {
+		l.ttl.Stop()
+	}
+	l.ttlGeneration++
+	generation := l.ttlGeneration
+	l.ttl = time.AfterFunc(b.lifetime(), func() { b.closeExpiredListener(l, generation) })
+}
+
+func (b *Bridge) closeExpiredListener(l *listener, generation uint64) {
+	b.mu.Lock()
+	if b.listeners[l.port] != l || l.ttlGeneration != generation {
+		b.mu.Unlock()
+		return
+	}
+	b.closeExactListenerLocked(l)
 	b.mu.Unlock()
 	b.logf("closed host listener on 127.0.0.1:%d", l.port)
 }
@@ -367,12 +542,13 @@ func (b *Bridge) acquireReplay() bool {
 
 func (b *Bridge) releaseReplay() { <-b.replaySlots }
 
-// handleCallback serves one browser request: replay the path+query into the
-// sandbox's loopback listener and relay the response. After a request
-// carrying the OAuth result (code=/error=) completes, the flow is done and
-// the listener closes.
+// handleCallback serves one browser request: validate and deliver the
+// path+query, then return a host-authored page. After a request carrying the
+// OAuth result (code=/error=) completes, the flow is done and the listener
+// closes.
 func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setBrowserSecurityHeaders(w)
 		if r.Method != http.MethodGet {
 			http.Error(w, "gantry oauth bridge: only GET callbacks are replayed", http.StatusMethodNotAllowed)
 			return
@@ -382,20 +558,39 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			http.Error(w, "gantry oauth bridge: callback URL too long", http.StatusRequestURITooLong)
 			return
 		}
-		// Custody mode: the daemon completes the flow host-side. A
-		// consumed callback is never replayed into the guest — the whole
-		// point is that the authorization code (and the tokens it yields)
-		// stay on the host.
 		b.mu.Lock()
-		consume := b.custodyConsume
+		expectedPath, expectedState, validateState := l.expectedPath, l.expectedState, l.validateState
 		b.mu.Unlock()
-		if consume != nil && consume(l.port, r.URL) {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = io.WriteString(w, "<html><body><h2>OAuth callback received</h2><p>Gantry is completing token custody on the host. Return to the guest CLI for the final result.</p></body></html>")
-			// Custody callbacks are one-shot just like transparent replays. Free
-			// dynamic Claude ports promptly instead of consuming the four-listener
-			// budget for the full TTL.
-			time.AfterFunc(2*time.Second, func() { b.closeExactListener(l) })
+		if expectedPath != "" && r.URL.Path != expectedPath {
+			http.Error(w, "gantry oauth bridge: callback path mismatch", http.StatusNotFound)
+			return
+		}
+		if validateState && r.URL.Query().Get("state") != expectedState {
+			http.Error(w, "gantry oauth bridge: callback state mismatch", http.StatusNotFound)
+			return
+		}
+		if !l.custody && validateState && expectedState == "" {
+			q := r.URL.Query()
+			if q.Get("code") != "" || q.Get("error") != "" {
+				http.Error(w, "gantry oauth bridge: callback state was not captured", http.StatusNotFound)
+				return
+			}
+		}
+		if l.custody {
+			// Custody callbacks must be claimed by an exact pending state. An
+			// unknown callback is never transparently replayed: otherwise a
+			// sandbox that won a fixed-port bind race could receive another
+			// sandbox's authorization code.
+			b.mu.Lock()
+			consume := b.custodyConsume
+			b.mu.Unlock()
+			if consume == nil || !consume(l.port, r.URL) {
+				http.Error(w, "gantry oauth bridge: no matching custody flow", http.StatusNotFound)
+				return
+			}
+			writeBrowserPage(w, http.StatusOK, custodyPage)
+			// A custody listener can serve several pending flows on one port.
+			// Its refreshed lifetime, rather than one callback, closes it.
 			return
 		}
 		if !b.acquireReplay() {
@@ -444,17 +639,7 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 		res, err := out.res, out.err
 		if err != nil {
 			b.logf("replay into sandbox failed (port %d): %v", l.port, err)
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = fmt.Fprintf(w, `<html><body style="font-family:sans-serif;max-width:40em;margin:3em auto">`+
-				`<h2>Sign-in could not be completed</h2><p>Gantry could not deliver the OAuth callback `+
-				`to the CLI inside the sandbox: %s</p><p>Check that the CLI is still waiting for sign-in, `+
-				`then retry. Details are in the sandbox daemon log.</p></body></html>`, html.EscapeString(err.Error()))
-			return
-		}
-		if len(res.body) > MaxReplayResponseSize {
-			b.logf("replay response from sandbox port %d exceeded %d bytes", l.port, MaxReplayResponseSize)
-			http.Error(w, "gantry oauth bridge: callback response too large", http.StatusBadGateway)
+			writeBrowserPage(w, http.StatusBadGateway, failurePage)
 			return
 		}
 		if res.status < 200 || res.status > 599 {
@@ -462,25 +647,13 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			http.Error(w, "gantry oauth bridge: invalid callback response", http.StatusBadGateway)
 			return
 		}
-		ct := res.contentType
-		if ct == "" {
-			ct = "text/html; charset=utf-8"
-		}
-		w.Header().Set("Content-Type", ct)
-		if res.location != "" {
-			// Codex answers /auth/callback with a 302 to its result page.
-			// Keep that navigation on this loopback bridge: the guest must
-			// not turn the host browser into an egress or localhost proxy.
-			location, err := normalizeReplayLocation(res.location, l.port)
-			if err != nil {
-				b.logf("replay response from sandbox port %d used unsafe Location: %v", l.port, err)
-				http.Error(w, "gantry oauth bridge: unsafe callback redirect", http.StatusBadGateway)
-				return
-			}
-			w.Header().Set("Location", location)
-		}
-		w.WriteHeader(res.status)
-		_, _ = w.Write(res.body)
+		// A compromised guest controls the loopback listener. Never relay its
+		// status, MIME type, redirect, or body into a host browser: active HTML
+		// here would execute under a trusted localhost origin and could access
+		// host/LAN services or persist a service worker. The response only
+		// confirms that the callback reached the guest; the CLI reports whether
+		// sign-in itself succeeded.
+		writeBrowserPage(w, http.StatusOK, completionPage)
 		if q := r.URL.Query(); q.Get("code") != "" || q.Get("error") != "" {
 			// OAuth flows are one-shot: the CLI exchanges the code and
 			// shuts its listener. Free the host port for the next login.
@@ -489,15 +662,28 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 	}
 }
 
-// replayResult is the guest listener's answer to a replayed
-// callback. Location matters: CLIs like codex answer /auth/callback with
-// a 302 to their success/error page, and a Location-less 302 renders as
-// a blank browser page — the exact symptom seen in field testing.
+func setBrowserSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store")
+	// Clear storage left by an older bridge that rendered guest-controlled
+	// localhost content. Cookies are deliberately excluded because they are
+	// host-wide rather than port-scoped and may belong to unrelated tooling.
+	w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
+}
+
+func writeBrowserPage(w http.ResponseWriter, status int, page string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, page)
+}
+
+// replayResult records only whether the guest listener answered with HTTP.
+// Guest headers and body are deliberately discarded before the host browser
+// response is constructed.
 type replayResult struct {
-	status      int
-	contentType string // guest Content-Type; the handler default applies when empty
-	location    string // normalized to an origin-relative target before browser relay
-	body        []byte
+	status int
 }
 
 // replayIntoGuest performs the callback GET inside the sandbox through the
@@ -540,23 +726,21 @@ func (b *Bridge) replayViaDevTCP(port int, requestURI string) (replayResult, err
 	if i := bytes.LastIndex(stdout, []byte("\nclient: task exited, status ")); i >= 0 {
 		stdout = stdout[:i]
 	}
-	return parseRawHTTPResponse(stdout, port)
+	return parseRawHTTPResponse(stdout)
 }
 
 // parseRawHTTPResponse splits a raw HTTP/1.x response (as printed by cat)
-// into status, the headers worth relaying (Content-Type, Location), and
-// body. Session transports can canonicalize CRLF to LF, so both forms are
-// accepted. Content-Length bodies are sliced exactly; chunked bodies are
-// unfolded.
-func parseRawHTTPResponse(raw []byte, callbackPort int) (replayResult, error) {
+// just far enough to validate its status. Guest headers and body are ignored;
+// session transports may canonicalize CRLF to LF, so both forms are accepted.
+func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 	if len(raw) > MaxReplayResponseSize {
 		return replayResult{}, fmt.Errorf("HTTP response exceeds %d bytes", MaxReplayResponseSize)
 	}
-	head, body, lineEnding, ok := splitHTTPResponseHead(raw)
+	head, _, lineEnding, ok := splitHTTPResponseHead(raw)
 	if !ok {
 		return replayResult{}, fmt.Errorf("no HTTP response from the in-sandbox listener: %.200s", raw)
 	}
-	statusLine, headers, _ := bytes.Cut(head, lineEnding)
+	statusLine, _, _ := bytes.Cut(head, lineEnding)
 	fields := bytes.Fields(statusLine)
 	if len(fields) < 2 || !bytes.HasPrefix(fields[0], []byte("HTTP/")) {
 		return replayResult{}, fmt.Errorf("malformed HTTP status line: %.100s", statusLine)
@@ -568,45 +752,7 @@ func parseRawHTTPResponse(raw []byte, callbackPort int) (replayResult, error) {
 	if status < 200 || status > 599 {
 		return replayResult{}, fmt.Errorf("invalid HTTP status code %d", status)
 	}
-	res := replayResult{status: status, body: body}
-	var chunked bool
-	for _, line := range bytes.Split(headers, lineEnding) {
-		k, v, ok := bytes.Cut(line, []byte(":"))
-		if !ok {
-			continue
-		}
-		v = bytes.TrimSpace(v)
-		switch {
-		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Length")):
-			if n, err := strconv.Atoi(string(v)); err == nil && n >= 0 {
-				if n > MaxReplayResponseSize {
-					return replayResult{}, fmt.Errorf("HTTP response Content-Length %d exceeds %d bytes", n, MaxReplayResponseSize)
-				}
-				if n > len(res.body) {
-					return replayResult{}, fmt.Errorf("truncated HTTP response body: got %d bytes, want %d", len(res.body), n)
-				}
-				res.body = res.body[:n]
-			}
-		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Transfer-Encoding")):
-			chunked = bytes.Contains(bytes.ToLower(v), []byte("chunked"))
-		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Content-Type")):
-			res.contentType = string(v)
-		case bytes.EqualFold(bytes.TrimSpace(k), []byte("Location")):
-			location, err := normalizeReplayLocation(string(v), callbackPort)
-			if err != nil {
-				return replayResult{}, fmt.Errorf("unsafe HTTP Location: %w", err)
-			}
-			res.location = location
-		}
-	}
-	if chunked {
-		decoded, err := decodeChunkedBody(res.body)
-		if err != nil {
-			return replayResult{}, fmt.Errorf("decode chunked HTTP response: %w", err)
-		}
-		res.body = decoded
-	}
-	return res, nil
+	return replayResult{status: status}, nil
 }
 
 func splitHTTPResponseHead(raw []byte) (head, body, lineEnding []byte, ok bool) {
@@ -619,106 +765,6 @@ func splitHTTPResponseHead(raw []byte) (head, body, lineEnding []byte, ok bool) 
 		return raw[:lfIndex], raw[lfIndex+2:], []byte("\n"), true
 	default:
 		return nil, nil, nil, false
-	}
-}
-
-// normalizeReplayLocation accepts origin-relative redirects and the absolute
-// same-origin form emitted by newer Codex tiny-http listeners. Absolute
-// localhost redirects are rewritten to relative form before reaching the host
-// browser; a different port could target an unrelated host-local service.
-func normalizeReplayLocation(location string, callbackPort int) (string, error) {
-	if err := validateReplayLocation(location); err == nil {
-		return location, nil
-	}
-	parsed, err := url.Parse(location)
-	if err != nil {
-		return "", fmt.Errorf("parse redirect: %w", err)
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil || callbackPort <= 0 || port != callbackPort || parsed.Scheme != "http" ||
-		(parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1") ||
-		parsed.User != nil || parsed.Opaque != "" {
-		return "", fmt.Errorf("redirect must stay on bridge origin 127.0.0.1:%d", callbackPort)
-	}
-	relative := parsed.EscapedPath()
-	if relative == "" {
-		relative = "/"
-	}
-	if parsed.ForceQuery || parsed.RawQuery != "" {
-		relative += "?" + parsed.RawQuery
-	}
-	if parsed.Fragment != "" {
-		relative += "#" + parsed.EscapedFragment()
-	}
-	if err := validateReplayLocation(relative); err != nil {
-		return "", err
-	}
-	return relative, nil
-}
-
-// validateReplayLocation permits only absolute-path references on the bridge
-// origin. Absolute, scheme-relative, backslash, and encoded authority-like
-// paths could otherwise make the host browser leave the sandbox's egress
-// boundary or contact another host-local service.
-func validateReplayLocation(location string) error {
-	if len(location) == 0 || len(location) > maxRequestURIBytes {
-		return fmt.Errorf("redirect length is outside 1..%d bytes", maxRequestURIBytes)
-	}
-	for _, char := range location {
-		if char < 0x20 || char == 0x7f {
-			return fmt.Errorf("redirect contains a control character")
-		}
-	}
-	if location[0] != '/' || strings.HasPrefix(location, "//") || strings.Contains(location, `\`) {
-		return fmt.Errorf("redirect must be an origin-relative absolute path")
-	}
-	parsed, err := url.Parse(location)
-	if err != nil {
-		return fmt.Errorf("parse redirect: %w", err)
-	}
-	if parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" ||
-		!strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(parsed.Path, `\`) {
-		return fmt.Errorf("redirect must stay on the bridge origin")
-	}
-	return nil
-}
-
-// decodeChunkedBody unfolds a Transfer-Encoding: chunked body. CLI OAuth
-// listeners are Node (claude, pi) or Rust (codex) one-shots; Node answers
-// without Content-Length use chunked framing, which must not leak chunk
-// markers into the page relayed to the browser.
-func decodeChunkedBody(raw []byte) ([]byte, error) {
-	var out []byte
-	rest := raw
-	for {
-		lineEnd := bytes.IndexByte(rest, '\n')
-		if lineEnd < 0 {
-			return nil, fmt.Errorf("truncated chunk header")
-		}
-		line := bytes.TrimSuffix(rest[:lineEnd], []byte{'\r'})
-		tail := rest[lineEnd+1:]
-		// Chunk sizes are hex, optionally followed by ;extensions.
-		sizeText, _, _ := bytes.Cut(line, []byte(";"))
-		n, err := strconv.ParseInt(strings.TrimSpace(string(sizeText)), 16, 64)
-		if err != nil || n < 0 {
-			return nil, fmt.Errorf("bad chunk size %q", line)
-		}
-		if n == 0 {
-			return out, nil // last-chunk; trailers ignored
-		}
-		if n > int64(len(tail)) {
-			return nil, fmt.Errorf("truncated chunk data")
-		}
-		out = append(out, tail[:n]...)
-		terminator := tail[n:]
-		switch {
-		case bytes.HasPrefix(terminator, []byte("\r\n")):
-			rest = terminator[2:]
-		case bytes.HasPrefix(terminator, []byte("\n")):
-			rest = terminator[1:]
-		default:
-			return nil, fmt.Errorf("malformed chunk terminator")
-		}
 	}
 }
 

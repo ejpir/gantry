@@ -76,6 +76,15 @@ func (m *mockRemote) handler() http.HandlerFunc {
 				auth := m.authSeen[len(m.authSeen)-1]
 				m.mu.Unlock()
 				result = map[string]any{"content": []map[string]any{{"type": "text", "text": "auth=" + auth}}}
+			case "escape_auth":
+				m.mu.Lock()
+				auth := m.authSeen[len(m.authSeen)-1]
+				m.mu.Unlock()
+				var escaped strings.Builder
+				for _, ch := range "auth=" + auth {
+					_, _ = fmt.Fprintf(&escaped, `\u%04x`, ch)
+				}
+				result = json.RawMessage(`{"content":[{"type":"text","text":"` + escaped.String() + `"}]}`)
 			case "leak":
 				result = map[string]any{"content": []map[string]any{{"type": "text", "text": "the token is t12-secret-token"}}}
 			default:
@@ -92,6 +101,33 @@ func (m *mockRemote) handler() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(raw)
+	}
+}
+
+func TestHTTPUpstreamRedactsJSONEscapedCredential(t *testing.T) {
+	const token = "t12-secret-token"
+	for _, sse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sse=%t", sse), func(t *testing.T) {
+			mock := &mockRemote{sse: sse}
+			srv := startMock(t, mock)
+			g, err := New(nil, nil, []Server{{
+				Name:    "mock",
+				URL:     srv.URL,
+				Headers: map[string]string{"Authorization": "Bearer " + token},
+				Tools:   ToolPolicy{Allow: []string{"*"}},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := runSession(t, g, []string{
+				`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mock__escape_auth","arguments":{}}}`,
+			})
+			resps := decodeResults(t, lines)
+			text := resps["1"]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+			if strings.Contains(text, token) {
+				t.Fatalf("JSON-escaped credential reached the guest: %q", text)
+			}
+		})
 	}
 }
 
@@ -313,6 +349,31 @@ func TestHTTPErrorPathsAreRedacted(t *testing.T) {
 		if strings.Contains(l, "t12-secret-token") || strings.Contains(l, "token ") || strings.Contains(l, "bad token") {
 			t.Fatalf("audit line carried upstream payload: %s", l)
 		}
+	}
+}
+
+func TestHTTPUpstreamRejectsMissingResultAndError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == "initialize" {
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":%q}}`, req.ID, protocolVersion)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s}`, req.ID)
+	}))
+	defer srv.Close()
+	u, err := startHTTPUpstream(context.Background(), nil, Server{Name: "bad", URL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.close()
+	if _, err := u.Call(context.Background(), "tools/call", json.RawMessage(`{}`)); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("missing result/error response was accepted: %v", err)
 	}
 }
 

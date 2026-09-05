@@ -56,9 +56,11 @@ type Virtq struct {
 
 	Addr VhostVringAddr
 
+	lifecycleMu   sync.Mutex
 	control       *readerControl
 	requests      sync.WaitGroup
 	notifications *notificationQueue
+	notifyErrOnce sync.Once
 }
 
 func (vq *Virtq) MapRing(desc, avail, used []byte) {
@@ -73,29 +75,13 @@ func (vq *Virtq) MapRing(desc, avail, used []byte) {
 	vq.Vring.AvailUsedEvent = &unsafe.Slice(&vq.Vring.Avail.Ring0, vq.Vring.Num+1)[vq.Vring.Num]
 }
 
-func (vq *Virtq) SetEnable(handle func(*VirtqElem) int) {
-	var enable uint
-	if handle != nil {
-		enable = 1
+func (vq *Virtq) start(handle func(*VirtqElem) int) {
+	vq.Enable = 1
+	vq.control = &readerControl{
+		cancel: make(chan struct{}, 1),
+		done:   make(chan struct{}, 1),
 	}
-	if enable != 0 && vq.control != nil {
-		vq.Enable = enable // idempotent SET_VRING_ENABLE
-		return
-	}
-
-	vq.Enable = enable
-	if vq.Enable != 0 {
-		vq.control = &readerControl{
-			cancel: make(chan struct{}, 1),
-			done:   make(chan struct{}, 1),
-		}
-		go vq.readLoop(handle)
-	} else if vq.control != nil {
-		close(vq.control.cancel)
-		<-vq.control.done
-		vq.requests.Wait()
-		vq.control = nil
-	}
+	go vq.readLoop(handle)
 }
 
 // popBatch drains the avail ring under the dispatch read lock and returns all
@@ -284,8 +270,28 @@ func (vq *Virtq) queueNotify() {
 	// if INBAND_NOTIFICATIONS ...
 	var payload [8]byte
 	payload[0] = 1
-	if _, err := syscall.Write(vq.CallFD, payload[:]); err != nil {
-		log.Panicf("eventfd write: %v", err)
+	if vq.CallFD < 0 {
+		vq.notifyErrOnce.Do(func() { log.Printf("vhost-user call doorbell is not configured") })
+		return
+	}
+	for {
+		n, err := syscall.Write(vq.CallFD, payload[:])
+		if err == syscall.EINTR {
+			continue
+		}
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			// A nonblocking notification pipe that is full already contains a
+			// pending wakeup, so this completion is safely coalesced.
+			return
+		}
+		if err != nil {
+			vq.notifyErrOnce.Do(func() { log.Printf("vhost-user call doorbell: %v", err) })
+			return
+		}
+		if n != len(payload) {
+			vq.notifyErrOnce.Do(func() { log.Printf("vhost-user call doorbell: short write %d/%d", n, len(payload)) })
+		}
+		return
 	}
 }
 
@@ -439,6 +445,8 @@ func newVirtq(dev *Device) *Virtq {
 }
 
 func (vq *Virtq) Close() error {
+	vq.lifecycleMu.Lock()
+	defer vq.lifecycleMu.Unlock()
 	if vq.control != nil {
 		close(vq.control.cancel)
 		<-vq.control.done
@@ -454,6 +462,28 @@ func (vq *Virtq) Close() error {
 	}
 
 	return nil
+}
+
+// resetRing drops every shared-memory view after the reader and all request
+// owners have stopped. Doorbell descriptors and negotiated features survive
+// so a virtio device reset can configure a fresh ring on the same connection.
+func (vq *Virtq) resetRing() {
+	vq.mu.Lock()
+	defer vq.mu.Unlock()
+	vq.Vring = Ring{}
+	vq.Inflight = nil
+	vq.InflightDescs = nil
+	vq.ResubmitList = nil
+	vq.ResubmitNum = 0
+	vq.Counter = 0
+	vq.LastAvailIdx = 0
+	vq.ShadowAvailIdx = 0
+	vq.UsedIdx = 0
+	vq.SignaledUsed = 0
+	vq.SignaledUsedValid = false
+	vq.inuse = 0
+	vq.Enable = 0
+	vq.Addr = VhostVringAddr{}
 }
 
 func (vq *Virtq) fetchAvailIdx() {

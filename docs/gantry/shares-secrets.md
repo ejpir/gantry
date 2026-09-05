@@ -70,6 +70,11 @@ Read-only enforcement happens at the host export, not only at the guest mount.
 > home directory, credential store, or container-engine socket with untrusted
 > code.
 
+Gantry refuses shares that overlap its application-state directory (normally
+`~/.gantry`), even when read-only. That directory contains host SSH include
+files, sandbox configurations, writable disks, credentials, and policy state;
+exposing it would let one guest poison later host or sandbox operations.
+
 ## Map guest-visible ownership
 
 Use `uid` and `gid` when the image runs as a non-root account:
@@ -145,21 +150,30 @@ process inspection and shell history.
 
 ## Refreshable secret sources
 
-File and command sources can rotate while a sandbox is running:
+File sources can rotate while a sandbox is running:
 
 ```console
 $ gantry start agent -image alpine:latest \
     -secret GITHUB_TOKEN=@/secure/token,ttl=60s
 ```
 
-```console
-$ gantry start agent -image alpine:latest \
-    -secret GITHUB_TOKEN='!gh auth token'
-```
+Command-backed (`NAME='!command ...'`) sources are disabled. Earlier prototypes
+ran them in the unconfined supervisor, where a guest-triggered credential
+request could execute command, script, plugin, or configuration input poisoned
+by this or another sandbox. Use an environment or file source until command
+resolution has a dedicated host-confinement boundary.
 
-A command source is an argv executed directly on the host, not a shell string.
-It can call tools such as `op`, `pass`, or `gh` without vendor-specific Gantry
-integration.
+A file source may coexist with an unrelated writable share, but it must be an
+existing single-link regular file reached through an absolute, clean path with
+no symbolic links or Windows reparse points. Gantry opens every component from
+pinned parent descriptors. On macOS, use canonical paths such as `/private/var`
+rather than `/var`. Atomic replacement with another regular single-link file at
+the same canonical path remains supported.
+
+The path must not sit inside or alias beneath a writable share; otherwise the
+guest could replace it. After removing a launch-time file source, restart the
+sandbox before adding a live writable share. This conservative lifetime
+barrier also covers a resolution already in flight.
 
 The optional `ttl` controls resolved-value caching:
 
@@ -167,10 +181,9 @@ The optional `ttl` controls resolved-value caching:
 | --- | --- | --- |
 | Environment | Start-time snapshot | Read from the launcher once; export again before resume. |
 | File | 60 seconds | Read the file again after the TTL. |
-| Command | 5 minutes | Run the command again after the TTL. |
-| File or command with `ttl=0` | No cache | Resolve on every use. |
+| File with `ttl=0` | No cache | Read the file on every use. |
 
-If a file disappears or a command fails after previously working, Gantry drops
+If a file disappears or becomes unsafe after previously working, Gantry drops
 the cached value and fails closed. It does not serve the stale credential.
 
 ## Bind a secret to a host
@@ -210,8 +223,8 @@ For a named sandbox, `sandbox.json` stores secret names and source references,
 not values. The behavior after a stop depends on the source:
 
 - Environment values are gone. Export them again before `gantry resume`.
-- File and command references remain in the saved configuration and resolve
-  again on resume.
+- File references remain in the saved configuration and resolve again on
+  resume.
 - Values loaded from a dotenv file or the dashboard are memory-only and must
   be supplied again.
 
@@ -242,8 +255,9 @@ Disable the bridge when it is not needed:
 $ gantry start dev -image alpine:latest -oauth-bridge=false
 ```
 
-The bridge accepts only supported callback paths and is not a general port
-forward.
+The bridge accepts only the captured callback path and state and is not a
+general port forward. It returns a host-authored completion page; guest HTML,
+headers, status, and redirects are never rendered by the host browser.
 
 ## Keep OAuth refresh tokens on the host
 

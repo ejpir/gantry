@@ -192,9 +192,9 @@ published port or a loopback-allowing policy; `required` rejects those options.
 A live port publish or loopback-enabling policy mutation against an already
 split Windows network worker is rejected explicitly.
 
-An explicit `-gvproxy` selects an external backend instead. Live policy,
-traffic inspection, proxy enforcement, and built-in port publishing require
-the embedded stack.
+The legacy external `-gvproxy` backend is disabled. It launched a configurable
+host executable outside the worker boundary; the embedded stack is the only
+network backend in the hardened configuration.
 
 ### MCP worker
 
@@ -314,9 +314,18 @@ deferred CPU onlining completes. The HVF backend uses the same slot mapping to
 wake the assigned vCPU (plus CPU 0 for compatibility with custom system roots),
 rather than waking every vCPU for each filesystem completion.
 
-A sandbox started with `-devcontainers` uses an explicit outer OCI profile for
-an inner Podman runtime in the same microVM. The profile exposes only FUSE,
-TUN, a read-only cgroup2 view, shared root propagation, and the
+Gantry OCI workloads leave their container procfs free of child masks and
+read-only overmounts. This lets coding-agent sandboxes mount a fresh procfs in
+child PID/user namespaces; Linux rejects that operation when locked OCI mounts
+hide non-empty procfs entries. It does not add host visibility: the process
+view is scoped to the workload PID namespace, and any non-process kernel state
+belongs to the sandbox's dedicated guest kernel rather than the host. Gantry
+continues to mask `/sys/firmware` and gives ordinary workloads a reduced
+capability set.
+
+A sandbox started with `-devcontainers` additionally uses an explicit outer
+OCI profile for an inner Podman runtime in the same microVM. The profile exposes
+only FUSE, TUN, a read-only cgroup2 view, shared root propagation, and the
 namespace-administration capabilities needed by inner `crun`. Enabling or
 disabling this profile on a running VM requires restart because its peer IDE
 block devices are part of the boot topology.
@@ -328,8 +337,8 @@ proxy environment, and invoke Podman through passwordless `sudo` when the
 session user is non-root. The SSH/IDE session remains UID 1000; only the nested
 runtime launcher elevates inside the microVM. Its containers configuration disables nested cgroup
 management and default sysctl writes and selects `slirp4netns`, avoiding guest
-bridge sysctls that the outer profile deliberately leaves read-only. No host
-container-engine socket or TCP endpoint crosses the microVM boundary.
+bridge sysctl changes. No host container-engine socket or TCP endpoint crosses
+the microVM boundary.
 
 The wrapper serializes its boot check and compares the current kernel boot ID
 with the cached ID under `/run/gantry/podman`. On a boot transition it removes
@@ -367,7 +376,7 @@ never travels through the guest.
 ```mermaid
 flowchart LR
     subgraph H[Host]
-        SRC[Environment, file, or command source] --> STORE[Per-sandbox secret store]
+        SRC[Environment or file source] --> STORE[Per-sandbox secret store]
         STORE --> ENV[Process environment builder]
         STORE --> BROKER[Bound credential broker]
         STORE --> GW[MCP gateway]
@@ -397,9 +406,15 @@ scrubs corresponding environment keys, and `sandbox.json` retains only names,
 bindings, and source references.
 
 Ordinary secrets are resolved into a process specification and therefore
-become visible to that guest process. File and command sources are resolved at
-use time and cached by TTL. A failed refresh invalidates the old cache entry;
-the broker never falls back to a stale value.
+become visible to that guest process. File sources are resolved at use time and
+cached by TTL. A failed refresh invalidates the old cache entry; the broker
+never falls back to a stale value. Command-backed sources are rejected because
+the supervisor does not yet provide a confined execution boundary for them.
+File source paths must fully resolve and cannot reside inside or alias beneath
+a writable share. Resolution walks a canonical path from pinned parent
+descriptors without following symlinks/reparse points and rejects multiply
+linked files. Share/source containment is repeated against the descriptor
+identity pinned for publication, closing pathname swap races.
 
 A host-bound secret is excluded from guest environments. The git helper sends
 a host/path request over its dedicated virtio-vsock service. The supervisor
@@ -436,11 +451,12 @@ in-guest filesystem hardening work.
 ### OAuth bridge and custody
 
 The callback bridge recognizes supported guest loopback authorization URLs
-and creates a short-lived listener on host loopback. It validates the expected
-path and state, accepts one callback, and replays that callback to the guest
-loopback service. Redirects returned by that service are restricted to
-absolute paths on the bridge origin, so the guest cannot use the host browser
-as an external or host-local request proxy. The bridge is separate from
+and creates a short-lived listener on host loopback. It validates the captured
+path and, when the authorization URL includes one, state; it accepts one
+callback and replays that callback to the guest loopback service. Custody-owned
+listeners fail closed when no pending state claims a callback. The host returns
+its own CSP-locked completion page; guest status, headers, redirects, body, and
+error details are never rendered in the browser. The bridge is separate from
 general port publishing.
 
 With custody enabled, the supervisor performs the provider-specific code

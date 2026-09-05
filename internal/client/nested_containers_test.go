@@ -2,6 +2,7 @@ package client
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ejpir/gantry/internal/image"
@@ -20,6 +21,19 @@ func TestNestedContainersConfigIsNarrowAndRootOnly(t *testing.T) {
 	config := decodeRuntimeConfig(t, encoded)
 	if config.Linux.RootfsPropagation != "rshared" {
 		t.Fatalf("rootfs propagation = %q, want rshared", config.Linux.RootfsPropagation)
+	}
+	for kind, paths := range map[string][]string{
+		"masked":    config.Linux.MaskedPaths,
+		"read-only": config.Linux.ReadonlyPaths,
+	} {
+		for _, path := range paths {
+			if path == "/proc" || strings.HasPrefix(path, "/proc/") {
+				t.Errorf("nested-runtime config retained %s proc path %q", kind, path)
+			}
+		}
+	}
+	if !slices.Contains(config.Linux.MaskedPaths, "/sys/firmware") {
+		t.Error("nested-runtime config removed non-proc base mask /sys/firmware")
 	}
 	for _, expected := range nestedContainerDevices {
 		var device *specs.LinuxDevice
@@ -80,6 +94,34 @@ func TestNestedContainersConfigGivesNonRootOnlySudoBoundingSet(t *testing.T) {
 	}
 	if len(capabilities.Effective) != 0 || len(capabilities.Permitted) != 0 || len(capabilities.Ambient) != 0 {
 		t.Fatalf("non-root development process received active capabilities: %+v", capabilities)
+	}
+}
+
+func TestOrdinaryContainerAllowsNestedProcMount(t *testing.T) {
+	encoded, err := configJSON(nil, true, []string{"true"}, &image.Config{User: "root"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := decodeRuntimeConfig(t, encoded)
+	for kind, paths := range map[string][]string{
+		"masked":    config.Linux.MaskedPaths,
+		"read-only": config.Linux.ReadonlyPaths,
+	} {
+		for _, path := range paths {
+			if path == "/proc" || strings.HasPrefix(path, "/proc/") {
+				t.Errorf("ordinary config retained %s proc path %q", kind, path)
+			}
+		}
+	}
+	if !slices.Contains(config.Linux.MaskedPaths, "/sys/firmware") {
+		t.Error("ordinary config removed non-proc mask /sys/firmware")
+	}
+	for _, capability := range []string{"CAP_SYS_ADMIN", "CAP_SYS_RAWIO", "CAP_SYS_PTRACE", "CAP_NET_ADMIN"} {
+		if slices.Contains(config.Process.Capabilities.Bounding, capability) ||
+			slices.Contains(config.Process.Capabilities.Effective, capability) ||
+			slices.Contains(config.Process.Capabilities.Permitted, capability) {
+			t.Errorf("ordinary config gained %s: %+v", capability, config.Process.Capabilities)
+		}
 	}
 }
 

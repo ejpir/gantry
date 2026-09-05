@@ -6,6 +6,8 @@ package vhostuser
 
 import (
 	"fmt"
+	"os"
+	"syscall"
 	"unsafe"
 )
 
@@ -24,8 +26,26 @@ func (r *deviceRegion) Close() error {
 }
 
 func (r *deviceRegion) configure(fd int, reg *VhostUserMemoryRegion) error {
-	if reg.DriverAddr+reg.MemorySize < reg.DriverAddr {
-		return fmt.Errorf("overflow 0x%x, sz %x", reg.DriverAddr, reg.MemorySize)
+	if reg == nil || reg.MemorySize == 0 || reg.DriverAddr+reg.MemorySize < reg.DriverAddr ||
+		reg.MmapOffset+reg.MemorySize < reg.MmapOffset {
+		return fmt.Errorf("invalid mapped range")
+	}
+	if reg.MemorySize > uint64(^uint(0)>>1) {
+		return fmt.Errorf("mapped range exceeds native address space")
+	}
+	if reg.MmapOffset%uint64(os.Getpagesize()) != 0 {
+		return fmt.Errorf("mmap offset %#x is not page aligned", reg.MmapOffset)
+	}
+	end := reg.MmapOffset + reg.MemorySize
+	if end > uint64(^uint64(0)>>1) {
+		return fmt.Errorf("mapped range exceeds int64")
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("fstat shared memory: %w", err)
+	}
+	if stat.Size < 0 || end > uint64(stat.Size) {
+		return fmt.Errorf("mapped range end %#x exceeds fd size %#x", end, stat.Size)
 	}
 
 	// MmapOffset is where this region begins inside the shared-memory fd

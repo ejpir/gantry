@@ -13,6 +13,10 @@ var gwMAC = [6]byte{0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xdd}
 
 // ipFrame builds an Ethernet/IPv4 frame with a UDP or TCP stub payload.
 func ipFrame(t *testing.T, dstIP string, proto uint8, dport uint16, payload []byte) []byte {
+	return ipFrameFromPort(t, dstIP, proto, 12345, dport, payload)
+}
+
+func ipFrameFromPort(t *testing.T, dstIP string, proto uint8, sport, dport uint16, payload []byte) []byte {
 	t.Helper()
 	dst := net.ParseIP(dstIP).To4()
 	src := net.ParseIP("192.168.127.2").To4()
@@ -20,13 +24,13 @@ func ipFrame(t *testing.T, dstIP string, proto uint8, dport uint16, payload []by
 	switch proto {
 	case protoUDP:
 		l4 = make([]byte, 8+len(payload))
-		binary.BigEndian.PutUint16(l4[0:2], 12345)
+		binary.BigEndian.PutUint16(l4[0:2], sport)
 		binary.BigEndian.PutUint16(l4[2:4], dport)
 		binary.BigEndian.PutUint16(l4[4:6], uint16(8+len(payload)))
 		copy(l4[8:], payload)
 	case protoTCP:
 		l4 = make([]byte, 20+len(payload))
-		binary.BigEndian.PutUint16(l4[0:2], 12345)
+		binary.BigEndian.PutUint16(l4[0:2], sport)
 		binary.BigEndian.PutUint16(l4[2:4], dport)
 		l4[12] = 5 << 4 // data offset
 		copy(l4[20:], payload)
@@ -280,20 +284,58 @@ func TestPolicyMatchTX(t *testing.T) {
 		{"metadata endpoint denied", ipFrame(t, "169.254.169.254", protoTCP, 443, nil), false},
 		{"metadata on 80 denied", ipFrame(t, "169.254.169.254", protoTCP, 80, nil), false},
 		{"icmp denied by default", ipFrame(t, "8.8.8.8", protoICMP, 0, []byte{8, 0, 0, 0}), false},
-		{"dhcp allowed", ipFrame(t, "255.255.255.255", protoUDP, 67, []byte{1}), true},
-		{"subnet broadcast allowed (DHCP)", ipFrame(t, subnetBroadcast, protoUDP, 67, []byte{1}), true},
+		{"dhcp allowed", ipFrameFromPort(t, "255.255.255.255", protoUDP, 68, 67, []byte{1}), true},
+		{"subnet broadcast allowed (DHCP)", ipFrameFromPort(t, subnetBroadcast, protoUDP, 68, 67, []byte{1}), true},
 		// regression: a unicast .255 address must NOT get the gateway pass
 		{".255 unicast bypass denied", ipFrame(t, "8.8.8.255", protoTCP, 443, nil), true},
 		{".255 unicast non-443 denied", ipFrame(t, "8.8.8.255", protoTCP, 80, nil), false},
 		{".255 unicast udp denied", ipFrame(t, "52.1.2.255", protoUDP, 53, []byte{1}), false},
 		{"gateway dns allowed (no allowlist)", ipFrame(t, gatewayIP, protoUDP, 53, []byte{1}), true},
-		{"gateway other svc allowed", ipFrame(t, gatewayIP, protoTCP, 80, nil), true},
+		{"gateway other service denied", ipFrame(t, gatewayIP, protoTCP, 80, nil), false},
+		{"gateway udp/68 is not DHCP", ipFrameFromPort(t, gatewayIP, protoUDP, 67, 68, []byte{1}), false},
+		{"broadcast dns denied", ipFrame(t, "255.255.255.255", protoUDP, 53, []byte{1}), false},
+		{"subnet broadcast tcp denied", ipFrame(t, subnetBroadcast, protoTCP, 80, nil), false},
 		{"ipv6 dropped", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x86, 0xdd}, make([]byte, 40)...), false},
 	}
 	for _, c := range cases {
 		if got := p.MatchTX(c.frame); got != c.want {
 			t.Errorf("%s: MatchTX = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestPolicyGatewayRequiresExplicitLocalAccess(t *testing.T) {
+	defaultPolicy := DefaultPolicy()
+	for _, tc := range []struct {
+		proto uint8
+		port  uint16
+	}{{protoTCP, 80}, {protoTCP, 2375}, {protoUDP, 123}} {
+		if defaultPolicy.MatchTX(ipFrame(t, gatewayIP, tc.proto, tc.port, nil)) {
+			t.Fatalf("default policy allowed gateway proto=%d port=%d", tc.proto, tc.port)
+		}
+	}
+
+	explicit := mustParse(t, `{
+		"default":"deny",
+		"rules":[{"action":"allow","cidr":"192.168.127.1/32","proto":"tcp","ports":"80"}]
+	}`)
+	if !explicit.MatchTX(ipFrame(t, gatewayIP, protoTCP, 80, nil)) {
+		t.Fatal("explicit gateway allow was ignored")
+	}
+	if explicit.MatchTX(ipFrame(t, gatewayIP, protoTCP, 2375, nil)) {
+		t.Fatal("explicit gateway allow widened to another port")
+	}
+
+	allowLocalWithDeny := mustParse(t, `{
+		"default":"allow",
+		"allowLocal":true,
+		"rules":[{"action":"deny","cidr":"192.168.127.1/32","proto":"tcp","ports":"80"}]
+	}`)
+	if allowLocalWithDeny.MatchTX(ipFrame(t, gatewayIP, protoTCP, 80, nil)) {
+		t.Fatal("explicit gateway deny was bypassed")
+	}
+	if !allowLocalWithDeny.MatchTX(ipFrame(t, gatewayIP, protoTCP, 443, nil)) {
+		t.Fatal("allowLocal did not permit an otherwise-unmatched gateway port")
 	}
 }
 
@@ -542,11 +584,12 @@ func TestDomainAllowlistRejectsSplitAndFragmentedDNS(t *testing.T) {
 		t.Fatal("non-first UDP DNS fragment was allowed")
 	}
 
-	// Without a domain allowlist there is no name filter to bypass:
-	// fragmented gateway traffic follows the generic gateway pass.
+	// Without a domain allowlist, a non-first fragment still carries no port:
+	// it cannot prove that it targets the resolver rather than a host-forwarded
+	// gateway port, so it fails closed.
 	open := mustParse(t, `{"default": "deny"}`)
-	if !open.MatchTX(second) {
-		t.Fatal("fragment dropped although no allowlist is configured")
+	if open.MatchTX(second) {
+		t.Fatal("unattributable gateway fragment bypassed the local wall")
 	}
 
 	// And the baseline still holds: a complete unlisted query is denied, a

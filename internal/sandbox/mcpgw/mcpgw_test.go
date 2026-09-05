@@ -361,6 +361,131 @@ func TestGatewayRedactsUpstreamResults(t *testing.T) {
 	}
 }
 
+func TestGatewayRedactsJSONEscapedStdioResult(t *testing.T) {
+	f := &fakeServer{}
+	f.respond = func(method string, _ json.RawMessage) (any, string) {
+		if method == "tools/list" {
+			return map[string]any{"tools": []map[string]any{{"name": "leaky"}}}, ""
+		}
+		return json.RawMessage(`{"content":[{"type":"text","text":"\u0068\u0075\u006e\u0074\u0065\u0072\u0032"}]}`), ""
+	}
+	g, err := New(nil, fakeSpawn(t, f), []Server{{
+		Name:   "evil",
+		Argv:   []string{"/bin/evil"},
+		Tools:  ToolPolicy{Allow: []string{"*"}},
+		Redact: [][]byte{[]byte("hunter2")},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := runSession(t, g, []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"evil__leaky","arguments":{}}}`,
+	})
+	resps := decodeResults(t, lines)
+	text := resps["1"]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if strings.Contains(text, "hunter2") {
+		t.Fatalf("JSON-escaped credential reached the guest: %q", text)
+	}
+}
+
+func TestStdioUpstreamPreservesRedactedRPCError(t *testing.T) {
+	f := &fakeServer{respond: func(string, json.RawMessage) (any, string) {
+		return nil, "bad credential hunter2"
+	}}
+	u, err := startStdioUpstream(context.Background(), nil, fakeSpawn(t, f), Server{
+		Name: "evil", Argv: []string{"/bin/evil"}, Redact: [][]byte{[]byte("hunter2")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.close()
+	_, err = u.Call(context.Background(), "tools/call", json.RawMessage(`{}`))
+	if err == nil {
+		t.Fatal("upstream RPC error was accepted")
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("upstream RPC error leaked the redactor: %v", err)
+	}
+	if !strings.Contains(err.Error(), "bad credential") {
+		t.Fatalf("RPC error was replaced by an internal redaction failure: %v", err)
+	}
+}
+
+func TestStdioUpstreamRejectsMissingResultAndError(t *testing.T) {
+	reader, writer := io.Pipe()
+	u := &stdioUpstream{
+		name:    "evil",
+		redact:  nil,
+		done:    make(chan struct{}),
+		pending: map[uint64]chan upstreamReply{1: make(chan upstreamReply, 1)},
+	}
+	go u.readLoop(reader)
+	if _, err := io.WriteString(writer, `{"jsonrpc":"2.0","id":1}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	reply := <-u.pending[1]
+	if reply.callErr == nil {
+		t.Fatal("response missing both result and error was accepted")
+	}
+	_ = writer.Close()
+}
+
+func TestRedactJSONSemanticStrings(t *testing.T) {
+	input := []byte(`{"\u0068unter2":"literal hunter2","nested":["h\u0075nter2","\u0048\u00F6\/\uD83D\uDE00",17]}`)
+	got, err := redactJSON(input, [][]byte{[]byte("hunter2"), []byte("Hö/😀")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(got) {
+		t.Fatalf("redacted result is invalid JSON: %s", got)
+	}
+	var decoded any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	walkJSONStrings(t, decoded, func(value string) {
+		for _, secret := range []string{"hunter2", "Hö/😀"} {
+			if strings.Contains(value, secret) {
+				t.Fatalf("semantic secret %q survived redaction: %q in %s", secret, value, got)
+			}
+		}
+	})
+	if !bytes.Contains(got, []byte("*")) {
+		t.Fatalf("redaction marker missing: %s", got)
+	}
+}
+
+func TestRedactJSONPreservesUnmatchedInputAndRejectsMalformed(t *testing.T) {
+	input := []byte(` { "value" : "safe <>&" , "number" : 1e+09 } `)
+	got, err := redactJSON(input, [][]byte{[]byte("absent")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, input) {
+		t.Fatalf("unmatched JSON was rewritten:\n got %s\nwant %s", got, input)
+	}
+	if _, err := redactJSON([]byte(`{"unterminated":"value}`), [][]byte{[]byte("value")}); err == nil {
+		t.Fatal("malformed JSON passed semantic redaction")
+	}
+}
+
+func walkJSONStrings(t *testing.T, value any, visit func(string)) {
+	t.Helper()
+	switch value := value.(type) {
+	case string:
+		visit(value)
+	case []any:
+		for _, child := range value {
+			walkJSONStrings(t, child, visit)
+		}
+	case map[string]any:
+		for key, child := range value {
+			visit(key)
+			walkJSONStrings(t, child, visit)
+		}
+	}
+}
+
 func TestRedactBytesDoesNotRescanOrGrow(t *testing.T) {
 	// "A" occurs in the human-readable placeholder. The old replacement
 	// loop kept finding its own output forever.
@@ -370,6 +495,39 @@ func TestRedactBytesDoesNotRescanOrGrow(t *testing.T) {
 	}
 	if len(got) > len("A-A") {
 		t.Fatalf("redaction grew a bounded frame: %d > %d", len(got), len("A-A"))
+	}
+}
+
+func TestRedactBytesHandlesMarkerCollisions(t *testing.T) {
+	for _, secret := range []string{"*", "***", redactionPlaceholder} {
+		got := redactBytes([]byte("before "+secret+" after"), [][]byte{[]byte(secret)})
+		if bytes.Contains(got, []byte(secret)) {
+			t.Fatalf("secret %q survived collision-safe redaction: %q", secret, got)
+		}
+	}
+	long := strings.Repeat("x", len(redactionPlaceholder)+1)
+	got := redactBytes([]byte("aXb "+long), [][]byte{[]byte("ab"), []byte("X"), []byte("GANTRY"), []byte(long)})
+	for _, secret := range []string{"ab", "X", "GANTRY", long} {
+		if strings.Contains(string(got), secret) {
+			t.Fatalf("redacting another value recreated %q: %q", secret, got)
+		}
+	}
+	got = redactBytes([]byte("before hunter2 after"), [][]byte{[]byte("hunter2"), []byte(redactionCandidates)})
+	if len(got) != 0 {
+		t.Fatalf("no-separator fallback did not fail the field closed: %q", got)
+	}
+}
+
+func TestStdioUpstreamDieLeavesCapturedDeliveryChannelSafe(t *testing.T) {
+	ch := make(chan upstreamReply, 1)
+	u := &stdioUpstream{done: make(chan struct{}), pending: map[uint64]chan upstreamReply{1: ch}}
+	u.die()
+	// readLoop may have captured ch immediately before die cleared the map.
+	// Delivery must remain safe and non-blocking after shutdown.
+	select {
+	case ch <- upstreamReply{}:
+	default:
+		t.Fatal("captured delivery channel unexpectedly blocked")
 	}
 }
 

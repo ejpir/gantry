@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/ejpir/gantry/internal/vsockports"
 )
 
 // virtio-vsock (device ID 19): stream sockets between guest and host.
@@ -141,7 +143,10 @@ func NewVsock(guestCID uint64, forwardDir string) *Vsock {
 		nextHostPort:  0x100000,
 		verboseLog:    os.Getenv("GANTRY_DEBUG_VSOCK") != "",
 		dial: func(port uint32) (net.Conn, error) {
-			path := filepath.Join(forwardDir, fmt.Sprintf("%d.sock", port))
+			path, err := vsockports.HostSocketPath(forwardDir, port)
+			if err != nil {
+				return nil, fmt.Errorf("vsock: %w", err)
+			}
 			return net.DialTimeout("unix", path, 3*time.Second)
 		},
 	}

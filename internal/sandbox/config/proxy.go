@@ -101,6 +101,9 @@ func (c RunConfig) ProxyEnvironment() []string {
 }
 
 func ValidateProxyConfig(c RunConfig) error {
+	if c.GVProxy != "" {
+		return fmt.Errorf("external -gvproxy is disabled: launching a configurable host executable is not part of the sandbox boundary (use the embedded network stack)")
+	}
 	proxy, err := ParseForwardProxy(c.ProxyURL)
 	if err != nil {
 		return err
@@ -119,9 +122,6 @@ func ValidateProxyConfig(c RunConfig) error {
 	}
 	if !c.Net {
 		return fmt.Errorf("proxy routing requires networking (remove -net=false)")
-	}
-	if c.ProxyEnforce && c.GVProxy != "" {
-		return fmt.Errorf("-proxy-enforce requires the embedded netstack (remove -gvproxy)")
 	}
 	return nil
 }

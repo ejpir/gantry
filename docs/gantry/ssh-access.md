@@ -115,6 +115,12 @@ passwordless `sudo`; the SSH and editor session itself remains the unprivileged
 `gantry` user. Gantry does not mount or expose a container engine from the
 host.
 
+Both the workload and IDE profiles leave their container procfs free of child
+overmounts so inner runtimes and coding-agent sandboxes can mount procfs in
+child PID/user namespaces. This does not reveal host processes: the microVM and
+each outer container's PID namespace remain in place. The IDE profile separately
+grants the guest-only capabilities required by its rootful Podman launcher.
+
 Unless overridden, `-devcontainers` selects:
 
 | Resource | Default |

@@ -30,11 +30,6 @@ func (d *daemonRuntime) load() error {
 		return fmt.Errorf("secrets handshake: %w", err)
 	}
 	d.audit = &auditRing{}
-	d.secretStore = newSecretStore(secrets, sources, func(f string, a ...any) {
-		line := fmt.Sprintf(f, a...)
-		d.audit.append(line)
-		fmt.Printf("daemon: %s\n", line)
-	})
 
 	d.dir = layout.Dir(d.name)
 	// Revalidate the local control boundary before reading configuration. On
@@ -63,6 +58,22 @@ func (d *daemonRuntime) load() error {
 	}
 	d.store = store
 	d.cfg = d.store.Snapshot()
+	if !sameSecretSources(sources, d.cfg.SecretSources) {
+		return fmt.Errorf("secrets handshake sources do not match the persisted sandbox configuration")
+	}
+	// Validate the sources actually received over stdin, not only their
+	// persisted descriptions. Normal launch keeps them identical; this second
+	// check also closes manual-daemon or future handshake-divergence paths.
+	actualSources := d.cfg
+	actualSources.SecretSources = sources
+	if err := config.ValidateSecretSourceIsolation(actualSources); err != nil {
+		return fmt.Errorf("secrets handshake isolation: %w", err)
+	}
+	d.secretStore = newSecretStore(secrets, sources, func(f string, a ...any) {
+		line := fmt.Sprintf(f, a...)
+		d.audit.append(line)
+		fmt.Printf("daemon: %s\n", line)
+	})
 	if d.cfg.ImageDigest != "" && !gutil.FileExists(d.cfg.Image) {
 		return fmt.Errorf("image %s not in cache; run `gantry image pull %s`", d.cfg.ImageDigest, d.cfg.ImageRef)
 	}

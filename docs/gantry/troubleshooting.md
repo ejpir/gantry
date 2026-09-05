@@ -151,7 +151,7 @@ $ gantry ports ls dev
 
 Confirm that the guest service listens on the guest port and not only on guest
 loopback. Port publishing requires networking and the embedded stack; it is
-not available with `-net=false` or `-gvproxy`.
+not available with `-net=false`.
 
 The default host bind is `127.0.0.1`. Use an explicit address only when remote
 hosts must connect.
@@ -209,8 +209,8 @@ the embedded split network worker. `-net=false` remains compatible with the
 split VMM. AppContainer network isolation cannot use host loopback without a
 privileged machine-wide exemption, which Gantry does not install. Remove
 published ports and loopback-allowing policy rules, or use `auto` and inspect
-the reported fallback. `-gvproxy` and host-path packet capture are also
-incompatible with strict mode.
+the reported fallback. Host-path packet capture is also incompatible with
+strict mode.
 
 ## Collect a useful report
 

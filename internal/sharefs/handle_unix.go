@@ -96,6 +96,9 @@ func (f *shareFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.A
 }
 
 func (f *shareFile) Flush(ctx context.Context) syscall.Errno {
+	if errno := f.available(); errno != 0 {
+		return errno
+	}
 	if fl, ok := f.FileHandle.(fs.FileFlusher); ok {
 		return fl.Flush(ctx)
 	}

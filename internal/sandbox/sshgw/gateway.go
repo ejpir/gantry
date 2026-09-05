@@ -22,6 +22,10 @@ import (
 const (
 	HandshakeTimeout = 10 * time.Second
 	MaxChannels      = 16
+	// DefaultUserSentinel is the wire username used by the managed OpenSSH
+	// configuration when the image's configured user should be selected. It is
+	// consumed by the gateway and is never passed to the guest.
+	DefaultUserSentinel = "__gantry_image_default__"
 )
 
 const genericChannelRefusal = "channel type is not permitted"
@@ -70,7 +74,6 @@ type Config struct {
 	Name        string
 	HostKeyPath string
 	DefaultUser string
-	HostUser    string
 	Spawner     Spawner
 	Auditf      func(string, ...any)
 	// PeerAllowed applies the local transport identity check before an SSH
@@ -135,22 +138,17 @@ func (g *Gateway) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-func sameHostAccount(requested, hostIdentity string) bool {
-	account := func(value string) string {
-		value = strings.TrimSpace(value)
-		if slash := strings.LastIndexAny(value, `\\/`); slash >= 0 {
-			value = value[slash+1:]
-		}
-		if at := strings.IndexByte(value, '@'); at > 0 {
-			value = value[:at]
-		}
-		return value
+func gatewayUser(requested, defaultUser string) string {
+	if requested == "" || requested == DefaultUserSentinel {
+		return defaultUser
 	}
-	return hostIdentity != "" && strings.EqualFold(account(requested), account(hostIdentity))
+	return requested
 }
 
 func (g *Gateway) serveConn(parent context.Context, raw net.Conn) {
 	defer func() { _ = raw.Close() }()
+	stopClose := context.AfterFunc(parent, func() { _ = raw.Close() })
+	defer stopClose()
 	_ = raw.SetDeadline(time.Now().Add(HandshakeTimeout))
 	conn, channels, requests, err := ssh.NewServerConn(raw, g.server)
 	if err != nil {
@@ -160,14 +158,7 @@ func (g *Gateway) serveConn(parent context.Context, raw net.Conn) {
 	_ = raw.SetDeadline(time.Time{})
 	defer func() { _ = conn.Close() }()
 
-	user := conn.User()
-	// Stock ssh must put a username on the wire. When it chose the host
-	// account implicitly, interpret that value as "the image default".
-	// Windows user.Current commonly returns DOMAIN\\User while OpenSSH sends
-	// only "user" (and lower-cases built-in accounts such as SYSTEM).
-	if user == "" || sameHostAccount(user, g.cfg.HostUser) {
-		user = g.cfg.DefaultUser
-	}
+	user := gatewayUser(conn.User(), g.cfg.DefaultUser)
 	g.auditf("connection open user=%s", user)
 	defer g.auditf("connection close user=%s", user)
 

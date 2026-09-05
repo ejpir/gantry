@@ -50,7 +50,7 @@ func TestParseForms(t *testing.T) {
 		t.Errorf("literal form must be refused, got %v", err)
 	}
 
-	f := filepath.Join(t.TempDir(), "tok")
+	f := filepath.Join(canonicalTempDir(t), "tok")
 	_ = os.WriteFile(f, []byte("file-value\n"), 0o600)
 	name, v, err = Parse("MY_TOKEN=@"+f, getenvFrom(env))
 	if err != nil || name != "MY_TOKEN" || v.Raw() != "file-value" {
@@ -65,7 +65,7 @@ func TestParseForms(t *testing.T) {
 }
 
 func TestParseFile(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "env")
+	f := filepath.Join(canonicalTempDir(t), "env")
 	_ = os.WriteFile(f, []byte(`# comment
 GITHUB_TOKEN=ghp_x
 QUOTED="va lue"
@@ -89,7 +89,7 @@ EMPTY=
 }
 
 func TestResolveAllOrderAndNames(t *testing.T) {
-	f := filepath.Join(t.TempDir(), "env")
+	f := filepath.Join(canonicalTempDir(t), "env")
 	_ = os.WriteFile(f, []byte("A=from-file\nB=from-file\n"), 0o600)
 	values, names, err := ResolveAll(
 		[]string{"B", "C"}, []string{f},
@@ -129,7 +129,7 @@ func TestParseSpecBindings(t *testing.T) {
 	}
 
 	// Bound + file form.
-	f := filepath.Join(t.TempDir(), "tok")
+	f := filepath.Join(canonicalTempDir(t), "tok")
 	if err := os.WriteFile(f, []byte("filetok\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,15 @@ import (
 	"time"
 )
 
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestParseSourceGrammar(t *testing.T) {
 	tests := []struct {
 		spec        string
@@ -74,7 +83,7 @@ func TestStoreEnvOnDemand(t *testing.T) {
 }
 
 func TestStoreFileTTLAndRotation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tok")
+	path := filepath.Join(canonicalTempDir(t), "tok")
 	if err := os.WriteFile(path, []byte("v1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +118,7 @@ func TestStoreFileTTLAndRotation(t *testing.T) {
 }
 
 func TestStoreFailClosed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tok")
+	path := filepath.Join(canonicalTempDir(t), "tok")
 	if err := os.WriteFile(path, []byte("v1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +267,7 @@ func TestStoreConcurrentResolvesShareOneFetch(t *testing.T) {
 }
 
 func TestStoreRejectsOversizedSourceValues(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "huge")
+	path := filepath.Join(canonicalTempDir(t), "huge")
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxResolvedValueBytes+1)), 0o600); err != nil {
 		t.Fatal(err)
 	}

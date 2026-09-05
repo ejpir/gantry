@@ -150,8 +150,11 @@ type VhostFS struct {
 	memorySize uint64
 	queues     []VhostQueueFiles
 	configured [virtioFSQueueCount]vhostQueueSnapshot
-	callStats  [virtioFSQueueCount]vhostCallStats
-	traceCalls bool
+	// A virtio reset renegotiates ring features before fresh queues are mapped
+	// on the existing backend connection.
+	needsFeatures bool
+	callStats     [virtioFSQueueCount]vhostCallStats
+	traceCalls    bool
 
 	setupOnce sync.Once
 	setupErr  error
@@ -187,10 +190,22 @@ func (v *VhostFS) configRead(off uint64, p []byte) {
 }
 
 func (v *VhostFS) reset() {
-	for index := range v.configured {
-		started := v.configured[index].started
-		v.configured[index] = vhostQueueSnapshot{started: started}
+	if v.setupErr != nil {
+		return
 	}
+	for index := range v.configured {
+		if v.configured[index].started {
+			state := make([]byte, 8)
+			binary.LittleEndian.PutUint32(state[0:4], uint32(index))
+			if err := v.request(vhostUserSetVringEnable, state, -1); err != nil {
+				v.setupErr = fmt.Errorf("reset queue %d: %w", index, err)
+				fmt.Fprintln(os.Stderr, "vhost-fs:", v.setupErr)
+				return
+			}
+		}
+		v.configured[index] = vhostQueueSnapshot{}
+	}
+	v.needsFeatures = true
 }
 
 func (v *VhostFS) handleQueue(qn int) {
@@ -204,6 +219,14 @@ func (v *VhostFS) handleQueue(qn int) {
 	q := &v.core.queues[qn]
 	if !q.ready || !q.numValid() {
 		return
+	}
+	if v.needsFeatures {
+		if err := v.sendFeatures(); err != nil {
+			v.setupErr = err
+			fmt.Fprintln(os.Stderr, "vhost-fs:", v.setupErr)
+			return
+		}
+		v.needsFeatures = false
 	}
 	snapshot := &v.configured[qn]
 	if !snapshot.configured || snapshot.num != q.num || snapshot.desc != q.descAddr ||
@@ -226,11 +249,10 @@ func (v *VhostFS) setup() error {
 	if v.core == nil || v.control == nil || v.memory == nil {
 		return fmt.Errorf("incomplete frontend")
 	}
-	features := v.core.driverFeat | vhostProtocolFeatures | vhostVersion1
 	if err := v.request(vhostUserSetOwner, nil, -1); err != nil {
 		return err
 	}
-	if err := v.request(vhostUserSetFeatures, u64Payload(features), -1); err != nil {
+	if err := v.sendFeatures(); err != nil {
 		return err
 	}
 	protocol := vhostProtocolReplyAck | vhostProtocolConfigureMemSlot
@@ -273,6 +295,14 @@ func (v *VhostFS) setup() error {
 		}
 		v.callWG.Add(1)
 		go v.readCalls(index, queue.CallRead)
+	}
+	return nil
+}
+
+func (v *VhostFS) sendFeatures() error {
+	features := v.core.driverFeat | vhostProtocolFeatures | vhostVersion1
+	if err := v.request(vhostUserSetFeatures, u64Payload(features), -1); err != nil {
+		return fmt.Errorf("set features: %w", err)
 	}
 	return nil
 }

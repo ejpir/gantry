@@ -39,6 +39,10 @@ func NewServer(tag, root string, readOnly bool) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := identity.ValidateExport(); err != nil {
+		release()
+		return nil, err
+	}
 	canonical := identity.Path()
 	export.identity = identity
 	export.Path = canonical
@@ -51,6 +55,7 @@ func NewServer(tag, root string, readOnly bool) (*Server, error) {
 		logger = log.New(os.Stdout, "[fs "+tag+"] ", 0)
 	}
 	server := &Server{root: canonical, export: export, guard: newRequestGuard()}
+	export.finishDrain = server.scheduleFinish
 	protocol := fuse.NewProtocolServer(fs.NewNodeFS(node, nil), &fuse.MountOptions{
 		Debug:                debug,
 		Logger:               logger,
@@ -71,6 +76,14 @@ func NewServer(tag, root string, readOnly bool) (*Server, error) {
 
 func (s *Server) Root() string { return s.root }
 
+// Identity returns the same pinned root identity used by request handling.
+func (s *Server) Identity() Identity {
+	if s == nil || s.export == nil {
+		return Identity{}
+	}
+	return s.export.Identity()
+}
+
 func (s *Server) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	s.request.RLock()
 	defer s.request.RUnlock()
@@ -90,8 +103,16 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
-	s.export.finish()
+	s.export.finishNow()
 	return nil
+}
+
+func (s *Server) scheduleFinish(finish func()) {
+	go func() {
+		s.request.Lock()
+		defer s.request.Unlock()
+		finish()
+	}()
 }
 
 type readOnlyHandler struct{ next fusewire.Handler }

@@ -31,6 +31,10 @@ The writable image root, installed packages, command history, and agent state
 survive a stop and resume. Project edits appear immediately on the host
 because `/workspace` is a direct share.
 
+The workload procfs supports coding agents that create a nested user/PID
+namespace sandbox (for example, with bubblewrap). Its process view remains
+inside the Gantry workload and microVM; it does not expose host processes.
+
 Use `,ro` for source that the agent should inspect but not change:
 
 ```console
@@ -106,4 +110,3 @@ $ gantry pi -pi-auth=false -image ./pi-agent.tar
 ```
 
 The guest-local login then persists in the sandbox's writable layer.
-

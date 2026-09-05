@@ -52,6 +52,7 @@ func TestValidateProxyConfig(t *testing.T) {
 	}
 
 	invalid := []RunConfig{
+		{Net: true, GVProxy: "gvproxy"},
 		{Net: true, ProxyURL: "ftp://proxy.example"},
 		{Net: true, ProxyURL: "http://user:password@proxy.example"},
 		{Net: true, ProxyURL: "socks5://proxy.example"},

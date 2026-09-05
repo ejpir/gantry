@@ -361,7 +361,17 @@ func cmdRun(argv []string) int {
 			return 2
 		}
 	}
-	filesystems, err := prepareRunFilesystems(hostShares)
+	var vsockFwdIdentity *sharefs.Identity
+	if len(hostShares) != 0 {
+		canonicalVsockFwd, identity, err := prepareRunVsockForward(*vsockFwd)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry run: prepare vsock forwarding:", err)
+			return 1
+		}
+		*vsockFwd = canonicalVsockFwd
+		vsockFwdIdentity = identity
+	}
+	filesystems, err := prepareRunFilesystems(hostShares, vsockFwdIdentity)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry run: prepare shares:", err)
 		return 1
@@ -407,7 +417,21 @@ func cmdRun(argv []string) int {
 	return 0
 }
 
-func prepareRunFilesystems(specs []shares.Spec) (filesystems []vmm.Filesystem, resultErr error) {
+func prepareRunVsockForward(path string) (string, *sharefs.Identity, error) {
+	if path == "" {
+		return "", nil, nil
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", nil, err
+	}
+	identity, err := sharefs.Identify(path)
+	if err != nil {
+		return "", nil, err
+	}
+	return identity.Path(), &identity, nil
+}
+
+func prepareRunFilesystems(specs []shares.Spec, vsockFwd *sharefs.Identity) (filesystems []vmm.Filesystem, resultErr error) {
 	defer func() {
 		if resultErr == nil {
 			return
@@ -423,11 +447,28 @@ func prepareRunFilesystems(specs []shares.Spec) (filesystems []vmm.Filesystem, r
 	}()
 
 	filesystems = make([]vmm.Filesystem, 0, len(specs))
+	identities := make([]sharefs.Identity, 0, len(specs))
 	for _, spec := range specs {
 		server, err := sharefs.NewServer(spec.Tag, spec.Path, spec.RO)
 		if err != nil {
 			resultErr = fmt.Errorf("%s: %w", spec.Tag, err)
 			return
+		}
+		if vsockFwd != nil && server.Identity().Overlaps(*vsockFwd) {
+			resultErr = fmt.Errorf("%s: share root %s overlaps vsock forwarding directory %s", spec.Tag, server.Root(), vsockFwd.Path())
+			if err := server.Close(); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+			return
+		}
+		for index, existing := range identities {
+			if server.Identity().Overlaps(existing) {
+				resultErr = fmt.Errorf("%s: share root %s overlaps share %s", spec.Tag, server.Root(), filesystems[index].Tag)
+				if err := server.Close(); err != nil {
+					resultErr = errors.Join(resultErr, err)
+				}
+				return
+			}
 		}
 		mode := ""
 		if spec.RO {
@@ -439,6 +480,7 @@ func prepareRunFilesystems(specs []shares.Spec) (filesystems []vmm.Filesystem, r
 			Owner:       server,
 			Description: fmt.Sprintf("host %q%s", server.Root(), mode),
 		})
+		identities = append(identities, server.Identity())
 	}
 	return filesystems, nil
 }

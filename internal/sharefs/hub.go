@@ -128,6 +128,10 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 	if err != nil {
 		return nil, "", err
 	}
+	if err := identity.ValidateExport(); err != nil {
+		release()
+		return nil, "", err
+	}
 	exp.identity = identity
 	exp.Path = identity.Path()
 	exp.node = node
@@ -141,6 +145,11 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 	if p == nil || p.export == nil {
 		return nil, fmt.Errorf("nil prepared share")
 	}
+	// Publication may reuse a path whose gracefully removed export has just
+	// reached OnForget. Drain old readers before a new independently locked
+	// namespace can become reachable.
+	h.request.Lock()
+	defer h.request.Unlock()
 	exp := p.export
 	h.mu.Lock()
 	if h.closed {
@@ -161,6 +170,7 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 		exp.coherence.attachRoot(child)
 	}
 	exp.onFinish = h.unregister
+	exp.finishDrain = h.scheduleFinish
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
 	p.export = nil
@@ -179,6 +189,13 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 	if p == nil || p.export == nil {
 		return nil, nil, fmt.Errorf("nil prepared share")
 	}
+	// A replacement must not publish a second export over the same host tree
+	// while an old request is between its policy check and host operation.
+	// HandleRequest holds the read side for the whole FUSE request, so this
+	// writer lock drains every in-flight operation before the namespace and
+	// lifecycle state change together.
+	h.request.Lock()
+	defer h.request.Unlock()
 	exp = p.export
 	h.mu.Lock()
 	if h.closed {
@@ -205,12 +222,18 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 		exp.coherence.attachRoot(child)
 	}
 	exp.onFinish = h.unregister
+	exp.finishDrain = h.scheduleFinish
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
 	p.export = nil
 	h.mu.Unlock()
 	if oldChild != nil {
 		oldChild.ForgetPersistent()
+		// If ForgetPersistent synchronously delivered OnForget, this caller
+		// already owns the writer gate and can preserve synchronous cleanup.
+		if old.finishScheduled.Load() {
+			old.finishNow()
+		}
 	}
 	h.bumpRootVer()
 	_ = h.root.NotifyEntry(exp.Tag)
@@ -253,6 +276,10 @@ func (h *Hub) unregister(export *Export) {
 // existing nodes and handles usable until the kernel forgets them; force
 // revokes subsequent host-backed operations with ESTALE.
 func (h *Hub) Remove(tag string, force bool) (*Export, error) {
+	// See Swap: removal is a lifecycle boundary. In particular, force removal
+	// may not revoke and release a root while a request still uses it.
+	h.request.Lock()
+	defer h.request.Unlock()
 	h.mu.Lock()
 	exp := h.exports[tag]
 	if exp == nil {
@@ -275,11 +302,14 @@ func (h *Hub) Remove(tag string, force bool) (*Export, error) {
 	h.mu.Unlock()
 	if child != nil {
 		child.ForgetPersistent()
+		if exp.finishScheduled.Load() {
+			exp.finishNow()
+		}
 	}
 	h.bumpRootVer()
 	_ = h.root.NotifyEntry(tag)
 	if child == nil {
-		exp.finish()
+		exp.finishNow()
 	}
 	return exp, nil
 }
@@ -322,9 +352,20 @@ func (h *Hub) Close() error {
 	h.mu.Unlock()
 	for _, exp := range exports {
 		exp.advanceState(ExportRevoked)
-		exp.finish()
+		exp.finishNow()
 	}
 	return nil
+}
+
+// scheduleFinish is called from OnForget while HandleRequest holds the read
+// side of request. A separate goroutine can safely wait for the writer side;
+// writer preference then prevents later requests from overtaking release.
+func (h *Hub) scheduleFinish(finish func()) {
+	go func() {
+		h.request.Lock()
+		defer h.request.Unlock()
+		finish()
+	}()
 }
 
 // SetNotificationSink is called by a transport only after the guest has

@@ -22,6 +22,23 @@ func TestRootFallsBackToPerAccountTempDir(t *testing.T) {
 	}
 }
 
+func TestProtectionRootCoversSiblingProductionSandboxes(t *testing.T) {
+	appRoot := t.TempDir()
+	root := filepath.Join(appRoot, "sandboxes")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GANTRY_HOME", root)
+	if got := ProtectionRoot(filepath.Join(root, "alpha")); got != appRoot {
+		t.Fatalf("ProtectionRoot(production sandbox) = %q, want %q", got, appRoot)
+	}
+
+	standalone := filepath.Join(t.TempDir(), "sandbox")
+	if got := ProtectionRoot(standalone); got != standalone {
+		t.Fatalf("ProtectionRoot(standalone sandbox) = %q, want %q", got, standalone)
+	}
+}
+
 func TestEnsureRootRejectsPlantedTempAncestor(t *testing.T) {
 	oldHome, oldTemp := userHomeDir, tempDir
 	t.Cleanup(func() { userHomeDir, tempDir = oldHome, oldTemp })

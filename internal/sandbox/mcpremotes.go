@@ -14,7 +14,7 @@
 //     verified TLS, plain HTTP only to loopback literals, no
 //     userinfo, non-public literal IPs refused at parse time.
 //   - Secret references resolve through the broker's secret Store
-//     (env/file/exec sources, fail-closed) — never from the guest.
+//     (env/file sources, fail-closed) — never from the guest.
 //   - custody: providers read the LIVE custody registry per session, so
 //     refreshed access tokens reach new sessions.
 //   - A spec that fails to parse or resolve refuses the whole `gantry

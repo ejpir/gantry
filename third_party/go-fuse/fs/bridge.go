@@ -423,6 +423,31 @@ func validGuestName(name string) bool {
 		!strings.ContainsRune(name, '/') && !strings.ContainsRune(name, 0)
 }
 
+// gantryRawBridgeLocker lets a policy wrapper serialize a host namespace
+// operation with the matching in-memory inode-tree update below. Without
+// spanning both phases, another request can observe the host rename before
+// MvChild changes relPath and address a different object on its second lookup.
+// The optional interface keeps upstream filesystems unaffected.
+type gantryRawBridgeLocker interface {
+	GantryLockRawBridge()
+	GantryUnlockRawBridge()
+}
+
+func lockGantryRawBridge(n *Inode) func() {
+	locker, ok := n.ops.(gantryRawBridgeLocker)
+	if !ok {
+		return func() {}
+	}
+	locker.GantryLockRawBridge()
+	return locker.GantryUnlockRawBridge
+}
+
+func withGantryRawBridgeLock(n *Inode, operation func()) {
+	unlock := lockGantryRawBridge(n)
+	defer unlock()
+	operation()
+}
+
 func (b *rawBridge) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
 	if !validGuestName(name) {
 		return fuse.EINVAL
@@ -431,6 +456,8 @@ func (b *rawBridge) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name s
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 	ctx := &fuse.Context{Caller: header.Caller, Cancel: cancel}
 	child, errno := b.lookup(ctx, parent, name, out)
 
@@ -477,6 +504,8 @@ func (b *rawBridge) Rmdir(cancel <-chan struct{}, header *fuse.InHeader, name st
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 	var errno syscall.Errno
 	if mops, ok := parent.ops.(NodeRmdirer); ok {
 		errno = mops.Rmdir(&fuse.Context{Caller: header.Caller, Cancel: cancel}, name)
@@ -498,6 +527,8 @@ func (b *rawBridge) Unlink(cancel <-chan struct{}, header *fuse.InHeader, name s
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 	var errno syscall.Errno
 	if mops, ok := parent.ops.(NodeUnlinker); ok {
 		errno = mops.Unlink(&fuse.Context{Caller: header.Caller, Cancel: cancel}, name)
@@ -519,6 +550,8 @@ func (b *rawBridge) Mkdir(cancel <-chan struct{}, input *fuse.MkdirIn, name stri
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 
 	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
 	mops, ok := parent.ops.(NodeMkdirer)
@@ -553,6 +586,8 @@ func (b *rawBridge) Mknod(cancel <-chan struct{}, input *fuse.MknodIn, name stri
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 
 	mops, ok := parent.ops.(NodeMknoder)
 	if !ok {
@@ -578,6 +613,8 @@ func (b *rawBridge) Create(cancel <-chan struct{}, input *fuse.CreateIn, name st
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 
 	mops, ok := parent.ops.(NodeCreater)
 	if !ok {
@@ -759,6 +796,8 @@ func (b *rawBridge) Rename(cancel <-chan struct{}, input *fuse.RenameIn, oldName
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(p1)
+	defer unlock()
 
 	if mops, ok := p1.ops.(NodeRenamer); ok {
 		errno := mops.Rename(&fuse.Context{Caller: input.Caller, Cancel: cancel}, oldName, p2.ops, newName, input.Flags)
@@ -787,6 +826,8 @@ func (b *rawBridge) Link(cancel <-chan struct{}, input *fuse.LinkIn, name string
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 
 	mops, ok := parent.ops.(NodeLinker)
 	if !ok {
@@ -813,6 +854,8 @@ func (b *rawBridge) Symlink(cancel <-chan struct{}, header *fuse.InHeader, targe
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(parent)
+	defer unlock()
 
 	mops, ok := parent.ops.(NodeSymlinker)
 	if !ok {
@@ -1272,6 +1315,8 @@ func (b *rawBridge) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fus
 	if status != fuse.OK {
 		return status
 	}
+	unlock := lockGantryRawBridge(n)
+	defer unlock()
 	ctx := &fuse.Context{Caller: input.Caller, Cancel: cancel}
 	fh, fuseFlags, errno := b.newDirHandle(ctx, n, input.Flags)
 	if errno != 0 {
@@ -1317,7 +1362,11 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 		if status != fuse.OK {
 			return status
 		}
-		fh, _, errno := b.newDirHandle(ctx, n, 0)
+		var fh FileHandle
+		var errno syscall.Errno
+		withGantryRawBridgeLock(n, func() {
+			fh, _, errno = b.newDirHandle(ctx, n, 0)
+		})
 		if errno != 0 {
 			return errnoToStatus(errno)
 		}
@@ -1456,30 +1505,32 @@ func (b *rawBridge) readDirMaybeLookup(cancel <-chan struct{}, input *fuse.ReadI
 		}
 
 		var child *Inode
-		if fileLookupper, ok := f.file.(FileLookuper); ok {
-			child, errno = fileLookupper.Lookup(ctx, de.Name, entryOut)
-		} else {
-			child, errno = b.lookup(ctx, n, de.Name, entryOut)
-		}
-
-		if errno != 0 {
-			if b.options.NegativeTimeout != nil {
-				entryOut.SetEntryTimeout(*b.options.NegativeTimeout)
-
-				// TODO: maybe simply not produce the dirent here?
-				// test?
+		withGantryRawBridgeLock(n, func() {
+			if fileLookupper, ok := f.file.(FileLookuper); ok {
+				child, errno = fileLookupper.Lookup(ctx, de.Name, entryOut)
+			} else {
+				child, errno = b.lookup(ctx, n, de.Name, entryOut)
 			}
-			// TODO: should break?
-		} else {
-			child, _ = b.addNewChild(n, de.Name, child, nil, 0, entryOut)
-			child.setEntryOut(entryOut)
-			b.setEntryOutTimeout(entryOut)
-			if de.Mode&syscall.S_IFMT != child.stableAttr.Mode&syscall.S_IFMT {
-				// The file type has changed behind our back. Use the new value.
-				out.FixMode(child.stableAttr.Mode)
+
+			if errno != 0 {
+				if b.options.NegativeTimeout != nil {
+					entryOut.SetEntryTimeout(*b.options.NegativeTimeout)
+
+					// TODO: maybe simply not produce the dirent here?
+					// test?
+				}
+				// TODO: should break?
+			} else {
+				child, _ = b.addNewChild(n, de.Name, child, nil, 0, entryOut)
+				child.setEntryOut(entryOut)
+				b.setEntryOutTimeout(entryOut)
+				if de.Mode&syscall.S_IFMT != child.stableAttr.Mode&syscall.S_IFMT {
+					// The file type has changed behind our back. Use the new value.
+					out.FixMode(child.stableAttr.Mode)
+				}
+				entryOut.Mode = child.stableAttr.Mode | (entryOut.Mode & 07777)
 			}
-			entryOut.Mode = child.stableAttr.Mode | (entryOut.Mode & 07777)
-		}
+		})
 	}
 
 	return fuse.OK

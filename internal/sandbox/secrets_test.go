@@ -83,6 +83,32 @@ func TestSecretsHandshake(t *testing.T) {
 	}
 }
 
+func TestSameSecretSourcesIsSemantic(t *testing.T) {
+	left := []secret.NamedSource{{
+		Name: "TOKEN", Source: secret.Source{
+			Kind: secret.SourceExec, Argv: []string{"helper", "token"}, Binding: "api.example", Refresh: time.Second,
+		},
+	}}
+	right := []secret.NamedSource{{
+		Name: "TOKEN", Source: secret.Source{
+			Kind: secret.SourceExec, Argv: []string{"helper", "token"}, Binding: "api.example", Refresh: time.Second,
+		},
+	}}
+	if !sameSecretSources(left, right) {
+		t.Fatal("equivalent source lists did not match")
+	}
+	right[0].Source.Argv[1] = "other"
+	if sameSecretSources(left, right) {
+		t.Fatal("different source argv unexpectedly matched")
+	}
+	if sameSecretSources(nil, right) {
+		t.Fatal("different source list lengths unexpectedly matched")
+	}
+	if !sameSecretSources(nil, []secret.NamedSource{}) {
+		t.Fatal("nil and empty source lists should be equivalent")
+	}
+}
+
 func TestSecretsHandshakeBounds(t *testing.T) {
 	many := make(map[string]secret.Value, controlproto.SecretsHandshakeMaxEntries+1)
 	for i := range controlproto.SecretsHandshakeMaxEntries + 1 {

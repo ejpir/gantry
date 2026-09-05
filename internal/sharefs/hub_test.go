@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -345,10 +346,18 @@ func TestShareHubNegotiatesAdaptiveReadDirPlus(t *testing.T) {
 		fuse.CAP_INIT_EXT | fuse.CAP_GANTRY_READDIR_EOF)
 	binary.LittleEndian.PutUint32(payload[12:16], uint32(capabilities))
 	binary.LittleEndian.PutUint32(payload[16:20], uint32(capabilities>>32))
-	_, errno, out := hubReq(t, hub,
+	n, errno, out := hubReq(t, hub,
 		[][]byte{fuseInHeader(fuseInit, 1, 0, len(payload)), payload}, 16, 64)
 	if errno != 0 {
 		t.Fatalf("FUSE_INIT errno %d", errno)
+	}
+	// Flags2 starts at byte 32 of fuse_init_out. Inspect only bytes covered by
+	// the response header's length: the Darwin protocol used to leave flags2
+	// populated in the backing buffer while truncating the wire reply to the
+	// 24-byte compatibility form, making this test report a false negotiation.
+	const flags2End = 36
+	if n < 16+flags2End {
+		t.Fatalf("FUSE_INIT response length %d omits flags2", n)
 	}
 	flags := uint64(binary.LittleEndian.Uint32(out[1][12:16])) |
 		uint64(binary.LittleEndian.Uint32(out[1][32:36]))<<32
@@ -1428,6 +1437,77 @@ func TestIdentityOverlapUsesObjectAndPath(t *testing.T) {
 	}
 	if rootIdentity.Overlaps(siblingIdentity) {
 		t.Fatal("unrelated sibling identities overlapped")
+	}
+}
+
+func TestIdentityOverlapUsesFilesystemScope(t *testing.T) {
+	state := newIdentity("/real/state/sandbox", 7, 30, false)
+	state.scope, state.scopeValid = "/fs/real/state/sandbox", true
+	aliasedParent := newIdentity("/mnt/state-alias", 7, 20, false)
+	aliasedParent.scope, aliasedParent.scopeValid = "/fs/real/state", true
+	aliasedChild := newIdentity("/mnt/child-alias", 7, 40, false)
+	aliasedChild.scope, aliasedChild.scopeValid = "/fs/real/state/sandbox/child", true
+	sibling := newIdentity("/mnt/sibling", 7, 50, false)
+	sibling.scope, sibling.scopeValid = "/fs/real/state/sibling", true
+	otherVolume := newIdentity("/mnt/other", 8, 60, false)
+	otherVolume.scope, otherVolume.scopeValid = "/fs/real/state", true
+	nestedMount := newIdentity("/mnt/export", 9, 70, false)
+	nestedMount.scope, nestedMount.scopeValid = "/other/export", true
+	nestedMount.mountedScopes = []identityScope{{path: "/fs/real/state/sandbox", volume: 7}}
+
+	if !state.Overlaps(aliasedParent) {
+		t.Fatal("bind-mounted state ancestor was not recognized")
+	}
+	if !state.Overlaps(aliasedChild) {
+		t.Fatal("bind-mounted state descendant was not recognized")
+	}
+	if state.Overlaps(sibling) {
+		t.Fatal("filesystem-scope sibling was treated as overlapping")
+	}
+	if state.Overlaps(otherVolume) {
+		t.Fatal("same scope on another volume was treated as overlapping")
+	}
+	if !state.Overlaps(nestedMount) {
+		t.Fatal("state mounted beneath an unrelated export was not recognized")
+	}
+	if !aliasedParent.Contains(state) {
+		t.Fatal("bind-mounted ancestor did not contain its descendant")
+	}
+	if state.Contains(aliasedParent) {
+		t.Fatal("directional containment treated an ancestor as a descendant")
+	}
+	if !nestedMount.Contains(state) {
+		t.Fatal("nested mounted scope did not contain the sensitive directory")
+	}
+	if state.Contains(sibling) || state.Contains(otherVolume) {
+		t.Fatal("directional containment crossed a sibling or volume")
+	}
+}
+
+func TestIdentityRejectsKernelControlFilesystems(t *testing.T) {
+	for _, filesystem := range []string{
+		"proc", "sysfs", "cgroup2", "debugfs", "devtmpfs", "efivarfs",
+		"mqueue", "functionfs", "gadgetfs", "fusectl", "autofs",
+	} {
+		root := newIdentity("/host/control", 7, 30, false)
+		root.filesystem = filesystem
+		if err := root.ValidateExport(); err == nil || !strings.Contains(err.Error(), filesystem) {
+			t.Errorf("%s root validation error = %v", filesystem, err)
+		}
+	}
+
+	nested := newIdentity("/host/export", 8, 40, false)
+	nested.filesystem = "ext4"
+	nested.mountedScopes = []identityScope{{path: "/", volume: 9, filesystem: "sysfs"}}
+	if err := nested.ValidateExport(); err == nil || !strings.Contains(err.Error(), "sysfs") {
+		t.Fatalf("nested sysfs validation error = %v", err)
+	}
+
+	ordinary := newIdentity("/host/work", 10, 50, false)
+	ordinary.filesystem = "ext4"
+	ordinary.mountedScopes = []identityScope{{path: "/data", volume: 11, filesystem: "tmpfs"}}
+	if err := ordinary.ValidateExport(); err != nil {
+		t.Fatalf("ordinary storage validation: %v", err)
 	}
 }
 

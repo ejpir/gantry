@@ -10,6 +10,8 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/sharefs"
+	"github.com/ejpir/gantry/internal/shares"
 )
 
 func TestWriteMainHelpListsCommands(t *testing.T) {
@@ -67,6 +69,57 @@ func TestCommandHelpSucceeds(t *testing.T) {
 	}
 	if status := runExec([]string{"-h"}); status != 0 {
 		t.Fatalf("runExec(-h) status = %d, want 0", status)
+	}
+}
+
+func TestPrepareRunFilesystemsRejectsVsockForwardOverlap(t *testing.T) {
+	root := t.TempDir()
+	forward := filepath.Join(root, "forward")
+	if err := os.Mkdir(forward, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := sharefs.Identify(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, readOnly := range []bool{false, true} {
+		_, err := prepareRunFilesystems([]shares.Spec{{Tag: "host", Path: root, RO: readOnly}}, &identity)
+		if err == nil || !strings.Contains(err.Error(), "overlaps vsock forwarding") {
+			t.Fatalf("readOnly=%v overlap error = %v", readOnly, err)
+		}
+	}
+}
+
+func TestPrepareRunVsockForwardPinsSymlinkTarget(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "forward")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	canonical, identity, err := prepareRunVsockForward(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical != identity.Path() || canonical == link {
+		t.Fatalf("forward path was not pinned to symlink target: canonical=%q identity=%q link=%q", canonical, identity.Path(), link)
+	}
+}
+
+func TestPrepareRunFilesystemsRejectsOverlappingShares(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	filesystems, err := prepareRunFilesystems([]shares.Spec{
+		{Tag: "root", Path: root},
+		{Tag: "child", Path: child},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "overlaps share root") {
+		t.Fatalf("overlap error = %v", err)
+	}
+	if len(filesystems) != 0 {
+		t.Fatalf("failed preparation retained %d filesystems", len(filesystems))
 	}
 }
 

@@ -27,8 +27,8 @@ Common flags:
 | `-runtime MODE` | Guest OCI runtime: `crun` or `runsc` |
 | `-rw=false` | Disable the writable container overlay |
 | `-share SPEC` | Add a host-directory share; repeatable |
-| `-secret SPEC` | Inject a secret: `NAME`, `NAME=@/path`, `NAME='!cmd args'`; append `@host` to bind for broker-only delivery, `,ttl=60s` to set refresh; repeatable |
-| `-secret-file PATH` | Load dotenv-style secrets; repeatable |
+| `-secret SPEC` | Inject `NAME` from the launcher environment or `NAME=@/canonical/path` from an existing symlink-free single-link file; append `@host` for broker-only delivery and `,ttl=60s` for refresh; command sources are refused |
+| `-secret-file PATH` | Load a symlink-free single-link dotenv file; repeatable |
 | `-net=false` | Disable guest networking |
 | `-net-policy PATH` | Load a JSON egress policy |
 | `-allow-local-net` | Allow host, LAN, link-local, and related destinations |
@@ -46,8 +46,9 @@ Common flags:
 | `-devcontainers` | Add the curated IDE peer container and nested Podman; preserves `-image` as the workload |
 | `-process-isolation MODE` | `auto`, `required`, or `off` |
 
-Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, `-layerset`, and
-`-gvproxy`.
+Advanced boot flags are `-kernel`, `-rootfs`, `-rwlayer`, and `-layerset`.
+The legacy external `-gvproxy` backend is disabled because it launches a
+configurable host executable; use the embedded network stack.
 
 ### `gantry configure`
 

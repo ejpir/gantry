@@ -6,8 +6,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +40,11 @@ func TestOAuthCallbackPorts(t *testing.T) {
 			name: "bare printed callback URL",
 			text: "listening on http://127.0.0.1:1455/auth/callback — waiting",
 			want: []int{1455},
+		},
+		{
+			name: "bare callback suffix and query",
+			text: "listening on http://127.0.0.1:55123/auth/callback/final?state=opaque-state",
+			want: []int{55123},
 		},
 		{
 			name: "non-localhost redirect ignored",
@@ -97,6 +104,89 @@ func TestOAuthCallbackPortsLocalhostHealthNotCallback(t *testing.T) {
 	}
 }
 
+func TestOAuthCallbackTargetsCapturePathAndState(t *testing.T) {
+	targets := callbackTargets(`Open https://provider.example/authorize?state=s3cr3t%2Fvalue&redirect_uri=http%3A%2F%2Flocalhost%3A55123%2Fauth%2Fcallback`)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %+v, want one", targets)
+	}
+	if got := targets[0]; got.port != 55123 || got.path != "/auth/callback" || got.state != "s3cr3t/value" || !got.validateState {
+		t.Fatalf("target = %+v", got)
+	}
+
+	targets = callbackTargets(`Open http://localhost:55124/auth/callback/final?state=bare-state`)
+	if len(targets) != 1 {
+		t.Fatalf("bare targets = %+v, want one", targets)
+	}
+	if got := targets[0]; got.port != 55124 || got.path != "/auth/callback/final" || got.state != "bare-state" || !got.validateState {
+		t.Fatalf("bare target = %+v", got)
+	}
+}
+
+func TestSniffWriterEnrichesStateSplitAcrossWrites(t *testing.T) {
+	port := freeAllowedOAuthPort(t)
+	b := testBridge(t, func(int, string) (replayResult, error) {
+		return replayResult{status: http.StatusOK}, nil
+	})
+	w := b.SniffWriter(io.Discard)
+	first := fmt.Sprintf("https://provider.example/authorize?redirect_uri=http%%3A%%2F%%2Flocalhost%%3A%d%%2Fauth%%2Fcallback", port)
+	if _, err := w.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("&state=late-state\n")); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	l := b.listeners[port]
+	b.mu.Unlock()
+	if l == nil || l.expectedPath != "/auth/callback" || l.expectedState != "late-state" || !l.validateState {
+		t.Fatalf("listener expectation was not enriched: %+v", l)
+	}
+}
+
+func TestSniffWriterExtendsPartialPathAndStateAcrossWrites(t *testing.T) {
+	cases := []struct {
+		name      string
+		first     func(int) string
+		second    string
+		wantPath  string
+		wantState string
+	}{
+		{
+			name:      "state token",
+			first:     func(port int) string { return fmt.Sprintf("open http://localhost:%d/auth/callback?state=late-", port) },
+			second:    "state\n",
+			wantPath:  "/auth/callback",
+			wantState: "late-state",
+		},
+		{
+			name:      "path token",
+			first:     func(port int) string { return fmt.Sprintf("open http://localhost:%d/auth/callback", port) },
+			second:    "/final?state=path-state\n",
+			wantPath:  "/auth/callback/final",
+			wantState: "path-state",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			port := freeAllowedOAuthPort(t)
+			b := testBridge(t, nil)
+			w := b.SniffWriter(io.Discard)
+			if _, err := w.Write([]byte(tc.first(port))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := w.Write([]byte(tc.second)); err != nil {
+				t.Fatal(err)
+			}
+			b.mu.Lock()
+			l := b.listeners[port]
+			b.mu.Unlock()
+			if l == nil || l.expectedPath != tc.wantPath || l.expectedState != tc.wantState || !l.validateState {
+				t.Fatalf("listener expectation = %+v, want path=%q state=%q", l, tc.wantPath, tc.wantState)
+			}
+		})
+	}
+}
+
 func testBridge(t *testing.T, replay func(port int, uri string) (replayResult, error)) *Bridge {
 	t.Helper()
 	b := &Bridge{
@@ -153,16 +243,8 @@ func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
 			return replayResult{}, err
 		}
 		defer func() { _ = resp.Body.Close() }()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return replayResult{}, err
-		}
-		return replayResult{
-			status:      resp.StatusCode,
-			contentType: resp.Header.Get("Content-Type"),
-			location:    resp.Header.Get("Location"),
-			body:        body,
-		}, nil
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return replayResult{status: resp.StatusCode}, nil
 	})
 
 	// Sniff a codex-style authorize URL; the bridge must bind 1455-equivalent.
@@ -205,9 +287,13 @@ func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, body %s", resp.StatusCode, body)
 	}
-	if !strings.Contains(string(body), "Sign-in complete") {
-		t.Fatalf("guest response not relayed: %s", body)
+	if !strings.Contains(string(body), "OAuth callback delivered") {
+		t.Fatalf("host completion page missing: %s", body)
 	}
+	if strings.Contains(string(body), "Sign-in complete") {
+		t.Fatalf("guest-controlled response reached the browser: %s", body)
+	}
+	assertSafeBrowserHeaders(t, resp.Header)
 	if gotURI != "/auth/callback?code=abc123&state=s3cr3t" {
 		t.Fatalf("guest saw URI %q", gotURI)
 	}
@@ -228,73 +314,95 @@ func TestBridgeEndToEndWithFakeGuest(t *testing.T) {
 	}
 }
 
-func TestBridgeForwardsGuestRedirect(t *testing.T) {
-	// Codex answers /auth/callback with a 302 to its result page. The
-	// Location header must reach the browser, or it renders a blank page.
+func TestBridgeDoesNotForwardGuestRedirectOrMetadata(t *testing.T) {
 	b := testBridge(t, func(port int, uri string) (replayResult, error) {
-		return replayResult{status: 302, location: "/auth/success", contentType: "text/plain; charset=utf-8"}, nil
+		raw := "HTTP/1.1 302 Found\r\n" +
+			"Content-Type: application/javascript\r\n" +
+			"Location: https://attacker.example/from-guest\r\n\r\n" +
+			`<script>fetch("http://127.0.0.1:2375/attack")</script>`
+		return parseRawHTTPResponse([]byte(raw))
 	})
 	l := &listener{port: 1}
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc&state=s", nil)
 	rec := httptest.NewRecorder()
 	b.handleCallback(l)(rec, req)
-	if rec.Code != 302 {
-		t.Fatalf("status = %d, want 302", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/auth/success" {
-		t.Fatalf("Location = %q, want /auth/success (blank-page regression)", loc)
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Fatalf("guest Location reached browser as %q", loc)
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
-		t.Fatalf("Content-Type = %q, guest type not preserved", ct)
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want fixed host type", ct)
 	}
+	if strings.Contains(rec.Body.String(), "127.0.0.1:2375") || strings.Contains(rec.Body.String(), "script") {
+		t.Fatalf("active guest body reached browser: %s", rec.Body.String())
+	}
+	assertSafeBrowserHeaders(t, rec.Header())
 }
 
-func TestBridgeNormalizesAbsoluteSameOriginGuestRedirect(t *testing.T) {
-	b := testBridge(t, func(port int, uri string) (replayResult, error) {
-		return replayResult{
-			status:   http.StatusFound,
-			location: "http://localhost:1455/success?id_token=opaque",
-		}, nil
+func TestBridgeRejectsMismatchedCallbackPathAndState(t *testing.T) {
+	var calls atomic.Int32
+	b := testBridge(t, func(int, string) (replayResult, error) {
+		calls.Add(1)
+		return replayResult{status: http.StatusOK}, nil
 	})
-	rec := httptest.NewRecorder()
-	b.handleCallback(&listener{port: 1455})(rec,
-		httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc", nil))
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status = %d, want 302", rec.Code)
+	l := &listener{port: 55123, expectedPath: "/auth/callback", expectedState: "expected", validateState: true}
+	for _, uri := range []string{
+		"/other/callback?code=x&state=expected",
+		"/auth/callback?code=x&state=wrong",
+		"/auth/callback?code=x",
+	} {
+		rec := httptest.NewRecorder()
+		b.handleCallback(l)(rec, httptest.NewRequest(http.MethodGet, uri, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", uri, rec.Code)
+		}
 	}
-	if got := rec.Header().Get("Location"); got != "/success?id_token=opaque" {
-		t.Fatalf("Location = %q, want same-origin relative redirect", got)
+	if calls.Load() != 0 {
+		t.Fatalf("mismatched callbacks reached guest %d times", calls.Load())
+	}
+	rec := httptest.NewRecorder()
+	b.handleCallback(l)(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?code=x&state=expected", nil))
+	if rec.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("matching callback status/calls = %d/%d", rec.Code, calls.Load())
+	}
+
+	// A state-less URL arms a state-less flow, not a wildcard. This keeps a
+	// sandbox that squats on a fixed callback port from receiving another
+	// sandbox's callback carrying an unpredictable state.
+	l.expectedState = ""
+	rec = httptest.NewRecorder()
+	b.handleCallback(l)(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?code=x&state=someone-else", nil))
+	if rec.Code != http.StatusNotFound || calls.Load() != 1 {
+		t.Fatalf("state-less expectation accepted another flow: status/calls = %d/%d", rec.Code, calls.Load())
+	}
+	rec = httptest.NewRecorder()
+	b.handleCallback(l)(rec, httptest.NewRequest(http.MethodGet, "/auth/callback?code=x", nil))
+	if rec.Code != http.StatusNotFound || calls.Load() != 1 {
+		t.Fatalf("state-less OAuth result was replayed: status/calls = %d/%d", rec.Code, calls.Load())
 	}
 }
 
-func TestBridgeRejectsGuestRedirectOffBridgeOrigin(t *testing.T) {
-	for _, location := range []string{
-		"https://attacker.example/exfil?oauth_code=abc123",
-		"//attacker.example/from-guest",
-		`/\attacker.example/from-guest`,
-		"/%2f%2fattacker.example/from-guest",
-		"/%5c%5cattacker.example/from-guest",
-	} {
-		t.Run(location, func(t *testing.T) {
-			b := testBridge(t, func(int, string) (replayResult, error) {
-				return replayResult{status: http.StatusFound, location: location}, nil
-			})
-			rec := httptest.NewRecorder()
-			b.handleCallback(&listener{port: 1})(rec,
-				httptest.NewRequest(http.MethodGet, "/auth/callback?code=abc", nil))
-			if rec.Code != http.StatusBadGateway {
-				t.Fatalf("status = %d, want 502", rec.Code)
-			}
-			if got := rec.Header().Get("Location"); got != "" {
-				t.Fatalf("unsafe Location forwarded as %q", got)
-			}
-		})
+func assertSafeBrowserHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "sandbox") {
+		t.Fatalf("unsafe or missing CSP: %q", csp)
+	}
+	if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := header.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := header.Get("Clear-Site-Data"); got != `"cache", "storage"` {
+		t.Fatalf("Clear-Site-Data = %q", got)
 	}
 }
 
 func TestBridgeReplayFailureReturnsBadGateway(t *testing.T) {
 	b := testBridge(t, func(port int, uri string) (replayResult, error) {
-		return replayResult{}, fmt.Errorf("in-sandbox replay exited 97: cannot connect")
+		return replayResult{}, fmt.Errorf(`in-sandbox replay exited 97: <script>fetch("http://127.0.0.1:2375")</script>`)
 	})
 	l := &listener{port: 1}
 	req := httptest.NewRequest(http.MethodGet, "/callback?code=x", nil)
@@ -305,6 +413,9 @@ func TestBridgeReplayFailureReturnsBadGateway(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "could not deliver") {
 		t.Fatalf("unhelpful error page: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "127.0.0.1:2375") || strings.Contains(rec.Body.String(), "script") {
+		t.Fatalf("guest-controlled error detail reached browser: %s", rec.Body.String())
 	}
 }
 
@@ -330,7 +441,7 @@ func TestBridgeCapsConcurrentReplays(t *testing.T) {
 		calls.Add(1)
 		started <- struct{}{}
 		<-release
-		return replayResult{status: http.StatusOK, body: []byte("ok")}, nil
+		return replayResult{status: http.StatusOK}, nil
 	})
 	l := &listener{port: 1455}
 	done := make(chan struct{}, maxConcurrentReplays)
@@ -407,24 +518,8 @@ func TestBridgeReplayTimeoutKeepsSlotCharged(t *testing.T) {
 }
 
 func TestBridgeRejectsOversizeReplayResponse(t *testing.T) {
-	b := testBridge(t, func(port int, uri string) (replayResult, error) {
-		return replayResult{
-			status: http.StatusOK,
-			body:   []byte(strings.Repeat("x", MaxReplayResponseSize+1)),
-		}, nil
-	})
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/callback?code=large", nil)
-	b.handleCallback(&listener{port: 1455})(rec, req)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("oversize response status = %d, want 502", rec.Code)
-	}
-	if rec.Body.Len() >= MaxReplayResponseSize {
-		t.Fatalf("oversize guest body was relayed: %d bytes", rec.Body.Len())
-	}
-
 	payload := []byte(strings.Repeat("y", MaxReplayResponseSize+4096))
-	if _, err := parseRawHTTPResponse(payload, 1455); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if _, err := parseRawHTTPResponse(payload); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("oversize raw response error = %v", err)
 	}
 }
@@ -482,7 +577,7 @@ func TestReplayViaDevTCPPreservesEmptyRedirectTerminator(t *testing.T) {
 		if err != nil {
 			t.Fatalf("suffix %q: %v", suffix, err)
 		}
-		if res.status != http.StatusFound || res.location != "/success?id_token=opaque" {
+		if res.status != http.StatusFound {
 			t.Fatalf("suffix %q: response = %+v", suffix, res)
 		}
 	}
@@ -490,91 +585,39 @@ func TestReplayViaDevTCPPreservesEmptyRedirectTerminator(t *testing.T) {
 
 func TestParseRawHTTPResponse(t *testing.T) {
 	raw := "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: 13\r\n\r\nHello, world!\nclient: task exited, status 0\n"
-	res, err := parseRawHTTPResponse([]byte(raw), 1455)
+	res, err := parseRawHTTPResponse([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.status != 200 {
 		t.Fatalf("status = %d", res.status)
 	}
-	if string(res.body) != "Hello, world!" {
-		t.Fatalf("body = %q (session trailer leaked into Content-Length body)", res.body)
-	}
-	if res.contentType != "text/html" {
-		t.Fatalf("contentType = %q", res.contentType)
-	}
 
-	// Close-delimited body without Content-Length.
-	raw2 := "HTTP/1.0 302 Found\r\nLocation: /auth/success\r\n\r\n"
-	res, err = parseRawHTTPResponse([]byte(raw2), 1455)
-	if err != nil || res.status != 302 {
-		t.Fatalf("status %d err %v", res.status, err)
-	}
-	if res.location != "/auth/success" {
-		t.Fatalf("location = %q (redirect target lost)", res.location)
-	}
-
-	// Session stream transports can turn tiny-http's CRLF response into LF.
-	// Newer Codex listeners also return an absolute redirect to their own
-	// callback origin; normalize it before returning it to the host browser.
-	tinyHTTP := "HTTP/1.0 302 Found\n" +
-		"Server: tiny-http (Rust)\n" +
-		"Location: http://localhost:1455/success?id_token=opaque\n\n"
-	res, err = parseRawHTTPResponse([]byte(tinyHTTP), 1455)
-	if err != nil || res.status != http.StatusFound {
-		t.Fatalf("tiny-http LF response: status %d err %v", res.status, err)
-	}
-	if res.location != "/success?id_token=opaque" {
-		t.Fatalf("tiny-http Location = %q, want normalized same-origin path", res.location)
-	}
-	if _, err := parseRawHTTPResponse([]byte(tinyHTTP), 53692); err == nil {
-		t.Fatal("same-host redirect to a different callback port must be rejected")
-	}
-
+	// Guest metadata is untrusted and must neither be interpreted nor rejected:
+	// the browser always gets a separately constructed host response.
 	for _, location := range []string{
 		"https://attacker.example/exfil",
 		"//attacker.example/from-guest",
 		"/%2f%2fattacker.example/from-guest",
 	} {
-		raw := "HTTP/1.0 302 Found\r\nLocation: " + location + "\r\n\r\n"
-		if _, err := parseRawHTTPResponse([]byte(raw), 1455); err == nil || !strings.Contains(err.Error(), "unsafe HTTP Location") {
-			t.Errorf("Location %q error = %v", location, err)
+		raw := "HTTP/1.0 302 Found\r\nContent-Type: application/javascript\r\nLocation: " + location + "\r\n\r\n<script>attack()</script>"
+		if parsed, err := parseRawHTTPResponse([]byte(raw)); err != nil || parsed.status != http.StatusFound {
+			t.Errorf("untrusted metadata changed delivery for Location %q: response=%+v error=%v", location, parsed, err)
 		}
 	}
 
-	// Node-style chunked response (claude/pi listeners).
-	raw3 := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n" +
-		"8\r\nSign-in \r\n8\r\ncomplete\r\n0\r\n\r\n"
-	res, err = parseRawHTTPResponse([]byte(raw3), 1455)
-	if err != nil || res.status != 200 {
-		t.Fatalf("chunked: status %d err %v", res.status, err)
-	}
-	if string(res.body) != "Sign-in complete" {
-		t.Fatalf("chunked body = %q", res.body)
+	// Session stream transports can turn tiny-http's CRLF response into LF.
+	lf := "HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n8\nignored!\n0\n\n"
+	res, err = parseRawHTTPResponse([]byte(lf))
+	if err != nil || res.status != http.StatusOK {
+		t.Fatalf("LF response: status %d err %v", res.status, err)
 	}
 
-	lfChunked := "HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n" +
-		"8\nSign-in \n8\ncomplete\n0\n\n"
-	res, err = parseRawHTTPResponse([]byte(lfChunked), 1455)
-	if err != nil || string(res.body) != "Sign-in complete" {
-		t.Fatalf("LF chunked body = %q, err %v", res.body, err)
-	}
-
-	if _, err := parseRawHTTPResponse([]byte("garbage"), 1455); err == nil {
+	if _, err := parseRawHTTPResponse([]byte("garbage")); err == nil {
 		t.Fatal("expected error for non-HTTP input")
 	}
-	if _, err := parseRawHTTPResponse([]byte("oops\r\n\r\nbody"), 1455); err == nil {
+	if _, err := parseRawHTTPResponse([]byte("oops\r\n\r\nbody")); err == nil {
 		t.Fatal("expected error for malformed status line")
-	}
-}
-
-func TestDecodeChunkedBodyRejectsOverflowSize(t *testing.T) {
-	if _, err := decodeChunkedBody([]byte("7fffffffffffffff\r\nx\r\n")); err == nil {
-		t.Fatal("MaxInt64 chunk size must be rejected")
-	}
-	raw := "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffffffffffff\r\nx\r\n"
-	if _, err := parseRawHTTPResponse([]byte(raw), 1455); err == nil || !strings.Contains(err.Error(), "decode chunked") {
-		t.Fatalf("malformed chunked response error = %v", err)
 	}
 }
 
@@ -601,6 +644,156 @@ func TestSniffWriterDedupesAndBindFailure(t *testing.T) {
 	}
 	if !failed {
 		t.Fatal("bind failure not remembered")
+	}
+}
+
+func TestSniffWriterDoesNotReopenClosedListener(t *testing.T) {
+	b := testBridge(t, nil)
+	port := freeAllowedOAuthPort(t)
+	w := b.SniffWriter(io.Discard)
+	first := fmt.Sprintf("open https://provider.example/authorize?redirect_uri=http%%3A%%2F%%2Flocalhost%%3A%d%%2Fauth%%2Fcallback", port)
+	if _, err := w.Write([]byte(first)); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	l := b.listeners[port]
+	b.mu.Unlock()
+	if l == nil {
+		t.Fatal("initial callback URL did not open listener")
+	}
+	b.closeExactListener(l)
+
+	// This completes the same buffered URL and therefore enriches its state.
+	// Enrichment after one-shot/TTL closure must not recreate the listener.
+	if _, err := w.Write([]byte("&state=late-state\nmore output\n")); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	_, reopened := b.listeners[port]
+	b.mu.Unlock()
+	if reopened {
+		t.Fatal("old buffered callback URL reopened a closed listener")
+	}
+}
+
+func TestSniffWriterConcurrentWrites(t *testing.T) {
+	b := testBridge(t, nil)
+	port := freeAllowedOAuthPort(t)
+	w := b.SniffWriter(io.Discard)
+	printed := fmt.Sprintf("open http://localhost:%d/auth/callback?state=concurrent\n", port)
+
+	const writers = 16
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := w.Write([]byte(printed))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.mu.Lock()
+	l := b.listeners[port]
+	b.mu.Unlock()
+	if l == nil || l.expectedPath != "/auth/callback" || l.expectedState != "concurrent" {
+		t.Fatalf("concurrent scanner result = %+v", l)
+	}
+}
+
+func TestCustodyListenerFailsClosedAndCannotBePoisoned(t *testing.T) {
+	var replayCalls atomic.Int32
+	b := testBridge(t, func(int, string) (replayResult, error) {
+		replayCalls.Add(1)
+		return replayResult{status: http.StatusOK}, nil
+	})
+	port := freeAllowedOAuthPort(t)
+	b.SetCustodyConsumer(func(_ int, u *url.URL) bool {
+		return u.Query().Get("state") == "owned-state"
+	})
+	if !b.EnsureCallbackPort(port) {
+		t.Fatal("custody listener did not open")
+	}
+
+	// Guest output cannot turn a custody-owned listener into a transparent
+	// one or install attacker-selected expectations on it.
+	w := b.SniffWriter(io.Discard)
+	printed := fmt.Sprintf("open http://localhost:%d/auth/callback?state=attacker-state\n", port)
+	if _, err := w.Write([]byte(printed)); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	l := b.listeners[port]
+	b.mu.Unlock()
+	if l == nil || !l.custody || l.expectedPath != "" || l.expectedState != "" {
+		t.Fatalf("custody listener was poisoned by sniffed output: %+v", l)
+	}
+
+	unknown := httptest.NewRecorder()
+	b.handleCallback(l)(unknown, httptest.NewRequest(http.MethodGet, "/auth/callback?code=victim-code&state=victim-state", nil))
+	if unknown.Code != http.StatusNotFound || replayCalls.Load() != 0 {
+		t.Fatalf("unknown custody callback status/replays = %d/%d", unknown.Code, replayCalls.Load())
+	}
+
+	owned := httptest.NewRecorder()
+	b.handleCallback(l)(owned, httptest.NewRequest(http.MethodGet, "/auth/callback?code=ours&state=owned-state", nil))
+	if owned.Code != http.StatusOK || replayCalls.Load() != 0 || !strings.Contains(owned.Body.String(), "OAuth callback received") {
+		t.Fatalf("owned custody callback status/replays/body = %d/%d/%q", owned.Code, replayCalls.Load(), owned.Body.String())
+	}
+	assertSafeBrowserHeaders(t, owned.Header())
+	b.mu.Lock()
+	stillActive := b.listeners[port] == l
+	b.mu.Unlock()
+	if !stillActive {
+		t.Fatal("one custody callback closed a listener shared by pending flows")
+	}
+}
+
+func TestCustodyRegistrationRefreshesListenerLifetime(t *testing.T) {
+	b := testBridge(t, nil)
+	port := freeAllowedOAuthPort(t)
+	if !b.EnsureCallbackPort(port) {
+		t.Fatal("first custody registration failed")
+	}
+	b.mu.Lock()
+	l := b.listeners[port]
+	firstGeneration := l.ttlGeneration
+	b.mu.Unlock()
+	if !b.EnsureCallbackPort(port) {
+		t.Fatal("second custody registration failed")
+	}
+	b.mu.Lock()
+	secondGeneration := l.ttlGeneration
+	b.mu.Unlock()
+	if secondGeneration <= firstGeneration {
+		t.Fatalf("listener lifetime generation did not advance: %d -> %d", firstGeneration, secondGeneration)
+	}
+
+	// A callback from the retired timer cannot close the refreshed listener.
+	b.closeExpiredListener(l, firstGeneration)
+	b.mu.Lock()
+	stillActive := b.listeners[port] == l
+	b.mu.Unlock()
+	if !stillActive {
+		t.Fatal("retired custody TTL closed refreshed listener")
+	}
+}
+
+func TestCustodyDoesNotReuseTransparentListener(t *testing.T) {
+	b := testBridge(t, nil)
+	port := freeAllowedOAuthPort(t)
+	if !b.ensureListenerTarget(callbackTarget{port: port, path: "/callback", state: "transparent", validateState: true}) {
+		t.Fatal("transparent listener did not open")
+	}
+	if b.EnsureCallbackPort(port) {
+		t.Fatal("custody reused a transparent listener")
 	}
 }
 

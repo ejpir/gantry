@@ -77,6 +77,69 @@ func TestResolveRWRules(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsHostExecSecretSource(t *testing.T) {
+	_, _, err := resolveSandbox(t, "-secret", "TOKEN=!credential-helper token")
+	if err == nil || !strings.Contains(err.Error(), "is disabled") {
+		t.Fatalf("host exec source error = %v", err)
+	}
+}
+
+func TestResolveNormalizesFileSecretSourcePath(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs := flag.NewFlagSet("secret-path", flag.ContinueOnError)
+	rf := config.RegisterRunFlags(fs)
+	if err := fs.Parse([]string{"-secret", "TOKEN=@token"}); err != nil {
+		t.Fatal(err)
+	}
+	_, sources, _, err := rf.ResolveSecretSources()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sources[0].Source.Ref; got != token {
+		t.Fatalf("file source path = %q, want %q", got, token)
+	}
+	if _, _, err := resolveSandbox(t, "-secret", "TOKEN=@dir/../token"); err == nil || !strings.Contains(err.Error(), "must be clean") {
+		t.Fatalf("ambiguous file source path error = %v", err)
+	}
+}
+
+func TestResolveSecretsNormalizesOneShotFilePaths(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "token"), []byte("from-spec\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secrets.env"), []byte("FROM_FILE=dotenv\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fs := flag.NewFlagSet("one-shot-secret-paths", flag.ContinueOnError)
+	rf := config.RegisterRunFlags(fs)
+	if err := fs.Parse([]string{"-secret", "TOKEN=@token,ttl=60s", "-secret-file", "secrets.env"}); err != nil {
+		t.Fatal(err)
+	}
+	values, _, err := rf.ResolveSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := values["TOKEN"].Raw(); got != "from-spec" {
+		t.Fatalf("TOKEN = %q, want from-spec", got)
+	}
+	if got := values["FROM_FILE"].Raw(); got != "dotenv" {
+		t.Fatalf("FROM_FILE = %q, want dotenv", got)
+	}
+}
+
 func TestResolveRWWithLayer(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)

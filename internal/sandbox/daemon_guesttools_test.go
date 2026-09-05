@@ -110,9 +110,13 @@ func TestGuestToolsTargetsSeparateWorkloadAndIDE(t *testing.T) {
 }
 
 func TestGuestToolsStageBaseAvoidsWindowsTemp(t *testing.T) {
-	const sandboxDir = `C:\Users\tester\.gantry\sandboxes\dev`
-	if got := guestToolsStageBase("windows", sandboxDir); got != sandboxDir {
-		t.Fatalf("Windows stage base = %q, want sandbox state %q", got, sandboxDir)
+	sandboxDir := filepath.Join("state", "sandboxes", "dev")
+	want := filepath.Dir(sandboxDir)
+	if got := guestToolsStageBase("windows", sandboxDir); got != want {
+		t.Fatalf("Windows stage base = %q, want state root %q", got, want)
+	}
+	if got := guestToolsStageBase("windows", ""); got != "" {
+		t.Fatalf("Windows stage base without sandbox state = %q, want empty", got)
 	}
 	if got := guestToolsStageBase("linux", sandboxDir); got != "" {
 		t.Fatalf("Linux stage base = %q, want OS temporary directory", got)
