@@ -38,20 +38,18 @@ func TestCorruptHostKeyFailsWithoutRekey(t *testing.T) {
 	}
 }
 
-func TestSameHostAccountHandlesWindowsIdentityForms(t *testing.T) {
+func TestGatewayUserMapsOnlyDefaultSentinel(t *testing.T) {
 	for _, test := range []struct {
 		requested string
-		host      string
-		want      bool
+		want      string
 	}{
-		{requested: "system", host: `NT AUTHORITY\SYSTEM`, want: true},
-		{requested: "Alice", host: `MACHINE\alice`, want: true},
-		{requested: "alice", host: "alice@example.com", want: true},
-		{requested: "guest", host: `MACHINE\alice`, want: false},
-		{requested: "alice", host: "", want: false},
+		{requested: "", want: "gantry"},
+		{requested: DefaultUserSentinel, want: "gantry"},
+		{requested: "root", want: "root"},
+		{requested: "alice", want: "alice"},
 	} {
-		if got := sameHostAccount(test.requested, test.host); got != test.want {
-			t.Errorf("sameHostAccount(%q, %q) = %t, want %t", test.requested, test.host, got, test.want)
+		if got := gatewayUser(test.requested, "gantry"); got != test.want {
+			t.Errorf("gatewayUser(%q) = %q, want %q", test.requested, got, test.want)
 		}
 	}
 }

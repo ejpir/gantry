@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -274,12 +273,11 @@ func TestVirtioFSLoopbackProtocol(t *testing.T) {
 	initOut := [][]byte{make([]byte, 16), make([]byte, 64)}
 	n, status := dev.handler.HandleRequest(
 		[][]byte{header(26, 1, 0, len(initPayload)), initPayload}, initOut)
+	// All hosts serve the Linux guest ABI at a new enough protocol minor to
+	// carry the extended InitOut, including flags2. A 40-byte total response
+	// is the legacy 24-byte payload that caused high capabilities to disappear
+	// on Darwin while the server still believed they were negotiated.
 	wantInit := 80
-	if runtime.GOOS == "darwin" {
-		// The vendored go-fuse Darwin protocol advertises minor 19 and
-		// therefore returns the legacy 24-byte InitOut.
-		wantInit = 40
-	}
 	if status != fuse.OK || n != wantInit || int32(binary.LittleEndian.Uint32(initOut[0][4:8])) != 0 {
 		t.Fatalf("FUSE_INIT: n=%d want=%d status=%v header=%x", n, wantInit, status, initOut[0])
 	}

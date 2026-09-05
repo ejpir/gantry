@@ -167,3 +167,29 @@ func (q *notificationQueue) close() {
 		q.ready(nil)
 	}
 }
+
+// reset detaches the notification source and discards buffers owned by the
+// old virtqueue generation. The caller has already stopped the queue reader
+// and joined ordinary requests; completionMu also joins a scheduled flush.
+func (q *notificationQueue) reset() {
+	if q == nil {
+		return
+	}
+	q.vq.completionMu.Lock()
+	q.mu.Lock()
+	q.closed = true
+	detach := q.attached
+	q.attached = false
+	q.slots = nil
+	q.pending = nil
+	q.bytes = 0
+	q.flushScheduled = false
+	q.mu.Unlock()
+	q.vq.completionMu.Unlock()
+	if detach && q.ready != nil {
+		q.ready(nil)
+	}
+	q.mu.Lock()
+	q.closed = false
+	q.mu.Unlock()
+}

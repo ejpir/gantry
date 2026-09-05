@@ -12,5 +12,8 @@ const outputDataSize = 288
 const (
 	_FUSE_KERNEL_VERSION   = 7
 	_MINIMUM_MINOR_VERSION = 12
-	_OUR_MINOR_VERSION     = 19
+	// This Darwin process serves a Linux virtio-fs guest, not macFUSE. Keep
+	// the negotiated minor aligned with the Linux server implementation so
+	// INIT replies include flags2 and the rest of the extended Linux ABI.
+	_OUR_MINOR_VERSION = 28
 )

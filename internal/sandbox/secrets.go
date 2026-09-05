@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,6 +85,21 @@ func newSecretStore(values map[string]secret.Value, sources []secret.NamedSource
 		st.Put(ns.Name, ns.Source)
 	}
 	return st
+}
+
+func sameSecretSources(left, right []secret.NamedSource) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		a, b := left[i], right[i]
+		if a.Name != b.Name || a.Source.Kind != b.Source.Kind ||
+			a.Source.Ref != b.Source.Ref || a.Source.Binding != b.Source.Binding ||
+			a.Source.Refresh != b.Source.Refresh || !slices.Equal(a.Source.Argv, b.Source.Argv) {
+			return false
+		}
+	}
+	return true
 }
 
 // scrubbedEnv removes exactly the keys that carry injected secret values from

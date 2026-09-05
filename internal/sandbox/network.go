@@ -130,6 +130,9 @@ func startNetworkWithWorkerStart(c config.RunConfig, workdir string, startWorker
 	if !c.Net {
 		return &Network{Policy: policy}, nil
 	}
+	if err := validateStaticUDPPortPolicy(policy, c.Ports); err != nil {
+		return nil, err
+	}
 
 	n := &Network{Policy: policy}
 	if c.GVProxy != "" {
@@ -293,6 +296,16 @@ func portForwards(specs []string) map[string]string {
 		forwards[local] = m.Remote()
 	}
 	return forwards
+}
+
+func validateStaticUDPPortPolicy(policy *netpol.Policy, specs []string) error {
+	for _, spec := range specs {
+		mapping, err := config.ParsePortSpec(spec)
+		if err == nil && mapping.Proto == "udp" {
+			return netpol.ValidateUDPPortPublishing(policy)
+		}
+	}
+	return nil
 }
 
 // vmmAttachment is the subset of a resolved network a split VMM worker is

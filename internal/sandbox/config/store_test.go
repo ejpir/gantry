@@ -14,6 +14,8 @@ import (
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/sharefs"
+	"github.com/ejpir/gantry/internal/shares"
 )
 
 // newTestConfigStore writes sandbox.json for cfg and opens its store — the
@@ -38,6 +40,15 @@ func newTestConfigStore(t *testing.T, dir string, cfg RunConfig) *ConfigStore {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func TestConfigStoreMutateRollback(t *testing.T) {
@@ -277,12 +288,12 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	enabled := true
 	custody := true
 	store := newTestConfigStore(t, dir, RunConfig{
-		Shares:      []string{"code=/tmp/code"},
+		Shares:      []string{"code=/tmp/code,ro"},
 		Ports:       []string{"127.0.0.1:8080:80"},
 		SecretNames: []string{"TOKEN"},
 		MCPRemotes:  []string{"name=api,url=https://example.com,allow=*"},
 		SecretSources: []secret.NamedSource{{
-			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceExec, Argv: []string{"helper", "arg"}},
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceEnv, Ref: "TOKEN", Argv: []string{"helper", "arg"}},
 		}},
 		OAuthBridge:  &enabled,
 		OAuthCustody: &custody,
@@ -314,7 +325,7 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	snapshot.LayerSet.Layers[0] = "changed"
 
 	got := store.Snapshot()
-	if got.Shares[0] != "code=/tmp/code" || got.Ports[0] != "127.0.0.1:8080:80" || got.SecretNames[0] != "TOKEN" {
+	if got.Shares[0] != "code=/tmp/code,ro" || got.Ports[0] != "127.0.0.1:8080:80" || got.SecretNames[0] != "TOKEN" {
 		t.Fatalf("snapshot mutated store slices: %+v", got)
 	}
 	if !*got.OAuthBridge || !*got.OAuthCustody || got.ImageCfg.Env[0] != "A=1" || got.ImageCfg.Entrypoint[0] != "/bin/app" || got.ImageCfg.Cmd[0] != "serve" ||
@@ -326,6 +337,166 @@ func TestConfigStoreSnapshotDoesNotAliasState(t *testing.T) {
 	}
 	if got.LayerSet.Layers[0] != "layer" {
 		t.Fatalf("snapshot mutated layer set: %+v", got.LayerSet)
+	}
+}
+
+func TestConfigStoreRejectsHostExecSecretSource(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{})
+
+	err := store.Mutate(func(cfg *RunConfig) error {
+		cfg.SecretSources = []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceExec, Argv: []string{"credential-helper", "token"}},
+		}}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "is disabled") {
+		t.Fatalf("host exec source mutation error = %v", err)
+	}
+	if got := store.Snapshot().SecretSources; len(got) != 0 {
+		t.Fatalf("rejected source persisted: %v", got)
+	}
+}
+
+func TestReadSandboxConfigRejectsPersistedExecSourceWithWritableShare(t *testing.T) {
+	dir := t.TempDir()
+	cfg := RunConfig{
+		Kernel: "/kernel", Rootfs: "/rootfs", Image: "/image", MemMB: 512, VCPUs: 1,
+		SecretSources: []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceExec, Argv: []string{"helper"}},
+		}},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sandbox.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSandboxConfig(dir); err == nil || !strings.Contains(err.Error(), "is disabled") {
+		t.Fatalf("persisted unsafe configuration error = %v", err)
+	}
+}
+
+func TestValidateSecretSourceIsolationRejectsFileSourceInsideWritableShare(t *testing.T) {
+	shareRoot := t.TempDir()
+	secretPath := filepath.Join(shareRoot, "token")
+	if err := os.WriteFile(secretPath, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath = canonicalTestPath(t, secretPath)
+	cfg := RunConfig{
+		Shares: []string{"code=" + shareRoot},
+		SecretSources: []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: secretPath},
+		}},
+	}
+	if err := ValidateSecretSourceIsolation(cfg); err == nil || !strings.Contains(err.Error(), "link to another host file") {
+		t.Fatalf("file source inside writable share error = %v", err)
+	}
+
+	cfg.Shares[0] += ",ro"
+	if err := ValidateSecretSourceIsolation(cfg); err != nil {
+		t.Fatalf("file source inside read-only share should be safe: %v", err)
+	}
+	cfg.Shares = []string{"code=" + t.TempDir()}
+	if err := ValidateSecretSourceIsolation(cfg); err != nil {
+		t.Fatalf("unrelated writable share should remain compatible with file source: %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		aliasParent := t.TempDir()
+		alias := filepath.Join(aliasParent, "share-alias")
+		if err := os.Symlink(shareRoot, alias); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Shares = []string{"code=" + alias}
+		if err := ValidateSecretSourceIsolation(cfg); err == nil || !strings.Contains(err.Error(), "link to another host file") {
+			t.Fatalf("aliased writable share error = %v", err)
+		}
+	}
+}
+
+func TestValidateSecretSourceIsolationFailsClosedForUnresolvedFileSource(t *testing.T) {
+	shareRoot := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "future", "token")
+	cfg := RunConfig{
+		Shares: []string{"code=" + shareRoot},
+		SecretSources: []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: missing},
+		}},
+	}
+	if err := ValidateSecretSourceIsolation(cfg); err == nil || !strings.Contains(err.Error(), "must exist") {
+		t.Fatalf("missing file source error = %v", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		alias := filepath.Join(t.TempDir(), "token-link")
+		if err := os.Symlink(filepath.Join(shareRoot, "future", "token"), alias); err != nil {
+			t.Fatal(err)
+		}
+		cfg.SecretSources[0].Source.Ref = alias
+		if err := ValidateSecretSourceIsolation(cfg); err == nil || !strings.Contains(err.Error(), "must exist") {
+			t.Fatalf("dangling alias into writable share error = %v", err)
+		}
+	}
+}
+
+func TestValidateSecretSourceIsolationRequiresStableFilePathSyntax(t *testing.T) {
+	sep := string(filepath.Separator)
+	for _, ref := range []string{"relative/token", sep + "safe" + sep + "dir" + sep + ".." + sep + "token"} {
+		cfg := RunConfig{
+			Shares: []string{"code=" + t.TempDir()},
+			SecretSources: []secret.NamedSource{{
+				Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: ref},
+			}},
+		}
+		if err := ValidateSecretSourceIsolation(cfg); err == nil {
+			t.Fatalf("file source path %q unexpectedly accepted", ref)
+		}
+	}
+	legacy := RunConfig{SecretSources: []secret.NamedSource{{
+		Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: "relative/token"},
+	}}}
+	if err := ValidateSecretSourceIsolation(legacy); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("legacy relative source error = %v", err)
+	}
+}
+
+func TestValidateSecretSourcePinnedShareUsesPreparedIdentity(t *testing.T) {
+	shareRoot := t.TempDir()
+	secretPath := filepath.Join(shareRoot, "token")
+	if err := os.WriteFile(secretPath, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath = canonicalTestPath(t, secretPath)
+	identity, err := sharefs.Identify(shareRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := []secret.NamedSource{{
+		Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: secretPath},
+	}}
+	// The pathname is deliberately unrelated: this models a symlink swap
+	// after pre-validation but before PrepareMapped pins its actual root.
+	share := shares.Spec{Tag: "code", Path: t.TempDir()}
+	if err := ValidateSecretSourcePinnedShare(source, share, identity); err == nil || !strings.Contains(err.Error(), "link to another host file") {
+		t.Fatalf("pinned share identity error = %v", err)
+	}
+}
+
+func TestValidateSecretSourceIsolationRejectsExecInEverySandbox(t *testing.T) {
+	execSource := []secret.NamedSource{{
+		Name: "TOKEN", Source: secret.Source{Kind: secret.SourceExec, Argv: []string{"helper"}},
+	}}
+	for _, cfg := range []RunConfig{
+		{SecretSources: execSource},
+		{RW: true, RWLayer: "/work.ext4", SecretSources: execSource},
+		{DevContainers: true, DevContainersRWLayer: "/ide.ext4", SecretSources: execSource},
+	} {
+		if err := ValidateSecretSourceIsolation(cfg); err == nil || !strings.Contains(err.Error(), "is disabled") {
+			t.Fatalf("host exec source error = %v", err)
+		}
 	}
 }
 
@@ -469,10 +640,7 @@ func TestConfigStoreSetResources(t *testing.T) {
 
 func TestConfigStoreSetShareForRestart(t *testing.T) {
 	dir := t.TempDir()
-	host := filepath.Join(dir, "host")
-	if err := os.Mkdir(host, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	host := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{Ports: []string{"127.0.0.1:8080:80"}})
 	share, err := store.SetShareForRestart("workspace="+host+",mount=/Users/eh04xk,uid=1000,gid=1000", false)
 	if err != nil {
@@ -518,6 +686,80 @@ func TestConfigStoreRejectsDescriptorIdentityAlias(t *testing.T) {
 	}
 }
 
+func TestConfigStoreRejectsShareOverlappingSandboxState(t *testing.T) {
+	for _, target := range []string{"state directory", "state parent", "state child"} {
+		t.Run(target, func(t *testing.T) {
+			stateParent := t.TempDir()
+			stateDir := filepath.Join(stateParent, "sandbox")
+			if err := os.Mkdir(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			store := newTestConfigStore(t, stateDir, RunConfig{})
+			sharePath := stateDir
+			switch target {
+			case "state parent":
+				sharePath = stateParent
+			case "state child":
+				sharePath = filepath.Join(stateDir, "child")
+				if err := os.Mkdir(sharePath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := store.SetShareForRestart("state="+sharePath, false); err == nil || !strings.Contains(err.Error(), "state root") {
+				t.Fatalf("state-overlapping share error = %v", err)
+			}
+			if got := store.Snapshot().Shares; len(got) != 0 {
+				t.Fatalf("rejected share changed configuration: %v", got)
+			}
+		})
+	}
+}
+
+func TestConfigStoreRejectsReadOnlyInternalStateShare(t *testing.T) {
+	stateDir := t.TempDir()
+	stageDir := filepath.Join(stateDir, "guest-tools-stage")
+	if err := os.Mkdir(stageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := newTestConfigStore(t, stateDir, RunConfig{})
+	if _, err := store.SetShareForRestart("tools="+stageDir+",ro", false); err == nil || !strings.Contains(err.Error(), "state root") {
+		t.Fatalf("read-only internal state share error = %v", err)
+	}
+	if got := store.Snapshot().Shares; len(got) != 0 {
+		t.Fatalf("rejected share changed configuration: %v", got)
+	}
+}
+
+func TestConfigStoreRejectsSiblingSandboxStateShare(t *testing.T) {
+	appRoot := t.TempDir()
+	root := filepath.Join(appRoot, "sandboxes")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GANTRY_HOME", root)
+	stateDir := filepath.Join(root, "alpha")
+	siblingDir := filepath.Join(root, "beta")
+	sshStateDir := filepath.Join(appRoot, "ssh")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(siblingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sshStateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := newTestConfigStore(t, stateDir, RunConfig{})
+	for tag, path := range map[string]string{"sibling": siblingDir, "sshstate": sshStateDir} {
+		if _, err := store.SetShareForRestart(tag+"="+path, false); err == nil || !strings.Contains(err.Error(), "Gantry state root") {
+			t.Fatalf("%s restart share error = %v", tag, err)
+		}
+	}
+	if got := store.Snapshot().Shares; len(got) != 0 {
+		t.Fatalf("rejected sibling share changed configuration: %v", got)
+	}
+}
+
 func TestConfigStoreRemoveShareForRestart(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{
@@ -551,10 +793,7 @@ func TestConfigStoreShareRestartHubConfinement(t *testing.T) {
 	// that is a parent (/run/gantry, /) or child of the hub mount shadows
 	// (or is shadowed by) the hub FUSE mount.
 	dir := t.TempDir()
-	host := filepath.Join(dir, "host")
-	if err := os.Mkdir(host, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	host := t.TempDir()
 	store := newTestConfigStore(t, dir, RunConfig{})
 	for _, alias := range []string{"/run/gantry/shares", "/run/gantry", "/run", "/", "/run/gantry/shares/x"} {
 		if _, err := store.SetShareForRestart("s"+strings.ReplaceAll(alias, "/", "_")+"="+host+",mount="+alias, false); err == nil {

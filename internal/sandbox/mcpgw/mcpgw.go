@@ -10,8 +10,8 @@
 //     to the agent;
 //   - request IDs are rewritten per upstream so responses can never cross
 //     servers or sessions;
-//   - configured redactors scrub credential material from anything
-//     forwarded back to the guest;
+//   - configured redactors scrub exact credential substrings from decoded
+//     JSON strings forwarded back to the guest;
 //   - the guest channel carries MCP only: batches and unknown methods are
 //     rejected before policy evaluation;
 //   - every decision lands on the audit trail with names only — never
@@ -59,8 +59,9 @@ type ToolPolicy struct {
 // gateway); a remote server sets URL (streamable-HTTP, reached from the
 // host). Headers are injected into every remote request; TokenFunc
 // supplies a fresh bearer token per session (custody). Redact holds byte
-// strings (credential material) scrubbed from anything forwarded back to
-// the guest — injected values are added automatically at session start.
+// strings (credential material) scrubbed from decoded JSON strings forwarded
+// back to the guest — injected values are added automatically at session
+// start.
 type Server struct {
 	Name      string                 `json:"name"`
 	Argv      []string               `json:"argv,omitempty"`
@@ -574,7 +575,12 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 		s.reply(req.ID, nil, &rpcError{codeServerError, "upstream call failed"})
 		return 0
 	}
-	raw = redactBytes(raw, srv.Redact)
+	raw, err = redactJSON(raw, srv.Redact)
+	if err != nil {
+		s.g.emit(Event{Type: EventCallError, Server: server, Tool: tool})
+		s.reply(req.ID, nil, &rpcError{codeServerError, "upstream call failed"})
+		return 0
+	}
 	// stdioUpstream.Call already unwraps the result object; forward it
 	// verbatim (post-redaction) so isError and content blocks survive.
 	s.replyRaw(req.ID, raw)
@@ -595,32 +601,131 @@ func (s *session) replyRaw(id json.RawMessage, result json.RawMessage) {
 }
 
 const redactionPlaceholder = "[REDACTED-BY-GANTRY-MCP-GATEWAY]"
+const redactionCandidates = "*#~!$%^&()+,-./:;<=>?@[]_`{|} 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-// redactBytes scrubs credential byte strings from anything returning to
-// the guest. Each secret is replaced in one non-recursive pass: rescanning an
-// inserted marker loops forever when a short secret occurs in the marker.
+// redactBytes scrubs credential byte strings from anything returning to the
+// guest. A one-byte separator absent from every secret prevents replacement
+// text or newly joined boundaries from recreating another configured secret.
 // The replacement never exceeds the secret length, so redaction cannot grow a
 // bounded MCP frame into an unbounded allocation.
 func redactBytes(b []byte, redactors [][]byte) []byte {
+	replacement := redactionSeparator(redactors)
+	if replacement == nil {
+		// Extremely unusual host configuration: the redactor set collectively
+		// contains every candidate separator. If any secret occurs, dropping
+		// the whole field is the only linear-time choice that cannot recreate a
+		// different secret at a joined boundary.
+		for _, secret := range redactors {
+			if len(secret) != 0 && bytes.Contains(b, secret) {
+				return nil
+			}
+		}
+		return b
+	}
 	for _, secret := range redactors {
 		if len(secret) == 0 || !bytes.Contains(b, secret) {
 			continue
-		}
-		replacement := []byte(redactionPlaceholder)
-		if len(replacement) > len(secret) {
-			replacement = bytes.Repeat([]byte{'*'}, len(secret))
 		}
 		b = bytes.ReplaceAll(b, secret, replacement)
 	}
 	return b
 }
 
+func redactionSeparator(redactors [][]byte) []byte {
+	// Start with the familiar marker character, then try the rest of printable
+	// ASCII. A candidate absent from every secret cannot itself disclose a
+	// secret or join surrounding fragments into one.
+	for i := 0; i < len(redactionCandidates); i++ {
+		candidate := redactionCandidates[i]
+		used := false
+		for _, secret := range redactors {
+			if bytes.IndexByte(secret, candidate) >= 0 {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return []byte{candidate}
+		}
+	}
+	return nil
+}
+
+// redactJSON scrubs secrets from the decoded value of every JSON string,
+// including object keys. Matching only the serialized bytes is insufficient:
+// an upstream can spell ordinary ASCII as \uXXXX and the guest's JSON parser
+// reconstructs the credential. Non-string JSON is left byte-for-byte intact.
+func redactJSON(b []byte, redactors [][]byte) ([]byte, error) {
+	if len(redactors) == 0 {
+		return b, nil
+	}
+	if !json.Valid(b) {
+		return nil, fmt.Errorf("invalid JSON result")
+	}
+	var out []byte
+	last := 0
+	for start := 0; start < len(b); {
+		if b[start] != '"' {
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(b) {
+			switch b[end] {
+			case '\\':
+				end += 2
+				continue
+			case '"':
+				end++
+				goto stringDone
+			default:
+				end++
+			}
+		}
+		return nil, fmt.Errorf("invalid JSON string")
+
+	stringDone:
+		var decoded string
+		if err := json.Unmarshal(b[start:end], &decoded); err != nil {
+			return nil, fmt.Errorf("invalid JSON string")
+		}
+		redacted := redactBytes([]byte(decoded), redactors)
+		if !bytes.Equal(redacted, []byte(decoded)) {
+			if out == nil {
+				out = make([]byte, 0, len(b))
+			}
+			out = append(out, b[last:start]...)
+			var encoded bytes.Buffer
+			encoder := json.NewEncoder(&encoded)
+			encoder.SetEscapeHTML(false)
+			if err := encoder.Encode(string(redacted)); err != nil { // strings are always JSON-encodable
+				return nil, fmt.Errorf("encode redacted JSON string")
+			}
+			out = append(out, bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'})...)
+			last = end
+		}
+		start = end
+	}
+	if out == nil {
+		return b, nil
+	}
+	out = append(out, b[last:]...)
+	if len(out) > mcpproto.MaxFrameBytes {
+		return nil, fmt.Errorf("redacted result exceeds %d bytes", mcpproto.MaxFrameBytes)
+	}
+	if !json.Valid(out) {
+		return nil, fmt.Errorf("redacted result is invalid JSON")
+	}
+	return out, nil
+}
+
 // --- stdio upstream --------------------------------------------------------
 
 // upstreamReply is one decoded response frame from an upstream.
 type upstreamReply struct {
-	result json.RawMessage
-	err    *rpcError
+	result  json.RawMessage
+	err     *rpcError
+	callErr error
 }
 
 // stdioUpstream speaks NDJSON MCP to one spawned server process. Request
@@ -712,12 +817,24 @@ func (u *stdioUpstream) readLoop(r io.ReadCloser) {
 		ch, ok := u.pending[id]
 		u.pmu.Unlock()
 		if ok {
-			if frame.Error != nil {
+			var reply upstreamReply
+			if (len(frame.Result) != 0) == (frame.Error != nil) {
+				reply.callErr = fmt.Errorf("response must contain exactly one of result or error")
+			} else if frame.Error != nil {
 				redacted := *frame.Error
 				redacted.Message = string(redactBytes([]byte(redacted.Message), u.redact))
-				frame.Error = &redacted
+				reply.err = &redacted
+			} else {
+				reply.result, reply.callErr = redactJSON(frame.Result, u.redact)
 			}
-			ch <- upstreamReply{result: redactBytes(frame.Result, u.redact), err: frame.Error}
+			// The channel is buffered and never closed. Non-blocking delivery
+			// prevents a duplicate response from pinning the reader after its
+			// caller has already returned.
+			select {
+			case ch <- reply:
+			default:
+				u.audit(Event{Type: EventUpstreamBadID, Server: u.name})
+			}
 		}
 	}
 }
@@ -727,10 +844,10 @@ func (u *stdioUpstream) die() {
 	u.dieOnce.Do(func() {
 		close(u.done)
 		u.pmu.Lock()
-		for id, ch := range u.pending {
-			close(ch)
-			delete(u.pending, id)
-		}
+		// Callers also select on done, so per-call channels need not be closed.
+		// Leaving a channel captured by readLoop open avoids send-after-close
+		// races during concurrent upstream shutdown.
+		clear(u.pending)
 		u.pmu.Unlock()
 	})
 }
@@ -783,6 +900,9 @@ func (u *stdioUpstream) Call(ctx context.Context, method string, params json.Raw
 	case r, ok := <-ch:
 		if !ok {
 			return nil, fmt.Errorf("upstream %s closed mid-call", u.name)
+		}
+		if r.callErr != nil {
+			return nil, fmt.Errorf("upstream %s result redaction failed", u.name)
 		}
 		if r.err != nil {
 			return nil, fmt.Errorf("upstream %s error %d: %s", u.name, r.err.Code, r.err.Message)

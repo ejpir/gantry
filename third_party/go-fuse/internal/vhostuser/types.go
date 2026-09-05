@@ -253,21 +253,11 @@ var decodeIn = map[uint32]func(unsafe.Pointer) any{
 	REQ_SET_VRING_ERR:         func(p unsafe.Pointer) any { return (*U64Payload)(p) },
 	REQ_SET_VRING_KICK:        func(p unsafe.Pointer) any { return (*U64Payload)(p) },
 	REQ_SET_VRING_NUM:         func(p unsafe.Pointer) any { return (*VhostVringState)(p) },
-	REQ_SET_LOG_BASE:          func(p unsafe.Pointer) any { return (*VhostUserLog)(p) },
 }
 
 var decodeOut = map[uint32]func(unsafe.Pointer) any{
 	REQ_GET_FEATURES:          func(p unsafe.Pointer) any { return (*GetFeaturesReply)(p) },
 	REQ_GET_PROTOCOL_FEATURES: func(p unsafe.Pointer) any { return (*GetProtocolFeaturesReply)(p) },
-}
-
-var inFDCount = map[uint32]int{
-	REQ_SET_BACKEND_REQ_FD: 1,
-	REQ_SET_VRING_CALL:     1,
-	REQ_SET_VRING_ERR:      1,
-	REQ_ADD_MEM_REG:        1,
-	REQ_SET_VRING_KICK:     1,
-	REQ_SET_LOG_BASE:       1,
 }
 
 func (r *GetFeaturesReply) String() string {

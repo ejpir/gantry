@@ -1,12 +1,12 @@
 package sandbox
 
 import (
-	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/sshgw"
 )
 
 func TestShellCommandQuotesOpenSSHTokens(t *testing.T) {
@@ -26,6 +26,9 @@ func TestShellCommandQuotesOpenSSHTokens(t *testing.T) {
 	if !strings.Contains(block, wantProxy) || !strings.Contains(block, wantKnownHosts) {
 		t.Fatalf("managed SSH commands are not safely constructed:\n%s", block)
 	}
+	if !strings.Contains(block, "User "+sshgw.DefaultUserSentinel) {
+		t.Fatalf("managed SSH block does not request the image default user:\n%s", block)
+	}
 	if strings.Contains(block, "%h") || strings.Contains(block, "%H") {
 		t.Fatalf("managed SSH block uses HostName-derived tokens:\n%s", block)
 	}
@@ -37,20 +40,6 @@ func TestRemoteSSHCommandPreservesArgumentBoundaries(t *testing.T) {
 line2'`
 	if got != want {
 		t.Fatalf("remote SSH command = %q, want %q", got, want)
-	}
-}
-
-func TestSSHHostUserUsesOpenSSHNamesForWindowsServiceSIDs(t *testing.T) {
-	for _, test := range []struct {
-		uid, username, want string
-	}{
-		{uid: "S-1-5-18", username: `WORKGROUP\MACHINE$`, want: "system"},
-		{uid: "S-1-5-19", username: `NT AUTHORITY\LOCAL SERVICE`, want: "local service"},
-		{uid: "1000", username: "alice", want: "alice"},
-	} {
-		if got := sshHostUser(&user.User{Uid: test.uid, Username: test.username}); got != test.want {
-			t.Errorf("sshHostUser(%q, %q) = %q, want %q", test.uid, test.username, got, test.want)
-		}
 	}
 }
 

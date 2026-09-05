@@ -293,7 +293,7 @@ func (br *broker) secretEnv() []string {
 }
 
 // bindings maps clean secret name → host pattern. Two sources of truth,
-// merged: the live Store (file/exec sources carry their binding) and the
+// merged: the live Store (file sources carry their binding) and the
 // persisted display names (eager env secrets carry their binding ONLY in
 // the persisted spec — the handshake transports their values, not their
 // bindings). A corrupt persisted entry is skipped; it can only widen a
@@ -318,7 +318,7 @@ func (br *broker) bindings() map[string]string {
 }
 
 // resolveCredential implements credhelper.Resolver over the live store:
-// the value resolves at REQUEST time, so a rotated file/exec source is
+// the value resolves at REQUEST time, so a rotated file source is
 // picked up mid-session. A source that stops resolving yields SourceError
 // — the broker answers empty and audits the failure.
 func (br *broker) resolveCredential(host string) (string, secret.Value, credhelper.Resolution) {

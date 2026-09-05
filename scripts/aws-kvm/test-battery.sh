@@ -30,6 +30,16 @@ fi
 export GANTRY_HOME="${GANTRY_HOME:-/tmp/.gantry/sandboxes}"
 export GANTRY_IMAGES="${GANTRY_IMAGES:-/tmp/.gantry/images}"
 RWDIR="$(dirname "$GANTRY_HOME")/rwlayers"
+# Secret files must use their physical, symlink-free spelling. In particular,
+# macOS exposes /tmp as a symlink to /private/tmp, which the secure source
+# opener intentionally rejects. A private directory also prevents another
+# local user from pre-planting a symlink at a predictable fixture path.
+SECRET_TMP=$(mktemp -d "${TMPDIR:-/tmp}/gantry-secrets.XXXXXX") || exit 2
+SECRET_TMP=$(CDPATH= cd -- "$SECRET_TMP" 2>/dev/null && pwd -P) || exit 2
+CANARY_FILE="$SECRET_TMP/canary-file"
+T9_TOKEN="$SECRET_TMP/t9-token"
+T5_START_LOG="$SECRET_TMP/t5-start.log"
+T9_START_LOG="$SECRET_TMP/t9-start.log"
 PASS=0
 FAIL=0
 SKIPPED=0
@@ -116,6 +126,7 @@ cleanup() {
   done
   rm -rf /tmp/sharetest
   rm -f "$EXPORT_ARCHIVE"
+  rm -rf -- "$SECRET_TMP"
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
@@ -334,8 +345,12 @@ echo "===== secrets (t5: cached OCI image) ====="
 # workload's environment inside the guest and NOWHERE in host state.
 CANARY="sk-canary-$(new_uuid)"
 FILECANARY="sk-file-$(new_uuid)"
-printf '%s\n' "$FILECANARY" > /tmp/canary-file
-CANARY="$CANARY" "$G" start t5 -secret CANARY -secret FROM_FILE=@/tmp/canary-file -image "$CACHE_IMAGE" >/dev/null 2>&1
+printf '%s\n' "$FILECANARY" > "$CANARY_FILE"
+CANARY="$CANARY" "$G" start t5 -secret CANARY -secret "FROM_FILE=@$CANARY_FILE" -image "$CACHE_IMAGE" >"$T5_START_LOG" 2>&1
+if [ $? -ne 0 ]; then
+  echo "t5 failed to start:" >&2
+  tail -20 "$T5_START_LOG" >&2
+fi
 sleep 2
 R=$(xe t5 'printenv CANARY');     chk "secrets: env value in guest"   "$CANARY" "$R"
 R=$(xe t5 'printenv FROM_FILE');  chk "secrets: @file value in guest" "$FILECANARY" "$R"
@@ -417,15 +432,19 @@ echo "===== secret sources with TTL (t9: file rotation, fail-closed) ====="
 # resolves at REQUEST time through the daemon's TTL Store — rotating the
 # file is picked up without a sandbox restart, and a broken source fails
 # closed (empty answer, never a stale value).
-echo "file-token-v1" > /tmp/t9-token
-"$G" start t9 -secret 'FILE_TOKEN@git.test=@/tmp/t9-token,ttl=2s' -image "$CACHE_IMAGE" >/dev/null 2>&1
+echo "file-token-v1" > "$T9_TOKEN"
+"$G" start t9 -secret "FILE_TOKEN@git.test=@$T9_TOKEN,ttl=2s" -image "$CACHE_IMAGE" >"$T9_START_LOG" 2>&1
+if [ $? -ne 0 ]; then
+  echo "t9 failed to start:" >&2
+  tail -20 "$T9_START_LOG" >&2
+fi
 sleep 4
 QF='printf "protocol=https\nhost=git.test\n\n" | /run/gantry/bin/credhelper get'
 R=$(xe t9 "$QF"); chk "source: file value delivered" "password=file-token-v1" "$R"
-echo "file-token-v2" > /tmp/t9-token   # rotate on the host
+echo "file-token-v2" > "$T9_TOKEN"      # rotate on the host
 sleep 3                              # past the 2s TTL
 R=$(xe t9 "$QF"); chk "source: rotation picked up live" "password=file-token-v2" "$R"
-rm -f /tmp/t9-token                  # source breaks after a good resolve
+rm -f "$T9_TOKEN"                     # source breaks after a good resolve
 sleep 3
 R=$(xe t9 "$QF"); empty_cred "source: fail-closed after source removal" "$R"
 

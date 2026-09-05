@@ -261,10 +261,7 @@ func TestBrokerMutatesSecretsWithoutPersistingValues(t *testing.T) {
 
 func TestBrokerConfiguresShareForRestart(t *testing.T) {
 	dir := t.TempDir()
-	host := filepath.Join(dir, "host")
-	if err := os.Mkdir(host, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	host := t.TempDir()
 	store := newTestConfigStore(t, dir, config.RunConfig{})
 	manager, _, err := control.NewShareManager(dir, store)
 	if err != nil {

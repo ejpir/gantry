@@ -6,6 +6,7 @@ package vhostuser
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"reflect"
@@ -215,59 +216,136 @@ func (s *Server) setFeatures(rep *SetFeaturesRequest) {
 
 const hdrSize = int(unsafe.Sizeof(Header{}))
 
-const _NEED_REPLY = (0x1 << 3)
+const (
+	_VERSION_MASK = 0x3
+	_VERSION      = 0x1
+	_REPLY        = 0x1 << 2
+	_NEED_REPLY   = 0x1 << 3
+
+	// Every request currently supported by this backend carries at most one
+	// descriptor. Bound ancillary input before the request header is trusted.
+	maxRequestFDs = 1
+)
+
+type requestSpec struct {
+	payloadSize uint32
+	fdCount     int
+}
+
+var requestSpecs = map[uint32]requestSpec{
+	REQ_GET_FEATURES:          {},
+	REQ_SET_FEATURES:          {payloadSize: uint32(unsafe.Sizeof(SetFeaturesRequest{}))},
+	REQ_SET_OWNER:             {},
+	REQ_SET_VRING_NUM:         {payloadSize: uint32(unsafe.Sizeof(VhostVringState{}))},
+	REQ_SET_VRING_ADDR:        {payloadSize: uint32(unsafe.Sizeof(VhostVringAddr{}))},
+	REQ_SET_VRING_BASE:        {payloadSize: uint32(unsafe.Sizeof(VhostVringState{}))},
+	REQ_SET_VRING_KICK:        {payloadSize: uint32(unsafe.Sizeof(U64Payload{})), fdCount: 1},
+	REQ_SET_VRING_CALL:        {payloadSize: uint32(unsafe.Sizeof(U64Payload{})), fdCount: 1},
+	REQ_SET_VRING_ERR:         {payloadSize: uint32(unsafe.Sizeof(U64Payload{})), fdCount: 1},
+	REQ_GET_PROTOCOL_FEATURES: {},
+	REQ_SET_PROTOCOL_FEATURES: {payloadSize: uint32(unsafe.Sizeof(SetProtocolFeaturesRequest{}))},
+	REQ_GET_QUEUE_NUM:         {},
+	REQ_SET_VRING_ENABLE:      {payloadSize: uint32(unsafe.Sizeof(VhostVringState{}))},
+	REQ_GET_MAX_MEM_SLOTS:     {},
+	REQ_ADD_MEM_REG:           {payloadSize: uint32(unsafe.Sizeof(VhostUserMemRegMsg{})), fdCount: 1},
+}
+
+func closeReceivedFDs(fds []int) {
+	for _, fd := range fds {
+		if fd >= 0 {
+			_ = syscall.Close(fd)
+		}
+	}
+}
+
+func appendUnixRights(oob []byte, fds *[]int) error {
+	if len(oob) == 0 {
+		return nil
+	}
+	scms, err := syscall.ParseSocketControlMessage(oob)
+	if err != nil {
+		return fmt.Errorf("parse control message: %w", err)
+	}
+	for _, scm := range scms {
+		if scm.Header.Level != syscall.SOL_SOCKET || scm.Header.Type != syscall.SCM_RIGHTS {
+			return fmt.Errorf("unsupported control message level=%d type=%d", scm.Header.Level, scm.Header.Type)
+		}
+		rights, err := syscall.ParseUnixRights(&scm)
+		if err != nil {
+			return fmt.Errorf("parse unix rights: %w", err)
+		}
+		for _, fd := range rights {
+			syscall.CloseOnExec(fd)
+		}
+		*fds = append(*fds, rights...)
+		if len(*fds) > maxRequestFDs {
+			return fmt.Errorf("received %d fds, maximum is %d", len(*fds), maxRequestFDs)
+		}
+	}
+	return nil
+}
+
+// readRequestBytes reads exactly len(dst) stream bytes and collects rights
+// attached to every recvmsg chunk. A sender may fragment either the header or
+// payload, and SCM_RIGHTS can legally arrive with either one.
+func (s *Server) readRequestBytes(dst []byte, fds *[]int) error {
+	for len(dst) > 0 {
+		var oob [4096]byte
+		n, oobN, flags, _, err := s.conn.ReadMsgUnix(dst, oob[:])
+		if appendErr := appendUnixRights(oob[:oobN], fds); appendErr != nil {
+			return appendErr
+		}
+		if flags&(syscall.MSG_CTRUNC|syscall.MSG_TRUNC) != 0 {
+			return fmt.Errorf("truncated recvmsg flags %#x", flags)
+		}
+		if n > 0 {
+			dst = dst[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrUnexpectedEOF
+		}
+	}
+	return nil
+}
 
 // oneRequest reads and handles one vhost-user message from the connection.
 func (s *Server) oneRequest() error {
-	var inBuf, oobBuf, outBuf [4096]byte
-
-	// _ = flags is usually CLOEXEC.
-	bufN, oobN, _, _, err := s.conn.ReadMsgUnix(inBuf[:hdrSize], oobBuf[:])
-	oob := oobBuf[:oobN]
-	if err != nil {
-		return err
+	var inBuf, outBuf [4096]byte
+	var inFDs []int
+	defer func() { closeReceivedFDs(inFDs) }()
+	if err := s.readRequestBytes(inBuf[:hdrSize], &inFDs); err != nil {
+		return fmt.Errorf("read vhost-user header: %w", err)
 	}
 
 	inHeader := (*Header)(unsafe.Pointer(&inBuf[0]))
-	reqName := (reqNames[int(inHeader.Request)])
-
-	var inFDs []int
-	if len(oob) > 0 {
-		scms, err := syscall.ParseSocketControlMessage(oob)
-		if err != nil {
-			return err
-		}
-		for _, scm := range scms {
-			fds, err := syscall.ParseUnixRights(&scm)
-			if err != nil {
-				return err
-			}
-			inFDs = append(inFDs, fds...)
-		}
-
-		for _, fd := range inFDs {
-			if err := syscall.SetNonblock(fd, true); err != nil {
-				return err
-			}
+	reqName := reqNames[int(inHeader.Request)]
+	if reqName == "" {
+		reqName = fmt.Sprintf("request %d", inHeader.Request)
+	}
+	if inHeader.Flags&_VERSION_MASK != _VERSION || inHeader.Flags&^uint32(_VERSION_MASK|_NEED_REPLY) != 0 {
+		return fmt.Errorf("invalid flags %#x for %s", inHeader.Flags, reqName)
+	}
+	spec, ok := requestSpecs[inHeader.Request]
+	if !ok {
+		return fmt.Errorf("unsupported operation %s", reqName)
+	}
+	if inHeader.Size != spec.payloadSize {
+		return fmt.Errorf("payload size %d for %s, want %d", inHeader.Size, reqName, spec.payloadSize)
+	}
+	if inHeader.Size > 0 {
+		if err := s.readRequestBytes(inBuf[hdrSize:hdrSize+int(inHeader.Size)], &inFDs); err != nil {
+			return fmt.Errorf("read %s payload: %w", reqName, err)
 		}
 	}
-
-	if inHeader.Size > 0 {
-		if int(inHeader.Size) > len(inBuf)-hdrSize {
-			return fmt.Errorf("payload size %d exceeds buffer (%d)", inHeader.Size, len(inBuf)-hdrSize)
-		}
-		bufN2, oobN2, flags2, addr2, err := s.conn.ReadMsgUnix(inBuf[hdrSize:hdrSize+int(inHeader.Size)], oobBuf[oobN:])
-		if err != nil {
-			return err
-		}
-		if bufN2 < int(inHeader.Size) {
-			return fmt.Errorf("short read got %d want %d", bufN2, inHeader.Size)
-		}
-		oobN += oobN2
-		bufN += bufN2
-
-		if oobN2 > 0 {
-			log.Printf("oob2 %q flags2 %x addr2 %x", oobBuf[oobN:oobN2+oobN], flags2, addr2)
+	if len(inFDs) != spec.fdCount {
+		return fmt.Errorf("got %d fds for %s, want %d", len(inFDs), reqName, spec.fdCount)
+	}
+	for _, fd := range inFDs {
+		if err := syscall.SetNonblock(fd, true); err != nil {
+			return fmt.Errorf("set %s fd nonblocking: %w", reqName, err)
 		}
 	}
 
@@ -276,7 +354,6 @@ func (s *Server) oneRequest() error {
 	if s.Debug {
 		inDebug := ""
 		if f := decodeIn[inHeader.Request]; f != nil {
-			// TODO - check payload size
 			inDebug = fmt.Sprintf("%v", f(inPayload))
 		} else if inHeader.Size > 0 {
 			inDebug = fmt.Sprintf("payload %q (%d bytes)", inBuf[hdrSize:hdrSize+int(inHeader.Size)], inHeader.Size)
@@ -289,84 +366,92 @@ func (s *Server) oneRequest() error {
 		log.Printf("rx %-2d %s %s %sFDs %v", inHeader.Request, reqName, inDebug, flagStr, inFDs)
 	}
 
-	if c := inFDCount[inHeader.Request]; c != len(inFDs) {
-		return fmt.Errorf("got %d fds for %s, want %d", len(inFDs), reqName, c)
-	}
-
 	var outHeader = (*Header)(unsafe.Pointer(&outBuf[0]))
 	outPayloadPtr := unsafe.Pointer(&outBuf[hdrSize])
 	inPayloadPtr := unsafe.Pointer(&inBuf[hdrSize])
 	*outHeader = *inHeader
-	outHeader.Flags |= 0x4 // reply
+	outHeader.Flags |= _REPLY
 	outHeader.Flags &^= _NEED_REPLY
 
-	// Hold the write lock for the entire dispatch so that control-plane
-	// mutations are never concurrent with vring dequeue (readLoop holds the
-	// read lock while draining).
-	s.device.dispatchMu.Lock()
+	// Most control-plane mutations run under the dispatch write lock so they
+	// cannot race vring dequeue. SET_VRING_ENABLE manages that lock internally:
+	// disabling must release it before joining a reader that may be waiting on
+	// the read side.
 	var rep any
 	var deviceErr error
-	switch inHeader.Request {
-	case REQ_GET_FEATURES:
-		r := (*GetFeaturesReply)(outPayloadPtr)
-		s.getFeatures(r)
-		rep = r
-	case REQ_SET_FEATURES:
-		req := (*SetFeaturesRequest)(inPayloadPtr)
-		s.setFeatures(req)
-	case REQ_GET_PROTOCOL_FEATURES:
-		r := (*GetProtocolFeaturesReply)(outPayloadPtr)
-		s.getProtocolFeatures(r)
-		rep = r
-	case REQ_SET_PROTOCOL_FEATURES:
-		req := (*SetProtocolFeaturesRequest)(inPayloadPtr)
-		s.setProtocolFeatures(req)
+	dispatch := func() {
+		switch inHeader.Request {
+		case REQ_GET_FEATURES:
+			r := (*GetFeaturesReply)(outPayloadPtr)
+			s.getFeatures(r)
+			rep = r
+		case REQ_SET_FEATURES:
+			req := (*SetFeaturesRequest)(inPayloadPtr)
+			s.setFeatures(req)
+		case REQ_GET_PROTOCOL_FEATURES:
+			r := (*GetProtocolFeaturesReply)(outPayloadPtr)
+			s.getProtocolFeatures(r)
+			rep = r
+		case REQ_SET_PROTOCOL_FEATURES:
+			req := (*SetProtocolFeaturesRequest)(inPayloadPtr)
+			s.setProtocolFeatures(req)
 
-	case REQ_GET_QUEUE_NUM:
-		r := (*U64Payload)(outPayloadPtr)
-		r.Num = s.device.GetQueueNum()
-		rep = r
-	case REQ_GET_MAX_MEM_SLOTS:
-		r := (*U64Payload)(outPayloadPtr)
-		r.Num = s.device.regions.GetMaxMemslots()
-		rep = r
-	case REQ_SET_BACKEND_REQ_FD:
-		s.device.SetReqFD(inFDs[0])
-	case REQ_SET_OWNER:
-		// should pass in addr or something?
-		s.device.SetOwner()
-	case REQ_SET_VRING_CALL:
-		req := (*U64Payload)(inPayloadPtr)
-		deviceErr = s.device.SetVringCall(inFDs[0], req.Num)
-	case REQ_SET_VRING_ERR:
-		req := (*U64Payload)(inPayloadPtr)
-		deviceErr = s.device.SetVringErr(inFDs[0], req.Num)
-	case REQ_SET_VRING_KICK:
-		req := (*U64Payload)(inPayloadPtr)
-		deviceErr = s.device.SetVringKick(inFDs[0], req.Num)
-	case REQ_ADD_MEM_REG:
-		// req can also be u64 if in postcopy mode (sigh).
-		req := (*VhostUserMemRegMsg)(inPayloadPtr)
-		deviceErr = s.device.regions.AddMemReg(inFDs[0], &req.Region)
-	case REQ_SET_VRING_NUM:
-		req := (*VhostVringState)(inPayloadPtr)
-		deviceErr = s.device.SetVringNum(req)
-	case REQ_SET_VRING_BASE:
-		req := (*VhostVringState)(inPayloadPtr)
-		deviceErr = s.device.SetVringBase(req)
-	case REQ_SET_VRING_ENABLE:
-		req := (*VhostVringState)(inPayloadPtr)
-		deviceErr = s.device.SetVringEnable(req)
-	case REQ_SET_VRING_ADDR:
-		req := (*VhostVringAddr)(inPayloadPtr)
-		deviceErr = s.device.SetVringAddr(req)
-	case REQ_SET_LOG_BASE:
-		req := (*VhostUserLog)(inPayloadPtr)
-		s.device.SetLogBase(inFDs[0], req)
-	default:
-		deviceErr = fmt.Errorf("unknown operation %d", inHeader.Request)
+		case REQ_GET_QUEUE_NUM:
+			r := (*U64Payload)(outPayloadPtr)
+			r.Num = s.device.GetQueueNum()
+			rep = r
+		case REQ_GET_MAX_MEM_SLOTS:
+			r := (*U64Payload)(outPayloadPtr)
+			r.Num = s.device.regions.GetMaxMemslots()
+			rep = r
+		case REQ_SET_OWNER:
+			s.device.SetOwner()
+		case REQ_SET_VRING_CALL:
+			req := (*U64Payload)(inPayloadPtr)
+			deviceErr = s.device.SetVringCall(inFDs[0], req.Num)
+			if deviceErr == nil {
+				inFDs[0] = -1
+			}
+		case REQ_SET_VRING_ERR:
+			req := (*U64Payload)(inPayloadPtr)
+			deviceErr = s.device.SetVringErr(inFDs[0], req.Num)
+			if deviceErr == nil {
+				inFDs[0] = -1
+			}
+		case REQ_SET_VRING_KICK:
+			req := (*U64Payload)(inPayloadPtr)
+			deviceErr = s.device.SetVringKick(inFDs[0], req.Num)
+			if deviceErr == nil {
+				inFDs[0] = -1
+			}
+		case REQ_ADD_MEM_REG:
+			req := (*VhostUserMemRegMsg)(inPayloadPtr)
+			fd := inFDs[0]
+			inFDs[0] = -1 // AddMemReg consumes the fd on every return path.
+			deviceErr = s.device.regions.AddMemReg(fd, &req.Region)
+		case REQ_SET_VRING_NUM:
+			req := (*VhostVringState)(inPayloadPtr)
+			deviceErr = s.device.SetVringNum(req)
+		case REQ_SET_VRING_BASE:
+			req := (*VhostVringState)(inPayloadPtr)
+			deviceErr = s.device.SetVringBase(req)
+		case REQ_SET_VRING_ENABLE:
+			req := (*VhostVringState)(inPayloadPtr)
+			deviceErr = s.device.SetVringEnable(req)
+		case REQ_SET_VRING_ADDR:
+			req := (*VhostVringAddr)(inPayloadPtr)
+			deviceErr = s.device.SetVringAddr(req)
+		default:
+			panic("validated request lacks dispatch")
+		}
 	}
-	s.device.dispatchMu.Unlock()
+	if inHeader.Request == REQ_SET_VRING_ENABLE {
+		dispatch()
+	} else {
+		s.device.dispatchMu.Lock()
+		dispatch()
+		s.device.dispatchMu.Unlock()
+	}
 
 	outPayloadSz := 0
 	if needReply && rep == nil {

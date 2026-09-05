@@ -9,6 +9,8 @@ import (
 	"log"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 const _HUGETLBFS_MAGIC = 0x958458f6
@@ -92,17 +94,41 @@ func composeMask(fs []int) uint64 {
 //     and never invalidates pointers already held by a request.
 func (vq *Virtq) readLoop(handle func(data *VirtqElem) int) {
 	defer close(vq.control.done)
+	pollFDs := []unix.PollFd{{Fd: int32(vq.KickFD), Events: unix.POLLIN}}
 	for {
 		select {
 		case <-vq.control.cancel:
 			return
 		default:
 		}
+		nReady, err := unix.Poll(pollFDs, 100)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			log.Printf("poll kick fd: %v", err)
+			return
+		}
+		if nReady == 0 {
+			continue
+		}
+		if pollFDs[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			return
+		}
+		if pollFDs[0].Revents&unix.POLLIN == 0 {
+			continue
+		}
 
 		var id [8]byte
 		n, err := syscall.Read(vq.KickFD, id[:])
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			continue
+		}
+		if err == syscall.EINTR {
+			continue
+		}
 		if err != nil {
-			log.Printf("read: %v", err)
+			log.Printf("read kick fd: %v", err)
 			return
 		}
 		if n == 0 {

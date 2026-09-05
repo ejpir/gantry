@@ -570,7 +570,7 @@ func (r *runResolver) normalizeAndValidatePaths() error {
 		share.Path = absolute
 		r.cfg.Shares[index] = share.String()
 	}
-	return nil
+	return config.ValidateSecretSourceIsolation(r.cfg)
 }
 
 func makeAbsolute(name string, target *string) error {

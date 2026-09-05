@@ -15,8 +15,9 @@ in. The denied ranges include:
 - loopback, CGNAT, multicast, and reserved ranges;
 - the host alias used by the userspace network.
 
-The guest's ARP, DHCP, DNS, and gateway traffic remains available so the link
-can operate.
+The guest's ARP, valid DHCP client traffic, and DNS to the embedded gateway
+remain available so the link can operate. Other gateway ports follow the
+ordinary local-network policy, and non-DHCP broadcast traffic is denied.
 
 To disable the network completely:
 
@@ -128,6 +129,14 @@ Supported forms are:
 80                   choose a free host port -> guest 80/tcp
 ```
 
+TCP publishes work with the default local-network wall: Gantry admits only
+handshake-tracked replies for the exact gateway-to-guest connection. UDP has
+no equivalent handshake, so a UDP publish is accepted only when the active
+egress policy already permits the virtual gateway's full ephemeral reply
+range, `192.168.127.1:16000-65535/udp`. The default policy does not. Granting
+that range (or using `-allow-local-net` with a default-allow policy) is an
+explicit widening of guest-to-gateway access.
+
 Add, inspect, or remove a forward while the sandbox is running:
 
 ```console
@@ -139,8 +148,9 @@ $ gantry ports unpublish web 8081:80
 Live changes are saved to `sandbox.json` and re-applied after restart. Add
 `--ephemeral` to change only the current boot.
 
-Port publishing requires the embedded network stack. It is unavailable with
-`-net=false` or an external `-gvproxy` backend.
+Port publishing requires networking and the embedded network stack. It is
+unavailable with `-net=false`; the legacy external `-gvproxy` backend is
+disabled.
 
 ## Use an upstream proxy
 
@@ -184,4 +194,3 @@ policy overrides.
 The Packets view starts a bounded, in-memory capture at the virtual Ethernet
 boundary. Captures are for live diagnosis and are not written as a general
 packet log.
-

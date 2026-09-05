@@ -3,7 +3,6 @@ package sandbox
 import (
 	"context"
 	"fmt"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,26 +23,6 @@ func sshInstallDir() string {
 }
 
 func sshHostKeyPath() string { return filepath.Join(sshInstallDir(), "host_ed25519") }
-
-func sshHostUser(current *user.User) string {
-	if current == nil {
-		return ""
-	}
-	// Go's Windows os/user lookup resolves LocalSystem's SID through the
-	// machine account (MACHINE$), while OpenSSH correctly puts "system" on the
-	// wire. Preserve the SSH-visible account name so implicit-user mapping still
-	// selects the image default on services and SSM field hosts.
-	switch strings.ToUpper(current.Uid) {
-	case "S-1-5-18":
-		return "system"
-	case "S-1-5-19":
-		return "local service"
-	case "S-1-5-20":
-		return "network service"
-	default:
-		return current.Username
-	}
-}
 
 func sshImageConfig(cfg config.RunConfig) *image.Config {
 	if cfg.DevContainers && cfg.DevContainersImageCfg != nil {
@@ -81,14 +60,10 @@ func (d *daemonRuntime) startSSHGateway() error {
 	if sshImageCfg != nil {
 		defaultUser = defaultSSHUser(sshImageCfg.User, sshImageCfg.UID)
 	}
-	hostUser := ""
-	if current, err := user.Current(); err == nil {
-		hostUser = sshHostUser(current)
-	}
 	gateway, err := sshgw.New(sshgw.Config{
 		Name: d.name, HostKeyPath: sshHostKeyPath(), DefaultUser: defaultUser,
-		HostUser: hostUser, Spawner: sshgw.SpawnFunc(d.broker.spawnSSH),
-		Auditf: d.broker.auditf, PeerAllowed: localsec.PeerSameUser,
+		Spawner: sshgw.SpawnFunc(d.broker.spawnSSH),
+		Auditf:  d.broker.auditf, PeerAllowed: localsec.PeerSameUser,
 	})
 	if err != nil {
 		_ = listener.Close()

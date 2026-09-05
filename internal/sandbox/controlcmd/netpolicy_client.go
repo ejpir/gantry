@@ -43,8 +43,12 @@ func SetNetworkPolicy(name, path string, allowLocal bool) (control.NetworkPolicy
 		if err != nil {
 			return control.NetworkPolicyEntry{}, err
 		}
-		policy, err = store.Snapshot().ApplyProxyPolicy(policy)
+		cfg := store.Snapshot()
+		policy, err = cfg.ApplyProxyPolicy(policy)
 		if err != nil {
+			return control.NetworkPolicyEntry{}, err
+		}
+		if err := control.ValidatePolicyAgainstSavedUDPPorts(policy, cfg.Ports); err != nil {
 			return control.NetworkPolicyEntry{}, err
 		}
 		if err := store.SetNetworkPolicy(resolvedPath, allowLocal); err != nil {

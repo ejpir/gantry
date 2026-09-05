@@ -146,14 +146,13 @@ func configJSONWithTransportCwdEnv(entries []ShareEntry, transport *shares.Trans
 				{Type: specs.UTSNamespace},
 				{Type: specs.MountNamespace},
 			},
-			MaskedPaths: []string{
-				"/proc/acpi", "/proc/asound", "/proc/kcore", "/proc/keys",
-				"/proc/latency_stats", "/proc/timer_list", "/proc/timer_stats",
-				"/proc/sched_debug", "/sys/firmware", "/proc/scsi",
-			},
-			ReadonlyPaths: []string{
-				"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger",
-			},
+			// Locked OCI mounts below /proc make Linux reject a procfs mount in
+			// a child user/PID namespace as "too revealing". Leave this
+			// workload-scoped procfs intact so coding-agent sandboxes can create
+			// their own PID namespace. The workload still has a reduced
+			// capability set and runs behind the microVM boundary.
+			MaskedPaths:   []string{"/sys/firmware"},
+			ReadonlyPaths: []string{},
 		},
 	}
 	encoded, err := json.Marshal(config)

@@ -10,6 +10,8 @@ import (
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
 )
@@ -26,15 +28,21 @@ import (
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
 type ShareManager struct {
-	dir        string
-	hub        *sharefs.Hub
-	store      *config.ConfigStore
-	mu         sync.Mutex
-	exports    map[string]*managedShare
-	retired    []*managedShare
-	generation uint64
-	failed     error
-	closed     bool
+	dir       string
+	stateRoot sharefs.Identity
+	hub       *sharefs.Hub
+	store     *config.ConfigStore
+	mu        sync.Mutex
+	exports   map[string]*managedShare
+	retired   []*managedShare
+	// sourceBarriers is the launch-time file-source capability set. It is
+	// intentionally sticky for the daemon lifetime: removing a source cannot
+	// make a concurrent or already-running host resolver safe for a live
+	// writable-share add. A restart establishes a new barrier.
+	sourceBarriers []secret.NamedSource
+	generation     uint64
+	failed         error
+	closed         bool
 }
 
 type managedShare struct {
@@ -80,7 +88,17 @@ type shareAddTransaction struct {
 // configuration owner; boot state is read from its snapshot.
 func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []string, error) {
 	cfg := store.Snapshot()
-	m := &ShareManager{dir: dir, store: store, exports: map[string]*managedShare{}}
+	stateIdentity, err := sharefs.Identify(layout.ProtectionRoot(dir))
+	if err != nil {
+		return nil, nil, fmt.Errorf("identify Gantry state root: %w", err)
+	}
+	m := &ShareManager{
+		dir:            dir,
+		stateRoot:      stateIdentity,
+		store:          store,
+		exports:        map[string]*managedShare{},
+		sourceBarriers: append([]secret.NamedSource(nil), cfg.SecretSources...),
+	}
 	if len(cfg.Shares) > config.MaxManagedShares {
 		return nil, nil, fmt.Errorf("too many shares: %d (max %d)", len(cfg.Shares), config.MaxManagedShares)
 	}
@@ -120,6 +138,11 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 		}
 		identity := prepared.Identity()
 		share.Path = canonical
+		if err := config.ValidateSecretSourcePinnedShare(m.isolationSourcesLocked(), share, identity); err != nil {
+			prepared.Close()
+			_ = m.Close()
+			return nil, nil, err
+		}
 		if err := m.validatePreparedShare(share, identity, nil); err != nil {
 			prepared.Close()
 			_ = m.Close()
@@ -204,6 +227,9 @@ func validateShareTarget(share shares.Spec) error {
 // validatePreparedShare compares only identities derived from pinned roots.
 // except is the export being atomically replaced, if any.
 func (m *ShareManager) validatePreparedShare(share shares.Spec, identity sharefs.Identity, except *managedShare) error {
+	if identity.Overlaps(m.stateRoot) {
+		return fmt.Errorf("share %s overlaps Gantry state root %s", share.Tag, m.stateRoot.Path())
+	}
 	ctr := config.ConfiguredShareTarget(share)
 	for _, existing := range m.exports {
 		if existing == except {
@@ -220,6 +246,22 @@ func (m *ShareManager) validatePreparedShare(share shares.Spec, identity sharefs
 		}
 		if ctr == config.ConfiguredShareTarget(existing.share) {
 			return fmt.Errorf("share tags %q and %q both target %s", existing.share.Tag, share.Tag, ctr)
+		}
+	}
+	// A gracefully removed export remains usable through inode and handle
+	// references already held by the guest. Until it reaches Revoked/Gone,
+	// publishing an overlapping root would create two independently locked
+	// namespaces over the same host objects and reintroduce check/use races.
+	for _, existing := range m.retired {
+		if existing.export == nil {
+			continue
+		}
+		state := existing.export.State()
+		if state != sharefs.ExportActive && state != sharefs.ExportDraining {
+			continue
+		}
+		if identity.Overlaps(existing.identity) {
+			return fmt.Errorf("share %s overlaps draining share %s (%s); wait for existing guest references to close", share.Tag, existing.share.Tag, existing.share.Path)
 		}
 	}
 	return nil
@@ -282,6 +324,9 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 	if err := validateShareTarget(share); err != nil {
 		return nil, err
 	}
+	if err := config.ValidateSecretSourceShare(m.isolationSourcesLocked(), share); err != nil {
+		return nil, err
+	}
 	existing := m.exports[share.Tag]
 	if existing == nil && len(m.exports) >= config.MaxManagedShares {
 		return nil, fmt.Errorf("too many shares (max %d)", config.MaxManagedShares)
@@ -292,6 +337,10 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 	}
 	identity := prepared.Identity()
 	share.Path = canonical
+	if err := config.ValidateSecretSourcePinnedShare(m.isolationSourcesLocked(), share, identity); err != nil {
+		prepared.Close()
+		return nil, err
+	}
 	identical := existing != nil &&
 		identity.Aliases(existing.identity) &&
 		existing.share.RO == share.RO &&
@@ -315,6 +364,14 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 		return nil, err
 	}
 	return candidate, nil
+}
+
+func (m *ShareManager) isolationSourcesLocked() []secret.NamedSource {
+	current := m.store.Snapshot().SecretSources
+	out := make([]secret.NamedSource, 0, len(m.sourceBarriers)+len(current))
+	out = append(out, m.sourceBarriers...)
+	out = append(out, current...)
+	return out
 }
 
 func (m *ShareManager) completeIdenticalAddLocked(existing *managedShare, persistent bool) (shares.Entry, error) {

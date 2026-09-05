@@ -14,6 +14,7 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/mcpspec"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
@@ -63,11 +64,14 @@ func ReadSandboxConfig(dir string) (RunConfig, error) {
 	if err := ValidateDevContainers(cfg); err != nil {
 		return RunConfig{}, fmt.Errorf("invalid devcontainers profile: %w", err)
 	}
+	if err := ValidateSecretSourceIsolation(cfg); err != nil {
+		return RunConfig{}, fmt.Errorf("invalid secret/share configuration: %w", err)
+	}
 	return cfg, nil
 }
 
 // ReadSandboxForLaunch reads one validated configuration and eagerly resolves
-// only legacy/env secrets. File and exec sources remain in cfg for daemon-side
+// only legacy/env secrets. File sources remain in cfg for daemon-side
 // use-time resolution. Callers must hold the sandbox launch lock across this
 // read and daemon spawn so a concurrent revocation cannot be lost.
 func ReadSandboxForLaunch(dir string, getenv func(string) (string, bool)) (RunConfig, map[string]secret.Value, error) {
@@ -126,6 +130,10 @@ func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 	backup := cloneRunConfig(s.cfg)
 	beforeSettings := sandboxSettingsOf(backup)
 	if err := fn(&s.cfg); err != nil {
+		s.cfg = backup
+		return err
+	}
+	if err := ValidateSecretSourceIsolation(s.cfg); err != nil {
 		s.cfg = backup
 		return err
 	}
@@ -363,7 +371,10 @@ func validateSandboxSettings(cfg RunConfig) error {
 	if err := ValidateProcessIsolation(cfg.ProcessIsolation); err != nil {
 		return err
 	}
-	return ValidateDevContainers(cfg)
+	if err := ValidateDevContainers(cfg); err != nil {
+		return err
+	}
+	return ValidateSecretSourceIsolation(cfg)
 }
 
 func nextSettingsRevision(revision uint64) (uint64, error) {
@@ -736,7 +747,7 @@ func (s *ConfigStore) SetSecretName(name string, present bool) error {
 		cfg.SecretNames = names
 		// Keep the source set in lockstep: removal drops the source so a
 		// revoked secret cannot re-resolve on restart; a set keeps an
-		// existing source (binding + file/exec ref survive an update) and
+		// existing source (binding + file ref survive an update) and
 		// otherwise records the env default, matching v1 resume-from-env.
 		srcs := make([]secret.NamedSource, 0, len(cfg.SecretSources)+1)
 		keptSource := secret.NamedSource{}
@@ -776,7 +787,17 @@ func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (shares.Spec
 	if err != nil {
 		return shares.Spec{}, err
 	}
+	if err := identity.ValidateExport(); err != nil {
+		return shares.Spec{}, err
+	}
 	share.Path = identity.Path()
+	stateIdentity, err := sharefs.Identify(layout.ProtectionRoot(filepath.Dir(s.path)))
+	if err != nil {
+		return shares.Spec{}, fmt.Errorf("identify Gantry state root: %w", err)
+	}
+	if identity.Overlaps(stateIdentity) {
+		return shares.Spec{}, fmt.Errorf("share %s overlaps Gantry state root %s", share.Tag, stateIdentity.Path())
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -817,6 +838,10 @@ func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (shares.Spec
 	}
 
 	s.cfg.Shares = ShareSpecsReplacingTag(s.cfg.Shares, share.Tag, ShareConfigSpec(share))
+	if err := ValidateSecretSourceIsolation(s.cfg); err != nil {
+		s.cfg = backup
+		return shares.Spec{}, err
+	}
 	if err := s.writeLocked(); err != nil {
 		if !atomicfile.Committed(err) {
 			s.cfg = backup
@@ -873,6 +898,9 @@ func (s *ConfigStore) writeLocked() error {
 // opening a store. The pre-spawn kernel refresh uses it: no daemon owns
 // sandbox.json yet, so there is no live store to mutate through.
 func WriteSandboxConfig(dir string, cfg RunConfig) error {
+	if err := ValidateSecretSourceIsolation(cfg); err != nil {
+		return err
+	}
 	s := &ConfigStore{path: filepath.Join(dir, "sandbox.json"), cfg: cfg}
 	return s.writeLocked()
 }

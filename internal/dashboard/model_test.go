@@ -328,7 +328,7 @@ func TestSandboxTUIShareDialogActions(t *testing.T) {
 }
 
 func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
-	t.Setenv("GANTRY_HOME", t.TempDir())
+	t.Setenv("GANTRY_HOME", filepath.Join(t.TempDir(), "sandboxes"))
 	if err := os.MkdirAll(sandboxDir("stopped"), 0o700); err != nil {
 		t.Fatal(err)
 	}

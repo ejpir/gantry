@@ -13,6 +13,7 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/sshgw"
 )
 
 const (
@@ -27,6 +28,7 @@ func managedSSHBlock(self string) string {
 	return strings.Join([]string{
 		sshConfigBegin,
 		"Host *.gantry",
+		"    User " + sshgw.DefaultUserSentinel,
 		// %n is the original alias that matched *.gantry. Unlike %h/%H, it is
 		// not replaced by a HostName override from another SSH config source.
 		"    ProxyCommand " + shellCommand(self, "ssh-proxy", "%n"),

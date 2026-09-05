@@ -128,10 +128,17 @@ $ gantry start dev -image alpine:latest -mcp \
 ```
 
 Binding the secret to the upstream host keeps it out of the guest environment.
-The gateway resolves it on the host when starting an MCP session. Injected
-credentials are automatically redacted from upstream results and errors.
+The gateway resolves it on the host when starting an MCP session. To reduce
+accidental reflection, Gantry masks exact occurrences of injected and
+configured secrets in decoded JSON strings, including JSON escape spellings.
 See [Host shares and secrets](shares-secrets.md#refreshable-secret-sources) for
-environment, file, and command sources.
+environment and file sources.
+
+> [!WARNING]
+> Give a credential only to an MCP server you trust with that credential.
+> Redaction is not a data-loss-prevention boundary: a server that receives a
+> secret can split, encode, or otherwise transform it in a tool result. Use
+> endpoint-bound, least-privilege, revocable credentials.
 
 Use a provider token held by OAuth custody when the remote accepts it:
 

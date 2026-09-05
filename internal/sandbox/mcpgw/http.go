@@ -4,10 +4,10 @@
 //
 // Security posture (docs/mcp-gateway.md, normative):
 //   - Credentials are injected by the gateway, resolved host-side; the
-//     guest never sees them in requests...
-//   - ...and never in responses either: every injected value joins the
-//     upstream's redaction set, so a reflecting or compromised remote
-//     cannot launder its own token back into the guest transcript.
+//     guest never sees them in requests. Exact occurrences in decoded JSON
+//     strings are masked on responses to contain accidental reflection.
+//     This is not DLP against a malicious credentialed upstream, which can
+//     transform or covertly encode a credential it necessarily receives.
 //   - Credential-to-origin binding: injected headers only ever go to the
 //     configured origin. Any redirect on a credentialed upstream is a
 //     hard error — never followed, never silent.
@@ -361,13 +361,20 @@ func (u *httpUpstream) Call(ctx context.Context, method string, params json.RawM
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("upstream %s: bad response frame: %w", u.name, err)
 	}
+	if (len(resp.Result) != 0) == (resp.Error != nil) {
+		return nil, fmt.Errorf("upstream %s: response must contain exactly one of result or error", u.name)
+	}
 	if resp.Error != nil {
 		// A reflecting upstream could embed the injected credential in an
 		// error message — redact error text too, not just results.
 		msg := redactBytes([]byte(resp.Error.Message), u.redact)
 		return nil, fmt.Errorf("upstream %s error %d: %s", u.name, resp.Error.Code, msg)
 	}
-	return redactBytes(resp.Result, u.redact), nil
+	result, err := redactJSON(resp.Result, u.redact)
+	if err != nil {
+		return nil, fmt.Errorf("upstream %s result redaction failed", u.name)
+	}
+	return result, nil
 }
 
 // Notify POSTs a notification and expects 202 Accepted. Failures are

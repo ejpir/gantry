@@ -16,6 +16,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharebroker"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
@@ -37,6 +38,15 @@ func newTestShareManager(t *testing.T, specs ...string) (*ShareManager, string) 
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	return manager, dir
+}
+
+func canonicalControlTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func TestShareManagerLiveAddPersistsAndPublishes(t *testing.T) {
@@ -89,6 +99,82 @@ func TestShareManagerLiveAddPersistsAndPublishes(t *testing.T) {
 	}
 }
 
+func TestShareManagerRejectsEphemeralWritableShareContainingFileSecret(t *testing.T) {
+	manager, _ := newTestShareManager(t)
+	shareRoot := t.TempDir()
+	secretPath := filepath.Join(shareRoot, "token")
+	if err := os.WriteFile(secretPath, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath = canonicalControlTestPath(t, secretPath)
+	if err := manager.store.Mutate(func(cfg *config.RunConfig) error {
+		cfg.SecretSources = []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: secretPath},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Add("code="+shareRoot, false, false); err == nil || !strings.Contains(err.Error(), "link to another host file") {
+		t.Fatalf("ephemeral writable share error = %v", err)
+	}
+	if _, err := manager.Add("code="+shareRoot+",ro", false, false); err != nil {
+		t.Fatalf("read-only ephemeral share should remain compatible: %v", err)
+	}
+}
+
+func TestShareManagerRejectsReadOnlyToWritableReplacementContainingFileSecret(t *testing.T) {
+	shareRoot := t.TempDir()
+	secretPath := filepath.Join(shareRoot, "token")
+	if err := os.WriteFile(secretPath, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath = canonicalControlTestPath(t, secretPath)
+	manager, _ := newTestShareManager(t, "code="+shareRoot+",ro")
+	if err := manager.store.Mutate(func(cfg *config.RunConfig) error {
+		cfg.SecretSources = []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: secretPath},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Add("code="+shareRoot, false, true); err == nil || !strings.Contains(err.Error(), "link to another host file") {
+		t.Fatalf("read-only to writable replacement error = %v", err)
+	}
+}
+
+func TestShareManagerLaunchFileSourceBarrierSurvivesPersistedRemoval(t *testing.T) {
+	dir := t.TempDir()
+	shareRoot := t.TempDir()
+	secretPath := filepath.Join(shareRoot, "token")
+	if err := os.WriteFile(secretPath, []byte("value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath = canonicalControlTestPath(t, secretPath)
+	cfg := config.RunConfig{
+		Kernel: "/kernel", Rootfs: "/rootfs", Image: "/image", MemMB: 512, RW: true,
+		SecretSources: []secret.NamedSource{{
+			Name: "TOKEN", Source: secret.Source{Kind: secret.SourceFile, Ref: secretPath},
+		}},
+	}
+	store := newTestConfigStore(t, dir, cfg)
+	manager, _, err := NewShareManager(dir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	if err := store.SetSecretName("TOKEN", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Snapshot().SecretSources) != 0 {
+		t.Fatal("persisted source was not removed")
+	}
+	if _, err := manager.Add("code="+shareRoot, false, false); err == nil || !strings.Contains(err.Error(), "link to another host file") {
+		t.Fatalf("launch-time source barrier error = %v", err)
+	}
+}
+
 func TestShareManagerPersistsGuestOwnership(t *testing.T) {
 	manager, dir := newTestShareManager(t)
 	shareDir := t.TempDir()
@@ -130,6 +216,117 @@ func TestShareManagerRejectsOverlapAndDuplicateContainerTarget(t *testing.T) {
 	}
 	if entry, err := manager.Add("root="+root, true, false); err != nil || entry.Tag != "root" {
 		t.Fatalf("idempotent duplicate: entry=%+v err=%v", entry, err)
+	}
+}
+
+func TestShareManagerRejectsShareOverlappingSandboxState(t *testing.T) {
+	for _, target := range []string{"state directory", "state parent", "state child", "state alias"} {
+		t.Run(target, func(t *testing.T) {
+			stateParent := t.TempDir()
+			stateDir := filepath.Join(stateParent, "sandbox")
+			if err := os.Mkdir(stateDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sharePath := stateDir
+			switch target {
+			case "state parent":
+				sharePath = stateParent
+			case "state child":
+				sharePath = filepath.Join(stateDir, "child")
+				if err := os.Mkdir(sharePath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "state alias":
+				sharePath = filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(stateDir, sharePath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := newTestConfigStore(t, stateDir, config.RunConfig{Shares: []string{"state=" + sharePath}, RW: true})
+			manager, _, err := NewShareManager(stateDir, store)
+			if manager != nil {
+				_ = manager.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), "state root") {
+				t.Fatalf("state-overlapping share error = %v", err)
+			}
+		})
+	}
+}
+
+func TestShareManagerRejectsLiveWritableStateShare(t *testing.T) {
+	manager, stateDir := newTestShareManager(t)
+	if _, err := manager.Add("state="+stateDir, false, false); err == nil || !strings.Contains(err.Error(), "state root") {
+		t.Fatalf("live state-overlapping share error = %v", err)
+	}
+}
+
+func TestShareManagerRejectsReadOnlyInternalStateShare(t *testing.T) {
+	stateDir := t.TempDir()
+	stageDir := filepath.Join(stateDir, "guest-tools-stage")
+	if err := os.Mkdir(stageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := newTestConfigStore(t, stateDir, config.RunConfig{Shares: []string{"tools=" + stageDir + ",ro"}, RW: true})
+	manager, _, err := NewShareManager(stateDir, store)
+	if manager != nil {
+		_ = manager.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "state root") {
+		t.Fatalf("read-only internal state share error = %v", err)
+	}
+}
+
+func TestShareManagerRejectsSiblingSandboxStateShare(t *testing.T) {
+	appRoot := t.TempDir()
+	root := filepath.Join(appRoot, "sandboxes")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GANTRY_HOME", root)
+	stateDir := filepath.Join(root, "alpha")
+	siblingDir := filepath.Join(root, "beta")
+	sshStateDir := filepath.Join(appRoot, "ssh")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(siblingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sshStateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := newTestConfigStore(t, stateDir, config.RunConfig{RW: true})
+	manager, _, err := NewShareManager(stateDir, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	for tag, path := range map[string]string{"sibling": siblingDir, "sshstate": sshStateDir} {
+		if _, err := manager.Add(tag+"="+path, false, false); err == nil || !strings.Contains(err.Error(), "Gantry state root") {
+			t.Fatalf("%s share error = %v", tag, err)
+		}
+	}
+}
+
+func TestShareManagerRejectsInitialGantryStateSiblingShare(t *testing.T) {
+	appRoot := t.TempDir()
+	root := filepath.Join(appRoot, "sandboxes")
+	stateDir := filepath.Join(root, "alpha")
+	sshStateDir := filepath.Join(appRoot, "ssh")
+	for _, path := range []string{root, stateDir, sshStateDir} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GANTRY_HOME", root)
+	store := newTestConfigStore(t, stateDir, config.RunConfig{Shares: []string{"sshstate=" + sshStateDir}, RW: true})
+	manager, _, err := NewShareManager(stateDir, store)
+	if manager != nil {
+		_ = manager.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "Gantry state root") {
+		t.Fatalf("initial Gantry-state share error = %v", err)
 	}
 }
 

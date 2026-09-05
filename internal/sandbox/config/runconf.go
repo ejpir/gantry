@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/secret"
+	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
@@ -176,7 +178,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		LayerSet:         fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
 		RW:               fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
 		Net:              fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
-		GVProxy:          fs.String("gvproxy", "", "use this external gvproxy binary instead of the embedded netstack"),
+		GVProxy:          fs.String("gvproxy", "", "legacy external gvproxy option (disabled; use the embedded netstack)"),
 		NetPol:           fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
 		AllowLN:          fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
 		ProxyURL:         fs.String("proxy", "", "route guest HTTP(S) through this http(s) or socks5(h) proxy URL"),
@@ -207,10 +209,10 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 	fs.Var(f.MCPRemotes, "mcp-remote", `remote MCP upstream: name=ID,url=https://HOST/PATH[,auth=bearer:SECRET|header:NAME:SECRET|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET] (repeatable)`)
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
 	fs.Var(f.Publish, "publish", "alias for -p")
-	fs.Var(f.Secrets, "secret", `inject a secret: NAME (from gantry's environment),
-NAME=@/path (file), or NAME='!cmd args' (exec stdout); suffix NAME@host binds
-to a host for broker-only delivery, ,ttl=60s overrides the refresh interval
-(0 = on-demand). Repeatable. NAME=literal is refused`)
+	fs.Var(f.Secrets, "secret", `inject a secret: NAME (from gantry's environment) or
+NAME=@/canonical/path (existing symlink-free single-link file); suffix NAME@host
+binds to a host for broker-only delivery, ,ttl=60s overrides refresh (0 =
+on-demand). Repeatable. NAME=literal and command-backed sources are refused`)
 	fs.Var(f.SecretFiles, "secret-file", "dotenv-style file of NAME=VALUE secrets (repeatable)")
 	return f
 }
@@ -292,7 +294,23 @@ func NormalizeMCPFilesystem(root, user string) (string, string, error) {
 var osLookupEnv = os.LookupEnv
 
 func (f *RunFlags) ResolveSecrets() (map[string]secret.Value, []string, error) {
-	return secret.ResolveAll(f.Secrets.List(), f.SecretFiles.List(), osLookupEnv)
+	files := make([]string, 0, len(f.SecretFiles.List()))
+	for _, file := range f.SecretFiles.List() {
+		canonical, err := canonicalSecretInputPath(file)
+		if err != nil {
+			return nil, nil, fmt.Errorf("-secret-file: %w", err)
+		}
+		files = append(files, canonical)
+	}
+	specs := make([]string, 0, len(f.Secrets.List()))
+	for _, spec := range f.Secrets.List() {
+		canonical, err := canonicalEagerSecretSpec(spec)
+		if err != nil {
+			return nil, nil, fmt.Errorf("-secret: %w", err)
+		}
+		specs = append(specs, canonical)
+	}
+	return secret.ResolveAll(specs, files, osLookupEnv)
 }
 
 // ResolveSecretSources is the sandbox-start resolution path. Two kinds
@@ -302,12 +320,13 @@ func (f *RunFlags) ResolveSecrets() (map[string]secret.Value, []string, error) {
 //     environment, exactly like v1: the value rides the stdin handshake
 //     and scrubbedEnv keeps it out of the daemon's /proc/environ. Env
 //     vars are static for a process's lifetime — a TTL would buy nothing.
-//   - FILE/EXEC specs (NAME=@path, NAME=!argv) become daemon-resolved
-//     SOURCES: the CLI never holds their values, and the daemon's Store
-//     re-resolves them at use time so rotation is picked up live.
+//   - FILE specs (NAME=@path) become daemon-resolved SOURCES: the CLI never
+//     holds their values, and the daemon's Store re-resolves them at use time
+//     so rotation is picked up live. Command sources are disabled.
 //
 // -secret-file entries stay literal values (dotenv files carry values,
-// not sources). Returns the literal values, the named file/exec sources,
+// not sources). Returns the literal values, named file sources (command
+// sources are rejected by configuration validation),
 // and the ordered unique persisted specs. Later occurrences of a name win
 // across all kinds.
 func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.NamedSource, []string, error) {
@@ -322,7 +341,11 @@ func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.Nam
 		display[name] = spec
 	}
 	for _, file := range f.SecretFiles.List() {
-		m, err := secret.ParseFile(file)
+		canonical, err := canonicalSecretInputPath(file)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("-secret-file: %w", err)
+		}
+		m, err := secret.ParseFile(canonical)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("-secret-file: %w", err)
 		}
@@ -336,6 +359,19 @@ func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.Nam
 		ns, err := secret.ParseNamedSource(spec)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("-secret: %w", err)
+		}
+		if ns.Source.Kind == secret.SourceFile {
+			// Persist the exact absolute path the daemon will open. Cleaning a
+			// path after launch is unsafe: kernels resolve "symlink/.." after
+			// following the symlink, while filepath.Clean resolves it lexically.
+			if filepath.Clean(ns.Source.Ref) != ns.Source.Ref {
+				return nil, nil, nil, fmt.Errorf("-secret: file source path %q must be clean (do not use . or .. components)", ns.Source.Ref)
+			}
+			canonical, err := canonicalSecretInputPath(ns.Source.Ref)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("-secret: %w", err)
+			}
+			ns.Source.Ref = canonical
 		}
 		if ns.Source.Kind == secret.SourceEnv {
 			// ParseSpec on an env spec is exactly the v1 path: eager value,
@@ -376,6 +412,216 @@ func sortedNames(m map[string]secret.Value) []string {
 // ParsedShares validates cfg.Shares into virtio-fs share descriptors.
 func (c RunConfig) ParsedShares() ([]shares.Spec, error) {
 	return shares.ParseSpecs(c.Shares)
+}
+
+// ValidateSecretSourceIsolation keeps guest-triggerable source resolution from
+// becoming a host execution primitive. Command sources would run on demand in
+// the unconfined supervisor, and per-sandbox path rules cannot establish that
+// their executable, scripts, plugins, configuration, or prior cross-sandbox
+// inputs are trusted. They therefore remain disabled until resolution has its
+// own host confinement boundary. File sources receive the narrower share-path
+// checks below because they do not execute their contents.
+func ValidateSecretSourceIsolation(c RunConfig) error {
+	for _, named := range c.SecretSources {
+		if named.Source.Kind == secret.SourceFile {
+			if err := validateSecretFileSourcePath(named.Name, named.Source.Ref); err != nil {
+				return err
+			}
+		}
+		if named.Source.Kind == secret.SourceExec {
+			return fmt.Errorf("host exec secret source %q is disabled: guest-triggered commands would run in the unconfined host supervisor (use an env/file secret source)", named.Name)
+		}
+	}
+	parsed, err := shares.ParseSpecs(c.Shares)
+	if err != nil {
+		return fmt.Errorf("parse shares for secret-source isolation: %w", err)
+	}
+	for _, share := range parsed {
+		if err := ValidateSecretSourceShare(c.SecretSources, share); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateSecretSourceShare applies the isolation rule to one proposed live
+// or persisted share before it is exposed to the guest.
+func ValidateSecretSourceShare(sources []secret.NamedSource, share shares.Spec) error {
+	if share.RO {
+		return nil
+	}
+	needsIdentity := false
+	for _, named := range sources {
+		switch named.Source.Kind {
+		case secret.SourceExec:
+			return fmt.Errorf("host exec secret source %q is disabled: guest-triggered commands would run in the unconfined host supervisor (use an env/file secret source)", named.Name)
+		case secret.SourceFile:
+			if err := validateSecretFileSourcePath(named.Name, named.Source.Ref); err != nil {
+				return err
+			}
+			needsIdentity = true
+		}
+	}
+	if !needsIdentity {
+		return nil
+	}
+	identity, err := sharefs.Identify(share.Path)
+	if err != nil {
+		return fmt.Errorf("identify writable share %q for secret-source isolation: %w", share.Tag, err)
+	}
+	return ValidateSecretSourcePinnedShare(sources, share, identity)
+
+}
+
+// ValidateSecretSourcePinnedShare repeats the source/share composition check
+// against the descriptor identity that PrepareMapped will actually publish.
+// Callers must use this after preparation: checking the pathname beforehand
+// alone leaves a symlink-swap window between policy and export.
+func ValidateSecretSourcePinnedShare(sources []secret.NamedSource, share shares.Spec, identity sharefs.Identity) error {
+	if share.RO {
+		return nil
+	}
+	if identity.Path() == "" {
+		return fmt.Errorf("writable share %q has no pinned identity", share.Tag)
+	}
+	for _, named := range sources {
+		switch named.Source.Kind {
+		case secret.SourceExec:
+			return fmt.Errorf("host exec secret source %q is disabled: guest-triggered commands would run in the unconfined host supervisor (use an env/file secret source)", named.Name)
+		case secret.SourceFile:
+			if err := validateSecretFileSourcePath(named.Name, named.Source.Ref); err != nil {
+				return err
+			}
+			reachable, err := secretFileReachableFromShare(named.Source.Ref, share.Path, identity)
+			if err != nil {
+				return fmt.Errorf("validate file secret source %q against writable share %q: %w", named.Name, share.Tag, err)
+			}
+			if reachable {
+				return fmt.Errorf("file secret source %q cannot be inside writable share %q: the guest could replace it with a link to another host file", named.Name, share.Tag)
+			}
+		}
+	}
+	return nil
+}
+
+func validateSecretFileSourcePath(name, sourcePath string) error {
+	if !filepath.IsAbs(sourcePath) {
+		return fmt.Errorf("file secret source %q path must be absolute (got %q); recreate the source so its launch-time path is preserved", name, sourcePath)
+	}
+	canonical, err := canonicalSecretInputPath(sourcePath)
+	if err != nil {
+		return fmt.Errorf("file secret source %q: %w", name, err)
+	}
+	if canonical != sourcePath {
+		return fmt.Errorf("file secret source %q path must be absolute (got %q)", name, sourcePath)
+	}
+	return nil
+}
+
+func canonicalSecretInputPath(raw string) (string, error) {
+	if filepath.Clean(raw) != raw {
+		return "", fmt.Errorf("secret file path %q must be clean (do not use . or .. components)", raw)
+	}
+	absolute, err := filepath.Abs(raw)
+	if err != nil {
+		return "", fmt.Errorf("resolve secret file path %q: %w", raw, err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("secret file path %q must exist and contain no symlinks: %w", absolute, err)
+	}
+	resolved = filepath.Clean(resolved)
+	absolute = filepath.Clean(absolute)
+	if resolved != absolute {
+		return "", fmt.Errorf("secret file path %q contains a symlink; use canonical path %q", absolute, resolved)
+	}
+	return absolute, nil
+}
+
+// canonicalEagerSecretSpec gives one-shot exec/spike the same source grammar
+// and file-path contract as persistent sandbox start. A TTL is validated but
+// omitted because an eager one-shot read has no cache lifetime. The low-level
+// secret opener still pins every path component against races.
+func canonicalEagerSecretSpec(spec string) (string, error) {
+	named, err := secret.ParseNamedSource(spec)
+	if err != nil {
+		return "", err
+	}
+	head := named.Name
+	if named.Source.Binding != "" {
+		head += "@" + named.Source.Binding
+	}
+	switch named.Source.Kind {
+	case secret.SourceEnv:
+		return head, nil
+	case secret.SourceFile:
+		canonical, err := canonicalSecretInputPath(named.Source.Ref)
+		if err != nil {
+			return "", err
+		}
+		return head + "=@" + canonical, nil
+	case secret.SourceExec:
+		return "", fmt.Errorf("host exec secret source %q is disabled: guest-triggered commands would run in the unconfined host supervisor (use an env/file secret source)", named.Name)
+	default:
+		return "", fmt.Errorf("secret %q has unknown source kind %q", named.Name, named.Source.Kind)
+	}
+}
+
+func secretFileReachableFromShare(sourcePath, sharePath string, shareIdentity sharefs.Identity) (bool, error) {
+	resolvedSource, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		// A dangling source or missing suffix is not safe to approve: an
+		// existing symlink may already point into the share, and the guest can
+		// make it resolve only after policy validation.
+		return false, fmt.Errorf("source path must exist and fully resolve before a writable share is enabled: %w", err)
+	}
+	resolvedShare, err := filepath.EvalSymlinks(sharePath)
+	if err != nil {
+		return false, fmt.Errorf("share path must fully resolve: %w", err)
+	}
+
+	sources := []string{sourcePath, filepath.Clean(resolvedSource)}
+	roots := []string{sharePath, filepath.Clean(resolvedShare), shareIdentity.Path()}
+	for _, root := range roots {
+		for _, source := range sources {
+			if pathInside(source, root) {
+				return true, nil
+			}
+		}
+	}
+
+	// Bind mounts, APFS firmlinks, case-folded spellings and other aliases can
+	// be lexically unrelated. Walk every source ancestor and compare opened
+	// directory identities. Reaching the share root by object identity catches
+	// platforms that cannot describe directional mount scopes.
+	seen := map[string]bool{}
+	for _, source := range sources {
+		for ancestor := filepath.Dir(source); ; ancestor = filepath.Dir(ancestor) {
+			if !seen[ancestor] {
+				seen[ancestor] = true
+				ancestorIdentity, err := sharefs.Identify(ancestor)
+				if err != nil {
+					return false, fmt.Errorf("identify source ancestor %q: %w", ancestor, err)
+				}
+				if shareIdentity.Contains(ancestorIdentity) {
+					return true, nil
+				}
+			}
+			parent := filepath.Dir(ancestor)
+			if parent == ancestor {
+				break
+			}
+		}
+	}
+	return false, nil
+}
+
+func pathInside(pathname, root string) bool {
+	relative, err := filepath.Rel(root, pathname)
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // Writable-layer size bounds. They are configuration limits rather than

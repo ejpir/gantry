@@ -13,7 +13,7 @@ package secret
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -139,7 +139,7 @@ func ParseSpec(spec string, getenv func(string) (string, bool)) (Spec, error) {
 		return Spec{}, err
 	}
 	if fileRef != "" {
-		b, err := os.ReadFile(fileRef)
+		b, err := readSecretFile(fileRef)
 		if err != nil {
 			return Spec{}, fmt.Errorf("secret %s: %w", name, err)
 		}
@@ -170,7 +170,7 @@ func Parse(spec string, getenv func(string) (string, bool)) (name string, v Valu
 // and blank lines ignored, one optional pair of surrounding quotes
 // stripped, CR tolerated. Every name must still be a valid env name.
 func ParseFile(path string) (map[string]Value, error) {
-	b, err := os.ReadFile(path)
+	b, err := readSecretFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +193,15 @@ func ParseFile(path string) (map[string]Value, error) {
 		out[strings.TrimSpace(name)] = Value(val)
 	}
 	return out, nil
+}
+
+func readSecretFile(path string) ([]byte, error) {
+	file, err := openSecretFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	return io.ReadAll(file)
 }
 
 // ResolveAll merges -secret specs and -secret-file files into the final

@@ -17,6 +17,7 @@ import (
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
+	"github.com/ejpir/gantry/internal/vsockports"
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
@@ -229,7 +230,10 @@ func (w *vmmWorker) vsockForward(dir string) workerproto.Handler {
 		}
 		var tok [workerproto.FDTokenLen]byte
 		copy(tok[:], token)
-		sock := filepath.Join(dir, fmt.Sprintf("%d.sock", body.Port))
+		sock, err := vsockports.HostSocketPath(dir, body.Port)
+		if err != nil {
+			return nil, fmt.Errorf("vsock.forward: %w", err)
+		}
 		conn, err := net.DialTimeout("unix", sock, 3*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("vsock.forward %s: %w", sock, err)

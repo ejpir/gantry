@@ -38,10 +38,21 @@ The guest receives only pre-opened boot disks and directories named with
 `-share`. Read-only shares are rejected by the host backend before a mutating
 filesystem operation reaches the host.
 
+Share roots are pinned before use. Gantry rejects roots that overlap its
+sandbox state, vsock-forwarding directory, or another export, including Linux
+bind-mount aliases and protected mounts nested below an otherwise ordinary
+directory. Host kernel-control filesystems such as procfs, sysfs, cgroupfs,
+debugfs and securityfs cannot be exported. The backend also rejects guest
+creation, opening, linking, or mutation of device nodes, FIFOs and sockets.
+
 A read-write share is deliberately writable. A compromised guest can read,
 change, or delete any content within that export that the launching user can
 access. Avoid sharing home directories, credential stores, Docker sockets,
 or broad source roots.
+
+Namespace serialization is local to one Gantry supervisor. Do not expose the
+same writable host tree from two concurrently running Gantry processes; host
+changes made after a root is validated are actions by the trusted operator.
 
 The trusted supervisor itself runs as the launching user and therefore has
 that user's host access. Gantry is not a privilege-separation boundary between
@@ -116,11 +127,26 @@ filesystem helper remains a separate unprivileged guest process; its `os.Root`
 path containment and remaining hardening work are documented in the
 [MCP worker confinement design](mcp-worker-confinement.md).
 
+A credentialed MCP upstream receives its own configured credential by design
+and must be trusted with it. The gateway masks exact secret substrings in
+decoded JSON strings to contain accidental reflection, but a malicious server
+can split or transform a credential over its functional response channel.
+
 ### Runtime inside the VM
 
 `-runtime runsc` adds a gVisor boundary between the workload and the guest
 kernel. It is defense in depth, not a replacement for the VM or host-side
 network and share policies.
+
+Gantry does not place locked OCI masks or read-only overmounts below a workload's
+`/proc`. That permits tools such as bubblewrap to mount a fresh procfs after
+creating child user and PID namespaces; Linux rejects the mount if the parent
+procfs is partly hidden. The procfs still cannot expose host processes or the
+host kernel because both are outside the microVM. It can expose guest-kernel
+state, and a root workload can change settings that the guest kernel permits
+with Gantry's reduced capability set; such changes affect its own dedicated VM.
+`/sys/firmware` remains masked. Use `-runtime runsc` when a workload also needs
+defense in depth from the guest kernel.
 
 ## Credentials
 
@@ -133,11 +159,33 @@ be inherited by child processes. A guest process can send them to any allowed
 network destination or write them to a writable share. Constrain both egress
 and filesystem access.
 
+Host command-backed secret sources are disabled: guest-triggered commands need
+a dedicated host-confinement boundary, and per-sandbox path checks cannot rule
+out inputs poisoned by another sandbox or an earlier run. File-backed secret
+paths must name existing single-link regular files through absolute, clean,
+symlink/reparse-free paths. Each component is opened relative to a pinned
+parent descriptor, and paths inside or aliased beneath a writable share are
+rejected. The prepared share handle is checked again before publication. These
+rules prevent on-demand credential resolution from becoming supervisor code
+execution or an arbitrary host-file read, including when another sandbox
+previously wrote the path.
+
+The legacy external `-gvproxy` backend is also disabled because it launches a
+configurable host executable. The embedded network stack avoids making a
+guest-writable executable path part of the supervisor's restart behavior.
+
 OAuth bridging opens bounded host-loopback listeners after detecting supported
-agent callback URLs. Guest callback responses may redirect only to an absolute
-path on the same bridge origin; external, scheme-relative, and host-local
-redirect targets are rejected. Disable the bridge with `-oauth-bridge=false`
-when unused.
+agent callback URLs. The captured callback path and OAuth state are validated;
+custody listeners reject callbacks that do not match a pending host-side flow.
+After delivery, the browser receives only a fixed, CSP-locked host page. Guest
+status, headers, redirects, bodies, and error details are discarded. Disable
+the bridge with `-oauth-bridge=false` when unused.
+
+If upgrading from a build that rendered the guest callback response, clear
+browser site data for any `localhost:<callback-port>` or
+`127.0.0.1:<callback-port>` origin previously used for sign-in. Hardened
+responses request cache and storage clearing, but an already-installed service
+worker can intercept navigation before that response is received.
 
 ## Local control surfaces
 
@@ -183,7 +231,7 @@ being shared.
 - Gantry is experimental and has not established a stable security boundary
   for hostile public multi-tenancy.
 - Windows support is experimental; strict mode does not support host-loopback
-  access, published ports, `-gvproxy`, or host-path packet capture.
+  access, published ports, or host-path packet capture.
 - Live/incremental snapshots and snapshot rollback are not supported; portable
   OCI export requires a stopped sandbox.
 - The embedded guest network is IPv4-only.

@@ -7,7 +7,7 @@
 // answers only when the request passes three gates:
 //
 //  1. egress   — the sandbox's network policy must allow the host, checked
-//     before any file/exec source is resolved;
+//     before any file source is resolved;
 //  2. binding  — a secret must be bound to that host (-secret NAME@host);
 //  3. presence — the value must currently be held (a revoked secret
 //     answers empty).

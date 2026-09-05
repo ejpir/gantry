@@ -362,3 +362,139 @@ func TestVhostFSProcessesQueueInSharedRAM(t *testing.T) {
 		t.Fatal("vhost backend did not stop")
 	}
 }
+
+func TestVhostFSResetReconfiguresChangedRing(t *testing.T) {
+	const ramSize = 2 << 20
+	file, err := os.CreateTemp(t.TempDir(), "vhost-reset-ram-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(ramSize); err != nil {
+		t.Fatal(err)
+	}
+	ram, err := syscall.Mmap(int(file.Fd()), 0, ramSize,
+		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Munmap(ram) }()
+	memory := NewRAM(ram, ramBase)
+
+	frontend, backend := testUnixConnPair(t)
+	endpoint, err := NewVhostEndpoint(frontend, testVhostQueues(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := endpoint.NewDevice("vhost-reset", file, ramBase, ramSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	irq := make(chan struct{}, 2)
+	core := NewCoreAt(device, memory, MMIOBaseArm64, MMIOIRQArm64,
+		func(_ int, level bool) {
+			if level {
+				select {
+				case irq <- struct{}{}:
+				default:
+				}
+			}
+		}, "vhost-reset")
+	defer func() { _ = core.Close() }()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- virtiofs.ServeConn(backend, func(read, write [][]byte) int {
+			if len(read) != 1 || len(read[0]) != 1 || len(write) != 1 || len(write[0]) != 1 {
+				return 0
+			}
+			write[0][0] = read[0][0] + 1
+			return 1
+		}, false, func(func([]byte) fuse.Status) {})
+	}()
+
+	configureAndSubmit := func(num uint32, desc, avail, used, input, output uint64, value byte) {
+		t.Helper()
+		core.MMIOWrite(0x030, virtioFSRequestQ)
+		core.MMIOWrite(0x038, num)
+		for offset, address := range map[uint64]uint64{0x080: desc, 0x090: avail, 0x0a0: used} {
+			core.MMIOWrite(offset, uint32(address))
+			core.MMIOWrite(offset+4, uint32(address>>32))
+		}
+		core.MMIOWrite(0x044, 1)
+		if err := memory.writeAt(avail, make([]byte, 8+2*num)); err != nil {
+			t.Fatal(err)
+		}
+		if err := memory.writeAt(used, make([]byte, 8+8*num)); err != nil {
+			t.Fatal(err)
+		}
+		var descriptor [32]byte
+		binary.LittleEndian.PutUint64(descriptor[0:8], input)
+		binary.LittleEndian.PutUint32(descriptor[8:12], 1)
+		binary.LittleEndian.PutUint16(descriptor[12:14], vringDescFNext)
+		binary.LittleEndian.PutUint16(descriptor[14:16], 1)
+		binary.LittleEndian.PutUint64(descriptor[16:24], output)
+		binary.LittleEndian.PutUint32(descriptor[24:28], 1)
+		binary.LittleEndian.PutUint16(descriptor[28:30], vringDescFWrite)
+		if err := memory.writeAt(desc, descriptor[:]); err != nil {
+			t.Fatal(err)
+		}
+		if err := memory.writeAt(input, []byte{value}); err != nil {
+			t.Fatal(err)
+		}
+		if err := memory.writeAt(output, []byte{0}); err != nil {
+			t.Fatal(err)
+		}
+		var available [4]byte
+		binary.LittleEndian.PutUint16(available[0:2], 1)
+		binary.LittleEndian.PutUint16(available[2:4], 0)
+		if err := memory.writeAt(avail+2, available[:]); err != nil {
+			t.Fatal(err)
+		}
+		core.MMIOWrite(0x050, virtioFSRequestQ)
+
+		select {
+		case <-irq:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for completion after queue configuration")
+		}
+		var usedIndex [2]byte
+		if err := memory.readAt(used+2, usedIndex[:]); err != nil {
+			t.Fatal(err)
+		}
+		if got := binary.LittleEndian.Uint16(usedIndex[:]); got != 1 {
+			t.Fatalf("used index = %d, want 1", got)
+		}
+		var result [1]byte
+		if err := memory.readAt(output, result[:]); err != nil {
+			t.Fatal(err)
+		}
+		if result[0] != value+1 {
+			t.Fatalf("response = %d, want %d", result[0], value+1)
+		}
+		core.MMIOWrite(0x064, virtioIntUsedBuffer)
+	}
+
+	core.MMIOWrite(0x020, uint32(vhostRingEventIdx))
+	configureAndSubmit(8,
+		ramBase+0x20000, ramBase+0x50000, ramBase+0x80000,
+		ramBase+0x110000, ramBase+0x110100, 0x31)
+
+	core.MMIOWrite(0x070, 0)
+	// Renegotiate without EVENT_IDX and move to a smaller, disjoint ring.
+	core.MMIOWrite(0x020, 0)
+	configureAndSubmit(4,
+		ramBase+0x28000, ramBase+0x58000, ramBase+0x88000,
+		ramBase+0x120000, ramBase+0x120100, 0x41)
+
+	if err := core.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			t.Fatalf("vhost backend shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("vhost backend did not stop")
+	}
+}

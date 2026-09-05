@@ -18,6 +18,18 @@ type winShareNode struct {
 	backend *winExportFS
 }
 
+func (n *winShareNode) GantryLockRawBridge() {
+	if n.export != nil {
+		n.export.namespace.Lock()
+	}
+}
+
+func (n *winShareNode) GantryUnlockRawBridge() {
+	if n.export != nil {
+		n.export.namespace.Unlock()
+	}
+}
+
 func (n *winShareNode) available() syscall.Errno {
 	if n.export == nil || !n.export.usable() {
 		return syscall.ESTALE
@@ -238,6 +250,9 @@ func (n *winShareNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 var _ fs.NodeRenamer = (*winShareNode)(nil)
 
 func (n *winShareNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	if errno := validateGuestRenameFlags(flags); errno != 0 {
+		return errno
+	}
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}

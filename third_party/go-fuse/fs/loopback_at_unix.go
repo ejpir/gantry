@@ -230,6 +230,27 @@ func (n *LoopbackNode) HostStat() (syscall.Stat_t, syscall.Errno) {
 	return st, 0
 }
 
+// HostChildStat lstats one direct child for an embedding filesystem's policy
+// check. Pinned roots keep the lookup descriptor-relative so the caller does
+// not fall back to a stale or sandbox-inaccessible absolute pathname.
+func (n *LoopbackNode) HostChildStat(name string) (syscall.Stat_t, syscall.Errno) {
+	if !validGuestName(name) {
+		return syscall.Stat_t{}, syscall.EINVAL
+	}
+	if n.pinned() {
+		return lstatRel(n.RootData.RootFD, relJoin(n.relPath(), name))
+	}
+	path, errno := n.securePath(name)
+	if errno != 0 {
+		return syscall.Stat_t{}, errno
+	}
+	var st syscall.Stat_t
+	if err := syscall.Lstat(path, &st); err != nil {
+		return syscall.Stat_t{}, ToErrno(err)
+	}
+	return st, 0
+}
+
 // relPath is the node's path relative to the pinned root, slash-separated.
 func (n *LoopbackNode) relPath() string {
 	return filepathToSlashTrim(n.relativePath())
@@ -465,9 +486,20 @@ func (n *LoopbackNode) setattrAt(ctx context.Context, f FileHandle, in *fuse.Set
 		// Truncate before setting times, so an explicit mtime is not
 		// clobbered by the truncate.
 		if sz, ok := in.GetSize(); ok {
-			fd, err := unix.Openat(dirfd, base, unix.O_WRONLY|unix.O_NOFOLLOW, 0)
+			// O_NONBLOCK ensures an externally raced FIFO cannot park the
+			// request before its actual descriptor type is verified.
+			fd, err := unix.Openat(dirfd, base, unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 			if err != nil {
 				return ToErrno(err)
+			}
+			var st unix.Stat_t
+			if err := unix.Fstat(fd, &st); err != nil {
+				unix.Close(fd)
+				return ToErrno(err)
+			}
+			if st.Mode&unix.S_IFMT != unix.S_IFREG {
+				unix.Close(fd)
+				return syscall.EPERM
 			}
 			err = unix.Ftruncate(fd, int64(sz))
 			unix.Close(fd)

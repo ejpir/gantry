@@ -253,6 +253,14 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -count=1 ./...
+      - name: vendored go-fuse security tests
+        if: matrix.name != 'windows-amd64'
+        working-directory: third_party/go-fuse
+        run: go test -count=1 ./fs ./fuse ./internal/vhostuser
+      - name: vendored go-fuse race tests
+        if: matrix.race
+        working-directory: third_party/go-fuse
+        run: go test -race -count=1 ./internal/vhostuser
       - name: go test -race
         if: matrix.race
         run: go test -race -count=1 ./...

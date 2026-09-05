@@ -11,7 +11,6 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/vnet"
 )
 
 func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
@@ -30,7 +29,7 @@ func TestNetworkPolicyManagerAppliesAndPersists(t *testing.T) {
 	}
 
 	live := netpol.DefaultPolicy()
-	manager := NewNetworkPolicyManager(store, NewLocalBackend(&vnet.Stack{}, live), live)
+	manager := NewNetworkPolicyManager(store, &localBackend{stack: &localNetworkStackStub{}, live: live}, live)
 	entry, err := manager.Set(policyPath, false)
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +122,7 @@ func TestNetworkPolicyManagerPreservesProxyEnforcement(t *testing.T) {
 		Net: true, ProxyURL: "http://203.0.113.5:3128", ProxyEnforce: true,
 	})
 	live := netpol.DefaultPolicy()
-	manager := NewNetworkPolicyManager(store, NewLocalBackend(&vnet.Stack{}, live), live)
+	manager := NewNetworkPolicyManager(store, &localBackend{stack: &localNetworkStackStub{}, live: live}, live)
 
 	entry, err := manager.Set("", false)
 	if err != nil {
@@ -154,7 +153,7 @@ func TestNetworkPolicyManagerPersistenceFailureRestoresSnapshot(t *testing.T) {
 	// live is the stable holder mutated by localBackend.Replace. The manager
 	// must retain an immutable old-policy snapshot rather than aliasing it.
 	live := netpol.DefaultPolicy()
-	manager := NewNetworkPolicyManager(store, NewLocalBackend(&vnet.Stack{}, live), live)
+	manager := NewNetworkPolicyManager(store, &localBackend{stack: &localNetworkStackStub{}, live: live}, live)
 	store.SetWriter(func(string, []byte, os.FileMode) error {
 		return errors.New("config path is unwritable")
 	})
@@ -185,7 +184,7 @@ func TestNetworkPolicyManagerKeepsCommittedPolicyOnDurabilityError(t *testing.T)
 	})
 
 	live := netpol.DefaultPolicy()
-	manager := NewNetworkPolicyManager(store, NewLocalBackend(&vnet.Stack{}, live), live)
+	manager := NewNetworkPolicyManager(store, &localBackend{stack: &localNetworkStackStub{}, live: live}, live)
 	entry, err := manager.Set(policyPath, false)
 	if !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
 		t.Fatalf("Set error = %v, want committed durability error", err)

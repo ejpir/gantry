@@ -816,6 +816,20 @@ func TestVMMWorkerVsockForward(t *testing.T) {
 	}
 }
 
+func TestVMMWorkerVsockForwardRejectsUnknownPort(t *testing.T) {
+	h := startVMMWorkerHarness(t, vmmworkerapi.Config{}, testAssets(t))
+	dial := (*h.fake).opts.VsockDial
+	if dial == nil {
+		t.Fatal("worker opts lack the bridged vsock dial func")
+	}
+	if conn, err := dial(42424); err == nil {
+		_ = conn.Close()
+		t.Fatal("unregistered guest port was forwarded")
+	} else if !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("unknown-port error = %v", err)
+	}
+}
+
 // TestVMMWorkerNonceMismatchRefused: a cross-wired fd channel dies at
 // the nonce check, before any RPC or frame.
 func TestVMMWorkerNonceMismatchRefused(t *testing.T) {

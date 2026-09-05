@@ -117,3 +117,15 @@ func TestStartNetworkPacketCaptureDoesNotDelegateHostPath(t *testing.T) {
 		t.Fatalf("required packet capture error = %v", err)
 	}
 }
+
+func TestStartNetworkUDPRequiresGatewayReplyPolicy(t *testing.T) {
+	denied := config.RunConfig{
+		Net: true, ProcessIsolation: "off", Ports: []string{"127.0.0.1:48081:18081/udp"},
+	}
+	if network, err := startNetwork(denied, t.TempDir()); err == nil {
+		network.Close()
+		t.Fatal("default local-network wall accepted a static UDP forward")
+	} else if !strings.Contains(err.Error(), "gateway reply port") {
+		t.Fatalf("static UDP policy error = %v", err)
+	}
+}

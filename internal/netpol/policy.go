@@ -15,13 +15,14 @@
 //     resolved IPs added to a dynamic allow table (TTL-capped). Classic
 //     sandbox use: "only deb.debian.org and *.docker.io".
 //
-// Link-local services (ARP, DHCP, the gateway's DNS/service address) are
-// always permitted so the network stays functional. A guest can still reach
+// Link-local services (ARP, DHCP, and the gateway's DNS address) are always
+// permitted so the network stays functional. A guest can still reach
 // IPs it already knows without DNS (inherent to DNS-based filtering) — the
 // rules layer is the hard guarantee, domains the convenient one.
 package netpol
 
 import (
+	"container/list"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -44,6 +45,10 @@ const (
 	protoICMP = 1
 	protoTCP  = 6
 	protoUDP  = 17
+	tcpFIN    = 0x01
+	tcpSYN    = 0x02
+	tcpRST    = 0x04
+	tcpACK    = 0x10
 
 	// gateway services that must stay reachable for the link to work
 	gatewayIP = "192.168.127.1"
@@ -53,9 +58,69 @@ const (
 	// unicast address whose last octet is 255 (8.8.8.255, ...),
 	// bypassing the rule list, the local-net wall and the default action.
 	subnetBroadcast = "192.168.127.255"
+	guestIP         = "192.168.127.2"
 	dnsMaxTTL       = 5 * time.Minute
 	maxDynamic      = 4096
+
+	// GatewayUDPFirstReplyPort and GatewayUDPLastReplyPort are the source-port
+	// range selected by the pinned gVisor netstack for host-published UDP
+	// connections. Unlike TCP, UDP has no flags that let the policy safely
+	// distinguish a live forwarded reply from a stale tuple that would fall
+	// through to gVisor's generic host-network forwarder.
+	GatewayUDPFirstReplyPort uint16 = 16000
+	GatewayUDPLastReplyPort  uint16 = 65535
+
+	// Host-published TCP ports are implemented by the embedded netstack opening
+	// a connection from gatewayIP to guestIP. Keep the gateway TCP return
+	// conntrack both short-lived and bounded: it is connection state, not a
+	// general gateway service pass.
+	publishedFlowPendingTTL = 30 * time.Second
+	publishedFlowIdleTTL    = 24 * time.Hour
+	maxPublishedFlows       = 4096
 )
+
+var (
+	gatewayIPv4 = [4]byte{192, 168, 127, 1}
+	guestIPv4   = [4]byte{192, 168, 127, 2}
+)
+
+// publishedFlow identifies the guest-to-gateway half of gateway TCP return
+// conntrack. The IPs are included deliberately: a matching port pair on a
+// spoofed or future additional guest must not inherit another guest's state.
+type publishedFlow struct {
+	guestIP     [4]byte
+	gatewayIP   [4]byte
+	proto       uint8
+	guestPort   uint16
+	gatewayPort uint16
+}
+
+type publishedFlowEntry struct {
+	flow   publishedFlow
+	expiry time.Time
+	state  publishedFlowState
+}
+
+type publishedFlowState uint8
+
+const (
+	publishedFlowPending publishedFlowState = iota
+	publishedFlowEstablished
+)
+
+// publishedFlowTable is a fixed-capacity LRU ordered by last trusted ingress
+// activity. Expiry is checked directly on every lookup because pending and
+// established entries intentionally have different TTLs. Insert,
+// refresh, and eviction remain O(1) under connection-flood pressure.
+type publishedFlowTable struct {
+	mu      sync.Mutex
+	entries map[publishedFlow]*list.Element
+	lru     list.List // front is the least-recently-active entry
+}
+
+func newPublishedFlowTable() *publishedFlowTable {
+	return &publishedFlowTable{entries: make(map[publishedFlow]*list.Element)}
+}
 
 // Policy is the parsed, enforced form of the policy file.
 type Policy struct {
@@ -80,19 +145,41 @@ type Policy struct {
 
 	mu      sync.Mutex
 	dynamic map[[4]byte]time.Time // DNS-learned allowances: IPv4 -> expiry
-	active  atomic.Pointer[Policy]
+
+	// Published-flow state is independent of a policy generation: an atomic
+	// policy replacement must not tear down already-established inbound
+	// connections. The table has its own lock; DNS dynamic state intentionally
+	// remains generation-local under mu.
+	publishedFlows atomic.Pointer[publishedFlowTable]
+	active         atomic.Pointer[Policy]
 }
 
 // Replace atomically switches every future policy decision to next. The
 // stable receiver remains attached to the virtio-net device, so a running VM
 // can change policy without rebuilding its device graph or network stack.
-// DNS-learned allowances intentionally start empty in the replacement.
+// DNS-learned allowances intentionally start empty in the replacement;
+// bounded TCP return-flow state is shared so established published
+// connections survive unless an explicit rule in the replacement denies them.
 func (p *Policy) Replace(next *Policy) error {
 	if p == nil || next == nil {
 		return fmt.Errorf("network policy replacement is nil")
 	}
-	p.active.Store(next.current())
+	current := p.current()
+	replacement := next.current()
+	replacement.publishedFlows.Store(current.publishedFlowTable())
+	p.active.Store(replacement)
 	return nil
+}
+
+func (p *Policy) publishedFlowTable() *publishedFlowTable {
+	if table := p.publishedFlows.Load(); table != nil {
+		return table
+	}
+	table := newPublishedFlowTable()
+	if p.publishedFlows.CompareAndSwap(nil, table) {
+		return table
+	}
+	return p.publishedFlows.Load()
 }
 
 func (p *Policy) current() *Policy {
@@ -177,7 +264,9 @@ func (p *Policy) MayAllowLoopback() bool {
 // NAT alias) is not. Equivalent to {"default": "allow"} with AllowLocal
 // left false — relax with the -allow-local-net flag or a policy file.
 func DefaultPolicy() *Policy {
-	return &Policy{DefaultAllow: true, dynamic: map[[4]byte]time.Time{}}
+	p := &Policy{DefaultAllow: true, dynamic: map[[4]byte]time.Time{}}
+	p.publishedFlows.Store(newPublishedFlowTable())
+	return p
 }
 
 // Rule matches destination IP (CIDR, default all), protocol (tcp/udp/icmp,
@@ -432,6 +521,7 @@ func Parse(data []byte) (*Policy, error) {
 		return nil, fmt.Errorf("network policy: %w", err)
 	}
 	p := &Policy{dynamic: map[[4]byte]time.Time{}}
+	p.publishedFlows.Store(newPublishedFlowTable())
 	switch fp.Default {
 	case "", "allow":
 		p.DefaultAllow = true
@@ -688,30 +778,252 @@ func (p *Policy) MatchTX(frame []byte) bool {
 	if !ok {
 		return false // policy active: no IPv6, no exotic ethertypes
 	}
+	dst := net.IP(pp.dst[:])
+	isGateway := dst.Equal(net.ParseIP(gatewayIP))
+	isBroadcast := dst.Equal(net.IPv4bcast) || dst.Equal(net.ParseIP(subnetBroadcast))
+	// The guest owns exactly one IPv4 address on this point-to-point link.
+	// Enforce that source identity before any destination allow: the embedded
+	// switch may reflect a unicast frame addressed to the guest MAC back onto
+	// this same link. Without anti-spoofing, a guest could forge a
+	// gateway-to-guest TCP handshake, observe its own reflected frames as
+	// trusted RX, and poison published-flow state across a policy replacement.
+	// A DHCP client may legitimately use 0.0.0.0 before receiving its lease.
+	zeroSourceDHCP := pp.src == ([4]byte{}) && pp.proto == protoUDP && pp.sport == 68 && pp.dport == 67 && (isGateway || isBroadcast)
+	if pp.src != guestIPv4 && !zeroSourceDHCP {
+		return false
+	}
 	// Close the fragmentation gap documented in parseFrame: a non-initial
 	// fragment (no ports parsed) can never match a port-scoped deny and
 	// would fall through to the default-allow verdict — drop it instead.
 	if pp.fragmented && pp.sport == 0 && pp.dport == 0 && p.DefaultAllow && p.hasPortScopedDeny {
 		return false
 	}
-	dst := net.IP(pp.dst[:])
-	// Only the sandbox's own gateway and broadcast (DHCP) get the
-	// link-services pass; multicast is NOT exempt — mDNS/SSDP probes are
-	// LAN discovery and belong behind the local-network wall.
-	if dst.Equal(net.ParseIP(gatewayIP)) ||
-		dst.Equal(net.IPv4bcast) || dst.Equal(net.ParseIP(subnetBroadcast)) {
-		return p.matchGatewayService(pp)
+	// A DHCP client request is consumed by the embedded server bound to UDP
+	// port 67. Nothing else gets a broadcast bypass: the default gVisor UDP
+	// forwarder would otherwise turn it into host/LAN traffic.
+	if isGateway || isBroadcast {
+		if pp.proto == protoUDP && pp.sport == 68 && pp.dport == 67 {
+			return true
+		}
+		if isBroadcast {
+			return false
+		}
+		// Gateway TCP is security-sensitive: the embedded generic forwarder
+		// turns a reassembled SYN into a host-network dial. Apply minimum tuple
+		// validation before every explicit/default allow so fragmented or
+		// malformed segments cannot skip the stale-flow invalidation below.
+		if pp.proto == protoTCP && !tcpTupleValid(pp) {
+			return false
+		}
+		// A guest-originated SYN starts a new gateway connection, never the
+		// return half of an older host-published connection. Forget an exact
+		// cached tuple before any explicit/local allow can admit that SYN;
+		// otherwise a gracefully closed published tuple could be reused while
+		// policy is permissive and then survive a later restrictive Replace.
+		p.invalidatePublishedReturnSYN(pp)
+		// DNS is the only other service hosted on the virtual gateway. Unknown
+		// ports must follow ordinary policy because the embedded TCP/UDP
+		// forwarders dial the destination from the host network namespace.
+		if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 {
+			return p.matchGatewayDNS(pp)
+		}
+		// Explicit policy is authoritative even for an established published
+		// flow. In particular, a live policy replacement with an exact deny
+		// must revoke access immediately while leaving unrelated flow state
+		// available to the new generation.
+		if allowed, matched := p.explicitRuleVerdict(pp.dst, pp.proto, pp.dport); matched {
+			return allowed
+		}
+		if p.Allows(pp.dst, pp.proto, pp.dport) {
+			return true
+		}
+		// A host-published connection originates inside the embedded netstack
+		// as gatewayIP:ephemeral -> guestIP:published. Admit only the exact
+		// reverse tuple previously observed on trusted ingress. This preserves
+		// the local-network wall for arbitrary guest -> gateway traffic.
+		return p.matchPublishedReturn(pp, time.Now())
 	}
 	return p.Allows(pp.dst, pp.proto, pp.dport)
 }
 
-// matchGatewayService keeps the link functional: DHCP always, DNS filtered
-// by name when a domain allowlist exists, everything else to the gateway
-// address (its captive services) allowed.
-func (p *Policy) matchGatewayService(pp parsedPacket) bool {
-	if pp.proto == protoUDP && (pp.dport == 67 || pp.dport == 68) {
-		return true // DHCP
+// tcpTupleValid applies the minimum framing checks needed before a
+// packet can create or consume a published-flow capability. Fragments are
+// excluded because non-initial fragments have no independently attributable
+// ports; normal TCP segmentation is unaffected.
+func tcpTupleValid(pp parsedPacket) bool {
+	if pp.fragmented || pp.sport == 0 || pp.dport == 0 {
+		return false
 	}
+	if pp.proto != protoTCP || len(pp.l4) < 20 {
+		return false
+	}
+	off := int(pp.l4[12]>>4) * 4
+	return off >= 20 && off <= len(pp.l4)
+}
+
+func publishedFlowFromIngress(pp parsedPacket) (publishedFlow, byte, bool) {
+	if pp.src != gatewayIPv4 || pp.dst != guestIPv4 || !tcpTupleValid(pp) || pp.sport == 53 || pp.sport == 67 {
+		return publishedFlow{}, 0, false
+	}
+	flow := publishedFlow{
+		guestIP:     pp.dst,
+		gatewayIP:   pp.src,
+		proto:       pp.proto,
+		guestPort:   pp.dport,
+		gatewayPort: pp.sport,
+	}
+	return flow, pp.l4[13], true
+}
+
+func publishedFlowFromReturn(pp parsedPacket) (publishedFlow, byte, bool) {
+	if pp.src != guestIPv4 || pp.dst != gatewayIPv4 || !tcpTupleValid(pp) {
+		return publishedFlow{}, 0, false
+	}
+	return publishedFlow{
+		guestIP:     pp.src,
+		gatewayIP:   pp.dst,
+		proto:       pp.proto,
+		guestPort:   pp.sport,
+		gatewayPort: pp.dport,
+	}, pp.l4[13], true
+}
+
+// observePublishedIngress records a capability only when the embedded
+// netstack has already emitted a matching packet toward the guest. RX is a
+// trusted direction: guest-originated frames are filtered before reaching it.
+func (p *Policy) observePublishedIngress(pp parsedPacket, now time.Time) {
+	flow, flags, ok := publishedFlowFromIngress(pp)
+	if !ok {
+		return
+	}
+	p.publishedFlowTable().observe(flow, flags, now)
+}
+
+func (p *Policy) matchPublishedReturn(pp parsedPacket, now time.Time) bool {
+	flow, flags, ok := publishedFlowFromReturn(pp)
+	if !ok {
+		return false
+	}
+	return p.publishedFlowTable().match(flow, flags, now)
+}
+
+func (p *Policy) invalidatePublishedReturnSYN(pp parsedPacket) {
+	flow, flags, ok := publishedFlowFromReturn(pp)
+	if !ok || flags&tcpSYN == 0 || flags&tcpACK != 0 {
+		return
+	}
+	table := p.publishedFlowTable()
+	table.mu.Lock()
+	defer table.mu.Unlock()
+	if element, exists := table.entries[flow]; exists {
+		table.remove(element)
+	}
+}
+
+func (t *publishedFlowTable) remove(element *list.Element) {
+	entry := element.Value.(*publishedFlowEntry)
+	delete(t.entries, entry.flow)
+	t.lru.Remove(element)
+}
+
+func (t *publishedFlowTable) touch(element *list.Element, now time.Time, ttl time.Duration) {
+	entry := element.Value.(*publishedFlowEntry)
+	entry.expiry = now.Add(ttl)
+	t.lru.MoveToBack(element)
+}
+
+func (t *publishedFlowTable) observe(flow publishedFlow, flags byte, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if element, exists := t.entries[flow]; exists {
+		entry := element.Value.(*publishedFlowEntry)
+		if !now.Before(entry.expiry) {
+			t.remove(element)
+		} else {
+			if flags&tcpRST != 0 {
+				t.remove(element)
+				return
+			}
+			if flags&tcpSYN != 0 && flags&(tcpACK|tcpRST|tcpFIN) == 0 {
+				// A reused netstack tuple begins a new handshake rather than
+				// inheriting the prior connection's established state.
+				entry.state = publishedFlowPending
+				t.touch(element, now, publishedFlowPendingTTL)
+				return
+			}
+			if entry.state == publishedFlowPending {
+				if flags&tcpACK == 0 || flags&tcpSYN != 0 {
+					return
+				}
+				entry.state = publishedFlowEstablished
+			}
+			// FIN can begin a legitimate long half-close, so only RST deletes
+			// state. Any valid trusted ingress packet refreshes established idle
+			// lifetime; guest TX never does.
+			t.touch(element, now, publishedFlowIdleTTL)
+			return
+		}
+	}
+	// Only a gateway-originated pure SYN can create state. An ACK without a
+	// prior tracked SYN may belong to a guest-initiated gateway connection that
+	// a restrictive policy replacement is meant to revoke; it must not recreate
+	// an expired or evicted capability.
+	initialSYN := flags&tcpSYN != 0 && flags&(tcpACK|tcpRST|tcpFIN) == 0
+	if !initialSYN {
+		return
+	}
+	if len(t.entries) >= maxPublishedFlows {
+		t.remove(t.lru.Front())
+	}
+	entry := &publishedFlowEntry{
+		flow:   flow,
+		expiry: now.Add(publishedFlowPendingTTL),
+		state:  publishedFlowPending,
+	}
+	t.entries[flow] = t.lru.PushBack(entry)
+}
+
+func (t *publishedFlowTable) match(flow publishedFlow, flags byte, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	element, exists := t.entries[flow]
+	if !exists {
+		return false
+	}
+	entry := element.Value.(*publishedFlowEntry)
+	if !now.Before(entry.expiry) {
+		t.remove(element)
+		return false
+	}
+	// gVisor's generic TCP forwarder treats every SYN without ACK as a new
+	// guest-originated connection, even malformed SYN|RST or SYN|FIN mixes.
+	// Reject that entire flag class before considering cached state.
+	if flags&tcpSYN != 0 && flags&tcpACK == 0 {
+		return false
+	}
+	allowed := flags&tcpRST != 0
+	if entry.state == publishedFlowPending {
+		allowed = allowed || flags&tcpSYN != 0 && flags&tcpACK != 0 && flags&tcpFIN == 0
+	} else {
+		// Never pass a bare SYN on cached state: once the original internal
+		// endpoint closes, gVisor's generic TCP forwarder would interpret it as
+		// a new guest-originated connection and dial from the host namespace.
+		allowed = allowed || flags&tcpACK != 0
+	}
+	if !allowed {
+		return false
+	}
+	// Trusted ingress alone refreshes idle lifetime. A malicious guest cannot
+	// pin a stale capability by repeatedly transmitting on it.
+	if flags&tcpRST != 0 {
+		t.remove(element)
+	}
+	return true
+}
+
+// matchGatewayDNS keeps the embedded resolver reachable, filtering by name
+// when a domain allowlist exists.
+func (p *Policy) matchGatewayDNS(pp parsedPacket) bool {
 	// Policy inspects single frames; the netstack reassembles. Under a
 	// domain allowlist no single frame of a fragmented datagram can be
 	// attributed to a query name — and non-first fragments carry no ports
@@ -719,7 +1031,7 @@ func (p *Policy) matchGatewayService(pp parsedPacket) bool {
 	if pp.fragmented && p.dnsFilterActive() && (pp.proto == protoUDP || pp.proto == protoTCP) {
 		return false
 	}
-	if (pp.proto == protoUDP || pp.proto == protoTCP) && pp.dport == 53 && p.dnsFilterActive() {
+	if p.dnsFilterActive() {
 		return p.dnsQueryAllowed(pp)
 	}
 	return true
@@ -750,7 +1062,7 @@ func (p *Policy) dnsQueryAllowed(pp parsedPacket) bool {
 		}
 	}
 	var msg dns.Msg
-	if err := msg.Unpack(payload); err != nil || len(msg.Question) == 0 {
+	if err := msg.Unpack(payload); err != nil || msg.Response || len(msg.Question) == 0 {
 		return false
 	}
 	for _, q := range msg.Question {
@@ -798,6 +1110,65 @@ func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
 	if current := p.current(); current != p {
 		return current.Allows(dst, proto, dport)
 	}
+	if allowed, matched := p.explicitRuleVerdict(dst, proto, dport); matched {
+		return allowed
+	}
+	if !p.AllowLocal && isLocal(dst) {
+		return false
+	}
+	p.mu.Lock()
+	if exp, ok := p.dynamic[dst]; ok {
+		if time.Now().Before(exp) {
+			p.mu.Unlock()
+			return true
+		}
+		delete(p.dynamic, dst)
+	}
+	p.mu.Unlock()
+	return p.DefaultAllow
+}
+
+// AllowsGatewayUDPReplies reports whether the effective, durable policy
+// permits every gateway-side port that gVisor may select for a published UDP
+// connection. Dynamic DNS allowances do not count: port publishing must not
+// depend on transient learned state. Callers reject UDP publishing when this
+// is false instead of opening a listener whose replies will be dropped.
+func (p *Policy) AllowsGatewayUDPReplies() bool {
+	if p == nil {
+		return false
+	}
+	if current := p.current(); current != p {
+		return current.AllowsGatewayUDPReplies()
+	}
+	fallbackAllows := p.AllowLocal && p.DefaultAllow
+	for port := uint32(GatewayUDPFirstReplyPort); port <= uint32(GatewayUDPLastReplyPort); port++ {
+		if allowed, matched := p.explicitRuleVerdict(gatewayIPv4, protoUDP, uint16(port)); matched {
+			if !allowed {
+				return false
+			}
+			continue
+		}
+		if !fallbackAllows {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateUDPPortPublishing returns a user-facing error when UDP published
+// replies cannot traverse the current policy without an unsafe conntrack
+// exception. TCP publishing uses independently tracked return state.
+func ValidateUDPPortPublishing(policy *Policy) error {
+	if policy != nil && policy.AllowsGatewayUDPReplies() {
+		return nil
+	}
+	return fmt.Errorf("udp port publishing requires policy permission for every gateway reply port %s:%d-%d; use TCP, explicitly allow that UDP range, or use -allow-local-net with a default-allow policy",
+		gatewayIP, GatewayUDPFirstReplyPort, GatewayUDPLastReplyPort)
+}
+
+// explicitRuleVerdict returns the first matching L3/L4 rule without applying
+// the implicit local-network wall, DNS-learned allowances, or default action.
+func (p *Policy) explicitRuleVerdict(dst [4]byte, proto uint8, dport uint16) (bool, bool) {
 	dstIP := net.IP(dst[:])
 	for _, r := range p.Rules {
 		if r.CIDR != nil && !r.CIDR.Contains(dstIP) {
@@ -818,36 +1189,25 @@ func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
 				continue
 			}
 		}
-		return !r.Deny
+		return !r.Deny, true
 	}
-	if !p.AllowLocal && isLocal(dst) {
-		return false
-	}
-	p.mu.Lock()
-	if exp, ok := p.dynamic[dst]; ok {
-		if time.Now().Before(exp) {
-			p.mu.Unlock()
-			return true
-		}
-		delete(p.dynamic, dst)
-	}
-	p.mu.Unlock()
-	return p.DefaultAllow
+	return false, false
 }
 
-// ObserveRX snoops DNS answers flowing back to the guest: A/AAAA records of
-// responses to allowlisted questions become dynamic allowances. (AAAA IPs
-// are recorded but moot — the embedded netstack is IPv4-only today.)
+// ObserveRX learns bounded TCP return state from trusted gateway-to-guest
+// ingress, then snoops DNS answers: A records of responses to allowlisted
+// questions become dynamic allowances.
 func (p *Policy) ObserveRX(frame []byte) {
 	if current := p.current(); current != p {
 		current.ObserveRX(frame)
 		return
 	}
-	if len(p.AllowDomains) == 0 {
+	pp, _, ok := parseFrame(frame)
+	if !ok {
 		return
 	}
-	pp, _, ok := parseFrame(frame)
-	if !ok || !pp.srcIsDNS {
+	p.observePublishedIngress(pp, time.Now())
+	if len(p.AllowDomains) == 0 || !pp.srcIsDNS || pp.src != gatewayIPv4 || pp.dst != guestIPv4 {
 		return
 	}
 	payload, _ := dnsPayload(pp)

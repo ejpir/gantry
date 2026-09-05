@@ -19,6 +19,22 @@ type shareNode struct {
 	export *Export
 }
 
+// GantryLockRawBridge is consumed by Gantry's go-fuse bridge around both a
+// namespace backend call and its subsequent inode-tree update. Keeping this
+// lock outside the Node method closes the otherwise unavoidable gap between
+// those two phases.
+func (n *shareNode) GantryLockRawBridge() {
+	if n.export != nil {
+		n.export.namespace.Lock()
+	}
+}
+
+func (n *shareNode) GantryUnlockRawBridge() {
+	if n.export != nil {
+		n.export.namespace.Unlock()
+	}
+}
+
 func (n *shareNode) available() syscall.Errno {
 	if n.export == nil || !n.export.usable() {
 		return syscall.ESTALE
@@ -48,6 +64,48 @@ func (n *shareNode) wrapFile(f fs.FileHandle, errno syscall.Errno) (fs.FileHandl
 		return nil, 0, errno
 	}
 	return &shareFile{FileHandle: f, export: n.export}, 0, 0
+}
+
+// Linux O_NONBLOCK is carried on the FUSE wire even when the host is Darwin.
+// Force it for the host open so a raced FIFO can never park a request worker;
+// validate the actual descriptor, then restore the guest's requested mode.
+const guestONonblock = uint32(0x800)
+
+func releaseOpenedFile(ctx context.Context, file fs.FileHandle) {
+	if releaser, ok := file.(fs.FileReleaser); ok {
+		_ = releaser.Release(ctx)
+	}
+}
+
+func validateOpenedFile(ctx context.Context, file fs.FileHandle, flags uint32) syscall.Errno {
+	passthrough, ok := file.(fs.FilePassthroughFder)
+	if !ok {
+		releaseOpenedFile(ctx, file)
+		return syscall.EPERM
+	}
+	fd, ok := passthrough.PassthroughFd()
+	if !ok {
+		releaseOpenedFile(ctx, file)
+		return syscall.EBADF
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		releaseOpenedFile(ctx, file)
+		return fs.ToErrno(err)
+	}
+	switch st.Mode & syscall.S_IFMT {
+	case syscall.S_IFREG, syscall.S_IFDIR:
+	default:
+		releaseOpenedFile(ctx, file)
+		return syscall.EPERM
+	}
+	if flags&guestONonblock == 0 {
+		if err := syscall.SetNonblock(fd, false); err != nil {
+			releaseOpenedFile(ctx, file)
+			return fs.ToErrno(err)
+		}
+	}
+	return 0
 }
 
 var _ fs.NodeWrapChilder = (*shareNode)(nil)
@@ -105,6 +163,9 @@ func (n *shareNode) Mknod(ctx context.Context, name string, mode, rdev uint32, o
 }
 
 func (n *shareNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if n.export == nil {
+		return nil, syscall.ESTALE
+	}
 	if errno := n.mutable(); errno != 0 {
 		return nil, errno
 	}
@@ -120,6 +181,9 @@ func (n *shareNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 }
 
 func (n *shareNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	if n.export == nil {
+		return syscall.ESTALE
+	}
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
@@ -131,6 +195,9 @@ func (n *shareNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *shareNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	if n.export == nil {
+		return syscall.ESTALE
+	}
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
@@ -142,18 +209,21 @@ func (n *shareNode) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *shareNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	if errno := n.mutable(); errno != 0 {
+	if errno := validateGuestRenameFlags(flags); errno != 0 {
 		return errno
 	}
 	other, ok := newParent.(*shareNode)
 	if !ok {
 		return syscall.EXDEV
 	}
-	if errno := other.mutable(); errno != 0 {
+	if n.export == nil || other.export != n.export {
+		return syscall.EXDEV
+	}
+	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	if other.export != n.export {
-		return syscall.EXDEV
+	if errno := other.mutable(); errno != 0 {
+		return errno
 	}
 	errno := n.LoopbackNode.Rename(ctx, name, newParent, newName, flags)
 	if errno == 0 && n.export.coherence != nil {
@@ -163,10 +233,25 @@ func (n *shareNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 }
 
 func (n *shareNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	if n.export == nil {
+		return nil, nil, 0, syscall.ESTALE
+	}
 	if errno := n.mutable(); errno != 0 {
 		return nil, nil, 0, errno
 	}
-	inode, fh, fuseFlags, errno = n.LoopbackNode.Create(ctx, name, flags, mode, out)
+	if existing, statErr := n.HostChildStat(name); statErr == 0 {
+		if existing.Mode&syscall.S_IFMT != syscall.S_IFREG {
+			return nil, nil, 0, syscall.EPERM
+		}
+	} else if statErr != syscall.ENOENT {
+		return nil, nil, 0, statErr
+	}
+	inode, fh, fuseFlags, errno = n.LoopbackNode.Create(ctx, name, flags|guestONonblock, mode, out)
+	if errno == 0 {
+		if errno = validateOpenedFile(ctx, fh, flags); errno != 0 {
+			return nil, nil, 0, errno
+		}
+	}
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
 		if n.export.coherence != nil {
@@ -179,6 +264,9 @@ func (n *shareNode) Create(ctx context.Context, name string, flags uint32, mode 
 }
 
 func (n *shareNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if n.export == nil {
+		return nil, syscall.ESTALE
+	}
 	if errno := n.mutable(); errno != 0 {
 		return nil, errno
 	}
@@ -194,11 +282,29 @@ func (n *shareNode) Symlink(ctx context.Context, target, name string, out *fuse.
 }
 
 func (n *shareNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if n.export == nil {
+		return nil, syscall.ESTALE
+	}
 	if errno := n.mutable(); errno != 0 {
 		return nil, errno
 	}
-	if other, ok := target.(*shareNode); ok && other.export != n.export {
+	other, ok := target.(*shareNode)
+	if !ok || other.export != n.export {
 		return nil, syscall.EXDEV
+	}
+	if kind := other.StableAttr().Mode & syscall.S_IFMT; kind != syscall.S_IFREG && kind != syscall.S_IFLNK {
+		return nil, syscall.EPERM
+	}
+	st, errno := other.HostStat()
+	if errno != 0 {
+		return nil, errno
+	}
+	// A hard link would let the guest plant another host-visible device,
+	// FIFO or socket entry without going through the denied MKNOD path.
+	// Regular files and symlinks are the only linkable share policy types;
+	// directories are rejected by the host kernel in any case.
+	if kind := st.Mode & syscall.S_IFMT; kind != syscall.S_IFREG && kind != syscall.S_IFLNK {
+		return nil, syscall.EPERM
 	}
 	inode, errno := n.LoopbackNode.Link(ctx, target, name, out)
 	if errno == 0 {
@@ -219,11 +325,25 @@ func (n *shareNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 }
 
 func (n *shareNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if n.export == nil {
+		return nil, 0, syscall.ESTALE
+	}
+	n.export.namespace.Lock()
+	defer n.export.namespace.Unlock()
 	if errno := n.available(); errno != 0 {
 		return nil, 0, errno
 	}
 	if n.export.RO && flags&openWriteFlags != 0 {
 		return nil, 0, syscall.EROFS
+	}
+	// StableAttr describes the inode the guest retained. Check it before any
+	// path-based host open as defense in depth against a future inode-tree
+	// synchronization regression; HostStat below separately checks the current
+	// path target.
+	switch n.StableAttr().Mode & syscall.S_IFMT {
+	case syscall.S_IFREG, syscall.S_IFDIR, syscall.S_IFLNK:
+	default:
+		return nil, 0, syscall.EPERM
 	}
 	// Reject pre-existing special files before opening: opening a host
 	// device node has side effects and must never be reachable from the
@@ -241,7 +361,12 @@ func (n *shareNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint
 	default:
 		return nil, 0, syscall.EPERM
 	}
-	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, flags)
+	fh, fuseFlags, errno := n.LoopbackNode.Open(ctx, flags|guestONonblock)
+	if errno == 0 {
+		if errno = validateOpenedFile(ctx, fh, flags); errno != 0 {
+			return nil, 0, errno
+		}
+	}
 	wrapped, _, errno := n.wrapFile(fh, errno)
 	return wrapped, fuseFlags, errno
 }
@@ -308,15 +433,36 @@ func (n *shareNode) Statx(ctx context.Context, f fs.FileHandle, flags uint32, ma
 }
 
 func (n *shareNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if n.export == nil {
+		return syscall.ESTALE
+	}
+	n.export.namespace.Lock()
+	defer n.export.namespace.Unlock()
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
-	// LoopbackNode's handle-less chmod/truncate path uses pathname syscalls.
-	// On Darwin chmod follows the final symlink, which would let a writable
-	// export mutate a target outside its pinned root. Symlink type is immutable
-	// for the inode lifetime, so reject every attribute mutation up front.
-	if n.StableAttr().Mode&syscall.S_IFMT == syscall.S_IFLNK {
-		return syscall.ELOOP
+	switch n.StableAttr().Mode & syscall.S_IFMT {
+	case syscall.S_IFREG, syscall.S_IFDIR:
+	default:
+		return syscall.EPERM
+	}
+	// A validated shareFile mutates its already-open regular file descriptor.
+	// Every other path enters LoopbackNode's handle-less *at implementation;
+	// validate its current target while guest namespace changes are excluded.
+	opened, validatedHandle := f.(*shareFile)
+	if validatedHandle && opened.export != n.export {
+		return syscall.EBADF
+	}
+	if !validatedHandle {
+		st, errno := n.HostStat()
+		if errno != 0 {
+			return errno
+		}
+		switch st.Mode & syscall.S_IFMT {
+		case syscall.S_IFREG, syscall.S_IFDIR:
+		default:
+			return syscall.EPERM
+		}
 	}
 	errno := n.LoopbackNode.Setattr(ctx, f, in, out)
 	// Ownership squash, as in NewFS: gVisor's gofer chowns every file it
@@ -356,6 +502,11 @@ func xattrWriteAllowed(attr string) bool {
 }
 
 func (n *shareNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	if n.export == nil {
+		return 0, syscall.ESTALE
+	}
+	n.export.namespace.Lock()
+	defer n.export.namespace.Unlock()
 	if errno := n.available(); errno != 0 {
 		return 0, errno
 	}
@@ -363,6 +514,11 @@ func (n *shareNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 }
 
 func (n *shareNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	if n.export == nil {
+		return 0, syscall.ESTALE
+	}
+	n.export.namespace.Lock()
+	defer n.export.namespace.Unlock()
 	if errno := n.available(); errno != 0 {
 		return 0, errno
 	}
@@ -370,6 +526,11 @@ func (n *shareNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 }
 
 func (n *shareNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	if n.export == nil {
+		return syscall.ESTALE
+	}
+	n.export.namespace.Lock()
+	defer n.export.namespace.Unlock()
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}
@@ -380,6 +541,11 @@ func (n *shareNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 }
 
 func (n *shareNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	if n.export == nil {
+		return syscall.ESTALE
+	}
+	n.export.namespace.Lock()
+	defer n.export.namespace.Unlock()
 	if errno := n.mutable(); errno != 0 {
 		return errno
 	}

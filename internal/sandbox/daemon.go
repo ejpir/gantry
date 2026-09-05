@@ -46,6 +46,10 @@ type daemonRuntime struct {
 	consoleLog *boundedlog.Pipe
 	network    *Network
 	shares     *control.ShareManager
+	// networkTransactions spans each live policy/port mutation through its
+	// persistence and rollback phase. Both control managers sharing the network
+	// backend must use this same coordinator.
+	networkTransactions *control.NetworkTransactionCoordinator
 	// Guest-tool delivery uses RPC and shares. The lifecycle gate prevents new
 	// deliveries once teardown starts and lets close cancel/join every owner
 	// before either dependency is released; guestToolsMu serializes retries.
