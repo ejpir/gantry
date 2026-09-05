@@ -203,7 +203,9 @@ GUEST_PORT
 ```
 
 The one-field form chooses a free host port. TCP is the default protocol and
-host loopback is the default bind address.
+host loopback is the default bind address. UDP publishes require an egress
+policy that permits every virtual-gateway reply port in
+`192.168.127.1:16000-65535/udp`; the default policy rejects them.
 
 ## Network policy
 

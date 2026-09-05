@@ -111,7 +111,10 @@ func (d *daemonRuntime) startHostServices() error {
 	for _, warning := range warnings {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
 	}
-	d.ports = control.NewPortManager(d.store, d.network.Backend)
+	if d.networkTransactions == nil {
+		d.networkTransactions = control.NewNetworkTransactionCoordinator()
+	}
+	d.ports = control.NewPortManagerWithCoordinator(d.store, d.network.Backend, d.networkTransactions)
 	return nil
 }
 

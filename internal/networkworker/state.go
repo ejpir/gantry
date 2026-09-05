@@ -12,10 +12,17 @@ import (
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-// state holds the worker's mutable services. Policy and port transitions use
-// independent locks; traffic recording is independently safe.
+type portStack interface {
+	Publish(proto, local, remote string) error
+	Unpublish(proto, local string) error
+	Forwards() ([]vnet.Forward, error)
+}
+
+// state holds the worker's mutable services. Policy commits and port
+// transitions share portMu so their policy checks and listener changes are
+// atomic with respect to each other; traffic recording is independently safe.
 type state struct {
-	stack         *vnet.Stack
+	stack         portStack
 	policy        *netpol.Policy // stable holder attached to the pumps
 	currentTxn    string
 	currentDigest [sha256.Size]byte
@@ -115,6 +122,15 @@ func (s *state) commitPolicy(req workerproto.Request) (any, error) {
 	if s.pending == nil || body.Generation != s.pendGen || body.Transaction != s.pendingTxn {
 		return nil, fmt.Errorf("no prepared policy transaction %q generation %d", body.Transaction, body.Generation)
 	}
+	s.portMu.Lock()
+	defer s.portMu.Unlock()
+	forwards, err := s.stack.Forwards()
+	if err != nil {
+		return nil, fmt.Errorf("list active port forwards: %w", err)
+	}
+	if err := validatePolicyAgainstUDPForwards(s.pending, forwards); err != nil {
+		return nil, err
+	}
 	if err := s.policy.Replace(s.pending); err != nil {
 		return nil, err
 	}
@@ -195,6 +211,11 @@ func (s *state) publishPort(req workerproto.Request) (any, error) {
 		remote:    body.Remote,
 	}
 	return s.applyPortMutation(body.Transaction, mutation, func() error {
+		if body.Proto == "udp" {
+			if err := netpol.ValidateUDPPortPublishing(s.policy); err != nil {
+				return err
+			}
+		}
 		return s.stack.Publish(body.Proto, body.Local, body.Remote)
 	})
 }
@@ -282,6 +303,19 @@ func (s *state) rememberPortTransaction(id string, transaction portTransaction) 
 func validatePortTransaction(transaction string) error {
 	if transaction == "" || len(transaction) > 128 {
 		return fmt.Errorf("invalid port transaction ID")
+	}
+	return nil
+}
+
+func validatePolicyAgainstUDPForwards(policy *netpol.Policy, forwards []vnet.Forward) error {
+	for _, forward := range forwards {
+		if forward.Protocol != "udp" {
+			continue
+		}
+		if err := netpol.ValidateUDPPortPublishing(policy); err != nil {
+			return fmt.Errorf("active UDP port forward %s -> %s: %w", forward.Local, forward.Remote, err)
+		}
+		return nil
 	}
 	return nil
 }

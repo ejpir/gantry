@@ -246,6 +246,34 @@ func TestSetNetworkPolicyStoppedSandboxWritesStore(t *testing.T) {
 	}
 }
 
+func TestSetNetworkPolicyStoppedRejectsPolicyThatBreaksSavedUDP(t *testing.T) {
+	useShortGantryHome(t)
+	dir := writeSandboxConfig(t, "stopped-udp")
+	store, err := config.LoadConfigStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const spec = "127.0.0.1:48104:18084/udp"
+	if err := store.Mutate(func(cfg *config.RunConfig) error {
+		cfg.AllowLN = true
+		cfg.Ports = []string{spec}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetNetworkPolicy("stopped-udp", "", false); err == nil || !strings.Contains(err.Error(), "saved UDP port forward") {
+		t.Fatalf("offline restrictive policy error = %v", err)
+	}
+	persisted, err := config.ReadSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted.AllowLN || len(persisted.Ports) != 1 || persisted.Ports[0] != spec {
+		t.Fatalf("rejected offline update changed persisted config: %+v", persisted)
+	}
+}
+
 // TestSetResourcesWhileLaunchLockHeld mirrors the net-policy guard: a
 // launcher mid-boot holds the launch lock, so the stopped-sandbox store
 // write must refuse rather than persist an allocation the booting daemon

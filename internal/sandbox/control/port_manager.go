@@ -26,8 +26,9 @@ import (
 // can never clobber a concurrent (or earlier) share mutation: both managers
 // always mutate the latest configuration, under one lock.
 type PortManager struct {
-	store   *config.ConfigStore
-	backend NetworkBackend // nil: ports unavailable (gvproxy backend or -net=false)
+	store        *config.ConfigStore
+	backend      NetworkBackend // nil: ports unavailable (gvproxy backend or -net=false)
+	transactions *NetworkTransactionCoordinator
 
 	mu sync.Mutex
 }
@@ -43,7 +44,17 @@ type PortEntry struct {
 // backend may be nil (ports then report unavailable, listing still shows
 // the saved set).
 func NewPortManager(store *config.ConfigStore, backend NetworkBackend) *PortManager {
-	return &PortManager{store: store, backend: backend}
+	return NewPortManagerWithCoordinator(store, backend, nil)
+}
+
+// NewPortManagerWithCoordinator binds port mutations to the same transaction
+// domain as policy updates for backend. A nil coordinator creates a private
+// domain for compatibility with standalone callers.
+func NewPortManagerWithCoordinator(store *config.ConfigStore, backend NetworkBackend, transactions *NetworkTransactionCoordinator) *PortManager {
+	if transactions == nil {
+		transactions = NewNetworkTransactionCoordinator()
+	}
+	return &PortManager{store: store, backend: backend, transactions: transactions}
 }
 
 var errPortsUnavailable = fmt.Errorf("port publishing requires the embedded netstack and networking enabled")
@@ -51,6 +62,8 @@ var errPortsUnavailable = fmt.Errorf("port publishing requires the embedded nets
 // Publish opens the listener now; persistent also records the mapping in
 // sandbox.json so stop/start cycles re-apply it.
 func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
+	m.transactions.mu.Lock()
+	defer m.transactions.mu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.backend == nil {
@@ -96,6 +109,8 @@ func (m *PortManager) Publish(spec string, persistent bool) (PortEntry, error) {
 // also drops it from the saved set. A saved-but-unbound mapping
 // (persistence drift) is still removed without touching the netstack.
 func (m *PortManager) Unpublish(spec string, persistent bool) (PortEntry, error) {
+	m.transactions.mu.Lock()
+	defer m.transactions.mu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.backend == nil {

@@ -21,6 +21,9 @@ import (
 )
 
 func (d *daemonRuntime) startControl() error {
+	if d.networkTransactions == nil {
+		d.networkTransactions = control.NewNetworkTransactionCoordinator()
+	}
 	d.signals = make(chan os.Signal, 1)
 	d.shutdown = make(chan struct{}, 1)
 	signal.Notify(d.signals, syscall.SIGINT, syscall.SIGTERM)
@@ -56,7 +59,7 @@ func (d *daemonRuntime) startControl() error {
 		store:          d.store,
 		shares:         d.shares,
 		ports:          d.ports,
-		netPolicy:      control.NewNetworkPolicyManager(d.store, d.network.Backend, d.network.Policy),
+		netPolicy:      control.NewNetworkPolicyManagerWithCoordinator(d.store, d.network.Backend, d.network.Policy, d.networkTransactions),
 		capture:        packetCaptureBackendFor(d.network, d.runner),
 		guestToolsDone: make(chan struct{}),
 		ideToolsDone:   make(chan struct{}),

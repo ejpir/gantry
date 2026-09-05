@@ -27,8 +27,9 @@ func MakeNetworkPolicyEntry(path string, allowLocal bool, policy *netpol.Policy,
 }
 
 type NetworkPolicyManager struct {
-	store   *config.ConfigStore
-	backend NetworkBackend
+	store        *config.ConfigStore
+	backend      NetworkBackend
+	transactions *NetworkTransactionCoordinator
 	// current is the last successfully applied policy: what Get reports
 	// for a running sandbox and what a persistence failure rolls the live
 	// state back to. In split mode it is the supervisor's copy of the
@@ -38,13 +39,24 @@ type NetworkPolicyManager struct {
 }
 
 func NewNetworkPolicyManager(store *config.ConfigStore, backend NetworkBackend, current *netpol.Policy) *NetworkPolicyManager {
+	return NewNetworkPolicyManagerWithCoordinator(store, backend, current, nil)
+}
+
+// NewNetworkPolicyManagerWithCoordinator binds a policy manager to the same
+// transaction domain as every PortManager that mutates backend. A nil
+// coordinator creates a private domain for compatibility with standalone
+// callers; production wiring passes one shared coordinator explicitly.
+func NewNetworkPolicyManagerWithCoordinator(store *config.ConfigStore, backend NetworkBackend, current *netpol.Policy, transactions *NetworkTransactionCoordinator) *NetworkPolicyManager {
 	// current must not alias the stable holder mutated by localBackend.Replace:
 	// persistence rollback needs an immutable snapshot of the policy that was
 	// active before the attempted update.
 	if snapshot, err := ClonePolicy(current); err == nil {
 		current = snapshot
 	}
-	return &NetworkPolicyManager{store: store, backend: backend, current: current}
+	if transactions == nil {
+		transactions = NewNetworkTransactionCoordinator()
+	}
+	return &NetworkPolicyManager{store: store, backend: backend, current: current, transactions: transactions}
 }
 
 func ResolveNetworkPolicy(path string, allowLocal bool) (string, *netpol.Policy, error) {
@@ -73,6 +85,8 @@ func ResolveNetworkPolicy(path string, allowLocal bool) (string, *netpol.Policy,
 }
 
 func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyEntry, error) {
+	m.transactions.mu.Lock()
+	defer m.transactions.mu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.backend == nil || m.current == nil {
@@ -82,8 +96,12 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
-	policy, err = m.store.Snapshot().ApplyProxyPolicy(policy)
+	cfg := m.store.Snapshot()
+	policy, err = cfg.ApplyProxyPolicy(policy)
 	if err != nil {
+		return NetworkPolicyEntry{}, err
+	}
+	if err := ValidatePolicyAgainstSavedUDPPorts(policy, cfg.Ports); err != nil {
 		return NetworkPolicyEntry{}, err
 	}
 	// Apply live FIRST and persist only on success, rolling the live
@@ -107,6 +125,26 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 	}
 	m.current = policy
 	return MakeNetworkPolicyEntry(path, allowLocal, policy, "active"), nil
+}
+
+// ValidatePolicyAgainstSavedUDPPorts rejects a candidate policy that would
+// make the persisted static-forward set fail its next boot preflight. Both
+// the running manager and the stopped-sandbox CLI path use this invariant.
+func ValidatePolicyAgainstSavedUDPPorts(policy *netpol.Policy, specs []string) error {
+	for _, spec := range specs {
+		mapping, err := config.ParsePortSpec(spec)
+		if err != nil {
+			return fmt.Errorf("saved port forward %q: %w", spec, err)
+		}
+		if mapping.Proto != "udp" {
+			continue
+		}
+		if err := netpol.ValidateUDPPortPublishing(policy); err != nil {
+			return fmt.Errorf("saved UDP port forward %s: %w", mapping.Short(), err)
+		}
+		return nil
+	}
+	return nil
 }
 
 func (m *NetworkPolicyManager) Get() (NetworkPolicyEntry, error) {

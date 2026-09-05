@@ -134,9 +134,11 @@ type Forward struct {
 
 // Publish opens a host listener at local (e.g. "127.0.0.1:8080") forwarding
 // into the guest at remote (e.g. "192.168.127.2:80"); proto is "tcp" or
-// "udp". The listener lives inside the netstack: forwarded connections are
-// dialed straight to the guest IP without touching the virtio link, so
-// egress policy never sees them — a publish is an explicit inbound hole.
+// "udp". The listener lives inside the netstack and dials the guest from the
+// virtual gateway address. Network policy recognizes handshake-tracked TCP
+// return packets without opening arbitrary guest-to-gateway access. UDP
+// remains subject to the local-network wall until its connection lifecycle
+// can be coupled to policy revocation.
 func (s *Stack) Publish(proto, local, remote string) error {
 	req, err := json.Marshal(types.ExposeRequest{Local: local, Remote: remote, Protocol: types.TransportProtocol(proto)})
 	if err != nil {

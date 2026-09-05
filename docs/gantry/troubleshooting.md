@@ -153,6 +153,10 @@ Confirm that the guest service listens on the guest port and not only on guest
 loopback. Port publishing requires networking and the embedded stack; it is
 not available with `-net=false`.
 
+TCP works with the default local-network wall. UDP requires the active egress
+policy to allow `192.168.127.1:16000-65535/udp`; Gantry rejects the publish
+instead of creating a listener whose replies would be silently dropped.
+
 The default host bind is `127.0.0.1`. Use an explicit address only when remote
 hosts must connect.
 

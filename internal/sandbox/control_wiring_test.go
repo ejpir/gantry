@@ -17,6 +17,17 @@ import (
 	"github.com/ejpir/gantry/internal/vnet"
 )
 
+type wiringNetworkBackend struct {
+	live *netpol.Policy
+}
+
+func (*wiringNetworkBackend) Publish(string, string, string) error { return nil }
+func (*wiringNetworkBackend) Unpublish(string, string) error       { return nil }
+func (*wiringNetworkBackend) Forwards() ([]vnet.Forward, error)    { return nil, nil }
+func (b *wiringNetworkBackend) SetPolicy(policy *netpol.Policy) error {
+	return b.live.Replace(policy)
+}
+
 func TestBrokerNetworkPolicyControl(t *testing.T) {
 	dir := t.TempDir()
 	store := newTestConfigStore(t, dir, config.RunConfig{Net: true})
@@ -26,7 +37,7 @@ func TestBrokerNetworkPolicyControl(t *testing.T) {
 	}
 	live := netpol.DefaultPolicy()
 	br := &broker{
-		netPolicy: control.NewNetworkPolicyManager(store, control.NewLocalBackend(&vnet.Stack{}, live), live),
+		netPolicy: control.NewNetworkPolicyManager(store, &wiringNetworkBackend{live: live}, live),
 		sessions:  map[string]chan struct{}{},
 	}
 	request := `{"op":"netpolicy.set","id":"policy","net_policy":{"path":` + strconv.Quote(policyPath) + `}}` + "\n"

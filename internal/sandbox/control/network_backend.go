@@ -36,11 +36,31 @@ type NetworkBackend interface {
 	SetPolicy(policy *netpol.Policy) error
 }
 
+// NetworkTransactionCoordinator serializes the complete live-change,
+// persistence, and rollback transactions performed by the policy and port
+// managers that share one backend. Backend locks alone are too narrow: a
+// policy write failure must be able to restore the old policy before a UDP
+// publish observes the temporary policy (and vice versa).
+type NetworkTransactionCoordinator struct {
+	mu sync.Mutex
+}
+
+func NewNetworkTransactionCoordinator() *NetworkTransactionCoordinator {
+	return &NetworkTransactionCoordinator{}
+}
+
+type localNetworkStack interface {
+	Publish(proto, local, remote string) error
+	Unpublish(proto, local string) error
+	Forwards() ([]vnet.Forward, error)
+}
+
 // localBackend wraps the embedded netstack and stable policy holder the
 // monolithic daemon has always used.
 type localBackend struct {
-	stack *vnet.Stack
+	stack localNetworkStack
 	live  *netpol.Policy
+	mu    sync.Mutex
 }
 
 // NewLocalBackend binds the interface to the in-process stack. live may
@@ -48,21 +68,73 @@ type localBackend struct {
 // keeping the swap on the stable holder — Replace rejects a nil target,
 // so a nil live means policy mutation is unavailable.
 func NewLocalBackend(stack *vnet.Stack, live *netpol.Policy) NetworkBackend {
-	return &localBackend{stack: stack, live: live}
+	var localStack localNetworkStack
+	if stack != nil {
+		localStack = stack
+	}
+	return &localBackend{stack: localStack, live: live}
 }
 
 func (b *localBackend) Publish(proto, local, remote string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if proto == "udp" {
+		if err := netpol.ValidateUDPPortPublishing(b.live); err != nil {
+			return err
+		}
+	}
+	if b.stack == nil {
+		return fmt.Errorf("network stack is nil")
+	}
 	return b.stack.Publish(proto, local, remote)
 }
 
 func (b *localBackend) Unpublish(proto, local string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stack == nil {
+		return fmt.Errorf("network stack is nil")
+	}
 	return b.stack.Unpublish(proto, local)
 }
 
-func (b *localBackend) Forwards() ([]vnet.Forward, error) { return b.stack.Forwards() }
+func (b *localBackend) Forwards() ([]vnet.Forward, error) {
+	if b.stack == nil {
+		return nil, fmt.Errorf("network stack is nil")
+	}
+	return b.stack.Forwards()
+}
 
 func (b *localBackend) SetPolicy(policy *netpol.Policy) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if policy == nil {
+		return b.live.Replace(nil)
+	}
+	if b.stack == nil {
+		return fmt.Errorf("network stack is nil")
+	}
+	forwards, err := b.stack.Forwards()
+	if err != nil {
+		return fmt.Errorf("list active port forwards: %w", err)
+	}
+	if err := validatePolicyAgainstUDPForwards(policy, forwards); err != nil {
+		return err
+	}
 	return b.live.Replace(policy)
+}
+
+func validatePolicyAgainstUDPForwards(policy *netpol.Policy, forwards []vnet.Forward) error {
+	for _, forward := range forwards {
+		if forward.Protocol != "udp" {
+			continue
+		}
+		if err := netpol.ValidateUDPPortPublishing(policy); err != nil {
+			return fmt.Errorf("active UDP port forward %s -> %s: %w", forward.Local, forward.Remote, err)
+		}
+		return nil
+	}
+	return nil
 }
 
 // policyMirrorBackend keeps a supervisor-owned stable Policy holder in sync

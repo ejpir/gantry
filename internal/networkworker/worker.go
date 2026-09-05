@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/ejpir/gantry/internal/netpol"
@@ -42,6 +43,15 @@ func Cmd() int {
 	return 0
 }
 
+func validateStaticUDPPortPolicy(policy *netpol.Policy, forwards map[string]string) error {
+	for local := range forwards {
+		if strings.HasPrefix(local, "udp:") {
+			return netpol.ValidateUDPPortPublishing(policy)
+		}
+	}
+	return nil
+}
+
 // Run serves the network-worker lifecycle on the given channels
 // until graceful shutdown, peer death, or a fatal protocol error. It is
 // transport-agnostic so tests can drive it over net.Pipe.
@@ -67,6 +77,9 @@ func Run(control, data net.Conn) (retErr error) {
 	}
 	if cfg.HostLoopbackUnavailable && (len(cfg.Forwards) != 0 || policy.MayAllowLoopback()) {
 		return fmt.Errorf("bootstrap: host loopback is unavailable to the confined network worker")
+	}
+	if err := validateStaticUDPPortPolicy(policy, cfg.Forwards); err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
 	}
 	if cfg.Debug {
 		_ = os.Setenv("GANTRY_DEBUG_NET", "1")

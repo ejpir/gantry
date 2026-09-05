@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -17,9 +18,16 @@ func ipFrame(t *testing.T, dstIP string, proto uint8, dport uint16, payload []by
 }
 
 func ipFrameFromPort(t *testing.T, dstIP string, proto uint8, sport, dport uint16, payload []byte) []byte {
+	return ipFrameBetweenPorts(t, "192.168.127.2", dstIP, proto, sport, dport, payload)
+}
+
+func ipFrameBetweenPorts(t *testing.T, srcIP, dstIP string, proto uint8, sport, dport uint16, payload []byte) []byte {
 	t.Helper()
 	dst := net.ParseIP(dstIP).To4()
-	src := net.ParseIP("192.168.127.2").To4()
+	src := net.ParseIP(srcIP).To4()
+	if src == nil || dst == nil {
+		t.Fatalf("invalid IPv4 endpoints %q -> %q", srcIP, dstIP)
+	}
 	var l4 []byte
 	switch proto {
 	case protoUDP:
@@ -45,10 +53,22 @@ func ipFrameFromPort(t *testing.T, dstIP string, proto uint8, sport, dport uint1
 	copy(ip[12:16], src)
 	copy(ip[16:20], dst)
 	frame := make([]byte, 0, 14+len(ip)+len(l4))
-	frame = append(frame, gwMAC[:]...)
-	frame = append(frame, guestMAC[:]...)
+	if srcIP == gatewayIP {
+		frame = append(frame, guestMAC[:]...)
+		frame = append(frame, gwMAC[:]...)
+	} else {
+		frame = append(frame, gwMAC[:]...)
+		frame = append(frame, guestMAC[:]...)
+	}
 	frame = append(frame, 0x08, 0x00)
 	return append(append(frame, ip...), l4...)
+}
+
+func tcpFrameBetween(t *testing.T, srcIP, dstIP string, sport, dport uint16, flags byte, payload []byte) []byte {
+	t.Helper()
+	frame := ipFrameBetweenPorts(t, srcIP, dstIP, protoTCP, sport, dport, payload)
+	frame[14+20+13] = flags
+	return frame
 }
 
 func arpFrame() []byte {
@@ -204,8 +224,8 @@ func TestResolveDomainAllowsDNSWithoutLearningBroadPermission(t *testing.T) {
 	if next.MatchTX(ipFrame(t, gatewayIP, protoUDP, 53, dnsQuery(t, "other.example"))) {
 		t.Fatal("unlisted DNS query was allowed")
 	}
-	answer := ipFrame(t, "192.168.127.2", protoUDP, 12345, dnsAnswer(t, "proxy.example", "203.0.113.5"))
-	binary.BigEndian.PutUint16(answer[14+20:14+22], 53)
+	answer := ipFrameBetweenPorts(t, gatewayIP, guestIP, protoUDP, 53, 12345,
+		dnsAnswer(t, "proxy.example", "203.0.113.5"))
 	next.ObserveRX(answer)
 	if next.DynamicSize() != 0 {
 		t.Fatal("resolve-only answer entered the dynamic allow table")
@@ -304,6 +324,23 @@ func TestPolicyMatchTX(t *testing.T) {
 	}
 }
 
+func TestPolicyRejectsGuestSourceSpoofing(t *testing.T) {
+	p := mustParse(t, `{"default":"allow","allowLocal":true}`)
+	for name, frame := range map[string][]byte{
+		"gateway source":      ipFrameBetweenPorts(t, gatewayIP, "93.184.216.34", protoTCP, 12345, 443, nil),
+		"public source":       ipFrameBetweenPorts(t, "203.0.113.9", "93.184.216.34", protoTCP, 12345, 443, nil),
+		"zero source":         ipFrameBetweenPorts(t, "0.0.0.0", "93.184.216.34", protoUDP, 12345, 443, nil),
+		"zero DHCP to public": ipFrameBetweenPorts(t, "0.0.0.0", "93.184.216.34", protoUDP, 68, 67, nil),
+	} {
+		if p.MatchTX(frame) {
+			t.Errorf("%s was allowed on the fixed guest link", name)
+		}
+	}
+	if !p.MatchTX(ipFrameBetweenPorts(t, "0.0.0.0", "255.255.255.255", protoUDP, 68, 67, []byte{1})) {
+		t.Fatal("DHCP bootstrap request from 0.0.0.0 was denied")
+	}
+}
+
 func TestPolicyGatewayRequiresExplicitLocalAccess(t *testing.T) {
 	defaultPolicy := DefaultPolicy()
 	for _, tc := range []struct {
@@ -337,6 +374,387 @@ func TestPolicyGatewayRequiresExplicitLocalAccess(t *testing.T) {
 	if !allowLocalWithDeny.MatchTX(ipFrame(t, gatewayIP, protoTCP, 443, nil)) {
 		t.Fatal("allowLocal did not permit an otherwise-unmatched gateway port")
 	}
+}
+
+func TestAllowsGatewayUDPRepliesRequiresCompleteEffectiveRange(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "default local wall", raw: `{"default":"allow"}`},
+		{name: "allow local default allow", raw: `{"default":"allow","allowLocal":true}`, want: true},
+		{name: "allow local default deny", raw: `{"default":"deny","allowLocal":true}`},
+		{
+			name: "explicit complete range",
+			raw:  `{"default":"deny","rules":[{"action":"allow","cidr":"192.168.127.1/32","proto":"udp","ports":"16000-65535"}]}`,
+			want: true,
+		},
+		{
+			name: "range misses final port",
+			raw:  `{"default":"deny","rules":[{"action":"allow","cidr":"192.168.127.1/32","proto":"udp","ports":"16000-65534"}]}`,
+		},
+		{
+			name: "earlier scoped deny wins",
+			raw: `{"default":"deny","rules":[
+				{"action":"deny","cidr":"192.168.127.1/32","proto":"udp","ports":"20000"},
+				{"action":"allow","cidr":"192.168.127.1/32","proto":"udp","ports":"16000-65535"}
+			]}`,
+		},
+		{
+			name: "later deny loses to complete allow",
+			raw: `{"default":"deny","rules":[
+				{"action":"allow","cidr":"192.168.127.1/32","proto":"udp","ports":"16000-65535"},
+				{"action":"deny","cidr":"192.168.127.1/32","proto":"udp","ports":"20000"}
+			]}`,
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := mustParse(t, tc.raw)
+			if got := policy.AllowsGatewayUDPReplies(); got != tc.want {
+				t.Fatalf("AllowsGatewayUDPReplies() = %t, want %t", got, tc.want)
+			}
+			if err := ValidateUDPPortPublishing(policy); (err == nil) != tc.want {
+				t.Fatalf("ValidateUDPPortPublishing() error = %v, want success %t", err, tc.want)
+			}
+		})
+	}
+
+	stable := DefaultPolicy()
+	if stable.AllowsGatewayUDPReplies() {
+		t.Fatal("default stable policy unexpectedly permits UDP replies")
+	}
+	if err := stable.Replace(mustParse(t, `{"default":"allow","allowLocal":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !stable.AllowsGatewayUDPReplies() {
+		t.Fatal("UDP reply check did not follow policy replacement")
+	}
+	if err := ValidateUDPPortPublishing(nil); err == nil {
+		t.Fatal("nil policy permitted UDP publishing")
+	}
+}
+
+func TestPublishedTCPReturnFlowIsExactAndIngressInitiated(t *testing.T) {
+	const (
+		guestServicePort  = 18080
+		gatewayClientPort = 49152
+	)
+	p := DefaultPolicy()
+	returnFrame := tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort, tcpSYN|tcpACK, nil)
+	if p.MatchTX(returnFrame) {
+		t.Fatal("guest reached an arbitrary gateway port before trusted ingress")
+	}
+
+	// The embedded published-port forwarder dials from gatewayIP to the fixed
+	// guest. Its initial SYN creates only the exact reverse-flow capability.
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpSYN, nil))
+	if !p.MatchTX(returnFrame) {
+		t.Fatal("published TCP SYN-ACK return was denied")
+	}
+	// The forwarder's ACK is trusted ingress and promotes the pending tuple
+	// before application data can flow.
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpACK, nil))
+	establishedReturn := tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort, tcpACK, []byte("HTTP/1.0 200 OK"))
+	if !p.MatchTX(establishedReturn) {
+		t.Fatal("established published TCP response was denied")
+	}
+	if err := p.Replace(mustParse(t, `{"default":"deny"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !p.MatchTX(establishedReturn) {
+		t.Fatal("policy replacement discarded established published flow")
+	}
+	denyExact := mustParse(t, `{"default":"allow","rules":[{"action":"deny","cidr":"192.168.127.1/32","proto":"tcp","ports":"49152"}]}`)
+	if err := p.Replace(denyExact); err != nil {
+		t.Fatal(err)
+	}
+	if p.MatchTX(establishedReturn) {
+		t.Fatal("explicit gateway deny did not revoke established published flow")
+	}
+	if err := p.Replace(mustParse(t, `{"default":"deny"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if p.MatchTX(tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort+1, gatewayClientPort, tcpACK, nil)) {
+		t.Fatal("published flow widened to another guest source port")
+	}
+	if p.MatchTX(tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort+1, tcpACK, nil)) {
+		t.Fatal("published flow widened to another gateway destination port")
+	}
+	if p.MatchTX(ipFrameBetweenPorts(t, guestIP, gatewayIP, protoUDP, guestServicePort, gatewayClientPort, nil)) {
+		t.Fatal("published TCP flow widened to UDP")
+	}
+	for name, flags := range map[string]byte{
+		"bare SYN": tcpSYN,
+		"SYN|RST":  tcpSYN | tcpRST,
+		"SYN|FIN":  tcpSYN | tcpFIN,
+	} {
+		if p.MatchTX(tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort, flags, nil)) {
+			t.Fatalf("cached published flow admitted %s as a new gateway connection", name)
+		}
+	}
+	fragmented := append([]byte(nil), establishedReturn...)
+	binary.BigEndian.PutUint16(fragmented[14+6:14+8], 0x2000)
+	if p.MatchTX(fragmented) {
+		t.Fatal("fragmented packet consumed published-flow state")
+	}
+	malformed := append([]byte(nil), establishedReturn...)
+	malformed[14+20+12] = 4 << 4
+	if p.MatchTX(malformed) {
+		t.Fatal("malformed TCP header consumed published-flow state")
+	}
+
+	rstPolicy := DefaultPolicy()
+	rstPolicy.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpSYN, nil))
+	if !rstPolicy.MatchTX(tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort, tcpRST, nil)) {
+		t.Fatal("guest RST for pending published flow was denied")
+	}
+	if rstPolicy.MatchTX(returnFrame) {
+		t.Fatal("guest RST did not delete published-flow state")
+	}
+
+	// A gateway SYN-ACK is a response to a guest-originated connection, not a
+	// published connection initiator. Neither it nor a later ACK can create
+	// return state without a prior tracked pure SYN.
+	p2 := DefaultPolicy()
+	p2.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpSYN|tcpACK, nil))
+	p2.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpACK, nil))
+	if p2.MatchTX(returnFrame) {
+		t.Fatal("gateway SYN-ACK/ACK created published TCP return state")
+	}
+}
+
+func TestGuestInitiatedGatewayFlowCannotSurvivePolicyTightening(t *testing.T) {
+	const (
+		guestClientPort    = 42000
+		gatewayServicePort = 8080
+	)
+	permissive := DefaultPolicy()
+	permissive.AllowLocal = true
+	guestSYN := tcpFrameBetween(t, guestIP, gatewayIP, guestClientPort, gatewayServicePort, tcpSYN, nil)
+	if !permissive.MatchTX(guestSYN) {
+		t.Fatal("permissive policy unexpectedly denied guest-initiated gateway connection")
+	}
+	// A normal server-side handshake sends SYN-ACK followed by ACK/data. These
+	// packets must never look like a gateway-originated published connection.
+	permissive.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayServicePort, guestClientPort, tcpSYN|tcpACK, nil))
+	gatewayACK := tcpFrameBetween(t, gatewayIP, guestIP, gatewayServicePort, guestClientPort, tcpACK, nil)
+	permissive.ObserveRX(gatewayACK)
+	if err := permissive.Replace(DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	// In-flight ACK/data arriving after the restrictive swap cannot recreate
+	// state either.
+	permissive.ObserveRX(gatewayACK)
+	guestACK := tcpFrameBetween(t, guestIP, gatewayIP, guestClientPort, gatewayServicePort, tcpACK, nil)
+	if permissive.MatchTX(guestACK) {
+		t.Fatal("guest-initiated gateway connection survived restrictive policy replacement")
+	}
+}
+
+func TestGuestSwitchEchoCannotSeedPublishedFlow(t *testing.T) {
+	const (
+		guestClientPort    = 42001
+		gatewayServicePort = 8080
+	)
+	permissive := mustParse(t, `{"default":"allow","allowLocal":true}`)
+	// gvisor-tap-vsock's learning switch reflects a frame addressed to the
+	// guest MAC back to the same QEMU link. Model that path exactly: only an
+	// egress frame admitted by MatchTX can reappear at ObserveRX.
+	echo := func(frame []byte) {
+		if permissive.MatchTX(frame) {
+			permissive.ObserveRX(frame)
+		}
+	}
+	echo(tcpFrameBetween(t, gatewayIP, guestIP, gatewayServicePort, guestClientPort, tcpSYN, nil))
+	echo(tcpFrameBetween(t, gatewayIP, guestIP, gatewayServicePort, guestClientPort, tcpACK, nil))
+	if err := permissive.Replace(DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	guestACK := tcpFrameBetween(t, guestIP, gatewayIP, guestClientPort, gatewayServicePort, tcpACK, nil)
+	if permissive.MatchTX(guestACK) {
+		t.Fatal("self-reflected spoofed handshake poisoned published-flow state")
+	}
+}
+
+func TestGuestSYNInvalidatesReusedPublishedTupleBeforePolicyAllow(t *testing.T) {
+	const (
+		guestPort   = 42002
+		gatewayPort = 49155
+	)
+	p := DefaultPolicy()
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayPort, guestPort, tcpSYN, nil))
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayPort, guestPort, tcpACK, nil))
+	guestACK := tcpFrameBetween(t, guestIP, gatewayIP, guestPort, gatewayPort, tcpACK, nil)
+	if !p.MatchTX(guestACK) {
+		t.Fatal("test setup did not establish a published return flow")
+	}
+	if err := p.Replace(mustParse(t, `{"default":"allow","allowLocal":true}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Frames that gVisor cannot treat as a new connection must not destroy
+	// otherwise valid published state or pass via the permissive policy, even
+	// when they carry a SYN bit.
+	fragmentedSYN := tcpFrameBetween(t, guestIP, gatewayIP, guestPort, gatewayPort, tcpSYN, nil)
+	binary.BigEndian.PutUint16(fragmentedSYN[14+6:14+8], 0x2000)
+	if p.MatchTX(fragmentedSYN) {
+		t.Fatal("fragmented gateway SYN was allowed")
+	}
+	malformedSYN := tcpFrameBetween(t, guestIP, gatewayIP, guestPort, gatewayPort, tcpSYN, nil)
+	malformedSYN[14+20+12] = 4 << 4
+	if p.MatchTX(malformedSYN) {
+		t.Fatal("malformed gateway SYN was allowed")
+	}
+	if err := p.Replace(DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if !p.MatchTX(guestACK) {
+		t.Fatal("fragmented or malformed SYN deleted established published state")
+	}
+
+	if err := p.Replace(mustParse(t, `{"default":"allow","allowLocal":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	guestSYN := tcpFrameBetween(t, guestIP, gatewayIP, guestPort, gatewayPort, tcpSYN, nil)
+	if !p.MatchTX(guestSYN) {
+		t.Fatal("permissive policy unexpectedly denied tuple-reuse SYN")
+	}
+	// This is now a guest-initiated connection. Its normal gateway SYN-ACK and
+	// ACK must not recreate the published capability invalidated above.
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayPort, guestPort, tcpSYN|tcpACK, nil))
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayPort, guestPort, tcpACK, nil))
+	if err := p.Replace(DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	if p.MatchTX(guestACK) {
+		t.Fatal("guest-initiated reuse of a stale published tuple survived policy tightening")
+	}
+}
+
+func TestPublishedUDPIngressDoesNotCreatePacketOnlyException(t *testing.T) {
+	const (
+		guestServicePort  = 18081
+		gatewayClientPort = 49153
+	)
+	p := DefaultPolicy()
+	returnFrame := ipFrameBetweenPorts(t, guestIP, gatewayIP, protoUDP, guestServicePort, gatewayClientPort, []byte("reply"))
+	if p.MatchTX(returnFrame) {
+		t.Fatal("guest reached an arbitrary UDP gateway port before trusted ingress")
+	}
+	p.ObserveRX(ipFrameBetweenPorts(t, gatewayIP, guestIP, protoUDP, gatewayClientPort, guestServicePort, []byte("request")))
+	if p.MatchTX(returnFrame) {
+		t.Fatal("UDP ingress created a stale packet-only gateway capability")
+	}
+}
+
+func TestPublishedReturnFlowExpiresAndTableIsBounded(t *testing.T) {
+	const (
+		guestServicePort  = 18082
+		gatewayClientPort = 49154
+	)
+	p := DefaultPolicy()
+	ingress := tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpSYN, nil)
+	p.ObserveRX(ingress)
+	returnFrame := tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort, tcpACK, nil)
+	key, _, ok := publishedFlowFromReturn(mustParseFrame(t, returnFrame))
+	if !ok {
+		t.Fatal("test return frame did not produce a flow key")
+	}
+	table := p.publishedFlowTable()
+	table.mu.Lock()
+	initialExpiry := table.entries[key].Value.(*publishedFlowEntry).expiry
+	table.mu.Unlock()
+	pendingReturn := tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, gatewayClientPort, tcpSYN|tcpACK, nil)
+	if !p.MatchTX(pendingReturn) {
+		t.Fatal("pending published flow denied SYN-ACK")
+	}
+	table.mu.Lock()
+	if got := table.entries[key].Value.(*publishedFlowEntry).expiry; !got.Equal(initialExpiry) {
+		t.Fatalf("guest SYN-ACK refreshed pending expiry: got %v, want %v", got, initialExpiry)
+	}
+	table.mu.Unlock()
+	p.ObserveRX(tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpACK, nil))
+	table.mu.Lock()
+	establishedExpiry := table.entries[key].Value.(*publishedFlowEntry).expiry
+	table.mu.Unlock()
+	if !p.MatchTX(returnFrame) {
+		t.Fatal("established published flow denied ACK")
+	}
+	table.mu.Lock()
+	if got := table.entries[key].Value.(*publishedFlowEntry).expiry; !got.Equal(establishedExpiry) {
+		t.Fatalf("guest ACK refreshed established expiry: got %v, want %v", got, establishedExpiry)
+	}
+	table.entries[key].Value.(*publishedFlowEntry).expiry = time.Now().Add(-time.Second)
+	table.mu.Unlock()
+	if p.MatchTX(returnFrame) {
+		t.Fatal("expired published flow remained usable")
+	}
+	trustedACK := tcpFrameBetween(t, gatewayIP, guestIP, gatewayClientPort, guestServicePort, tcpACK, nil)
+	p.ObserveRX(trustedACK)
+	if p.MatchTX(returnFrame) {
+		t.Fatal("gateway ACK recreated expired flow without a tracked SYN")
+	}
+	// Establish it again so the capacity run below really evicts a live entry.
+	p.ObserveRX(ingress)
+	p.ObserveRX(trustedACK)
+	if !p.MatchTX(returnFrame) {
+		t.Fatal("new gateway SYN/ACK sequence did not re-establish flow")
+	}
+
+	base := time.Now()
+	for i := 0; i <= maxPublishedFlows; i++ {
+		frame := tcpFrameBetween(t, gatewayIP, guestIP, uint16(10000+i), guestServicePort, tcpSYN, nil)
+		pp := mustParseFrame(t, frame)
+		p.observePublishedIngress(pp, base.Add(time.Duration(i)*time.Nanosecond))
+	}
+	table.mu.Lock()
+	size := len(table.entries)
+	table.mu.Unlock()
+	if size != maxPublishedFlows {
+		t.Fatalf("published flow table size = %d, want bounded size %d", size, maxPublishedFlows)
+	}
+	table.mu.Lock()
+	_, survivedEviction := table.entries[key]
+	table.mu.Unlock()
+	if survivedEviction {
+		t.Fatal("least-recently-active established flow was not evicted at capacity")
+	}
+	p.ObserveRX(trustedACK)
+	if p.MatchTX(returnFrame) {
+		t.Fatal("gateway ACK recreated evicted flow without a tracked SYN")
+	}
+}
+
+func TestPublishedFlowDNSFilteringTakesPrecedence(t *testing.T) {
+	const guestServicePort = 18083
+	p := mustParse(t, `{"default":"deny","allowDomains":["allowed.example"]}`)
+	// Gateway service traffic cannot normally create conntrack state. Seed an
+	// exact synthetic entry anyway to prove DNS filtering remains authoritative
+	// even if state somehow survives from an older implementation or generation.
+	flow := publishedFlow{
+		guestIP: guestIPv4, gatewayIP: gatewayIPv4, proto: protoTCP,
+		guestPort: guestServicePort, gatewayPort: 53,
+	}
+	table := p.publishedFlowTable()
+	table.observe(flow, tcpSYN, time.Now())
+	table.observe(flow, tcpACK, time.Now())
+	evil := dnsQuery(t, "blocked.example")
+	payload := append([]byte{byte(len(evil) >> 8), byte(len(evil))}, evil...)
+	if p.MatchTX(tcpFrameBetween(t, guestIP, gatewayIP, guestServicePort, 53, tcpACK, payload)) {
+		t.Fatal("published-flow state bypassed gateway DNS allowlist")
+	}
+}
+
+func mustParseFrame(t *testing.T, frame []byte) parsedPacket {
+	t.Helper()
+	pp, arp, ok := parseFrame(frame)
+	if arp || !ok {
+		t.Fatal("test frame did not parse as IPv4")
+	}
+	return pp
 }
 
 func dnsQuery(t *testing.T, name string) []byte {
@@ -397,12 +815,9 @@ func TestDomainAllowlistAndSnoop(t *testing.T) {
 		t.Fatal("no dynamic allowance before any DNS answer")
 	}
 
-	// snoop a response to an allowed question → IPs become reachable
-	p.ObserveRX(ipFrame(t, "192.168.127.2", protoUDP, 12345,
-		dnsAnswer(t, "deb.debian.org", "151.101.2.132", "151.101.66.132")))
-	// fix source port to 53 (builds RX frame): rebuild with sport 53
-	frame := ipFrame(t, "192.168.127.2", protoUDP, 12345, dnsAnswer(t, "deb.debian.org", "151.101.2.132"))
-	binary.BigEndian.PutUint16(frame[14+20:14+22], 53)
+	// Snoop a gateway response to an allowed question → IPs become reachable.
+	frame := ipFrameBetweenPorts(t, gatewayIP, guestIP, protoUDP, 53, 12345,
+		dnsAnswer(t, "deb.debian.org", "151.101.2.132"))
 	p.ObserveRX(frame)
 
 	if p.DynamicSize() == 0 {
@@ -419,11 +834,30 @@ func TestDomainAllowlistAndSnoop(t *testing.T) {
 
 	// answers to unlisted questions teach nothing
 	p2 := mustParse(t, `{"default": "deny", "allowDomains": ["only.this.org"]}`)
-	f2 := ipFrame(t, "192.168.127.2", protoUDP, 12345, dnsAnswer(t, "evil.com", "6.6.6.6"))
-	binary.BigEndian.PutUint16(f2[14+20:14+22], 53)
+	f2 := ipFrameBetweenPorts(t, gatewayIP, guestIP, protoUDP, 53, 12345,
+		dnsAnswer(t, "evil.com", "6.6.6.6"))
 	p2.ObserveRX(f2)
 	if p2.DynamicSize() != 0 {
 		t.Fatal("unlisted answer leaked into the allow table")
+	}
+}
+
+func TestGuestSwitchEchoCannotPoisonDNSAllowances(t *testing.T) {
+	p := mustParse(t, `{"default":"deny","allowDomains":["allowed.example"]}`)
+	poisoned := [4]byte{203, 0, 113, 66}
+	forged := ipFrameBetweenPorts(t, guestIP, gatewayIP, protoUDP, 53, 53,
+		dnsAnswer(t, "allowed.example", net.IP(poisoned[:]).String()))
+	// The learning switch reflects unicast frames addressed to the guest MAC
+	// onto this same link. MatchTX must reject a DNS response, and ObserveRX
+	// must independently refuse to learn one that did not come from gatewayIP.
+	copy(forged[0:6], guestMAC[:])
+	if p.MatchTX(forged) {
+		p.ObserveRX(forged)
+		t.Fatal("outbound forged DNS response passed the query filter")
+	}
+	p.ObserveRX(forged)
+	if p.DynamicSize() != 0 || p.Allows(poisoned, protoTCP, 443) {
+		t.Fatal("self-reflected guest DNS response poisoned dynamic allowances")
 	}
 }
 
@@ -515,8 +949,8 @@ func TestLocalWallBeatsDNSSnoop(t *testing.T) {
 	// rebinding: an allowlisted domain resolving to a LAN IP must NOT
 	// punch through the local wall
 	p := mustParse(t, `{"default": "deny", "allowDomains": ["deb.debian.org"]}`)
-	f := ipFrame(t, "192.168.127.2", protoUDP, 12345, dnsAnswer(t, "deb.debian.org", "192.168.1.50"))
-	binary.BigEndian.PutUint16(f[14+20:14+22], 53)
+	f := ipFrameBetweenPorts(t, gatewayIP, guestIP, protoUDP, 53, 12345,
+		dnsAnswer(t, "deb.debian.org", "192.168.1.50"))
 	p.ObserveRX(f)
 	if p.DynamicSize() == 0 {
 		t.Fatal("snoop should still record the answer")

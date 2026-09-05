@@ -2,11 +2,62 @@ package control
 
 import (
 	"errors"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/vnet"
 )
+
+type localNetworkStackStub struct {
+	mu                 sync.Mutex
+	forwards           []vnet.Forward
+	publishStarted     chan struct{}
+	releasePublish     chan struct{}
+	publishStartOnce   sync.Once
+	unpublishStarted   chan struct{}
+	releaseUnpublish   chan struct{}
+	unpublishStartOnce sync.Once
+}
+
+func (s *localNetworkStackStub) Publish(proto, local, remote string) error {
+	if s.publishStarted != nil {
+		s.publishStartOnce.Do(func() { close(s.publishStarted) })
+	}
+	if s.releasePublish != nil {
+		<-s.releasePublish
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.forwards = append(s.forwards, vnet.Forward{Local: local, Remote: remote, Protocol: proto})
+	return nil
+}
+
+func (s *localNetworkStackStub) Unpublish(proto, local string) error {
+	if s.unpublishStarted != nil {
+		s.unpublishStartOnce.Do(func() { close(s.unpublishStarted) })
+	}
+	if s.releaseUnpublish != nil {
+		<-s.releaseUnpublish
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, forward := range s.forwards {
+		if forward.Protocol == proto && forward.Local == local {
+			s.forwards = append(s.forwards[:i], s.forwards[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+func (s *localNetworkStackStub) Forwards() ([]vnet.Forward, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]vnet.Forward(nil), s.forwards...), nil
+}
 
 type policyBackendStub struct {
 	policy    *netpol.Policy
@@ -110,6 +161,78 @@ func TestPolicyMirrorChangesOnlyAfterSplitBackendAcceptsPolicy(t *testing.T) {
 	}
 	if old.DomainAllowed("github.com") || !old.DomainAllowed("gitlab.com") {
 		t.Fatal("successful split update did not change the supervisor policy mirror")
+	}
+}
+
+func TestLocalBackendRejectsUDPWithoutGatewayReplyPolicy(t *testing.T) {
+	// A nil stack makes the ordering assertion explicit: policy validation must
+	// reject before any listener operation is attempted.
+	denied := NewLocalBackend(nil, netpol.DefaultPolicy())
+	if err := denied.Publish("udp", "127.0.0.1:48081", vnet.GuestIP+":18081"); err == nil {
+		t.Fatal("default local-network wall accepted a live UDP forward")
+	} else if !strings.Contains(err.Error(), "gateway reply port") {
+		t.Fatalf("live UDP policy error = %v", err)
+	}
+}
+
+func TestLocalBackendRejectsPolicyThatBreaksActiveUDPForward(t *testing.T) {
+	live := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)
+	stack := &localNetworkStackStub{forwards: []vnet.Forward{{
+		Local: "127.0.0.1:48081", Remote: vnet.GuestIP + ":18081", Protocol: "udp",
+	}}}
+	backend := &localBackend{stack: stack, live: live}
+
+	if err := backend.SetPolicy(netpol.DefaultPolicy()); err == nil {
+		t.Fatal("policy tightening succeeded while a UDP forward was active")
+	} else if !strings.Contains(err.Error(), "gateway reply port") {
+		t.Fatalf("policy tightening error = %v", err)
+	}
+	if err := netpol.ValidateUDPPortPublishing(live); err != nil {
+		t.Fatalf("rejected update changed the live policy: %v", err)
+	}
+
+	if err := backend.Unpublish("udp", "127.0.0.1:48081"); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.SetPolicy(netpol.DefaultPolicy()); err != nil {
+		t.Fatalf("policy tightening after UDP unpublish: %v", err)
+	}
+}
+
+func TestLocalBackendSerializesPublishWithPolicyUpdate(t *testing.T) {
+	live := mustTestPolicy(t, `{"default":"allow","allowLocal":true}`)
+	stack := &localNetworkStackStub{
+		publishStarted: make(chan struct{}),
+		releasePublish: make(chan struct{}),
+	}
+	backend := &localBackend{stack: stack, live: live}
+
+	publishDone := make(chan error, 1)
+	go func() {
+		publishDone <- backend.Publish("udp", "127.0.0.1:48081", vnet.GuestIP+":18081")
+	}()
+	select {
+	case <-stack.publishStarted:
+	case <-time.After(time.Second):
+		t.Fatal("UDP publish did not reach the stack")
+	}
+
+	policyDone := make(chan error, 1)
+	go func() { policyDone <- backend.SetPolicy(netpol.DefaultPolicy()) }()
+	select {
+	case err := <-policyDone:
+		t.Fatalf("policy update overtook an in-flight UDP publish: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(stack.releasePublish)
+	if err := <-publishDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-policyDone; err == nil {
+		t.Fatal("policy update ignored the newly active UDP forward")
+	} else if !strings.Contains(err.Error(), "gateway reply port") {
+		t.Fatalf("serialized policy update error = %v", err)
 	}
 }
 

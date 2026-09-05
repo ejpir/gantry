@@ -129,6 +129,14 @@ Supported forms are:
 80                   choose a free host port -> guest 80/tcp
 ```
 
+TCP publishes work with the default local-network wall: Gantry admits only
+handshake-tracked replies for the exact gateway-to-guest connection. UDP has
+no equivalent handshake, so a UDP publish is accepted only when the active
+egress policy already permits the virtual gateway's full ephemeral reply
+range, `192.168.127.1:16000-65535/udp`. The default policy does not. Granting
+that range (or using `-allow-local-net` with a default-allow policy) is an
+explicit widening of guest-to-gateway access.
+
 Add, inspect, or remove a forward while the sandbox is running:
 
 ```console

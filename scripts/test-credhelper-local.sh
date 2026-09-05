@@ -66,7 +66,10 @@ fi
 # and helper in one explicit staging directory when a caller supplied it.
 export GANTRY_ARTIFACTS="$ARTIFACTS"
 
-TD=$(mktemp -d "${TMPDIR:-/tmp}/gantry-chtest.XXXXXX")
+TD=$(mktemp -d "${TMPDIR:-/tmp}/gantry-chtest.XXXXXX") || exit 1
+# File-backed secret sources deliberately reject symlinked path spellings.
+# Resolve aliases such as macOS /var -> /private/var before using TD/ftok.
+TD=$(CDPATH= cd -- "$TD" && pwd -P) || exit 1
 # GANTRY_HOME is the sandboxes root itself; nesting it keeps the rwlayer
 # dir (its sibling) inside the temp tree.
 export GANTRY_HOME="$TD/sandboxes"
@@ -110,7 +113,7 @@ sleep 3   # guest-tools delivery races readiness; give the async push a moment
 
 R=$(xe ch1 'printenv BOUND_TOKEN || echo ABSENT'); chk "binding: bound secret NOT ambient" "ABSENT" "$R"
 R=$(xe ch1 'printenv GIT_CONFIG_VALUE_0');         chk "binding: git wired via env config" "/run/gantry/bin/credhelper" "$R"
-R=$(xe ch1 'test -x /run/gantry/bin/gantry-guest && test -L /run/gantry/bin/credhelper && echo HELPER-OK')
+R=$(xe ch1 'test -x /run/gantry/bin/gantry-guest && test -x /run/gantry/bin/credhelper && echo HELPER-OK')
 if printf '%s' "$R" | grep -qa "HELPER-OK"; then ok "binding: helper staged in guest"; else
 	bad "binding: helper staged in guest"; printf '%s\n' "$R" | tail -4
 	DL=$(find "$GANTRY_HOME/ch1" -name daemon.log 2>/dev/null | head -1)
