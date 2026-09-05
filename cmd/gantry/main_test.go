@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -90,13 +91,19 @@ func TestPrepareRunFilesystemsRejectsVsockForwardOverlap(t *testing.T) {
 	}
 }
 
-func TestPrepareRunVsockForwardPinsSymlinkTarget(t *testing.T) {
+func TestPrepareRunVsockForwardSymlinkPolicy(t *testing.T) {
 	target := t.TempDir()
 	link := filepath.Join(t.TempDir(), "forward")
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	canonical, identity, err := prepareRunVsockForward(link)
+	if runtime.GOOS == "windows" {
+		if err == nil || !strings.Contains(err.Error(), "reparse point") {
+			t.Fatalf("symlink root error = %v, want reparse-point rejection", err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
