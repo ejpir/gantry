@@ -17,7 +17,7 @@ $SecretsSandbox = "security-secrets"
 $OAuthSandbox = "security-oauth"
 $OAuthBadSandbox = "security-oauth-bad"
 $MCPSandbox = "security-mcp"
-$TestRoot = Join-Path $Root "security-replay"
+$TestRoot = Value-OrDefault "GANTRY_TEST_SECURITY_ROOT" "C:\gantry-e2e\security-replay"
 
 $env:GANTRY_HOME = $StateRoot
 $env:GANTRY_ARTIFACTS = $Root

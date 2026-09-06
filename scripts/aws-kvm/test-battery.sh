@@ -287,13 +287,13 @@ R=$("$G" image ls 2>&1);                         chk "image: ls shows cached ref
 # Keep one exec session alive as a guest HTTP service while publishing and
 # withdrawing a live host port. Alpine's minimal BusyBox does not include the
 # httpd applet, so use its persistent netcat listener with a tiny HTTP handler.
-# BusyBox uses -ll with -e for persistence, not OpenBSD netcat's -lk.
+# BusyBox uses -lk with -e for a persistent listener.
 # The chosen loopback port is intentionally ephemeral so local developer runs
 # do not need a reserved port.
 PORT_FIXTURE=$(cat <<'GUEST_HTTP'
 printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK"' > /tmp/gantry-http-handler
 chmod 700 /tmp/gantry-http-handler
-exec busybox nc -ll -p 18080 -e /tmp/gantry-http-handler
+exec busybox nc -lk -p 18080 -e /tmp/gantry-http-handler
 GUEST_HTTP
 )
 run_with_timeout 120 "$G" exec t4 -- sh -c "$PORT_FIXTURE" </dev/null >/tmp/gantry-t4-http.log 2>&1 &
@@ -310,6 +310,25 @@ done
 if [ -z "$PORT_FIXTURE_READY" ]; then
   echo "guest port fixture did not reach task start before publication:" >&2
   tail -20 /tmp/gantry-t4-http.log >&2
+else
+  # A started exec task has not necessarily reached nc's bind or completed
+  # its first persistent-listener handoff. Require a full in-guest HTTP round
+  # trip before testing the host forward so startup races are not attributed
+  # to the forwarding path on a busy metal host.
+  PORT_LISTENER_READY=
+  for _ in {1..30}; do
+    R=$(xe t4 'busybox wget -qO- http://127.0.0.1:18080/ 2>/dev/null || true')
+    if printf '%s' "$R" | grep -qa 'GANTRY-PORT-OK'; then
+      PORT_LISTENER_READY=1
+      break
+    fi
+    kill -0 "$HTTP_SESSION" 2>/dev/null || break
+    sleep 1
+  done
+  if [ -z "$PORT_LISTENER_READY" ]; then
+    echo "guest port fixture did not serve HTTP on port 18080 before publication:" >&2
+    tail -20 /tmp/gantry-t4-http.log >&2
+  fi
 fi
 R=$("$G" ports publish --ephemeral t4 18080 2>&1)
                                             chk "ports: ephemeral host allocation accepted" "published" "$R"
@@ -323,7 +342,10 @@ fi
 PORT_SPEC=$HOST_PORT:18080
 PORT_BODY=
 for _ in 1 2 3 4 5; do
-  PORT_BODY=$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>"$SECRET_TMP/t4-curl.log") && break
+  PORT_BODY=$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>"$SECRET_TMP/t4-curl.log")
+  if printf '%s' "$PORT_BODY" | grep -qa 'GANTRY-PORT-OK'; then
+    break
+  fi
   sleep 1
 done
                                             chk "ports: guest service reachable" "GANTRY-PORT-OK" "$PORT_BODY"

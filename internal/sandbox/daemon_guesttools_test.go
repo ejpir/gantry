@@ -109,11 +109,14 @@ func TestGuestToolsTargetsSeparateWorkloadAndIDE(t *testing.T) {
 	}
 }
 
-func TestGuestToolsStageBaseAvoidsWindowsTemp(t *testing.T) {
-	sandboxDir := filepath.Join("state", "sandboxes", "dev")
-	want := filepath.Dir(sandboxDir)
+func TestGuestToolsStageBaseAvoidsWindowsTempAndProtectedState(t *testing.T) {
+	appRoot := t.TempDir()
+	sandboxRoot := filepath.Join(appRoot, "sandboxes")
+	t.Setenv("GANTRY_HOME", sandboxRoot)
+	sandboxDir := filepath.Join(sandboxRoot, "dev")
+	want := appRoot + "-guest-tools"
 	if got := guestToolsStageBase("windows", sandboxDir); got != want {
-		t.Fatalf("Windows stage base = %q, want state root %q", got, want)
+		t.Fatalf("Windows stage base = %q, want protected-state sibling %q", got, want)
 	}
 	if got := guestToolsStageBase("windows", ""); got != "" {
 		t.Fatalf("Windows stage base without sandbox state = %q, want empty", got)

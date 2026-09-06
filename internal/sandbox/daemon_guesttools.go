@@ -19,6 +19,8 @@ import (
 
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
@@ -303,8 +305,13 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(ctx context.Context, data []by
 		return fmt.Errorf("share manager unavailable")
 	}
 	stageBase := guestToolsStageBase(runtime.GOOS, d.dir)
-	if runtime.GOOS == "windows" && stageBase == "" {
-		return fmt.Errorf("sandbox state directory unavailable for guest-tools staging")
+	if runtime.GOOS == "windows" {
+		if stageBase == "" {
+			return fmt.Errorf("sandbox state directory unavailable for guest-tools staging")
+		}
+		if err := localsec.CreateManagerDir(stageBase); err != nil {
+			return fmt.Errorf("secure guest-tools staging root: %w", err)
+		}
 	}
 	return withGuestToolsStage(stageBase, data, func(stageDir string) error {
 		if err := ctx.Err(); err != nil {
@@ -389,15 +396,17 @@ func (d *daemonRuntime) verifyGuestTools(ctx context.Context, sum [32]byte, size
 	return nil
 }
 
-// guestToolsStageBase keeps Windows staging in the Gantry-owned state root,
-// but outside the per-sandbox directory that must never be guest-visible.
-// An empty base deliberately selects the OS temporary directory on Unix.
+// guestToolsStageBase keeps Windows staging in a private sibling of the
+// protected Gantry state tree. Staging inside that tree would make the
+// ephemeral helper share overlap security-sensitive state and be rejected;
+// the ordinary OS temp directory may be inaccessible to service and
+// AppContainer launches. An empty base deliberately selects OS temp on Unix.
 func guestToolsStageBase(goos, sandboxDir string) string {
 	if goos == "windows" {
 		if sandboxDir == "" {
 			return ""
 		}
-		return filepath.Dir(sandboxDir)
+		return layout.ProtectionRoot(sandboxDir) + "-guest-tools"
 	}
 	return ""
 }
