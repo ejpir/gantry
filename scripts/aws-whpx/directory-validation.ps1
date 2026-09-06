@@ -20,7 +20,7 @@ $Stress = [int](Value-OrDefault "GANTRY_TEST_STRESS_FILES" "150000")
 $StressRounds = [int](Value-OrDefault "GANTRY_TEST_STRESS_ROUNDS" "2")
 $DirectLimitMicros = [long](Value-OrDefault "GANTRY_TEST_DIRECT_LIMIT_US" "30000000")
 $ReuseExisting = (Value-OrDefault "GANTRY_TEST_REUSE_EXISTING" "0") -eq "1"
-$HostRoot = Join-Path $Root "dirscan-host"
+$HostRoot = Value-OrDefault "GANTRY_TEST_HOST_ROOT" "C:\gantry-e2e\dirscan-host"
 $GuestRoot = "/root/gantry-dirscan"
 $ShareTag = "dirscan"
 
