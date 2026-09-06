@@ -22,6 +22,7 @@ require (
 	github.com/miekg/dns v1.1.72
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/pkg/sftp v1.13.10
+	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.56.0
 	golang.org/x/mod v0.38.0
 	golang.org/x/sys v0.47.0

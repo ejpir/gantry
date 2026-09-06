@@ -3,7 +3,6 @@ package dashboard
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -90,12 +89,7 @@ func (m *sandboxTUIModel) updateFocusedDialogInput(msg tea.Msg) (tea.Model, tea.
 	var cmd tea.Cmd
 	switch m.dialog {
 	case tuiCreateDialog:
-		switch m.createFocus {
-		case 0:
-			m.createName, cmd = m.createName.Update(msg)
-		case 1:
-			m.createImage, cmd = m.createImage.Update(msg)
-		}
+		cmd = m.updateInput(msg)
 	case tuiShareAddDialog:
 		switch m.shareFocus {
 		case 1:
@@ -544,63 +538,6 @@ func (m *sandboxTUIModel) setCreateSliderBoundary(maximum bool) bool {
 	return true
 }
 
-func (m *sandboxTUIModel) cycleCreateKernel(delta int) {
-	count := len(m.createKernels) + 1 // +1 for "auto"
-	m.createKernel = ((m.createKernel+delta)%count + count) % count
-}
-
-// createKernelSelection returns the explicit kernel path, or "" for auto.
-func (m *sandboxTUIModel) createKernelSelection() string {
-	if m.createKernel <= 0 || m.createKernel > len(m.createKernels) {
-		return ""
-	}
-	return m.createKernels[m.createKernel-1]
-}
-
-func (m *sandboxTUIModel) createKernelLabel() string {
-	if k := m.createKernelSelection(); k != "" {
-		return filepath.Base(k)
-	}
-	if m.createRuntime == "runsc" {
-		return "auto (downloads the 4K-page kernel)"
-	}
-	return "auto (downloads if needed)"
-}
-
-// createArgv builds the CLI argv for the dialog's current choices. Kept
-// separate from submitCreate so tests can inspect it without spawning.
-func (m *sandboxTUIModel) createArgv(name string) []string {
-	argv := []string{"start", name}
-	if image := strings.TrimSpace(m.createImage.Value()); image != "" {
-		argv = append(argv, "-image", image)
-	}
-	if m.createRuntime == "runsc" {
-		argv = append(argv, "-runtime", "runsc")
-	}
-	if k := m.createKernelSelection(); k != "" {
-		argv = append(argv, "-kernel", k)
-	}
-	if m.createSSH {
-		argv = append(argv, "-ssh")
-	}
-	if m.createDevContainers {
-		argv = append(argv, "-devcontainers")
-	}
-	if m.createCPUs.Value != 1 {
-		argv = append(argv, "-cpus", strconv.Itoa(m.createCPUs.Value))
-	}
-	if m.createMemory.Value != 512 {
-		argv = append(argv, "-mem", strconv.Itoa(m.createMemory.Value))
-	}
-	if m.createDisk.Value != int(m.limits.DefaultDiskSizeMiB) {
-		argv = append(argv, "-disk-size", strconv.Itoa(m.createDisk.Value))
-	}
-	if m.createIsolation != "auto" {
-		argv = append(argv, "-process-isolation", m.createIsolation)
-	}
-	return argv
-}
-
 func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
 	m.dialog = tuiCreateDialog
 	m.dialogScroll = 0
@@ -609,7 +546,7 @@ func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
 	m.createName.Reset()
 	m.createImage.Reset()
 	m.createCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, 1)
-	m.createMemory = newResourceSlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 128, 512)
+	m.createMemory = newMemorySlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 512)
 	m.createDisk = newResourceSlider(int(m.limits.MinDiskSizeMiB), int(m.limits.MaxDiskSizeMiB), 512, int(m.limits.DefaultDiskSizeMiB))
 	m.createRuntime = "crun"
 	m.createKernels = m.service.KernelChoices()
@@ -664,7 +601,7 @@ func (m *sandboxTUIModel) submitCreate() (tea.Model, tea.Cmd) {
 		m.createErrFocus = 5
 		return m, m.focusCreate(5)
 	}
-	return m.beginAction("create", name, m.createArgv(name), false)
+	return m.beginStart("create", m.createRequest(name))
 }
 
 func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
@@ -679,7 +616,7 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 	m.dialogScroll = 0
 	m.formError = ""
 	m.editCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, maxInt(1, selected.VCPUs))
-	m.editMemory = newResourceSlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 128, int(selected.MemMB))
+	m.editMemory = newMemorySlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), int(selected.MemMB))
 	m.editIsolation = selected.ProcessIsolation
 	if m.editIsolation == "" {
 		m.editIsolation = "auto"
@@ -1630,10 +1567,29 @@ func (m *sandboxTUIModel) ensureDialogFocusVisible() {
 		m.dialogScroll = 0
 		return
 	}
-	_, height, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
+	width, height, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), m.dialog)
 	viewport := maxInt(1, height-4)
 	maxScroll := maxInt(0, lipgloss.Height(content)-viewport)
 	m.dialogScroll = clampInt(m.dialogScroll, 0, maxScroll)
+	if m.dialog == tuiCreateDialog {
+		layout := m.createLayout(tuiThemeFor(m.dark), maxInt(10, width-6))
+		target := layout.controls[m.createFocus]
+		if m.createFocus == 10 {
+			m.dialogScroll = maxScroll
+			return
+		}
+		if m.createFocus == 0 {
+			m.dialogScroll = 0
+			return
+		}
+		if target.y < m.dialogScroll {
+			m.dialogScroll = target.y
+		}
+		if target.y+target.h > m.dialogScroll+viewport {
+			m.dialogScroll = clampInt(target.y+minInt(target.h, viewport)-viewport, 0, maxScroll)
+		}
+		return
+	}
 	needle, fromEnd := m.dialogFocusTarget()
 	if needle == "" || maxScroll == 0 {
 		return
@@ -2073,21 +2029,23 @@ func (m sandboxTUIModel) confirmationActionLabel() string {
 }
 
 func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
-	if m.dialogButtonHit(mouse, bounds, "Cancel") {
+	layout := m.createLayout(tuiThemeFor(m.dark), maxInt(10, bounds.w-6))
+	x, y := mouse.X-bounds.x-3, mouse.Y-bounds.y-2+m.dialogScroll
+	if layout.cancel.contains(x, y) {
 		m.closeDialog()
 		return m, nil
 	}
-	if m.dialogButtonHit(mouse, bounds, "Create sandbox") {
+	if layout.submit.contains(x, y) {
 		m.createFocus = 10
 		return m.submitCreate()
 	}
-	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
-		{label: "Name", focus: 0}, {label: "OCI image", focus: 1},
-		{label: "Runtime", focus: 2}, {label: "Kernel", focus: 3},
-		{label: "SSH", focus: 4}, {label: "Dev Containers", focus: 5},
-		{label: "CPUs", focus: 6}, {label: "Memory", focus: 7},
-		{label: "Persistent disk", focus: 8}, {label: "Process isolation", focus: 9},
-	})
+	focus, ok := 0, false
+	for index, rect := range layout.controls {
+		if rect.contains(x, y) {
+			focus, ok = index, true
+			break
+		}
+	}
 	if !ok {
 		return m, nil
 	}

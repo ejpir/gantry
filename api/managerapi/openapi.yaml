@@ -217,7 +217,7 @@ components:
       required: [name, state]
       properties:
         name: { type: string }
-        state: { type: string, enum: [running, stopped] }
+        state: { type: string, enum: [starting, running, stopped] }
         pid: { type: integer }
         image: { type: string }
         imageRef: { type: string }
@@ -228,6 +228,20 @@ components:
         proxy: { type: string, format: uri }
         noProxy: { type: string }
         proxyEnforce: { type: boolean }
+        desired:
+          $ref: "#/components/schemas/BootSettings"
+        active:
+          description: Settings allocated to the running VM; absent for stopped sandboxes and daemons started by older versions.
+          $ref: "#/components/schemas/BootSettings"
+        restartRequired: { type: boolean }
+    BootSettings:
+      type: object
+      required: [memoryMiB, cpus, processIsolation, devContainers]
+      properties:
+        memoryMiB: { type: integer }
+        cpus: { type: integer }
+        processIsolation: { type: string, enum: [auto, required, off] }
+        devContainers: { type: boolean }
     CreateSandboxRequest:
       type: object
       required: [name, image]
@@ -289,6 +303,9 @@ components:
         sandbox: { type: string }
         state: { type: string, enum: [running, succeeded, failed] }
         error: { type: string }
+        warnings:
+          type: array
+          items: { type: string }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     Event:

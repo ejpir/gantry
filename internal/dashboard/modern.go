@@ -190,7 +190,7 @@ func (m sandboxTUIModel) renderOperationalSandboxPanel(theme tuiTheme, width, he
 func (m sandboxTUIModel) operationalPanelContent(theme tuiTheme, sandbox tuiSandbox) tuiOperationalPanelContent {
 	state := lipgloss.NewStyle().Foreground(sandboxStateColor(theme, sandbox.State)).Render("●")
 	name := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sandbox.Name)
-	metadata := fmt.Sprintf("%dc %s · %s · %s", maxInt(1, sandbox.VCPUs), formatOverviewMemory(sandbox.MemMB), defaultText(sandbox.Runtime, "runtime unknown"), shortImageRef(sandbox.Image))
+	metadata := fmt.Sprintf("%dc %s · %s · %s", maxInt(1, sandbox.DisplayCPUs()), formatOverviewMemory(sandbox.DisplayMemoryMiB()), defaultText(sandbox.Runtime, "runtime unknown"), shortImageRef(sandbox.Image))
 	header := state + " " + name + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(metadata)
 	traffic := lipgloss.NewStyle().Foreground(theme.muted).Render("traffic  ") +
 		lipgloss.NewStyle().Foreground(theme.success).Render(m.sandboxTrafficSparkline(sandbox.Name, 16)) +
@@ -427,7 +427,7 @@ func (m sandboxTUIModel) renderSandboxMasterList(theme tuiTheme, geometry tuiMas
 			first = " " + first
 		}
 		image := "  " + lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText(shortImageRef(sandbox.Image), maxInt(4, inner-2)))
-		resources := fmt.Sprintf("  %d vCPU · %s", maxInt(1, sandbox.VCPUs), formatMiBHuman(sandbox.MemMB))
+		resources := fmt.Sprintf("  %d vCPU · %s", maxInt(1, sandbox.DisplayCPUs()), formatMiBHuman(sandbox.DisplayMemoryMiB()))
 		features := "  " + sandboxFeatureSummary(sandbox)
 		lines = append(lines, first, image, lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(resources, inner)), lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(features, inner)))
 	}
@@ -455,7 +455,7 @@ func (m sandboxTUIModel) renderSandboxTopology(theme tuiTheme, geometry tuiMaste
 		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(truncateText(selected.Name, maxInt(4, inner-18))),
 		m.renderSandboxState(theme, *selected), inner,
 	)
-	vmSummary := fmt.Sprintf("microVM  ·  %d vCPU  ·  %s RAM  ·  %s", maxInt(1, selected.VCPUs), formatMiBHuman(selected.MemMB), defaultText(selected.Runtime, "runtime unknown"))
+	vmSummary := fmt.Sprintf("microVM  ·  %d vCPU  ·  %s RAM  ·  %s", maxInt(1, selected.DisplayCPUs()), formatMiBHuman(selected.DisplayMemoryMiB()), defaultText(selected.Runtime, "runtime unknown"))
 	separator := lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", inner))
 
 	workloadWidth := geometry.workloadWidth

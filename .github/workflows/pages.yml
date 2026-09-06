@@ -1,0 +1,84 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+      - 'docs/gantry/**'
+      - 'scripts/build_docs.py'
+      - 'scripts/test_build_docs.py'
+      - 'scripts/docs/**'
+      - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'index.html'
+      - 'docs/gantry/**'
+      - 'scripts/build_docs.py'
+      - 'scripts/test_build_docs.py'
+      - 'scripts/docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never interrupt an in-flight production deployment. PR builds have their
+# own concurrency groups and cannot publish the site.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.26'
+      - name: Test documentation generator
+        run: uv run scripts/build_docs.py --test
+      - name: Generate documentation from Markdown
+        run: uv run scripts/build_docs.py
+      - name: Stage public HTML only
+        # Preserve relative links and the /gantry/ project-site prefix. Never
+        # upload the repository root, which can include non-public artifacts.
+        run: |
+          site_dir="$RUNNER_TEMP/gantry-pages"
+          mkdir -p "$site_dir/docs/gantry"
+          cp index.html "$site_dir/index.html"
+          cp docs/gantry/index.html "$site_dir/docs/gantry/index.html"
+          touch "$site_dir/.nojekyll"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/gantry-pages
+
+  deploy:
+    name: Publish to GitHub Pages
+    # A PR or a manual run on a feature branch must never deploy production.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy static site
+        id: deployment
+        uses: actions/deploy-pages@v4

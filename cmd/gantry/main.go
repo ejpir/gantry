@@ -82,7 +82,7 @@ func main() {
 func runMain(args []string) int {
 	if len(args) == 0 {
 		if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-			return dashboard.Run(dashboardsvc.NewDashboardService())
+			return dashboard.Run(dashboardsvc.NewDashboardService(sandbox.NewLifecycleService()))
 		}
 		writeMainHelp(os.Stderr)
 		return 2
@@ -179,7 +179,7 @@ func runMain(args []string) int {
 		}
 		return 0
 	case "tui":
-		return dashboard.Run(dashboardsvc.NewDashboardService())
+		return dashboard.Run(dashboardsvc.NewDashboardService(sandbox.NewLifecycleService()))
 	case "stop", "delete":
 		if len(argv) != 1 {
 			fmt.Fprintf(os.Stderr, "usage: gantry %s <name>\n", command)

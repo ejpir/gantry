@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"strings"
@@ -241,7 +242,7 @@ type registryLoginRecordingService struct {
 	stored       dashboardapi.RegistryLoginRequest
 }
 
-func (s *registryLoginRecordingService) Command(argv ...string) (*exec.Cmd, error) {
+func (s *registryLoginRecordingService) Command(ctx context.Context, argv ...string) (*exec.Cmd, error) {
 	s.commandCalls++
 	return nil, errors.New("registry credentials must not use argv")
 }

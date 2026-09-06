@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,8 +10,10 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
@@ -18,6 +21,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/secret"
 )
@@ -58,32 +62,19 @@ flags:`)
 
 	rf.Name = name
 	_ = fs.Parse(fargv)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	progress := gutil.NewProgressPrinter(os.Stdout, "gantry start: ")
-	cfg, warnings, err := resolveFlags(rf, fs, progress.Printf, timeline.mark)
-	progress.Finish()
+	defer progress.Finish()
+	_, err := (sandboxLifecycle{milestone: timeline.mark}).Start(ctx, lifecycle.StartRequest{
+		Name: name, Mode: lifecycle.Replace, Options: rf.Options(fs),
+	}, cliStartObserver(progress, os.Stdout, os.Stderr))
 	if err != nil {
+		progress.Finish()
 		fmt.Fprintln(os.Stderr, "gantry start:", err)
 		return 1
 	}
-	for _, w := range warnings {
-		fmt.Fprintln(os.Stderr, "gantry start:", w)
-	}
-	// -secret specs resolve DAEMON-side at use time (rotation without
-	// restart); the CLI handshake carries only literal -secret-file values.
-	secrets, _, _, err := rf.ResolveSecretSources()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "gantry start:", err)
-		return 1
-	}
-	timeline.mark("launcher secrets resolved")
-	if secretCount := len(secrets) + len(cfg.SecretSources); secretCount > 0 && cfg.Net && cfg.NetPol == "" {
-		fmt.Fprintf(os.Stderr, `gantry start: %d secret(s) injected with the default egress policy (internet
-allowed). Consider -net-policy with a domain allowlist so an injected
-agent cannot send them anywhere.
-`, secretCount)
-	}
-
-	return launchSandboxModeWithSpawnerTiming(name, cfg, secrets, true, false, startSandboxDaemon, timeline.mark)
+	return 0
 }
 
 // launcherBootTimeline covers the part of startup which precedes the daemon's
@@ -109,25 +100,34 @@ func (t *launcherBootTimeline) mark(phase string) {
 	fmt.Fprintf(os.Stderr, "boot-timing: %-36s %9.3f ms\n", phase, float64(time.Since(t.started))/float64(time.Millisecond))
 }
 
-// CmdResume boots a stopped sandbox from its persisted configuration. The
-// dashboard's Start action invokes the same CLI primitive asynchronously,
-// avoiding duplicate daemon lifecycle code. Secret values are never persisted;
-// configured names must be present in Gantry's current environment.
+// CmdResume boots a stopped sandbox through the shared application service.
 func CmdResume(name string) int {
-	launchLock, err := holdSandboxLaunchLock(name)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	progress := gutil.NewProgressPrinter(os.Stdout, "gantry start: ")
+	defer progress.Finish()
+	_, err := NewLifecycleService().Start(ctx, lifecycle.StartRequest{Name: name, Mode: lifecycle.Resume},
+		cliStartObserver(progress, os.Stdout, os.Stderr))
 	if err != nil {
+		progress.Finish()
 		fmt.Fprintln(os.Stderr, "gantry resume:", err)
 		return 1
 	}
-	defer func() { _ = launchLock.Close() }()
+	return 0
+}
 
-	dir := layout.Dir(name)
-	cfg, secrets, err := config.ReadSandboxForLaunch(dir, os.LookupEnv)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gantry resume: sandbox %q has no valid saved configuration: %v\n", name, err)
-		return 1
+func cliStartObserver(progress *gutil.ProgressPrinter, output, errorOutput io.Writer) lifecycle.Observer {
+	return func(event lifecycle.Progress) {
+		if event.Warning {
+			progress.Finish()
+			_, _ = fmt.Fprintln(errorOutput, "gantry start:", event.Message)
+		} else if event.Phase == "prepare" {
+			progress.Printf("%s", event.Message)
+		} else {
+			progress.Finish()
+			_, _ = fmt.Fprintln(output, event.Message)
+		}
 	}
-	return launchSandboxLocked(name, cfg, secrets, false, false, startSandboxDaemon)
 }
 
 const daemonReadySocketName = "start-ready.sock"
@@ -223,7 +223,7 @@ func launchSandboxModeWithSpawnerTimingIO(name string, cfg config.RunConfig, sec
 
 type sandboxDaemonProcess interface {
 	PID() int
-	SendHandshake(string) error
+	SendHandshake(context.Context, string) error
 	Wait() error
 	Kill() error
 }
@@ -235,17 +235,20 @@ type execSandboxDaemon struct {
 
 func (p *execSandboxDaemon) PID() int { return p.cmd.Process.Pid }
 
-func (p *execSandboxDaemon) SendHandshake(payload string) error {
+func (p *execSandboxDaemon) SendHandshake(ctx context.Context, payload string) error {
 	if p.handshake == nil {
 		return fmt.Errorf("daemon handshake is already closed")
 	}
-	written, writeErr := io.WriteString(p.handshake, payload)
+	handshake := p.handshake
+	p.handshake = nil
+	stop := context.AfterFunc(ctx, func() { _ = handshake.Close() })
+	defer stop()
+	written, writeErr := io.WriteString(handshake, payload)
 	if writeErr == nil && written != len(payload) {
 		writeErr = io.ErrShortWrite
 	}
-	closeErr := p.handshake.Close()
-	p.handshake = nil
-	return errors.Join(writeErr, closeErr)
+	closeErr := handshake.Close()
+	return errors.Join(ctx.Err(), writeErr, closeErr)
 }
 
 func (p *execSandboxDaemon) Wait() error { return p.cmd.Wait() }
@@ -303,19 +306,22 @@ func sandboxLaunchLabel(transient bool) string {
 	return label
 }
 
-func launchSandboxLocked(name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig, transient bool, spawn sandboxDaemonSpawner) int {
-	return launchSandboxLockedTiming(name, cfg, secrets, replaceConfig, transient, spawn, nil)
-}
-
-func launchSandboxLockedTiming(name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig, transient bool, spawn sandboxDaemonSpawner, milestone func(string)) int {
-	return launchSandboxLockedTimingIO(name, cfg, secrets, replaceConfig, transient, spawn, milestone, os.Stdout, os.Stderr)
-}
-
 func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig, transient bool, spawn sandboxDaemonSpawner, milestone func(string), output, errorOutput io.Writer) int {
-	// Human diagnostics are best effort: write failures must not replace the
-	// lifecycle status, and buffers used by the manager cannot fail.
-	writeLine := func(writer io.Writer, args ...any) { _, _ = fmt.Fprintln(writer, args...) }
-	writef := func(writer io.Writer, format string, args ...any) { _, _ = fmt.Fprintf(writer, format, args...) }
+	_, err := launchSandboxLockedCore(context.Background(), name, cfg, secrets, replaceConfig, transient, spawn, milestone, func(event lifecycle.Progress) {
+		_, _ = fmt.Fprintln(output, event.Message)
+	})
+	if err != nil {
+		_, _ = fmt.Fprintln(errorOutput, sandboxLaunchLabel(transient)+":", err)
+		return 1
+	}
+	return 0
+}
+
+func launchSandboxLockedCore(ctx context.Context, name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig, transient bool, spawn sandboxDaemonSpawner, milestone func(string), observer lifecycle.Observer) (int, error) {
+	writeLine := func(args ...any) { observer.Emit("launch", strings.TrimSuffix(fmt.Sprintln(args...), "\n")) }
+	writef := func(format string, args ...any) {
+		observer.Emit("launch", strings.TrimSuffix(fmt.Sprintf(format, args...), "\n"))
+	}
 	mark := func(phase string) {
 		if milestone != nil {
 			milestone(phase)
@@ -323,40 +329,34 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 	}
 	label := sandboxLaunchLabel(transient)
 	dir := layout.Dir(name)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	// The pid file is diagnostic; the daemon's held lifetime lock is the
 	// authoritative proof. Checking both while holding the stable launch lock
 	// closes the window around pid creation and stale/corrupt pid files.
 	if _, alive := layout.PID(name); alive || layout.LockHeld(dir) {
-		writef(errorOutput, "%s: sandbox %q is already running\n", label, name)
-		return 1
+		return 0, fmt.Errorf("%w: %q", lifecycle.ErrAlreadyRunning, name)
 	}
 	handshake, err := secretsHandshakeJSON(secrets, cfg.SecretSources)
 	if err != nil {
-		writeLine(errorOutput, label+":", err)
-		return 1
+		return 0, err
 	}
 
 	if replaceConfig {
 		if err := os.RemoveAll(dir); err != nil {
-			writeLine(errorOutput, label+":", err)
-			return 1
+			return 0, err
 		}
 	}
 	// The broker has no application-layer authentication: the platform's
 	// private directory permissions are the access boundary between a local
 	// user and a root shell inside the sandbox (plus its rw host shares).
 	if err := localsec.CreateDir(dir); err != nil {
-		writeLine(errorOutput, label+":", err)
-		return 1
+		return 0, err
 	}
 	if !replaceConfig && !transient {
-		var progressPrinter *gutil.ProgressPrinter
 		progress := func(format string, values ...any) {
-			writef(output, label+": "+format+"\n", values...)
-		}
-		if file, ok := output.(*os.File); ok {
-			progressPrinter = gutil.NewProgressPrinter(file, label+": ")
-			progress = progressPrinter.Printf
+			observer.Emit("prepare", fmt.Sprintf(format, values...))
 		}
 		oldKernel := cfg.Kernel
 		refreshed, changed, err := refreshSavedKernelForRestart(dir, cfg, progress)
@@ -366,21 +366,17 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 			var warnings []string
 			cfg, profileChanged, warnings, err = prepareDevContainersProfile(name, cfg, progress)
 			for _, warning := range warnings {
-				writef(output, "%s: %s\n", label, warning)
+				writef("%s: %s\n", label, warning)
 			}
 			if err == nil && profileChanged {
 				err = config.WriteSandboxConfig(dir, cfg)
 			}
 		}
-		if progressPrinter != nil {
-			progressPrinter.Finish()
-		}
 		if err != nil {
-			writeLine(errorOutput, label+":", err)
-			return 1
+			return 0, err
 		}
 		if changed && cfg.Kernel != oldKernel {
-			writef(output, "%s: updated saved kernel to %s\n", label, cfg.Kernel)
+			writef("%s: updated saved kernel to %s\n", label, cfg.Kernel)
 		}
 	}
 	cleanupSandboxRuntime(dir)
@@ -389,8 +385,7 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 	if replaceConfig {
 		b, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
-			writeLine(errorOutput, label+":", err)
-			return 1
+			return 0, err
 		}
 		configPath := filepath.Join(dir, "sandbox.json")
 		// Publish atomically before spawn so the daemon consumes exactly this
@@ -404,8 +399,7 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 			writeConfig = atomicfile.WriteFileDurable
 		}
 		if err := writeConfig(configPath, append(b, '\n'), 0o600); err != nil {
-			writeLine(errorOutput, label+":", err)
-			return 1
+			return 0, err
 		}
 		mark("launcher configuration published")
 		if deferDurability {
@@ -416,25 +410,22 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 			mark("launcher configuration persisted")
 		}
 	} else if !transient {
-		writef(output, "gantry start: using saved configuration for %q\n", name)
+		writef("gantry start: using saved configuration for %q\n", name)
 	}
 
 	// Detached daemon: same binary, signed (this is why start goes through
 	// scripts/run-macos.sh on macOS: build+codesign first).
 	exe, err := os.Executable()
 	if err != nil {
-		writeLine(errorOutput, label+":", err)
-		return 1
+		return 0, err
 	}
 	daemonLogPath := filepath.Join(dir, "daemon.log")
 	if err := boundedlog.RotatePrevious(daemonLogPath); err != nil {
-		writeLine(errorOutput, label+": preserve previous daemon log:", err)
-		return 1
+		return 0, fmt.Errorf("preserve previous daemon log: %w", err)
 	}
 	logf, err := os.Create(daemonLogPath)
 	if err != nil {
-		writeLine(errorOutput, label+":", err)
-		return 1
+		return 0, err
 	}
 	defer func() { _ = logf.Close() }()
 
@@ -463,27 +454,26 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 	cmd.Env = scrubbedEnv(os.Environ(), secrets)
 	layout.DetachDaemon(cmd)
 	if spawn == nil {
-		writeLine(errorOutput, label+": spawn daemon: unavailable")
-		return 1
+		return 0, fmt.Errorf("spawn daemon: unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	process, err := spawn(cmd)
 	if err != nil {
-		writeLine(errorOutput, label+": spawn daemon:", err)
-		return 1
+		return 0, fmt.Errorf("spawn daemon: %w", err)
 	}
 	mark("launcher daemon spawned")
 	pid := process.PID()
 	if pid <= 0 {
 		_ = process.Kill()
 		_ = process.Wait()
-		writeLine(errorOutput, label+": spawn daemon: invalid process id")
-		return 1
+		return 0, fmt.Errorf("spawn daemon: invalid process id")
 	}
-	if err := process.SendHandshake(handshake); err != nil {
+	if err := process.SendHandshake(ctx, handshake); err != nil {
 		_ = process.Kill()
 		waitErr := process.Wait()
-		writef(errorOutput, "%s: deliver daemon handshake: %v (wait: %v)\n", label, err, waitErr)
-		return 1
+		return 0, fmt.Errorf("deliver daemon handshake: %w", errors.Join(err, waitErr))
 	}
 	mark("launcher handshake delivered")
 	exited := make(chan error, 1)
@@ -499,18 +489,23 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 	}
 
 	if transient {
-		writef(output, "gantry exec: VM booting (vmm pid %d)\n", pid)
+		writef("gantry exec: VM booting (vmm pid %d)\n", pid)
 	} else {
-		writef(output, "gantry start: sandbox %q booting (vmm pid %d)\n", name, pid)
+		writef("gantry start: sandbox %q booting (vmm pid %d)\n", name, pid)
 	}
 	readyPath := filepath.Join(dir, "ready")
-	announceReady := func() int {
+	announceReady := func() (int, error) {
 		mark("launcher readiness received")
 		if configDurable != nil {
-			if err := <-configDurable; err != nil {
+			var err error
+			select {
+			case err = <-configDurable:
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+			if err != nil {
 				waitErr := abortUncommittedDaemon()
-				writef(errorOutput, "%s: persist configuration: %v (wait: %v)\n", label, err, waitErr)
-				return 1
+				return 0, fmt.Errorf("persist configuration: %w", errors.Join(err, waitErr))
 			}
 			configDurable = nil
 			mark("launcher configuration persisted")
@@ -521,16 +516,18 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 		// stable serialization boundary around an unowned daemon.
 		if !layout.LockHeld(dir) {
 			waitErr := abortUncommittedDaemon()
-			writef(errorOutput, "%s: daemon reported readiness without acquiring its lifetime lock (wait: %v)\n", label, waitErr)
-			return 1
+			return 0, fmt.Errorf("daemon reported readiness without acquiring its lifetime lock (wait: %v)", waitErr)
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, errors.Join(err, abortUncommittedDaemon())
 		}
 		mark("launcher launch committed")
 		if transient {
-			writeLine(output, "gantry exec: VM ready")
+			writeLine("gantry exec: VM ready")
 		} else {
-			writef(output, "gantry start: sandbox %q is up — attach with: gantry exec %s\n", name, name)
+			writef("gantry start: sandbox %q is up — attach with: gantry exec %s\n", name, name)
 		}
-		return 0
+		return pid, nil
 	}
 	timeout := time.NewTimer(sandboxDaemonReadyTimeout(cfg))
 	defer timeout.Stop()
@@ -550,19 +547,24 @@ func launchSandboxLockedTimingIO(name string, cfg config.RunConfig, secrets map[
 				return announceReady()
 			}
 		case err := <-exited:
-			writef(errorOutput, "%s: daemon exited during boot: %v\n", label, err)
-			dumpTailTo(errorOutput, filepath.Join(dir, "console.log"))
-			dumpTailTo(errorOutput, filepath.Join(dir, "daemon.log"))
-			return 1
+			return 0, daemonStartupError(dir, fmt.Errorf("daemon exited during boot: %v", err))
+		case <-ctx.Done():
+			return 0, errors.Join(ctx.Err(), abortUncommittedDaemon())
 		case <-timeout.C:
 			if !layout.LockHeld(dir) {
-				waitErr := abortUncommittedDaemon()
-				writef(errorOutput, "%s: daemon did not acquire its lifetime lock before startup timed out (wait: %v)\n", label, waitErr)
+				return 0, daemonStartupError(dir, errors.Join(fmt.Errorf("daemon did not acquire its lifetime lock before startup timed out"), abortUncommittedDaemon()))
 			}
-			writef(errorOutput, "%s: timed out waiting for the guest RPC connection; see %s\n", label, dir)
-			dumpTailTo(errorOutput, filepath.Join(dir, "console.log"))
-			dumpTailTo(errorOutput, filepath.Join(dir, "daemon.log"))
-			return 1
+			return 0, daemonStartupError(dir, fmt.Errorf("timed out waiting for the guest RPC connection; see %s", dir))
 		}
 	}
+}
+
+func daemonStartupError(dir string, cause error) error {
+	var diagnostics strings.Builder
+	dumpTailTo(&diagnostics, filepath.Join(dir, "console.log"))
+	dumpTailTo(&diagnostics, filepath.Join(dir, "daemon.log"))
+	if diagnostics.Len() == 0 {
+		return cause
+	}
+	return fmt.Errorf("%w\n%s", cause, diagnostics.String())
 }

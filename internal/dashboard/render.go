@@ -385,7 +385,7 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	case tuiOverviewPage:
 		running, allocatedVCPUs := 0, 0
 		for _, sandbox := range m.sandboxes {
-			allocatedVCPUs += maxInt(1, sandbox.VCPUs)
+			allocatedVCPUs += maxInt(1, sandbox.DisplayCPUs())
 			if sandbox.State == tuiRunning {
 				running++
 			}
@@ -569,7 +569,7 @@ func (m sandboxTUIModel) renderSandboxCard(theme tuiTheme, layout tuiDashboardLa
 	if runtimeName == "" {
 		runtimeName = "unknown"
 	}
-	compute := fmt.Sprintf("%s · %dc · %dMB", runtimeName, maxInt(1, sandbox.VCPUs), sandbox.MemMB)
+	compute := fmt.Sprintf("%s · %dc · %dMB", runtimeName, maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())
 	computeLine := labeledValue(theme, "compute", compute, innerWidth)
 	storageLine := labeledValue(theme, "storage", sandboxStorageSummary(sandbox, false), innerWidth)
 	network := "offline"
@@ -642,6 +642,9 @@ func (m sandboxTUIModel) renderSandboxState(theme tuiTheme, sandbox tuiSandbox) 
 	}
 	switch sandbox.State {
 	case tuiRunning:
+		if sandbox.RestartRequired {
+			return lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render("● RESTART NEEDED")
+		}
 		return lipgloss.NewStyle().Bold(true).Foreground(theme.success).Render("● RUNNING")
 	case tuiStarting:
 		return m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render("STARTING")
@@ -1128,12 +1131,15 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		{"Image", sandbox.Image},
 		{"Runtime", sandbox.Runtime},
 		{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
-		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.VCPUs), sandbox.MemMB)},
+		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())},
 		{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
 		{"SSH", map[bool]string{true: "enabled", false: "disabled"}[sandbox.SSH]},
 		{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
 		{"Storage", sandboxStorageSummary(*sandbox, true)},
 		{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
+	}
+	if sandbox.RestartRequired {
+		rows = append(rows, [2]string{"Next boot", fmt.Sprintf("%d CPU · %d MiB RAM (restart required)", sandbox.VCPUs, sandbox.MemMB)})
 	}
 	if sandbox.Net {
 		rows = append(rows,
@@ -1259,73 +1265,6 @@ func (m sandboxTUIModel) renderUpdateDialog(theme tuiTheme, width int) string {
 	buttons := alignRight(cancel+"  "+update, width)
 	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("←/→ choose  •  enter confirm")
 	return header + "\n\n" + current + "\n" + latest + "\n\n" + description + "\n\n" + note + "\n\n" + renderConfirmationFooter(buttons, hint)
-}
-
-func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {
-	header := m.dialogHeader(theme, "Create sandbox", width)
-	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Create and boot a persistent local microVM.")
-	section := func(title string) string {
-		return lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(strings.ToUpper(title))
-	}
-	nameLabel := formLabel(theme, "Name", m.createFocus == 0)
-	imageLabel := formLabel(theme, "OCI image", m.createFocus == 1) + lipgloss.NewStyle().Foreground(theme.muted).Render("  optional")
-	nameField := renderInputField(theme, m.createName.View(), width, m.createFocus == 0)
-	imageField := renderInputField(theme, m.createImage.View(), width, m.createFocus == 1)
-	runtimeLabel := formLabel(theme, "Runtime", m.createFocus == 2)
-	runtimeValue := lipgloss.NewStyle().Bold(m.createFocus == 2).Foreground(theme.text).Render(m.createRuntime) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  ←/→ or space to change")
-	kernelLabel := formLabel(theme, "Kernel", m.createFocus == 3)
-	kernelValue := lipgloss.NewStyle().Bold(m.createFocus == 3).Foreground(theme.text).Render(truncateText(m.createKernelLabel(), maxInt(12, width-16))) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  ←/→ to change")
-	sshLabel := formLabel(theme, "SSH", m.createFocus == 4)
-	sshValue := renderFeatureToggle(theme, m.createSSH)
-	devLabel := formLabel(theme, "Dev Containers", m.createFocus == 5)
-	devValue := renderFeatureToggle(theme, m.createDevContainers)
-	developmentNote := "Adds the curated IDE environment and nested Podman."
-	if m.createDevContainers {
-		developmentNote = fmt.Sprintf("SSH and crun enabled automatically · IDE disk follows Persistent disk (%s)", formatMiBHuman(uint(m.createDisk.Value)))
-	}
-	developmentHint := lipgloss.NewStyle().Foreground(theme.muted).Render(developmentNote)
-	cpuLabel := formLabel(theme, "CPUs", m.createFocus == 6)
-	cpuSlider := m.createCPUs.View(theme, width, m.createFocus == 6, "CPU")
-	memoryLabel := formLabel(theme, "Memory", m.createFocus == 7)
-	memorySlider := m.createMemory.View(theme, width, m.createFocus == 7, "MiB")
-	diskLabel := formLabel(theme, "Persistent disk", m.createFocus == 8)
-	diskSlider := m.createDisk.View(theme, width, m.createFocus == 8, "MiB")
-	isolationLabel := formLabel(theme, "Process isolation", m.createFocus == 9)
-	isolationValue := lipgloss.NewStyle().Bold(m.createFocus == 9).Foreground(theme.text).Render(m.createIsolation) +
-		lipgloss.NewStyle().Foreground(theme.muted).Render("  ←/→ cycles auto / required / off")
-
-	fields := []string{
-		nameLabel + "\n" + nameField,
-		imageLabel + "\n" + imageField,
-		runtimeLabel + "\n" + runtimeValue,
-		kernelLabel + "\n" + kernelValue,
-		sshLabel + "\n" + sshValue,
-		devLabel + "\n" + devValue,
-		cpuLabel + "\n" + cpuSlider,
-		memoryLabel + "\n" + memorySlider,
-		diskLabel + "\n" + diskSlider,
-		isolationLabel + "\n" + isolationValue,
-	}
-	if m.formError != "" && m.createErrFocus >= 0 && m.createErrFocus < len(fields) {
-		errorLine := lipgloss.NewStyle().Foreground(theme.error).Render(lipgloss.Wrap(safeUIBlock(m.formError), width, ""))
-		fields[m.createErrFocus] += "\n" + errorLine
-	}
-
-	cancel := renderDialogButton(theme, "Cancel", false, false)
-	create := renderDialogButton(theme, "Create sandbox", m.createFocus == 10, false)
-	buttons := alignRight(cancel+"  "+create, width)
-	hint := lipgloss.NewStyle().Foreground(theme.muted).Render("tab next  •  ←/→ change  •  ctrl+enter create  •  esc cancel")
-	gap := m.formSectionGap()
-	groups := []string{
-		section("Identity") + gap + strings.Join(fields[0:2], gap),
-		section("Runtime") + gap + strings.Join(fields[2:4], gap),
-		section("Development") + gap + strings.Join(fields[4:6], gap) + "\n" + developmentHint,
-		section("Resources") + gap + strings.Join(fields[6:9], gap),
-		section("Security") + gap + fields[9],
-	}
-	return header + "\n" + description + gap + strings.Join(groups, gap) + "\n" + renderFormFooter("", buttons, hint)
 }
 
 func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {

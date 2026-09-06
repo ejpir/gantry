@@ -83,6 +83,17 @@ $ curl --unix-socket "$HOME/.gantry/manager.sock" \
 
 ## Stop, start, and delete
 
+Sandbox inspection reports `starting` until both guest RPC and the local
+control broker are ready, then `running`. A stopped daemon reports `stopped`.
+The CLI and dashboard use the same readiness definition.
+
+The `desired` object describes saved boot settings; `active` describes the
+current VM allocation. Changing memory, CPUs, process isolation, or the
+Dev Containers topology sets `restartRequired` until the next start.
+Existing top-level `cpus` and `memoryMiB` fields retain their saved-setting
+meaning. `active` is absent for stopped sandboxes and older daemons that
+have not published a boot snapshot.
+
 ```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" -X POST \
     http://gantry.local/v1/sandboxes/api-dev/stop

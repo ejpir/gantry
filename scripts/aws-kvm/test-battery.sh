@@ -287,12 +287,13 @@ R=$("$G" image ls 2>&1);                         chk "image: ls shows cached ref
 # Keep one exec session alive as a guest HTTP service while publishing and
 # withdrawing a live host port. Alpine's minimal BusyBox does not include the
 # httpd applet, so use its persistent netcat listener with a tiny HTTP handler.
+# BusyBox uses -ll with -e for persistence, not OpenBSD netcat's -lk.
 # The chosen loopback port is intentionally ephemeral so local developer runs
 # do not need a reserved port.
 PORT_FIXTURE=$(cat <<'GUEST_HTTP'
 printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK"' > /tmp/gantry-http-handler
 chmod 700 /tmp/gantry-http-handler
-exec busybox nc -lk -p 18080 -e /tmp/gantry-http-handler
+exec busybox nc -ll -p 18080 -e /tmp/gantry-http-handler
 GUEST_HTTP
 )
 run_with_timeout 120 "$G" exec t4 -- sh -c "$PORT_FIXTURE" </dev/null >/tmp/gantry-t4-http.log 2>&1 &
@@ -322,11 +323,12 @@ fi
 PORT_SPEC=$HOST_PORT:18080
 PORT_BODY=
 for _ in 1 2 3 4 5; do
-  PORT_BODY=$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>/dev/null) && break
+  PORT_BODY=$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$HOST_PORT/" 2>"$SECRET_TMP/t4-curl.log") && break
   sleep 1
 done
                                             chk "ports: guest service reachable" "GANTRY-PORT-OK" "$PORT_BODY"
 if ! printf '%s' "$PORT_BODY" | grep -qa 'GANTRY-PORT-OK'; then
+  tail -4 "$SECRET_TMP/t4-curl.log" >&2
   tail -20 /tmp/gantry-t4-http.log >&2
 fi
                                             chk "ports: live mapping listed" "$HOST_PORT" "$PORTS"

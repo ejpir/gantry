@@ -339,6 +339,7 @@ func TestCreateSandboxModalUsesSectionsAndDependencyCopy(t *testing.T) {
 	m.createFocus = 5
 	m.adjustCreateChoice(1)
 	plain = ansi.Strip(m.renderCreateDialog(tuiThemeFor(m.dark), 66))
+	plain = strings.Join(strings.Fields(plain), " ")
 	for _, want := range []string{"[✓] Enabled", "SSH and crun enabled automatically", "IDE disk follows Persistent disk"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("Dev Containers modal missing %q:\n%s", want, plain)

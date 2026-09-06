@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"github.com/ejpir/gantry/internal/client"
-	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/secret"
@@ -167,44 +166,41 @@ type RunFlags struct {
 
 // RegisterRunFlags adds the shared run flags to fs.
 func RegisterRunFlags(fs *flag.FlagSet) *RunFlags {
+	defaults := DefaultRunOptions()
 	f := &RunFlags{
-		Kernel: fs.String("kernel", guestasset.DefaultKernel(), "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)"),
-		Rootfs: fs.String("rootfs", guestasset.DefaultRootfs(), "VM rootfs (nerdbox EROFS with vminitd)"),
+		Kernel: fs.String("kernel", defaults.Kernel, "Linux kernel image (arm64 Image or x86-64 vmlinux ELF)"),
+		Rootfs: fs.String("rootfs", defaults.Rootfs, "VM rootfs (nerdbox EROFS with vminitd)"),
 		Image: fs.String("image", "", `container image: a reference to pull ("debian:bookworm-slim",
 "ghcr.io/org/app@sha256:..."), an OCI layout dir, a docker save tar,
 or a plain .erofs file (default: release Alpine image; staged Debian/shell image in development)`),
 		RWLayer:          fs.String("rwlayer", "", "ext4 writable layer, /dev/vdc (default: per-sandbox ~/.gantry/rwlayers/<name>.ext4, auto-created)"),
-		RWLayerSizeMiB:   fs.Uint("disk-size", DefaultRWLayerSizeMiB, "persistent writable disk size in MiB (also sets a newly created IDE layer when explicit)"),
+		RWLayerSizeMiB:   fs.Uint("disk-size", defaults.RWLayerSizeMiB, "persistent writable disk size in MiB (also sets a newly created IDE layer when explicit)"),
 		LayerSet:         fs.String("layerset", "", "layerset manifest JSON (fsmeta + ordered layer blobs) to attach natively instead of a flattened image"),
 		RW:               fs.Bool("rw", false, "writable overlay container root (default: on when a writable layer exists)"),
-		Net:              fs.Bool("net", true, "attach virtio-net via the embedded netstack"),
+		Net:              fs.Bool("net", defaults.Net, "attach virtio-net via the embedded netstack"),
 		GVProxy:          fs.String("gvproxy", "", "legacy external gvproxy option (disabled; use the embedded netstack)"),
 		NetPol:           fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
 		AllowLN:          fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
 		ProxyURL:         fs.String("proxy", "", "route guest HTTP(S) through this http(s) or socks5(h) proxy URL"),
 		NoProxy:          fs.String("no-proxy", "", "comma-separated proxy bypasses (default: localhost and loopback)"),
 		ProxyEnforce:     fs.Bool("proxy-enforce", false, "block direct TCP 80/443 and UDP 443 except to the configured proxy"),
-		OAuthBridge:      fs.Bool("oauth-bridge", true, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
+		OAuthBridge:      fs.Bool("oauth-bridge", defaults.OAuthBridge, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
 		OAuthCustody:     fs.Bool("oauth-custody", false, "hold OAuth refresh tokens on the host; push fresh access tokens into the guest (claude, codex)"),
 		MCP:              fs.Bool("mcp", false, "run the per-sandbox MCP gateway (docs/mcp-gateway.md): agents reach it via gantry-guest mcp-proxy"),
-		MCPFSRoot:        fs.String("mcp-fs-root", "/", "jail directory for the gateway's built-in filesystem server"),
-		MCPFSUser:        fs.String("mcp-fs-user", "nobody", "unprivileged guest user or UID:GID the gateway's local servers run as"),
+		MCPFSRoot:        fs.String("mcp-fs-root", defaults.MCPFSRoot, "jail directory for the gateway's built-in filesystem server"),
+		MCPFSUser:        fs.String("mcp-fs-user", defaults.MCPFSUser, "unprivileged guest user or UID:GID the gateway's local servers run as"),
 		MCPRemotes:       &gutil.StrList{},
 		SSH:              fs.Bool("ssh", false, "enable SSH protocol access on the sandbox-local ssh.sock (no TCP listener)"),
 		DevContainers:    fs.Bool("devcontainers", false, "add the curated IDE container and nested Podman inside this VM (requires -ssh and crun)"),
-		ProcessIsolation: fs.String("process-isolation", "auto", "split sandbox into supervisor + worker processes: auto | required | off"),
-		MemMB:            fs.Uint("mem", 512, "guest RAM in MiB"),
-		VCPUs:            fs.Int("cpus", 1, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
+		ProcessIsolation: fs.String("process-isolation", defaults.ProcessIsolation, "split sandbox into supervisor + worker processes: auto | required | off"),
+		MemMB:            fs.Uint("mem", defaults.MemMB, "guest RAM in MiB"),
+		VCPUs:            fs.Int("cpus", defaults.VCPUs, fmt.Sprintf("guest vCPU count (max %d on this host)", MaxSandboxVCPUs())),
 		Shares:           &gutil.StrList{},
 		Publish:          &gutil.StrList{},
 		Secrets:          &gutil.StrList{},
 		SecretFiles:      &gutil.StrList{},
 	}
-	runtime := os.Getenv("GANTRY_RUNTIME")
-	if runtime == "" {
-		runtime = "crun"
-	}
-	f.Runtime = fs.String("runtime", runtime, "container runtime in the guest: crun | runsc (gVisor)")
+	f.Runtime = fs.String("runtime", defaults.Runtime, "container runtime in the guest: crun | runsc (gVisor)")
 	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
 	fs.Var(f.MCPRemotes, "mcp-remote", `remote MCP upstream: name=ID,url=https://HOST/PATH[,auth=bearer:SECRET|header:NAME:SECRET|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET] (repeatable)`)
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
@@ -215,6 +211,61 @@ binds to a host for broker-only delivery, ,ttl=60s overrides refresh (0 =
 on-demand). Repeatable. NAME=literal and command-backed sources are refused`)
 	fs.Var(f.SecretFiles, "secret-file", "dotenv-style file of NAME=VALUE secrets (repeatable)")
 	return f
+}
+
+// Options detaches parsed CLI values from flag pointers and records which
+// default-sensitive inputs were explicitly supplied.
+func (f *RunFlags) Options(fs *flag.FlagSet) RunOptions {
+	options := RunOptions{
+		Name:             f.Name,
+		Kernel:           *f.Kernel,
+		Rootfs:           *f.Rootfs,
+		Runtime:          *f.Runtime,
+		Image:            *f.Image,
+		RWLayer:          *f.RWLayer,
+		LayerSet:         *f.LayerSet,
+		GVProxy:          *f.GVProxy,
+		NetPol:           *f.NetPol,
+		ProxyURL:         *f.ProxyURL,
+		NoProxy:          *f.NoProxy,
+		MCPFSRoot:        *f.MCPFSRoot,
+		MCPFSUser:        *f.MCPFSUser,
+		ProcessIsolation: *f.ProcessIsolation,
+		RW:               *f.RW,
+		Net:              *f.Net,
+		AllowLN:          *f.AllowLN,
+		ProxyEnforce:     *f.ProxyEnforce,
+		OAuthBridge:      *f.OAuthBridge,
+		OAuthCustody:     *f.OAuthCustody,
+		MCP:              *f.MCP,
+		SSH:              *f.SSH,
+		DevContainers:    *f.DevContainers,
+		RWLayerSizeMiB:   *f.RWLayerSizeMiB,
+		MemMB:            *f.MemMB,
+		VCPUs:            *f.VCPUs,
+		Shares:           append([]string(nil), f.Shares.List()...),
+		Publish:          append([]string(nil), f.Publish.List()...),
+		MCPRemotes:       append([]string(nil), f.MCPRemotes.List()...),
+		Secrets:          append([]string(nil), f.Secrets.List()...),
+		SecretFiles:      append([]string(nil), f.SecretFiles.List()...),
+	}
+	fs.Visit(func(value *flag.Flag) {
+		switch value.Name {
+		case "kernel":
+			options.Explicit.Kernel = true
+		case "rootfs":
+			options.Explicit.Rootfs = true
+		case "rw":
+			options.Explicit.RW = true
+		case "mem":
+			options.Explicit.Memory = true
+		case "cpus":
+			options.Explicit.CPUs = true
+		case "disk-size":
+			options.Explicit.DiskSize = true
+		}
+	})
+	return options
 }
 
 // OAuthBridgeEnabled resolves the default-on persisted setting. A pointer is
@@ -330,6 +381,10 @@ func (f *RunFlags) ResolveSecrets() (map[string]secret.Value, []string, error) {
 // and the ordered unique persisted specs. Later occurrences of a name win
 // across all kinds.
 func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.NamedSource, []string, error) {
+	return (RunOptions{Secrets: f.Secrets.List(), SecretFiles: f.SecretFiles.List()}).ResolveSecretSources()
+}
+
+func (f RunOptions) ResolveSecretSources() (map[string]secret.Value, []secret.NamedSource, []string, error) {
 	values := map[string]secret.Value{}
 	sources := map[string]secret.NamedSource{}
 	display := map[string]string{}
@@ -340,7 +395,7 @@ func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.Nam
 		}
 		display[name] = spec
 	}
-	for _, file := range f.SecretFiles.List() {
+	for _, file := range f.SecretFiles {
 		canonical, err := canonicalSecretInputPath(file)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("-secret-file: %w", err)
@@ -355,7 +410,7 @@ func (f *RunFlags) ResolveSecretSources() (map[string]secret.Value, []secret.Nam
 			add(name, name)
 		}
 	}
-	for _, spec := range f.Secrets.List() {
+	for _, spec := range f.Secrets {
 		ns, err := secret.ParseNamedSource(spec)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("-secret: %w", err)

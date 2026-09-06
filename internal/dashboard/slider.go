@@ -17,6 +17,12 @@ type resourceSlider struct {
 	Value int
 }
 
+// Memory allocations must not expand the host-derived slider bounds, even
+// when an existing sandbox was configured on a machine with more RAM.
+func newMemorySlider(minimum, maximum, value int) resourceSlider {
+	return newResourceSlider(minimum, maximum, 128, clampInt(value, minimum, maximum))
+}
+
 func newResourceSlider(minimum, maximum, step, value int) resourceSlider {
 	s := resourceSlider{Min: minimum, Max: maximum, Step: maxInt(1, step)}
 	if value < s.Min {
@@ -44,6 +50,10 @@ func (s *resourceSlider) SetFraction(position, width int) {
 		return
 	}
 	position = clampInt(position, 0, width-1)
+	if position == width-1 {
+		s.Set(s.Max)
+		return
+	}
 	raw := s.Min + (s.Max-s.Min)*position/(width-1)
 	raw = s.Min + ((raw-s.Min+s.Step/2)/s.Step)*s.Step
 	s.Set(raw)

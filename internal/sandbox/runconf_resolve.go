@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -21,38 +22,10 @@ import (
 	"github.com/ejpir/gantry/internal/vmm"
 )
 
-type explicitRunFlags struct {
-	kernel   bool
-	rootfs   bool
-	rw       bool
-	mem      bool
-	vcpus    bool
-	diskSize bool
-}
-
-func collectExplicitRunFlags(fs *flag.FlagSet) (set explicitRunFlags) {
-	fs.Visit(func(flag *flag.Flag) {
-		switch flag.Name {
-		case "kernel":
-			set.kernel = true
-		case "rootfs":
-			set.rootfs = true
-		case "rw":
-			set.rw = true
-		case "mem":
-			set.mem = true
-		case "cpus":
-			set.vcpus = true
-		case "disk-size":
-			set.diskSize = true
-		}
-	})
-	return set
-}
-
 type runResolver struct {
-	flags      *config.RunFlags
-	explicit   explicitRunFlags
+	options    config.RunOptions
+	values     map[string]secret.Value
+	explicit   config.ExplicitOptions
 	cfg        config.RunConfig
 	warnings   []string
 	progress   func(string, ...any)
@@ -74,103 +47,99 @@ func resolveFlags(f *config.RunFlags, fs *flag.FlagSet, progress func(string, ..
 }
 
 func resolveFlagsWithPolicy(f *config.RunFlags, fs *flag.FlagSet, progress func(string, ...any), milestone func(string), cachedOnly bool) (config.RunConfig, []string, error) {
+	result, err := resolveRunOptions(context.Background(), f.Options(fs), progress, milestone, cachedOnly)
+	return result.Config, result.Warnings, err
+}
+
+type resolvedRun struct {
+	Config   config.RunConfig
+	Secrets  map[string]secret.Value
+	Warnings []string
+}
+
+func resolveRunOptions(ctx context.Context, options config.RunOptions, progress func(string, ...any), milestone func(string), cachedOnly bool) (resolvedRun, error) {
 	r := runResolver{
-		flags:      f,
-		explicit:   collectExplicitRunFlags(fs),
+		options:    options,
+		explicit:   options.Explicit,
 		progress:   progress,
 		cachedOnly: cachedOnly,
 	}
-	mark := func(phase string) {
-		if milestone != nil {
-			milestone(phase)
+
+	// Validate structural/session inputs and secret sources before any disk
+	// artifacts are created. Keep every frontend on this same ordered pipeline.
+	steps := []struct {
+		run       func() error
+		milestone string
+	}{
+		{r.initialize, ""},
+		{r.resolveSessionOptions, ""},
+		{r.resolveSecrets, ""},
+		{r.resolveRuntime, "launcher runtime resolved"},
+		{r.resolveBootAssets, "launcher boot assets resolved"},
+		{r.resolveImage, "launcher image resolved"},
+		{r.resolveWritableLayer, ""},
+		{r.resolveDevContainersProfile, "launcher writable layer resolved"},
+		{r.resolveNetworking, ""},
+		{r.normalizeAndValidatePaths, "launcher configuration resolved"},
+	}
+	result := func() resolvedRun { return resolvedRun{Config: r.cfg, Secrets: r.values, Warnings: r.warnings} }
+	for _, step := range steps {
+		if err := ctx.Err(); err != nil {
+			return result(), err
+		}
+		if err := step.run(); err != nil {
+			return result(), err
+		}
+		if milestone != nil && step.milestone != "" {
+			milestone(step.milestone)
 		}
 	}
-	if err := r.initialize(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	// Session options are structural and side-effect free. Resolve them before
-	// secrets so -mcp-remote (which implies MCP) also stages the guest helper.
-	if err := r.resolveSessionOptions(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	// Secrets validate before any on-disk artifacts are created (the
-	// per-sandbox writable layer in particular): a bad -secret spec must
-	// fail the start without leaving a fresh 512 MiB rwlayer behind.
-	if err := r.resolveSecrets(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	if err := r.resolveRuntime(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	mark("launcher runtime resolved")
-	if err := r.resolveBootAssets(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	mark("launcher boot assets resolved")
-	if err := r.resolveImage(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	mark("launcher image resolved")
-	if err := r.resolveWritableLayer(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	if err := r.resolveDevContainersProfile(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	mark("launcher writable layer resolved")
-	if err := r.resolveNetworking(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	if err := r.normalizeAndValidatePaths(); err != nil {
-		return r.cfg, r.warnings, err
-	}
-	mark("launcher configuration resolved")
-	return r.cfg, r.warnings, nil
+	return result(), ctx.Err()
 }
 
 func (r *runResolver) initialize() error {
-	if *r.flags.DevContainers {
-		if !r.explicit.mem {
-			*r.flags.MemMB = min(config.DefaultDevContainersMemoryMiB, uint(config.MaxSandboxMemMB))
+	if r.options.DevContainers {
+		if !r.explicit.Memory {
+			r.options.MemMB = min(config.DefaultDevContainersMemoryMiB, uint(config.MaxSandboxMemMB))
 		}
-		if !r.explicit.vcpus {
-			*r.flags.VCPUs = min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs())
+		if !r.explicit.CPUs {
+			r.options.VCPUs = min(config.DefaultDevContainersVCPUs, config.MaxSandboxVCPUs())
 		}
-		if r.explicit.diskSize {
-			r.cfg.DevContainersDiskMiB = *r.flags.RWLayerSizeMiB
+		if r.explicit.DiskSize {
+			r.cfg.DevContainersDiskMiB = r.options.RWLayerSizeMiB
 		} else {
 			r.cfg.DevContainersDiskMiB = config.DefaultDevContainersDiskSizeMiB
 		}
 	}
-	if err := config.ValidateSandboxResources(*r.flags.MemMB, *r.flags.VCPUs); err != nil {
+	if err := config.ValidateSandboxResources(r.options.MemMB, r.options.VCPUs); err != nil {
 		return err
 	}
-	if err := config.ValidateRWLayerSize(*r.flags.RWLayerSizeMiB); err != nil {
+	if err := config.ValidateRWLayerSize(r.options.RWLayerSizeMiB); err != nil {
 		return err
 	}
-	r.cfg.MemMB = *r.flags.MemMB
-	r.cfg.VCPUs = *r.flags.VCPUs
-	r.cfg.RWLayerSizeMiB = *r.flags.RWLayerSizeMiB
+	r.cfg.MemMB = r.options.MemMB
+	r.cfg.VCPUs = r.options.VCPUs
+	r.cfg.RWLayerSizeMiB = r.options.RWLayerSizeMiB
 	return nil
 }
 
 func (r *runResolver) resolveRuntime() error {
-	r.cfg.Runtime = *r.flags.Runtime
-	r.cfg.Kernel = *r.flags.Kernel
-	if r.explicit.kernel {
+	r.cfg.Runtime = r.options.Runtime
+	r.cfg.Kernel = r.options.Kernel
+	if r.explicit.Kernel {
 		r.cfg.KernelPolicy = config.KernelPolicyPinned
 	} else {
 		r.cfg.KernelPolicy = config.KernelPolicyRelease
 	}
-	r.cfg.Rootfs = *r.flags.Rootfs
+	r.cfg.Rootfs = r.options.Rootfs
 	switch r.cfg.Runtime {
 	case "crun":
 		return nil
 	case "runsc":
-		if !r.explicit.rootfs {
+		if !r.explicit.Rootfs {
 			r.cfg.Rootfs = guestasset.GVisorRootfs(r.cfg.Rootfs)
 		}
-		if !r.explicit.kernel {
+		if !r.explicit.Kernel {
 			r.cfg.Kernel = guestasset.GVisorKernel(r.cfg.Kernel)
 		}
 		return nil
@@ -181,7 +150,7 @@ func (r *runResolver) resolveRuntime() error {
 
 func (r *runResolver) resolveBootAssets() error {
 	if r.cfg.Kernel != "" && !gutil.FileExists(r.cfg.Kernel) {
-		if r.explicit.kernel {
+		if r.explicit.Kernel {
 			return fmt.Errorf("kernel %s not found", r.cfg.Kernel)
 		}
 		kernel, err := guestasset.EnsureKernel(r.cfg.Kernel, r.report)
@@ -198,7 +167,7 @@ func (r *runResolver) resolveBootAssets() error {
 	if r.cfg.Rootfs == "" || gutil.FileExists(r.cfg.Rootfs) {
 		return nil
 	}
-	if r.explicit.rootfs {
+	if r.explicit.Rootfs {
 		return fmt.Errorf("rootfs %s not found", r.cfg.Rootfs)
 	}
 	rootfs, err := guestasset.EnsureRootfs(r.cfg.Rootfs, r.report)
@@ -214,7 +183,7 @@ func (r *runResolver) resolveBootAssets() error {
 }
 
 func (r *runResolver) resolveImage() error {
-	r.cfg.Image = *r.flags.Image
+	r.cfg.Image = r.options.Image
 	if r.cfg.Image == "" {
 		r.cfg.Image = guestasset.DefaultImage()
 		if !gutil.FileExists(r.cfg.Image) {
@@ -230,8 +199,8 @@ func (r *runResolver) resolveImage() error {
 			r.cfg.Image = imagePath
 		}
 	}
-	if *r.flags.LayerSet != "" {
-		layers, err := client.LoadLayerSet(*r.flags.LayerSet)
+	if r.options.LayerSet != "" {
+		layers, err := client.LoadLayerSet(r.options.LayerSet)
 		if err != nil {
 			return err
 		}
@@ -285,19 +254,19 @@ func kernelArch(path string) (string, error) {
 }
 
 func (r *runResolver) resolveWritableLayer() error {
-	if r.cfg.LayerSet != nil && r.explicit.rw && !*r.flags.RW {
+	if r.cfg.LayerSet != nil && r.explicit.RW && !r.options.RW {
 		return fmt.Errorf("a layerset is a writable overlay pair (remove -rw=false)")
 	}
 
-	r.cfg.RWLayer = *r.flags.RWLayer
+	r.cfg.RWLayer = r.options.RWLayer
 	explicitLayer := r.cfg.RWLayer != ""
 	switch {
 	case r.cfg.RWLayer != "":
-	case r.explicit.rw && !*r.flags.RW:
+	case r.explicit.RW && !r.options.RW:
 		// An explicitly read-only VM cannot attach a writable layer. In
 		// particular, do not format the implicit per-sandbox ext4.
-	case r.flags.Name != "":
-		path, warnings, err := rwlayer.Default(r.flags.Name, r.cfg.ImageIdentity(), r.cfg.RWLayerSizeMiB, r.report)
+	case r.options.Name != "":
+		path, warnings, err := rwlayer.Default(r.options.Name, r.cfg.ImageIdentity(), r.cfg.RWLayerSizeMiB, r.report)
 		if err != nil {
 			return err
 		}
@@ -314,7 +283,7 @@ func (r *runResolver) resolveWritableLayer() error {
 		}
 		r.cfg.RW = true
 	}
-	r.cfg.RW = *r.flags.RW || r.cfg.RW || (!r.explicit.rw && r.cfg.RWLayer != "")
+	r.cfg.RW = r.options.RW || r.cfg.RW || (!r.explicit.RW && r.cfg.RWLayer != "")
 	if r.cfg.RWLayer == "" && r.cfg.RW {
 		r.cfg.RW = false
 		r.warnings = append(r.warnings, "-rw: no writable layer found; running read-only. Create one with ./scripts/mkrwlayer.sh artifacts/rwlayer.ext4 512")
@@ -332,7 +301,7 @@ func (r *runResolver) resolveWritableLayer() error {
 }
 
 func (r *runResolver) resolveDevContainersProfile() error {
-	prepared, _, warnings, err := prepareDevContainersProfile(r.flags.Name, r.cfg, r.progress)
+	prepared, _, warnings, err := prepareDevContainersProfile(r.options.Name, r.cfg, r.progress)
 	if err != nil {
 		return err
 	}
@@ -342,20 +311,20 @@ func (r *runResolver) resolveDevContainersProfile() error {
 }
 
 func (r *runResolver) resolveNetworking() error {
-	r.cfg.Shares = append([]string(nil), (*r.flags.Shares)...)
+	r.cfg.Shares = append([]string(nil), (r.options.Shares)...)
 	if !r.cfg.RW && len(r.cfg.Shares) != 0 {
 		return fmt.Errorf("shares require a writable container root (remove -rw=false)")
 	}
-	r.cfg.Ports = append([]string(nil), (*r.flags.Publish)...)
-	r.cfg.Net = *r.flags.Net
-	r.cfg.GVProxy = *r.flags.GVProxy
-	proxy, err := config.ParseForwardProxy(*r.flags.ProxyURL)
+	r.cfg.Ports = append([]string(nil), (r.options.Publish)...)
+	r.cfg.Net = r.options.Net
+	r.cfg.GVProxy = r.options.GVProxy
+	proxy, err := config.ParseForwardProxy(r.options.ProxyURL)
 	if err != nil {
 		return err
 	}
 	r.cfg.ProxyURL = proxy.URL
-	r.cfg.NoProxy = *r.flags.NoProxy
-	r.cfg.ProxyEnforce = *r.flags.ProxyEnforce
+	r.cfg.NoProxy = r.options.NoProxy
+	r.cfg.ProxyEnforce = r.options.ProxyEnforce
 	if err := config.ValidateProxyConfig(r.cfg); err != nil {
 		return err
 	}
@@ -391,10 +360,11 @@ func (r *runResolver) resolveNetworking() error {
 }
 
 func (r *runResolver) resolveSecrets() error {
-	_, sources, names, err := r.flags.ResolveSecretSources()
+	values, sources, names, err := r.options.ResolveSecretSources()
 	if err != nil {
 		return err
 	}
+	r.values = values
 	r.cfg.SecretNames = names
 	r.cfg.SecretSources = sources
 	// Host-bound secrets (NAME@host), OAuth custody, MCP, and SSH all need
@@ -403,7 +373,7 @@ func (r *runResolver) resolveSecrets() error {
 	// Stage the asset here — during CLI resolution, with progress — so a
 	// first-run download never lands on the VM boot path. Failure to stage
 	// is not fatal: the daemon warns loudly at delivery time instead.
-	if hasBoundSecrets(names) || *r.flags.OAuthCustody || *r.flags.MCP || *r.flags.SSH {
+	if hasBoundSecrets(names) || r.options.OAuthCustody || r.options.MCP || r.options.SSH {
 		path, err := guestasset.EnsureGuestTools(guestasset.DefaultGuestTools(), r.report)
 		if err != nil {
 			// Not fatal: the daemon warns loudly at delivery time instead.
@@ -430,10 +400,10 @@ func (r *runResolver) resolveSecrets() error {
 // nothing to warn about; a policy that fails to parse is reported by
 // network bring-up, not here.
 func (r *runResolver) warnBoundSecretsVsPolicy(names []string, sources []secret.NamedSource) {
-	if r.flags.NetPol == nil || *r.flags.NetPol == "" {
+	if r.options.NetPol == "" {
 		return
 	}
-	policy, err := netpol.Load(*r.flags.NetPol)
+	policy, err := netpol.Load(r.options.NetPol)
 	if err != nil {
 		return
 	}
@@ -455,31 +425,31 @@ func (r *runResolver) warnBoundSecretsVsPolicy(names []string, sources []secret.
 }
 
 func (r *runResolver) resolveSessionOptions() error {
-	r.cfg.ProcessIsolation = *r.flags.ProcessIsolation
+	r.cfg.ProcessIsolation = r.options.ProcessIsolation
 	if err := config.ValidateProcessIsolation(r.cfg.ProcessIsolation); err != nil {
 		return fmt.Errorf("-process-isolation must be auto, required, or off, got %q", r.cfg.ProcessIsolation)
 	}
-	r.cfg.NetPol = *r.flags.NetPol
-	r.cfg.AllowLN = *r.flags.AllowLN
-	enabled := *r.flags.OAuthBridge
+	r.cfg.NetPol = r.options.NetPol
+	r.cfg.AllowLN = r.options.AllowLN
+	enabled := r.options.OAuthBridge
 	r.cfg.OAuthBridge = &enabled
-	custody := *r.flags.OAuthCustody
+	custody := r.options.OAuthCustody
 	r.cfg.OAuthCustody = &custody
 	if custody && !enabled {
 		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
 	}
-	r.cfg.MCP = *r.flags.MCP
-	r.cfg.SSH = *r.flags.SSH
-	r.cfg.DevContainers = *r.flags.DevContainers
+	r.cfg.MCP = r.options.MCP
+	r.cfg.SSH = r.options.SSH
+	r.cfg.DevContainers = r.options.DevContainers
 	if r.cfg.DevContainers && !r.cfg.SSH {
 		return fmt.Errorf("-devcontainers requires -ssh")
 	}
-	if r.cfg.DevContainers && config.NormalizeRuntime(*r.flags.Runtime) != "crun" {
+	if r.cfg.DevContainers && config.NormalizeRuntime(r.options.Runtime) != "crun" {
 		return fmt.Errorf("-devcontainers requires -runtime crun")
 	}
-	r.cfg.MCPFSRoot = *r.flags.MCPFSRoot
-	r.cfg.MCPFSUser = *r.flags.MCPFSUser
-	r.cfg.MCPRemotes = append([]string{}, (*r.flags.MCPRemotes)...)
+	r.cfg.MCPFSRoot = r.options.MCPFSRoot
+	r.cfg.MCPFSUser = r.options.MCPFSUser
+	r.cfg.MCPRemotes = append([]string{}, (r.options.MCPRemotes)...)
 	if len(r.cfg.MCPRemotes) > mcpspec.MaxRemotes {
 		return fmt.Errorf("too many -mcp-remote values (max %d)", mcpspec.MaxRemotes)
 	}

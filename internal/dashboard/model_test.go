@@ -1110,10 +1110,10 @@ func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {
 	m.openCreateDialog()
 	m.createName.SetValue("gvisor-box")
 
-	// defaults: crun + auto → no extra flags
-	argv := m.createArgv("gvisor-box")
-	if strings.Join(argv, " ") != "start gvisor-box" {
-		t.Fatalf("default argv = %v", argv)
+	// Defaults remain typed; an automatic kernel is not marked explicit.
+	request := m.createRequest("gvisor-box")
+	if request.Name != "gvisor-box" || request.Options.Runtime != "crun" || request.Options.Explicit.Kernel {
+		t.Fatalf("default request=%+v", request)
 	}
 
 	// toggle runtime to runsc
@@ -1126,13 +1126,12 @@ func TestSandboxTUICreateRuntimeAndKernel(t *testing.T) {
 	// cycle kernel: auto → staged kernel
 	m.createFocus = 3
 	_, _ = m.updateCreateDialogKey(tea.KeyPressMsg{Code: tea.KeySpace})
-	argv = m.createArgv("gvisor-box")
-	joined := strings.Join(argv, " ")
-	if !strings.Contains(joined, "-runtime runsc") {
-		t.Errorf("argv lacks -runtime runsc: %v", argv)
+	request = m.createRequest("gvisor-box")
+	if request.Options.Runtime != "runsc" {
+		t.Errorf("runtime=%s", request.Options.Runtime)
 	}
-	if !strings.Contains(joined, "-kernel ") || !strings.Contains(joined, staged) {
-		t.Errorf("argv lacks the staged kernel: %v", argv)
+	if !request.Options.Explicit.Kernel || !strings.Contains(request.Options.Kernel, staged) {
+		t.Errorf("kernel selection=%+v", request.Options)
 	}
 
 	// cycle again: back to auto → no -kernel flag
@@ -1167,9 +1166,9 @@ func TestSandboxTUICreateResourceSliders(t *testing.T) {
 	if m.createIsolation != "required" {
 		t.Fatalf("isolation choice = %q, want required", m.createIsolation)
 	}
-	argv := strings.Join(m.createArgv("bigger"), " ")
-	if !strings.Contains(argv, "-cpus 2") || !strings.Contains(argv, "-mem 640") || !strings.Contains(argv, "-disk-size 1024") || !strings.Contains(argv, "-process-isolation required") {
-		t.Fatalf("create argv = %q", argv)
+	options := m.createRequest("bigger").Options
+	if options.VCPUs != 2 || options.MemMB != 640 || options.RWLayerSizeMiB != 1024 || options.ProcessIsolation != "required" {
+		t.Fatalf("create options=%+v", options)
 	}
 }
 
@@ -1187,11 +1186,9 @@ func TestSandboxTUICreateDevContainersEnablesSSHAndDefaults(t *testing.T) {
 		m.createDisk.Value != int(m.limits.DefaultDevContainersDiskMiB) {
 		t.Fatalf("devcontainer defaults = %d CPU, %d MiB RAM, %d MiB disk", m.createCPUs.Value, m.createMemory.Value, m.createDisk.Value)
 	}
-	argv := strings.Join(m.createArgv("dev"), " ")
-	for _, want := range []string{"-ssh", "-devcontainers", "-cpus", "-mem", "-disk-size"} {
-		if !strings.Contains(argv, want) {
-			t.Errorf("create argv %q lacks %q", argv, want)
-		}
+	options := m.createRequest("dev").Options
+	if !options.SSH || !options.DevContainers || !options.Explicit.Memory || !options.Explicit.CPUs || !options.Explicit.DiskSize {
+		t.Errorf("create options=%+v", options)
 	}
 }
 
@@ -1252,30 +1249,34 @@ func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
 }
 
 func TestSandboxTUICreateButtonHitbox(t *testing.T) {
-	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
-	m.loading = false
-	m.width, m.height = 100, 30
-	m.openCreateDialog()
-	m.createName.SetValue("click-create")
-	m.focusCreate(10)
+	for _, size := range [][2]int{{28, 12}, {40, 20}, {100, 30}} {
+		t.Run(fmt.Sprintf("%dx%d", size[0], size[1]), func(t *testing.T) {
+			m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
+			m.loading = false
+			m.width, m.height = size[0], size[1]
+			m.openCreateDialog()
+			m.createName.SetValue("click-create")
+			m.focusCreate(10)
 
-	plain := ansi.Strip(m.View().Content)
-	buttonX, buttonY := -1, -1
-	lines := strings.Split(plain, "\n")
-	for y := len(lines) - 1; y >= 0; y-- {
-		if byteOffset := strings.LastIndex(lines[y], "Create"); byteOffset >= 0 {
-			buttonX = lipgloss.Width(lines[y][:byteOffset]) + 1
-			buttonY = y
-			break
-		}
-	}
-	if buttonX < 0 || buttonY < 0 {
-		t.Fatalf("Create button not rendered:\n%s", plain)
-	}
-	model, _ := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
-	m = *model.(*sandboxTUIModel)
-	if m.dialog != tuiNoDialog || m.busyAction != "create" || m.busyName != "click-create" {
-		t.Fatalf("Create click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+			plain := ansi.Strip(m.View().Content)
+			buttonX, buttonY := -1, -1
+			lines := strings.Split(plain, "\n")
+			for y := len(lines) - 1; y >= 0; y-- {
+				if byteOffset := strings.LastIndex(lines[y], "Create"); byteOffset >= 0 {
+					buttonX = lipgloss.Width(lines[y][:byteOffset]) + 1
+					buttonY = y
+					break
+				}
+			}
+			if buttonX < 0 || buttonY < 0 {
+				t.Fatalf("Create button not rendered:\n%s", plain)
+			}
+			model, _ := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
+			m = *model.(*sandboxTUIModel)
+			if m.dialog != tuiNoDialog || m.busyAction != "create" || m.busyName != "click-create" {
+				t.Fatalf("Create click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+			}
+		})
 	}
 }
 
