@@ -4,10 +4,12 @@
 package api
 
 import (
+	"context"
 	"os/exec"
 	"time"
 
 	"github.com/ejpir/gantry/internal/packetcapture"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -20,6 +22,10 @@ const (
 )
 
 type Sandbox struct {
+	ActiveAvailable      bool
+	ActiveMemMB          uint
+	ActiveVCPUs          int
+	RestartRequired      bool
 	Name                 string
 	State                SandboxState
 	PID                  int
@@ -56,6 +62,22 @@ type Sandbox struct {
 	RXBytes              uint64
 	DroppedPackets       uint64
 	TrafficAvailable     bool
+}
+
+// DisplayCPUs and DisplayMemoryMiB use the current allocation when it is
+// known. Saved values remain available separately for editing the next boot.
+func (sandbox Sandbox) DisplayCPUs() int {
+	if sandbox.State == Running && sandbox.ActiveAvailable {
+		return sandbox.ActiveVCPUs
+	}
+	return sandbox.VCPUs
+}
+
+func (sandbox Sandbox) DisplayMemoryMiB() uint {
+	if sandbox.State == Running && sandbox.ActiveAvailable {
+		return sandbox.ActiveMemMB
+	}
+	return sandbox.MemMB
 }
 
 type Traffic struct {
@@ -284,8 +306,9 @@ func Invalid(field string, err error) error {
 // own sandbox storage, validation, and broker RPCs; the dashboard owns only
 // interaction and presentation state.
 type Service interface {
+	lifecycle.Service
 	Snapshot() (Snapshot, error)
-	Command(argv ...string) (*exec.Cmd, error)
+	Command(ctx context.Context, argv ...string) (*exec.Cmd, error)
 	ResourceLimits() ResourceLimits
 	KernelChoices() []string
 	DefaultShareMount(tag string) string

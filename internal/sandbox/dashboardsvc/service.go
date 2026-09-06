@@ -1,6 +1,7 @@
 package dashboardsvc
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
@@ -25,16 +27,31 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
+	"github.com/ejpir/gantry/internal/sandbox/inspection"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
 // NewDashboardService exposes sandbox control through the presentation-neutral
 // dashboard contract. Constructing it performs no I/O.
-func NewDashboardService() dashboardapi.Service { return dashboardService{} }
+func NewDashboardService(launch ...lifecycle.Service) dashboardapi.Service {
+	service := dashboardService{}
+	if len(launch) > 0 {
+		service.launch = launch[0]
+	}
+	return service
+}
 
-type dashboardService struct{}
+type dashboardService struct{ launch lifecycle.Service }
+
+func (service dashboardService) Start(ctx context.Context, request lifecycle.StartRequest, observer lifecycle.Observer) (lifecycle.StartResult, error) {
+	if service.launch == nil {
+		return lifecycle.StartResult{}, fmt.Errorf("sandbox lifecycle service unavailable")
+	}
+	return service.launch.Start(ctx, request, observer)
+}
 
 var _ dashboardapi.Service = dashboardService{}
 
@@ -42,18 +59,20 @@ func (dashboardService) Snapshot() (dashboardapi.Snapshot, error) {
 	return loadDashboardSnapshot()
 }
 
-func (dashboardService) Command(argv ...string) (*exec.Cmd, error) {
+func (dashboardService) Command(ctx context.Context, argv ...string) (*exec.Cmd, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command(executable, argv...), nil
+	command := exec.CommandContext(ctx, executable, argv...)
+	command.WaitDelay = 2 * time.Second
+	return command, nil
 }
 
 func (dashboardService) ResourceLimits() dashboardapi.ResourceLimits {
 	return dashboardapi.ResourceLimits{
 		MinMemoryMB:                   uint(config.MinSandboxMemMB),
-		MaxMemoryMB:                   uint(config.MaxSandboxMemMB),
+		MaxMemoryMB:                   dashboardMaxMemoryMB(hostMemoryBytes()),
 		MinDiskSizeMiB:                config.MinRWLayerSizeMiB,
 		MaxDiskSizeMiB:                config.MaxRWLayerSizeMiB,
 		DefaultDiskSizeMiB:            config.DefaultRWLayerSizeMiB,
@@ -683,21 +702,16 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			Secrets: "none", MemMB: 512, VCPUs: 1, Dir: dir,
 			ConfigPath: filepath.Join(dir, "sandbox.json"),
 		}
-		if pid, alive := layout.PID(name); alive {
-			sandbox.PID = pid
-			sandbox.State = dashboardapi.Starting
-			if dashboardFileExists(filepath.Join(dir, "ready")) {
-				sandbox.State = dashboardapi.Running
-			}
+		observed, inspectErr := inspection.Inspect(name)
+		sandbox.PID, sandbox.State, sandbox.Updated = observed.PID, dashboardapi.SandboxState(observed.State), observed.Updated
+		sandbox.RestartRequired = observed.RestartRequired
+		if observed.Active != nil {
+			sandbox.ActiveAvailable = true
+			sandbox.ActiveMemMB, sandbox.ActiveVCPUs = observed.Active.MemoryMiB, observed.Active.CPUs
 		}
-		if info, statErr := os.Stat(sandbox.ConfigPath); statErr == nil {
-			sandbox.Updated = info.ModTime()
-		}
-
-		var cfg config.RunConfig
-		configOK := false
-		if raw, readErr := os.ReadFile(sandbox.ConfigPath); readErr == nil && json.Unmarshal(raw, &cfg) == nil {
-			configOK = true
+		cfg := observed.Desired
+		configOK := inspectErr == nil && observed.ConfigError == nil
+		if configOK {
 			sandbox.Kernel = cfg.Kernel
 			sandbox.Image = cfg.ImageRef
 			if sandbox.Image == "" {

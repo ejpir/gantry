@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
+	"github.com/ejpir/gantry/internal/sandbox/inspection"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw/mcpproto"
 	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
@@ -38,23 +37,23 @@ func CmdLs() int {
 	fmt.Printf("%-20s %-10s %-8s %-24s %s\n", "NAME", "STATE", "PID", "SECRETS", "IMAGE")
 	for _, e := range sandboxes {
 		name := e.Name()
-		state, pidStr := "stopped", "-"
-		if pid, alive := layout.PID(name); alive {
-			state, pidStr = "running", fmt.Sprint(pid)
+		observed, inspectErr := inspection.Inspect(name)
+		state, pidStr := string(observed.State), "-"
+		if observed.PID > 0 {
+			pidStr = fmt.Sprint(observed.PID)
 		}
 		image, secrets := "-", "-"
-		if b, err := os.ReadFile(filepath.Join(layout.Dir(name), "sandbox.json")); err == nil {
-			var cfg config.RunConfig
-			if json.Unmarshal(b, &cfg) == nil {
-				image = filepath.Base(cfg.Image)
-				if cfg.RW {
-					image += " (rw)"
-				}
-				if len(cfg.SecretNames) > 0 {
-					secrets = strings.Join(cfg.SecretNames, ",")
-				}
+		if inspectErr == nil && observed.ConfigError == nil {
+			cfg := observed.Desired
+			image = filepath.Base(cfg.Image)
+			if cfg.RW {
+				image += " (rw)"
+			}
+			if len(cfg.SecretNames) > 0 {
+				secrets = strings.Join(cfg.SecretNames, ",")
 			}
 		}
+
 		fmt.Printf("%-20s %-10s %-8s %-24s %s\n", name, state, pidStr, secrets, image)
 	}
 	return 0
@@ -151,7 +150,7 @@ func requestDaemonShutdown(name string) error {
 
 func cleanupSandboxRuntime(dir string) {
 	removeSSHRuntime(filepath.Base(dir), dir)
-	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", daemonReadySocketName, "ctl.sock", "1025.sock", "listen-1026.sock", credhelper.SockName, mcpproto.SockName, "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
+	for _, f := range []string{"vmm.pid", "gvproxy.pid", "ready", inspection.ActiveFile, daemonReadySocketName, "ctl.sock", "1025.sock", "listen-1026.sock", credhelper.SockName, mcpproto.SockName, "net.sock", "net.sock.client", "gvproxy-api.sock", "shares.json"} {
 		_ = os.Remove(filepath.Join(dir, f))
 	}
 	_ = os.RemoveAll(filepath.Join(dir, guestToolsShareDir))

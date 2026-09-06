@@ -3,9 +3,8 @@ package manager
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"io"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,29 +14,20 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
-	"github.com/ejpir/gantry/internal/secret"
 )
 
 type functionLifecycle struct {
-	resolve func(*config.RunFlags, *flag.FlagSet) (config.RunConfig, []string, error)
-	launch  func(string, config.RunConfig, map[string]secret.Value, bool, io.Writer, io.Writer) int
-	stop    func(string) error
-	delete  func(string) error
-	exec    func(context.Context, string, ExecRequest) (ExecResult, error)
+	start  func(context.Context, lifecycle.StartRequest, lifecycle.Observer) (lifecycle.StartResult, error)
+	stop   func(string) error
+	delete func(string) error
+	exec   func(context.Context, string, ExecRequest) (ExecResult, error)
 }
 
-func (f functionLifecycle) Resolve(flags *config.RunFlags, fs *flag.FlagSet) (config.RunConfig, []string, error) {
-	if f.resolve == nil {
-		panic("unexpected Lifecycle.Resolve")
+func (f functionLifecycle) Start(ctx context.Context, request lifecycle.StartRequest, observer lifecycle.Observer) (lifecycle.StartResult, error) {
+	if f.start == nil {
+		panic("unexpected Lifecycle.Start")
 	}
-	return f.resolve(flags, fs)
-}
-
-func (f functionLifecycle) Launch(name string, cfg config.RunConfig, secrets map[string]secret.Value, replace bool, stdout, stderr io.Writer) int {
-	if f.launch == nil {
-		panic("unexpected Lifecycle.Launch")
-	}
-	return f.launch(name, cfg, secrets, replace, stdout, stderr)
+	return f.start(ctx, request, observer)
 }
 
 func (f functionLifecycle) Stop(name string) error {
@@ -63,108 +53,67 @@ func (f functionLifecycle) Exec(ctx context.Context, name string, request ExecRe
 
 func TestManagerRoutesLifecycleOperations(t *testing.T) {
 	t.Setenv("GANTRY_HOME", filepath.Join(t.TempDir(), "sandboxes"))
-	t.Setenv("CREATE_TOKEN", "create-value")
-	t.Setenv("START_TOKEN", "start-value")
-
-	saved := config.RunConfig{
-		Image: "saved.erofs", MemMB: 512, VCPUs: 1,
-		SecretNames: []string{"START_TOKEN"},
-	}
 	savedDir := layout.Dir("saved")
 	if err := os.MkdirAll(savedDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := config.WriteSandboxConfig(savedDir, saved); err != nil {
+	if err := config.WriteSandboxConfig(savedDir, config.RunConfig{MemMB: 512, VCPUs: 1}); err != nil {
 		t.Fatal(err)
 	}
-
-	resolved := config.RunConfig{
-		Image: "resolved.erofs", MemMB: 768, VCPUs: 2,
-		SecretNames: []string{"CREATE_TOKEN"}, ProcessIsolation: "off",
-	}
-	type launchCall struct {
-		name    string
-		cfg     config.RunConfig
-		secrets map[string]secret.Value
-		replace bool
-	}
+	var requests []lifecycle.StartRequest
 	var calls []string
-	var launches []launchCall
-	lifecycle := functionLifecycle{
-		resolve: func(flags *config.RunFlags, _ *flag.FlagSet) (config.RunConfig, []string, error) {
-			calls = append(calls, "resolve")
-			if flags.Name != "created" || *flags.Image != "example.test/app" ||
-				*flags.MemMB != 768 || *flags.VCPUs != 2 || *flags.ProcessIsolation != "off" {
-				t.Fatalf("create flags were not routed: %+v", flags)
+	service := newManagerService(functionLifecycle{
+		start: func(ctx context.Context, request lifecycle.StartRequest, _ lifecycle.Observer) (lifecycle.StartResult, error) {
+			if ctx == nil {
+				t.Fatal("missing operation context")
 			}
-			if got := flags.Secrets.List(); !reflect.DeepEqual(got, []string{"CREATE_TOKEN"}) {
-				t.Fatalf("create secrets = %v", got)
-			}
-			return resolved, []string{"cached warning"}, nil
-		},
-		launch: func(name string, cfg config.RunConfig, values map[string]secret.Value, replace bool, stdout, stderr io.Writer) int {
-			calls = append(calls, "launch:"+name)
-			copyValues := make(map[string]secret.Value, len(values))
-			for key, value := range values {
-				copyValues[key] = value
-			}
-			launches = append(launches, launchCall{name: name, cfg: cfg, secrets: copyValues, replace: replace})
-			if stdout == nil || stderr == nil {
-				t.Fatal("Launch received nil output writer")
-			}
-			return 0
+			requests = append(requests, request)
+			calls = append(calls, "start:"+request.Name)
+			return lifecycle.StartResult{Name: request.Name, Warnings: []string{"cached warning"}}, nil
 		},
 		stop: func(name string) error {
 			calls = append(calls, "stop:"+name)
 			return fmt.Errorf("already stopped: %w", ErrNotRunning)
 		},
-		delete: func(name string) error {
-			calls = append(calls, "delete:"+name)
-			return nil
-		},
-	}
-	service := newManagerService(lifecycle)
-
+		delete: func(name string) error { calls = append(calls, "delete:"+name); return nil },
+	})
 	create := managerRequest(t, service, http.MethodPost, "/v1/sandboxes",
 		`{"name":"created","image":"example.test/app","memoryMiB":768,"cpus":2,"processIsolation":"off","secretNames":["CREATE_TOKEN"]}`, nil)
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", create.Code, create.Body.String())
 	}
-	var createOperation managerOperation
-	if err := json.Unmarshal(create.Body.Bytes(), &createOperation); err != nil {
+	var operation managerOperation
+	if err := json.Unmarshal(create.Body.Bytes(), &operation); err != nil {
 		t.Fatal(err)
 	}
-	if createOperation.State != "succeeded" || !reflect.DeepEqual(createOperation.Warnings, []string{"cached warning"}) {
-		t.Fatalf("create operation = %+v", createOperation)
+	if operation.State != "succeeded" || !reflect.DeepEqual(operation.Warnings, []string{"cached warning"}) {
+		t.Fatalf("operation = %+v", operation)
 	}
-
-	start := managerRequest(t, service, http.MethodPost, "/v1/sandboxes/saved/start", "", nil)
-	if start.Code != http.StatusOK {
-		t.Fatalf("start = %d %s", start.Code, start.Body.String())
+	for _, action := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/sandboxes/saved/start"},
+		{http.MethodPost, "/v1/sandboxes/saved/stop"},
+		{http.MethodDelete, "/v1/sandboxes/saved"},
+	} {
+		response := managerRequest(t, service, action.method, action.path, "", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s = %d %s", action.path, response.Code, response.Body.String())
+		}
 	}
-	stop := managerRequest(t, service, http.MethodPost, "/v1/sandboxes/saved/stop", "", nil)
-	if stop.Code != http.StatusOK {
-		t.Fatalf("idempotent stop = %d %s", stop.Code, stop.Body.String())
+	if !reflect.DeepEqual(calls, []string{"start:created", "start:saved", "stop:saved", "delete:saved"}) {
+		t.Fatalf("calls=%v", calls)
 	}
-	deleted := managerRequest(t, service, http.MethodDelete, "/v1/sandboxes/saved", "", nil)
-	if deleted.Code != http.StatusOK {
-		t.Fatalf("delete = %d %s", deleted.Code, deleted.Body.String())
+	if len(requests) != 2 {
+		t.Fatalf("requests=%+v", requests)
 	}
-
-	wantCalls := []string{"resolve", "launch:created", "launch:saved", "stop:saved", "delete:saved"}
-	if !reflect.DeepEqual(calls, wantCalls) {
-		t.Fatalf("lifecycle calls = %v, want %v", calls, wantCalls)
+	created := requests[0]
+	if created.Name != "created" || created.Mode != lifecycle.Create || !created.CachedOnly ||
+		created.Options.Image != "example.test/app" || created.Options.MemMB != 768 || created.Options.VCPUs != 2 ||
+		created.Options.ProcessIsolation != "off" || !created.Options.Explicit.Memory || !created.Options.Explicit.CPUs ||
+		!created.Options.Explicit.RW || created.Options.RW || !reflect.DeepEqual(created.Options.Secrets, []string{"CREATE_TOKEN"}) {
+		t.Fatalf("create request=%+v", created)
 	}
-	if len(launches) != 2 {
-		t.Fatalf("launch calls = %+v", launches)
-	}
-	if call := launches[0]; call.name != "created" || !call.replace || !reflect.DeepEqual(call.cfg, resolved) ||
-		call.secrets["CREATE_TOKEN"].Raw() != "create-value" {
-		t.Fatalf("create launch = %+v", call)
-	}
-	if call := launches[1]; call.name != "saved" || call.replace || !reflect.DeepEqual(call.cfg, saved) ||
-		call.secrets["START_TOKEN"].Raw() != "start-value" {
-		t.Fatalf("start launch = %+v", call)
+	if requests[1].Name != "saved" || requests[1].Mode != lifecycle.Resume {
+		t.Fatalf("resume request=%+v", requests[1])
 	}
 }
 

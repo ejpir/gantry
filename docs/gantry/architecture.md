@@ -76,6 +76,25 @@ The ordinary command paths are:
 - `serve` provides a structured local HTTP API and delegates lifecycle work
   to the same implementation.
 
+Create and resume use the typed `internal/sandbox/lifecycle` application
+contract. CLI flags, HTTP JSON, and dashboard form inputs are converted into
+launch options at their respective adapters. The shared service owns
+configuration resolution, the launch lock, and readiness; it returns ordinary
+Go errors and structured progress events. HTTP creation retains its explicit
+read-only default and cached-image policy.
+
+`internal/sandbox/inspection` supplies the shared readiness and configuration
+read model. The daemon publishes its immutable boot settings before readiness,
+allowing frontends to distinguish active resources from saved changes that
+require restart. The create dialog owns its form state and emits control
+geometry during rendering.
+
+Dashboard shutdown cancels and joins its launch operations and background
+subprocesses. Preparation checks cancellation between its existing bounded
+stages; a launch cancelled before readiness reaps its uncommitted daemon.
+After readiness the persistent sandbox owns its daemon independently of the
+caller. Subprocess diagnostics retain a bounded tail.
+
 ### Sandbox supervisor
 
 The supervisor is the trusted host control plane for one sandbox. It owns:

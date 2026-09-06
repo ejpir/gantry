@@ -3,29 +3,16 @@ package manager
 import (
 	"context"
 	"errors"
-	"flag"
-	"io"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"net/http"
 	"time"
-
-	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/secret"
 )
 
 // Lifecycle is the sandbox lifecycle this API drives. The sandbox package
 // implements it; the manager speaks HTTP and never learns how a VM is
 // started, stopped or entered.
 type Lifecycle interface {
-	// Resolve turns registered run flags into a boot configuration using only
-	// locally cached assets — an API request must never block on a network
-	// fetch — and returns any warnings alongside it.
-	Resolve(flags *config.RunFlags, fs *flag.FlagSet) (config.RunConfig, []string, error)
-
-	// Launch boots name and returns a CLI-style exit status, writing progress
-	// to stdout and diagnostics to stderr. replaceConfig rewrites cfg for a
-	// create; a start re-reads saved config and env secrets under the stable
-	// cross-process launch lock rather than trusting the HTTP preflight copy.
-	Launch(name string, cfg config.RunConfig, secrets map[string]secret.Value, replaceConfig bool, stdout, stderr io.Writer) int
+	lifecycle.Service
 
 	// Stop reports ErrNotRunning when the sandbox is already stopped.
 	Stop(name string) error

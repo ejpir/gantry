@@ -24,9 +24,10 @@ import (
 
 	"github.com/ejpir/gantry/api/managerapi"
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/inspection"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
-	"github.com/ejpir/gantry/internal/secret"
 )
 
 const (
@@ -73,18 +74,21 @@ type managerEvent struct {
 }
 
 type managerSandbox struct {
-	Name         string `json:"name"`
-	State        string `json:"state"`
-	PID          int    `json:"pid,omitempty"`
-	Image        string `json:"image,omitempty"`
-	ImageRef     string `json:"imageRef,omitempty"`
-	ImageDigest  string `json:"imageDigest,omitempty"`
-	CPUs         int    `json:"cpus,omitempty"`
-	MemoryMiB    uint   `json:"memoryMiB,omitempty"`
-	Writable     bool   `json:"writable"`
-	Proxy        string `json:"proxy,omitempty"`
-	NoProxy      string `json:"noProxy,omitempty"`
-	ProxyEnforce bool   `json:"proxyEnforce,omitempty"`
+	Desired         inspection.BootSettings  `json:"desired"`
+	Active          *inspection.BootSettings `json:"active,omitempty"`
+	RestartRequired bool                     `json:"restartRequired"`
+	Name            string                   `json:"name"`
+	State           string                   `json:"state"`
+	PID             int                      `json:"pid,omitempty"`
+	Image           string                   `json:"image,omitempty"`
+	ImageRef        string                   `json:"imageRef,omitempty"`
+	ImageDigest     string                   `json:"imageDigest,omitempty"`
+	CPUs            int                      `json:"cpus,omitempty"`
+	MemoryMiB       uint                     `json:"memoryMiB,omitempty"`
+	Writable        bool                     `json:"writable"`
+	Proxy           string                   `json:"proxy,omitempty"`
+	NoProxy         string                   `json:"noProxy,omitempty"`
+	ProxyEnforce    bool                     `json:"proxyEnforce,omitempty"`
 }
 
 type managerCreateRequest struct {
@@ -233,21 +237,9 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(operation *managerOperation) error {
-		if _, err := os.Stat(filepath.Join(layout.Dir(request.Name), "sandbox.json")); err == nil {
-			return fmt.Errorf("sandbox %q already exists", request.Name)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		cfg, secrets, warnings, err := m.resolveCreate(request)
-		if err != nil {
-			return err
-		}
-		m.setOperationWarnings(operation.ID, warnings)
-		var output, errorOutput bytes.Buffer
-		if status := m.lifecycle.Launch(request.Name, cfg, secrets, true, &output, &errorOutput); status != 0 {
-			return managerCommandError(errorOutput.String(), output.String(), "sandbox start failed")
-		}
-		return nil
+		result, err := m.lifecycle.Start(r.Context(), request.startRequest(), nil)
+		m.setOperationWarnings(operation.ID, result.Warnings)
+		return err
 	})
 }
 
@@ -257,15 +249,8 @@ func (m *managerService) handleStartSandbox(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(*managerOperation) error {
-		cfg, secrets, err := loadManagerStart(name)
-		if err != nil {
-			return err
-		}
-		var output, errorOutput bytes.Buffer
-		if status := m.lifecycle.Launch(name, cfg, secrets, false, &output, &errorOutput); status != 0 {
-			return managerCommandError(errorOutput.String(), output.String(), "sandbox start failed")
-		}
-		return nil
+		_, err := m.lifecycle.Start(r.Context(), lifecycle.StartRequest{Name: name, Mode: lifecycle.Resume}, nil)
+		return err
 	})
 }
 
@@ -600,111 +585,52 @@ func (m *managerService) subscribe() (uint64, <-chan managerEvent, func(), bool)
 	return id, channel, cancel, true
 }
 
-func (m *managerService) resolveCreate(request managerCreateRequest) (config.RunConfig, map[string]secret.Value, []string, error) {
-	fs := flag.NewFlagSet("manager-create", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	flags := config.RegisterRunFlags(fs)
-	flags.Name = request.Name
-	set := func(name, value string) error {
-		if err := fs.Set(name, value); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		return nil
+func (request managerCreateRequest) startRequest() lifecycle.StartRequest {
+	options := config.DefaultRunOptions()
+	options.Name, options.Image = request.Name, request.Image
+	if request.Kernel != "" {
+		options.Kernel = request.Kernel
+		options.Explicit.Kernel = true
 	}
-	for _, setting := range []struct{ name, value string }{
-		{"image", request.Image}, {"kernel", request.Kernel}, {"rootfs", request.Rootfs},
-		{"runtime", request.Runtime}, {"rwlayer", request.RWLayer}, {"net-policy", request.NetworkPolicy},
-		{"proxy", request.Proxy}, {"no-proxy", request.NoProxy},
-		{"process-isolation", request.ProcessIsolation},
-	} {
-		if setting.value != "" {
-			if err := set(setting.name, setting.value); err != nil {
-				return config.RunConfig{}, nil, nil, err
-			}
-		}
+	if request.Rootfs != "" {
+		options.Rootfs = request.Rootfs
+		options.Explicit.Rootfs = true
 	}
-	// The manager API intentionally defaults to read-only and network enabled.
-	rw := false
+	if request.Runtime != "" {
+		options.Runtime = request.Runtime
+	}
+	if request.ProcessIsolation != "" {
+		options.ProcessIsolation = request.ProcessIsolation
+	}
+	options.RWLayer = request.RWLayer
+	// HTTP creation has always defaulted to read-only. Presence is explicit
+	// so the common resolver does not infer a writable layer.
+	options.Explicit.RW = true
 	if request.RW != nil {
-		rw = *request.RW
+		options.RW = *request.RW
 	}
-	if err := set("rw", fmt.Sprint(rw)); err != nil {
-		return config.RunConfig{}, nil, nil, err
-	}
-	network := true
 	if request.Net != nil {
-		network = *request.Net
+		options.Net = *request.Net
 	}
-	if err := set("net", fmt.Sprint(network)); err != nil {
-		return config.RunConfig{}, nil, nil, err
-	}
-	oauth := true
 	if request.OAuthBridge != nil {
-		oauth = *request.OAuthBridge
+		options.OAuthBridge = *request.OAuthBridge
 	}
-	if err := set("oauth-bridge", fmt.Sprint(oauth)); err != nil {
-		return config.RunConfig{}, nil, nil, err
-	}
-	if request.AllowLocalNetwork {
-		if err := set("allow-local-net", "true"); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
-	}
-	if request.ProxyEnforce {
-		if err := set("proxy-enforce", "true"); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
-	}
+	options.NetPol, options.AllowLN = request.NetworkPolicy, request.AllowLocalNetwork
+	options.ProxyURL, options.NoProxy, options.ProxyEnforce = request.Proxy, request.NoProxy, request.ProxyEnforce
 	if request.MemoryMiB != 0 {
-		if err := set("mem", fmt.Sprint(request.MemoryMiB)); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
-	}
-	if request.DiskSizeMiB != 0 {
-		if err := set("disk-size", fmt.Sprint(request.DiskSizeMiB)); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
+		options.MemMB = request.MemoryMiB
+		options.Explicit.Memory = true
 	}
 	if request.CPUs != 0 {
-		if err := set("cpus", fmt.Sprint(request.CPUs)); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
+		options.VCPUs = request.CPUs
+		options.Explicit.CPUs = true
 	}
-	for _, share := range request.Shares {
-		if err := set("share", share); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
+	if request.DiskSizeMiB != 0 {
+		options.RWLayerSizeMiB = request.DiskSizeMiB
+		options.Explicit.DiskSize = true
 	}
-	for _, publish := range request.Publish {
-		if err := set("publish", publish); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
-	}
-	for _, name := range request.SecretNames {
-		if err := set("secret", name); err != nil {
-			return config.RunConfig{}, nil, nil, err
-		}
-	}
-	cfg, warnings, err := m.lifecycle.Resolve(flags, fs)
-	if err != nil {
-		return config.RunConfig{}, nil, warnings, err
-	}
-	// Source-backed secrets resolve daemon-side; only literal dotenv-file
-	// values ride the handshake from here. Resolve normally already
-	// populated cfg.SecretSources from the same flags; merge defensively.
-	secrets, sources, _, err := flags.ResolveSecretSources()
-	if len(cfg.SecretSources) == 0 && len(sources) > 0 {
-		cfg.SecretSources = sources
-	}
-	return cfg, secrets, warnings, err
-}
-
-func loadManagerStart(name string) (config.RunConfig, map[string]secret.Value, error) {
-	cfg, secrets, err := config.ReadSandboxForLaunch(layout.Dir(name), os.LookupEnv)
-	if err != nil {
-		return config.RunConfig{}, nil, fmt.Errorf("sandbox %q has no valid saved configuration: %w", name, err)
-	}
-	return cfg, secrets, nil
+	options.Shares, options.Publish, options.Secrets = request.Shares, request.Publish, request.SecretNames
+	return lifecycle.StartRequest{Name: request.Name, Mode: lifecycle.Create, Options: options, CachedOnly: true}
 }
 
 func listManagerSandboxes() ([]managerSandbox, error) {
@@ -729,17 +655,14 @@ func listManagerSandboxes() ([]managerSandbox, error) {
 }
 
 func inspectManagerSandbox(name string) (managerSandbox, error) {
-	cfg, err := config.ReadSandboxConfig(layout.Dir(name))
+	snapshot, err := inspection.Inspect(name)
 	if err != nil {
 		return managerSandbox{}, err
 	}
-	state := "stopped"
-	pid, alive := layout.PID(name)
-	if alive {
-		state = "running"
-	} else {
-		pid = 0
+	if snapshot.ConfigError != nil {
+		return managerSandbox{}, snapshot.ConfigError
 	}
+	cfg := snapshot.Desired
 	imageName := filepath.Base(cfg.Image)
 	if cfg.ImageRef != "" {
 		imageName = cfg.ImageRef
@@ -749,7 +672,8 @@ func inspectManagerSandbox(name string) (managerSandbox, error) {
 		noProxy = config.DefaultNoProxy
 	}
 	return managerSandbox{
-		Name: name, State: state, PID: pid, Image: imageName,
+		Name: name, State: string(snapshot.State), PID: snapshot.PID, Image: imageName,
+		Desired: inspection.Settings(cfg), Active: snapshot.Active, RestartRequired: snapshot.RestartRequired,
 		ImageRef: cfg.ImageRef, ImageDigest: cfg.ImageDigest,
 		CPUs: cfg.VCPUs, MemoryMiB: cfg.MemMB, Writable: cfg.RW,
 		Proxy: cfg.ProxyURL, NoProxy: noProxy, ProxyEnforce: cfg.ProxyEnforce,
@@ -830,17 +754,6 @@ func writeManagerError(w http.ResponseWriter, status int, err error, operationID
 		message = err.Error()
 	}
 	writeManagerJSON(w, status, managerErrorResponse{Error: message, OperationID: operationID})
-}
-
-func managerCommandError(errorOutput, output, fallback string) error {
-	message := strings.TrimSpace(errorOutput)
-	if message == "" {
-		message = strings.TrimSpace(output)
-	}
-	if message == "" {
-		message = fallback
-	}
-	return errors.New(message)
 }
 
 func managerFingerprint(method, path string, body []byte) string {

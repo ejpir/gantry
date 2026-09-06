@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -36,7 +37,7 @@ func installDurabilityGate(t *testing.T) (entered <-chan struct{}, release chan<
 }
 
 func (p *fakeSandboxDaemon) PID() int { return p.pid }
-func (p *fakeSandboxDaemon) SendHandshake(string) error {
+func (p *fakeSandboxDaemon) SendHandshake(context.Context, string) error {
 	return nil
 }
 func (p *fakeSandboxDaemon) Wait() error {

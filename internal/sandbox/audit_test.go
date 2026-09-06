@@ -64,7 +64,7 @@ func TestWarnBoundSecretsVsPolicy(t *testing.T) {
 	}
 	var got []string
 	r := &runResolver{
-		flags:    &config.RunFlags{NetPol: &pol},
+		options:  config.RunOptions{NetPol: pol},
 		progress: func(f string, a ...any) { got = append(got, fmt.Sprintf(f, a...)) },
 	}
 	src, err := secret.ParseNamedSource("AWS_CREDS@sts.amazonaws.com=@/secure/aws")
@@ -97,7 +97,7 @@ func TestWarnBoundSecretsVsPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = nil
-	r.flags.NetPol = &pol2
+	r.options.NetPol = pol2
 	r.warnBoundSecretsVsPolicy([]string{"GL@gitlab.com"}, nil)
 	if len(got) != 0 {
 		t.Fatalf("warnings with name-blind policy = %v, want none", got)
@@ -106,7 +106,7 @@ func TestWarnBoundSecretsVsPolicy(t *testing.T) {
 	// No -net-policy at all: nothing to check.
 	got = nil
 	empty := ""
-	r.flags.NetPol = &empty
+	r.options.NetPol = empty
 	r.warnBoundSecretsVsPolicy([]string{"GL@gitlab.com"}, nil)
 	if len(got) != 0 {
 		t.Fatalf("warnings without policy = %v, want none", got)

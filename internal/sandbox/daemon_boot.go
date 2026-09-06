@@ -11,6 +11,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/inspection"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
@@ -267,6 +268,9 @@ func (d *daemonRuntime) connectGuest() error {
 func (d *daemonRuntime) publishReady() error {
 	if d.control == nil || d.broker == nil {
 		return fmt.Errorf("refusing to publish readiness before the control broker is listening")
+	}
+	if err := inspection.PublishActive(d.dir, d.cfg); err != nil {
+		return fmt.Errorf("publish active sandbox settings: %w", err)
 	}
 	// Keep the historical timing label, but record it only after startControl
 	// has installed ctl.sock and launched the broker accept loop. startControl

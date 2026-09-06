@@ -1,16 +1,14 @@
 package dashboard
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
+	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/selfupdate"
 
@@ -28,6 +26,7 @@ func Run(service dashboardapi.Service) int {
 	}
 
 	model := newSandboxTUIModel(service)
+	defer model.operations.close()
 	program := tea.NewProgram(
 		&model,
 		tea.WithInput(os.Stdin),
@@ -178,8 +177,9 @@ type tuiUpdateStatusMsg struct {
 }
 
 type sandboxTUIModel struct {
-	service dashboardapi.Service
-	limits  dashboardapi.ResourceLimits
+	operations *dashboardOperations
+	service    dashboardapi.Service
+	limits     dashboardapi.ResourceLimits
 
 	page      tuiPage
 	sandboxes []tuiSandbox
@@ -243,77 +243,65 @@ type sandboxTUIModel struct {
 	updateChecked bool
 	exitMessage   string
 
-	dialog              tuiDialog
-	dialogScroll        int
-	confirmRemove       bool
-	createFocus         int
-	createErrFocus      int
-	createName          textinput.Model
-	createImage         textinput.Model
-	createCPUs          resourceSlider
-	createMemory        resourceSlider
-	createDisk          resourceSlider
-	createRuntime       string   // "crun" (default) or "runsc"
-	createKernels       []string // staged kernel paths; index 0 in the UI is "auto"
-	createKernel        int
-	createIsolation     string
-	createSSH           bool
-	createDevContainers bool
-	editFocus           int
-	editCPUs            resourceSlider
-	editMemory          resourceSlider
-	editIsolation       string
-	editSSH             bool
-	editDevContainers   bool
-	shareFocus          int
-	shareSandbox        sandboxPicker
-	shareTag            textinput.Model
-	sharePath           textinput.Model
-	shareMount          textinput.Model
-	shareOwner          textinput.Model
-	shareRO             bool
-	shareReplace        bool
-	portFocus           int
-	portSandbox         sandboxPicker
-	portBind            textinput.Model
-	portGuest           textinput.Model
-	portUDP             bool
-	policyFocus         int
-	policySandbox       sandboxPicker
-	policyPath          textinput.Model
-	policyLocal         bool
-	ruleFocus           int
-	ruleSandbox         sandboxPicker
-	ruleTarget          textinput.Model
-	rulePorts           textinput.Model
-	ruleAction          string
-	ruleProtocol        string
-	secretFocus         int
-	secretSandbox       sandboxPicker
-	secretName          textinput.Model
-	secretValue         textinput.Model
-	mcpFocus            int
-	mcpSandbox          sandboxPicker
-	mcpName             textinput.Model
-	mcpURL              textinput.Model
-	mcpAuthKind         string
-	mcpAuthHeader       textinput.Model
-	mcpAuthRef          textinput.Model
-	mcpAllow            textinput.Model
-	mcpDeny             textinput.Model
-	mcpRedact           textinput.Model
-	mcpEditing          bool
-	mcpFSFocus          int
-	mcpFSRoot           textinput.Model
-	mcpFSUser           textinput.Model
-	pullFocus           int
-	pullRef             textinput.Model
-	pullArch            string
-	loginFocus          int
-	loginRegistry       textinput.Model
-	loginUsername       textinput.Model
-	loginPassword       textinput.Model
-	formError           string
+	dialog        tuiDialog
+	dialogScroll  int
+	confirmRemove bool
+	createDialogModel
+	editFocus         int
+	editCPUs          resourceSlider
+	editMemory        resourceSlider
+	editIsolation     string
+	editSSH           bool
+	editDevContainers bool
+	shareFocus        int
+	shareSandbox      sandboxPicker
+	shareTag          textinput.Model
+	sharePath         textinput.Model
+	shareMount        textinput.Model
+	shareOwner        textinput.Model
+	shareRO           bool
+	shareReplace      bool
+	portFocus         int
+	portSandbox       sandboxPicker
+	portBind          textinput.Model
+	portGuest         textinput.Model
+	portUDP           bool
+	policyFocus       int
+	policySandbox     sandboxPicker
+	policyPath        textinput.Model
+	policyLocal       bool
+	ruleFocus         int
+	ruleSandbox       sandboxPicker
+	ruleTarget        textinput.Model
+	rulePorts         textinput.Model
+	ruleAction        string
+	ruleProtocol      string
+	secretFocus       int
+	secretSandbox     sandboxPicker
+	secretName        textinput.Model
+	secretValue       textinput.Model
+	mcpFocus          int
+	mcpSandbox        sandboxPicker
+	mcpName           textinput.Model
+	mcpURL            textinput.Model
+	mcpAuthKind       string
+	mcpAuthHeader     textinput.Model
+	mcpAuthRef        textinput.Model
+	mcpAllow          textinput.Model
+	mcpDeny           textinput.Model
+	mcpRedact         textinput.Model
+	mcpEditing        bool
+	mcpFSFocus        int
+	mcpFSRoot         textinput.Model
+	mcpFSUser         textinput.Model
+	pullFocus         int
+	pullRef           textinput.Model
+	pullArch          string
+	loginFocus        int
+	loginRegistry     textinput.Model
+	loginUsername     textinput.Model
+	loginPassword     textinput.Model
+	formError         string
 
 	lastClickIndex int
 	lastClickKind  string
@@ -337,10 +325,10 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	image.Placeholder = "blank uses Gantry's configured default"
 	image.Prompt = ""
 	createCPUs := newResourceSlider(1, limits.MaxVCPUs, 1, 1)
-	createMemory := newResourceSlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), 128, 512)
+	createMemory := newMemorySlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), 512)
 	createDisk := newResourceSlider(int(limits.MinDiskSizeMiB), int(limits.MaxDiskSizeMiB), 512, int(limits.DefaultDiskSizeMiB))
 	editCPUs := newResourceSlider(1, limits.MaxVCPUs, 1, 1)
-	editMemory := newResourceSlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), 128, 512)
+	editMemory := newMemorySlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), 512)
 	shareTag := textinput.New()
 	shareTag.Placeholder = "code"
 	shareTag.CharLimit = 36
@@ -443,59 +431,62 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	loginPassword.EchoCharacter = '•'
 
 	m := sandboxTUIModel{
-		service:         service,
-		page:            tuiOverviewPage,
-		limits:          limits,
-		width:           100,
-		height:          30,
-		dark:            true,
-		loading:         true,
-		refreshing:      true,
-		spinner:         sp,
-		animating:       true,
-		createErrFocus:  -1,
-		createName:      name,
-		createImage:     image,
-		createCPUs:      createCPUs,
-		createMemory:    createMemory,
-		createDisk:      createDisk,
-		createRuntime:   "crun",
-		createIsolation: "auto",
-		editCPUs:        editCPUs,
-		editMemory:      editMemory,
-		shareTag:        shareTag,
-		sharePath:       sharePath,
-		shareMount:      shareMount,
-		shareOwner:      shareOwner,
-		shareRO:         true,
-		portBind:        portBind,
-		portGuest:       portGuest,
-		policyPath:      policyPath,
-		ruleTarget:      ruleTarget,
-		rulePorts:       rulePorts,
-		ruleAction:      "deny",
-		ruleProtocol:    "tcp",
-		secretName:      secretName,
-		secretValue:     secretValue,
-		mcpName:         mcpName,
-		mcpURL:          mcpURL,
-		mcpAuthHeader:   mcpAuthHeader,
-		mcpAuthRef:      mcpAuthRef,
-		mcpAllow:        mcpAllow,
-		mcpDeny:         mcpDeny,
-		mcpRedact:       mcpRedact,
-		mcpFSRoot:       mcpFSRoot,
-		mcpFSUser:       mcpFSUser,
-		pullRef:         pullRef,
-		pullArch:        "auto",
-		loginRegistry:   loginRegistry,
-		loginUsername:   loginUsername,
-		loginPassword:   loginPassword,
-		imageSection:    tuiImageSectionImages,
-		lastClickIndex:  -1,
-		packetAfter:     make(map[string]uint64),
-		trafficHistory:  make(map[string][]uint64),
-		trafficTotals:   make(map[string]uint64),
+		operations: newDashboardOperations(),
+		service:    service,
+		page:       tuiOverviewPage,
+		limits:     limits,
+		width:      100,
+		height:     30,
+		dark:       true,
+		loading:    true,
+		refreshing: true,
+		spinner:    sp,
+		animating:  true,
+		createDialogModel: createDialogModel{
+			createErrFocus:  -1,
+			createName:      name,
+			createImage:     image,
+			createCPUs:      createCPUs,
+			createMemory:    createMemory,
+			createDisk:      createDisk,
+			createRuntime:   "crun",
+			createIsolation: "auto",
+		},
+		editCPUs:       editCPUs,
+		editMemory:     editMemory,
+		shareTag:       shareTag,
+		sharePath:      sharePath,
+		shareMount:     shareMount,
+		shareOwner:     shareOwner,
+		shareRO:        true,
+		portBind:       portBind,
+		portGuest:      portGuest,
+		policyPath:     policyPath,
+		ruleTarget:     ruleTarget,
+		rulePorts:      rulePorts,
+		ruleAction:     "deny",
+		ruleProtocol:   "tcp",
+		secretName:     secretName,
+		secretValue:    secretValue,
+		mcpName:        mcpName,
+		mcpURL:         mcpURL,
+		mcpAuthHeader:  mcpAuthHeader,
+		mcpAuthRef:     mcpAuthRef,
+		mcpAllow:       mcpAllow,
+		mcpDeny:        mcpDeny,
+		mcpRedact:      mcpRedact,
+		mcpFSRoot:      mcpFSRoot,
+		mcpFSUser:      mcpFSUser,
+		pullRef:        pullRef,
+		pullArch:       "auto",
+		loginRegistry:  loginRegistry,
+		loginUsername:  loginUsername,
+		loginPassword:  loginPassword,
+		imageSection:   tuiImageSectionImages,
+		lastClickIndex: -1,
+		packetAfter:    make(map[string]uint64),
+		trafficHistory: make(map[string][]uint64),
+		trafficTotals:  make(map[string]uint64),
 	}
 	m.applyInputTheme()
 	return m
@@ -1146,7 +1137,7 @@ func (m *sandboxTUIModel) primaryAction() (tea.Model, tea.Cmd) {
 	if selected.State == tuiStarting {
 		return m, m.showToast(tuiToastInfo, "Sandbox is starting", selected.Name)
 	}
-	return m.beginAction("start", selected.Name, []string{"resume", selected.Name}, false)
+	return m.beginStart("start", lifecycle.StartRequest{Name: selected.Name, Mode: lifecycle.Resume})
 }
 
 func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
@@ -1160,7 +1151,7 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 	case tuiStarting:
 		return m, m.showToast(tuiToastInfo, "Sandbox is starting", selected.Name)
 	default:
-		return m.beginAction("start", selected.Name, []string{"resume", selected.Name}, false)
+		return m.beginStart("start", lifecycle.StartRequest{Name: selected.Name, Mode: lifecycle.Resume})
 	}
 }
 
@@ -1173,126 +1164,7 @@ func (m *sandboxTUIModel) beginAction(action, name string, argv []string, intera
 	if action == "create" || action == "start" {
 		m.selectNext = name
 	}
-	return m, tea.Batch(runTUIProcessCmd(m.service, action, name, argv, interactive), m.ensureAnimation())
-}
-
-func runTUIProcessCmd(service dashboardapi.Service, action, name string, argv []string, interactive bool) tea.Cmd {
-	cmd, err := service.Command(argv...)
-	if err != nil {
-		return func() tea.Msg { return tuiProcessDoneMsg{action: action, name: name, err: err} }
-	}
-	if interactive {
-		return tea.ExecProcess(cmd, func(err error) tea.Msg {
-			msg := tuiProcessDoneMsg{action: action, name: name}
-			if err != nil {
-				msg.output = err.Error()
-				// Preserve the session's exit status as a warning rather than an
-				// action failure; the TUI and terminal handoff both succeeded.
-				if _, ok := err.(*exec.ExitError); !ok {
-					msg.err = err
-				}
-			}
-			return msg
-		})
-	}
-	events := make(chan tuiProcessStreamEvent, 16)
-	return func() tea.Msg {
-		output := &tuiProcessOutput{events: events}
-		cmd.Stdout = output
-		cmd.Stderr = output
-		go func() {
-			err := cmd.Run()
-			events <- tuiProcessStreamEvent{done: &tuiProcessDoneMsg{
-				action: action,
-				name:   name,
-				output: strings.TrimSpace(output.String()),
-				err:    err,
-			}}
-			close(events)
-		}()
-		return receiveTUIProcessStream(events)
-	}
-}
-
-func waitTUIProcessStream(stream <-chan tuiProcessStreamEvent) tea.Cmd {
-	return func() tea.Msg { return receiveTUIProcessStream(stream) }
-}
-
-func receiveTUIProcessStream(stream <-chan tuiProcessStreamEvent) tea.Msg {
-	event, ok := <-stream
-	if !ok {
-		done := tuiProcessDoneMsg{err: fmt.Errorf("process output stream closed unexpectedly")}
-		event.done = &done
-	}
-	return tuiProcessStreamMsg{event: event, stream: stream}
-}
-
-// tuiProcessOutput retains the command's complete diagnostic output while
-// forwarding only bounded operation-progress lines to Bubble Tea. stdout and
-// stderr may be copied concurrently by os/exec, hence the shared lock.
-type tuiProcessOutput struct {
-	mu      sync.Mutex
-	output  bytes.Buffer
-	pending string
-	events  chan<- tuiProcessStreamEvent
-}
-
-func (w *tuiProcessOutput) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	_, _ = w.output.Write(p)
-	w.pending += string(p)
-	var progress []string
-	for {
-		newline := strings.IndexByte(w.pending, '\n')
-		if newline < 0 {
-			break
-		}
-		line := strings.TrimSuffix(w.pending[:newline], "\r")
-		w.pending = w.pending[newline+1:]
-		if line, ok := operationProgressLine(line); ok {
-			progress = append(progress, line)
-		}
-	}
-	w.mu.Unlock()
-
-	for _, line := range progress {
-		select {
-		case w.events <- tuiProcessStreamEvent{progress: line}:
-		default: // The next update supersedes a stale intermediate percentage.
-		}
-	}
-	return len(p), nil
-}
-
-func (w *tuiProcessOutput) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.output.String()
-}
-
-func operationProgressLine(line string) (string, bool) {
-	start := -1
-	for _, marker := range []string{"downloading ", "creating persistent disk "} {
-		if index := strings.Index(line, marker); index >= 0 && (start < 0 || index < start) {
-			start = index
-		}
-	}
-	if start < 0 {
-		// Image pulls report one line per layer instead of a progress bar.
-		// The CLI prefixes those with "gantry image: "; its failure line is
-		// "gantry image <verb>: " (no space before the colon), so the two
-		// never collide.
-		if index := strings.Index(line, "gantry image: "); index >= 0 {
-			progress := strings.TrimSpace(line[index+len("gantry image: "):])
-			return progress, progress != ""
-		}
-		return "", false
-	}
-	line = line[start:]
-	if !strings.Contains(line, "[") || !strings.Contains(line, "]") {
-		return "", false
-	}
-	return line, true
+	return m, tea.Batch(runTUIProcessCmd(m.operations, m.service, action, name, argv, interactive), m.ensureAnimation())
 }
 
 func saveSandboxConfigCmd(service dashboardapi.Service, request dashboardapi.SandboxConfigRequest, running bool) tea.Cmd {
