@@ -1,17 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101210">
   <meta name="description" content="Gantry runs your OCI images in lightweight Linux microVMs. A standalone binary, a familiar CLI, and a private kernel for every sandbox. Open source for Linux, macOS, and experimental Windows.">
   <meta property="og:title" content="Gantry — Your containers. Their own kernel.">
-  <meta property="og:description" content="Container workflow. VM boundary. Run OCI images in lightweight Linux microVMs with one standalone binary.">
+  <meta property="og:description" content="Run OCI images in lightweight Linux microVMs with one standalone binary and a private kernel per sandbox.">
   <meta property="og:type" content="website">
   <title>Gantry — Your containers. Their own kernel.</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%23c2f36b'/%3E%3Cpath d='M10 29V11h20v18M17 29V18h6v11' fill='none' stroke='%23101210' stroke-width='4'/%3E%3C/svg%3E">
+  <script>
+    try {
+      if (localStorage.getItem('gantry-docs-theme') === 'light') {
+        document.documentElement.dataset.theme = 'light';
+        document.querySelector('meta[name="theme-color"]').content = '#f7f8f3';
+      }
+    } catch (_) {}
+  </script>
   <style>
     :root {
+      color-scheme: dark;
       --bg: #101210;
       --surface: #171a17;
       --surface-raised: #1e221d;
@@ -23,6 +32,16 @@
       --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
       --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
       --page-width: 1240px;
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f7f8f3;
+      --surface: #eef1e8;
+      --surface-raised: #e6ebdd;
+      --border: #d2dac7;
+      --text: #202819;
+      --muted: #57634d;
+      --lime: #365b19;
     }
     *, *::before, *::after { box-sizing: border-box; }
     html { scroll-behavior: smooth; scroll-padding-top: 100px; }
@@ -57,16 +76,18 @@
     .skip-link:focus { transform: translateY(0); }
     .site-header { position: sticky; top: 0; z-index: 20; background: rgb(16 18 16 / 94%); border-bottom: 1px solid var(--border); backdrop-filter: blur(18px); }
     .nav { height: 84px; display: flex; align-items: center; gap: 36px; }
-    .brand { display: inline-flex; align-items: center; gap: 11px; font-size: 29px; font-weight: 650; letter-spacing: -.055em; }
-    .brand-mark { width: 29px; height: 30px; color: var(--lime); }
+    .brand { display: inline-flex; align-items: center; gap: 8px; font-size: 29px; font-weight: 650; letter-spacing: -.055em; }
+    .brand-mark { width: 29px; height: 30px; color: var(--lime); transform: translateY(2px); }
     .brand-period { color: var(--lime); }
     .nav-links { display: flex; align-items: center; gap: 29px; margin-left: auto; font-size: 12px; color: var(--muted); }
     .nav-links > a:hover, .footer-links a:hover { color: var(--lime); }
     .nav-actions { display: flex; align-items: center; gap: 24px; }
     .source-link { gap: 8px; font-size: 12px; }
     .nav-cta { min-height: 38px; padding: 8px 14px; font-size: 12px; gap: 18px; }
+    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 6px; background: transparent; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); flex-shrink: 0; }
+    .theme-toggle:hover { background: var(--surface-raised); color: var(--lime); }
     .menu-toggle { display: none; width: 42px; height: 42px; border: 1px solid var(--border); background: var(--surface); border-radius: 5px; align-items: center; justify-content: center; }
-    .hero { position: relative; padding-top: 78px; overflow: hidden; }
+    .hero { position: relative; padding-block: 78px 64px; overflow: hidden; }
     .hero::before { content: ""; position: absolute; top: 0; right: -180px; width: 950px; height: 800px; pointer-events: none; background: radial-gradient(ellipse at 50% 38%, rgb(143 187 64 / 6%), transparent 62%); }
     .hero-grid { display: grid; grid-template-columns: 1.15fr 1fr; align-items: center; gap: 28px; position: relative; }
     .hero-copy { padding-bottom: 18px; }
@@ -100,16 +121,13 @@
     .copy-icon { margin-left: auto; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; min-width: 30px; min-height: 30px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); }
     .copy-icon:hover { background: #303a28; color: var(--lime); }
     .hero-caption { color: var(--muted); font: 9px/1.6 var(--mono); text-align: right; padding: 9px 9px 0; }
-    .hero-bottom { margin-top: 65px; border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding-block: 23px; gap: 20px; }
-    .hero-bottom > p { color: var(--muted); font-size: 12px; }
-    .platform-list { display: flex; align-items: center; flex-wrap: wrap; gap: 29px; }
-    .platform-label { display: inline-flex; align-items: center; gap: 9px; font-size: 12px; }
-    .platform-label small { color: var(--muted); font: 9px var(--mono); padding: 2px 5px; border: 1px solid var(--border); border-radius: 3px; }
     .section { padding-block: 100px; border-top: 1px solid var(--border); }
     .section-heading { display: flex; justify-content: space-between; align-items: end; gap: 36px; margin-bottom: 42px; }
     .section-heading .eyebrow, .architecture-copy .eyebrow { color: var(--lime); margin-bottom: 17px; }
-    h2 { font-size: clamp(34px, 3.5vw, 49px); line-height: 1.12; letter-spacing: -.05em; font-weight: 550; }
+    h2 { font-size: clamp(34px, 3.5vw, 49px); line-height: 1.12; letter-spacing: -.05em; font-weight: 550; text-wrap: balance; }
     .section-heading > p { color: var(--muted); max-width: 285px; font-size: 14px; line-height: 1.8; padding-bottom: 3px; }
+    #product .section-heading { display: block; }
+    #product .section-heading > p { max-width: 660px; margin-top: 18px; padding-bottom: 0; }
     .feature-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; }
     .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; padding: 30px; position: relative; transition: border-color .2s; }
     .feature-card:hover { border-color: #566448; }
@@ -117,18 +135,21 @@
     .feature-card p { font-size: 13px; line-height: 1.8; color: var(--muted); margin-top: 12px; }
     .feature-number { font: 10px var(--mono); color: var(--muted); display: flex; align-items: center; justify-content: space-between; }
     .feature-number .icon { width: 21px; height: 21px; }
-    .workflow-card { grid-column: span 7; padding-bottom: 0; }
+    .workflow-card { grid-column: span 7; }
     .workflow-card p { max-width: 405px; }
-    .terminal { border: 1px solid var(--border); background: #10130f; border-radius: 6px 6px 0 0; margin-top: 24px; border-bottom: 0; }
+    .terminal { border: 1px solid var(--border); background: #10130f; border-radius: 6px; margin-top: 24px; overflow: hidden; }
     .terminal-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 40px; padding: 0 14px; border-bottom: 1px solid var(--border); font: 9px var(--mono); color: var(--muted); }
     .terminal-dots { display: flex; gap: 5px; }
     .terminal-dots span { width: 6px; height: 6px; border-radius: 50%; background: #4b5543; }
     .terminal-dots span:first-child { background: #b1c399; }
-    .terminal-tabs { display: flex; gap: 23px; margin: 0 18px; border-bottom: 1px solid var(--border); }
+    .terminal-tabs { display: flex; flex-wrap: wrap; gap: 0 16px; margin: 0 18px; border-bottom: 1px solid var(--border); }
     .terminal-tab { padding: 11px 0 9px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); font: 10px var(--mono); min-height: 42px; }
     .terminal-tab[aria-selected="true"] { color: var(--lime); border-bottom-color: var(--lime); }
     .terminal-tab:hover { color: var(--text); }
     .workflow-panel { padding: 17px 18px 24px; min-height: 122px; }
+    .workflow-panel + .workflow-panel { border-top: 1px solid var(--border); }
+    .js .workflow-panel { border-top: 0; }
+    .workflow-panel .workflow-docs { display: inline-block; margin-top: 14px; color: var(--lime); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
     .workflow-panel pre { margin: 0; font: 11px/2 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
     .workflow-panel .command-comment { color: var(--muted); }
     .agent-card { grid-column: span 5; background: var(--lime); border-color: var(--lime); color: var(--bg); display: flex; flex-direction: column; }
@@ -145,9 +166,16 @@
     .permission-line .permission { color: var(--lime); margin-left: auto; }
     .feature-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 24px; }
     .tag { font: 10px var(--mono); color: #c0c8b7; border: 1px solid #3a4233; border-radius: 4px; padding: 5px 8px; }
-    .network-mini { display: flex; align-items: center; gap: 9px; margin-top: 28px; font: 10px var(--mono); }
-    .network-mini .network-line { flex: 1; min-width: 10px; border-top: 1px dashed #677952; }
-    .network-mini .network-end { color: var(--lime); }
+    .network-mini { display: grid; grid-template-columns: auto minmax(12px, 1fr) auto minmax(24px, 1fr) auto; align-items: center; gap: 8px; margin-top: 24px; font: 10px var(--mono); }
+    .network-line { position: relative; border-top: 1px dashed var(--muted); }
+    .network-line::after { content: ""; position: absolute; right: 0; top: -3px; width: 5px; height: 5px; border-top: 1px solid var(--muted); border-right: 1px solid var(--muted); transform: rotate(45deg); }
+    .network-policy { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--lime); }
+    .network-branches { width: 100%; height: 64px; fill: none; stroke: var(--muted); stroke-width: 1; }
+    .network-allow { color: var(--lime); }
+    .network-block { color: #eaa59b; }
+    .network-branches .network-allow, .network-branches .network-block { stroke: currentColor; }
+    .network-outcomes { display: grid; grid-template-rows: 32px 32px; align-items: center; }
+    [data-theme="light"] .network-block { color: #9f342e; }
     .architecture { background: #131611; position: relative; }
     .architecture-layout { display: grid; grid-template-columns: .9fr 1.1fr; gap: 90px; align-items: start; }
     .architecture-copy > p:not(.eyebrow) { margin-top: 23px; color: var(--muted); font-size: 14px; line-height: 1.9; max-width: 380px; }
@@ -167,13 +195,6 @@
     .stack-host.bottom { display: flex; justify-content: center; align-items: center; gap: 9px; color: #c5ccbd; background: transparent; }
     .architecture-note { margin-top: 32px; padding: 17px 19px; border-left: 2px solid #536344; background: #181f13; color: #b1baa7; font-size: 11px; line-height: 1.8; }
     .architecture-note a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
-    .performance { border-top: 1px solid var(--border); padding-top: 45px; margin-top: 72px; }
-    .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .metric { padding-right: 20px; }
-    .metric + .metric { padding-left: 34px; border-left: 1px solid var(--border); }
-    .metric-value { font-size: 44px; line-height: 1.2; font-weight: 500; letter-spacing: -.055em; }
-    .metric-value span { font-size: 20px; color: var(--muted); letter-spacing: -.025em; }
-    .metric-label { margin-top: 10px; color: var(--muted); font-size: 11px; }
     .benchmark-note { color: #a3ad99; font: 9px/1.9 var(--mono); margin-top: 31px; max-width: 880px; }
     .benchmark-note a { text-decoration: underline; text-underline-offset: 3px; }
     .platforms { padding-block: 78px; }
@@ -220,14 +241,48 @@
     .footer-top { display: flex; align-items: start; justify-content: space-between; gap: 25px; }
     .footer-description { color: var(--muted); font-size: 12px; margin-top: 10px; }
     .footer-links { display: flex; flex-wrap: wrap; gap: 27px; font-size: 11px; color: #c2c8ba; padding-top: 10px; }
-    .footer-wordmark { display: flex; align-items: baseline; justify-content: space-between; overflow: hidden; margin-top: 47px; border-bottom: 1px solid var(--border); }
-    .footer-wordmark > span:first-child { color: #5d6a52; font-size: clamp(110px, 19vw, 260px); line-height: 1.06; font-weight: 650; letter-spacing: -.075em; user-select: none; margin-left: -8px; }
-    .footer-wordmark .wordmark-period { color: #708454; }
-    .footer-wordmark .eyebrow { color: var(--muted); text-align: right; padding-bottom: 25px; line-height: 1.9; }
-    .footer-bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: var(--muted); font: 9px/1.8 var(--mono); padding-block: 20px; }
+    .footer-bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: var(--muted); font: 9px/1.8 var(--mono); padding-block: 20px; margin-top: 28px; border-top: 1px solid var(--border); }
     .footer-bottom a { text-decoration: underline; text-underline-offset: 3px; }
     .toast { position: fixed; bottom: 25px; left: 50%; transform: translate(-50%, 15px); z-index: 50; pointer-events: none; opacity: 0; transition: opacity .2s, transform .2s; background: var(--lime); color: #17220c; box-shadow: 0 8px 35px #0005; border-radius: 5px; padding: 12px 18px; font: 12px/1.5 var(--mono); max-width: calc(100% - 32px); text-align: center; }
     .toast.is-visible { transform: translate(-50%, 0); opacity: 1; }
+    /* Match the manual's light palette; keep code surfaces consistently dark. */
+    [data-theme="light"] .site-header { background: rgb(247 248 243 / 96%); }
+    [data-theme="light"] .button-primary { background: #365b19; color: #fff; }
+    [data-theme="light"] .button-primary:hover { background: #294611; }
+    [data-theme="light"] .status-dot { box-shadow: 0 0 0 4px rgb(54 91 25 / 10%); }
+    [data-theme="light"] .diagram-index { color: var(--muted); }
+    [data-theme="light"] .microvm-diagram { background-image: radial-gradient(#c5cfb8 1px, transparent 1px); }
+    [data-theme="light"] .microvm-diagram text { fill: #365b19; }
+    [data-theme="light"] .diagram-floor { stroke: #b8c5aa; opacity: .55; }
+    [data-theme="light"] .diagram-corners { stroke: #82936e; }
+    [data-theme="light"] .agent-card { background: #c2f36b; border-color: #aacb77; color: #172012; }
+    [data-theme="light"] .permission-line .path { color: var(--text); }
+    [data-theme="light"] .tag { color: var(--muted); border-color: #b8c5aa; }
+    [data-theme="light"] .architecture { background: #eef1e8; }
+    [data-theme="light"] .vm-boundary { background: #e5edda; border-color: #829c68; }
+    [data-theme="light"] .stack-block { background: #f7f8f3; border-color: #b8c5aa; color: var(--text); }
+    [data-theme="light"] .stack-block small { color: var(--muted); }
+    [data-theme="light"] .stack-block.optional { background: transparent; }
+    [data-theme="light"] .stack-kernel { background: #c2f36b; }
+    [data-theme="light"] .stack-host.bottom { color: var(--muted); }
+    [data-theme="light"] .architecture-note { background: #e5edda; border-color: #829c68; color: var(--muted); }
+    [data-theme="light"] .benchmark-note { color: var(--muted); }
+    [data-theme="light"] .platform-card .icon { color: var(--muted); }
+    [data-theme="light"] .platform-status { color: #365b19; border-color: #a9b998; }
+    [data-theme="light"] .footer-links { color: var(--muted); }
+    [data-theme="light"] .quickstart::before { background: repeating-linear-gradient(120deg, #c2f36b 0 8px, #81945c 8px 9px); }
+    [data-theme="light"] .toast { background: #365b19; color: #fff; }
+    [data-theme="light"] .terminal,
+    [data-theme="light"] .hero-command,
+    [data-theme="light"] .install-card {
+      color-scheme: dark;
+      --bg: #101210;
+      --text: #f0f1e9;
+      --muted: #a6aca0;
+      --border: #30352e;
+      --lime: #c2f36b;
+      color: var(--text);
+    }
     @media (min-width: 1600px) { .hero { padding-top: 96px; } }
     @media (max-width: 1100px) {
       .container { width: calc(100% - 64px); }
@@ -241,10 +296,7 @@
       .architecture-layout { gap: 50px; }
       .quickstart-layout { gap: 38px; }
       .feature-card { padding: 25px; }
-      .workflow-card { padding-bottom: 0; }
       .agent-card h3 { font-size: 30px; }
-      .metric-value { font-size: 37px; }
-      .metric + .metric { padding-left: 24px; }
     }
     @media (max-width: 900px) {
       .nav { height: 73px; }
@@ -255,16 +307,12 @@
       h1 { font-size: clamp(54px, 8.5vw, 78px); }
       .hero-description { max-width: 455px; font-size: 17px; }
       .hero-visual { width: min(560px, 100%); margin-inline: auto; }
-      .hero-bottom { margin-top: 37px; align-items: start; }
-      .platform-list { gap: 14px; }
-      .hero-bottom > p { max-width: 185px; }
       .section { padding-block: 72px; }
       .section-heading { align-items: start; }
       .section-heading > p { max-width: 240px; font-size: 13px; }
       .workflow-card { grid-column: span 7; }
       .agent-card { grid-column: span 5; }
       .feature-card { padding: 23px; }
-      .workflow-card { padding-bottom: 0; }
       .small-feature { grid-column: span 6; }
       .small-feature:last-child { grid-column: span 12; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; column-gap: 32px; }
       .small-feature:last-child .feature-number { grid-column: span 2; }
@@ -275,8 +323,6 @@
       .architecture-layout { gap: 33px; }
       .architecture-copy h2 { font-size: 36px; }
       .vm-boundary { padding: 15px; }
-      .metric-value { font-size: 32px; }
-      .metric + .metric { padding-left: 18px; }
       .platform-card { padding: 20px; }
       .platform-card-title { flex-wrap: wrap; gap: 9px; }
       .platform-status { margin-left: 0; }
@@ -287,7 +333,6 @@
       .quickstart-copy > p:not(.eyebrow) { margin-top: 0; }
       .quickstart-copy .text-link { align-self: end; justify-self: start; margin-top: 16px; }
       .install-code { min-height: 0; }
-      .footer-wordmark .eyebrow { font-size: 9px; }
     }
     @media (max-width: 640px) {
       html { scroll-padding-top: 88px; }
@@ -296,7 +341,7 @@
       .brand { font-size: 27px; }
       .brand-mark { width: 26px; height: 27px; }
       .nav-actions { margin-left: auto; gap: 10px; }
-      .nav-cta { min-height: 36px; font-size: 10px; gap: 10px; padding: 7px 10px; }
+      .nav-cta { display: none; }
       .nav-links { width: 100%; order: 3; gap: 25px; margin-left: 0; padding: 10px 0 4px; }
       .js .menu-toggle { display: inline-flex; }
       .js .nav-links { display: none; padding-bottom: 9px; }
@@ -317,12 +362,6 @@
       .hero-command code { font-size: 9px; }
       .hero-caption { font-size: 8px; }
       .motion-toggle { font-size: 8px; bottom: 0; right: 0; }
-      .hero-bottom { flex-direction: column; gap: 17px; padding-block: 23px; }
-      .hero-bottom > p { max-width: none; }
-      .platform-list { gap: 15px; }
-      .platform-label { font-size: 10px; gap: 6px; }
-      .platform-label .icon { width: 16px; height: 16px; }
-      .platform-label small { font-size: 8px; }
       .section { padding-block: 56px; }
       .section-heading { display: block; margin-bottom: 28px; }
       .section-heading > p { margin-top: 19px; max-width: 320px; }
@@ -330,7 +369,6 @@
       .section-heading .eyebrow, .architecture-copy .eyebrow { font-size: 10px; }
       .feature-grid { grid-template-columns: 1fr; gap: 13px; }
       .feature-card, .workflow-card, .agent-card, .small-feature, .small-feature:last-child { grid-column: 1; display: block; padding: 23px; min-height: 0; }
-      .workflow-card { padding-bottom: 0; }
       .agent-card { min-height: 306px; }
       .agent-card h3 { font-size: 34px; }
       .agent-card .text-link { margin-top: 25px; }
@@ -343,12 +381,6 @@
       .architecture-copy h2 { font-size: 37px; }
       .architecture-copy > p:not(.eyebrow) { margin-top: 20px; }
       .architecture-note { margin-top: 23px; }
-      .performance { margin-top: 42px; padding-top: 32px; }
-      .metric-grid { grid-template-columns: 1fr 1fr; gap: 25px 0; }
-      .metric, .metric + .metric { padding: 0 15px 0 0; border: none; }
-      .metric:nth-child(even) { padding-left: 22px; border-left: 1px solid var(--border); }
-      .metric-value { font-size: 38px; }
-      .metric-label { font-size: 10px; }
       .benchmark-note { font-size: 8px; margin-top: 25px; }
       .platforms { padding-block: 51px; }
       .platform-cards { grid-template-columns: 1fr; }
@@ -368,9 +400,6 @@
       .site-footer { padding-top: 33px; }
       .footer-top { flex-direction: column; }
       .footer-links { gap: 21px; }
-      .footer-wordmark { margin-top: 30px; }
-      .footer-wordmark > span:first-child { font-size: 27vw; margin-left: -4px; }
-      .footer-wordmark .eyebrow { display: none; }
       .footer-bottom { font-size: 8px; padding-block: 17px; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -400,6 +429,8 @@
       <symbol id="i-windows" viewBox="0 0 24 24"><path d="m3 5 8-1v7H3V5Zm10-1 8-1v8h-8V4ZM3 13h8v7l-8-1v-6Zm10 0h8v8l-8-1v-7Z"/></symbol>
       <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-4 1-4-2-6-2m15 5v-4c0-1-.4-2-1-2 3-.4 5-2 5-5 0-2-.6-3-1.6-4 .2-1 0-3-.4-4-2 0-4 1-4 1-3-1-5-1-8 0 0 0-2-1-4-1-.4 1-.6 3-.4 4C2.6 8 2 9 2 11c0 3 2 4.6 5 5-.6 0-1 1-1 2v4" transform="translate(1 0) scale(.9)"/></symbol>
       <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z"/></symbol>
       <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
     </defs>
   </svg>
@@ -418,6 +449,7 @@
       <div class="nav-actions">
         <a class="text-link source-link" href="https://github.com/ejpir/gantry"><svg class="icon icon-small" aria-hidden="true"><use href="#i-github"/></svg> GitHub</a>
         <a class="button button-primary nav-cta" href="#quickstart">Get Gantry <svg class="icon icon-small" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme" hidden data-enhance><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button>
         <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav-links" hidden data-enhance><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
       </div>
     </nav>
@@ -428,17 +460,17 @@
       <div class="container">
         <div class="hero-grid">
           <div class="hero-copy">
-            <p class="hero-eyebrow eyebrow"><span class="status-dot" aria-hidden="true"></span> Container workflow. VM boundary.</p>
+            <p class="hero-eyebrow eyebrow"><span class="status-dot" aria-hidden="true"></span> Open-source Linux microVMs</p>
             <h1 id="hero-title"><span class="line">Your containers.</span><span class="line">Their <span class="accent">own kernel.</span></span></h1>
-            <p class="hero-description">Run OCI images in lightweight Linux microVMs. A familiar CLI, a private kernel, and a little more room to experiment.</p>
+            <p class="hero-description">Run OCI images in lightweight Linux microVMs, with a private kernel for each sandbox and a CLI for managing their lifecycle.</p>
             <div class="hero-actions">
-              <a class="button button-primary" href="#quickstart">Start building <svg class="icon icon-small" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+              <a class="button button-primary" href="#quickstart">Get started <svg class="icon icon-small" aria-hidden="true"><use href="#i-arrow"/></svg></a>
               <a class="text-link" href="https://github.com/ejpir/gantry">Explore the source <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a>
             </div>
-            <div class="hero-footnote"><span>One standalone binary</span><span>Apache-2.0</span><span>No Docker required</span></div>
+            <div class="hero-footnote"><span>One standalone binary</span><span>Apache-2.0</span><span>No Docker required</span><span>No telemetry</span></div>
           </div>
           <figure class="hero-visual">
-            <div class="diagram-heading"><span class="eyebrow">A small world of its own</span><span class="diagram-index">FIG. 01 / MICROVM</span></div>
+            <div class="diagram-heading"><span class="eyebrow">MicroVM overview</span><span class="diagram-index">FIG. 01 / MICROVM</span></div>
             <div class="microvm-diagram">
               <svg viewBox="0 0 560 470" role="img" aria-labelledby="diagram-title diagram-description">
                 <title id="diagram-title">An OCI image, inside its own Linux microVM</title>
@@ -450,7 +482,7 @@
                   <radialGradient id="floor-glow"><stop stop-color="#a0d846" stop-opacity=".15"/><stop offset="1" stop-color="#a0d846" stop-opacity="0"/></radialGradient>
                 </defs>
                 <ellipse cx="280" cy="340" rx="245" ry="119" fill="url(#floor-glow)"/>
-                <g stroke="#36402c" stroke-width=".7" fill="none" opacity=".8">
+                <g class="diagram-floor" stroke="#36402c" stroke-width=".7" fill="none" opacity=".8">
                   <path d="m26 329 254 137 254-137M26 307 280 444 534 307M56 291 280 412 504 291M86 275 280 380 474 275"/>
                   <path d="m26 351 254-137 254 137M56 367 280 246 504 367M86 383 280 278 474 383"/>
                 </g>
@@ -487,21 +519,13 @@
                 <text x="445" y="78" fill="#c2f36b" font-size="9">OCI IMAGE</text>
                 <text x="22" y="292" fill="#c9d3ba" font-size="9">PRIVATE KERNEL</text>
                 <text x="438" y="395" fill="#c9d3ba" font-size="8">NATIVE HOST</text>
-                <g stroke="#69765d" stroke-width="1"><path d="M8 29V15h14M552 29V15h-14M8 423v14h14"/></g>
+                <g class="diagram-corners" stroke="#69765d" stroke-width="1" fill="none"><path d="M8 29V15h14M552 29V15h-14M8 423v14h14"/></g>
               </svg>
               <button class="motion-toggle" id="motion-toggle" type="button" aria-pressed="false" hidden data-enhance><svg class="icon icon-small" aria-hidden="true"><use href="#i-pause"/></svg><span>Pause animation</span></button>
             </div>
             <div class="hero-command"><span class="shell-prompt" aria-hidden="true">$</span><code id="hero-command">gantry exec -image alpine:latest -- /bin/sh</code><button class="copy-icon" type="button" data-copy="hero-command" aria-label="Copy the disposable sandbox command" hidden data-enhance><svg class="icon icon-small" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
-            <figcaption class="hero-caption">One command. One disposable sandbox. / Illustrative diagram</figcaption>
+            <figcaption class="hero-caption">Disposable sandbox example / Illustrative diagram</figcaption>
           </figure>
-        </div>
-        <div class="hero-bottom">
-          <p>Different hosts. Same way of working.</p>
-          <div class="platform-list" aria-label="Supported host platforms">
-            <span class="platform-label"><svg class="icon" aria-hidden="true"><use href="#i-linux"/></svg> Linux</span>
-            <span class="platform-label"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg> Apple silicon</span>
-            <span class="platform-label"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg> Windows <small>experimental</small></span>
-          </div>
         </div>
       </div>
     </section>
@@ -509,54 +533,78 @@
     <section class="section" id="product" aria-labelledby="product-title">
       <div class="container">
         <div class="section-heading">
-          <div><p class="eyebrow">01 / Built for your next experiment</p><h2 id="product-title">Familiar on the outside.<br>Different underneath.</h2></div>
-          <p>Your images. Your tools. Your editor.<br>Just with a Linux microVM between your workload and your host.</p>
+          <div><p class="eyebrow">01 / Features</p><h2 id="product-title">Development in Linux microVMs</h2></div>
+          <p>For local development, coding-agent workspaces, and testing Linux tools.</p>
         </div>
         <div class="feature-grid">
           <article class="feature-card workflow-card">
             <div class="feature-number"><span>01 — THE WORKFLOW</span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg></div>
-            <h3>A workspace, not a throwaway.</h3>
-            <p>Pull an OCI image. Give it a name. Stop and resume without losing your installed packages or private writable disk.</p>
+            <h3>Persistent workspaces</h3>
+            <p>From your project directory, create a Debian sandbox with the project shared at <code>/workspace</code>. Shared edits change host files; installed packages stay on the sandbox’s private disk.</p>
             <div class="terminal">
               <div class="terminal-header"><div class="terminal-dots" aria-hidden="true"><span></span><span></span><span></span></div><span>gantry / CLI examples</span><svg class="icon icon-small" aria-hidden="true"><use href="#i-terminal"/></svg></div>
-              <div class="terminal-tabs" role="tablist" aria-label="Sandbox workflow" hidden data-enhance>
-                <button class="terminal-tab" id="workflow-create-tab" type="button" role="tab" aria-selected="true" aria-controls="workflow-create" tabindex="0">01 Create</button>
-                <button class="terminal-tab" id="workflow-work-tab" type="button" role="tab" aria-selected="false" aria-controls="workflow-work" tabindex="-1">02 Work</button>
-                <button class="terminal-tab" id="workflow-resume-tab" type="button" role="tab" aria-selected="false" aria-controls="workflow-resume" tabindex="-1">03 Resume</button>
+              <div class="terminal-tabs" role="tablist" aria-label="CLI examples" hidden data-enhance>
+                <button class="terminal-tab" id="workflow-workspace-tab" type="button" role="tab" aria-selected="true" aria-controls="workflow-workspace" tabindex="0">Workspace</button>
+                <button class="terminal-tab" id="workflow-mcp-tab" type="button" role="tab" aria-selected="false" aria-controls="workflow-mcp" tabindex="-1">MCP gateway</button>
+                <button class="terminal-tab" id="workflow-ssh-tab" type="button" role="tab" aria-selected="false" aria-controls="workflow-ssh" tabindex="-1">SSH / Dev Containers</button>
               </div>
-              <div class="workflow-panel" id="workflow-create" role="tabpanel" aria-labelledby="workflow-create-tab" tabindex="0"><pre><span class="command-comment"># Your image, in its own microVM.</span>
-<span class="shell-prompt">$</span> gantry start dev -image debian:bookworm-slim
-<span class="command-comment"># A persistent sandbox called “dev”.</span></pre></div>
-              <div class="workflow-panel" id="workflow-work" role="tabpanel" aria-labelledby="workflow-work-tab" tabindex="0" hidden><pre><span class="command-comment"># Step inside. Make yourself at home.</span>
+              <div class="workflow-panel" id="workflow-workspace" tabindex="0" role="region" aria-label="Project workflow example for Linux and macOS"><pre><code><span class="command-comment"># Linux / macOS · gantry must be on PATH</span>
+<span class="shell-prompt">$</span> gantry start dev -image debian:bookworm-slim \
+    -share "workspace=$PWD,mount=/workspace"
 <span class="shell-prompt">$</span> gantry exec dev -- /bin/bash
-<span class="command-comment"># Or open the terminal dashboard: gantry tui</span></pre></div>
-              <div class="workflow-panel" id="workflow-resume" role="tabpanel" aria-labelledby="workflow-resume-tab" tabindex="0" hidden><pre><span class="command-comment"># Call it a day. Pick up where you left off.</span>
+<span class="command-comment"># In the guest: cd /workspace, work, then exit.</span>
 <span class="shell-prompt">$</span> gantry stop dev
-<span class="shell-prompt">$</span> gantry resume dev</pre></div>
+<span class="shell-prompt">$</span> gantry resume dev</code></pre></div>
+              <div class="workflow-panel" id="workflow-mcp" tabindex="0" role="region" aria-label="MCP gateway example for Linux and macOS"><pre><code><span class="command-comment"># Linux / macOS · read-only project access via MCP</span>
+<span class="shell-prompt">$</span> gantry start tools -image alpine:latest \
+    -share "code=$PWD,mount=/workspace,ro,uid=1000,gid=1000" \
+    -mcp -mcp-fs-root /workspace -mcp-fs-user 1000:1000
+<span class="command-comment"># Inspect the enabled tools and recorded calls</span>
+<span class="shell-prompt">$</span> gantry mcp tools tools
+<span class="shell-prompt">$</span> gantry audit tools</code></pre>
+                <a class="workflow-docs" href="docs/gantry/index.html#mcp-gateway">Connect an agent or add a remote MCP server ↗</a>
+              </div>
+              <div class="workflow-panel" id="workflow-ssh" tabindex="0" role="region" aria-label="SSH and Dev Containers example for Linux and macOS"><pre><code><span class="command-comment"># Linux / macOS · project shared with the IDE user</span>
+<span class="shell-prompt">$</span> gantry start ide -ssh -devcontainers \
+    -share "code=$PWD,mount=/workspace,uid=1000,gid=1000"
+<span class="shell-prompt">$</span> gantry ssh doctor ide
+<span class="shell-prompt">$</span> gantry ssh setup
+<span class="shell-prompt">$</span> gantry ssh ide
+<span class="command-comment"># Exit SSH, then open VS Code with Remote SSH installed</span>
+<span class="shell-prompt">$</span> code --remote ssh-remote+ide.gantry /workspace
+<span class="command-comment"># With Dev Containers installed: Reopen in Container</span></code></pre>
+                <a class="workflow-docs" href="docs/gantry/index.html#ssh-access">SSH, editor setup, and nested Podman ↗</a>
+              </div>
             </div>
           </article>
           <article class="feature-card agent-card">
-            <div class="feature-number"><span>02 — ROOM TO BUILD</span><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></div>
-            <h3>Let your agent build.<br>Not roam.</h3>
+            <div class="feature-number"><span>02 — CODING AGENTS</span><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></div>
+            <h3>Sandboxes for coding agents</h3>
             <p>Give coding agents a workspace of their own, explicitly shared directories, and the network policy you choose.</p>
-            <a class="text-link" href="docs/gantry/index.html#coding-agents">Meet the agent sandbox <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a>
+            <a class="text-link" href="docs/gantry/index.html#coding-agents">Coding agent setup <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a>
             <svg class="agent-art" viewBox="0 0 160 160" fill="none" aria-hidden="true"><path d="m80 9 61 34v73l-61 35-61-35V43Z" stroke="#254408" stroke-width="1" stroke-dasharray="3 4"/><path d="m80 35 40 23v47l-40 23-40-23V58Z" stroke="#254408" stroke-width="2"/><path d="m40 58 40 23 40-23M80 81v47" stroke="#254408" stroke-width="2"/><path d="m62 48 40 23M60 116V69l40-22" stroke="#254408" stroke-width="1"/></svg>
           </article>
           <article class="feature-card small-feature">
             <div class="feature-number"><span>03 — EXPLICIT ACCESS</span><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></div>
-            <h3>Your host stays yours.</h3>
+            <h3>Directory sharing and secrets</h3>
             <p>Share only the directories you name. Keep secrets in memory, not in your command-line arguments.</p>
             <div class="permission-line"><svg class="icon icon-small" aria-hidden="true"><use href="#i-folder"/></svg><span class="path">/workspace</span><span class="permission">explicitly shared</span></div>
           </article>
           <article class="feature-card small-feature">
             <div class="feature-number"><span>04 — NETWORK CONTROL</span><svg class="icon" aria-hidden="true"><use href="#i-network"/></svg></div>
-            <h3>Set the ground rules.</h3>
+            <h3>Networking and egress policies</h3>
             <p>Control egress, route through proxies, publish ports, and inspect traffic from the terminal dashboard.</p>
-            <div class="network-mini"><span>sandbox</span><span class="network-line"></span><svg class="icon icon-small accent" aria-hidden="true"><use href="#i-shield"/></svg><span class="network-line"></span><span class="network-end">your policy</span></div>
+            <div class="network-mini" role="img" aria-label="Sandbox traffic passes through your policy, which allows or blocks each connection.">
+              <span aria-hidden="true">sandbox</span>
+              <span class="network-line" aria-hidden="true"></span>
+              <span class="network-policy" aria-hidden="true"><svg class="icon"><use href="#i-shield"/></svg><span>policy</span></span>
+              <svg class="network-branches" viewBox="0 0 60 64" preserveAspectRatio="none" aria-hidden="true"><path d="M0 32H12M12 16V48"/><path class="network-allow" d="M12 16H56M51 12l5 4-5 4"/><path class="network-block" d="M12 48H56M56 44v8"/></svg>
+              <span class="network-outcomes" aria-hidden="true"><span class="network-allow">✓ Allow</span><span class="network-block">× Block</span></span>
+            </div>
           </article>
           <article class="feature-card small-feature">
-            <div class="feature-number"><span>05 — DEVELOPER NATIVE</span><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg></div>
-            <h3>Stay in your flow.</h3>
+            <div class="feature-number"><span>05 — INTEGRATIONS</span><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg></div>
+            <h3>Editor and API integration</h3>
             <p>Use local SSH, connect VS Code Dev Containers, or automate sandboxes with the local HTTP/JSON manager API.</p>
             <div class="feature-tags"><span class="tag">SSH</span><span class="tag">Dev Containers</span><span class="tag">HTTP API</span></div>
           </article>
@@ -568,11 +616,11 @@
       <div class="container">
         <div class="architecture-layout">
           <div class="architecture-copy">
-            <p class="eyebrow">02 / A different kind of lightweight</p>
-            <h2 id="architecture-title">Less machinery.<br>More boundary.</h2>
+            <p class="eyebrow">02 / Architecture</p>
+            <h2 id="architecture-title">A standalone VMM and CLI</h2>
             <p>Gantry is a standalone Go VMM and CLI. It talks directly to your host’s virtualization backend. No Docker, containerd, QEMU, or libkrun required.</p>
             <p>Each sandbox gets a private Linux kernel. Guest-facing work runs in confined host workers where supported, with optional gVisor inside the VM.</p>
-            <a class="text-link" href="docs/gantry/index.html#architecture">Go under the hood <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a>
+            <a class="text-link" href="docs/gantry/index.html#architecture">Architecture documentation <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a>
           </div>
           <div class="architecture-stack" role="figure" aria-label="Simplified Gantry architecture">
             <div class="stack-topline"><span>THE STACK, SIMPLIFIED</span><span>NOT TO SCALE ↓</span></div>
@@ -587,22 +635,14 @@
             <div class="stack-host bottom"><svg class="icon icon-small" aria-hidden="true"><use href="#i-chip"/></svg> KVM / Hypervisor.framework / WHPX</div>
           </div>
         </div>
-        <p class="architecture-note">Built in the open, still experimental. Gantry is not yet a hardened boundary for hostile public multi-tenancy. <a href="docs/gantry/index.html#security">Read the security model and platform limitations.</a></p>
-        <div class="performance">
-          <div class="metric-grid">
-            <div class="metric"><p class="metric-value accent">72.9<span> ms*</span></p><p class="metric-label">Measured Linux arm64 startup</p></div>
-            <div class="metric"><p class="metric-value">1<span> binary</span></p><p class="metric-label">Standalone Go VMM + CLI</p></div>
-            <div class="metric"><p class="metric-value">0<span> required</span></p><p class="metric-label">External container daemons</p></div>
-            <div class="metric"><p class="metric-value">Your<span> kernel</span></p><p class="metric-label">A private guest for each sandbox</p></div>
-          </div>
-          <p class="benchmark-note">* Median CLI-to-RPC-ready time on Linux arm64 / KVM: cold guest, warm host file caches, 1 vCPU, 512 MiB RAM, networking off. Not a first-download measurement. Results vary by host. <a href="https://github.com/ejpir/gantry#startup-performance">Benchmark details ↗</a></p>
-        </div>
+        <p class="architecture-note">Gantry is experimental and is not yet a hardened boundary for hostile public multi-tenancy. <a href="docs/gantry/index.html#security">Read the security model and platform limitations.</a></p>
+        <p class="benchmark-note">Measured startup: 72.9 ms median CLI-to-RPC-ready time on Linux arm64 / KVM, with a cold guest, warm host file caches, 1 vCPU, 512 MiB RAM, and networking off. Not a first-download measurement. Results vary by host. <a href="https://github.com/ejpir/gantry#startup-performance">Benchmark details ↗</a></p>
       </div>
     </section>
 
     <section class="section platforms" aria-labelledby="platforms-title">
       <div class="container">
-        <div class="section-heading"><div><p class="eyebrow">03 / At home on your host</p><h2 id="platforms-title">Native virtualization. No detours.</h2></div><a class="text-link" href="docs/gantry/index.html#install/prerequisites">Check requirements <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a></div>
+        <div class="section-heading"><div><p class="eyebrow">03 / Platforms</p><h2 id="platforms-title">Host virtualization backends</h2></div><a class="text-link" href="docs/gantry/index.html#install/prerequisites">Check requirements <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a></div>
         <div class="platform-cards">
           <article class="platform-card"><div class="platform-card-title"><svg class="icon" aria-hidden="true"><use href="#i-linux"/></svg><h3>Linux</h3><span class="platform-status">supported</span></div><p class="backend">KVM</p><p>x86-64 &amp; arm64 · Requires access to /dev/kvm</p></article>
           <article class="platform-card"><div class="platform-card-title"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg><h3>macOS</h3><span class="platform-status">supported</span></div><p class="backend">Hypervisor.framework</p><p>Apple silicon · macOS 13 or later</p></article>
@@ -614,9 +654,9 @@
     <section class="quickstart" id="quickstart" aria-labelledby="quickstart-title">
       <div class="container quickstart-layout">
         <div class="quickstart-copy">
-          <p class="eyebrow">04 / Your next sandbox starts here</p>
-          <h2 id="quickstart-title">Less setup.<br>More shipping.</h2>
-          <p>Grab the binary. Bring an image.<br>Gantry downloads and verifies matching guest assets on your first sandbox start.</p>
+          <p class="eyebrow">04 / Installation</p>
+          <h2 id="quickstart-title">Install Gantry</h2>
+          <p>Download the binary for your host. Hardware virtualization must be available; if running inside a VM, it must expose nested virtualization. First use needs network access to download the guest assets and OCI image. Assets are verified and cached for later starts.</p>
           <a class="text-link" href="https://github.com/ejpir/gantry/releases/latest">Browse the latest release <svg class="icon icon-small" aria-hidden="true"><use href="#i-up-right"/></svg></a>
         </div>
         <div class="install-card">
@@ -630,6 +670,7 @@
             <pre class="install-code"><code id="install-code">curl -L https://github.com/ejpir/gantry/releases/latest/download/gantry-linux-amd64 -o gantry
 chmod +x gantry</code></pre>
             <div class="install-launch"><p>02 / Start your first disposable sandbox</p><pre><code id="launch-code">./gantry exec -image alpine:latest -- /bin/sh</code></pre></div>
+            <p class="install-note">This command creates a temporary sandbox. Named sandboxes retain their state and private writable disks under <code>~/.gantry</code> by default (<code>%USERPROFILE%\.gantry</code> on Windows). Shared project files stay in their original host directory.</p>
             <div class="install-footer"><button class="copy-button" id="copy-install" type="button" hidden data-enhance><svg class="icon icon-small" aria-hidden="true"><use href="#i-copy"/></svg> Copy commands</button><a class="install-docs" href="docs/gantry/index.html#install">Full installation guide ↗</a></div>
             <p class="install-note" id="install-note">Linux x86-64. Your user must have read/write access to /dev/kvm. Use the ARM64 binary on Arm hosts.</p>
             <noscript><p class="install-note">These commands are for Linux x86-64. The full installation guide includes macOS, Windows, and Linux ARM64.</p></noscript>
@@ -642,11 +683,10 @@ chmod +x gantry</code></pre>
   <footer class="site-footer">
     <div class="container">
       <div class="footer-top">
-        <div><a class="brand" href="#" aria-label="Gantry home"><svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M3 28V4h26v24M11 28V12h10v16" stroke="currentColor" stroke-width="4"/></svg><span>gantry<span class="brand-period">.</span></span></a><p class="footer-description">Small worlds. Big possibilities.</p></div>
+        <div><a class="brand" href="#" aria-label="Gantry home"><svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M3 28V4h26v24M11 28V12h10v16" stroke="currentColor" stroke-width="4"/></svg><span>gantry<span class="brand-period">.</span></span></a><p class="footer-description">Open-source microVM runtime.</p></div>
         <nav class="footer-links" aria-label="Footer navigation"><a href="https://github.com/ejpir/gantry">GitHub ↗</a><a href="docs/gantry/index.html">Documentation ↗</a><a href="https://github.com/ejpir/gantry/blob/main/SECURITY.md">Security ↗</a><a href="https://github.com/ejpir/gantry/releases">Releases ↗</a></nav>
       </div>
-      <div class="footer-wordmark" aria-hidden="true"><span>gantry<span class="wordmark-period">.</span></span><span class="eyebrow">Container workflow.<br>VM boundary.<br>Built in the open.</span></div>
-      <div class="footer-bottom"><span>Open source, on purpose. <a href="https://github.com/ejpir/gantry/blob/main/LICENSE">Apache-2.0 licensed.</a></span><span>Experimental software. Deliberate boundaries.</span></div>
+      <div class="footer-bottom"><span><a href="https://github.com/ejpir/gantry/blob/main/LICENSE">Apache-2.0 licensed.</a></span><span>Experimental software.</span></div>
     </div>
   </footer>
   <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -656,6 +696,27 @@ chmod +x gantry</code></pre>
       'use strict';
       document.documentElement.classList.add('js');
       document.querySelectorAll('[data-enhance]').forEach(element => { element.hidden = false; });
+
+      const themeButton = document.getElementById('theme-toggle');
+      function updateTheme() {
+        const light = document.documentElement.dataset.theme === 'light';
+        themeButton.setAttribute('aria-label', `Switch to ${light ? 'dark' : 'light'} theme`);
+        themeButton.querySelector('use').setAttribute('href', light ? '#i-moon' : '#i-sun');
+        document.querySelector('meta[name="theme-color"]').content = light ? '#f7f8f3' : '#101210';
+      }
+      themeButton.addEventListener('click', () => {
+        const theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = theme;
+        try { localStorage.setItem('gantry-docs-theme', theme); } catch (_) {}
+        updateTheme();
+      });
+      window.addEventListener('storage', event => {
+        if (event.key === 'gantry-docs-theme' || event.key === null) {
+          document.documentElement.dataset.theme = event.newValue === 'light' ? 'light' : 'dark';
+          updateTheme();
+        }
+      });
+      updateTheme();
 
       // Mobile navigation remains available as ordinary links without JavaScript.
       const menuButton = document.getElementById('menu-toggle');
@@ -714,11 +775,19 @@ chmod +x gantry</code></pre>
         });
         return select;
       }
-      wireTabs(document.querySelector('.terminal-tabs'), tab => {
+      const workflowTabs = document.querySelector('.terminal-tabs');
+      workflowTabs.querySelectorAll('[role="tab"]').forEach(tab => {
+        const panel = document.getElementById(tab.getAttribute('aria-controls'));
+        panel.setAttribute('role', 'tabpanel');
+        panel.setAttribute('aria-labelledby', tab.id);
+        panel.removeAttribute('aria-label');
+      });
+      const selectWorkflow = wireTabs(workflowTabs, tab => {
         document.querySelectorAll('.workflow-panel').forEach(panel => {
           panel.hidden = panel.id !== tab.getAttribute('aria-controls');
         });
       });
+      selectWorkflow(document.getElementById('workflow-workspace-tab'));
 
       const releaseBase = 'https://github.com/ejpir/gantry/releases/latest/download/';
       const linuxArch = document.getElementById('linux-arch');
@@ -791,7 +860,7 @@ chmod +x gantry</code></pre>
           if (previousFocus instanceof HTMLElement) previousFocus.focus({ preventScroll: true });
         }
         button.disabled = false;
-        notify(copied ? 'Copied. Your next sandbox is a paste away.' : 'Copy unavailable. Please select and copy the command text.');
+        notify(copied ? 'Commands copied.' : 'Copy unavailable. Please select and copy the command text.');
       }
       document.querySelectorAll('[data-copy]').forEach(button => {
         button.addEventListener('click', () => copyText(document.getElementById(button.dataset.copy).textContent, button));
