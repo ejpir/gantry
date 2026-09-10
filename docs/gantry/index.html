@@ -1217,16 +1217,21 @@ the guest.</p>
 them and does not inject them into the VM. See
 <a href="#images/authenticate-to-registries">Images</a>.</p>
 <h2 id="shares-secrets/complete-browser-oauth" tabindex="-1">Complete browser OAuth</h2>
-<p>The OAuth callback bridge is enabled by default. When a supported Codex,
-Claude, or Pi login prints a <code>127.0.0.1</code> or <code>localhost</code> callback URL, Gantry
-opens the matching host-loopback callback temporarily so the host browser can
-complete the guest login.</p>
+<p>The OAuth callback bridge is enabled by default. A daemon-owned guest helper
+watches for loopback TCP listeners on the fixed callback ports and Linux
+ephemeral-port range. Gantry opens a matching host-loopback OAuth gate
+temporarily, so browser login works for unmodified CLIs—including programs
+nested under agents or terminal multiplexers. It does not depend on parsing
+terminal output. Root callbacks such as <code>http://localhost:&lt;ephemeral-port&gt;</code>
+are supported.</p>
 <p>Disable the bridge when it is not needed:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> console</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="console example"><code><span class="gp">$ </span>gantry<span class="w"> </span>start<span class="w"> </span>dev<span class="w"> </span>-image<span class="w"> </span>alpine:latest<span class="w"> </span>-oauth-bridge<span class="o">=</span><span class="nb">false</span>
 </code></pre></div>
-<p>The bridge accepts only the captured callback path and state and is not a
-general port forward. It returns a host-authored completion page; guest HTML,
-headers, status, and redirects are never rendered by the host browser.</p>
+<p>The host gate accepts only GET requests carrying an OAuth result
+(<code>code</code>/<code>error</code>) and non-empty <code>state</code>; the guest CLI performs authoritative
+state and PKCE validation. It is not a general port forward. Gantry returns a
+host-authored completion page; guest HTML, headers, status, and redirects are
+never rendered by the host browser.</p>
 <h2 id="shares-secrets/keep-oauth-refresh-tokens-on-the-host" tabindex="-1">Keep OAuth refresh tokens on the host</h2>
 <p>OAuth custody is available for Codex and Claude:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> console</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="console example"><code><span class="gp">$ </span>gantry<span class="w"> </span>start<span class="w"> </span>agent<span class="w"> </span>-image<span class="w"> </span>ubuntu:latest<span class="w"> </span>-oauth-custody
@@ -1874,7 +1879,7 @@ installed build.</p>
 </tr>
 <tr>
 <td><code>-oauth-bridge=false</code></td>
-<td>Disable supported agent OAuth callback bridging</td>
+<td>Disable automatic guest-loopback OAuth callback bridging</td>
 </tr>
 <tr>
 <td><code>-oauth-custody</code></td>
@@ -2747,12 +2752,15 @@ previously wrote the path.</p>
 <p>The legacy external <code>-gvproxy</code> backend is also disabled because it launches a
 configurable host executable. The embedded network stack avoids making a
 guest-writable executable path part of the supervisor's restart behavior.</p>
-<p>OAuth bridging opens bounded host-loopback listeners after detecting supported
-agent callback URLs. The captured callback path and OAuth state are validated;
-custody listeners reject callbacks that do not match a pending host-side flow.
-After delivery, the browser receives only a fixed, CSP-locked host page. Guest
-status, headers, redirects, bodies, and error details are discarded. Disable
-the bridge with <code>-oauth-bridge=false</code> when unused.</p>
+<p>OAuth bridging uses a trusted guest helper to discover loopback TCP listeners
+without tracing applications or parsing terminal output. Matching host ports
+are bounded to fixed callback ports and the Linux ephemeral range. Transparent
+listeners accept only GET requests carrying <code>code</code>/<code>error</code> and non-empty
+<code>state</code>; the guest CLI remains authoritative for state and PKCE validation.
+Custody listeners additionally require an exact pending host-side flow. After
+delivery, the browser receives only a fixed, CSP-locked host page. Guest status,
+headers, redirects, bodies, and error details are discarded. Disable the bridge
+with <code>-oauth-bridge=false</code> when unused.</p>
 <p>If upgrading from a build that rendered the guest callback response, clear
 browser site data for any <code>localhost:&lt;callback-port&gt;</code> or
 <code>127.0.0.1:&lt;callback-port&gt;</code> origin previously used for sign-in. Hardened

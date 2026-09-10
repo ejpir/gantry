@@ -9,6 +9,7 @@
 //	oauth login <provider>  custody-mode OAuth: the daemon completes
 //	                      the exchange host-side and holds the refresh
 //	                      token (internal/sandbox/oauthtokens)
+//	oauth-watch           daemon-only loopback listener discovery
 //
 // Modes are answer-only adapters: they can request credentials from the
 // host broker but can never add, swap, or re-point them.
@@ -45,6 +46,8 @@ func main() {
 		runCredHelper(args)
 	case "oauth":
 		runOAuth(args)
+	case "oauth-watch":
+		os.Exit(runOAuthWatch(args))
 	case "mcp-proxy":
 		os.Exit(runMCPProxy())
 	case "mcp-serve":
@@ -78,6 +81,7 @@ func usage() {
 modes:
   credhelper   git credential.helper; answers "get" from the host credential broker
   oauth        custody-mode OAuth login: gantry-guest oauth login <provider>
+  oauth-watch  daemon-only loopback listener discovery
   mcp-proxy    bridge agent stdio MCP to the host gateway (vsock 1029)
   mcp-serve    run a contained local MCP server: mcp-serve filesystem --root DIR --user U
   user-exists  exit successfully only when NAME exists in guest /etc/passwd

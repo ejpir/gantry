@@ -21,12 +21,13 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
-// Guest-tools delivery: sandboxes configured with host-bound secrets
-// (-secret NAME@host) need the multicall helper inside the guest. Two
-// channels, in preference order:
+// Guest-tools delivery: OAuth listener discovery, MCP, host-bound secrets,
+// custody, and SSH need the trusted multicall helper inside the guest. Two
+// delivery channels are tried in preference order:
 //
 //  1. share hot-add — the daemon stages the binary in a private host directory,
 //     live-adds it at /host/gantry-tools, and invokes its static install-self
@@ -39,8 +40,9 @@ import (
 // Both paths end with a guest-side sha256+size verification before the
 // selected workload or IDE readiness bit flips: a mangled helper must never
 // become executable guest authority. Workload delivery failure is fatal when
-// MCP, bound credentials, or OAuth custody require it; asynchronous SSH
-// delivery failure leaves the VM ready but refuses SSH for that boot.
+// MCP, bound credentials, OAuth listener discovery, or OAuth custody require
+// it; asynchronous SSH delivery failure leaves the VM ready but refuses SSH
+// for that boot.
 const (
 	guestToolsMaxBytes     = 64 << 20
 	guestToolsDirGuest     = "/run/gantry/bin"
@@ -115,7 +117,7 @@ type guestToolsBootPlan struct {
 }
 
 func planGuestToolsDelivery(cfg config.RunConfig) guestToolsBootPlan {
-	required := cfg.MCP || hasBoundSecrets(cfg.SecretNames) || cfg.OAuthCustodyEnabled()
+	required := cfg.MCP || hasBoundSecrets(cfg.SecretNames) || oauthbridge.Enabled(cfg.OAuthBridgeEnabled()) || cfg.OAuthCustodyEnabled()
 	return guestToolsBootPlan{
 		workloadRequired: required,
 		workloadAsync:    !required && cfg.SSH && !cfg.DevContainers,

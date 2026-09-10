@@ -244,10 +244,13 @@ them and does not inject them into the VM. See
 
 ## Complete browser OAuth
 
-The OAuth callback bridge is enabled by default. When a supported Codex,
-Claude, or Pi login prints a `127.0.0.1` or `localhost` callback URL, Gantry
-opens the matching host-loopback callback temporarily so the host browser can
-complete the guest login.
+The OAuth callback bridge is enabled by default. A daemon-owned guest helper
+watches for loopback TCP listeners on the fixed callback ports and Linux
+ephemeral-port range. Gantry opens a matching host-loopback OAuth gate
+temporarily, so browser login works for unmodified CLIs—including programs
+nested under agents or terminal multiplexers. It does not depend on parsing
+terminal output. Root callbacks such as `http://localhost:<ephemeral-port>`
+are supported.
 
 Disable the bridge when it is not needed:
 
@@ -255,9 +258,11 @@ Disable the bridge when it is not needed:
 $ gantry start dev -image alpine:latest -oauth-bridge=false
 ```
 
-The bridge accepts only the captured callback path and state and is not a
-general port forward. It returns a host-authored completion page; guest HTML,
-headers, status, and redirects are never rendered by the host browser.
+The host gate accepts only GET requests carrying an OAuth result
+(`code`/`error`) and non-empty `state`; the guest CLI performs authoritative
+state and PKCE validation. It is not a general port forward. Gantry returns a
+host-authored completion page; guest HTML, headers, status, and redirects are
+never rendered by the host browser.
 
 ## Keep OAuth refresh tokens on the host
 

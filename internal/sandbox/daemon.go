@@ -59,17 +59,21 @@ type daemonRuntime struct {
 	guestToolsCancel   context.CancelFunc
 	guestToolsStopping bool
 	guestToolsWG       sync.WaitGroup
-	ports              *control.PortManager
-	runner             vmmworker.Runner
-	machine            *vmm.Machine
-	rpc                *ttrpc.Client
-	control            net.Listener
-	broker             *broker
-	sshMu              sync.Mutex
-	sshListener        net.Listener
-	sshCancel          func()
-	mcpListener        net.Listener
-	mcpWorker          *mcpworkersup.Worker
+	// OAuth listener discovery is a daemon-owned guest task. It starts after
+	// verified helper delivery and stops before RPC teardown.
+	oauthWatchCancel context.CancelFunc
+	oauthWatchWG     sync.WaitGroup
+	ports            *control.PortManager
+	runner           vmmworker.Runner
+	machine          *vmm.Machine
+	rpc              *ttrpc.Client
+	control          net.Listener
+	broker           *broker
+	sshMu            sync.Mutex
+	sshListener      net.Listener
+	sshCancel        func()
+	mcpListener      net.Listener
+	mcpWorker        *mcpworkersup.Worker
 
 	guestErr <-chan error
 	signals  chan os.Signal
@@ -127,6 +131,9 @@ func (d *daemonRuntime) run() int {
 	if plan.ideAsync {
 		d.startAsyncGuestToolsDelivery(d.cfg, []guestToolsTarget{ideTarget})
 	}
+	if err := d.startOAuthListenerWatch(); err != nil {
+		return daemonFailure(err)
+	}
 	// Readiness means both the guest RPC and the local authenticated control
 	// broker can accept work. Publishing it from connectGuest left a window in
 	// which `gantry start` returned successfully before ctl.sock existed, so an
@@ -153,9 +160,9 @@ func (d *daemonRuntime) bootLog(phase string) {
 }
 
 func (d *daemonRuntime) close() {
-	// Delivery owns RPC sessions and temporary shares. Cancel and join it
-	// before closing any of those resources. gracefulStop may already have
-	// done this; stopGuestToolsDelivery is deliberately idempotent.
+	// Watcher and delivery own RPC sessions. Cancel and join both before
+	// closing their dependencies. These stops are deliberately idempotent.
+	d.stopOAuthListenerWatch()
 	d.stopGuestToolsDelivery()
 	d.stopSSHGateway()
 	if d.mcpListener != nil {

@@ -131,13 +131,6 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 	// used to live here predates image configs)
 	manifest := client.LoadShareManifest(br.dir)
 	var status int
-	// Session stdout flows through the broker. The default-on OAuth bridge
-	// sniffer can arm only bounded, approved host-side callback listeners;
-	// per-sandbox and global settings can disable it.
-	stdout := io.Writer(c)
-	if br.oauth != nil {
-		stdout = br.oauth.SniffWriter(stdout)
-	}
 	options := client.SessionOptions{
 		StreamSock:     br.streamSock,
 		StreamDial:     br.streamDial,
@@ -160,7 +153,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 		ExitStatus:     &status,
 	}
 	applySessionTarget(&options, br.sessionTarget(false))
-	err := client.Session(br.rpc, options, stdin, stdout)
+	err := client.Session(br.rpc, options, stdin, c)
 	if err != nil {
 		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
 		// The broker is the only process that still has the sandbox logs

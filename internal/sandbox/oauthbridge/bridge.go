@@ -1,47 +1,49 @@
 // Package oauthbridge runs the host-side OAuth loopback callback bridge for a
-// sandbox. A CLI inside the guest prints an authorize URL whose redirect_uri
-// points at guest loopback; the browser that opens it runs on the host, where
-// that port means nothing. The bridge sniffs the printed URL, binds the same
-// port on the host, and replays each callback request into the guest.
+// sandbox. A guest-side watcher reports loopback TCP listeners independently
+// of application and terminal output. The bridge binds matching host-loopback
+// ports and replays OAuth callback requests into the guest.
 //
-// It reaches the guest through a single injected Exec: one command run inside
-// the sandbox container. That keeps the bridge independent of the daemon's
-// broker, session limits and RPC plumbing, which own that call.
+// Callback replay reaches the guest through one injected Exec. Listener
+// discovery is supplied separately by the daemon's trusted watcher task, so
+// this package remains independent of guest process and terminal plumbing.
 package oauthbridge
 
 // oauth_bridge.go — transparent OAuth loopback callback bridge.
 //
-// Agent CLIs (codex, claude, pi, …) sign in with an OAuth authorization-code
-// flow against a loopback listener INSIDE the sandbox (codex:
-// http://localhost:1455/auth/callback, pi: http://localhost:53692/callback,
-// claude: http://localhost:<random>/callback). The CLI prints the authorize
+// Agent CLIs (codex, claude, pi, andromeda, …) sign in with an OAuth
+// authorization-code flow against a loopback listener INSIDE the sandbox
+// (codex: http://localhost:1455/auth/callback, pi:
+// http://localhost:53692/callback, claude:
+// http://localhost:<random>/callback, andromeda:
+// http://localhost:<random>). The CLI prints the authorize
 // URL and waits for the provider to redirect the browser to the loopback
 // listener — but the browser runs on the HOST, where that port is not the
 // sandbox listener. The redirect dies in the host's network stack and login
 // never completes.
 //
-// The daemon already relays every exec session's stdout through the broker,
-// so it sees the printed authorize URL. This bridge:
+// A daemon-owned helper watches guest procfs for loopback TCP listeners, so
+// nested programs and terminal redraws cannot hide a callback port. This
+// bridge:
 //
-//  1. sniffs session output for OAuth loopback redirect URLs
-//     (redirect_uri=…localhost:<port>…, or a bare
-//     http://localhost:<port>/callback-style URL);
-//  2. binds 127.0.0.1:<port> on the host (loopback only, never LAN);
-//  3. when the host browser lands on it, replays the callback into the
-//     sandbox with an internal exec running a bash /dev/tcp one-shot —
-//     no helper binary, no image/rootfs changes, no MITM, no new egress:
-//     the request is made by a process inside the guest netns, which is
-//     exactly what the CLI's loopback listener expects;
-//  4. returns a host-authored completion page and closes the listener once a
-//     callback carrying code=/error= has been delivered. Guest response bytes
-//     are never rendered in the host browser.
+//  1. receives bounded snapshots of guest loopback listeners;
+//  2. binds matching 127.0.0.1:<port> listeners on the host (loopback only,
+//     never LAN);
+//  3. accepts only OAuth-shaped result requests and replays them into the
+//     sandbox with an internal exec running a bash /dev/tcp one-shot—no MITM
+//     and no new egress. The request is made by a process inside the guest
+//     netns, exactly where the CLI's loopback listener expects it;
+//  4. returns a host-authored completion page and closes the host gate when
+//     the guest listener disappears. Guest response bytes are never rendered
+//     in the host browser.
 //
 // Security posture: the bridge is enabled by default, with per-sandbox and
 // global opt-outs. Host listeners bind 127.0.0.1 only and are restricted to
 // the documented fixed callback ports or the dynamic OAuth range. Listener
 // count, replay concurrency, duration, request size, and response size are all
-// bounded. Only GET path+query is replayed to guest loopback; browser headers
-// and cookies never cross the boundary.
+// bounded. Transparent callbacks must carry state and code/error; the guest
+// CLI remains authoritative for state and PKCE validation. Only GET path+query
+// is replayed to guest loopback; browser headers and cookies never cross the
+// boundary.
 //
 // This mirrors the reference sandbox stack's behavior (host-side callback
 // listener + replay via in-sandbox exec) without its TLS-intercepting
@@ -55,7 +57,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,9 +64,8 @@ import (
 )
 
 const (
-	maxActiveListeners    = 4
+	maxActiveListeners    = 16
 	maxFailedPorts        = 64
-	maxPortsPerSession    = 4
 	maxConcurrentReplays  = 2
 	maxRequestURIBytes    = 8 << 10
 	MaxReplayResponseSize = 256 << 10
@@ -111,51 +111,31 @@ type Bridge struct {
 // listener is one bound host port.
 type listener struct {
 	port          int
-	expectedPath  string
-	expectedState string
-	validateState bool
 	custody       bool
 	ln            net.Listener
 	ttl           *time.Timer
 	ttlGeneration uint64
 }
 
-type callbackTarget struct {
-	port          int
-	path          string
-	state         string
-	validateState bool
-	custody       bool
-}
-
-var (
-	// reOAuthRedirectURI matches the redirect_uri query parameter of a
-	// printed authorize URL, URL-encoded or not:
-	//   redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback
-	//   redirect_uri=http://localhost:53692/callback
-	reOAuthRedirectURI = regexp.MustCompile(`redirect_uri=([^&\s"'()<>\[\]{}\x1b]+)`)
-	// reOAuthLoopbackURL matches a directly printed callback URL:
-	//   http://localhost:53692/callback  http://127.0.0.1:1455/auth/callback
-	// Match the whole printed URL token, then inspect its parsed path. Keeping
-	// the suffix and query is necessary for /callback/suffix and ?state= flows.
-	reOAuthLoopbackURL = regexp.MustCompile(`http://(?:localhost|127\.0\.0\.1):(\d{1,5})/[^\s"'()<>\[\]{}\x1b]*`)
-)
-
-// New creates the default-on, resource-bounded bridge. enabled is the
-// persisted sandbox setting; GANTRY_OAUTH_BRIDGE is a global override. It
-// returns nil when the bridge is switched off, which callers treat as "no
-// bridge" rather than an error.
-func New(exec Exec, enabled bool) *Bridge {
-	if exec == nil {
-		return nil
-	}
+// Enabled resolves the persisted setting and GANTRY_OAUTH_BRIDGE override.
+// Guest-tool planning and bridge construction share it so the watcher helper
+// is neither omitted nor delivered unnecessarily.
+func Enabled(enabled bool) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GANTRY_OAUTH_BRIDGE"))) {
 	case "1", "true", "yes", "on":
-		enabled = true
+		return true
 	case "0", "false", "no", "off":
-		return nil
+		return false
+	default:
+		return enabled
 	}
-	if !enabled {
+}
+
+// New creates the default-on, resource-bounded bridge. It returns nil when the
+// bridge is switched off, which callers treat as "no bridge" rather than an
+// error.
+func New(exec Exec, enabled bool) *Bridge {
+	if exec == nil || !Enabled(enabled) {
 		return nil
 	}
 	return &Bridge{
@@ -169,120 +149,11 @@ func New(exec Exec, enabled bool) *Bridge {
 	}
 }
 
-// allowedCallbackPort keeps stdout-derived binds away from arbitrary
-// host services. Codex and pi use the two fixed ports; Claude-style dynamic
-// callbacks use the IANA dynamic/private range.
+// allowedCallbackPort keeps automatic host binds away from ordinary service
+// ports. Codex and Pi use fixed legacy ports; other CLIs use ephemeral ports
+// selected from Linux's normal range.
 func allowedCallbackPort(port int) bool {
-	return port == 1455 || port == 53692 || port >= 49152 && port <= 65535
-}
-
-// callbackPorts extracts host-side ports of OAuth loopback redirect
-// targets from CLI output. It is the pure scanner core, kept separate for
-// tests.
-func callbackPorts(text string) []int {
-	targets := callbackTargets(text)
-	out := make([]int, 0, len(targets))
-	for _, target := range targets {
-		out = append(out, target.port)
-	}
-	return out
-}
-
-func callbackTargets(text string) []callbackTarget {
-	byPort := map[int]callbackTarget{}
-	add := func(target callbackTarget) {
-		if !allowedCallbackPort(target.port) {
-			return
-		}
-		if old, ok := byPort[target.port]; ok {
-			merged, _ := mergeCallbackTarget(old, target)
-			byPort[target.port] = merged
-			return
-		}
-		byPort[target.port] = target
-	}
-	for _, m := range reOAuthRedirectURI.FindAllStringSubmatchIndex(text, -1) {
-		raw, err := url.QueryUnescape(trimPrintedURLToken(text[m[2]:m[3]]))
-		if err != nil {
-			raw = text[m[2]:m[3]]
-		}
-		u, err := url.Parse(raw)
-		if err != nil || u.Scheme != "http" {
-			continue
-		}
-		if h := u.Hostname(); h != "localhost" && h != "127.0.0.1" {
-			continue
-		}
-		if !strings.Contains(strings.ToLower(u.Path), "callback") {
-			continue
-		}
-		if p, err := strconv.Atoi(u.Port()); err == nil {
-			add(callbackTarget{port: p, path: u.Path, state: callbackStateNear(text, m[0], m[1]), validateState: true})
-		}
-	}
-	for _, m := range reOAuthLoopbackURL.FindAllStringSubmatchIndex(text, -1) {
-		u, parseErr := url.Parse(trimPrintedURLToken(text[m[0]:m[1]]))
-		if parseErr != nil || !strings.Contains(strings.ToLower(u.Path), "callback") {
-			continue
-		}
-		if p, err := strconv.Atoi(text[m[2]:m[3]]); err == nil {
-			add(callbackTarget{port: p, path: u.Path, state: u.Query().Get("state"), validateState: true})
-		}
-	}
-	out := make([]callbackTarget, 0, len(byPort))
-	for _, target := range byPort {
-		out = append(out, target)
-	}
-	return out
-}
-
-func trimPrintedURLToken(raw string) string {
-	return strings.TrimRight(raw, ".,;:")
-}
-
-// mergeCallbackTarget enriches a target only with observations for the same
-// port and path. It never replaces an established non-empty expectation.
-func mergeCallbackTarget(old, next callbackTarget) (callbackTarget, bool) {
-	merged := old
-	if old.port != next.port || old.custody != next.custody {
-		return merged, false
-	}
-	if merged.path == "" || (next.path != "" && strings.HasPrefix(next.path, merged.path)) {
-		merged.path = next.path
-	}
-	samePath := next.path == "" || merged.path == "" || merged.path == next.path
-	if samePath && (merged.state == "" || (next.state != "" && strings.HasPrefix(next.state, merged.state))) {
-		merged.state = next.state
-	}
-	if samePath && next.validateState {
-		merged.validateState = true
-	}
-	return merged, merged != old
-}
-
-// callbackStateNear extracts state from the same printed authorization URL
-// that carried redirect_uri. It also handles a bare query fragment used by a
-// few CLIs. An unavailable state stays empty and is not guessed.
-func callbackStateNear(text string, start, end int) string {
-	isBoundary := func(b byte) bool { return strings.ContainsRune(" \t\r\n\"'()<>[]{}\x1b", rune(b)) }
-	left := start
-	for left > 0 && !isBoundary(text[left-1]) {
-		left--
-	}
-	right := end
-	for right < len(text) && !isBoundary(text[right]) {
-		right++
-	}
-	token := trimPrintedURLToken(text[left:right])
-	if u, err := url.Parse(token); err == nil {
-		if state := u.Query().Get("state"); state != "" {
-			return state
-		}
-	}
-	if values, err := url.ParseQuery(text[start:right]); err == nil {
-		return values.Get("state")
-	}
-	return ""
+	return port == 1455 || port == 53692 || port >= 32768 && port <= 65535
 }
 
 // SetCustodyConsumer installs the custody-mode interception hook: when
@@ -294,121 +165,71 @@ func (b *Bridge) SetCustodyConsumer(consume func(port int, u *url.URL) bool) {
 	b.custodyConsume = consume
 }
 
-// EnsureCallbackPort opens the host loopback listener for a custody flow
-// before any authorize URL has been sniffed (the guest helper declares
-// its redirect port up front). It reports whether the allowed port was
-// actually opened (or was already custody-owned); the caller fails loudly on
-// bind, listener-kind conflict, or listener-limit errors rather than stranding
-// the browser.
+// EnsureCallbackPort opens a custody-owned host listener before the custody
+// helper prints its authorize URL. Custody does not run a guest HTTP listener;
+// its exact pending state is validated by custodyConsume.
 func (b *Bridge) EnsureCallbackPort(port int) bool {
-	if !allowedCallbackPort(port) {
-		return false
+	return b.ensureListener(port, true)
+}
+
+// OpenGuestListener mirrors a newly observed guest-loopback listener on host
+// loopback. The endpoint is an OAuth request gate, not a general port forward.
+func (b *Bridge) OpenGuestListener(port int) bool {
+	return b.ensureListener(port, false)
+}
+
+// CloseGuestListener removes a transparent listener when the corresponding
+// guest socket disappears. Custody-owned listeners have an independent
+// lifecycle and are never affected by procfs snapshots.
+func (b *Bridge) CloseGuestListener(port int) {
+	b.mu.Lock()
+	delete(b.failed, port)
+	l := b.listeners[port]
+	if l == nil || l.custody {
+		b.mu.Unlock()
+		return
 	}
-	// Custody validates its nonce in custodyConsume. Mark its listener as
-	// custody-owned so stdout sniffing cannot weaken or replace that check and
-	// an unknown-state callback can never fall through to guest replay.
-	return b.ensureListenerTarget(callbackTarget{port: port, custody: true})
+	b.closeExactListenerLocked(l)
+	b.mu.Unlock()
+	b.logf("closed host listener on 127.0.0.1:%d (guest listener closed)", port)
 }
 
-// SniffWriter returns a writer that forwards every byte unchanged while
-// scanning for OAuth callback URLs. Writes are serialized so concurrent relay
-// and status output cannot race its rolling buffer or wrapped writer.
-func (b *Bridge) SniffWriter(w io.Writer) io.Writer {
-	return &sniffWriter{w: w, b: b, seen: map[int]callbackTarget{}}
-}
-
-type sniffWriter struct {
-	mu  sync.Mutex
-	w   io.Writer
-	b   *Bridge
-	buf []byte // rolling tail window for URLs split across writes
-	// A declared session may arm a small number of flows, not walk the
-	// entire dynamic port range by printing synthetic authorize URLs.
-	seen map[int]callbackTarget
-}
-
-func (s *sniffWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, err := s.w.Write(p)
-	if n > 0 {
-		s.buf = append(s.buf, p[:n]...)
-		if len(s.buf) > 16384 {
-			s.buf = s.buf[len(s.buf)-16384:]
+// CloseGuestListeners tears down every transparently discovered listener when
+// the watcher exits. Custody callbacks remain available for their own TTL.
+func (b *Bridge) CloseGuestListeners() {
+	b.mu.Lock()
+	var closed []int
+	for port, l := range b.listeners {
+		if l.custody {
+			continue
 		}
-		for _, target := range callbackTargets(string(s.buf)) {
-			old, ok := s.seen[target.port]
-			if !ok && len(s.seen) >= maxPortsPerSession {
-				continue
-			}
-			if !ok {
-				s.seen[target.port] = target
-				s.b.ensureListenerTarget(target)
-				continue
-			}
-			merged, changed := mergeCallbackTarget(old, target)
-			if changed {
-				s.seen[target.port] = merged
-				// Enrichment is allowed only while the original listener is
-				// still active. Old bytes in the rolling window must never
-				// reopen a one-shot or expired flow.
-				s.b.enrichListenerTarget(merged)
-			}
-		}
+		b.closeExactListenerLocked(l)
+		closed = append(closed, port)
 	}
-	return n, err
+	b.failed = map[int]bool{}
+	b.mu.Unlock()
+	for _, port := range closed {
+		b.logf("closed host listener on 127.0.0.1:%d (guest watcher stopped)", port)
+	}
 }
 
 // ensureListener binds 127.0.0.1:port on the host once. Bind failures are
-// remembered so repeated prints of the same URL don't spam.
-func (b *Bridge) ensureListener(port int) bool {
-	return b.ensureListenerTarget(callbackTarget{port: port})
-}
-
-func (b *Bridge) ensureListenerTarget(target callbackTarget) bool {
-	return b.ensureListenerTargetMode(target, true)
-}
-
-func (b *Bridge) enrichListenerTarget(target callbackTarget) bool {
-	return b.ensureListenerTargetMode(target, false)
-}
-
-func (b *Bridge) ensureListenerTargetMode(target callbackTarget, allowCreate bool) bool {
-	port := target.port
+// remembered until the guest closes and reopens that port.
+func (b *Bridge) ensureListener(port int, custody bool) bool {
 	if !allowedCallbackPort(port) {
 		return false
 	}
 	b.mu.Lock()
 	if existing, ok := b.listeners[port]; ok {
-		// Custody and transparent replay have different trust semantics. Never
-		// reuse or enrich one kind of listener as the other kind.
-		if existing.custody != target.custody {
+		if existing.custody != custody {
 			b.mu.Unlock()
 			return false
 		}
-		if existing.custody {
-			// Multiple custody flows may share a callback port. Keep the
-			// listener alive for a full flow lifetime after the latest one is
-			// registered; a generation check prevents an old timer callback
-			// from closing the refreshed listener.
+		if custody {
 			b.resetListenerLifetimeLocked(existing)
-			b.mu.Unlock()
-			return true
 		}
-		// A URL split across terminal writes may reveal the path first and
-		// state later. Enrich an existing listener, but never replace one
-		// flow's non-empty expectation with a different value.
-		current := callbackTarget{port: port, path: existing.expectedPath, state: existing.expectedState, validateState: existing.validateState}
-		merged, _ := mergeCallbackTarget(current, target)
-		existing.expectedPath = merged.path
-		existing.expectedState = merged.state
-		existing.validateState = merged.validateState
 		b.mu.Unlock()
 		return true
-	}
-	if !allowCreate {
-		b.mu.Unlock()
-		return false
 	}
 	if b.failed[port] {
 		b.mu.Unlock()
@@ -416,10 +237,10 @@ func (b *Bridge) ensureListenerTargetMode(target callbackTarget, allowCreate boo
 	}
 	if len(b.listeners) >= maxActiveListeners {
 		b.mu.Unlock()
-		b.logf("listener limit reached (%d); ignoring callback port %d", maxActiveListeners, port)
+		b.logf("listener limit reached (%d); ignoring guest loopback port %d", maxActiveListeners, port)
 		return false
 	}
-	// Keep the lock across bind so concurrent output cannot race the same
+	// Keep the lock across bind so concurrent snapshots cannot race the same
 	// port or exceed the listener limit between check and publication.
 	ln, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
@@ -431,19 +252,19 @@ func (b *Bridge) ensureListenerTargetMode(target callbackTarget, allowCreate boo
 		b.logf("cannot bind host 127.0.0.1:%d (%v) — is something already using it?", port, err)
 		return false
 	}
-	l := &listener{
-		port:          port,
-		expectedPath:  target.path,
-		expectedState: target.state,
-		validateState: target.validateState,
-		custody:       target.custody,
-		ln:            ln,
-	}
+	l := &listener{port: port, custody: custody, ln: ln}
 	b.listeners[port] = l
-	// A flow the user abandons must not hold the host port forever.
-	b.resetListenerLifetimeLocked(l)
+	// Transparent lifetime follows the observed guest socket. Custody has no
+	// guest listener, so retain its bounded abandoned-flow TTL.
+	if custody {
+		b.resetListenerLifetimeLocked(l)
+	}
 	b.mu.Unlock()
-	b.logf("OAuth callback detected: listening on host http://127.0.0.1:%d (replaying into the sandbox)", port)
+	if custody {
+		b.logf("OAuth custody callback: listening on host http://127.0.0.1:%d", port)
+	} else {
+		b.logf("guest loopback listener detected: OAuth callback gate on host http://127.0.0.1:%d", port)
+	}
 	go b.serve(l)
 	return true
 }
@@ -463,16 +284,6 @@ func (b *Bridge) serve(l *listener) {
 	b.closeExactListener(l)
 }
 
-// closeListener unbinds and forgets a port. Safe to call repeatedly.
-func (b *Bridge) closeListener(port int) {
-	b.mu.Lock()
-	l := b.listeners[port]
-	b.mu.Unlock()
-	if l != nil {
-		b.closeExactListener(l)
-	}
-}
-
 // closeExactListener prevents an old TTL/callback timer from closing a new
 // listener that later reused the same port.
 func (b *Bridge) closeExactListener(l *listener) {
@@ -487,9 +298,8 @@ func (b *Bridge) closeExactListener(l *listener) {
 }
 
 func (b *Bridge) closeExactListenerLocked(l *listener) {
-	// Close before making the port available for reuse. Otherwise a scanner
-	// can observe the deleted map entry, race the still-open socket, and
-	// permanently cache an EADDRINUSE failure for this bridge.
+	// Close before making the port available for reuse. Otherwise a watcher
+	// snapshot can race the still-open socket and cache an EADDRINUSE failure.
 	if l.ttl != nil {
 		l.ttl.Stop()
 	}
@@ -542,10 +352,9 @@ func (b *Bridge) acquireReplay() bool {
 
 func (b *Bridge) releaseReplay() { <-b.replaySlots }
 
-// handleCallback serves one browser request: validate and deliver the
-// path+query, then return a host-authored page. After a request carrying the
-// OAuth result (code=/error=) completes, the flow is done and the listener
-// closes.
+// handleCallback serves one browser request. Transparent listeners accept
+// only OAuth-shaped results; the guest CLI performs authoritative state and
+// PKCE validation. Custody callbacks retain their exact host-side state gate.
 func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setBrowserSecurityHeaders(w)
@@ -557,24 +366,6 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 		if len(uri) > maxRequestURIBytes {
 			http.Error(w, "gantry oauth bridge: callback URL too long", http.StatusRequestURITooLong)
 			return
-		}
-		b.mu.Lock()
-		expectedPath, expectedState, validateState := l.expectedPath, l.expectedState, l.validateState
-		b.mu.Unlock()
-		if expectedPath != "" && r.URL.Path != expectedPath {
-			http.Error(w, "gantry oauth bridge: callback path mismatch", http.StatusNotFound)
-			return
-		}
-		if validateState && r.URL.Query().Get("state") != expectedState {
-			http.Error(w, "gantry oauth bridge: callback state mismatch", http.StatusNotFound)
-			return
-		}
-		if !l.custody && validateState && expectedState == "" {
-			q := r.URL.Query()
-			if q.Get("code") != "" || q.Get("error") != "" {
-				http.Error(w, "gantry oauth bridge: callback state was not captured", http.StatusNotFound)
-				return
-			}
 		}
 		if l.custody {
 			// Custody callbacks must be claimed by an exact pending state. An
@@ -591,6 +382,11 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			writeBrowserPage(w, http.StatusOK, custodyPage)
 			// A custody listener can serve several pending flows on one port.
 			// Its refreshed lifetime, rather than one callback, closes it.
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("state") == "" || (q.Get("code") == "" && q.Get("error") == "") {
+			http.Error(w, "gantry oauth bridge: not an OAuth callback result", http.StatusNotFound)
 			return
 		}
 		if !b.acquireReplay() {
@@ -654,11 +450,9 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 		// confirms that the callback reached the guest; the CLI reports whether
 		// sign-in itself succeeded.
 		writeBrowserPage(w, http.StatusOK, completionPage)
-		if q := r.URL.Query(); q.Get("code") != "" || q.Get("error") != "" {
-			// OAuth flows are one-shot: the CLI exchanges the code and
-			// shuts its listener. Free the host port for the next login.
-			time.AfterFunc(2*time.Second, func() { b.closeExactListener(l) })
-		}
+		// The guest watcher closes this gate with the underlying socket. Do not
+		// assume the application is one-shot: some unmodified CLIs reuse a
+		// loopback listener for later login attempts.
 	}
 }
 
@@ -698,12 +492,12 @@ func (b *Bridge) replayIntoGuest(port int, requestURI string) (replayResult, err
 // devTCPReplayScript is run inside the sandbox with: bash -c script -- PORT URI
 // It opens a TCP connection to the CLI's loopback listener via bash's
 // /dev/tcp, writes one HTTP/1.0 GET, and prints the raw response to stdout.
-// bash is present in every gantry image (the default shell); containers
-// share the VM netns, so 127.0.0.1 here is the CLI's listener.
+// bash is present in every gantry image (the default shell); containers share
+// the VM netns. Using localhost lets the resolver reach IPv4 or IPv6 loopback.
 const devTCPReplayScript = `set -u
 port=$1; uri=$2
-exec 3<>"/dev/tcp/127.0.0.1/$port" || { echo "oauth-replay: cannot connect to 127.0.0.1:$port (CLI not listening?)" >&2; exit 97; }
-printf 'GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nUser-Agent: gantry-oauth-bridge\r\nAccept: */*\r\nConnection: close\r\n\r\n' "$uri" >&3 || { echo "oauth-replay: write failed" >&2; exit 98; }
+exec 3<>"/dev/tcp/localhost/$port" || { echo "oauth-replay: cannot connect to localhost:$port (CLI not listening?)" >&2; exit 97; }
+printf 'GET %s HTTP/1.0\r\nHost: localhost:%s\r\nUser-Agent: gantry-oauth-bridge\r\nAccept: */*\r\nConnection: close\r\n\r\n' "$uri" "$port" >&3 || { echo "oauth-replay: write failed" >&2; exit 98; }
 cat <&3
 `
 

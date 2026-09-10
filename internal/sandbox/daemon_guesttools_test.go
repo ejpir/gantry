@@ -11,14 +11,20 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/config"
 )
 
-func TestMCPReadyTimeoutCoversBothGuestToolDeliveryAttempts(t *testing.T) {
-	if got := sandboxDaemonReadyTimeout(config.RunConfig{}); got != defaultSandboxDaemonReadyTimeout {
+func TestHelperBackedReadyTimeoutCoversBothDeliveryAttempts(t *testing.T) {
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "")
+	disabled := false
+	if got := sandboxDaemonReadyTimeout(config.RunConfig{OAuthBridge: &disabled}); got != defaultSandboxDaemonReadyTimeout {
 		t.Fatalf("ordinary ready timeout = %s, want %s", got, defaultSandboxDaemonReadyTimeout)
 	}
-	if got := sandboxDaemonReadyTimeout(config.RunConfig{SSH: true, DevContainers: true}); got != defaultSandboxDaemonReadyTimeout {
+	if got := sandboxDaemonReadyTimeout(config.RunConfig{SSH: true, DevContainers: true, OAuthBridge: &disabled}); got != defaultSandboxDaemonReadyTimeout {
 		t.Fatalf("async SSH/Dev Containers ready timeout = %s, want %s", got, defaultSandboxDaemonReadyTimeout)
 	}
-	got := sandboxDaemonReadyTimeout(config.RunConfig{MCP: true})
+	got := sandboxDaemonReadyTimeout(config.RunConfig{})
+	if wantMin := 2*guestToolsTimeout + time.Second; got < wantMin {
+		t.Fatalf("OAuth watcher ready timeout = %s, want at least %s", got, wantMin)
+	}
+	got = sandboxDaemonReadyTimeout(config.RunConfig{MCP: true, OAuthBridge: &disabled})
 	if wantMin := 2*guestToolsTimeout + time.Second; got < wantMin {
 		t.Fatalf("MCP ready timeout = %s, want at least %s", got, wantMin)
 	}
@@ -63,13 +69,34 @@ func TestSSHGuestToolsWaitReportsFailureAndCancellation(t *testing.T) {
 }
 
 func TestMCPAndDevContainersSplitSynchronousAndAsyncHelperDelivery(t *testing.T) {
-	plan := planGuestToolsDelivery(config.RunConfig{SSH: true, DevContainers: true, MCP: true})
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "")
+	disabled := false
+	plan := planGuestToolsDelivery(config.RunConfig{SSH: true, DevContainers: true, MCP: true, OAuthBridge: &disabled})
 	if !plan.workloadRequired || plan.workloadAsync || !plan.ideAsync {
 		t.Fatalf("MCP+IDE helper plan = %+v", plan)
 	}
-	sshOnly := planGuestToolsDelivery(config.RunConfig{SSH: true})
+	sshOnly := planGuestToolsDelivery(config.RunConfig{SSH: true, OAuthBridge: &disabled})
 	if sshOnly.workloadRequired || !sshOnly.workloadAsync || sshOnly.ideAsync {
 		t.Fatalf("SSH-only helper plan = %+v", sshOnly)
+	}
+}
+
+func TestOAuthBridgeControlsGuestWatcherToolDelivery(t *testing.T) {
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "")
+	disabled := false
+	if plan := planGuestToolsDelivery(config.RunConfig{}); !plan.workloadRequired {
+		t.Fatalf("default OAuth bridge did not require workload helper: %+v", plan)
+	}
+	if plan := planGuestToolsDelivery(config.RunConfig{OAuthBridge: &disabled}); plan.workloadRequired {
+		t.Fatalf("disabled OAuth bridge required workload helper: %+v", plan)
+	}
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "1")
+	if plan := planGuestToolsDelivery(config.RunConfig{OAuthBridge: &disabled}); !plan.workloadRequired {
+		t.Fatalf("global OAuth enable did not require workload helper: %+v", plan)
+	}
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "0")
+	if plan := planGuestToolsDelivery(config.RunConfig{}); plan.workloadRequired {
+		t.Fatalf("global OAuth disable required workload helper: %+v", plan)
 	}
 }
 
@@ -93,17 +120,19 @@ func TestGuestToolsReadinessIsIndependentPerOCIRoot(t *testing.T) {
 }
 
 func TestGuestToolsTargetsSeparateWorkloadAndIDE(t *testing.T) {
-	ideOnly := guestToolsTargets(config.RunConfig{SSH: true, DevContainers: true})
+	t.Setenv("GANTRY_OAUTH_BRIDGE", "")
+	disabled := false
+	ideOnly := guestToolsTargets(config.RunConfig{SSH: true, DevContainers: true, OAuthBridge: &disabled})
 	if len(ideOnly) != 1 || !ideOnly[0].ide {
 		t.Fatalf("IDE-only helper targets = %+v", ideOnly)
 	}
 	both := guestToolsTargets(config.RunConfig{
-		SSH: true, DevContainers: true, MCP: true,
+		SSH: true, DevContainers: true, MCP: true, OAuthBridge: &disabled,
 	})
 	if len(both) != 2 || both[0].ide || !both[1].ide {
 		t.Fatalf("workload+IDE helper targets = %+v", both)
 	}
-	workloadOnly := guestToolsTargets(config.RunConfig{SSH: true})
+	workloadOnly := guestToolsTargets(config.RunConfig{SSH: true, OAuthBridge: &disabled})
 	if len(workloadOnly) != 1 || workloadOnly[0].ide {
 		t.Fatalf("workload helper targets = %+v", workloadOnly)
 	}
