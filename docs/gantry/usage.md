@@ -126,7 +126,19 @@ $ gantry
 `gantry tui` opens the same dashboard explicitly. From it you can create,
 start, stop, enter, edit, and remove sandboxes; inspect storage and isolation;
 and manage network rules, traffic, packet capture, shares, ports, secrets, and MCP servers.
-Press `?` in the dashboard for its current key bindings.
+Press `?` for an aligned list of navigation, current-view actions, and application shortcuts.
+
+- Click a table column heading to sort it; click it again to reverse the order.
+  Press `S` to choose any sort field, including fields hidden on narrow terminals,
+  or select **Default order** to reset it. Each view remembers its own sort order
+  during the session, including across live refreshes.
+- Press `/` to filter by a case-insensitive substring of the sandbox name.
+  Press Enter to apply, or Escape to cancel. Apply an empty value (or click
+  **Clear**) to show all sandboxes again. The filter is shared across
+  sandbox-scoped views; cached images and registry credentials remain host-wide.
+- Sorting and filtering preserve the selected record when it remains visible.
+  They do not change network policy, packet-capture scope, or retained traffic;
+  clearing a filter restores hidden rows immediately.
 
 ## Inspect local state
 

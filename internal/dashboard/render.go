@@ -15,76 +15,14 @@ import (
 
 const (
 	tuiTopPadding    = 1
-	tuiMenuHeight    = tuiTopPadding + 2
+	tuiHeaderGap     = 1
+	tuiMenuHeight    = tuiTopPadding + 2 + tuiHeaderGap
 	tuiFooterPadding = 1
 	tuiStatusHeight  = tuiFooterPadding + 1
 	tuiCardHeight    = 10
 	tuiCardGapX      = 2
 	tuiCardGapY      = 1
 )
-
-type tuiTheme struct {
-	bg            color.Color
-	panel         color.Color
-	panelSelected color.Color
-	panelRaised   color.Color
-	text          color.Color
-	secondary     color.Color
-	muted         color.Color
-	border        color.Color
-	borderMuted   color.Color
-	accent        color.Color
-	accentFg      color.Color
-	brand         color.Color
-	brandFg       color.Color
-	success       color.Color
-	warning       color.Color
-	error         color.Color
-	info          color.Color
-}
-
-func tuiThemeFor(dark bool) tuiTheme {
-	if dark {
-		return tuiTheme{
-			bg:            lipgloss.Color("#16161E"),
-			panel:         lipgloss.Color("#1A1B26"),
-			panelSelected: lipgloss.Color("#202337"),
-			panelRaised:   lipgloss.Color("#292E42"),
-			text:          lipgloss.Color("#E6E9F0"),
-			secondary:     lipgloss.Color("#C9CFDB"),
-			muted:         lipgloss.Color("#6B7386"),
-			border:        lipgloss.Color("#4A5266"),
-			borderMuted:   lipgloss.Color("#3A4152"),
-			accent:        lipgloss.Color("#7F77DD"),
-			accentFg:      lipgloss.Color("#EEEDFE"),
-			brand:         lipgloss.Color("#7F77DD"),
-			brandFg:       lipgloss.Color("#EEEDFE"),
-			success:       lipgloss.Color("#5DCAA5"),
-			warning:       lipgloss.Color("#EFA027"),
-			error:         lipgloss.Color("#D4537E"),
-			info:          lipgloss.Color("#7F77DD"),
-		}
-	}
-	return tuiTheme{
-		bg:            lipgloss.Color("#F7F8FC"),
-		panel:         lipgloss.Color("#FFFFFF"),
-		panelSelected: lipgloss.Color("#EDF3FF"),
-		panelRaised:   lipgloss.Color("#E4E9F2"),
-		text:          lipgloss.Color("#2C2C2A"),
-		secondary:     lipgloss.Color("#4B4B47"),
-		muted:         lipgloss.Color("#888780"),
-		border:        lipgloss.Color("#9D9B93"),
-		borderMuted:   lipgloss.Color("#B4B2A9"),
-		accent:        lipgloss.Color("#534AB7"),
-		accentFg:      lipgloss.Color("#EEEDFE"),
-		brand:         lipgloss.Color("#534AB7"),
-		brandFg:       lipgloss.Color("#EEEDFE"),
-		success:       lipgloss.Color("#0F6E56"),
-		warning:       lipgloss.Color("#854F0B"),
-		error:         lipgloss.Color("#993556"),
-		info:          lipgloss.Color("#534AB7"),
-	}
-}
 
 type tuiRect struct{ x, y, w, h int }
 
@@ -107,10 +45,10 @@ type tuiDashboardLayout struct {
 
 func (m sandboxTUIModel) dashboardLayout() tuiDashboardLayout {
 	screenWidth := maxInt(24, m.width)
-	height := maxInt(tuiMenuHeight+tuiStatusHeight+1, m.height)
+	height := maxInt(m.headerHeight()+tuiStatusHeight+1, m.height)
 	contentX := 0
 	width := screenWidth
-	contentY := tuiMenuHeight
+	contentY := m.headerHeight()
 	contentHeight := maxInt(1, height-contentY-tuiStatusHeight)
 	cardHeight := minInt(tuiCardHeight, contentHeight)
 	cardHeight = maxInt(5, cardHeight)
@@ -214,6 +152,9 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 			body = m.renderCardGrid(theme, layout)
 		}
 	}
+	if m.sandboxFilter != "" && !m.loading && m.page != tuiImagesPage && m.page != tuiOverviewPage && m.page != tuiSandboxesPage && m.pageRowCount(m.page) == 0 {
+		body = m.renderTableEmpty(theme, layout, "No matching rows", "Press / to change or clear the sandbox filter.")
+	}
 	status := m.renderStatusBar(theme, layout.screenWidth)
 
 	sections := []string{header, body, status}
@@ -242,7 +183,7 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 			z = 4
 		}
 		layers = append(layers, lipgloss.NewLayer(toast).
-			X(maxInt(0, layout.screenWidth-toastWidth-2)).Y(tuiMenuHeight+1).Z(z))
+			X(maxInt(0, layout.screenWidth-toastWidth-2)).Y(layout.contentY+1).Z(z))
 	}
 	// Publish the hit map from this exact render pass. All geometry in the map
 	// is shared with the components rendered above, including responsive mode,
@@ -258,11 +199,11 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 }
 
 func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
-	brand := lipgloss.NewStyle().Bold(true).Foreground(theme.brandFg).Background(theme.brand).Padding(0, 1).Render("GANTRY")
+	brandRows := strings.Split(renderHeaderBrand(theme, width), "\n")
 	var left strings.Builder
 	left.WriteString("  ")
-	left.WriteString(brand)
-	position := 2 + lipgloss.Width(brand)
+	left.WriteString(brandRows[tuiTopPadding])
+	position := 2 + headerBrandWidth(width)
 	tabs := m.tabRects(width)
 	for _, tab := range tabs {
 		if tab.x > position {
@@ -270,7 +211,7 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 		}
 		style := lipgloss.NewStyle().Foreground(theme.muted)
 		if tab.active {
-			style = style.Foreground(theme.text).Bold(true).Underline(true)
+			style = style.Foreground(theme.accent).Bold(true).Underline(true)
 		}
 		left.WriteString(style.Render(tab.label))
 		position = tab.x + tab.w
@@ -294,13 +235,32 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 		}
 	}
 	line := left.String()
+	summaryShown := false
 	if right != "" && lipgloss.Width(line)+lipgloss.Width(right)+3 <= width {
 		line = joinSides(line, right+"  ", width)
+		summaryShown = summary != "" && strings.Contains(right, summary)
 	} else {
 		line = truncateANSI(line, width)
 	}
-	content := strings.Repeat("\n", tuiTopPadding) + line
-	style := lipgloss.NewStyle().Foreground(theme.text).Background(theme.bg).Width(width).Height(tuiMenuHeight).MaxHeight(tuiMenuHeight)
+	bottom := "  " + brandRows[2]
+	if label := m.viewQueryLabel(); label != "" && m.queryToolbarHeight() == 0 {
+		bottom += strings.Repeat(" ", maxInt(2, headerBrandWidth(width)-lipgloss.Width(brandRows[2])+2)) + lipgloss.NewStyle().Foreground(theme.accent).Render(label)
+		bottom = truncateANSI(bottom, maxInt(1, width-2))
+	}
+	if !summaryShown && summary != "" && lipgloss.Width(bottom)+lipgloss.Width(summary)+3 <= width {
+		bottom = joinSides(bottom, summary+"  ", width)
+	}
+	top := "  " + brandRows[0]
+	if label := m.viewSortLabel(); label != "" {
+		budget := maxInt(1, width-lipgloss.Width(top)-4)
+		top = joinSides(top, lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(label, budget))+"  ", width)
+	}
+	content := top + "\n" + line + "\n" + bottom
+	if m.queryToolbarHeight() > 0 {
+		filter := lipgloss.NewStyle().Foreground(theme.accent).Render(truncateText(m.viewQueryLabel(), maxInt(1, width-4)))
+		content += "\n\n  " + filter
+	}
+	style := lipgloss.NewStyle().Foreground(theme.text).Background(theme.bg).Width(width).Height(m.headerHeight()).MaxHeight(m.headerHeight())
 	return renderSurface(style, theme.text, theme.bg, content)
 }
 
@@ -343,7 +303,7 @@ type tuiTabRect struct {
 }
 
 func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
-	const navigationStart = 12 // two-cell inset, eight-cell brand, two-cell gap
+	navigationStart := 2 + headerBrandWidth(width) + 2
 	currentLabel := "‹ " + strings.ToLower(pageDisplayTitle(m.page)) + " ›"
 	compactCurrent := func() []tuiTabRect {
 		label := truncateText(currentLabel, maxInt(1, width-navigationStart))
@@ -383,15 +343,24 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	switch m.page {
 	case tuiOverviewPage:
-		running, allocatedVCPUs := 0, 0
+		running, configuredVCPUs := 0, 0
+		unknownConfig := false
 		for _, sandbox := range m.sandboxes {
-			allocatedVCPUs += maxInt(1, sandbox.DisplayCPUs())
+			if sandbox.ConfigError {
+				unknownConfig = true
+			} else {
+				configuredVCPUs += maxInt(1, sandbox.VCPUs)
+			}
 			if sandbox.State == tuiRunning {
 				running++
 			}
 		}
+		configured := fmt.Sprint(configuredVCPUs)
+		if unknownConfig {
+			configured += "+?"
+		}
 		hostVCPUs := maxInt(1, m.limits.MaxVCPUs)
-		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running · host %d/%d vCPU", running, allocatedVCPUs, hostVCPUs))
+		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running · %s vCPU configured · %d host", running, configured, hostVCPUs))
 	case tuiTrafficPage:
 		var tx, rx, blocked uint64
 		for _, sandbox := range m.sandboxes {
@@ -735,6 +704,14 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 }
 
 func (m sandboxTUIModel) contextHints() [][2]string {
+	hints := m.pageContextHints()
+	at := minInt(2, len(hints))
+	out := append([][2]string{}, hints[:at]...)
+	out = append(out, [2]string{"/", "filter"}, [2]string{"S", "sort"})
+	return append(out, hints[at:]...)
+}
+
+func (m sandboxTUIModel) pageContextHints() [][2]string {
 	switch m.page {
 	case tuiOverviewPage:
 		if len(m.sandboxes) == 0 {
@@ -811,7 +788,7 @@ func (m sandboxTUIModel) renderCardScrollbar(theme tuiTheme, layout tuiDashboard
 func (m sandboxTUIModel) toastBounds(theme tuiTheme) tuiRect {
 	toast := m.renderToast(theme)
 	width, height := lipgloss.Width(toast), lipgloss.Height(toast)
-	return tuiRect{x: maxInt(0, m.width-width-2), y: tuiMenuHeight + 1, w: width, h: height}
+	return tuiRect{x: maxInt(0, m.width-width-2), y: m.headerHeight() + 1, w: width, h: height}
 }
 
 func (m sandboxTUIModel) renderToast(theme tuiTheme) string {
@@ -855,7 +832,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 	idealWidth := 62
 	switch kind {
 	case tuiHelpDialog:
-		idealWidth = 72
+		idealWidth = 110
 	case tuiInfoDialog:
 		idealWidth = 68
 	case tuiPacketDetailDialog:
@@ -971,6 +948,10 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 	switch kind {
 	case tuiHelpDialog:
 		content = m.renderHelpDialog(theme, innerWidth)
+	case tuiSandboxFilterDialog:
+		content = m.renderFilterDialog(theme, innerWidth)
+	case tuiSortDialog:
+		content, _ = m.sortDialogLayout(theme, innerWidth)
 	case tuiInfoDialog:
 		content = m.renderInfoDialog(theme, innerWidth)
 	case tuiPacketDetailDialog:
@@ -1039,84 +1020,7 @@ func (m sandboxTUIModel) dialogHeader(theme tuiTheme, title string, width int) s
 }
 
 func (m sandboxTUIModel) renderHelpDialog(theme tuiTheme, width int) string {
-	header := m.dialogHeader(theme, "Keyboard shortcuts", width)
-	column := func(title string, rows [][2]string) string {
-		lines := []string{lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(title)}
-		for _, row := range rows {
-			key := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Width(13).Render(row[0])
-			desc := lipgloss.NewStyle().Foreground(theme.secondary).Render(row[1])
-			lines = append(lines, key+" "+desc)
-		}
-		return strings.Join(lines, "\n")
-	}
-	navigation := column("NAVIGATION", [][2]string{
-		{"←↑↓→ / hjkl", "move selection"},
-		{"pgup / pgdown", "move one page"},
-		{"g / G", "first / last row"},
-		{"mouse wheel", "scroll the view"},
-		{"tab / S-tab", "switch views"},
-		{"0 … 9", "jump to overview or a view"},
-	})
-	actions := column("SANDBOX ACTIONS", [][2]string{
-		{"enter", "open or start"},
-		{"s", "start / stop"},
-		{"n", "create a sandbox"},
-		{"e", "edit resources / isolation"},
-		{"i", "show details"},
-		{"d", "remove"},
-		{"r", "refresh"},
-	})
-	viewActions := column("VIEW ACTIONS", [][2]string{
-		{"a", "add a host share"},
-		{"d", "remove selected share"},
-		{"r", "replace selected share"},
-		{"e (Rules)", "edit network policy"},
-		{"space (Pkts)", "pause packet display"},
-		{"c (Packets)", "clear packet capture"},
-		{"d (Packets)", "inspect packet contents"},
-		{"a/f/e/d MCP", "remote add, filesystem, edit, remove"},
-		{"p/d/u (Images)", "pull, remove, prune"},
-		{"a/d + s (Images)", "registry login/logout, section"},
-	})
-	applicationRows := [][2]string{
-		{"?", "toggle this help"},
-		{"q / ctrl+c", "quit"},
-		{"ctrl+c / ctrl+v", "copy / paste focused field"},
-		{"click", "select a navigation item, row, card, or visible action"},
-		{"double-click", "inspect, open, or start"},
-	}
-	if m.updateStatus.Available {
-		applicationRows = append([][2]string{{"U", "install " + m.updateStatus.Latest}}, applicationRows...)
-	}
-	application := column("APPLICATION", applicationRows)
-	var body string
-	if width >= 58 {
-		body = lipgloss.JoinHorizontal(lipgloss.Top, navigation, strings.Repeat(" ", 3), actions, strings.Repeat(" ", 3), viewActions)
-		body += "\n\n" + application
-	} else {
-		binding := func(key, description string) string {
-			return lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(key) + " " +
-				lipgloss.NewStyle().Foreground(theme.secondary).Render(description)
-		}
-		navigation = strings.Join([]string{
-			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("NAVIGATION"),
-			binding("←↑↓→ / hjkl", "move") + "  ·  " + binding("tab", "view") + "  ·  " + binding("1…9", "jump"),
-			binding("g / G", "first / last") + "  ·  " + binding("wheel", "scroll"),
-		}, "\n")
-		actions = strings.Join([]string{
-			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("SANDBOX ACTIONS"),
-			binding("enter", "open / start") + "  ·  " + binding("s", "start / stop"),
-			binding("n", "create") + "  ·  " + binding("i", "details") + "  ·  " + binding("d", "remove"),
-			binding("r", "refresh") + "  ·  " + binding("e", "policy") + "  ·  " + binding("a/d/r", "mounts"),
-			binding("d/space/c", "pkts") + "  ·  " + binding("a/f/e/d", "MCP") + "  ·  " + binding("p/d/u/s", "images"),
-		}, "\n")
-		application = strings.Join([]string{
-			lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render("APPLICATION"),
-			binding("?", "help") + "  ·  " + binding("q", "quit") + "  ·  " + binding("click", "select"),
-		}, "\n")
-		body = navigation + "\n\n" + actions + "\n\n" + application
-	}
-	return header + "\n\n" + body
+	return m.renderKeyboardHelp(theme, width)
 }
 
 func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
@@ -1666,7 +1570,7 @@ func renderDialogButton(theme tuiTheme, label string, focused, danger bool) stri
 	if danger {
 		foreground = theme.error
 		if focused {
-			foreground, background = lipgloss.Color("#FFFFFF"), theme.error
+			foreground, background = theme.errorFg, theme.error
 		}
 	}
 	return lipgloss.NewStyle().Bold(focused).Foreground(foreground).Background(background).Padding(0, 2).Render(label)

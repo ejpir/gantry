@@ -619,7 +619,7 @@ Use a named sandbox when the command needs to install packages or retain
 filesystem changes.</p>
 </div><footer class="doc-footer"><p>Help make these docs better. <a href="https://github.com/ejpir/gantry/edit/main/docs/gantry/get-started.md" target="_blank" rel="noopener noreferrer">Edit this page on GitHub ↗</a></p><nav class="pager" aria-label="Adjacent guides"><a class="pager-link" href="#install"><span>Previous</span><strong>Installation <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a><a class="pager-link" href="#usage"><span>Next</span><strong>Everyday usage <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a></nav></footer></article>
 <article class="doc-page" id="usage" data-label="Everyday usage" data-group="Get started" data-title="Use Gantry">
-<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Get started</span><span aria-hidden="true">/</span><span>Everyday usage</span></div><p class="eyebrow">Get started</p><h1 id="usage/use-gantry" tabindex="-1">Use Gantry</h1><div class="page-meta"><span>3 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/usage.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
+<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Get started</span><span aria-hidden="true">/</span><span>Everyday usage</span></div><p class="eyebrow">Get started</p><h1 id="usage/use-gantry" tabindex="-1">Use Gantry</h1><div class="page-meta"><span>4 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/usage.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
 <div class="prose"><p>Use this page as a command-oriented guide to everyday sandbox operations.</p>
 <h2 id="usage/choose-persistent-or-one-shot-execution" tabindex="-1">Choose persistent or one-shot execution</h2>
 <p>A named sandbox keeps its writable disk and configuration between starts:</p>
@@ -701,7 +701,20 @@ Gantry's per-sandbox default avoids that unsafe sharing.</p>
 <p><code>gantry tui</code> opens the same dashboard explicitly. From it you can create,
 start, stop, enter, edit, and remove sandboxes; inspect storage and isolation;
 and manage network rules, traffic, packet capture, shares, ports, secrets, and MCP servers.
-Press <code>?</code> in the dashboard for its current key bindings.</p>
+Press <code>?</code> for an aligned list of navigation, current-view actions, and application shortcuts.</p>
+<ul>
+<li>Click a table column heading to sort it; click it again to reverse the order.
+Press <code>S</code> to choose any sort field, including fields hidden on narrow terminals,
+or select <strong>Default order</strong> to reset it. Each view remembers its own sort order
+during the session, including across live refreshes.</li>
+<li>Press <code>/</code> to filter by a case-insensitive substring of the sandbox name.
+Press Enter to apply, or Escape to cancel. Apply an empty value (or click
+<strong>Clear</strong>) to show all sandboxes again. The filter is shared across
+sandbox-scoped views; cached images and registry credentials remain host-wide.</li>
+<li>Sorting and filtering preserve the selected record when it remains visible.
+They do not change network policy, packet-capture scope, or retained traffic;
+clearing a filter restores hidden rows immediately.</li>
+</ul>
 <h2 id="usage/inspect-local-state" tabindex="-1">Inspect local state</h2>
 <p>By default, persistent state is under <code>~/.gantry</code>:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> text</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="text example"><code>~/.gantry/

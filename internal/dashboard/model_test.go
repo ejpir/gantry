@@ -617,7 +617,7 @@ func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 	}}
 	view := m.View()
 	plain := ansi.Strip(view.Content)
-	for _, want := range []string{"GANTRY", "overview", "dev", "alpine:latest", "traffic", "denied", "exposure", "recent denies", "n new"} {
+	for _, want := range []string{"gantry.", "overview", "dev", "alpine:latest", "TRAFFIC", "BLOCKED PACKETS", "ACCESS", "Recent blocks", "n new"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view does not contain %q:\n%s", want, plain)
 		}
@@ -1045,11 +1045,16 @@ func TestSandboxTUICompactHelpKeepsAllSections(t *testing.T) {
 	m.loading = false
 	m.width, m.height = 60, 20
 	m.dialog = tuiHelpDialog
-	plain := ansi.Strip(m.View().Content)
-	for _, want := range []string{"NAVIGATION", "SANDBOX ACTIONS", "APPLICATION"} {
+	_, _, content, _ := m.dialogMeasured(tuiThemeFor(m.dark), tuiHelpDialog)
+	plain := ansi.Strip(content)
+	for _, want := range []string{"NAVIGATION", "SANDBOX ACTIONS", "FILTER & SORT", "APPLICATION"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("compact help does not contain %q:\n%s", want, plain)
 		}
+	}
+	_, _ = m.updateDialogKey(tea.KeyPressMsg{Code: tea.KeyEnd})
+	if !strings.Contains(ansi.Strip(m.View().Content), "APPLICATION") {
+		t.Fatal("compact help cannot scroll to the final section")
 	}
 }
 
