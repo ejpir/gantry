@@ -47,14 +47,18 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 		for index, rect := range geometry.entryRects {
 			targets = append(targets, tuiHitTarget{kind: "entry", index: index, rect: rect})
 		}
+		if geometry.inspectorRect.w > 0 {
+			_, actions := m.renderOverviewInspector(tuiThemeFor(m.dark), geometry.inspectorRect)
+			targets = append(targets, actions...)
+		}
 	case tuiSandboxesPage:
 		if m.usesMasterDetail(layout) {
 			geometry := m.masterDetailGeometry(layout)
-			if geometry.workloadRect.w > 0 && geometry.workloadRect.h > 0 {
-				targets = append(targets, tuiHitTarget{kind: "workload", index: m.cursor, rect: geometry.workloadRect})
-			}
-			if geometry.createRect.w > 0 && geometry.createRect.h > 0 {
-				targets = append(targets, tuiHitTarget{kind: "create", index: m.cursor, rect: geometry.createRect})
+			_, actions := m.renderSandboxStack(tuiThemeFor(m.dark), geometry.detailWidth, layout.contentHeight-geometry.detailTop)
+			for _, target := range actions {
+				target.rect.x += layout.contentX + geometry.detailOffset
+				target.rect.y += layout.contentY + geometry.detailTop
+				targets = append(targets, target)
 			}
 			for index, rect := range geometry.entryRects {
 				targets = append(targets, tuiHitTarget{kind: "entry", index: index, rect: rect})
@@ -78,6 +82,12 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 			targets = append(targets, tuiHitTarget{kind: "entry", index: index, rect: visibleRect})
 		}
 	default:
+		if !m.loading && m.pageRowCount(m.page) > 0 {
+			for _, cell := range m.sortHeaderCells(maxInt(1, layout.width-4)) {
+				targets = append(targets, tuiHitTarget{kind: "sort-column", action: cell.column.id,
+					rect: tuiRect{x: layout.contentX + 2 + cell.x, y: layout.contentY, w: cell.width, h: 1}})
+			}
+		}
 		rowY := layout.contentY + tuiTableHeaderHeight
 		_, scroll, count := m.tableState()
 		if scroll != nil {
@@ -117,7 +127,7 @@ func (m sandboxTUIModel) statusBarHitTargets(layout tuiDashboardLayout) []tuiHit
 
 func clickableContextKey(key string) bool {
 	switch key {
-	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc":
+	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc", "/", "S":
 		return true
 	default:
 		return false
@@ -174,6 +184,9 @@ func sandboxCardActionRects(card tuiRect, sandbox tuiSandbox) []tuiCardActionRec
 
 func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, tea.Cmd) {
 	switch target.kind {
+	case "sort-column":
+		m.chooseSort(target.action)
+		return m, nil
 	case "menu":
 		switch target.action {
 		case "new":

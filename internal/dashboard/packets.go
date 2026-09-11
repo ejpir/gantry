@@ -47,8 +47,8 @@ func (m *sandboxTUIModel) refreshPacketsCmd() tea.Cmd {
 	if m.packetLoading || m.packetPaused {
 		return nil
 	}
-	targets := make([]string, 0, len(m.sandboxes))
-	for _, sandbox := range m.sandboxes {
+	targets := make([]string, 0, len(m.allSandboxes()))
+	for _, sandbox := range m.allSandboxes() {
 		if sandbox.State == tuiRunning && sandbox.Net {
 			targets = append(targets, sandbox.Name)
 		}
@@ -97,24 +97,26 @@ func (m *sandboxTUIModel) handlePacketCapture(message tuiPacketCaptureMsg) (tea.
 	m.packetAfter = message.after
 	m.packetEvicted = message.evicted
 	m.packetError = safeUILine(message.err)
-	wasFollowing := len(m.packets) == 0 || m.packetCursor == len(m.packets)-1
-	m.packets = append(m.packets, message.rows...)
-	sort.SliceStable(m.packets, func(left, right int) bool {
-		if m.packets[left].Timestamp.Equal(m.packets[right].Timestamp) {
-			if m.packets[left].Sandbox == m.packets[right].Sandbox {
-				return m.packets[left].Sequence < m.packets[right].Sequence
+	m.rememberViewSource()
+	key := m.selectedPacketKey()
+	wasFollowing := m.sorts[tuiPacketsPage].column == "" && (len(m.packets) == 0 || m.packetCursor == len(m.packets)-1)
+	m.packetSource = append(m.packetSource, message.rows...)
+	sort.SliceStable(m.packetSource, func(left, right int) bool {
+		if m.packetSource[left].Timestamp.Equal(m.packetSource[right].Timestamp) {
+			if m.packetSource[left].Sandbox == m.packetSource[right].Sandbox {
+				return m.packetSource[left].Sequence < m.packetSource[right].Sequence
 			}
-			return m.packets[left].Sandbox < m.packets[right].Sandbox
+			return m.packetSource[left].Sandbox < m.packetSource[right].Sandbox
 		}
-		return m.packets[left].Timestamp.Before(m.packets[right].Timestamp)
+		return m.packetSource[left].Timestamp.Before(m.packetSource[right].Timestamp)
 	})
-	if len(m.packets) > tuiMaxPacketRows {
-		drop := len(m.packets) - tuiMaxPacketRows
-		m.packets = append([]tuiPacketRow(nil), m.packets[drop:]...)
-		if !wasFollowing {
-			m.packetCursor = max(0, m.packetCursor-drop)
-		}
+	if len(m.packetSource) > tuiMaxPacketRows {
+		drop := len(m.packetSource) - tuiMaxPacketRows
+		m.packetSource = append([]tuiPacketRow(nil), m.packetSource[drop:]...)
 	}
+	m.rebuildRows()
+	m.restorePacketSelection(key)
+	m.dashboardHits = nil
 	if wasFollowing && len(m.packets) > 0 {
 		m.packetCursor = len(m.packets) - 1
 	}
@@ -149,13 +151,13 @@ func (m *sandboxTUIModel) clearPacketsCmd() tea.Cmd {
 	if m.packetLoading {
 		return nil
 	}
-	targets := make([]string, 0, len(m.sandboxes))
-	for _, sandbox := range m.sandboxes {
+	targets := make([]string, 0, len(m.allSandboxes()))
+	for _, sandbox := range m.allSandboxes() {
 		if sandbox.State == tuiRunning && sandbox.Net {
 			targets = append(targets, sandbox.Name)
 		}
 	}
-	m.packets = nil
+	m.packets, m.packetSource = nil, nil
 	m.packetCursor, m.packetScroll = 0, 0
 	m.packetAfter = make(map[string]uint64)
 	m.packetEvicted = 0

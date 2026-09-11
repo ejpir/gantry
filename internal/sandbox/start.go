@@ -288,10 +288,10 @@ func startSandboxDaemon(cmd *exec.Cmd) (sandboxDaemonProcess, error) {
 const defaultSandboxDaemonReadyTimeout = 20 * time.Second
 
 func sandboxDaemonReadyTimeout(cfg config.RunConfig) time.Duration {
-	if cfg.MCP {
-		// MCP readiness includes verified delivery of gantry-guest. Allow both
-		// bounded delivery channels to fail before the launcher gives up, so a
-		// slow architecture reports the actual fail-closed delivery error rather
+	if planGuestToolsDelivery(cfg).workloadRequired {
+		// Helper-backed readiness includes verified delivery of gantry-guest.
+		// Allow both bounded delivery channels to fail before the launcher gives
+		// up, so a slow architecture reports the actual fail-closed error rather
 		// than an unrelated 20-second guest-RPC timeout.
 		return 2*guestToolsTimeout + time.Minute
 	}

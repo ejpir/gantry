@@ -50,10 +50,10 @@ func TestOperationalDashboardMatchesReferenceLayout(t *testing.T) {
 	view := m.View().Content
 	plain := ansi.Strip(view)
 	for _, want := range []string{
-		"GANTRY", "overview", "sandboxes", "traffic", "rules", "ports", "packets", "mounts", "secrets", "mcp", "images",
-		"2 running", "host 16/", "codex-dev", "12c 23G", "codex-dev-pre-host-relays:v1",
-		"▁▁▁", "denied", "19,277", "exposure", "1 port · 3 mounts", "1 rw",
-		"recent denies:", "debian.org", "nodejs.org", "n new",
+		"gantry.", "overview", "sandboxes", "traffic", "rules", "ports", "packets", "mounts", "secrets", "mcp", "images",
+		"2 running", "16 vCPU configured", "codex-dev", "12 vCPU", "23.3 GiB", "codex-dev-pre-host-relays:v1",
+		"▁▁▁", "BLOCKED PACKETS", "19,277", "ACCESS", "1 port · 3 mounts", "1 writable mount",
+		"Recent blocks:", "debian.org", "nodejs.org", "n new", "SELECTED /", "ACTIONS",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("operational dashboard missing %q:\n%s", want, plain)
@@ -67,9 +67,8 @@ func TestOperationalDashboardMatchesReferenceLayout(t *testing.T) {
 	}
 }
 
-func TestOperationalDashboardUsesContentSizedResponsivePanels(t *testing.T) {
+func TestOperationalDashboardUsesBoundedResponsivePanels(t *testing.T) {
 	m := modernDashboardTestModel()
-	preferred := m.overviewPreferredPanelWidth(tuiThemeFor(m.dark))
 	for _, width := range []int{80, 140, 220, 300} {
 		m.width = width
 		view := m.View().Content
@@ -77,7 +76,11 @@ func TestOperationalDashboardUsesContentSizedResponsivePanels(t *testing.T) {
 			t.Fatalf("dashboard width at %d columns = %d", width, got)
 		}
 		geometry := m.overviewGeometry(m.dashboardLayout())
-		want := minInt(width-4, preferred)
+		available := width - 4
+		if geometry.inspectorRect.w > 0 {
+			available -= geometry.inspectorRect.w + 2
+		}
+		want := minInt(available, tuiOverviewPanelWidth)
 		if got := geometry.panelWidth; got != want {
 			t.Fatalf("panel width at %d columns = %d, want %d", width, got, want)
 		}
@@ -93,7 +96,7 @@ func TestOperationalDashboardUsesContentSizedResponsivePanels(t *testing.T) {
 
 func TestSandboxMasterDetailRendersWorkloadAndDevelopmentTopology(t *testing.T) {
 	m := modernDashboardTestModel()
-	m.page = tuiSandboxesPage
+	m.page, m.height = tuiSandboxesPage, 44 // Full cards, icons, and the detail top inset.
 	plain := ansi.Strip(m.View().Content)
 	for _, want := range []string{
 		"codex-dev", "microVM", "12 vCPU", "23.3 GiB RAM", "Workload", "Development",
@@ -133,11 +136,11 @@ func TestTrafficSparklineSamplesCounterDeltas(t *testing.T) {
 
 func TestTopologyNodesAndFactsHaveBreathingRoom(t *testing.T) {
 	theme := tuiThemeFor(true)
-	node := strings.Split(ansi.Strip(renderTopologyNode(theme, 44, "Workload", []string{"running", "image", "runtime", "disk"})), "\n")
-	if len(node) != topologyNodeHeight(4) {
-		t.Fatalf("topology node height = %d, want %d", len(node), topologyNodeHeight(4))
+	node := strings.Split(ansi.Strip(renderStackNode(theme, 44, "Workload", []string{"running", "image", "runtime", "disk"})), "\n")
+	if len(node) != 8 {
+		t.Fatalf("topology node height = %d, want 8", len(node))
 	}
-	if !strings.Contains(node[1], "Workload") || strings.Trim(node[2], " │") != "" || strings.Trim(node[len(node)-2], " │") != "" {
+	if !strings.Contains(node[1], "Workload") || strings.Trim(node[2], " │") != "" {
 		t.Fatalf("topology node lacks title/data separation and bottom padding:\n%s", strings.Join(node, "\n"))
 	}
 
@@ -152,7 +155,7 @@ func TestTopologyNodesAndFactsHaveBreathingRoom(t *testing.T) {
 			break
 		}
 	}
-	if networkRow < 2 || strings.Trim(detail[networkRow-2], " │") != "" {
+	if networkRow < 1 || strings.TrimSpace(detail[networkRow-1]) != "" {
 		t.Fatalf("facts section lacks top padding:\n%s", strings.Join(detail, "\n"))
 	}
 }
@@ -395,14 +398,19 @@ func TestTopNavigationHasVerticalBreathingRoom(t *testing.T) {
 		t.Fatalf("rendered screen missing %q", needle)
 		return -1
 	}
-	if strings.TrimSpace(lines[0]) != "" {
-		t.Fatalf("top padding row is not blank: %q", lines[0])
+	if got := strings.TrimSpace(lines[0]); got != "┌───┐" {
+		t.Fatalf("top padding row should contain only the logo: %q", lines[0])
 	}
 	if got := rowOf("traffic"); got != tuiTopPadding {
 		t.Fatalf("Traffic tab row = %d, want top navigation row %d", got, tuiTopPadding)
 	}
-	if strings.TrimSpace(lines[tuiTopPadding+1]) != "" {
-		t.Fatalf("row below top navigation is not blank: %q", lines[tuiTopPadding+1])
+	if got := strings.TrimSpace(lines[tuiTopPadding+1]); got != "││ ││" {
+		t.Fatalf("row below top navigation should contain only the logo: %q", lines[tuiTopPadding+1])
+	}
+	for row := tuiMenuHeight - tuiHeaderGap; row < layout.contentY; row++ {
+		if strings.TrimSpace(lines[row]) != "" {
+			t.Fatalf("dedicated header gap is not blank: %q", lines[row])
+		}
 	}
 	if got := rowOf("STATUS"); got != layout.contentY {
 		t.Fatalf("table header row = %d, want content row %d", got, layout.contentY)

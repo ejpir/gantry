@@ -36,7 +36,7 @@ Common flags:
 | `-proxy URL` | Set an HTTP(S) or SOCKS upstream proxy |
 | `-no-proxy LIST` | Override the proxy bypass list |
 | `-proxy-enforce` | Block direct TCP 80/443 and UDP 443 except to the proxy |
-| `-oauth-bridge=false` | Disable supported agent OAuth callback bridging |
+| `-oauth-bridge=false` | Disable automatic guest-loopback OAuth callback bridging |
 | `-oauth-custody` | Hold OAuth refresh tokens on the host; push fresh access tokens into the guest (Codex, Claude) |
 | `-mcp` | Enable the MCP gateway with the contained read-only filesystem server ([manual](mcp-gateway.md)) |
 | `-mcp-fs-root PATH` | Confine the MCP filesystem server to PATH (default `/`) |

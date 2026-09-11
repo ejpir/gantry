@@ -38,6 +38,10 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m, nil
 	}
 	switch m.dialog {
+	case tuiSandboxFilterDialog:
+		return m.updateFilterDialogKey(msg)
+	case tuiSortDialog:
+		return m.updateSortDialogKey(msg.String())
 	case tuiCreateDialog:
 		return m.updateCreateDialogKey(msg)
 	case tuiEditDialog:
@@ -88,6 +92,8 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 func (m *sandboxTUIModel) updateFocusedDialogInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.dialog {
+	case tuiSandboxFilterDialog:
+		m.sandboxFilterInput, cmd = m.sandboxFilterInput.Update(msg)
 	case tuiCreateDialog:
 		cmd = m.updateInput(msg)
 	case tuiShareAddDialog:
@@ -1502,6 +1508,7 @@ func (m *sandboxTUIModel) closeDialog() {
 	m.packetDetail = nil
 	m.confirmRemove = false
 	m.formError = ""
+	m.sandboxFilterInput.Blur()
 	m.createName.Blur()
 	m.createImage.Blur()
 	m.shareTag.Blur()
@@ -1571,6 +1578,21 @@ func (m *sandboxTUIModel) ensureDialogFocusVisible() {
 	viewport := maxInt(1, height-4)
 	maxScroll := maxInt(0, lipgloss.Height(content)-viewport)
 	m.dialogScroll = clampInt(m.dialogScroll, 0, maxScroll)
+	if m.dialog == tuiSortDialog || m.dialog == tuiSandboxFilterDialog {
+		row := 5 // filter input text, below title, label, and border
+		if m.dialog == tuiSortDialog {
+			_, options := m.sortDialogLayout(tuiThemeFor(m.dark), maxInt(10, width-6))
+			row = options[clampInt(m.sortCursor, 0, len(options)-1)].row
+		}
+		if row < m.dialogScroll {
+			m.dialogScroll = row
+		}
+		if row >= m.dialogScroll+viewport {
+			m.dialogScroll = row - viewport + 1
+		}
+		m.dialogScroll = clampInt(m.dialogScroll, 0, maxScroll)
+		return
+	}
 	if m.dialog == tuiCreateDialog {
 		layout := m.createLayout(tuiThemeFor(m.dark), maxInt(10, width-6))
 		target := layout.controls[m.createFocus]
@@ -1740,6 +1762,8 @@ func (m *sandboxTUIModel) resizeInputs() {
 	m.loginRegistry.SetWidth(imageFieldWidth)
 	m.loginUsername.SetWidth(imageFieldWidth)
 	m.loginPassword.SetWidth(imageFieldWidth)
+	filterWidth, _ := m.dialogSize(tuiSandboxFilterDialog)
+	m.sandboxFilterInput.SetWidth(maxInt(1, filterWidth-10))
 }
 
 func (m *sandboxTUIModel) applyInputTheme() {
@@ -1752,6 +1776,7 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	styles.Blurred.Placeholder = lipgloss.NewStyle().Foreground(theme.muted)
 	styles.Blurred.Prompt = lipgloss.NewStyle().Foreground(theme.muted)
 	styles.Cursor.Color = theme.accent
+	m.sandboxFilterInput.SetStyles(styles)
 	m.createName.SetStyles(styles)
 	m.createImage.SetStyles(styles)
 	m.shareTag.SetStyles(styles)
@@ -1963,6 +1988,28 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m, nil
 	}
 	switch m.dialog {
+	case tuiSandboxFilterDialog:
+		if m.dialogButtonHit(mouse, bounds, "Apply") {
+			m.applySandboxFilter(m.sandboxFilterInput.Value())
+			m.closeDialog()
+		} else if m.dialogButtonHit(mouse, bounds, "Clear") {
+			m.applySandboxFilter("")
+			m.closeDialog()
+		}
+		return m, nil
+	case tuiSortDialog:
+		_, options := m.sortDialogLayout(tuiThemeFor(m.dark), maxInt(10, bounds.w-6))
+		row := mouse.Y - bounds.y - 2 + m.dialogScroll
+		if mouse.X >= bounds.x+3 && mouse.X < bounds.x+bounds.w-3 {
+			for _, option := range options {
+				if option.row == row {
+					m.chooseSort(option.id)
+					m.closeDialog()
+					break
+				}
+			}
+		}
+		return m, nil
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog, tuiImagePruneDialog, tuiRegistryLogoutDialog:
 		return m.updateConfirmationDialogMouse(mouse, bounds)
 	case tuiCreateDialog:

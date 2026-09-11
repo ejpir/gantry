@@ -110,6 +110,8 @@ const (
 	tuiImagePruneDialog
 	tuiRegistryLoginDialog
 	tuiRegistryLogoutDialog
+	tuiSandboxFilterDialog
+	tuiSortDialog
 )
 
 type tuiToastKind uint8
@@ -185,6 +187,13 @@ type sandboxTUIModel struct {
 	sandboxes []tuiSandbox
 	cursor    int // len(sandboxes) is the trailing "New Sandbox" card
 	scrollRow int
+
+	viewSource         *tuiRefreshMsg
+	packetSource       []tuiPacketRow
+	sandboxFilter      string
+	sandboxFilterInput textinput.Model
+	sorts              [tuiPageCount + 1]tuiSortState
+	sortCursor         int
 
 	traffic        []tuiTrafficRow
 	trafficCursor  int
@@ -431,17 +440,18 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 	loginPassword.EchoCharacter = '•'
 
 	m := sandboxTUIModel{
-		operations: newDashboardOperations(),
-		service:    service,
-		page:       tuiOverviewPage,
-		limits:     limits,
-		width:      100,
-		height:     30,
-		dark:       true,
-		loading:    true,
-		refreshing: true,
-		spinner:    sp,
-		animating:  true,
+		sandboxFilterInput: textinput.New(),
+		operations:         newDashboardOperations(),
+		service:            service,
+		page:               tuiOverviewPage,
+		limits:             limits,
+		width:              100,
+		height:             30,
+		dark:               true,
+		loading:            true,
+		refreshing:         true,
+		spinner:            sp,
+		animating:          true,
 		createDialogModel: createDialogModel{
 			createErrFocus:  -1,
 			createName:      name,
@@ -603,16 +613,13 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 		selectedName = selected.Name
 	}
 	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey := m.selectedTableKeys()
+	packetKey := m.selectedPacketKey()
 	m.sampleSandboxTraffic(msg.sandboxes)
-	m.sandboxes = msg.sandboxes
-	m.traffic = msg.traffic
-	m.rules = msg.rules
-	m.mounts = msg.mounts
-	m.ports = msg.ports
-	m.secrets = msg.secrets
-	m.mcpServers = msg.mcp
-	m.images = msg.images
-	m.registries = msg.registries
+	m.rememberViewSource()
+	m.viewSource = &msg
+	m.rebuildRows()
+	m.restorePacketSelection(packetKey)
+	m.dashboardHits = nil
 
 	target := m.selectNext
 	if target == "" {
@@ -896,6 +903,11 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 
 func (m *sandboxTUIModel) updateGlobalKey(key string) (tea.Cmd, bool) {
 	switch key {
+	case "/":
+		return m.openFilterDialog(), true
+	case "S":
+		m.openSortDialog()
+		return nil, true
 	case "q", "ctrl+c":
 		return tea.Quit, true
 	case "n":
@@ -1553,6 +1565,9 @@ func (m *sandboxTUIModel) setPage(page tuiPage) {
 		return
 	}
 	m.page = page
+	if m.viewSource != nil {
+		m.rebuildView(false)
+	}
 	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 }

@@ -174,12 +174,15 @@ The legacy external `-gvproxy` backend is also disabled because it launches a
 configurable host executable. The embedded network stack avoids making a
 guest-writable executable path part of the supervisor's restart behavior.
 
-OAuth bridging opens bounded host-loopback listeners after detecting supported
-agent callback URLs. The captured callback path and OAuth state are validated;
-custody listeners reject callbacks that do not match a pending host-side flow.
-After delivery, the browser receives only a fixed, CSP-locked host page. Guest
-status, headers, redirects, bodies, and error details are discarded. Disable
-the bridge with `-oauth-bridge=false` when unused.
+OAuth bridging uses a trusted guest helper to discover loopback TCP listeners
+without tracing applications or parsing terminal output. Matching host ports
+are bounded to fixed callback ports and the Linux ephemeral range. Transparent
+listeners accept only GET requests carrying `code`/`error` and non-empty
+`state`; the guest CLI remains authoritative for state and PKCE validation.
+Custody listeners additionally require an exact pending host-side flow. After
+delivery, the browser receives only a fixed, CSP-locked host page. Guest status,
+headers, redirects, bodies, and error details are discarded. Disable the bridge
+with `-oauth-bridge=false` when unused.
 
 If upgrading from a build that rendered the guest callback response, clear
 browser site data for any `localhost:<callback-port>` or

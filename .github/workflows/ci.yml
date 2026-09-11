@@ -354,11 +354,15 @@ jobs:
             return "$status"
           }
           trap cleanup EXIT
+          # This smoke test is deliberately offline and exercises only native
+          # boot+exec. Disable the default OAuth callback bridge so it neither
+          # downloads a released guest helper nor tries the bulk exec-channel
+          # fallback against the read-only workload root.
           "$BIN" start ci \
             -kernel "${{ runner.temp }}/kernels/gantry-kernel-x86_64" \
             -rootfs "$ASSETS/nerdbox-rootfs.erofs" \
             -image "$ASSETS/alpine.erofs" \
-            -net=false -rw=false
+            -net=false -rw=false -oauth-bridge=false
           if output=$("$BIN" exec ci -- /bin/sh -c 'echo hello world' 2>&1); then
             exec_rc=0
           else

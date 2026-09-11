@@ -527,7 +527,7 @@ func (m sandboxTUIModel) renderPopulatedTable(theme tuiTheme, layout tuiDashboar
 	end := minInt(count, scroll+m.tableVisibleRows())
 	capacity := maxInt(layout.contentHeight, 2+(end-scroll)+m.tableDetailHeight())
 	lines := make([]string, 0, capacity)
-	lines = append(lines, m.renderTableHeader(theme, page, inner), m.renderTableSeparator(theme, inner))
+	lines = append(lines, m.renderSortableTableHeader(theme, page, inner), m.renderTableSeparator(theme, inner))
 	for index := scroll; index < end; index++ {
 		line := m.renderTableRow(theme, page, index, inner)
 		lines = append(lines, renderTableSelection(theme, line, inner, index == cursor))
