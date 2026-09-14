@@ -63,6 +63,38 @@ orchestrator skips the two direct-public-egress assertions when a socket probe
 confirms that host policy permits Internet access only through a proxy; set
 `GANTRY_TEST_PUBLIC_EGRESS=required` to force those assertions.
 
+Both the Linux main battery and the macOS functional battery now include
+`scripts/oauth-custody-e2e.py`. It uses real VMs and the current guest helper,
+with local mock OAuth/MCP endpoints: no browser, GitHub account, real token, or
+public OAuth connection is required. It checks GitHub device polling and
+host-bound git credentials (including egress denial), custom MCP PKCE/resource
+binding, refresh-token rotation, access-token redaction, stop/resume persistence,
+expired/revoked credentials, and absence of guest auth files and audit leaks.
+The pre-existing Claude auth-file custody checks remain in the shared battery.
+
+To rerun only the new OAuth scenarios after building/staging the binaries:
+
+```sh
+# Apple silicon: rebuild and sign the current host/guest binaries first.
+sh scripts/build.sh
+# Use a cached OCI reference or a local EROFS as --image.
+GANTRY_ARTIFACTS="$PWD/artifacts" python3 scripts/oauth-custody-e2e.py \
+  --gantry artifacts/gantry-darwin-arm64 \
+  --kernel artifacts/gantry-kernel-arm64 \
+  --rootfs artifacts/nerdbox-rootfs-arm64.erofs \
+  --image alpine:latest
+```
+
+The standalone harness uses private, short `/tmp` paths for its own sandboxes
+and removes them on success. Failures retain diagnostics and print their path;
+`--keep` also retains successful-run logs. Timed-out commands retain partial
+output and identify their log file; missing MCP replies report the received IDs.
+An early stdin-EOF check catches older host binaries that can leave `mcp-proxy`
+waiting after its replies. It does not stop or delete your normal sandboxes.
+Refresh-on-resume checks shorten only the fixture's **stopped** token
+expiry, never a live registry file. The AWS runner uploads a fresh copy of the
+harness alongside both binaries on every run.
+
 ## Quick start
 
 Run from the repository root:
@@ -101,7 +133,8 @@ before running the full battery or expect that section to fail.
 | `stage-assets.sh` | Cross-build `gantry-linux-amd64` and upload the standard test assets. |
 | `run-tests.sh` | Upload a fresh x86_64 binary, populate `/opt/gantry`, and run `test-battery.sh`. |
 | `run-tests-arm64.sh` | Upload current ARM64 binaries and boot assets, then run the maintained confinement/share/MCP battery on Graviton. |
-| `test-battery.sh` | Exercise x86_64 crun, runsc, DNS/egress, concurrency, shares, cached OCI images, secrets, and OAuth custody. |
+| `test-battery.sh` | Shared Linux KVM/macOS HVF functional battery, including secrets and Claude/GitHub/custom MCP OAuth custody. |
+| `../oauth-custody-e2e.py` | Standalone real-VM GitHub device and generic MCP/PKCE custody checks using local mock endpoints. |
 | `ssh-devcontainers-validation.sh` | Exercise direct and managed SSH, SFTP, asynchronous helper readiness, nested Podman, and stop/resume state handling. |
 | `directory-validation.sh` | Exercise large shared-directory scans and host/guest coherence. |
 | `self-update-validation.sh` | Verify a disposable tagged binary updates in place from a checksummed GitHub release. |

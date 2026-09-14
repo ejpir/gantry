@@ -45,6 +45,7 @@ FAIL=0
 SKIPPED=0
 MOCKPID=
 MOCKMCP=
+CUSTODY_LOGIN=
 HTTP_SESSION=
 PORT_SPEC=
 EXPORT_ARCHIVE=/tmp/gantry-functional-export-$$.oci.tar
@@ -118,6 +119,7 @@ cleanup() {
   trap - EXIT HUP INT TERM
   [ -z "$PORT_SPEC" ] || "$G" ports unpublish --ephemeral t4 "$PORT_SPEC" >/dev/null 2>&1
   stop_background "$HTTP_SESSION"
+  stop_background "$CUSTODY_LOGIN"
   stop_background "$MOCKPID"
   stop_background "$MOCKMCP"
   for sandbox in t1 t2 t3 t4 t5 t6 t7 t8 t9 t10 t11 t12 t13 t14 t10bad t12bad1 t12bad2; do
@@ -280,7 +282,10 @@ fi
 "$G" start t4 -image "$CACHE_IMAGE" 2>&1 | tail -2
 sleep 1
 R=$(xe t4 'head -1 /etc/os-release');             chk "image: alpine runs"     "Alpine" "$R"
-R=$(xe t4 'echo PATH=$PATH');                     chk "image: config env"     "PATH=/usr/local/sbin" "$R"
+# Helper-backed features intentionally prepend /run/gantry/bin. Verify that
+# the image's configured PATH remains intact beneath any trusted prefixes.
+R=$(xe t4 'case ":$PATH:" in *:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:) echo IMAGE-PATH-OK;; *) echo "PATH=$PATH";; esac')
+                                                    chk "image: config env"     "IMAGE-PATH-OK" "$R"
 R=$(xe t4 'busybox | head -1');                   chk "image: busybox links"  "BusyBox" "$R"
 R=$("$G" image ls 2>&1);                         chk "image: ls shows cached reference" "$CACHE_IMAGE" "$R"
 
@@ -479,7 +484,7 @@ R=$("$G" start t10bad -oauth-custody -oauth-bridge=false -image "$CACHE_IMAGE" 2
 chk "custody: disabled callback bridge refused" "requires -oauth-bridge=true" "$R"
 [ ! -e "$GANTRY_HOME/t10bad" ] && ok "custody: refused config leaves no sandbox state" || bad "custody: refused config leaves no sandbox state"
 # docs/credential-brokering.md workstream 3: with -oauth-custody the guest
-# helper runs the PKCE flow but the DAEMON exchanges the code and holds
+# helper requests a PKCE flow and the DAEMON exchanges the code and holds
 # the refresh token host-side; the guest auth file carries a short-lived
 # access token plus a sentinel. A mock authorization server on the
 # instance loopback stands in for the real provider.
@@ -525,17 +530,29 @@ sleep 4
 # The login blocks until the callback lands: run it in the background,
 # scrape the authorize URL for its dynamic port + state, and play the
 # browser redirect with curl.
-( printf '/run/gantry/bin/gantry-guest oauth login claude\nexit\n' | run_with_timeout 60 "$G" exec t10 > /tmp/t10-login.log 2>&1 ) &
-sleep 4
+run_with_timeout 60 "$G" exec t10 -- /run/gantry/bin/gantry-guest oauth login claude \
+  </dev/null > /tmp/t10-login.log 2>&1 &
+CUSTODY_LOGIN=$!
+for _ in {1..30}; do
+  grep -qa 'https://claude.ai/oauth/authorize' /tmp/t10-login.log && break
+  kill -0 "$CUSTODY_LOGIN" 2>/dev/null || break
+  sleep 1
+done
 URL=$(grep -oa 'https://claude.ai/oauth/authorize[^ ]*' /tmp/t10-login.log | head -1)
 CPORT=$(printf '%s' "$URL" | sed -n 's/.*127\.0\.0\.1%3A\([0-9]*\)%2Fcallback.*/\1/p')
 CSTATE=$(printf '%s' "$URL" | sed -n 's/.*[?&]state=\([A-Za-z0-9_-]*\).*/\1/p')
-curl --noproxy '*' -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
+curl --noproxy '*' --max-time 10 -s "http://127.0.0.1:$CPORT/callback?code=mock-code&state=$CSTATE" > /tmp/t10-callback.html
 # The guest helper polls oauth.status on a ~1s cadence; give the
 # completion line time to land in the session log instead of racing it.
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do grep -qa "tokens held on host" /tmp/t10-login.log && break; sleep 1; done
 R=$(cat /tmp/t10-callback.html);            chk "custody: callback consumed host-side"        "OAuth callback received" "$R"
 R=$(cat /tmp/t10-login.log);                chk "custody: login completed in guest"            "tokens held on host" "$R"
+if wait "$CUSTODY_LOGIN"; then
+  ok "custody: guest login exits successfully"
+else
+  bad "custody: guest login exits successfully"
+fi
+CUSTODY_LOGIN=
 R=$(xe t10 'cat /root/.claude/.credentials.json')
                                             chk "custody: guest holds an access token"        "at-mock-" "$R"
                                             chk "custody: guest refresh token is a sentinel"  "gantry-custody-refresh-held-on-host" "$R"
@@ -554,11 +571,27 @@ $G stop t10 >/dev/null 2>&1
 $G resume t10 >/dev/null 2>&1
 sleep 5
 R=$(grep custody "$GANTRY_HOME/t10/daemon.log")
-                                            chk "custody: session restored after restart"     "session restored and access token pushed" "$R"
-R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login github 2>&1')
-                                            chk "custody: unknown provider refused"           "no custody login" "$R"
+                                            chk "custody: session restored after restart"     "session restored; configured delivery ready" "$R"
+R=$(xe t10 'cat /root/.claude/.credentials.json')
+                                            chk "custody: restored access token available"    "at-mock-REFRESHED" "$R"
+R=$(xe t10 '/run/gantry/bin/gantry-guest oauth login not-configured-e2e 2>&1')
+                                            chk "custody: unknown provider refused"           "unknown provider" "$R"
 stop_background "$MOCKPID"
 MOCKPID=
+
+echo "===== generic OAuth custody (GitHub device + MCP PKCE, isolated VM state) ====="
+# The same stdlib-only harness runs on Linux KVM and macOS HVF. Only the OAuth
+# and MCP upstreams are mocks; the guest helper, vsock broker, refresh loop,
+# MCP worker and restart persistence are real. AWS stages this file beside G.
+python3 "${GANTRY_TEST_OAUTH_E2E:-$BASE/scripts/oauth-custody-e2e.py}" \
+  --gantry "$G" --kernel "$KERNEL" --rootfs "$ROOTFS" --image "$CACHE_IMAGE" \
+  2>&1 | tee "$SECRET_TMP/oauth-e2e.log"
+OAUTH_E2E_STATUS=${PIPESTATUS[0]}
+if [ "$OAUTH_E2E_STATUS" -eq 0 ] && grep -qa '^OAuth E2E: [1-9][0-9]* checks passed$' "$SECRET_TMP/oauth-e2e.log"; then
+  ok "custody: GitHub and generic MCP end-to-end battery"
+else
+  bad "custody: GitHub and generic MCP end-to-end battery"
+fi
 
 echo "===== MCP gateway (t11: fs server via mcp-proxy, containment) ====="
 # docs/mcp-gateway.md milestone 1: the agent speaks MCP (NDJSON stdio) to

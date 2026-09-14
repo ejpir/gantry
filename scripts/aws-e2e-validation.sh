@@ -8,7 +8,7 @@
 #   sh scripts/aws-e2e-validation.sh macos    # local Apple-silicon macOS
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 usage() {
@@ -17,6 +17,9 @@ usage: scripts/aws-e2e-validation.sh [aws|macos]
 
   aws      validate the reusable AWS Linux KVM and Windows WHPX hosts (default)
   macos    validate the local Apple-silicon macOS HVF backend
+
+Both modes include signed OPA policy validation with real VMs and loopback-only
+fixtures (no OPA/OpenSSL installation or public egress needed on test hosts).
 
 macOS overrides:
   GANTRY_ARTIFACTS               artifact directory (default: ./artifacts)
@@ -80,7 +83,8 @@ run_macos_validation() {
 	MAC_TMP=$(mktemp -d /tmp/gantry-me2e.XXXXXX)
 	MAC_ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
 	mkdir -p "$MAC_ARTIFACTS"
-	MAC_ARTIFACTS=$(CDPATH= cd -- "$MAC_ARTIFACTS" && pwd)
+	MAC_ARTIFACTS=$(CDPATH='' cd -- "$MAC_ARTIFACTS" && pwd)
+	# shellcheck disable=SC2317 # Called indirectly by the EXIT trap.
 	cleanup_macos() {
 		status=$?
 		trap - EXIT HUP INT TERM
@@ -116,7 +120,7 @@ run_macos_validation() {
 		exit 1
 	}
 
-	echo "===== macOS HVF: core CLI, runtime, networking, credentials, and MCP battery ====="
+	echo "===== macOS HVF: core CLI, networking, credentials, GitHub/MCP OAuth custody, and MCP battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" \
 		GANTRY_TEST_PUBLIC_EGRESS="$MAC_PUBLIC_EGRESS" \
 		GANTRY_TEST_ROOT="$ROOT" \
@@ -129,6 +133,13 @@ run_macos_validation() {
 		GANTRY_IMAGES="$MAC_TMP/functional/images" \
 		GANTRY_STORE_URL='' \
 		bash scripts/aws-kvm/test-battery.sh
+
+	echo "===== macOS HVF: signed OPA organization-policy battery ====="
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+		-o "$MAC_TMP/policy-e2e" ./tests/e2e/policy
+	"$MAC_TMP/policy-e2e" \
+		-gantry "$MAC_GANTRY" -kernel "$MAC_KERNEL" -rootfs "$MAC_ROOTFS" \
+		-image "$MAC_WORKLOAD" -artifacts "$MAC_ARTIFACTS"
 
 	if [ "${GANTRY_SKIP_DEVCONTAINERS:-0}" = 1 ]; then
 		echo "===== macOS HVF: SSH/Dev Containers and directory batteries skipped ====="
@@ -214,7 +225,7 @@ if [ -z "${AWS_ACCESS_KEY_ID:-}" ] && [ -f "$KEYS_FILE" ]; then
 fi
 
 REGION=${GANTRY_TEST_REGION:-eu-west-1}
-export AWS_DEFAULT_REGION=$REGION
+export AWS_DEFAULT_REGION="$REGION"
 ACCOUNT=$(aws sts get-caller-identity --region "$REGION" --query Account --output text)
 BUCKET=${GANTRY_TEST_BUCKET:-gantry-kvm-test-$ACCOUNT}
 
@@ -232,11 +243,13 @@ WINDOWS_IID=${GANTRY_WINDOWS_IID:-$(instance_by_name gantry-whpx-test)}
 
 DIRECTORY_RUN=
 IDE_BUILD_DIR=
+POLICY_BUILD_DIR=
 cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	[ -z "$DIRECTORY_RUN" ] || rm -f -- "$DIRECTORY_RUN"
 	[ -z "$IDE_BUILD_DIR" ] || rm -rf -- "$IDE_BUILD_DIR"
+	[ -z "$POLICY_BUILD_DIR" ] || rm -rf -- "$POLICY_BUILD_DIR"
 	if [ "${GANTRY_KEEP_INSTANCES:-0}" != 1 ]; then
 		echo "== stopping AWS validation instances =="
 		aws ec2 stop-instances --region "$REGION" \
@@ -248,6 +261,16 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
+
+# Compile the black-box policy driver from this checkout before starting EC2.
+# It signs short-lived fixtures on each host: no stale signatures, controller-
+# specific mount paths, private-key uploads, or remote Go/OPA dependencies.
+POLICY_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gantry-policy-e2e.XXXXXX")
+echo "== build Linux and Windows organization-policy drivers =="
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/policy-linux-amd64" ./tests/e2e/policy
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/policy-windows-amd64.exe" ./tests/e2e/policy
 
 # Build the curated x86_64 image from the current Dockerfile so the field run
 # validates these source changes rather than a stale release or S3 object. A
@@ -262,6 +285,10 @@ fi
 [ -s "$IDE_IMAGE" ] || { echo "curated IDE image missing: $IDE_IMAGE" >&2; exit 1; }
 echo "== staging current curated IDE image =="
 aws s3 cp "$IDE_IMAGE" "s3://$BUCKET/gantry-ide-image-x86_64.erofs" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/policy-linux-amd64" "s3://$BUCKET/e2e/policy-linux-amd64" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/policy-windows-amd64.exe" "s3://$BUCKET/e2e/policy-windows-amd64.exe" \
 	--region "$REGION" --only-show-errors
 
 instance_state() {
@@ -333,9 +360,46 @@ echo "===== Windows WHPX: field + security + SSH/Dev Containers + directory batt
 GANTRY_TEST_IID=$WINDOWS_IID GANTRY_TEST_BUCKET=$BUCKET \
 	GANTRY_TEST_REGION=$REGION sh scripts/aws-whpx/replay.sh
 
-echo "===== Linux KVM: main field battery ====="
+echo "===== Linux KVM: main field battery (including GitHub/MCP OAuth custody) ====="
 GANTRY_TEST_IID=$LINUX_IID BUCKET=$BUCKET REGION=$REGION \
 	sh scripts/aws-kvm/run-tests.sh 1800
+
+# The preceding replays staged the current Gantry binaries and guest assets.
+# Always replace the driver too, rather than reusing a prior field battery.
+echo "===== Linux KVM: signed OPA organization-policy battery ====="
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/policy-linux-amd64 /opt/gantry/policy-e2e 600
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py -c '
+chmod +x /opt/gantry/policy-e2e
+/opt/gantry/policy-e2e -gantry /opt/gantry/gantry-linux-amd64 \
+  -kernel /opt/gantry/nerdbox-kernel-x86_64 \
+  -rootfs /opt/gantry/nerdbox-rootfs-x86_64.erofs \
+  -image /opt/gantry/debian-bookworm-amd64.erofs -artifacts /opt/gantry
+' 1200
+
+echo "===== Windows WHPX: signed OPA organization-policy battery ====="
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
+	--s3-download "$BUCKET" e2e/policy-windows-amd64.exe C:/gantry/policy-e2e.exe 600
+# Quote host paths as PowerShell literals, including paths containing apostrophes.
+WINDOWS_POLICY_COMMAND=$(python3 - \
+	"${GANTRY_TEST_EXE:-C:/gantry/gantry-field.exe}" \
+	"${GANTRY_TEST_CURRENT_KERNEL:-C:/gantry/gantry-kernel-x86_64}" \
+	"${GANTRY_TEST_CURRENT_ROOTFS:-C:/gantry/nerdbox-rootfs-x86_64.erofs}" \
+	"${GANTRY_TEST_WORKLOAD_IMAGE:-C:/gantry/debian-bookworm-amd64.erofs}" \
+	"${GANTRY_TEST_ROOT:-C:/gantry}" <<'PY'
+import sys
+
+values = sys.argv[1:]
+args = ["C:/gantry/policy-e2e.exe"]
+for flag, value in zip(("-gantry", "-kernel", "-rootfs", "-image", "-artifacts"), values):
+    args.extend((flag, value))
+command = " ".join("'" + value.replace("'", "''") + "'" for value in args)
+print("$ErrorActionPreference='Stop'; & " + command + "; exit $LASTEXITCODE")
+PY
+)
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
+	-c "$WINDOWS_POLICY_COMMAND" 1200
 
 echo "===== Linux KVM: SSH/Dev Containers battery ====="
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \

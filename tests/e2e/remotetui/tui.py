@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Real Gantry TUI driver. POSIX PTY + a small screen reader; no dependencies."""
+
+import codecs
+import fcntl
+import json
+import os
+from pathlib import Path
+import pty
+import re
+import select
+import signal
+import struct
+import subprocess
+import sys
+import termios
+import time
+import unicodedata
+
+
+class Terminal:
+    """Read cursor-addressed text, not historical matches from older dialogs."""
+
+    width, height = 120, 54
+
+    def __init__(self, fixture, name):
+        self.fixture = fixture
+        self.base = Path(fixture["root"]) / name
+        self.base.mkdir(mode=0o700)
+        self.env = dict(os.environ, HOME=str(self.base),
+                        GANTRY_HOME=str(self.base / "sandboxes"),
+                        GANTRY_REMOTE="must-not-be-used", TERM="xterm-256color",
+                        COLORTERM="truecolor", GANTRY_E2E_BROWSER_URL=fixture["browser"])
+        self.env["PATH"] = fixture["shim"] + os.pathsep + self.env.get("PATH", "")
+        self.screen = [[" "] * self.width for _ in range(self.height)]
+        self.row = self.col = 0
+        self.pending = ""
+        self.transcript = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.status = None
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.execve(fixture["gantry"], [fixture["gantry"], "tui", "-remote="], self.env)
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", self.height, self.width, 0, 0))
+        self.wait_text("Press n to create one.")
+
+    def text(self):
+        return "\n".join("".join(row) for row in self.screen)
+
+    def send(self, value):
+        os.write(self.fd, value.encode())
+
+    def pump(self, timeout=0.05):
+        if not select.select([self.fd], [], [], timeout)[0]:
+            return
+        try:
+            data = os.read(self.fd, 65536)
+        except OSError:
+            return
+        text = self.decoder.decode(data)
+        self.transcript = (self.transcript + text)[-(4 << 20):]
+        self.pending += text
+        while self.pending:
+            if self.pending.startswith("\x1b["):
+                match = re.match(r"\x1b\[([0-?]*)([ -/]*)([@-~])", self.pending)
+                if not match:
+                    break
+                self.csi(match[1], match[3])
+                self.pending = self.pending[match.end():]
+                continue
+            if self.pending.startswith(("\x1b]", "\x1bP", "\x1b_")):
+                match = re.match(r"\x1b[\]P_](.*?)(?:\x07|\x1b\\)", self.pending, re.S)
+                if not match:
+                    break
+                if match[1] == "11;?":
+                    self.send("\x1b]11;rgb:0000/0000/0000\x07")
+                elif match[1] == "10;?":
+                    self.send("\x1b]10;rgb:ffff/ffff/ffff\x07")
+                self.pending = self.pending[match.end():]
+                continue
+            if self.pending[0] == "\x1b":
+                if len(self.pending) < 2:
+                    break
+                length = 3 if self.pending[1] in "()" else 2
+                if len(self.pending) < length:
+                    break
+                self.pending = self.pending[length:]
+                continue
+            char, self.pending = self.pending[0], self.pending[1:]
+            if char == "\r":
+                self.col = 0
+            elif char == "\n":
+                self.row += 1
+                if self.row >= self.height:
+                    self.screen.pop(0)
+                    self.screen.append([" "] * self.width)
+                    self.row = self.height - 1
+            elif char == "\b":
+                self.col = max(0, self.col - 1)
+            elif char >= " " and not unicodedata.combining(char):
+                if self.col >= self.width:
+                    self.col, self.row = 0, min(self.height - 1, self.row + 1)
+                self.screen[self.row][self.col] = char
+                self.col += 2 if unicodedata.east_asian_width(char) in "WF" else 1
+
+    def csi(self, raw, command):
+        if raw.startswith(("?", ">", "<", "=")) or command == "m":
+            return
+        values = [int(v or 0) for v in raw.split(";")] if re.fullmatch(r"[0-9;]*", raw) else [0]
+        first = values[0] or 1
+        if command in "Hf":
+            self.row = min(self.height - 1, first - 1)
+            self.col = min(self.width - 1, (values[1] or 1) - 1) if len(values) > 1 else 0
+        elif command in "ABCD":
+            if command == "A": self.row = max(0, self.row - first)
+            if command == "B": self.row = min(self.height - 1, self.row + first)
+            if command == "C": self.col = min(self.width - 1, self.col + first)
+            if command == "D": self.col = max(0, self.col - first)
+        elif command == "G":
+            self.col = min(self.width - 1, first - 1)
+        elif command == "d":
+            self.row = min(self.height - 1, first - 1)
+        elif command == "J":
+            if values[0] in (2, 3):
+                self.screen = [[" "] * self.width for _ in range(self.height)]
+            elif values[0] == 0:
+                self.screen[self.row][self.col:] = [" "] * (self.width - self.col)
+                for row in range(self.row + 1, self.height): self.screen[row] = [" "] * self.width
+        elif command == "K":
+            start, end = (0, self.width) if values[0] == 2 else ((0, self.col + 1) if values[0] == 1 else (self.col, self.width))
+            self.screen[self.row][start:end] = [" "] * (end - start)
+        elif command == "X":
+            end = min(self.width, self.col + first)
+            self.screen[self.row][self.col:end] = [" "] * (end - self.col)
+        elif command == "P":
+            row = self.screen[self.row]
+            del row[self.col:self.col + first]
+            row.extend([" "] * (self.width - len(row)))
+        elif command == "n" and first == 6:
+            self.send(f"\x1b[{self.row + 1};{self.col + 1}R")
+
+    def wait(self, predicate, message, timeout=20):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.pump()
+            if predicate():
+                return
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self.status = os.waitstatus_to_exitcode(status)
+                raise AssertionError(f"TUI exited {self.status} waiting for {message}\n{self.text()}")
+        raise AssertionError(f"timeout waiting for {message}\n{self.text()}")
+
+    def wait_text(self, text):
+        self.wait(lambda: text.lower() in self.text().lower(), text)
+
+    def settle(self):
+        end = time.monotonic() + 0.3
+        while time.monotonic() < end:
+            self.pump()
+
+    def profiles(self):
+        return read_json(self.base / "remotes.json").get("remotes") or []
+
+    def fixture_state(self):
+        return read_json(self.fixture["state"])
+
+    def close(self):
+        try:
+            if self.status is None:
+                os.kill(self.pid, signal.SIGTERM)
+                _, status = os.waitpid(self.pid, 0)
+                self.status = os.waitstatus_to_exitcode(status)
+        finally:
+            os.close(self.fd)
+
+    def quit(self):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and self.status is None:
+            self.send("q")
+            self.settle()
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self.status = os.waitstatus_to_exitcode(status)
+        assert self.status == 0, "TUI did not quit cleanly"
+        assert self.fixture["token"] not in self.transcript, "manager token appeared in terminal output"
+
+
+def read_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def enter_create(terminal, name):
+    terminal.wait_text("Location: Remote")
+    terminal.send(name + "\talpine" + "\t" * 9 + "\r")
+    terminal.wait(lambda: any(c["name"] == name for c in (terminal.fixture_state().get("creates") or [])), "remote create request")
+    terminal.settle()
+    assert not (terminal.base / "sandboxes" / name).exists(), "remote creation created local state"
+
+
+def standalone(fixture):
+    terminal = Terminal(fixture, "standalone")
+    try:
+        terminal.send("n")
+        terminal.wait_text("Where should this sandbox run?")
+        terminal.send("l")
+        terminal.wait_text("Location: Local")
+        terminal.send("\x1b")
+        terminal.settle()
+        terminal.send("n")
+        terminal.wait_text("Where should this sandbox run?")
+        terminal.send("r")
+        terminal.wait_text("Standalone remotes use")
+        terminal.send("a")
+        terminal.wait_text("Manager token")
+        terminal.send("standalone\t" + fixture["manager"] + "\twrong-manager-token-123456\t" + fixture["ca"] + "\t\t\r")
+        terminal.wait_text("access denied")
+        assert not terminal.profiles(), "refused authentication still saved a profile"
+        terminal.send("\x1b[Z" * 3 + fixture["token"] + "\t" * 3 + "\r")
+        terminal.wait(lambda: len(terminal.profiles()) == 1, "standalone registration")
+        assert fixture["token"] not in (terminal.base / "remotes.json").read_text(), "token stored in profile"
+        token_path = terminal.base / "remotes" / "standalone.token"
+        assert token_path.stat().st_mode & 0o777 == 0o600, "token is not private"
+        token_path.chmod(0o640)
+        probe = subprocess.run([fixture["gantry"], "remote", "test", "standalone", "-remote="], env=terminal.env, capture_output=True, text=True, timeout=20, check=False)
+        assert probe.returncode != 0 and "chmod 600" in probe.stderr, "readable token was accepted"
+        token_path.chmod(0o600)
+        enter_create(terminal, "standalone-dev")
+        assert not list(terminal.base.glob("sandboxes-orgs/*.json")), "standalone flow required organization login"
+        terminal.wait_text("Remote: standalone")
+        before = terminal.fixture_state()["health"]
+        terminal.send("t")
+        terminal.wait(lambda: terminal.fixture_state()["health"] > before, "TUI health test")
+        terminal.settle()
+        terminal.send("d")
+        terminal.wait_text("Remove remote profile")
+        terminal.send("y")
+        terminal.wait(lambda: not terminal.profiles(), "profile removal")
+        assert not token_path.exists(), "profile removal kept token"
+        assert not terminal.fixture_state().get("unexpected"), "profile management sent a sandbox mutation"
+        terminal.settle()
+        terminal.quit()
+        print("PASS standalone: add without org, auth refusal, private token, remote pull/create, TUI test/remove")
+    finally:
+        terminal.close()
+
+
+def organization(fixture):
+    terminal = Terminal(fixture, "organization")
+    try:
+        terminal.send("n")
+        terminal.wait_text("Where should this sandbox run?")
+        terminal.send("o")
+        terminal.wait_text("Organization config file")
+        terminal.send(fixture["config"] + "\tdeveloper\t\r")
+        terminal.wait_text("example-org / org-team")
+        receipts = list(terminal.base.glob("sandboxes-orgs/*.json"))
+        assert len(receipts) == 1 and read_json(receipts[0]).get("remote_catalog"), "login did not save public discovery metadata"
+        assert not terminal.profiles(), "discovery auto-added a remote or credential"
+        terminal.send("\r")
+        terminal.wait_text("Manager token")
+        terminal.send(fixture["token"] + "\t" * 3 + "\r")
+        terminal.wait(lambda: len(terminal.profiles()) == 1, "organization remote registration")
+        enter_create(terminal, "organization-dev")
+        created = next(c for c in terminal.fixture_state()["creates"] if c["name"] == "organization-dev")
+        assert created["organizationPolicy"]["profile"] == "developer", "organization selection lost its signed policy"
+        terminal.quit()
+        print("PASS organization: browser OIDC/PKCE, dynamic discovery, separate manager token, policy-bound create")
+    finally:
+        terminal.close()
+
+
+def main():
+    fixture = read_json(sys.argv[1])
+    try:
+        standalone(fixture)
+        organization(fixture)
+    except Exception as exc:
+        # Even a failed terminal assertion must not expose the write-only token.
+        print(str(exc).replace(fixture["token"], "[redacted]"), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
