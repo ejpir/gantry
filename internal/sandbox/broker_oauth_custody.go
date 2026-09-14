@@ -71,6 +71,12 @@ type custodyResult struct {
 	callbackPath string
 }
 
+type custodyRefreshLoop struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // custodyManager owns pending flows, the token registry, and the refresh
 // loops for one sandbox daemon.
 type custodyManager struct {
@@ -86,7 +92,7 @@ type custodyManager struct {
 	mu       sync.Mutex
 	flows    map[string]*custodyFlow
 	finished map[string]custodyResult // bounded terminal results retained for idempotent callbacks/status
-	loops    map[string]chan struct{} // provider -> stop signal
+	loops    map[string]*custodyRefreshLoop
 }
 
 func newCustodyManager(br *broker, registry *oauthtokens.Registry) *custodyManager {
@@ -95,7 +101,7 @@ func newCustodyManager(br *broker, registry *oauthtokens.Registry) *custodyManag
 		registry: registry,
 		flows:    map[string]*custodyFlow{},
 		finished: map[string]custodyResult{},
-		loops:    map[string]chan struct{}{},
+		loops:    map[string]*custodyRefreshLoop{},
 	}
 	cm.pushAuthFile = cm.pushGuestAuthFile
 	cm.ensurePort = br.oauth.EnsureCallbackPort
@@ -383,18 +389,26 @@ func (cm *custodyManager) pushGuestAuthFile(provider string, tok oauthbridge.Tok
 func (cm *custodyManager) startRefreshLoop(provider string) {
 	cm.mu.Lock()
 	// A new login replaces any sleeper built from the previous token set so
-	// its new expiry takes effect immediately.
+	// its new expiry takes effect immediately. Join the old loop before
+	// publishing its replacement: otherwise both can observe an already-due
+	// set and submit the same rotating refresh token.
 	if old := cm.loops[provider]; old != nil {
-		close(old)
+		old.cancel()
+		<-old.done
 	}
-	stop := make(chan struct{})
-	cm.loops[provider] = stop
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := &custodyRefreshLoop{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	cm.loops[provider] = loop
 	cm.mu.Unlock()
 
 	go func() {
 		defer func() {
+			// Unblock a replacement before taking cm.mu; startRefreshLoop holds
+			// that lock while joining the previous generation.
+			loop.cancel()
+			close(loop.done)
 			cm.mu.Lock()
-			if cm.loops[provider] == stop {
+			if cm.loops[provider] == loop {
 				delete(cm.loops, provider)
 			}
 			cm.mu.Unlock()
@@ -423,7 +437,7 @@ func (cm *custodyManager) startRefreshLoop(provider string) {
 			timer := time.NewTimer(wait)
 			select {
 			case <-timer.C:
-			case <-stop:
+			case <-loop.ctx.Done():
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
@@ -438,10 +452,13 @@ func (cm *custodyManager) startRefreshLoop(provider string) {
 			if !supported {
 				return
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			tok, err := oauthbridge.RefreshTokens(ctx, spec, set.RefreshToken, set.ClientID)
-			cancel()
+			refreshCtx, cancelRefresh := context.WithTimeout(loop.ctx, 30*time.Second)
+			tok, err := oauthbridge.RefreshTokens(refreshCtx, spec, set.RefreshToken, set.ClientID)
+			cancelRefresh()
 			if err != nil {
+				if loop.ctx.Err() != nil {
+					return
+				}
 				// Transient failures retry on a short clock; an invalid grant
 				// drops the set so the guest fails loudly and re-login starts a
 				// fresh scheduler.
@@ -453,7 +470,7 @@ func (cm *custodyManager) startRefreshLoop(provider string) {
 				retry := time.NewTimer(time.Minute)
 				select {
 				case <-retry.C:
-				case <-stop:
+				case <-loop.ctx.Done():
 					if !retry.Stop() {
 						select {
 						case <-retry.C:

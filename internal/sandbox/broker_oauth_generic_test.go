@@ -43,15 +43,19 @@ func genericCustody(t *testing.T, spec oauthprovider.Spec) *custodyManager {
 
 func stopCustodyLoops(cm *custodyManager) {
 	cm.mu.Lock()
-	defer cm.mu.Unlock()
-	for _, stop := range cm.loops {
-		close(stop)
+	loops := cm.loops
+	cm.loops = map[string]*custodyRefreshLoop{}
+	for _, loop := range loops {
+		loop.cancel()
 	}
-	cm.loops = map[string]chan struct{}{}
 	for _, flow := range cm.flows {
 		if flow.timer != nil {
 			flow.timer.Stop()
 		}
+	}
+	cm.mu.Unlock()
+	for _, loop := range loops {
+		<-loop.done
 	}
 }
 
@@ -152,8 +156,8 @@ func TestGenericCustodyLoginRefreshMCPAndRestart(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if refreshes.Load() != 1 || set.RefreshToken != "rotated-refresh" {
-		t.Fatal("refresh rotation not captured")
+	if count, rotated := refreshes.Load(), set.RefreshToken == "rotated-refresh"; count != 1 || !rotated {
+		t.Fatalf("refresh requests = %d, rotated token captured = %t", count, rotated)
 	}
 	checkMCP("rotated-access")
 	stopCustodyLoops(cm)
