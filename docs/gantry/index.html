@@ -3626,6 +3626,11 @@ and simplifies platform, architecture, and installation guidance. It remains a
 single dependency-free HTML file with no telemetry or external runtime assets.</p>
 <h2 id="releases-v0.0.22/reliability-and-validation" tabindex="-1">Reliability and validation</h2>
 <ul>
+<li>Tagged Windows release executables are Authenticode-signed and RFC 3161
+timestamped through Azure Artifact Signing on a dedicated Windows runner.
+The release fails if signature or timestamp verification fails, and SHA-256
+sidecars are generated only after the signed files replace unsigned build
+outputs.</li>
 <li>Guest listener snapshots are size- and count-bounded; malformed or oversized
 reports are discarded without blocking the helper stream.</li>
 <li>OAuth watcher startup requires an initial guest snapshot before daemon
