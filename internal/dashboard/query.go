@@ -17,7 +17,7 @@ func (m *sandboxTUIModel) rememberViewSource() {
 	if m.viewSource != nil {
 		return
 	}
-	m.viewSource = &tuiRefreshMsg{sandboxes: m.sandboxes, traffic: m.traffic, rules: m.rules, mounts: m.mounts, ports: m.ports, secrets: m.secrets, mcp: m.mcpServers, images: m.images, registries: m.registries}
+	m.viewSource = &tuiRefreshMsg{sandboxes: m.sandboxes, traffic: m.traffic, rules: m.rules, mounts: m.mounts, ports: m.ports, secrets: m.secrets, mcp: m.mcpServers, audit: m.auditEvents, images: m.images, registries: m.registries}
 	m.packetSource = slices.Clone(m.packets)
 }
 
@@ -52,6 +52,7 @@ func (m *sandboxTUIModel) rebuildRows() {
 	m.ports = filteredRows(s.ports, q, func(r tuiPortRow) string { return r.Sandbox })
 	m.secrets = filteredRows(s.secrets, q, func(r tuiSecretRow) string { return r.Sandbox })
 	m.mcpServers = filteredRows(s.mcp, q, func(r tuiMCPRow) string { return r.Sandbox })
+	m.auditEvents = filteredRows(s.audit, q, func(r tuiAuditRow) string { return r.Sandbox })
 	m.packets = filteredRows(m.packetSource, q, func(r tuiPacketRow) string { return r.Sandbox })
 	m.images, m.registries = slices.Clone(s.images), slices.Clone(s.registries)
 	sandboxScope := tuiSandboxesPage
@@ -65,6 +66,7 @@ func (m *sandboxTUIModel) rebuildRows() {
 	sortRows(m.ports, m.sorts[tuiPortsPage], portSortValue)
 	sortRows(m.secrets, m.sorts[tuiSecretsPage], secretSortValue)
 	sortRows(m.mcpServers, m.sorts[tuiMCPPage], mcpSortValue)
+	sortRows(m.auditEvents, m.sorts[tuiAuditPage], auditSortValue)
 	sortRows(m.packets, m.sorts[tuiPacketsPage], packetSortValue)
 	sortRows(m.images, m.sorts[tuiImagesPage], imageSortValue)
 	sortRows(m.registries, m.sorts[tuiPageCount], registrySortValue)
@@ -100,6 +102,7 @@ func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
 	newCard := m.page == tuiSandboxesPage && m.onNewCard()
 	t, r, mount, port, secret, mcp, image, registry := m.selectedTableKeys()
 	packet := m.selectedPacketKey()
+	audit := m.selectedAuditKey()
 	m.rebuildRows()
 	if resetScroll {
 		m.cursor, m.scrollRow = 0, 0
@@ -107,6 +110,7 @@ func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
 		m.mountCursor, m.mountScroll, m.portCursor, m.portScroll = 0, 0, 0, 0
 		m.secretCursor, m.secretScroll, m.mcpCursor, m.mcpScroll = 0, 0, 0, 0
 		m.packetCursor, m.packetScroll = 0, 0
+		m.auditCursor, m.auditScroll = 0, 0
 	}
 	if newCard {
 		m.cursor = len(m.sandboxes)
@@ -121,6 +125,7 @@ func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
 	}
 	m.restoreTableSelections(t, r, mount, port, secret, mcp, image, registry)
 	m.restorePacketSelection(packet)
+	m.restoreAuditSelection(audit)
 	m.ensureCursorVisible()
 	m.ensureTableCursorVisible()
 	m.dashboardHits = nil

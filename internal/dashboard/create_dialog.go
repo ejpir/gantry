@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ejpir/gantry/internal/remote"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 
@@ -16,6 +17,9 @@ import (
 // createDialogModel owns the create form's inputs, launch request, and layout.
 // The enclosing dashboard coordinates navigation and asynchronous operations.
 type createDialogModel struct {
+	createRemote        string // empty is explicitly local, never GANTRY_REMOTE
+	createEndpoint      remote.Profile
+	createOrganization  string // revalidate receipt and snapshot at submission
 	createFocus         int
 	createErrFocus      int
 	createName          textinput.Model
@@ -71,6 +75,9 @@ func (m *createDialogModel) createKernelSelection() string {
 }
 
 func (m *createDialogModel) createKernelLabel() string {
+	if m.createRemote != "" {
+		return "auto (on the remote manager)"
+	}
 	if k := m.createKernelSelection(); k != "" {
 		return filepath.Base(k)
 	}
@@ -81,12 +88,23 @@ func (m *createDialogModel) createKernelLabel() string {
 }
 
 func (m createDialogModel) render(theme tuiTheme, width int, header, gap, formError string) createFormLayout {
-	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Create and boot a persistent local microVM.")
+	descriptionText := "Location: Local · Create and boot a persistent microVM on this computer."
+	if m.createRemote != "" {
+		descriptionText = "Location: Remote " + m.createRemote + " · image pulls and creation run on that manager, never locally."
+		if m.createOrganization != "" {
+			descriptionText = "Organization: " + m.createOrganization + " · " + descriptionText + " Your signed policy is applied at creation."
+		}
+	}
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(safeUIBlock(descriptionText))
 	section := func(title string) string {
 		return lipgloss.NewStyle().Bold(true).Foreground(theme.accent).Render(strings.ToUpper(title))
 	}
 	nameLabel := formLabel(theme, "Name", m.createFocus == 0)
-	imageLabel := formLabel(theme, "OCI image", m.createFocus == 1) + lipgloss.NewStyle().Foreground(theme.muted).Render("  optional")
+	imageHint := "  optional"
+	if m.createRemote != "" {
+		imageHint = "  required · pulled remotely if not cached"
+	}
+	imageLabel := formLabel(theme, "OCI image", m.createFocus == 1) + lipgloss.NewStyle().Foreground(theme.muted).Render(imageHint)
 	nameField := renderInputField(theme, m.createName.View(), width, m.createFocus == 0)
 	imageField := renderInputField(theme, m.createImage.View(), width, m.createFocus == 1)
 	runtimeLabel := formLabel(theme, "Runtime", m.createFocus == 2)
@@ -178,7 +196,11 @@ type createFormLayout struct {
 }
 
 func (m sandboxTUIModel) createLayout(theme tuiTheme, width int) createFormLayout {
-	return m.render(theme, width, m.dialogHeader(theme, "Create sandbox", width), m.formSectionGap(), m.formError)
+	title := "Create sandbox · Local"
+	if m.createRemote != "" {
+		title = "Create sandbox · " + safeUILine(m.createRemote)
+	}
+	return m.render(theme, width, m.dialogHeader(theme, title, width), m.formSectionGap(), m.formError)
 }
 
 func (m sandboxTUIModel) renderCreateDialog(theme tuiTheme, width int) string {

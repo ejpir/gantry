@@ -16,6 +16,8 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 	switch page {
 	case tuiOverviewPage:
 		return len(m.sandboxes)
+	case tuiRemotesPage:
+		return len(m.remoteLines())
 	case tuiTrafficPage:
 		return len(m.traffic)
 	case tuiRulesPage:
@@ -28,6 +30,8 @@ func (m sandboxTUIModel) pageRowCount(page tuiPage) int {
 		return len(m.secrets)
 	case tuiMCPPage:
 		return len(m.mcpServers)
+	case tuiAuditPage:
+		return len(m.auditEvents)
 	case tuiPacketsPage:
 		return len(m.packets)
 	case tuiImagesPage:
@@ -550,6 +554,8 @@ func (m sandboxTUIModel) tableRenderPosition(page tuiPage) (scroll, cursor int) 
 		return m.secretScroll, m.secretCursor
 	case tuiMCPPage:
 		return m.mcpScroll, m.mcpCursor
+	case tuiAuditPage:
+		return m.auditScroll, m.auditCursor
 	case tuiPacketsPage:
 		return m.packetScroll, m.packetCursor
 	case tuiImagesPage:
@@ -576,6 +582,8 @@ func (m sandboxTUIModel) renderTableHeader(theme tuiTheme, page tuiPage, width i
 		return m.renderSecretsHeader(theme, width)
 	case tuiMCPPage:
 		return m.renderMCPHeader(theme, width)
+	case tuiAuditPage:
+		return m.renderAuditHeader(theme, width)
 	case tuiPacketsPage:
 		return m.renderPacketsHeader(theme, width)
 	case tuiImagesPage:
@@ -602,6 +610,8 @@ func (m sandboxTUIModel) renderTableRow(theme tuiTheme, page tuiPage, index, wid
 		return m.renderSecretRow(theme, m.secrets[index], width)
 	case tuiMCPPage:
 		return m.renderMCPRow(theme, m.mcpServers[index], width)
+	case tuiAuditPage:
+		return m.renderAuditRow(theme, m.auditEvents[index], width)
 	case tuiPacketsPage:
 		return m.renderPacketRow(theme, m.packets[index], width)
 	case tuiImagesPage:
@@ -628,6 +638,8 @@ func (m sandboxTUIModel) renderTableDetail(theme tuiTheme, page tuiPage, width i
 		return m.renderSecretDetail(theme, width)
 	case tuiMCPPage:
 		return m.renderMCPDetail(theme, width)
+	case tuiAuditPage:
+		return m.renderAuditDetail(theme, width)
 	case tuiPacketsPage:
 		return m.renderPacketDetail(theme, width)
 	case tuiImagesPage:
