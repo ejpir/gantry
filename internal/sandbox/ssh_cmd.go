@@ -12,6 +12,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sshconfig"
 )
 
 var runSSHProcess = runAttachedCommand
@@ -142,10 +143,4 @@ func readSSHConfig(name string) (config.RunConfig, error) {
 	return cfg, nil
 }
 
-func remoteSSHCommand(argv []string) string {
-	quoted := make([]string, len(argv))
-	for index, value := range argv {
-		quoted[index] = "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-	}
-	return strings.Join(quoted, " ")
-}
+func remoteSSHCommand(argv []string) string { return sshconfig.GuestCommand(argv) }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ejpir/gantry/api/managerapi"
 	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"net/http"
 	"os"
@@ -82,7 +83,7 @@ func TestManagerRoutesLifecycleOperations(t *testing.T) {
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", create.Code, create.Body.String())
 	}
-	var operation managerOperation
+	var operation managerapi.Operation
 	if err := json.Unmarshal(create.Body.Bytes(), &operation); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +180,7 @@ func TestManagerRoutesExecResult(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("exec = %d %s", response.Code, response.Body.String())
 	}
-	var result managerExecResponse
+	var result managerapi.ExecResult
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}

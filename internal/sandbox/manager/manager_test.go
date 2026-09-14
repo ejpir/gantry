@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bytes"
+	"github.com/ejpir/gantry/api/managerapi"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -94,7 +95,7 @@ func TestManagerEventsDropsSlowSubscriber(t *testing.T) {
 	}
 	defer cancel()
 	for index := range managerEventBuffer + 1 {
-		operation := &managerOperation{ID: "event", Sandbox: "test", State: "running", Created: time.Now(), Updated: time.Now()}
+		operation := &operationRecord{Operation: managerapi.Operation{ID: "event", Sandbox: "test", State: "running", Created: time.Now(), Updated: time.Now()}}
 		service.mu.Lock()
 		service.publishLocked("operation", operation)
 		service.mu.Unlock()
@@ -134,14 +135,14 @@ func TestServeManagerRefusesNonSocketEndpoint(t *testing.T) {
 }
 
 func TestManagerExecValidation(t *testing.T) {
-	request := managerExecRequest{Argv: []string{"pwd"}, Cwd: "/workspace"}
+	request := managerapi.ExecRequest{Argv: []string{"pwd"}, Cwd: "/workspace"}
 	if err := validateManagerExec(&request); err != nil {
 		t.Fatal(err)
 	}
 	if request.TimeoutSeconds != 30 || request.MaxOutputBytes != managerDefaultOutputBytes {
 		t.Fatalf("defaults = timeout %d output %d", request.TimeoutSeconds, request.MaxOutputBytes)
 	}
-	for _, request := range []managerExecRequest{
+	for _, request := range []managerapi.ExecRequest{
 		{},
 		{Argv: []string{"true"}, Cwd: "relative"},
 		{Argv: []string{"true"}, TimeoutSeconds: 3601},

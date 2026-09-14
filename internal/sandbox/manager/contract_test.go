@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/inspection"
 
 	"go.yaml.in/yaml/v3"
@@ -35,10 +38,18 @@ func TestManagerOpenAPIContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, shape := range map[string]any{
-		"Sandbox": managerSandbox{}, "BootSettings": inspection.BootSettings{},
-		"CreateSandboxRequest": managerCreateRequest{}, "ExecRequest": managerExecRequest{},
-		"ExecResult": managerExecResponse{}, "Error": managerErrorResponse{},
-		"Operation": managerOperation{}, "Event": managerEvent{},
+		"Sandbox": managerapi.Sandbox{}, "BootSettings": inspection.BootSettings{},
+		"CreateSandboxRequest": managerapi.CreateSandboxRequest{}, "ExecRequest": managerapi.ExecRequest{},
+		"ConfigureSandboxRequest": managerapi.ConfigureSandboxRequest{}, "ConfigureSandboxResult": managerapi.ConfigureSandboxResult{},
+		"RunVMRequest": managerapi.RunVMRequest{},
+		"ExecResult":   managerapi.ExecResult{}, "Error": managerapi.ErrorResponse{},
+		"Operation": managerapi.Operation{}, "Event": managerapi.Event{},
+		"Health": managerapi.Health{}, "Image": managerapi.Image{}, "ImageList": managerapi.ImageList{},
+		"ImagePullRequest": managerapi.ImagePullRequest{}, "ImageDeleteRequest": managerapi.ImageDeleteRequest{},
+		"SSHHostKey": managerapi.SSHHostKey{}, "NetworkPolicy": managerapi.NetworkPolicy{},
+		"NetworkPolicyRequest": managerapi.NetworkPolicyRequest{}, "NetworkRuleSummary": netpol.RuleSummary{},
+		"OrganizationPolicy": managerapi.OrganizationPolicy{}, "OrganizationPolicyRequest": managerapi.OrganizationPolicyRequest{},
+		"OrganizationSnapshot": policy.Config{}, "OrganizationInfo": policy.SnapshotInfo{}, "AuditTail": managerapi.AuditTail{},
 	} {
 		t.Run(name, func(t *testing.T) {
 			schema, ok := document.Components.Schemas[name]
@@ -85,6 +96,11 @@ func TestManagerOpenAPIContract(t *testing.T) {
 					want = "integer"
 				case reflect.Slice:
 					want = "array"
+					if typ == reflect.TypeFor[json.RawMessage]() {
+						want = "object"
+					} else if typ == reflect.TypeFor[[]byte]() {
+						want = "string"
+					}
 				case reflect.Struct:
 					if typ.PkgPath() == "time" && typ.Name() == "Time" {
 						want = "string"
