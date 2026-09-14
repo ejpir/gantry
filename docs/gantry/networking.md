@@ -92,6 +92,20 @@ For a stopped sandbox, these commands update the saved configuration for its
 next start. For a running embedded-network sandbox, the change applies to
 subsequent packets without a reboot.
 
+## Optional organization policy
+
+Gantry can intersect local network policy with a verified, signed OPA policy
+snapshot. Start with `-org-policy bundle.tar.gz -org-policy-key public.pem
+-policy-profile NAME`; the same snapshot also governs requested host shares,
+MCP tools and brokered credentials. Local policy changes cannot widen its
+permissions. The host owner remains trusted and can clear the snapshot while
+the sandbox is stopped.
+
+See [Organization policy](organization-policy.md) for setup and updates, or
+[Architecture](architecture.md#native-network-restrictions) for network semantics
+and limitations. Organization DNS permissions allow
+resolution only; IP/protocol/port permissions are separate.
+
 ## Understand domain allowlists
 
 When `allowDomains` is non-empty, the gateway DNS resolver filters queries by

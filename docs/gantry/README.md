@@ -40,6 +40,10 @@ filesystem by digest.
   registry credentials.
 - [Networking](networking.md) — egress policy, DNS allowlists, port
   publishing, proxies, and traffic inspection.
+- [Organization policy](organization-policy.md) — apply, inspect, update,
+  and try a policy locally.
+- [Organization login](organization-login.md) — sign in, discover team
+  remotes, and apply your organization's policy.
 - [Host shares and secrets](shares-secrets.md) — expose selected directories,
   map ownership, and inject credentials without putting values in argv.
 - [Coding agents](coding-agents.md) — isolate an agent and run Pi in a
@@ -48,10 +52,12 @@ filesystem by digest.
   against a sandbox, and what that still needs.
 - [SSH access](ssh-access.md) — stock SSH, SFTP, loopback forwarding, managed
   `*.gantry` hostnames, remote editors, and nested Dev Containers.
-- [Manager API](manager-api.md) — automate local sandbox lifecycle over an
-  authenticated Unix socket.
+- [Remote access](remote-access.md) — standalone HTTPS managers, TUI
+  Local / Remote / Organization creation, and optional organization discovery.
+- [Manager API](manager-api.md) — automate sandbox lifecycle over an
+  authenticated Unix socket or bearer-authenticated HTTPS.
 - [Architecture](architecture.md) — supervisor, workers, microVM, storage,
-  networking, and request flows.
+  networking, organization trust, and policy enforcement.
 - [Security](security.md) — trust boundaries, isolation controls, and known
   limitations.
 - [CLI reference](cli-reference.md) — commands, flags, and accepted value

@@ -266,25 +266,102 @@ never rendered by the host browser.
 
 ## Keep OAuth refresh tokens on the host
 
-OAuth custody is available for Codex and Claude:
+OAuth custody supports Codex, Claude, GitHub, and host-configured OAuth
+providers (including MCP servers):
 
 ```console
 $ gantry start agent -image ubuntu:latest -oauth-custody
 $ gantry exec agent -- gantry-guest oauth login codex
 ```
 
-Open the printed authorization URL in the host browser. The guest receives a
-short-lived access token and a nonfunctional refresh-token sentinel. Gantry
-keeps the real refresh token in the sandbox's protected host state, refreshes
-it ahead of expiry, and pushes updated access tokens into the guest auth file.
+Open the printed authorization URL in the host browser. For Codex and Claude,
+the guest receives an access token and a nonfunctional refresh-token sentinel.
+Gantry keeps the real refresh token in the sandbox's protected host state,
+refreshes it ahead of expiry, and pushes updated access tokens into the guest
+auth file. Other providers do not need a guest auth-file adapter.
 
 Custody survives `gantry stop` and `gantry resume`. A fresh `gantry start` for
 an existing name replaces that custody state, so log in again. If the provider
 revokes the refresh token, the session fails closed and must be authenticated
 again.
 
-OAuth custody requires the callback bridge. Providers other than Codex and
-Claude use the callback bridge without custody.
+### GitHub
+
+```console
+$ gantry exec agent -- gantry-guest oauth login github
+```
+
+Open the printed device verification URL and enter the displayed code. Gantry
+uses GitHub CLI's public device-flow client (`repo read:org gist` scopes) and
+keeps the resulting token host-side. Git-over-HTTPS obtains the access token
+on demand through the credential helper, bound to `github.com` and gated by
+the sandbox's egress policy. No `GITHUB_TOKEN` environment variable or `gh`
+auth file is written; this does not transparently log the `gh` CLI in.
+GitHub may issue a non-expiring token without a refresh token.
+
+### Custom providers and MCP servers
+
+Create a **host-side** `company-oauth.json` containing public client metadata:
+
+```json
+{
+  "name": "company-mcp",
+  "authorize_url": "https://auth.example.com/authorize",
+  "token_url": "https://auth.example.com/token",
+  "client_id": "YOUR_PUBLIC_CLIENT_ID",
+  "redirect_uri": "http://127.0.0.1:53693/callback",
+  "scope": "mcp offline_access",
+  "resource": "https://mcp.example.com/mcp"
+}
+```
+
+Register that redirect URI with the authorization server, then:
+
+```console
+$ gantry start dev -image ubuntu:latest -oauth-custody \
+    -oauth-provider ./company-oauth.json \
+    -mcp-remote 'name=company,url=https://mcp.example.com/mcp,auth=custody:company-mcp,allow=read_*'
+$ gantry exec dev -- gantry-guest oauth login company-mcp
+```
+
+The host generates state and PKCE, exchanges and refreshes tokens, and injects
+only the current access token into the configured MCP upstream. Neither token
+is written into a guest file; refresh tokens never reach the MCP worker.
+Expired or revoked credentials fail closed. Use a distinct registration name
+for each account/resource; registrations are scoped to one sandbox.
+
+Provider configuration supports:
+
+| Field | Meaning |
+|---|---|
+| `name` | Unique lowercase registration name; built-in names are reserved |
+| `grant` | `authorization_code` (default, PKCE S256) or `device_code` |
+| `authorize_url` | Authorization endpoint for the code flow |
+| `device_authorization_url` | Device endpoint for the device flow; omit code-flow fields |
+| `token_url`, `client_id` | Token endpoint and public client registration |
+| `redirect_uri` | HTTP IPv4 loopback callback; default `http://127.0.0.1:0/callback` chooses a dynamic port |
+| `scope` | Space-separated scopes |
+| `resource` | Optional RFC 8707 resource, sent at authorization, exchange, and refresh |
+| `exchange_encoding`, `refresh_encoding` | `form` (default) or `json` |
+| `credential_hosts` | Optional array of exact hostnames permitting guest git-helper access-token delivery; empty by default |
+
+Endpoints require HTTPS (HTTP on literal `127.0.0.1` is allowed for local
+development). Callback ports must be bridge-allowed: 1455 or 32768–65535.
+Provider files are snapshotted into sandbox configuration, not reread during
+refresh. Changing an issuance endpoint, client, scope, or resource invalidates
+its persisted session and requires re-login. Explicit bound secrets take
+precedence over OAuth helper bindings; configured bindings precede the built-in
+GitHub binding.
+
+This supports **public OAuth clients**. Client secrets, device login interception
+from unmodified CLIs, and automatic MCP authorization-server discovery/dynamic
+client registration are not implemented. Supply endpoints and register a public
+client yourself. Do not put secrets in provider JSON. Only authorize MCP remotes
+you trust with the corresponding access token.
+
+OAuth custody still requires the callback bridge to be enabled, although device
+login itself opens no callback listener. The transparent bridge remains
+provider-independent for unmodified CLI logins without custody.
 
 For diagrams of share, secret, OAuth, and MCP data flow, see
 [Architecture](architecture.md#host-capability-bridges). For boundary details,

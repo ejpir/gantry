@@ -1,0 +1,78 @@
+{
+  "gantry": {
+    "expires_at": "2026-10-13T22:23:03Z",
+    "organization": "local-test",
+    "profiles": {
+      "developer": {
+        "network": {
+          "dns": [
+            "github.com",
+            "*.githubusercontent.com",
+            "*.docker.io"
+          ],
+          "rules": [
+            {
+              "cidr": "0.0.0.0/0",
+              "effect": "allow",
+              "id": "https",
+              "ports": [
+                443
+              ],
+              "protocol": "tcp"
+            },
+            {
+              "cidr": "169.254.0.0/16",
+              "effect": "deny",
+              "id": "metadata",
+              "ports": [],
+              "protocol": "any"
+            }
+          ]
+        },
+        "rules": [
+          {
+            "action": "mount.read",
+            "effect": "allow",
+            "id": "project-read",
+            "path": "/Users/eh04xk/repos/minivm"
+          },
+          {
+            "action": "mcp.connect",
+            "effect": "allow",
+            "id": "fs-connect",
+            "server": "fs"
+          },
+          {
+            "action": "mcp.tools.list",
+            "effect": "allow",
+            "id": "fs-list",
+            "server": "fs",
+            "tool": "*"
+          },
+          {
+            "action": "mcp.tools.call",
+            "effect": "allow",
+            "id": "fs-read",
+            "server": "fs",
+            "tool": "read_file"
+          },
+          {
+            "action": "mcp.tools.call",
+            "effect": "allow",
+            "id": "fs-directory",
+            "server": "fs",
+            "tool": "list_directory"
+          },
+          {
+            "action": "credential.use",
+            "effect": "allow",
+            "host": "github.com",
+            "id": "github-credential"
+          }
+        ]
+      }
+    },
+    "revision": "test-20260913T222303Z",
+    "version": 1
+  }
+}

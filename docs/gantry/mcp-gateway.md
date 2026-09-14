@@ -140,15 +140,22 @@ environment and file sources.
 > secret can split, encode, or otherwise transform it in a tool result. Use
 > endpoint-bound, least-privilege, revocable credentials.
 
-Use a provider token held by OAuth custody when the remote accepts it:
+Use a token issued for the MCP server, held by OAuth custody:
 
 ```console
 $ gantry start dev -image ubuntu:latest -mcp -oauth-custody \
-    -mcp-remote 'name=ai,url=https://mcp.example.com/,auth=custody:claude,allow=read_*'
+    -oauth-provider ./company-oauth.json \
+    -mcp-remote 'name=company,url=https://mcp.example.com/mcp,auth=custody:company-mcp,allow=read_*'
+$ gantry exec dev -- gantry-guest oauth login company-mcp
 ```
 
-Log in with `gantry-guest oauth login claude` before using that remote. New
-MCP sessions pick up refreshed access tokens automatically.
+See [custom OAuth providers](shares-secrets.md#custom-providers-and-mcp-servers)
+for `company-oauth.json`, including the public client ID, endpoints, scopes,
+and optional resource/audience binding. Generic providers need no guest auth
+file. New MCP sessions pick up refreshed access tokens automatically; expired,
+missing, or revoked credentials fail closed. Refresh tokens stay in the
+supervisor. Built-in `claude`, `codex`, and `github` references still work when
+the explicitly configured upstream accepts those tokens.
 
 ## Restrict tools
 

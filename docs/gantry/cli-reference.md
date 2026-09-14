@@ -37,7 +37,8 @@ Common flags:
 | `-no-proxy LIST` | Override the proxy bypass list |
 | `-proxy-enforce` | Block direct TCP 80/443 and UDP 443 except to the proxy |
 | `-oauth-bridge=false` | Disable automatic guest-loopback OAuth callback bridging |
-| `-oauth-custody` | Hold OAuth refresh tokens on the host; push fresh access tokens into the guest (Codex, Claude) |
+| `-oauth-custody` | Hold OAuth tokens on the host (Codex, Claude, GitHub, and configured public-client providers) |
+| `-oauth-provider PATH` | Snapshot a host-owned OAuth provider JSON file; repeatable, requires `-oauth-custody` ([configuration](shares-secrets.md#custom-providers-and-mcp-servers)) |
 | `-mcp` | Enable the MCP gateway with the contained read-only filesystem server ([manual](mcp-gateway.md)) |
 | `-mcp-fs-root PATH` | Confine the MCP filesystem server to PATH (default `/`) |
 | `-mcp-fs-user USER` | Run MCP local servers as this guest user (name, numeric UID from passwd, or explicit `UID:GID`; default `nobody`; root refused) |
@@ -60,7 +61,10 @@ gantry configure NAME [--ssh[=BOOL]] [--devcontainers[=BOOL]]
 ```
 
 SSH can apply immediately. Memory, CPU, process-isolation, and Dev Containers
-topology changes apply on the next VM start.
+topology changes apply on the next VM start. Add `-remote PROFILE` to update
+that manager's sandbox instead; no local fallback is allowed. Remote updates
+accept `-key KEY` for safe retries, preserve omitted flags and explicit false,
+and return whether a running VM needs restarting.
 
 ### `gantry exec`
 
@@ -218,16 +222,61 @@ gantry net-policy show NAME
 `set` and `default` apply live to compatible running sandboxes and persist for
 the next boot.
 
+## Organization policy
+
+```text
+gantry policy generate -out DIR [-mount PATH ...] [-ttl 30d] [-profile developer]
+gantry policy sign -data data.json -out DIR (-signing-key private.pem | -ephemeral)
+gantry policy verify -bundle bundle.tar.gz -key public.pem -profile NAME
+gantry policy check -bundle bundle.tar.gz -key public.pem -profile NAME -action ACTION -resource JSON
+gantry policy set NAME -bundle bundle.tar.gz -key public.pem -profile NAME
+gantry policy show NAME
+gantry policy clear NAME
+```
+
+`generate` creates a restrictive test policy: default-deny except for explicit
+read-only mount roots. It also accepts `-organization` and `-revision`; defaults
+are `local-test` and a timestamp. TTL supports whole days or Go-style durations
+from 1 second through 365 days. `sign` validates and signs edited JSON without
+changing its permissions, revision, or expiry.
+
+Both authoring commands require a **new output directory**, containing
+`source/data.json`, `bundle.tar.gz`, and `public.pem`. They never save private keys.
+`generate` and `sign -ephemeral` use fresh test keys; `sign -signing-key` uses an
+existing RSA private key. No OPA/OpenSSL installation is required. `set` and
+`clear` require a stopped sandbox. See [Organization policy](organization-policy.md)
+for the workflow and [Architecture](architecture.md#organization-policy-engine)
+for supported rules and security limits.
+
+## Organization login
+
+```text
+gantry org login -config organization.json [-profile NAME] [-no-browser] [-timeout 5m]
+gantry org status ORGANIZATION
+gantry org apply ORGANIZATION SANDBOX
+gantry org logout ORGANIZATION
+```
+
+Uses OIDC Authorization Code + S256 PKCE with a trusted HTTPS issuer and explicit
+membership-to-profile mappings. Only a token-free host receipt and pinned signed
+policy are saved. `apply` requires an active login and a stopped sandbox without
+OAuth custody. Logout/login expiry do not revoke already-pinned policies or end
+provider SSO. See [Organization login](organization-login.md) to get started and
+[Architecture](architecture.md#organization-identity-and-discovery) for trust
+configuration, protocol details and validation.
+
 ## Security audit trail
 
 ```text
 gantry audit NAME
 ```
 
-Prints the sandbox daemon's in-memory trail of security-relevant events:
-credential deliveries and withholds, secret-source failures, and OAuth
-custody events (logins, refreshes, push failures). The trail names secrets
-but never quotes values, and holds the most recent 256 events. `daemon.log`
+Prints the sandbox daemon's trail of security-relevant events: organization
+policy decisions, credential deliveries and withholds, secret-source failures,
+and OAuth custody events (logins, refreshes, push failures). Uses the live ring
+while running and falls back to `audit.log` after shutdown. The trail names
+secrets but never quotes values, and returns at most 256 retained events.
+Persistence is bounded and best-effort, not a compliance archive. `daemon.log`
 remains the primary record.
 
 ## Dashboard
@@ -241,14 +290,63 @@ gantry tui
 
 Press `?` inside the dashboard for key bindings.
 
+Press `A` (or use Tab) to open **Audit**. It refreshes automatically and shows
+live events or the saved trail for stopped sandboxes. Policy decisions highlight
+allow/deny, action, reason, organization, revision, profile, and matching rule IDs.
+Use `/` to filter by sandbox, `S` or column headers to sort, `r` to refresh, and
+Enter to inspect/copy the full recorded event. The default order is newest first
+within each sandbox; the audit format has no timestamps. This view is read-only.
+
 ## Manager API
 
 ```text
 gantry serve [-socket PATH]
+gantry serve -listen tls://ADDR:PORT --token-file FILE [--self-signed]
 ```
 
 The default endpoint is `~/.gantry/manager.sock`. See
 [Manager API](manager-api.md).
+
+## Remote managers
+
+A manager served with `-listen tls://…` is a remote control plane for the
+everyday verbs. Profiles are configured once and selected per command:
+
+```text
+gantry remote add NAME https://HOST:PORT [--token-file FILE | --token-stdin]
+             [--ca FILE] [--fingerprint sha256:HEX]
+gantry remote ls
+gantry remote test NAME
+gantry remote rm NAME
+
+gantry start dev -image alpine:latest -remote NAME
+gantry exec dev -remote NAME -- uname -a
+gantry ls -remote NAME
+gantry stop dev -remote NAME
+gantry resume dev -remote NAME
+gantry delete dev -remote NAME
+```
+
+`GANTRY_REMOTE` supplies the default target; an explicit `-remote` wins, and
+`-remote ""` forces local. Tokens are host-shell authority on the remote and
+are stored in per-remote `0600` files under `~/.gantry/remotes/`; a
+group/world-readable token file is refused. TLS is always verified — pass
+`--ca` for servers using `--self-signed` (the server's
+`~/.gantry/serve/ca.crt`) and `--fingerprint` to pin the exact certificate
+printed by `gantry serve` at startup. Remote exec is non-interactive
+(bounded output, guest exit code propagated); use `gantry ssh NAME -remote
+PROFILE` for a terminal. Paths in start flags (`-share`, `-net-policy`,
+`-kernel`, …) resolve on the remote host. Organization bundle/key flags instead
+upload local signed policy files. `-secret` accepts plain names resolved from
+the manager's own environment.
+
+Remote image pulls, SSH, live events, policy changes, and audit tails are also
+supported. CLI start requires a cached image: run `gantry image pull REF -remote
+NAME` first. The TUI's **Create → Local / Remote / Organization** flow can pull
+missing images remotely and offers standalone registration without org login.
+**Remotes (B)** supports **a** add, **t** test, **d** remove profile/token, and
+**L** organization sign-in/discovery. See [Remote access](remote-access.md) for
+examples, security boundaries and the catalog contract.
 
 ## Coding-agent helpers
 
@@ -303,6 +401,13 @@ It accepts extra `-disk` and `-share` values, memory and vCPU settings, a raw
 network endpoint, and virtio-vsock forwarding options. Prefer `start` and
 `exec` for OCI workloads.
 
+With `-remote PROFILE`, those same raw boot paths resolve on the manager host.
+Remote-only flags are `-timeout SECONDS` (default 300, maximum 3600),
+`-max-output BYTES` (default 16384, maximum 65536), and `-key KEY` for idempotent
+retries. Console input/output is bounded and noninteractive. Exit 124 means the
+helper reached its deadline; exit 130 means cancellation. This does not create
+a named sandbox and is not an alias for `start`. See [Remote access](remote-access.md).
+
 ## Version and updates
 
 ```text
@@ -317,6 +422,7 @@ gantry update --force   # reinstall a deliberately rebuilt/retagged release
 |---|---|
 | `GANTRY_ARTIFACTS` | Explicit guest-asset directory |
 | `GANTRY_HOME` | Sandbox-state root instead of `~/.gantry/sandboxes` |
+| `GANTRY_REMOTE` | Default `-remote` target for lifecycle verbs |
 | `GANTRY_IMAGES` | OCI image-cache root instead of `~/.gantry/images` |
 | `GANTRY_RUNTIME` | Default guest runtime for `start` and one-shot `exec` |
 | `GANTRY_PI_IMAGE` | Default image for `gantry pi` |
