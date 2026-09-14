@@ -124,6 +124,7 @@ func newPublishedFlowTable() *publishedFlowTable {
 
 // Policy is the parsed, enforced form of the policy file.
 type Policy struct {
+	guard        *networkGuard
 	DefaultAllow bool     `json:"-"`
 	Rules        []Rule   `json:"-"`
 	AllowDomains []string `json:"-"` // normalized: lower-case, no trailing dot
@@ -166,6 +167,7 @@ func (p *Policy) Replace(next *Policy) error {
 	}
 	current := p.current()
 	replacement := next.current()
+	InheritGuard(replacement, current)
 	replacement.publishedFlows.Store(current.publishedFlowTable())
 	p.active.Store(replacement)
 	return nil
@@ -498,6 +500,7 @@ type fileRule struct {
 }
 
 type filePolicy struct {
+	Guard          *GuardSpec `json:"organization_guard,omitempty"`
 	Default        string     `json:"default"` // "allow" (default) | "deny"
 	AllowLocal     *bool      `json:"allowLocal,omitempty"`
 	Rules          []fileRule `json:"rules"`
@@ -521,6 +524,13 @@ func Parse(data []byte) (*Policy, error) {
 		return nil, fmt.Errorf("network policy: %w", err)
 	}
 	p := &Policy{dynamic: map[[4]byte]time.Time{}}
+	if fp.Guard != nil {
+		var err error
+		p.guard, err = parseGuard(*fp.Guard)
+		if err != nil {
+			return nil, err
+		}
+	}
 	p.publishedFlows.Store(newPublishedFlowTable())
 	switch fp.Default {
 	case "", "allow":
@@ -666,6 +676,19 @@ func (p *Policy) RuleSummaries() []RuleSummary {
 		defaultAction = "allow"
 	}
 	out = append(out, RuleSummary{Action: defaultAction, Target: "public internet", Protocol: "any", Source: "default"})
+	if p.guard != nil {
+		for _, rule := range p.guard.spec.Rules {
+			ports := make([]string, 0, len(rule.Ports))
+			for _, port := range rule.Ports {
+				ports = append(ports, strconv.Itoa(int(port)))
+			}
+			out = append(out, RuleSummary{Action: rule.Effect, Target: rule.CIDR, Protocol: rule.Protocol, Ports: strings.Join(ports, ","), Source: "org:" + p.guard.spec.Organization + ":" + rule.ID})
+		}
+		out = append(out, RuleSummary{Action: "deny", Target: "unmatched organization egress", Protocol: "any", Source: "org:" + p.guard.spec.Organization})
+		for _, domain := range p.guard.spec.DNS {
+			out = append(out, RuleSummary{Action: "resolve", Target: domain, Protocol: "dns", Source: "org:" + p.guard.spec.Organization})
+		}
+	}
 	return out
 }
 
@@ -705,6 +728,9 @@ func (p *Policy) Describe() string {
 	}
 	if len(p.ResolveDomains) > 0 {
 		s += fmt.Sprintf(", resolve only: %s", strings.Join(p.ResolveDomains, ", "))
+	}
+	if p.guard != nil {
+		s += fmt.Sprintf(", organization %s revision %s (expires %s)", p.guard.spec.Organization, p.guard.spec.Revision, p.guard.spec.ExpiresAt.Format(time.RFC3339))
 	}
 	return s
 }
@@ -772,6 +798,9 @@ func (p *Policy) MatchTX(frame []byte) bool {
 		return current.MatchTX(frame)
 	}
 	pp, arp, ok := parseFrame(frame)
+	if !p.guard.valid() || p.guard != nil && pp.fragmented {
+		return false // expired grants and unattributable fragments fail closed
+	}
 	if arp {
 		return true // link-local name resolution, harmless
 	}
@@ -832,7 +861,7 @@ func (p *Policy) MatchTX(frame []byte) bool {
 		// must revoke access immediately while leaving unrelated flow state
 		// available to the new generation.
 		if allowed, matched := p.explicitRuleVerdict(pp.dst, pp.proto, pp.dport); matched {
-			return allowed
+			return allowed && p.guard.allows(pp.dst, pp.proto, pp.dport)
 		}
 		if p.Allows(pp.dst, pp.proto, pp.dport) {
 			return true
@@ -1110,6 +1139,9 @@ func (p *Policy) Allows(dst [4]byte, proto uint8, dport uint16) bool {
 	if current := p.current(); current != p {
 		return current.Allows(dst, proto, dport)
 	}
+	if !p.guard.allows(dst, proto, dport) {
+		return false
+	}
 	if allowed, matched := p.explicitRuleVerdict(dst, proto, dport); matched {
 		return allowed
 	}
@@ -1142,6 +1174,9 @@ func (p *Policy) AllowsGatewayUDPReplies() bool {
 	}
 	fallbackAllows := p.AllowLocal && p.DefaultAllow
 	for port := uint32(GatewayUDPFirstReplyPort); port <= uint32(GatewayUDPLastReplyPort); port++ {
+		if !p.guard.allows(gatewayIPv4, protoUDP, uint16(port)) {
+			return false
+		}
 		if allowed, matched := p.explicitRuleVerdict(gatewayIPv4, protoUDP, uint16(port)); matched {
 			if !allowed {
 				return false
@@ -1281,6 +1316,9 @@ func (p *Policy) DomainAllowed(name string) bool {
 	if current := p.current(); current != nil && current != p {
 		return current.DomainAllowed(name)
 	}
+	if !p.guard.domainAllowed(name) {
+		return false
+	}
 	if len(p.AllowDomains) == 0 {
 		return true
 	}
@@ -1288,11 +1326,12 @@ func (p *Policy) DomainAllowed(name string) bool {
 }
 
 func (p *Policy) dnsDomainAllowed(name string) bool {
-	return domainMatches(p.AllowDomains, name) || domainMatches(p.ResolveDomains, name)
+	local := len(p.AllowDomains) == 0 && len(p.ResolveDomains) == 0 || domainMatches(p.AllowDomains, name) || domainMatches(p.ResolveDomains, name)
+	return local && p.guard.domainAllowed(name)
 }
 
 func (p *Policy) dnsFilterActive() bool {
-	return len(p.AllowDomains) != 0 || len(p.ResolveDomains) != 0
+	return p.guard != nil || len(p.AllowDomains) != 0 || len(p.ResolveDomains) != 0
 }
 
 func domainMatches(domains []string, name string) bool {
@@ -1346,6 +1385,9 @@ func Marshal(p *Policy) ([]byte, error) {
 		return nil, fmt.Errorf("network policy: cannot marshal nil policy")
 	}
 	fp := filePolicy{AllowDomains: cur.AllowDomains, ResolveDomains: cur.ResolveDomains}
+	if cur.guard != nil {
+		fp.Guard = &cur.guard.spec
+	}
 	if !cur.DefaultAllow {
 		fp.Default = "deny"
 	}

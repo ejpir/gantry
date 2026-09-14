@@ -13,7 +13,14 @@ import (
 	"testing"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/networker"
 )
+
+// startNetwork constructs a policy snapshot for these topology tests. The
+// daemon uses startNetworkWithGovernance with its shared, audited snapshot.
+func startNetwork(c config.RunConfig, workdir string) (*Network, error) {
+	return startNetworkWithWorkerStart(c, workdir, networker.Start)
+}
 
 // TestStartNetworkSplitModes exercises StartNetwork's topology decision:
 // auto/required split, off stays monolithic, and the backend is functional

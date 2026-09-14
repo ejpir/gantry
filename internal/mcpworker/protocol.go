@@ -14,6 +14,7 @@ const ProtocolVersion = 1
 const (
 	OpShutdown   = "mcp.shutdown"
 	OpCredential = "mcp.credential"
+	OpAuthorize  = "mcp.authorize"
 	OpAudit      = "mcp.audit"
 )
 
@@ -32,6 +33,7 @@ type ServerConfig struct {
 	URL        string           `json:"url,omitempty"`
 	Local      bool             `json:"local,omitempty"`
 	Credential bool             `json:"credential,omitempty"`
+	Authorize  bool             `json:"authorize,omitempty"`
 	Tools      mcpgw.ToolPolicy `json:"tools,omitempty"`
 }
 
@@ -39,6 +41,15 @@ type BootAck struct {
 	OK          bool               `json:"ok"`
 	Error       string             `json:"error,omitempty"`
 	Confinement *workerconf.Report `json:"confinement,omitempty"`
+}
+
+// AuthorizationRequest cannot select identity, profile, endpoint or arbitrary
+// input. The supervisor derives those from its immutable server/session map.
+type AuthorizationRequest struct {
+	Server  string `json:"server"`
+	Session string `json:"session"`
+	Action  string `json:"action"`
+	Tool    string `json:"tool"`
 }
 
 type CredentialRequest struct {

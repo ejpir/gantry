@@ -28,9 +28,11 @@ import (
 // capabilities. Credential and Spawn closures contain authority and are never
 // serialized into worker bootstrap.
 type Server struct {
-	Config     workerapi.ServerConfig
-	Credential func() (workerapi.CredentialResponse, error)
-	Spawn      func(context.Context) (io.WriteCloser, io.ReadCloser, func(), error)
+	Config        workerapi.ServerConfig
+	Credential    func() (workerapi.CredentialResponse, error)
+	Spawn         func(context.Context) (io.WriteCloser, io.ReadCloser, func(), error)
+	Authorize     func(context.Context, string, string) error
+	AuthorizeDial func(context.Context, string, net.IP, string) error
 }
 
 type Worker struct {
@@ -69,6 +71,7 @@ func start(servers []Server, workdir, confinement string, audit func(mcpgw.Event
 		if _, exists := serverMap[server.Config.Name]; exists {
 			return nil, fmt.Errorf("mcp worker: duplicate server %q", server.Config.Name)
 		}
+		server.Config.Authorize = server.Authorize != nil
 		serverMap[server.Config.Name] = server
 		config.Servers = append(config.Servers, server.Config)
 	}
@@ -114,6 +117,7 @@ func start(servers []Server, workdir, confinement string, audit func(mcpgw.Event
 	go func() {
 		brokerDone <- workerproto.ServeRequests(child.Channels["broker"], map[string]workerproto.Handler{
 			workerapi.OpCredential: handle.credential,
+			workerapi.OpAuthorize:  handle.authorize,
 			workerapi.OpAudit:      handle.auditEvent,
 		})
 	}()
@@ -169,12 +173,17 @@ func (worker *Worker) openWorkerStream(ctx context.Context, request workerapi.Op
 	if !ok {
 		return fmt.Errorf("unknown MCP server")
 	}
+	if server.Authorize != nil {
+		if err := server.Authorize(ctx, "mcp.connect", ""); err != nil {
+			return err
+		}
+	}
 	switch request.Kind {
 	case workerapi.StreamRemote:
 		if server.Config.Local || server.Config.URL == "" {
 			return fmt.Errorf("server is not remote")
 		}
-		conn, err := mcpgw.DialRemote(ctx, server.Config.URL)
+		conn, err := mcpgw.DialRemoteWithPolicy(ctx, server.Config.URL, server.AuthorizeDial)
 		if err != nil {
 			return err
 		}
@@ -218,11 +227,49 @@ func (worker *Worker) credential(request workerproto.Request) (any, error) {
 	if !ok || server.Config.Local || !server.Config.Credential || server.Credential == nil {
 		return nil, fmt.Errorf("credential unavailable for server")
 	}
+	if server.Authorize != nil {
+		if err := server.Authorize(context.Background(), "credential.use", ""); err != nil {
+			return nil, err
+		}
+	}
 	credential, err := server.Credential()
 	if err != nil {
 		return nil, fmt.Errorf("credential unavailable for server")
 	}
 	return credential, nil
+}
+
+func (worker *Worker) authorize(request workerproto.Request) (any, error) {
+	if len(request.Body) > 2048 {
+		return nil, fmt.Errorf("authorization request too large")
+	}
+	var body workerapi.AuthorizationRequest
+	if err := decodeStrictBody(request, &body); err != nil {
+		return nil, err
+	}
+	if !worker.hasSessionCapability(body.Session) {
+		return nil, fmt.Errorf("invalid MCP session capability")
+	}
+	server, known := worker.servers[body.Server]
+	if !known || len(body.Tool) > 256 {
+		return nil, fmt.Errorf("invalid MCP authorization request")
+	}
+	switch body.Action {
+	case "mcp.connect":
+		if body.Tool != "" {
+			return nil, fmt.Errorf("connection authorization takes no tool")
+		}
+	case "mcp.tools.list", "mcp.tools.call":
+		if body.Tool == "" {
+			return nil, fmt.Errorf("tool authorization needs a tool")
+		}
+	default:
+		return nil, fmt.Errorf("invalid MCP authorization action")
+	}
+	if server.Authorize != nil {
+		return nil, server.Authorize(context.Background(), body.Action, body.Tool)
+	}
+	return nil, nil
 }
 
 func (worker *Worker) auditEvent(request workerproto.Request) (any, error) {

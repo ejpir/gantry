@@ -72,8 +72,8 @@ type broker struct {
 	// restarting the VM, and newly created user sessions read it atomically.
 	devContainers atomic.Bool
 	configure     func(controlproto.ConfigureRequest) (bool, error)
-	// audit is the bounded security-event trail served by audit.tail. auditMu
-	// serializes all sinks, including on-disk rotation and LogFunc callbacks.
+	// audit is the daemon-wide trail and sink writer shared with early boot
+	// and policy callbacks. auditMu is only the no-ring standalone fallback.
 	audit   *auditRing
 	auditMu sync.Mutex
 
@@ -282,7 +282,7 @@ func (br *broker) secretEnv() []string {
 	env := secret.Env(resolved)
 	// With a bound secret held and the helper staged, point git at the
 	// broker via ephemeral env config — no guest file is ever written.
-	if bound > 0 && br.guestToolsReady.Load() {
+	if (bound > 0 || br.cfg.OAuthCustodyEnabled()) && br.guestToolsReady.Load() {
 		env = append(env,
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=credential.helper",
@@ -323,7 +323,7 @@ func (br *broker) bindings() map[string]string {
 // — the broker answers empty and audits the failure.
 func (br *broker) resolveCredential(host string) (string, secret.Value, credhelper.Resolution) {
 	if br.secretStore == nil {
-		return "", "", credhelper.NoBinding
+		return br.resolveCustodyCredential(host)
 	}
 	bindings := br.bindings()
 	names := make([]string, 0, len(bindings))
@@ -341,7 +341,7 @@ func (br *broker) resolveCredential(host string) (string, secret.Value, credhelp
 		}
 		return name, v, credhelper.OK
 	}
-	return "", "", credhelper.NoBinding
+	return br.resolveCustodyCredential(host)
 }
 
 func (br *broker) mcpControl(c net.Conn, req controlproto.Request) {

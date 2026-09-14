@@ -59,6 +59,9 @@ func (d *daemonRuntime) load() error {
 	}
 	d.store = store
 	d.cfg = d.store.Snapshot()
+	if err := d.loadOrganizationPolicy(); err != nil {
+		return err
+	}
 	if !sameSecretSources(sources, d.cfg.SecretSources) {
 		return fmt.Errorf("secrets handshake sources do not match the persisted sandbox configuration")
 	}
@@ -71,9 +74,7 @@ func (d *daemonRuntime) load() error {
 		return fmt.Errorf("secrets handshake isolation: %w", err)
 	}
 	d.secretStore = newSecretStore(secrets, sources, func(f string, a ...any) {
-		line := fmt.Sprintf(f, a...)
-		d.audit.append(line)
-		fmt.Printf("daemon: %s\n", line)
+		d.audit.logf(d.dir, f, a...)
 	})
 	if d.cfg.ImageDigest != "" && !gutil.FileExists(d.cfg.Image) {
 		return fmt.Errorf("image %s not in cache; run `gantry image pull %s`", d.cfg.ImageDigest, d.cfg.ImageRef)
@@ -96,7 +97,7 @@ func (d *daemonRuntime) startHostServices() error {
 	}
 	d.consoleLog = consoleLog
 	d.console = consoleLog.Writer()
-	network, err := startNetwork(d.cfg, d.dir)
+	network, err := startNetworkWithGovernance(d.cfg, d.dir, d.governance)
 	if err != nil {
 		return err
 	}
@@ -104,7 +105,7 @@ func (d *daemonRuntime) startHostServices() error {
 	d.bootLog("network up")
 	d.logNetworkState()
 
-	shareManager, warnings, err := control.NewShareManager(d.dir, d.store)
+	shareManager, warnings, err := control.NewShareManagerWithPolicy(d.dir, d.store, d.governance)
 	if err != nil {
 		return fmt.Errorf("shares: %w", err)
 	}

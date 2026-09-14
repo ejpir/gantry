@@ -23,6 +23,8 @@ import (
 	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/oauthprovider"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
 	"github.com/ejpir/gantry/internal/shares"
@@ -75,6 +77,7 @@ type RunConfig struct {
 	Net            bool             `json:"net"`
 	GVProxy        string           `json:"gvproxy,omitempty"`
 	NetPol         string           `json:"net_policy,omitempty"`
+	OrgPolicy      *policy.Config   `json:"org_policy,omitempty"`
 	AllowLN        bool             `json:"allow_local_net,omitempty"`
 	ProxyURL       string           `json:"proxy,omitempty"`
 	NoProxy        string           `json:"no_proxy,omitempty"`
@@ -84,10 +87,12 @@ type RunConfig struct {
 	// field existed; a non-nil false value is the persisted opt-out.
 	OAuthBridge *bool `json:"oauth_bridge,omitempty"`
 	// OAuthCustody moves OAuth token custody host-side (workstream 3):
-	// the daemon exchanges codes itself, holds refresh tokens, and pushes
-	// fresh access tokens into the guest auth file. Default off — the
+	// the daemon exchanges grants itself, holds refresh tokens, and serves
+	// access tokens through explicitly configured delivery adapters. Default off — the
 	// transparent bridge needs no provider-specific knowledge.
 	OAuthCustody *bool `json:"oauth_custody,omitempty"`
+	// OAuthProviders are host-approved public client registrations, not tokens.
+	OAuthProviders []oauthprovider.Spec `json:"oauth_providers,omitempty"`
 	// MCP gates the per-sandbox split MCP gateway (docs/mcp-gateway.md): a
 	// capability-limited host worker reached through a vsock/opaque-relay
 	// mux, with contained local servers. MCPFSRoot jails the built-in filesystem server; MCPFSUser
@@ -149,11 +154,13 @@ type RunFlags struct {
 	Publish                                 *gutil.StrList
 	Net                                     *bool
 	GVProxy, NetPol                         *string
+	OrgPolicy, OrgPolicyKey, PolicyProfile  *string
 	AllowLN                                 *bool
 	ProxyURL, NoProxy                       *string
 	ProxyEnforce                            *bool
 	OAuthBridge                             *bool
 	OAuthCustody                            *bool
+	OAuthProviders                          *gutil.StrList
 	MCP                                     *bool
 	MCPFSRoot, MCPFSUser                    *string
 	MCPRemotes                              *gutil.StrList
@@ -180,12 +187,16 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 		Net:              fs.Bool("net", defaults.Net, "attach virtio-net via the embedded netstack"),
 		GVProxy:          fs.String("gvproxy", "", "legacy external gvproxy option (disabled; use the embedded netstack)"),
 		NetPol:           fs.String("net-policy", "", "JSON egress policy file (rules + domain allowlist)"),
+		OrgPolicy:        fs.String("org-policy", "", "signed data-only OPA bundle (.tar.gz); snapshotted at creation"),
+		OrgPolicyKey:     fs.String("org-policy-key", "", "trusted RSA public key PEM for the organization bundle"),
+		PolicyProfile:    fs.String("policy-profile", "", "profile in the signed organization policy bundle"),
 		AllowLN:          fs.Bool("allow-local-net", false, "let the sandbox reach LAN/link-local/host (default: internet only)"),
 		ProxyURL:         fs.String("proxy", "", "route guest HTTP(S) through this http(s) or socks5(h) proxy URL"),
 		NoProxy:          fs.String("no-proxy", "", "comma-separated proxy bypasses (default: localhost and loopback)"),
 		ProxyEnforce:     fs.Bool("proxy-enforce", false, "block direct TCP 80/443 and UDP 443 except to the configured proxy"),
 		OAuthBridge:      fs.Bool("oauth-bridge", defaults.OAuthBridge, "bridge agent OAuth loopback callbacks to bounded host listeners (disable with -oauth-bridge=false)"),
-		OAuthCustody:     fs.Bool("oauth-custody", false, "hold OAuth refresh tokens on the host; push fresh access tokens into the guest (claude, codex)"),
+		OAuthCustody:     fs.Bool("oauth-custody", false, "hold OAuth tokens on the host (claude, codex, github, and configured providers)"),
+		OAuthProviders:   &gutil.StrList{},
 		MCP:              fs.Bool("mcp", false, "run the per-sandbox MCP gateway (docs/mcp-gateway.md): agents reach it via gantry-guest mcp-proxy"),
 		MCPFSRoot:        fs.String("mcp-fs-root", defaults.MCPFSRoot, "jail directory for the gateway's built-in filesystem server"),
 		MCPFSUser:        fs.String("mcp-fs-user", defaults.MCPFSUser, "unprivileged guest user or UID:GID the gateway's local servers run as"),
@@ -202,6 +213,7 @@ or a plain .erofs file (default: release Alpine image; staged Debian/shell image
 	}
 	f.Runtime = fs.String("runtime", defaults.Runtime, "container runtime in the guest: crun | runsc (gVisor)")
 	fs.Var(f.Shares, "share", "host directory exported through virtio-fs as TAG=PATH[,mount=CTRPATH][,ro][,uid=N,gid=N] (repeatable)")
+	fs.Var(f.OAuthProviders, "oauth-provider", "host-owned OAuth provider JSON file (repeatable; requires -oauth-custody)")
 	fs.Var(f.MCPRemotes, "mcp-remote", `remote MCP upstream: name=ID,url=https://HOST/PATH[,auth=bearer:SECRET|header:NAME:SECRET|custody:PROVIDER][,allow=GLOB][,deny=GLOB][,redact=SECRET] (repeatable)`)
 	fs.Var(f.Publish, "p", "publish a guest port on the host: [IP:]HOST:GUEST[/udp], loopback by default (repeatable)")
 	fs.Var(f.Publish, "publish", "alias for -p")
@@ -226,6 +238,9 @@ func (f *RunFlags) Options(fs *flag.FlagSet) RunOptions {
 		LayerSet:         *f.LayerSet,
 		GVProxy:          *f.GVProxy,
 		NetPol:           *f.NetPol,
+		OrgPolicy:        *f.OrgPolicy,
+		OrgPolicyKey:     *f.OrgPolicyKey,
+		PolicyProfile:    *f.PolicyProfile,
 		ProxyURL:         *f.ProxyURL,
 		NoProxy:          *f.NoProxy,
 		MCPFSRoot:        *f.MCPFSRoot,
@@ -249,6 +264,7 @@ func (f *RunFlags) Options(fs *flag.FlagSet) RunOptions {
 		Secrets:          append([]string(nil), f.Secrets.List()...),
 		SecretFiles:      append([]string(nil), f.SecretFiles.List()...),
 	}
+	options.OAuthProviderFiles = append([]string(nil), f.OAuthProviders.List()...)
 	fs.Visit(func(value *flag.Flag) {
 		switch value.Name {
 		case "kernel":

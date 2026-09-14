@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
@@ -88,11 +89,16 @@ func (d *daemonRuntime) startControl() error {
 		return fmt.Errorf("credential broker listener: %w", err)
 	}
 	// credhelper decision lines self-prefix "credhelper: ".
-	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.broker.domainAllowed, d.broker.auditf)
+	d.broker.cred = credhelper.New(d.broker.resolveCredential, d.credentialAllowed, d.broker.auditf)
 	// OAuth custody (opt-in): the daemon completes guest-initiated logins
 	// host-side, holds refresh tokens (0600 disk sync under the sandbox
 	// dir for restart durability), and pushes fresh access tokens into
 	// the guest. Requires the callback bridge to intercept callbacks.
+	if err := config.NormalizeOAuthProviders(&d.cfg); err != nil {
+		_ = credLn.Close()
+		return err
+	}
+	d.broker.cfg.OAuthProviders = d.cfg.OAuthProviders
 	if d.cfg.OAuthCustodyEnabled() {
 		if d.broker.oauth == nil {
 			_ = credLn.Close()
@@ -128,8 +134,16 @@ func (d *daemonRuntime) startControl() error {
 func (d *daemonRuntime) supervise() int {
 	workerDead := closedWhenNetworkWorkerExits(d.network)
 	vmmDead := closedWhenVMMWorkerExits(d.runner)
+	var policyExpiry <-chan time.Time
+	if deadline := d.governance.ExpiresAt(); !deadline.IsZero() {
+		timer := time.NewTimer(max(0, time.Until(deadline)))
+		defer timer.Stop()
+		policyExpiry = timer.C
+	}
 
 	select {
+	case <-policyExpiry:
+		return d.gracefulStop("organization policy expired")
 	case sig := <-d.signals:
 		return d.gracefulStop("signal " + sig.String())
 	case <-d.shutdown:

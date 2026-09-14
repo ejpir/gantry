@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/secret"
@@ -28,13 +30,14 @@ import (
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
 type ShareManager struct {
-	dir       string
-	stateRoot sharefs.Identity
-	hub       *sharefs.Hub
-	store     *config.ConfigStore
-	mu        sync.Mutex
-	exports   map[string]*managedShare
-	retired   []*managedShare
+	dir        string
+	stateRoot  sharefs.Identity
+	hub        *sharefs.Hub
+	store      *config.ConfigStore
+	governance *policy.Engine
+	mu         sync.Mutex
+	exports    map[string]*managedShare
+	retired    []*managedShare
 	// sourceBarriers is the launch-time file-source capability set. It is
 	// intentionally sticky for the daemon lifetime: removing a source cannot
 	// make a concurrent or already-running host resolver safe for a live
@@ -50,6 +53,7 @@ type managedShare struct {
 	identity  sharefs.Identity
 	export    *sharefs.Export
 	ephemeral bool
+	internal  bool // daemon-owned payload; ordinary share mutations cannot replace/remove it
 }
 
 // shareAddCandidate owns a pinned root until commit publishes it. Publish and
@@ -87,12 +91,24 @@ type shareAddTransaction struct {
 // per-device path for an empty configuration. The store is the broker-owned
 // configuration owner; boot state is read from its snapshot.
 func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []string, error) {
+	engine, err := policy.New(store.Snapshot().OrgPolicy, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return NewShareManagerWithPolicy(dir, store, engine)
+}
+
+func NewShareManagerWithPolicy(dir string, store *config.ConfigStore, engine *policy.Engine) (*ShareManager, []string, error) {
 	cfg := store.Snapshot()
+	if cfg.OrgPolicy != nil && engine == nil {
+		return nil, nil, fmt.Errorf("organization policy was not initialized")
+	}
 	stateIdentity, err := sharefs.Identify(layout.ProtectionRoot(dir))
 	if err != nil {
 		return nil, nil, fmt.Errorf("identify Gantry state root: %w", err)
 	}
 	m := &ShareManager{
+		governance:     engine,
 		dir:            dir,
 		stateRoot:      stateIdentity,
 		store:          store,
@@ -112,6 +128,7 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 		return nil, nil, err
 	}
 	m.hub = hub
+	hub.SetDeadline(engine.ExpiresAt())
 	var warnings []string
 	configured, err := shares.ParseSpecs(cfg.Shares)
 	if err != nil {
@@ -138,6 +155,11 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 		}
 		identity := prepared.Identity()
 		share.Path = canonical
+		if err := m.authorizeShare(share); err != nil {
+			prepared.Close()
+			_ = m.Close()
+			return nil, nil, err
+		}
 		if err := config.ValidateSecretSourcePinnedShare(m.isolationSourcesLocked(), share, identity); err != nil {
 			prepared.Close()
 			_ = m.Close()
@@ -209,6 +231,13 @@ func (m *ShareManager) ConfigureRestart(spec string, replace bool) (shares.Spec,
 	defer m.mu.Unlock()
 	if err := m.readyLocked(); err != nil {
 		return shares.Spec{}, err
+	}
+	share, err := shares.ParseSpec(spec)
+	if err != nil {
+		return shares.Spec{}, err
+	}
+	if existing := m.exports[share.Tag]; existing != nil && existing.internal {
+		return shares.Spec{}, fmt.Errorf("share %q is reserved for guest-tools delivery", share.Tag)
 	}
 	return m.store.SetShareForRestart(spec, replace)
 }
@@ -317,10 +346,25 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 	if share.CtrPath != "" {
 		return nil, fmt.Errorf("live shares always appear at /host/<tag>; mount=CTRPATH requires sandbox restart")
 	}
+	share.CtrPath = config.DefaultHubCtrPath(share.Tag)
+	candidate, err := m.preparePinnedAddLocked(share, replace)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.authorizeShare(candidate.share); err != nil {
+		candidate.Close()
+		return nil, err
+	}
+	return candidate, nil
+}
+
+// preparePinnedAddLocked validates and pins an export but does not authorize
+// organization mount access. User exports must go through prepareAddLocked.
+// The only other caller stages daemon-owned helper bytes, never a caller path.
+func (m *ShareManager) preparePinnedAddLocked(share shares.Spec, replace bool) (*shareAddCandidate, error) {
 	if !filepath.IsAbs(share.Path) {
 		return nil, fmt.Errorf("share path must be absolute (got %q)", share.Path)
 	}
-	share.CtrPath = config.DefaultHubCtrPath(share.Tag)
 	if err := validateShareTarget(share); err != nil {
 		return nil, err
 	}
@@ -328,6 +372,9 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 		return nil, err
 	}
 	existing := m.exports[share.Tag]
+	if existing != nil && existing.internal {
+		return nil, fmt.Errorf("share %q is reserved for guest-tools delivery", share.Tag)
+	}
 	if existing == nil && len(m.exports) >= config.MaxManagedShares {
 		return nil, fmt.Errorf("too many shares (max %d)", config.MaxManagedShares)
 	}
@@ -364,6 +411,17 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 		return nil, err
 	}
 	return candidate, nil
+}
+
+func (m *ShareManager) authorizeShare(share shares.Spec) error {
+	resource := policy.Resource{Path: share.Path}
+	if err := m.governance.Authorize(context.Background(), policy.MountRead, resource); err != nil {
+		return err
+	}
+	if !share.RO {
+		return m.governance.Authorize(context.Background(), policy.MountWrite, resource)
+	}
+	return nil
 }
 
 func (m *ShareManager) isolationSourcesLocked() []secret.NamedSource {
@@ -492,6 +550,9 @@ func shareOwnerEqual(a, b shares.Spec) bool {
 func (m *ShareManager) Remove(tag string, persistent, force bool) (shares.Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if existing := m.exports[tag]; existing != nil && existing.internal {
+		return shares.Entry{}, fmt.Errorf("share %q is reserved for guest-tools delivery", tag)
+	}
 	return m.removeLocked(tag, persistent, force)
 }
 

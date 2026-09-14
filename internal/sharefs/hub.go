@@ -53,6 +53,7 @@ type Hub struct {
 	exports  map[string]*Export
 	all      map[*Export]struct{}
 	closed   bool
+	deadline time.Time // request lock; hard expiry of an optional host policy
 	nextSalt atomic.Uint64
 }
 
@@ -387,6 +388,14 @@ func (h *Hub) SetNotificationSink(sink fusewire.NotificationSink) {
 	h.notificationsReady.Store(true)
 }
 
+// SetDeadline bounds the lifetime of every export, including already-open
+// handles. Zero means no policy deadline. Set before exposing the hub.
+func (h *Hub) SetDeadline(deadline time.Time) {
+	h.request.Lock()
+	defer h.request.Unlock()
+	h.deadline = deadline
+}
+
 // HandleRequest serves one raw FUSE request. Hub remains transport-neutral;
 // callers may connect it directly to virtio or through sharebroker.
 func (h *Hub) HandleRequest(in, out [][]byte) (int, fuse.Status) {
@@ -394,6 +403,9 @@ func (h *Hub) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	defer h.request.RUnlock()
 	if h.closed {
 		return 0, fuse.EIO
+	}
+	if !h.deadline.IsZero() && !time.Now().Before(h.deadline) {
+		return 0, fuse.EACCES
 	}
 	return h.guard.handle(h.handler, in, out)
 }

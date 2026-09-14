@@ -96,6 +96,7 @@ func (s *state) preparePolicy(req workerproto.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	netpol.InheritGuard(next, s.policy)
 	if s.hostLoopbackUnavailable && next.MayAllowLoopback() {
 		return nil, fmt.Errorf("policy permits host loopback, which is unavailable to the confined Windows network worker")
 	}

@@ -80,7 +80,7 @@ func CmdNetworkPolicy(argv []string) int {
 			fmt.Fprintln(os.Stderr, "gantry net-policy show:", err)
 			return 1
 		}
-		printNetworkPolicyShow(os.Stdout, args[0], entry)
+		PrintNetworkPolicyShow(os.Stdout, args[0], entry)
 		return 0
 	default:
 		usage()
@@ -123,6 +123,10 @@ func GetNetworkPolicy(name string) (control.NetworkPolicyEntry, error) {
 	if err != nil {
 		return control.NetworkPolicyEntry{}, err
 	}
+	policy, err = cfg.ApplyOrganizationPolicy(policy)
+	if err != nil {
+		return control.NetworkPolicyEntry{}, err
+	}
 	return control.MakeNetworkPolicyEntry(path, cfg.AllowLN, policy, "saved"), nil
 }
 
@@ -148,7 +152,8 @@ func printNetworkPolicyMutation(entry control.NetworkPolicyEntry) {
 	fmt.Printf("network policy %s: %s (%s, allow-local-net=%t)\n", entry.State, path, entry.Description, entry.AllowLocal)
 }
 
-func printNetworkPolicyShow(output io.Writer, sandbox string, entry control.NetworkPolicyEntry) {
+// PrintNetworkPolicyShow renders the canonical local/remote policy summary.
+func PrintNetworkPolicyShow(output io.Writer, sandbox string, entry control.NetworkPolicyEntry) {
 	path := entry.Path
 	if path == "" {
 		path = "built-in default"

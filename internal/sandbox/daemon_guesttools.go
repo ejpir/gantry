@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -19,8 +18,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/layout"
-	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/shares"
 )
@@ -44,9 +42,8 @@ import (
 // it; asynchronous SSH delivery failure leaves the VM ready but refuses SSH
 // for that boot.
 const (
-	guestToolsMaxBytes     = 64 << 20
+	guestToolsMaxBytes     = control.GuestToolsMaxBytes
 	guestToolsDirGuest     = "/run/gantry/bin"
-	guestToolsShareTag     = "gantry-tools"
 	guestToolsShareDir     = "guesttools" // legacy in-sandbox staging directory; delete cleanup only
 	guestToolsDeliverOp    = "guest tools delivery"
 	guestToolsInstallOp    = "guest tools install"
@@ -281,59 +278,15 @@ func (d *daemonRuntime) guestToolsFailed(ctx context.Context, targets []guestToo
 	}
 }
 
-// withGuestToolsStage owns one attempt's temporary payload. Cleanup is local
-// rather than deferred to daemon shutdown, so retries cannot overwrite or
-// accumulate staging-directory state.
-func withGuestToolsStage(base string, data []byte, use func(string) error) error {
-	stageDir, err := os.MkdirTemp(base, "gantry-guest-tools-*")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := os.RemoveAll(stageDir); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: guest tools staging cleanup: %v\n", err)
-		}
-	}()
-	if err := os.WriteFile(filepath.Join(stageDir, "gantry-guest"), data, 0o755); err != nil {
-		return err
-	}
-	return use(stageDir)
-}
-
 // deliverGuestToolsViaShare exposes one verified host payload and installs it
 // independently into every OCI root that advertises helper-backed features.
 func (d *daemonRuntime) deliverGuestToolsViaShare(ctx context.Context, data []byte, sum [32]byte, targets []guestToolsTarget) error {
 	if d.shares == nil {
 		return fmt.Errorf("share manager unavailable")
 	}
-	stageBase := guestToolsStageBase(runtime.GOOS, d.dir)
-	if runtime.GOOS == "windows" {
-		if stageBase == "" {
-			return fmt.Errorf("sandbox state directory unavailable for guest-tools staging")
-		}
-		if err := localsec.CreateManagerDir(stageBase); err != nil {
-			return fmt.Errorf("secure guest-tools staging root: %w", err)
-		}
-	}
-	return withGuestToolsStage(stageBase, data, func(stageDir string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		entry, err := d.shares.Add(guestToolsShareTag+"="+stageDir+",ro", false, true)
-		if err != nil {
-			return fmt.Errorf("share hot-add: %w", err)
-		}
-		ctrPath := entry.CtrPath
-		if ctrPath == "" {
-			ctrPath = shares.HubHostPath + "/" + guestToolsShareTag
-		}
-		defer func() {
-			if _, err := d.shares.Remove(guestToolsShareTag, false, true); err != nil {
-				fmt.Fprintf(os.Stderr, "daemon: guest tools share cleanup: %v\n", err)
-			}
-		}()
+	return d.shares.WithGuestToolsShare(ctx, data, func(entry shares.Entry) error {
 		for _, target := range targets {
-			if err := d.installGuestToolsFromShare(ctx, ctrPath, sum, int64(len(data)), target); err != nil {
+			if err := d.installGuestToolsFromShare(ctx, entry.CtrPath, sum, int64(len(data)), target); err != nil {
 				return fmt.Errorf("%s helper install: %w", target.label, err)
 			}
 		}
@@ -342,13 +295,13 @@ func (d *daemonRuntime) deliverGuestToolsViaShare(ctx context.Context, data []by
 }
 
 func (d *daemonRuntime) installGuestToolsFromShare(ctx context.Context, ctrPath string, sum [32]byte, size int64, target guestToolsTarget) error {
-	status := -1
 	directErr := fmt.Errorf("host share does not expose executable mode")
 	if runtime.GOOS != "windows" {
-		_, status, directErr = d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
+		out, status, err := d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
 			[]string{ctrPath + "/gantry-guest", "install-self"},
 			15*time.Second, 4<<10, guestToolsInstallOp, target.ide)
-		if directErr == nil && status == 0 {
+		directErr = guestToolsExecError(out, status, err)
+		if directErr == nil {
 			return d.verifyGuestTools(ctx, sum, size, target)
 		}
 	}
@@ -356,11 +309,8 @@ func (d *daemonRuntime) installGuestToolsFromShare(ctx context.Context, ctrPath 
 	copyOut, copyStatus, copyErr := d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
 		[]string{"sh", "-c", copyScript, "gantry-guest-share-copy", ctrPath + "/gantry-guest"},
 		guestToolsShareTimeout, 4<<10, guestToolsInstallOp, target.ide)
-	if copyErr != nil {
-		return fmt.Errorf("execute shared helper: %v; copy shared helper: %w (output %q)", directErr, copyErr, copyOut)
-	}
-	if copyStatus != 0 {
-		return fmt.Errorf("execute shared helper status %d; copy shared helper exited with status %d (output %q)", status, copyStatus, copyOut)
+	if err := guestToolsExecError(copyOut, copyStatus, copyErr); err != nil {
+		return fmt.Errorf("execute shared helper: %v; copy shared helper: %w", directErr, err)
 	}
 	return d.verifyGuestTools(ctx, sum, size, target)
 }
@@ -374,8 +324,9 @@ func (d *daemonRuntime) deliverGuestToolsViaExec(ctx context.Context, data []byt
 	_ = enc.Close()
 	script := fmt.Sprintf("mkdir -p %[1]s && base64 -d > %[1]s/gantry-guest.tmp && chmod 755 %[1]s/gantry-guest.tmp && mv %[1]s/gantry-guest.tmp %[1]s/gantry-guest && ln -sf gantry-guest %[1]s/credhelper", guestToolsDirGuest)
 	for _, target := range targets {
-		if _, _, err := d.broker.internalExecAsRootTargetContext(ctx, bytes.NewReader(encoded.Bytes()), []string{"sh", "-c", script},
-			guestToolsTimeout, 4<<10, guestToolsDeliverOp, target.ide); err != nil {
+		out, status, err := d.broker.internalExecAsRootTargetContext(ctx, bytes.NewReader(encoded.Bytes()), []string{"sh", "-c", script},
+			guestToolsTimeout, 4<<10, guestToolsDeliverOp, target.ide)
+		if err := guestToolsExecError(out, status, err); err != nil {
 			return fmt.Errorf("%s helper stream: %w", target.label, err)
 		}
 		if err := d.verifyGuestTools(ctx, sum, int64(len(data)), target); err != nil {
@@ -386,31 +337,32 @@ func (d *daemonRuntime) deliverGuestToolsViaExec(ctx context.Context, data []byt
 }
 
 func (d *daemonRuntime) verifyGuestTools(ctx context.Context, sum [32]byte, size int64, target guestToolsTarget) error {
-	out, _, err := d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
+	out, status, err := d.broker.internalExecAsRootTargetContext(ctx, strings.NewReader(""),
 		[]string{guestToolsDirGuest + "/gantry-guest", "verify-self"},
 		15*time.Second, 4<<10, guestToolsVerifyOp, target.ide)
+	if err := guestToolsExecError(out, status, err); err != nil {
+		return fmt.Errorf("%s helper verification: %w", target.label, err)
+	}
 	gotSize, gotSum := parseGuestToolsVerification(out)
 	wantSum := hex.EncodeToString(sum[:])
-	if err != nil || gotSum != wantSum || gotSize != fmt.Sprint(size) {
-		return fmt.Errorf("%s integrity check failed (guest %s bytes sha256 %s, want %d bytes sha256 %s; exec err: %v)",
-			target.label, gotSize, gotSum, size, wantSum, err)
+	if gotSum != wantSum || gotSize != fmt.Sprint(size) {
+		return fmt.Errorf("%s integrity check failed (guest %s bytes sha256 %s, want %d bytes sha256 %s; output %q)",
+			target.label, gotSize, gotSum, size, wantSum, out)
 	}
 	return nil
 }
 
-// guestToolsStageBase keeps Windows staging in a private sibling of the
-// protected Gantry state tree. Staging inside that tree would make the
-// ephemeral helper share overlap security-sensitive state and be rejected;
-// the ordinary OS temp directory may be inaccessible to service and
-// AppContainer launches. An empty base deliberately selects OS temp on Unix.
-func guestToolsStageBase(goos, sandboxDir string) string {
-	if goos == "windows" {
-		if sandboxDir == "" {
-			return ""
-		}
-		return layout.ProtectionRoot(sandboxDir) + "-guest-tools"
+// A nil transport error does not mean a helper command succeeded. Preserve
+// the bounded output and exit status so missing utilities or failed installs
+// cannot be misreported as a successful transfer with an empty checksum.
+func guestToolsExecError(out []byte, status int, err error) error {
+	if err != nil {
+		return fmt.Errorf("guest exec status %d (output %q): %w", status, out, err)
 	}
-	return ""
+	if status != 0 {
+		return fmt.Errorf("guest exec exited with status %d (output %q)", status, out)
+	}
+	return nil
 }
 
 // parseGuestToolsVerification finds either the tagged shell-probe result used

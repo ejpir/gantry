@@ -11,6 +11,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/networker"
@@ -86,19 +87,30 @@ func NetMarker(sock string, conn net.Conn) string {
 	return ""
 }
 
-// StartNetwork builds the egress policy and brings up the configured
-// backend. workdir holds the gvproxy socket/log when an external gvproxy
-// is used. A nil *Network (with nil error) means -net=false.
-func startNetwork(c config.RunConfig, workdir string) (*Network, error) {
-	return startNetworkWithWorkerStart(c, workdir, networker.Start)
-}
-
 type networkWorkerStart func(networkworker.Config, string) (*networker.Worker, net.Conn, error)
 
 // startNetworkWithWorkerStart keeps process creation injectable per call for
 // topology tests. Production always passes networker.Start; avoiding a
 // package-global spawn hook keeps concurrent sandbox starts race-free.
 func startNetworkWithWorkerStart(c config.RunConfig, workdir string, startWorker networkWorkerStart) (*Network, error) {
+	governance, err := policy.New(c.OrgPolicy, nil)
+	if err != nil {
+		return nil, err
+	}
+	return startNetworkPrepared(c, workdir, startWorker, governance)
+}
+
+func startNetworkWithGovernance(c config.RunConfig, workdir string, governance *policy.Engine) (*Network, error) {
+	return startNetworkPrepared(c, workdir, networker.Start, governance)
+}
+
+func startNetworkPrepared(c config.RunConfig, workdir string, startWorker networkWorkerStart, governance *policy.Engine) (*Network, error) {
+	if c.OrgPolicy != nil && governance == nil {
+		return nil, fmt.Errorf("organization policy was not initialized")
+	}
+	if governance != nil && c.GVProxy != "" {
+		return nil, fmt.Errorf("organization policy requires the embedded netstack")
+	}
 	if err := config.ValidateProxyConfig(c); err != nil {
 		return nil, err
 	}
@@ -126,6 +138,15 @@ func startNetworkWithWorkerStart(c config.RunConfig, workdir string, startWorker
 	policy, err = c.ApplyProxyPolicy(policy)
 	if err != nil {
 		return nil, err
+	}
+	if governance != nil {
+		if policy == nil {
+			policy = netpol.DefaultPolicy()
+		}
+		policy, err = governance.ApplyNetwork(policy)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !c.Net {
 		return &Network{Policy: policy}, nil

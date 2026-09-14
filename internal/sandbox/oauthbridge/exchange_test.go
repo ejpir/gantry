@@ -99,7 +99,7 @@ func TestCodexUsesProviderContractAndJWTExpiry(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(TokenResponse{AccessToken: accessToken, RefreshToken: "refresh-2"})
 	}))
 	t.Cleanup(srv.Close)
-	spec := custodySpecs["codex"]
+	spec, _ := CustodySpecFor("codex")
 	spec.TokenURL = srv.URL
 	tok, err := ExchangeCode(context.Background(), spec, "code", "verifier", "client", "http://localhost:1455/auth/callback")
 	if err != nil {

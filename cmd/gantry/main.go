@@ -50,6 +50,7 @@ usage:
   gantry share <verb>               # live host shares: add|remove|ls
   gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
   gantry net-policy <verb>          # live egress policy: set|default|show
+  gantry policy <verb>              # signed org policy: generate|sign|verify|check|set|clear|show
   gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
   gantry export [options] <name>    # package a stopped sandbox as a portable OCI archive
   gantry stop <name>                # stop a sandbox
@@ -228,6 +229,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return controlcmd.CmdPorts(argv), true
 	case "net-policy":
 		return controlcmd.CmdNetworkPolicy(argv), true
+	case "policy":
+		return controlcmd.CmdPolicy(argv), true
 	case "import":
 		return sandbox.CmdImport(argv), true
 	case "export":

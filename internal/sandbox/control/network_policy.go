@@ -101,6 +101,7 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
+	netpol.InheritGuard(policy, m.current)
 	if err := ValidatePolicyAgainstSavedUDPPorts(policy, cfg.Ports); err != nil {
 		return NetworkPolicyEntry{}, err
 	}
@@ -162,6 +163,10 @@ func (m *NetworkPolicyManager) Get() (NetworkPolicyEntry, error) {
 		return NetworkPolicyEntry{}, err
 	}
 	policy, err = cfg.ApplyProxyPolicy(policy)
+	if err != nil {
+		return NetworkPolicyEntry{}, err
+	}
+	policy, err = cfg.ApplyOrganizationPolicy(policy)
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
