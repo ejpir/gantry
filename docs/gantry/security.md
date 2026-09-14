@@ -177,12 +177,17 @@ guest-writable executable path part of the supervisor's restart behavior.
 OAuth bridging uses a trusted guest helper to discover loopback TCP listeners
 without tracing applications or parsing terminal output. Matching host ports
 are bounded to fixed callback ports and the Linux ephemeral range. Transparent
-listeners accept only GET requests carrying `code`/`error` and non-empty
-`state`; the guest CLI remains authoritative for state and PKCE validation.
-Custody listeners additionally require an exact pending host-side flow. After
-delivery, the browser receives only a fixed, CSP-locked host page. Guest status,
-headers, redirects, bodies, and error details are discarded. Disable the bridge
-with `-oauth-bridge=false` when unused.
+listeners accept GET query results or URL-encoded POST forms with exactly one
+non-empty `state` and either `code` or `error`. URLs are limited to 8 KiB and
+POST bodies to 16 KiB; malformed, duplicated or query/form-conflicting OAuth
+fields are rejected. Form reads and replay share a bounded concurrency limit.
+The guest CLI remains authoritative for state and PKCE validation. Browser
+headers/cookies are stripped; the preserved method, URI and body reach guest
+loopback through exec stdin, not argv. Callback data and guest error text are
+not logged. Custody listeners remain GET-only and require an exact pending
+host-side flow. After delivery, the browser receives only a fixed, CSP-locked
+host page. Guest status, headers, redirects, bodies, and error details are
+discarded. Disable the bridge with `-oauth-bridge=false` when unused.
 
 If upgrading from a build that rendered the guest callback response, clear
 browser site data for any `localhost:<callback-port>` or

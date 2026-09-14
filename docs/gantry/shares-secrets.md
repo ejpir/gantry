@@ -258,11 +258,17 @@ Disable the bridge when it is not needed:
 $ gantry start dev -image alpine:latest -oauth-bridge=false
 ```
 
-The host gate accepts only GET requests carrying an OAuth result
-(`code`/`error`) and non-empty `state`; the guest CLI performs authoritative
-state and PKCE validation. It is not a general port forward. Gantry returns a
-host-authored completion page; guest HTML, headers, status, and redirects are
-never rendered by the host browser.
+The host gate accepts OAuth results (`code` or `error`, plus non-empty `state`)
+as GET queries or URL-encoded POST forms (`response_mode=form_post`, used by
+Microsoft kubelogin/MSAL). POST forms are limited to 16 KiB and forwarded with
+their method and body intact; browser headers and cookies are never forwarded.
+The guest CLI performs authoritative state and PKCE validation. This is not a
+general port forward. Gantry returns a host-authored completion page; guest
+HTML, headers, status, and redirects are never rendered by the host browser.
+
+A browser may still warn when the HTTPS identity-provider page submits a form
+to an HTTP loopback callback. POST support does not remove that browser warning;
+changing MSAL's callback to GET is not compatible with its POST-only listener.
 
 ## Keep OAuth refresh tokens on the host
 

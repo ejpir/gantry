@@ -471,14 +471,25 @@ in-guest filesystem hardening work.
 
 ### OAuth bridge and custody
 
-The callback bridge recognizes supported guest loopback authorization URLs
-and creates a short-lived listener on host loopback. It validates the captured
-path and, when the authorization URL includes one, state; it accepts one
-callback and replays that callback to the guest loopback service. Custody-owned
-listeners fail closed when no pending state claims a callback. The host returns
-its own CSP-locked completion page; guest status, headers, redirects, body, and
-error details are never rendered in the browser. The bridge is separate from
-general port publishing.
+A daemon-owned guest helper discovers loopback TCP listeners without reading
+application output. The callback bridge mirrors allowed ports on host loopback
+and closes transparent gates when the guest socket disappears. It accepts
+OAuth-shaped GET queries and `application/x-www-form-urlencoded` POST results
+with one non-empty state and either code or error. The guest CLI validates its
+own state and PKCE; the bridge does not infer them from authorization URLs.
+
+POST preserves the original form bytes and method, including MSAL's POST-only
+`response_mode=form_post` flow. Duplicate result fields and query/form mixing
+are rejected. URLs are bounded to 8 KiB, forms to 16 KiB, and form reads share
+the two-slot replay limit. A fixed bash `/dev/tcp/localhost/PORT` helper receives
+a host-constructed HTTP request on stdin, keeping callback data out of argv and
+shell source. Only synthetic headers are sent; browser cookies and headers
+never cross into the guest. Replay errors omit guest-controlled text.
+
+Custody-owned listeners stay GET-only and fail closed when no exact pending
+state claims a callback. The host returns its own CSP-locked completion page;
+guest status, headers, redirects, body, and error details are never rendered
+in the browser. The bridge is separate from general port publishing.
 
 With custody enabled, the supervisor performs code or device-grant exchanges
 using host-approved provider metadata. It stores tokens in the protected

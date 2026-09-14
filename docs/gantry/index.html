@@ -1310,11 +1310,16 @@ are supported.</p>
 <p>Disable the bridge when it is not needed:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> console</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="console example"><code><span class="gp">$ </span>gantry<span class="w"> </span>start<span class="w"> </span>dev<span class="w"> </span>-image<span class="w"> </span>alpine:latest<span class="w"> </span>-oauth-bridge<span class="o">=</span><span class="nb">false</span>
 </code></pre></div>
-<p>The host gate accepts only GET requests carrying an OAuth result
-(<code>code</code>/<code>error</code>) and non-empty <code>state</code>; the guest CLI performs authoritative
-state and PKCE validation. It is not a general port forward. Gantry returns a
-host-authored completion page; guest HTML, headers, status, and redirects are
-never rendered by the host browser.</p>
+<p>The host gate accepts OAuth results (<code>code</code> or <code>error</code>, plus non-empty <code>state</code>)
+as GET queries or URL-encoded POST forms (<code>response_mode=form_post</code>, used by
+Microsoft kubelogin/MSAL). POST forms are limited to 16 KiB and forwarded with
+their method and body intact; browser headers and cookies are never forwarded.
+The guest CLI performs authoritative state and PKCE validation. This is not a
+general port forward. Gantry returns a host-authored completion page; guest
+HTML, headers, status, and redirects are never rendered by the host browser.</p>
+<p>A browser may still warn when the HTTPS identity-provider page submits a form
+to an HTTP loopback callback. POST support does not remove that browser warning;
+changing MSAL's callback to GET is not compatible with its POST-only listener.</p>
 <h2 id="shares-secrets/keep-oauth-refresh-tokens-on-the-host" tabindex="-1">Keep OAuth refresh tokens on the host</h2>
 <p>OAuth custody supports Codex, Claude, GitHub, and host-configured OAuth
 providers (including MCP servers):</p>
@@ -2703,7 +2708,7 @@ gantry update --force   # reinstall a deliberately rebuilt/retagged release
 harnesses. They are not part of the normal user interface.</p>
 </div><footer class="doc-footer"><p>Help make these docs better. <a href="https://github.com/ejpir/gantry/edit/main/docs/gantry/cli-reference.md" target="_blank" rel="noopener noreferrer">Edit this page on GitHub ↗</a></p><nav class="pager" aria-label="Adjacent guides"><a class="pager-link" href="#manager-api"><span>Previous</span><strong>Manager API <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a><a class="pager-link" href="#architecture"><span>Next</span><strong>Architecture <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a></nav></footer></article>
 <article class="doc-page" id="architecture" data-label="Architecture" data-group="Reference" data-title="Architecture">
-<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Reference</span><span aria-hidden="true">/</span><span>Architecture</span></div><p class="eyebrow">Reference</p><h1 id="architecture/architecture" tabindex="-1">Architecture</h1><div class="page-meta"><span>30 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/architecture.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
+<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Reference</span><span aria-hidden="true">/</span><span>Architecture</span></div><p class="eyebrow">Reference</p><h1 id="architecture/architecture" tabindex="-1">Architecture</h1><div class="page-meta"><span>31 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/architecture.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
 <div class="prose"><p>This page explains how Gantry turns an OCI image and a small set of host
 capabilities into a running microVM sandbox. For the security properties and
 limitations of these boundaries, see <a href="#security">Security</a>.</p>
@@ -3117,14 +3122,23 @@ limited to 1 MiB; one session permits 16 in-flight calls, one gateway permits
 capability protocol, residual risks, platform enforcement, and remaining
 in-guest filesystem hardening work.</p>
 <h3 id="architecture/oauth-bridge-and-custody" tabindex="-1">OAuth bridge and custody</h3>
-<p>The callback bridge recognizes supported guest loopback authorization URLs
-and creates a short-lived listener on host loopback. It validates the captured
-path and, when the authorization URL includes one, state; it accepts one
-callback and replays that callback to the guest loopback service. Custody-owned
-listeners fail closed when no pending state claims a callback. The host returns
-its own CSP-locked completion page; guest status, headers, redirects, body, and
-error details are never rendered in the browser. The bridge is separate from
-general port publishing.</p>
+<p>A daemon-owned guest helper discovers loopback TCP listeners without reading
+application output. The callback bridge mirrors allowed ports on host loopback
+and closes transparent gates when the guest socket disappears. It accepts
+OAuth-shaped GET queries and <code>application/x-www-form-urlencoded</code> POST results
+with one non-empty state and either code or error. The guest CLI validates its
+own state and PKCE; the bridge does not infer them from authorization URLs.</p>
+<p>POST preserves the original form bytes and method, including MSAL's POST-only
+<code>response_mode=form_post</code> flow. Duplicate result fields and query/form mixing
+are rejected. URLs are bounded to 8 KiB, forms to 16 KiB, and form reads share
+the two-slot replay limit. A fixed bash <code>/dev/tcp/localhost/PORT</code> helper receives
+a host-constructed HTTP request on stdin, keeping callback data out of argv and
+shell source. Only synthetic headers are sent; browser cookies and headers
+never cross into the guest. Replay errors omit guest-controlled text.</p>
+<p>Custody-owned listeners stay GET-only and fail closed when no exact pending
+state claims a callback. The host returns its own CSP-locked completion page;
+guest status, headers, redirects, body, and error details are never rendered
+in the browser. The bridge is separate from general port publishing.</p>
 <p>With custody enabled, the supervisor performs code or device-grant exchanges
 using host-approved provider metadata. It stores tokens in the protected
 <code>oauth-tokens.json</code> registry and refreshes it atomically. Explicit delivery
@@ -3681,12 +3695,17 @@ guest-writable executable path part of the supervisor's restart behavior.</p>
 <p>OAuth bridging uses a trusted guest helper to discover loopback TCP listeners
 without tracing applications or parsing terminal output. Matching host ports
 are bounded to fixed callback ports and the Linux ephemeral range. Transparent
-listeners accept only GET requests carrying <code>code</code>/<code>error</code> and non-empty
-<code>state</code>; the guest CLI remains authoritative for state and PKCE validation.
-Custody listeners additionally require an exact pending host-side flow. After
-delivery, the browser receives only a fixed, CSP-locked host page. Guest status,
-headers, redirects, bodies, and error details are discarded. Disable the bridge
-with <code>-oauth-bridge=false</code> when unused.</p>
+listeners accept GET query results or URL-encoded POST forms with exactly one
+non-empty <code>state</code> and either <code>code</code> or <code>error</code>. URLs are limited to 8 KiB and
+POST bodies to 16 KiB; malformed, duplicated or query/form-conflicting OAuth
+fields are rejected. Form reads and replay share a bounded concurrency limit.
+The guest CLI remains authoritative for state and PKCE validation. Browser
+headers/cookies are stripped; the preserved method, URI and body reach guest
+loopback through exec stdin, not argv. Callback data and guest error text are
+not logged. Custody listeners remain GET-only and require an exact pending
+host-side flow. After delivery, the browser receives only a fixed, CSP-locked
+host page. Guest status, headers, redirects, bodies, and error details are
+discarded. Disable the bridge with <code>-oauth-bridge=false</code> when unused.</p>
 <p>If upgrading from a build that rendered the guest callback response, clear
 browser site data for any <code>localhost:&lt;callback-port&gt;</code> or
 <code>127.0.0.1:&lt;callback-port&gt;</code> origin previously used for sign-in. Hardened

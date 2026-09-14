@@ -3,11 +3,11 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -74,8 +74,8 @@ func (d *daemonRuntime) startControl() error {
 	d.secretStore.SetLogger(d.broker.auditf)
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
-	d.broker.oauth = oauthbridge.New(func(args []string, timeout time.Duration) ([]byte, int, error) {
-		return d.broker.internalExec(strings.NewReader(""), args, timeout,
+	d.broker.oauth = oauthbridge.New(func(stdin io.Reader, args []string, timeout time.Duration) ([]byte, int, error) {
+		return d.broker.internalExec(stdin, args, timeout,
 			oauthbridge.MaxReplayResponseSize, "oauth callback replay")
 	}, d.broker.cfg.OAuthBridgeEnabled())
 	// Credential broker: guest helpers reach it over vsock (the VMM dials
