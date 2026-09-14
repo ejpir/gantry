@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -157,8 +158,13 @@ func TestStandaloneRemoteAddIsWriteOnlyAndReturnsToCreate(t *testing.T) {
 		t.Fatalf("registration failed: %v", err)
 	}
 	info, err := os.Stat(filepath.Join(filepath.Dir(os.Getenv("GANTRY_HOME")), "remotes", profile.Name+".token"))
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("token permissions: %v", err)
+	if err != nil {
+		t.Fatalf("token file: %v", err)
+	}
+	// The successful remote.Load above verifies the protected Windows DACL;
+	// Unix exposes the equivalent owner-only protection through mode bits.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("token permissions: %04o", info.Mode().Perm())
 	}
 	m.closeDialog()
 	m.openRemoteProfiles()
