@@ -153,8 +153,13 @@ func Add(profile Profile, token string) error {
 	if err := localsec.CreateManagerDir(tokenDir()); err != nil {
 		return err
 	}
-	if err := atomicfile.WriteFile(tokenPath(profile.Name), []byte(token+"\n"), 0o600); err != nil {
+	path := tokenPath(profile.Name)
+	if err := atomicfile.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 		return err
+	}
+	if err := secureTokenFile(path); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("secure token file: %w", err)
 	}
 	store, err := loadStore()
 	if err != nil {
@@ -247,8 +252,8 @@ func LoadToken(name string) (string, error) {
 	if !info.Mode().IsRegular() || info.Size() > 258 {
 		return "", fmt.Errorf("token file %s must be a regular file of at most 258 bytes", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("token file %s is accessible by other users (%04o); fix with: chmod 600 %s", path, info.Mode().Perm(), path)
+	if err := validateTokenFileSecurity(path, info); err != nil {
+		return "", err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {

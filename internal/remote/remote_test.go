@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -59,14 +60,17 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("Load = %+v, %q", profile, token)
 	}
 
-	// Both the profile store and the token file are owner-only.
-	for _, path := range []string{storePath(), tokenPath("cloud")} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s mode = %04o, want 0600", path, info.Mode().Perm())
+	// Unix mode bits protect both files. Windows token ACL validation happens
+	// in Load above and is covered directly by the Windows security test.
+	if runtime.GOOS != "windows" {
+		for _, path := range []string{storePath(), tokenPath("cloud")} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("%s mode = %04o, want 0600", path, info.Mode().Perm())
+			}
 		}
 	}
 
@@ -123,6 +127,11 @@ func TestProfileValidation(t *testing.T) {
 func TestLoadTokenRefusesGroupReadable(t *testing.T) {
 	testHome(t)
 	addTestProfile(t, "cloud")
+	if runtime.GOOS == "windows" {
+		// os.Chmod does not alter the Windows DACL. The equivalent ACL
+		// rejection is covered by TestLoadTokenRefusesPermissiveWindowsACL.
+		return
+	}
 	path := tokenPath("cloud")
 	if err := os.Chmod(path, 0o640); err != nil {
 		t.Fatal(err)
