@@ -315,6 +315,26 @@ The guest receives several block-backed filesystems:
 OCI image cache entries are immutable and shared between sandboxes by digest.
 Writable ext4 layers are private and must not be shared by running VMs.
 
+### OCI image preparation and export
+
+For commands and workflows, see [Images](images.md).
+
+For OCI inputs, the host resolver selects the guest architecture, verifies the
+manifest and blobs, preserves execution configuration, and publishes a
+flattened EROFS image plus metadata under the platform-manifest digest. Local
+OCI layouts, OCI archives, and Docker save archives enter the same verified
+cache. Native layer sets instead attach an fsmeta image and ordered immutable
+EROFS layers directly.
+
+Export requires a stopped sandbox and an exclusive writable-layer lock. A
+read-only ext4 view replays committed journal metadata in memory, then emits an
+OCI image-layout archive containing the immutable base plus workload changes.
+Overlay whiteouts, opaque directories, ownership, modes, links, sparse files,
+device metadata, and supported extended attributes are translated without
+mounting the filesystem. Host shares and the separate Dev Containers IDE layer
+are excluded. Logical file data is bounded by the writable device size or
+64 GiB, whichever is smaller, and output is atomically replaced.
+
 Host directories use a single multiplexed virtio-fs share hub. Each admitted
 tag appears in the guest namespace and is bind-mounted into the container at
 its selected path. The supervisor retains the host roots and applies
@@ -470,6 +490,8 @@ capability protocol, residual risks, platform enforcement, and remaining
 in-guest filesystem hardening work.
 
 ### OAuth bridge and custody
+
+For setup and login commands, see [OAuth](oauth.md).
 
 A daemon-owned guest helper discovers loopback TCP listeners without reading
 application output. The callback bridge mirrors allowed ports on host loopback
@@ -894,6 +916,42 @@ endpoint. A terminal session uses two channels:
 Keeping the exit status out of the byte stream means guest output cannot forge
 process state. The manager API uses the same broker with explicit timeout and
 output-size bounds.
+
+## Remote manager transport
+
+For setup and everyday commands, see [Remote access](remote-access.md).
+
+`gantry serve` exposes the lifecycle service over HTTP/1.1. A local Unix socket
+uses same-user authentication; network listeners require TLS and a bearer token.
+Plaintext listeners, credentialed redirects, and disabled certificate
+verification are not supported. Self-signed mode persists a local CA; clients
+may also pin the exact leaf fingerprint.
+
+A client profile stores only endpoint and public trust metadata in
+`remotes.json`. Its bearer token is a separate owner-only file, validated with
+Unix mode bits or a protected Windows DACL. Registration verifies TLS,
+authentication, and health before saving either. The token grants the same host
+control as the manager API and is not scoped by organization identity.
+
+Remote dispatch resolves an explicit `-remote` or `GANTRY_REMOTE` before local
+command execution. Unsupported or failed remote operations do not fall back to
+local. Manager-host paths remain manager-host paths; only APIs defined as
+uploads, such as network policy documents and signed organization snapshots,
+read bytes on the client.
+
+Lifecycle mutations use bounded operation records and optional idempotency
+keys. Image pulls may outlive a disconnected client, while operation records
+and server-sent events remain in memory and do not provide durable history.
+Exec and low-level run have explicit input, output, and deadline bounds.
+
+Remote SSH upgrades one authenticated TLS request into a tunnel to the selected
+sandbox's existing host-side SSH gateway. It cannot select another socket or
+destination. The client learns the install host key over authenticated TLS and
+pins it per profile; rotation requires explicit acceptance.
+
+Organization discovery remains separate. A catalog suggests endpoint and trust
+metadata, but never supplies a manager token or changes the manager's bearer
+authentication boundary.
 
 ## On-disk state
 

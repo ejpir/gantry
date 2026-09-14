@@ -63,6 +63,7 @@ GROUPS = (
             ("ssh-access.md", "SSH & Dev Containers", "code"),
             ("remote-access.md", "Remote access", "network"),
             ("organization-login.md", "Organization login", "key"),
+            ("oauth.md", "OAuth", "key"),
             ("mcp-gateway.md", "MCP gateway", "network"),
             ("manager-api.md", "Manager API", "braces"),
         ),

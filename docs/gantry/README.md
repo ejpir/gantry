@@ -46,6 +46,8 @@ filesystem by digest.
   remotes, and apply your organization's policy.
 - [Host shares and secrets](shares-secrets.md) — expose selected directories,
   map ownership, and inject credentials without putting values in argv.
+- [OAuth](oauth.md) — complete guest browser login and keep refresh tokens on
+  the host.
 - [Coding agents](coding-agents.md) — isolate an agent and run Pi in a
   project sandbox.
 - [Editor integration](../editor-integration.md) — run an agent from an editor
