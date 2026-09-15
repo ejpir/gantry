@@ -4,7 +4,7 @@
 #   export GANTRY_TEST_IID=i-xxx   (from infra-up.sh)
 #   sh scripts/aws-kvm/run-tests.sh
 set -euo pipefail
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 HERE="$ROOT/scripts/aws-kvm"
 
@@ -18,13 +18,15 @@ GOOS=linux GOARCH=amd64 go build -o /tmp/gantry-linux-amd64 ./cmd/gantry
 aws s3 cp /tmp/gantry-linux-amd64 "s3://$BUCKET/gantry-linux-amd64" --quiet
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o /tmp/gantry-guest-x86_64 ./cmd/gantry-guest
 aws s3 cp /tmp/gantry-guest-x86_64 "s3://$BUCKET/gantry-guest-x86_64" --quiet
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -o /tmp/gantry-oauth-idp-linux-amd64 ./tests/e2e/oauthidp
+aws s3 cp /tmp/gantry-oauth-idp-linux-amd64 "s3://$BUCKET/gantry-oauth-idp-linux-amd64" --quiet
 aws s3 cp "$ROOT/scripts/oauth-custody-e2e.py" "s3://$BUCKET/oauth-custody-e2e.py" --quiet
 
 echo "== running battery on ${GANTRY_TEST_IID:?export GANTRY_TEST_IID} =="
 # Bootstrap /opt/gantry on the instance: presign every asset and emit a
 # retry-loop download block (fresh instances have nothing; existing
 # files are kept, the binary is always refreshed).
-ASSETS="gantry-linux-amd64 gantry-guest-x86_64 oauth-custody-e2e.py nerdbox-kernel-x86_64 gantry-kernel-x86_64 nerdbox-rootfs-x86_64.erofs nerdbox-rootfs-gvisor-x86_64.erofs debian-bookworm-amd64.erofs gantry-ide-image-x86_64.erofs rwlayer-amd64.ext4"
+ASSETS="gantry-linux-amd64 gantry-guest-x86_64 gantry-oauth-idp-linux-amd64 oauth-custody-e2e.py nerdbox-kernel-x86_64 gantry-kernel-x86_64 nerdbox-rootfs-x86_64.erofs nerdbox-rootfs-gvisor-x86_64.erofs debian-bookworm-amd64.erofs gantry-ide-image-x86_64.erofs rwlayer-amd64.ext4"
 DL="mkdir -p /opt/gantry && cd /opt/gantry"
 for a in $ASSETS; do
 	U=$(aws s3 presign "s3://$BUCKET/$a" --expires-in 7200)
@@ -37,9 +39,9 @@ for a in $ASSETS; do
 pkill -f gantry-linux-amd64 2>/dev/null || true; sleep 1
 for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o gantry-new '$U' && break; sleep 3; done
 mv -f gantry-new '$a' && chmod +x '$a'"
-	elif [ "$a" = gantry-guest-x86_64 ] || [ "$a" = oauth-custody-e2e.py ]; then
-		# Always refresh both the helper and its E2E harness. A reusable host
-		# must not validate stale guest code or stale OAuth assertions.
+	elif [ "$a" = gantry-guest-x86_64 ] || [ "$a" = gantry-oauth-idp-linux-amd64 ] || [ "$a" = oauth-custody-e2e.py ]; then
+		# Always refresh the helper and both E2E fixtures. A reusable host must
+		# not validate stale guest code or stale OAuth assertions.
 		DL="$DL
 for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o guest-new '$U' && break; sleep 3; done
 mv -f guest-new '$a' && chmod +x '$a'"
@@ -63,5 +65,5 @@ mv -f rootfs-new '$a'"
 	fi
 done
 SU=$(aws s3 presign "s3://$BUCKET/alpine-store.tar.gz" --expires_in 7200 2>/dev/null || aws s3 presign "s3://$BUCKET/alpine-store.tar.gz" --expires-in 7200)
-{ echo "$DL"; echo "export GANTRY_STORE_URL='$SU'"; echo "export GANTRY_TEST_OAUTH_E2E=/opt/gantry/oauth-custody-e2e.py"; echo "ls -la /opt/gantry"; cat "$HERE/test-battery.sh"; } > /tmp/gantry-battery-run.sh
+{ echo "$DL"; echo "export GANTRY_STORE_URL='$SU'"; echo "export GANTRY_TEST_OAUTH_E2E=/opt/gantry/oauth-custody-e2e.py"; echo "export GANTRY_TEST_OAUTH_IDP=/opt/gantry/gantry-oauth-idp-linux-amd64"; echo "ls -la /opt/gantry"; cat "$HERE/test-battery.sh"; } > /tmp/gantry-battery-run.sh
 python3 "$HERE/ssm.py" /tmp/gantry-battery-run.sh "${1:-1200}"

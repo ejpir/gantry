@@ -163,6 +163,18 @@ func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 	return nil
 }
 
+// SetOrganizationPolicy persists the verified snapshot through the running
+// daemon's single configuration owner.
+func (s *ConfigStore) SetOrganizationPolicy(snapshot *policy.Config) error {
+	return s.Mutate(func(cfg *RunConfig) error {
+		if snapshot != nil && cfg.OAuthCustodyEnabled() {
+			return fmt.Errorf("organization policy v1 does not support OAuth custody")
+		}
+		cfg.OrgPolicy = policy.CloneConfig(snapshot)
+		return nil
+	})
+}
+
 func cloneRunConfig(cfg RunConfig) RunConfig {
 	cfg.OrgPolicy = policy.CloneConfig(cfg.OrgPolicy)
 	cfg.Shares = append([]string(nil), cfg.Shares...)

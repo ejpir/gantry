@@ -35,7 +35,7 @@ RWDIR="$(dirname "$GANTRY_HOME")/rwlayers"
 # opener intentionally rejects. A private directory also prevents another
 # local user from pre-planting a symlink at a predictable fixture path.
 SECRET_TMP=$(mktemp -d "${TMPDIR:-/tmp}/gantry-secrets.XXXXXX") || exit 2
-SECRET_TMP=$(CDPATH= cd -- "$SECRET_TMP" 2>/dev/null && pwd -P) || exit 2
+SECRET_TMP=$(CDPATH='' cd -- "$SECRET_TMP" 2>/dev/null && pwd -P) || exit 2
 CANARY_FILE="$SECRET_TMP/canary-file"
 T9_TOKEN="$SECRET_TMP/t9-token"
 T5_START_LOG="$SECRET_TMP/t5-start.log"
@@ -291,14 +291,17 @@ R=$("$G" image ls 2>&1);                         chk "image: ls shows cached ref
 
 # Keep one exec session alive as a guest HTTP service while publishing and
 # withdrawing a live host port. Alpine's minimal BusyBox does not include the
-# httpd applet, so use its persistent netcat listener with a tiny HTTP handler.
-# BusyBox uses -lk with -e for a persistent listener.
+# httpd applet, so use netcat with a tiny HTTP handler. BusyBox's `nc -lk -e`
+# intermittently reuses a closing handler and returns headers without the
+# body; restarting a one-shot listener after each request is deterministic.
 # The chosen loopback port is intentionally ephemeral so local developer runs
 # do not need a reserved port.
 PORT_FIXTURE=$(cat <<'GUEST_HTTP'
 printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK"' > /tmp/gantry-http-handler
 chmod 700 /tmp/gantry-http-handler
-exec busybox nc -lk -p 18080 -e /tmp/gantry-http-handler
+while :; do
+  busybox nc -l -p 18080 -e /tmp/gantry-http-handler
+done
 GUEST_HTTP
 )
 run_with_timeout 120 "$G" exec t4 -- sh -c "$PORT_FIXTURE" </dev/null >/tmp/gantry-t4-http.log 2>&1 &
@@ -580,10 +583,11 @@ stop_background "$MOCKPID"
 MOCKPID=
 
 echo "===== generic OAuth custody (GitHub device + MCP PKCE, isolated VM state) ====="
-# The same stdlib-only harness runs on Linux KVM and macOS HVF. Only the OAuth
-# and MCP upstreams are mocks; the guest helper, vsock broker, refresh loop,
-# MCP worker and restart persistence are real. AWS stages this file beside G.
+# The same Python orchestrator and protocol-level Go authorization server run
+# on Linux KVM and macOS HVF. The guest helper, vsock broker, refresh loop, MCP
+# worker and restart persistence are real. AWS stages both fixtures beside G.
 python3 "${GANTRY_TEST_OAUTH_E2E:-$BASE/scripts/oauth-custody-e2e.py}" \
+  --idp "${GANTRY_TEST_OAUTH_IDP:-$BASE/gantry-oauth-idp}" \
   --gantry "$G" --kernel "$KERNEL" --rootfs "$ROOTFS" --image "$CACHE_IMAGE" \
   2>&1 | tee "$SECRET_TMP/oauth-e2e.log"
 OAUTH_E2E_STATUS=${PIPESTATUS[0]}

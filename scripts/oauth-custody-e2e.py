@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """Real-VM OAuth custody checks shared by Linux KVM and macOS HVF.
 
-Only the authorization/MCP servers are mocked. Login, vsock, the credential
-helper, MCP worker, refresh, and stop/resume all run through the current Gantry
-binaries. No browser, public OAuth service, or real credential is needed.
+A disposable Go authorization server implements the public-client grants and
+protected MCP resource. Login, vsock, the credential helper, MCP worker,
+refresh, and stop/resume all run through the current Gantry binaries. No
+browser, public OAuth service, or real credential is needed.
 """
 
 import argparse
-import base64
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import tempfile
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 GH_CLIENT = "Iv1.b507a08c87ecfe98"
+GH_SCOPE = "repo read:org gist"
 GH_ACCESS = "e2e-github-access-canary"
 DEVICE_CODE = "e2e-private-device-canary"
 USER_CODE = "E2E-TEST"
@@ -60,284 +60,109 @@ def browser_get(url):
         return response.read().decode()
 
 
-class MockOAuth:
-    """Strict local OAuth/MCP fixture; observations contain decisions, not secrets."""
+def available_callback_uri():
+    """Choose an explicit allowed callback while leaving Gantry to bind it."""
+    for _ in range(20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        if 32768 <= port <= 65535:
+            return "http://127.0.0.1:%d/callback" % port
+    raise OSError("could not allocate an allowed OAuth callback port")
 
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.approved = False
-        self.pending = 0
-        self.github_issues = 0
-        self.codes = {}
-        self.exchanges = 0
-        self.refreshes = 0
-        self.revoked = False
-        self.rejections = 0
-        self.mcp_phases = []
-        self.errors = []
-        fixture = self
 
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *_args):
-                pass
+class LocalIDP:
+    """Subprocess wrapper for Gantry's protocol-level Go OAuth fixture."""
 
-            def reply(self, status, payload=None, location=None):
-                body = b"" if payload is None else json.dumps(payload).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                if location:
-                    self.send_header("Location", location)
-                self.end_headers()
-                self.wfile.write(body)
+    def __init__(self, executable):
+        executable = str(Path(executable).resolve())
+        if not os.access(executable, os.X_OK):
+            raise ValueError("--idp must name an executable fixture binary")
+        self.process = subprocess.Popen(
+            [executable],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        ready = []
 
-            def do_GET(self):
-                try:
-                    with fixture.lock:
-                        fixture.get(self)
-                except (ValueError, KeyError) as error:
-                    with fixture.lock:
-                        fixture.errors.append(str(error))
-                    self.reply(400, {"error": "invalid_request"})
+        def read_ready():
+            ready.append(self.process.stdout.readline(4097))
 
-            def do_POST(self):
-                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
-                try:
-                    if self.headers.get_content_type() == "application/json":
-                        body = json.loads(raw)
-                    else:
-                        body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
-                    with fixture.lock:
-                        fixture.post(self, body)
-                except (ValueError, KeyError) as error:
-                    with fixture.lock:
-                        fixture.errors.append(str(error))
-                    self.reply(400, {"error": "invalid_grant"})
-
-            def do_DELETE(self):
-                self.reply(200)
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.origin = "http://127.0.0.1:%d" % self.server.server_port
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        reader = threading.Thread(target=read_ready, daemon=True)
+        reader.start()
+        reader.join(timeout=10)
+        line = ready[0] if ready else ""
+        try:
+            message = json.loads(line)
+            parsed = urlsplit(message["origin"])
+            if (
+                len(line) > 4096
+                or parsed.scheme != "http"
+                or parsed.hostname != "127.0.0.1"
+                or parsed.port is None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("invalid fixture origin")
+            expected = {
+                "client_id": "e2e-public-client",
+                "scope": "mcp offline_access",
+                "github_client_id": GH_CLIENT,
+                "github_scope": GH_SCOPE,
+            }
+            if any(message.get(key) != value for key, value in expected.items()):
+                raise ValueError("fixture registration mismatch")
+            if self.process.poll() is not None:
+                raise ValueError("fixture exited after readiness")
+            self.origin = message["origin"]
+            self.client_id = message["client_id"]
+            self.scope = message["scope"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self.close()
+            raise ValueError("local OAuth IdP did not emit valid readiness") from error
 
     def close(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
+        process = getattr(self, "process", None)
+        if process is None:
+            return
+        self.process = None
+        if process.stdin:
+            process.stdin.close()
+        if process.poll() is None:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        if process.stdout:
+            process.stdout.close()
+        if process.stderr:
+            process.stderr.close()
+
+    def request(self, path, method="GET"):
+        request = Request(
+            self.origin + path,
+            data=b"" if method == "POST" else None,
+            method=method,
+        )
+        with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
+            raw = response.read()
+        return json.loads(raw) if raw else {}
 
     def observation(self, field):
-        with self.lock:
-            value = getattr(self, field)
-            return list(value) if isinstance(value, list) else value
+        return self.request("/test/observations")[field]
 
-    @staticmethod
-    def require(condition, message):
-        if not condition:
-            raise ValueError(message)
-
-    def get(self, request):
-        parsed = urlsplit(request.path)
-        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-        if parsed.path == "/device/verify":
-            self.require(
-                query.get("user_code") == USER_CODE, "wrong public device code"
-            )
-            self.approved = True
-            request.reply(200, {"approved": True})
-        elif parsed.path == "/authorize":
-            self.require(
-                query.get("client_id") == "e2e-public-client", "wrong authorize client"
-            )
-            self.require(
-                query.get("scope") == "mcp offline_access", "wrong authorize scope"
-            )
-            self.require(
-                query.get("resource") == self.origin + "/mcp",
-                "missing authorize resource",
-            )
-            self.require(query.get("response_type") == "code", "wrong response type")
-            self.require(
-                query.get("code_challenge_method") == "S256", "missing PKCE S256"
-            )
-            self.require(
-                bool(query.get("state")) and bool(query.get("code_challenge")),
-                "missing state/PKCE",
-            )
-            redirect = urlsplit(query["redirect_uri"])
-            self.require(
-                redirect.scheme == "http"
-                and redirect.hostname == "127.0.0.1"
-                and redirect.port is not None
-                and 49152 <= redirect.port <= 65535
-                and redirect.path == "/callback"
-                and not redirect.query,
-                "invalid dynamic loopback redirect",
-            )
-            code = "e2e-code-%d" % (len(self.codes) + 1)
-            self.codes[code] = query
-            request.reply(
-                302,
-                location=query["redirect_uri"]
-                + "?"
-                + urlencode({"code": code, "state": query["state"]}),
-            )
-        else:
-            request.reply(405)
-
-    def post(self, request, body):
-        path = urlsplit(request.path).path
-        if path in ("/github/device", "/github/token", "/token"):
-            self.require(
-                request.headers.get_content_type()
-                == "application/x-www-form-urlencoded",
-                "public-client grant is not form encoded",
-            )
-        if path == "/github/device":
-            self.require(
-                body.get("client_id") == GH_CLIENT, "wrong GitHub device client"
-            )
-            self.require(
-                body.get("scope") == "repo read:org gist", "wrong GitHub scopes"
-            )
-            request.reply(
-                200,
-                {
-                    "device_code": DEVICE_CODE,
-                    "user_code": USER_CODE,
-                    "verification_uri": self.origin + "/device/verify",
-                    "interval": 1,
-                    "expires_in": 120,
-                },
-            )
-        elif path == "/github/token":
-            self.require(
-                body.get("client_id") == GH_CLIENT, "wrong GitHub token client"
-            )
-            self.require(
-                body.get("grant_type") == "urn:ietf:params:oauth:grant-type:device_code"
-                and body.get("device_code") == DEVICE_CODE,
-                "wrong device grant",
-            )
-            if not self.approved:
-                self.pending += 1
-                request.reply(200, {"error": "authorization_pending"})
-            else:
-                self.github_issues += 1
-                # GitHub can return neither an expiry nor a refresh token.
-                request.reply(200, {"access_token": GH_ACCESS, "token_type": "bearer"})
-        elif path == "/token":
-            self.require(
-                body.get("client_id") == "e2e-public-client", "wrong token client"
-            )
-            self.require(
-                body.get("resource") == self.origin + "/mcp", "missing token resource"
-            )
-            if body.get("grant_type") == "authorization_code":
-                authorization = self.codes.pop(body.get("code"), None)
-                self.require(
-                    authorization is not None,
-                    "unrecognized or reused authorization code",
-                )
-                verifier = body.get("code_verifier", "")
-                challenge = (
-                    base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-                    .decode()
-                    .rstrip("=")
-                )
-                self.require(
-                    len(verifier) >= 43
-                    and challenge == authorization["code_challenge"],
-                    "PKCE mismatch",
-                )
-                self.require(
-                    body.get("redirect_uri") == authorization["redirect_uri"],
-                    "redirect mismatch",
-                )
-                self.exchanges += 1
-                request.reply(
-                    200,
-                    {
-                        "access_token": MCP_ACCESS + "0",
-                        "refresh_token": MCP_REFRESH + "0",
-                        "expires_in": 1,
-                    },
-                )
-            else:
-                self.require(
-                    body.get("grant_type") == "refresh_token", "wrong generic grant"
-                )
-                self.require(
-                    body.get("refresh_token") == MCP_REFRESH + str(self.refreshes),
-                    "rotated refresh token not used",
-                )
-                if self.revoked:
-                    self.rejections += 1
-                    # Also exercise providers that return OAuth errors with HTTP 200.
-                    request.reply(
-                        200,
-                        {"error": "invalid_grant", "error_description": ERROR_CANARY},
-                    )
-                else:
-                    self.refreshes += 1
-                    request.reply(
-                        200,
-                        {
-                            "access_token": MCP_ACCESS + str(self.refreshes),
-                            "refresh_token": MCP_REFRESH + str(self.refreshes),
-                            "expires_in": 3600,
-                        },
-                    )
-        elif path == "/mcp":
-            self.mcp(request, body)
-        else:
-            request.reply(404)
-
-    def mcp(self, request, body):
-        authorization = request.headers.get("Authorization", "")
-        self.require(
-            not self.revoked
-            and authorization == "Bearer " + MCP_ACCESS + str(self.refreshes),
-            "MCP received missing, stale, or revoked credential",
-        )
-        if "id" not in body:
-            request.reply(202)
-            return
-        method = body.get("method")
-        if method == "initialize":
-            result = {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "oauth-e2e", "version": "1"},
-            }
-        elif method == "tools/list":
-            result = {
-                "tools": [
-                    {
-                        "name": "probe",
-                        "description": "Check custody delivery",
-                        "inputSchema": {"type": "object"},
-                    }
-                ]
-            }
-        elif method == "tools/call":
-            self.require(
-                body.get("params", {}).get("name") == "probe", "wrong MCP tool"
-            )
-            self.mcp_phases.append(self.refreshes)
-            # Deliberately reflect the credential: the worker must redact it.
-            result = {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "phase:%d auth=%s" % (self.refreshes, authorization),
-                    }
-                ]
-            }
-        else:
-            result = {}
-        request.reply(200, {"jsonrpc": "2.0", "id": body["id"], "result": result})
+    def revoke(self):
+        response = self.request("/test/revoke", "POST")
+        if response.get("revoked") is not True:
+            raise ValueError("local OAuth IdP did not revoke the fixture grant")
 
 
 class CommandTimeout(subprocess.TimeoutExpired):
@@ -700,14 +525,16 @@ class Battery:
         self.command("stop", "gh")
 
         provider = self.root / "provider.json"
+        configured_redirect = available_callback_uri()
         provider.write_text(
             json.dumps(
                 {
                     "name": "company-mcp",
                     "authorize_url": self.fixture.origin + "/authorize",
                     "token_url": self.fixture.origin + "/token",
-                    "client_id": "e2e-public-client",
-                    "scope": "mcp offline_access",
+                    "client_id": self.fixture.client_id,
+                    "redirect_uri": configured_redirect,
+                    "scope": self.fixture.scope,
                     "resource": self.fixture.origin + "/mcp",
                 }
             )
@@ -755,12 +582,13 @@ class Battery:
             and callback.hostname == "127.0.0.1"
             and callback.username is None
             and callback.password is None
+            and redirect == configured_redirect
             and callback.port is not None
-            and 49152 <= callback.port <= 65535
+            and 32768 <= callback.port <= 65535
             and callback.path == "/callback"
             and not callback.query
             and not callback.fragment,
-            "host chose an IPv4-loopback callback in the dynamic range",
+            "host honored the configured IPv4-loopback callback",
         )
         try:
             browser_get(redirect + "?state=wrong-e2e-state&code=wrong-e2e-code")
@@ -830,8 +658,7 @@ class Battery:
                 sandbox + " audit/config/logs contain no OAuth secrets",
             )
         self.expire_stopped("mcp", "company-mcp")
-        with self.fixture.lock:
-            self.fixture.revoked = True
+        self.fixture.revoke()
         self.command("resume", "mcp", timeout=180)
         self.wait_for(
             lambda: not self.token("mcp", "company-mcp"),
@@ -851,7 +678,7 @@ class Battery:
         )
         self.check(
             not self.fixture.observation("errors"),
-            "mock verified PKCE, resource, refresh rotation, and upstream binding",
+            "local IdP verified PKCE, resource, refresh rotation, and upstream binding",
         )
 
     def close(self, keep=False):
@@ -899,6 +726,11 @@ def main():
     parser.add_argument("--rootfs", required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument(
+        "--idp",
+        default=os.environ.get("GANTRY_TEST_OAUTH_IDP", ""),
+        help="path to the disposable Go OAuth IdP fixture",
+    )
+    parser.add_argument(
         "--keep",
         action="store_true",
         help="retain private fixture logs after a successful run",
@@ -906,8 +738,10 @@ def main():
     args = parser.parse_args()
     if not os.access(args.gantry, os.X_OK):
         parser.error("--gantry must name an executable host binary")
+    if not args.idp:
+        parser.error("--idp is required (or set GANTRY_TEST_OAUTH_IDP)")
     os.umask(0o077)
-    fixture = MockOAuth()
+    fixture = LocalIDP(args.idp)
     battery = Battery(args, fixture)
     success = False
     try:

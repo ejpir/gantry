@@ -44,7 +44,7 @@ usage:
   gantry mcp <name> [tools]         # MCP gateway: configured servers; live tool list
   gantry ssh NAME [-- CMD]          # SSH through the sandbox-local socket
   gantry tui                        # interactive local sandbox dashboard
-  gantry serve                      # HTTP/JSON manager (unix socket; -listen tls://… for remote)
+  gantry serve                      # manager API and optional organization-wide mTLS policy feed
   gantry remote <verb>              # remote manager profiles: add|ls|rm|test
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI images: ls|pull|import|rm|prune|login|logout|credentials
@@ -73,7 +73,7 @@ Run 'gantry start --help' or 'gantry exec --help' for all flags.
 
 Remote managers: start, exec, ls, stop, delete, and resume accept
 -remote NAME (or GANTRY_REMOTE) to run against a manager served with
-gantry serve -listen tls://... — see docs/remote-sandbox-access.md.
+gantry serve -listen tls://... — see docs/gantry/remote-access.md.
 `)
 }
 
@@ -279,7 +279,7 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 	case "net-policy":
 		return controlcmd.CmdNetworkPolicy(argv), true
 	case "policy":
-		return controlcmd.CmdPolicy(argv), true
+		return controlcmd.CmdPolicyWithRollout(argv, sandbox.RolloutOrganizationPolicy), true
 	case "org":
 		return controlcmd.CmdOrg(argv), true
 	case "import":

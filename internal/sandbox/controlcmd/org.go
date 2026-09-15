@@ -12,11 +12,10 @@ import (
 
 	"github.com/ejpir/gantry/internal/orgauth"
 	"github.com/ejpir/gantry/internal/policy"
-	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
-// CmdOrg manages host-only OIDC receipts and explicit stopped-sandbox adoption.
+// CmdOrg manages host-only OIDC receipts and explicit sandbox adoption.
 func CmdOrg(args []string) int {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, `usage:
@@ -28,8 +27,8 @@ func CmdOrg(args []string) int {
 
 The host-owned config pins an HTTPS issuer, public OIDC client, group-to-profile
 mapping, signed policy bundle and verification key. Login uses code + PKCE;
-no tokens are saved or delivered to guests. apply requires a stopped sandbox.
-Login expiry/logout do not revoke policies already pinned to sandboxes.`)
+no tokens are saved or delivered to guests. apply updates a running sandbox
+live. Login expiry/logout do not revoke policies already pinned to sandboxes.`)
 	}
 	fail := func(err error) int { fmt.Fprintln(os.Stderr, "gantry org:", err); return 1 }
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
@@ -78,7 +77,7 @@ Login expiry/logout do not revoke policies already pinned to sandboxes.`)
 		if err := applyOrgSession(args[2], session); err != nil {
 			return fail(err)
 		}
-		fmt.Println("Organization policy pinned for next start. Login expiry/logout will not revoke this snapshot.")
+		fmt.Println("Organization policy applied live when running and pinned for the next start. Login expiry/logout will not revoke this snapshot.")
 		return 0
 	default:
 		usage()
@@ -171,22 +170,8 @@ func applyOrgSession(name string, session *orgauth.Session) error {
 	if err := layout.ValidateName(name); err != nil {
 		return err
 	}
-	return mutateRunningOrStopped(name, func() error {
-		return fmt.Errorf("stop %s before changing its organization policy", name)
-	}, func() error {
-		store, err := config.LoadConfigStore(layout.Dir(name))
-		if err != nil {
-			return err
-		}
-		return store.Mutate(func(cfg *config.RunConfig) error {
-			if err := session.Validate(); err != nil {
-				return err
-			}
-			if cfg.OAuthCustodyEnabled() {
-				return fmt.Errorf("organization policy v1 does not support OAuth custody")
-			}
-			cfg.OrgPolicy = policy.CloneConfig(session.Policy)
-			return nil
-		})
-	})
+	if err := session.Validate(); err != nil {
+		return err
+	}
+	return SetOrganizationPolicy(name, session.Policy)
 }

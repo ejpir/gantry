@@ -28,6 +28,11 @@ cid=$(docker create --platform "$PLATFORM" "$IMAGE")
 trap 'docker rm "$cid" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 mkdir "$WORK/rootfs"
 docker export "$cid" | tar -x -C "$WORK/rootfs"
+# Runtime engines commonly omit their injected files from `export`. Preserve
+# bind targets so crun can mount them even when Gantry uses an immutable root.
+mkdir -p "$WORK/rootfs/etc"
+[ -e "$WORK/rootfs/etc/hosts" ] || : >"$WORK/rootfs/etc/hosts"
+[ -e "$WORK/rootfs/etc/resolv.conf" ] || : >"$WORK/rootfs/etc/resolv.conf"
 docker rm "$cid" >/dev/null
 trap 'rm -rf "$WORK"' EXIT
 

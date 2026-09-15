@@ -146,9 +146,6 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 		servers = append(servers, server)
 	}
 	for i := range servers {
-		if d.governance == nil {
-			break
-		}
 		server := &servers[i]
 		name := server.Config.Name
 		host := ""

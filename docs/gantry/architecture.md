@@ -520,6 +520,10 @@ adapters select guest access-token files, credential-broker use, or host-side
 MCP injection; file adapters use a sentinel instead of exposing a refresh token.
 On resume, the supervisor restores the registry and configured delivery paths.
 This guest/tool custody mechanism is independent of organization OIDC login.
+The real-VM acceptance battery launches the disposable authorization server in
+`internal/orgauth/testidp`: it owns single-use codes, validates S256 PKCE and
+resource/callback binding, rotates refresh tokens, and protects a local MCP
+resource instead of returning canned token responses.
 
 ## Organization identity and discovery
 
@@ -611,14 +615,14 @@ They are local host state, not portable signed proofs for remote services.
 
 A receipt expires at the earlier of ID-token and signed-policy expiry. Expired
 receipts cannot be applied; login is explicit, with no background token refresh.
-`org apply` revalidates the receipt and copies its snapshot into a stopped
-sandbox under the launch/mutation lock. A pinned sandbox policy then follows its
-own signed expiry independently of the receipt. Logout, group removal or login
-expiry does not stop sandboxes or clear their policies. Logout removes the local
-receipt, not provider SSO or upstream tokens. Revocation requires explicit
-sandbox stop/update/clear. Continuous membership checks, protected enrollment,
-automatic bundle acquisition/refresh and multi-organization composition are not
-implemented. Governed sandboxes currently reject guest/tool OAuth custody.
+`org apply` revalidates the receipt and applies its snapshot through the same
+live-or-stopped mutation path as `policy set`. A pinned sandbox policy then
+follows its own signed expiry independently of the receipt. Logout, group
+removal or login expiry does not stop sandboxes or clear their policies. Logout
+removes the local receipt, not provider SSO or upstream tokens. Revocation
+requires an explicit sandbox policy update or clear. Continuous membership
+checks, protected enrollment, automatic OIDC-driven bundle refresh and
+multi-organization composition are not implemented. Governed sandboxes currently reject guest/tool OAuth custody.
 
 ### Dynamic remote catalog
 
@@ -762,10 +766,12 @@ gantry policy verify -bundle /tmp/org-policy.tar.gz -key /tmp/org-public.pem \
 
 The three launch flags `-org-policy`, `-org-policy-key` and `-policy-profile` must
 be supplied together and also work with one-shot `exec`. Bundle bytes and public
-key are pinned in `sandbox.json` and reverified at boot. Source-file changes
-cannot update a running sandbox or its next boot. `policy set/clear` and `org
-apply` require a stopped sandbox and the launch lock; there is no partially
-reloaded enforcement state. `policy show` verifies the saved snapshot, while
+key are pinned in `sandbox.json` and reverified at boot. Source-file changes do
+not alter that snapshot. `policy set/clear`, `org apply`, and manager API
+updates reconcile their selected running daemon live. A manager policy-feed
+generation fans out through the same path to every saved sandbox; stopped
+updates use the launch lock and affect the next boot. `--restart` or `restart: true` explicitly selects
+controlled stop/update/resume. `policy show` verifies the saved snapshot, while
 `net-policy show` reports effective live rules when running. Neither signing
 private keys nor organization login tokens are persisted in sandbox config.
 
@@ -806,6 +812,87 @@ remain in force. Remote MCP dials check organization DNS and IP/port rules on th
 exact resolved address used, retaining SSRF protection. Credential release checks
 the configured upstream hostname before resolving its secret.
 
+### Policy distribution and live rollout
+
+`gantry serve` can run one optional host-side organization policy receiver
+configured by `-policy-feed`. Its configuration pins an organization, one
+profile applied manager-wide, an exact HTTPS endpoint, the organization RSA
+verification key, TLS CA, and mTLS client certificate/key. Paths are resolved
+and read once at manager startup. Files must be regular and symlink-free; the
+client key also requires owner-only Unix permissions or a protected Windows
+DACL. Feed credentials never enter a guest, manager API response, or sandbox
+configuration.
+
+The endpoint is polled immediately and then every 5–3600 seconds (30 seconds by
+default). Requests refuse redirects, require normal hostname verification plus
+the configured client certificate, use bounded headers and deadlines, and send
+`If-None-Match` with the last ETag. The last successfully applied generation and
+digest are returned in bounded request headers so the service can observe
+rollout progress. `Prefer: wait=30` lets a service implement a long poll without
+requiring a distinct streaming protocol. Responses are strict, bounded JSON
+containing version 1, the exact organization, a nonzero
+monotonic generation and one base64-encoded signed bundle. Profile and public
+key come only from local configuration.
+
+The receiver verifies the bundle through the normal policy engine before
+lifecycle mutation. Feed state stores the endpoint identity, applied and
+pending generations, bundle digests, ETags, and signed bundles in the protected
+manager state tree. Desired state is staged durably before fan-out. A restarted
+manager restores mandatory admission and attempts any pending fan-out before
+accepting lifecycle requests; unsuccessful targets remain stopped and retry in
+the background. An applied snapshot is restored before a 304 or unavailable
+feed response. The mTLS private key is never copied there. An
+older generation is rejected, and reusing a generation with different content
+is also rejected. Transport authentication controls which service can assign a
+generation, while the separately pinned bundle signature establishes policy
+provenance.
+
+A changed generation takes the manager-wide policy write barrier, enumerates
+all saved sandboxes, and then uses the existing per-sandbox mutation locks in
+stable order. Lifecycle requests and new exec/SSH admission take the read side
+before a sandbox lock, so creation, start, deletion, manual policy mutation, or
+a new remote session cannot cross the fan-out boundary. The new snapshot is
+also retained for later manager-created
+sandboxes. Per-sandbox policy replacement/clear and unmanaged low-level VM runs
+are refused while that snapshot is active; a failed target cannot be resumed
+through the manager until its saved snapshot matches.
+
+For each running sandbox, the daemon first verifies and compiles the candidate
+without changing active state. It then enables fail-closed credential/MCP and
+filesystem barriers, enters the network policy/port transaction domain,
+installs a default-deny network barrier (retaining only required replies for
+active UDP forwards), and:
+
+1. derives the local network policy from the active in-memory snapshot rather
+   than rereading a source path, then exactly replaces its organization guard;
+2. atomically marks each now-denied user export inaccessible and updates the
+   share expiry deadline, without revoking daemon-owned helper delivery;
+3. persists the snapshot through the daemon's single `ConfigStore` owner;
+4. publishes the immutable authorization engine, resets the expiry timer, and
+   releases the barriers.
+
+The embedded stack, split network worker and degraded split-VMM topology all
+receive the complete effective network policy. Worker generations use
+prepare/commit/status reconciliation; an unconfirmed worker update fails closed.
+Local network-policy and port changes share the outer transaction lock, so they
+land wholly before or after the organization generation. Existing MCP sessions
+are closed at the barrier; new sessions, authorization, and credential release
+read the controller for the active generation. Denied exports stay
+pinned but all new and already-open-handle operations fail; a later generation
+can restore them without changing the user's share configuration.
+
+A confirmed failure before persistence restores the old network and share
+state. For an organization-wide generation, any target that does not reach the
+new snapshot is stopped even if its local rollback succeeded; fan-out continues
+to the remaining targets. The receiver records and reports its aggregate cursor
+only after every saved sandbox succeeds, so a partial rollout is retried. A
+stopped sandbox is updated without being started.
+
+`restart: true` and `--restart` retain the controlled rollout path. A private
+marker records intent before stopping; retries resume an already-saved
+snapshot, while failures remain stopped and recoverable. This fallback is also
+useful for topology changes which cannot support a live organization policy.
+
 ### Native network restrictions
 
 Rego's `network_plan` query materializes a validated native guard rather than
@@ -820,8 +907,8 @@ allow = local policy allows AND organization network plan allows
 
 Local JSON retains first-match semantics, DNS-learned state and its default
 public-internet posture. Organization policy cannot relax the local-network
-wall. Live `net-policy` updates, dashboard overrides and worker replacements
-inherit the guard; only a stopped snapshot change can remove it.
+wall. Live `net-policy` updates and dashboard overrides inherit the current
+guard; an organization-policy generation exactly replaces or removes it.
 
 `network.dns` permits queries through the gateway resolver; an empty list denies
 queries. DNS permission does not grant returned IP access: a matching IP/port
@@ -857,8 +944,9 @@ compliance storage. No MCP arguments/results, tokens or resource contents are
 logged. Packets retain bounded traffic summaries, not per-packet Rego decisions.
 
 V1 excludes arbitrary bundle Rego, argument-based MCP rules, interactive
-approvals, mandatory host enrollment, automatic refresh, live policy reload,
-revision rollback protection, continuous SSO checks and multi-org composition.
+approvals, mandatory host enrollment, continuous SSO checks and multi-org
+composition. Policy feeds prevent generation rollback locally but
+do not turn free-form bundle revisions into a globally ordered revision scheme.
 OAuth custody is rejected until host-side refresh/delivery is governed. Host
 image/asset downloads and other administrative activity are outside this policy.
 Explicit environment/file secrets remain host-selected inputs; their eventual
@@ -933,6 +1021,12 @@ Unix mode bits or a protected Windows DACL. Registration verifies TLS,
 authentication, and health before saving either. The token grants the same host
 control as the manager API and is not scoped by organization identity.
 
+The optional policy feed is an outbound mTLS connection owned by the manager
+and uses a separate client identity. It does not expose or reuse the manager
+bearer token. Feed-triggered fan-out shares bounded lifecycle admission and the
+same per-sandbox serialization as API operations, behind a manager-wide policy
+barrier.
+
 Remote dispatch resolves an explicit `-remote` or `GANTRY_REMOTE` before local
 command execution. Unsupported or failed remote operations do not fall back to
 local. Manager-host paths remain manager-host paths; only APIs defined as
@@ -963,6 +1057,7 @@ The default layout is:
 
 ~/.gantry/
 ├── credentials.json
+├── manager-state/policy-feeds/ # feed generations, digests, ETags and signed bundle
 ├── orgs/                       # token-free organization login receipts
 ├── remotes.json                # public remote profile metadata
 ├── remotes/<profile>.token     # private manager bearer tokens
@@ -989,6 +1084,7 @@ The default layout is:
     ├── worker-vmm.log
     ├── worker-mcp.log          # when MCP is enabled
     ├── mcp-restart-required    # saved MCP config differs from the live worker
+    ├── policy-rollout.json     # only while a controlled restart is incomplete
     └── runtime locks, sockets, and readiness files
 ```
 

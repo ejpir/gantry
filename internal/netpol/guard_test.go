@@ -67,6 +67,30 @@ func TestOrganizationGuardCannotBeOverridden(t *testing.T) {
 	}
 }
 
+func TestReplaceExactChangesOrganizationGuard(t *testing.T) {
+	oldPolicy, err := WithGuard(DefaultPolicy(), testGuard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard := testGuard()
+	guard.Revision = "r2"
+	guard.Rules = []GuardRule{{ID: "other", Effect: "allow", CIDR: "2.2.2.2/32", Protocol: "tcp", Ports: []uint16{80}}}
+	guard.DNS = []string{"other.example"}
+	next, err := WithGuard(DefaultPolicy(), guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oldPolicy.ReplaceExact(next); err != nil {
+		t.Fatal(err)
+	}
+	if oldPolicy.Allows([4]byte{1, 1, 1, 1}, protoTCP, 443) || !oldPolicy.Allows([4]byte{2, 2, 2, 2}, protoTCP, 80) {
+		t.Fatal("exact replacement did not publish the new organization guard")
+	}
+	if oldPolicy.DomainAllowed("example.com") || !oldPolicy.DomainAllowed("other.example") {
+		t.Fatal("exact replacement did not publish the new DNS guard")
+	}
+}
+
 func TestOrganizationDNSIsResolutionOnly(t *testing.T) {
 	guard := testGuard()
 	guard.Rules = nil

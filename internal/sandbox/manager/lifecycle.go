@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 )
 
@@ -26,6 +27,13 @@ type Lifecycle interface {
 	// Exec runs one command inside a running sandbox and captures its output,
 	// reporting ErrExecTimeout or ErrExecOutputLimit when those bounds are hit.
 	Exec(ctx context.Context, name string, request ExecRequest) (ExecResult, error)
+}
+
+// OrganizationPolicyService is the optional live-policy capability supplied
+// by the local sandbox lifecycle. Keeping it separate preserves manager
+// backends which intentionally support only controlled restarts.
+type OrganizationPolicyService interface {
+	ApplyOrganizationPolicy(context.Context, string, *policy.Config) error
 }
 
 // ImageService is the image-cache capability of a manager backend. Keeping it

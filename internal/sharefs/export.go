@@ -62,7 +62,8 @@ type Export struct {
 	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
 	coherence       *exportCoherence
 
-	state atomic.Int32
+	state        atomic.Int32
+	policyDenied atomic.Bool
 	// namespace serializes guest-originated name mutations with the
 	// lstat/open policy check. The host is trusted, but concurrent FUSE
 	// requests must not swap a FIFO or device into place between those steps.
@@ -99,6 +100,12 @@ func (e *Export) Identity() Identity {
 	return e.identity
 }
 
+// PolicyDenied reports that the active organization-policy generation has
+// withheld this otherwise-live export.
+func (e *Export) PolicyDenied() bool {
+	return e != nil && e.policyDenied.Load()
+}
+
 func (e *Export) advanceState(next ExportState) {
 	if e == nil {
 		return
@@ -113,7 +120,7 @@ func (e *Export) advanceState(next ExportState) {
 
 func (e *Export) usable() bool {
 	state := e.State()
-	return state == ExportActive || state == ExportDraining
+	return !e.policyDenied.Load() && (state == ExportActive || state == ExportDraining)
 }
 
 func (e *Export) mutable() syscall.Errno {

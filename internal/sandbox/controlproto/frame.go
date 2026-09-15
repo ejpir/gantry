@@ -8,9 +8,10 @@ import (
 )
 
 const (
-	// Control requests are commands and metadata, never bulk data. Session
-	// bytes flow only after the bounded JSON handshake has completed.
-	MaxRequestBytes  = 64 << 10
+	// Control requests are commands and bounded metadata, including a signed
+	// organization snapshot of at most policy.MaxBundleBytes after base64 JSON
+	// encoding. Session bytes still flow only after this handshake.
+	MaxRequestBytes  = 512 << 10
 	MaxResponseBytes = 1 << 20
 	MaxEventBytes    = 64 << 10
 	HandshakeTimeout = 5 * time.Second

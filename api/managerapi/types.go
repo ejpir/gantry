@@ -48,7 +48,8 @@ type Sandbox struct {
 
 // CreateSandboxRequest is POST /v1/sandboxes. Zero values are omitted so the
 // manager's defaults apply; secret NAMES only — values are resolved from the
-// manager's own environment and are never accepted over HTTP.
+// manager's own environment and are never accepted over HTTP. An active
+// organization-wide feed snapshot is inherited rather than client-selectable.
 type CreateSandboxRequest struct {
 	OrganizationPolicy *policy.Config `json:"organizationPolicy,omitempty"`
 	Name               string         `json:"name"`
@@ -126,9 +127,13 @@ type NetworkPolicyRequest struct {
 
 // OrganizationPolicyRequest accepts only a signed data bundle and PUBLIC key.
 // The canonical policy.Config is shared with the local verification path.
+// Per-sandbox mutations are refused while a manager-wide feed is active.
 type OrganizationPolicyRequest struct {
 	Snapshot *policy.Config `json:"snapshot,omitempty"`
 	Clear    bool           `json:"clear,omitempty"`
+	// Restart explicitly selects controlled stop/update/resume. Without it, a
+	// running sandbox reconciles the policy across live enforcement points.
+	Restart bool `json:"restart,omitempty"`
 }
 
 type OrganizationPolicy struct {

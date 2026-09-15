@@ -1,6 +1,6 @@
-// Package testidp implements a loopback-only, disposable OIDC protocol fixture.
-// It automatically authenticates a synthetic user. It is NOT a production IdP
-// and is only imported by tests and the standalone E2E driver.
+// Package testidp implements loopback-only, disposable OAuth 2.0 and OIDC
+// protocol fixtures. They automatically authenticate a synthetic user. They
+// are NOT production IdPs and are imported only by tests and E2E drivers.
 package testidp
 
 import (

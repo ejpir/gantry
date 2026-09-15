@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
@@ -72,6 +73,7 @@ type broker struct {
 	// restarting the VM, and newly created user sessions read it atomically.
 	devContainers atomic.Bool
 	configure     func(controlproto.ConfigureRequest) (bool, error)
+	policyApply   func(*policy.Config) error
 	// audit is the daemon-wide trail and sink writer shared with early boot
 	// and policy callbacks. auditMu is only the no-ring standalone fallback.
 	audit   *auditRing
@@ -176,6 +178,8 @@ func (br *broker) handle(c net.Conn) {
 		br.configureControl(c, req)
 	case "netpolicy.set", "netpolicy.get":
 		br.networkPolicyControl(c, req)
+	case "policy.set":
+		br.organizationPolicyControl(c, req)
 	case "secret.set", "secret.remove":
 		br.secretControl(c, req)
 	case "mcp.remote.set", "mcp.remote.remove", "mcp.filesystem.set":
@@ -191,6 +195,23 @@ func (br *broker) handle(c net.Conn) {
 	default:
 		_, _ = fmt.Fprintln(c, `{"error":"unknown op"}`)
 	}
+}
+
+func (br *broker) organizationPolicyControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.OrganizationPolicyResponse) { _ = json.NewEncoder(c).Encode(&resp) }
+	if br.policyApply == nil {
+		respond(controlproto.OrganizationPolicyResponse{Error: "live organization policy is unavailable"})
+		return
+	}
+	if req.Policy == nil || req.Policy.Clear == (req.Policy.Snapshot != nil) {
+		respond(controlproto.OrganizationPolicyResponse{Error: "supply exactly one of snapshot or clear=true"})
+		return
+	}
+	if err := br.policyApply(req.Policy.Snapshot); err != nil {
+		respond(controlproto.OrganizationPolicyResponse{Error: err.Error()})
+		return
+	}
+	respond(controlproto.OrganizationPolicyResponse{OK: true})
 }
 
 func (br *broker) secretControl(c net.Conn, req controlproto.Request) {

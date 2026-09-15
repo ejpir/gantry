@@ -97,7 +97,7 @@ func (d *daemonRuntime) startHostServices() error {
 	}
 	d.consoleLog = consoleLog
 	d.console = consoleLog.Writer()
-	network, err := startNetworkWithGovernance(d.cfg, d.dir, d.governance)
+	network, err := startNetworkWithGovernance(d.cfg, d.dir, d.governance.Snapshot())
 	if err != nil {
 		return err
 	}
@@ -105,7 +105,7 @@ func (d *daemonRuntime) startHostServices() error {
 	d.bootLog("network up")
 	d.logNetworkState()
 
-	shareManager, warnings, err := control.NewShareManagerWithPolicy(d.dir, d.store, d.governance)
+	shareManager, warnings, err := control.NewShareManagerWithController(d.dir, d.store, d.governance)
 	if err != nil {
 		return fmt.Errorf("shares: %w", err)
 	}

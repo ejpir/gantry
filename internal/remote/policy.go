@@ -96,7 +96,7 @@ func remotePolicy(ctx context.Context, out, errs io.Writer, target string, clien
 	usage := func() int {
 		_, _ = fmt.Fprintf(errs, "usage: gantry %s %s -remote NAME\n", verb, map[string]string{
 			"net-policy": "show NAME | set NAME FILE [--allow-local-net] | default NAME",
-			"policy":     "show NAME | set NAME -bundle FILE -key PUBLIC.pem -profile PROFILE | clear NAME",
+			"policy":     "show NAME | set NAME -bundle FILE -key PUBLIC.pem -profile PROFILE [--restart] | clear NAME [--restart]",
 			"audit":      "NAME",
 		}[verb])
 		return 2
@@ -121,12 +121,14 @@ func remotePolicy(ctx context.Context, out, errs io.Writer, target string, clien
 	fs.SetOutput(errs)
 	var allowLocal *bool
 	var bundle, key, profile *string
+	var restart *bool
 	if verb == "net-policy" {
 		allowLocal = fs.Bool("allow-local-net", false, "allow remote host local networks (organization policy still applies)")
 	} else {
 		bundle = fs.String("bundle", "", "signed data-only policy bundle on this client")
 		key = fs.String("key", "", "trusted RSA PUBLIC key on this client")
 		profile = fs.String("profile", "", "organization profile")
+		restart = fs.Bool("restart", false, "stop, update, and resume a running sandbox")
 	}
 	args, err := parseInterleaved(fs, argv[1:])
 	if errors.Is(err, flag.ErrHelp) {
@@ -188,7 +190,7 @@ func remotePolicy(ctx context.Context, out, errs io.Writer, target string, clien
 			}
 			return 0
 		case "set", "clear":
-			request := managerapi.OrganizationPolicyRequest{Clear: action == "clear"}
+			request := managerapi.OrganizationPolicyRequest{Clear: action == "clear", Restart: *restart}
 			if !request.Clear {
 				request.Snapshot, err = policy.ReadConfig(*bundle, *key, *profile)
 				if err != nil {
@@ -197,7 +199,7 @@ func remotePolicy(ctx context.Context, out, errs io.Writer, target string, clien
 				if request.Snapshot == nil {
 					return usage()
 				}
-			} else if fs.NFlag() != 0 {
+			} else if *bundle != "" || *key != "" || *profile != "" {
 				return usage()
 			}
 			op, err = client.SetOrganizationPolicy(ctx, name, request)

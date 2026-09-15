@@ -179,9 +179,9 @@ func (g *networkGuard) domainAllowed(name string) bool {
 	return domainMatches(g.spec.DNS, name)
 }
 
-// WithGuard attaches a detached guard to a detached local policy. Normal local
-// policy replacements cannot remove or replace the running guard; changing an
-// organization snapshot is a restart-only operation in v1.
+// WithGuard attaches a detached guard to a detached local policy. Ordinary
+// local-policy replacements inherit the running guard; the daemon's live
+// organization transaction may exactly replace it.
 func WithGuard(policy *Policy, spec GuardSpec) (*Policy, error) {
 	guard, err := parseGuard(spec)
 	if err != nil {
@@ -201,4 +201,20 @@ func InheritGuard(next, current *Policy) {
 	if next != nil && current != nil && current.current().guard != nil {
 		next.guard = current.current().guard
 	}
+}
+
+// WithoutGuard clones the local network policy while removing its
+// organization overlay. It is used when a running daemon prepares a new
+// signed organization generation without rereading the original policy file.
+func WithoutGuard(current *Policy) (*Policy, error) {
+	raw, err := Marshal(current)
+	if err != nil {
+		return nil, err
+	}
+	cloned, err := Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	cloned.guard = nil
+	return cloned, nil
 }

@@ -143,6 +143,24 @@ rollback support.
 
 An explicit `-rwlayer` is caller-owned and is not removed by `gantry delete`.
 
+## A policy feed does not update all sandboxes
+
+Policy-feed diagnostics are written by the `gantry serve` process. Check that:
+
+- the feed URL uses HTTPS and does not redirect;
+- the service trusts the configured client certificate;
+- the configured CA verifies the service hostname;
+- the client-key file has owner-only permissions or a protected Windows ACL;
+- the response organization and signed bundle match the locally pinned key and
+  profile; and
+- the generation increased without reusing an old number for different bytes.
+
+A feed cursor advances only after every saved sandbox receives the generation.
+The receiver continues with other targets and retries a partial rollout. Any
+running target that cannot reconcile is stopped rather than left on the old
+organization generation. `gantry policy show NAME` reports each saved revision;
+a deliberately stopped sandbox is updated but not started.
+
 ## Strict process isolation refuses to start
 
 `-process-isolation=required` fails when a worker property cannot be verified.

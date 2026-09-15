@@ -97,7 +97,10 @@ function Start-TestSandbox([string]$Name, [string[]]$ExtraArgs) {
         "-kernel", $script:Kernel,
         "-rootfs", $script:Rootfs,
         "-image", $script:Image,
-        "-mem", "256",
+        # Helper-backed OAuth/MCP startup must not race a 256 MiB guest under
+        # a loaded reusable metal host; this battery validates security, not
+        # minimum-memory operation.
+        "-mem", "512",
         "-cpus", "1",
         "-process-isolation", "auto"
     ) + $ExtraArgs

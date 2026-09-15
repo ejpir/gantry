@@ -110,8 +110,19 @@ func run(opts options) (runErr error) {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(repo, "go.mod")); err != nil {
-		return fmt.Errorf("run from the Gantry repository root: %w", err)
+	if opts.gantry == "" {
+		if _, err := os.Stat(filepath.Join(repo, "go.mod")); err != nil {
+			return fmt.Errorf("run from the Gantry repository root when building Gantry: %w", err)
+		}
+	} else {
+		gantry, err := filepath.Abs(opts.gantry)
+		if err != nil {
+			return err
+		}
+		opts.gantry = gantry
+		// A prebuilt field driver is standalone. Use the supplied binary's
+		// directory for child commands rather than requiring source on hosts.
+		repo = filepath.Dir(gantry)
 	}
 
 	work := opts.workDir
@@ -184,6 +195,18 @@ func run(opts options) (runErr error) {
 		env = environmentFrom(env, map[string]string{"GANTRY_IMAGES": opts.imageStore})
 	}
 
+	var policyFeed *policyFeedHarness
+	if !opts.apiOnly {
+		if err := step("prepare mTLS policy feed", func() error {
+			var err error
+			policyFeed, err = setupPolicyFeed(ctx, repo, env, gantry, work)
+			return err
+		}); err != nil {
+			return err
+		}
+		defer policyFeed.Close()
+	}
+
 	if !opts.apiOnly && opts.image == builtInImage {
 		if err := step("cache built-in image", func() error {
 			var err error
@@ -217,6 +240,9 @@ func run(opts options) (runErr error) {
 			"-listen", "unix://" + socketPath,
 			"-listen", "tls://" + remote.address,
 			"--self-signed", "--token-file", remote.tokenPath}
+	}
+	if policyFeed != nil {
+		serveArgs = append(serveArgs, "--policy-feed", policyFeed.configPath)
 	}
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -346,7 +372,7 @@ func run(opts options) (runErr error) {
 
 	createBody, err := json.Marshal(map[string]any{
 		"name": opts.name, "image": opts.image, "kernel": opts.kernel, "rootfs": opts.rootfs,
-		"rw": false, "net": false, "oauthBridge": false, "processIsolation": "auto",
+		"rw": false, "net": true, "oauthBridge": false, "processIsolation": "auto",
 		"memoryMiB": 512, "cpus": 1, "secretNames": []string{"MANAGER_E2E_SECRET"},
 	})
 	if err != nil {
@@ -402,6 +428,48 @@ func run(opts options) (runErr error) {
 		}
 		if !bytes.Contains(config, []byte("MANAGER_E2E_SECRET")) || bytes.Contains(config, []byte(secretValue)) {
 			return errors.New("sandbox config must contain the secret name but never its value")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	// Complete the real low-level VM deadline check before activating the
+	// organization-wide feed. Raw runs are deliberately refused after policy
+	// publication because they have no named sandbox enforcement points.
+	if m2 != nil {
+		if err := step("real remote CLI lifecycle, SSH/SFTP, live configure and raw VM deadline", func() error { return m2.lifecycleChecks(ctx, opts) }); err != nil {
+			return err
+		}
+		if _, _, err := m2.cli(ctx, 0, "remote", "rm", "m2"); err != nil {
+			return err
+		}
+		m2 = nil
+	}
+
+	if err := step("organization-wide mTLS policy feed live update", func() error {
+		return testPolicyFeedRollout(ctx, client, policyFeed, opts.name, createBody)
+	}); err != nil {
+		return err
+	}
+	if err := step("organization policy refuses unmanaged raw VM", func() error {
+		kernel, rootfs := opts.kernel, opts.rootfs
+		if kernel == "" {
+			kernel = guestasset.DefaultKernel()
+		}
+		if rootfs == "" {
+			rootfs = guestasset.DefaultRootfs()
+		}
+		request, err := json.Marshal(map[string]any{"kernel": kernel, "rootfs": rootfs})
+		if err != nil {
+			return err
+		}
+		status, body, _, err := client.do(ctx, http.MethodPost, "/v1/run", request, map[string]string{"Idempotency-Key": "raw-policy-refused-1"})
+		if err != nil {
+			return err
+		}
+		if status != http.StatusConflict || !bytes.Contains(body, []byte("disabled while an organization-wide policy feed is active")) {
+			return fmt.Errorf("organization-managed raw run status=%d body=%s", status, body)
 		}
 		return nil
 	}); err != nil {
@@ -480,14 +548,6 @@ func run(opts options) (runErr error) {
 		return err
 	}
 
-	if m2 != nil {
-		if err := step("real remote CLI lifecycle, SSH/SFTP, live configure and raw VM deadline", func() error { return m2.lifecycleChecks(ctx, opts) }); err != nil {
-			return err
-		}
-		if _, _, err := m2.cli(ctx, 0, "remote", "rm", "m2"); err != nil {
-			return err
-		}
-	}
 	fmt.Println("manager API E2E passed")
 	return nil
 }

@@ -47,6 +47,22 @@ func TestNormalizeAndAuthorization(t *testing.T) {
 	}
 }
 
+func TestNormalizePreservesConfiguredLoopbackCallback(t *testing.T) {
+	p := testSpec()
+	p.RedirectURI = "http://127.0.0.1:53693/callback"
+	p, err := Normalize(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, redirect, err := p.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redirect != p.RedirectURI {
+		t.Fatalf("authorization redirect = %q, want %q", redirect, p.RedirectURI)
+	}
+}
+
 func TestNormalizeRejectsUnsafeOrUnsupportedRegistrations(t *testing.T) {
 	for name, mutate := range map[string]func(*Spec){
 		"reserved":                 func(p *Spec) { p.Provider = "codex" },

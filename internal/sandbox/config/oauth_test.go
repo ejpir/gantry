@@ -10,7 +10,7 @@ import (
 	"github.com/ejpir/gantry/internal/oauthprovider"
 )
 
-const customOAuthJSON = `{"name":"company-mcp","authorize_url":"https://auth.example/authorize","token_url":"https://auth.example/token","client_id":"public-client","resource":"https://mcp.example/mcp","credential_hosts":["git.example"]}`
+const customOAuthJSON = `{"name":"company-mcp","authorize_url":"https://auth.example/authorize","token_url":"https://auth.example/token","client_id":"public-client","redirect_uri":"http://127.0.0.1:53693/callback","scope":"mcp offline_access","resource":"https://mcp.example/mcp","credential_hosts":["git.example"]}`
 
 func TestOAuthProviderFileValidation(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "provider.json")
@@ -63,7 +63,7 @@ func TestOAuthProviderConfigRoundTripAndSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := store.Snapshot()
-	if snapshot.OAuthProviders[0].Provider != "company-mcp" || snapshot.OAuthProviders[0].Resource != p.Resource {
+	if snapshot.OAuthProviders[0].Provider != "company-mcp" || snapshot.OAuthProviders[0].Resource != p.Resource || snapshot.OAuthProviders[0].RedirectURI != p.RedirectURI || snapshot.OAuthProviders[0].Scope != p.Scope {
 		t.Fatal("registration not persisted")
 	}
 	snapshot.OAuthProviders[0].CredentialHosts[0] = "evil.example"

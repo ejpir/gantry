@@ -258,10 +258,11 @@ func writeFile(path string, data []byte, mode os.FileMode) error {
 }
 
 // A missing guest utility is an infrastructure failure, not a passing deny.
-const probePrerequisites = `command -v timeout >/dev/null || exit 42
-if command -v curl >/dev/null; then :; elif command -v wget >/dev/null; then :; else exit 42; fi
-if command -v getent >/dev/null; then :; elif command -v nslookup >/dev/null; then :; else exit 42; fi
-test -x /run/gantry/bin/credhelper && test -x /run/gantry/bin/gantry-guest || exit 42
+const probePrerequisites = `command -v timeout >/dev/null || { echo OPA-MISSING-timeout; exit 42; }
+if command -v curl >/dev/null; then :; elif command -v wget >/dev/null; then :; else echo OPA-MISSING-http-client; exit 42; fi
+if command -v getent >/dev/null; then :; elif command -v nslookup >/dev/null; then :; else echo OPA-MISSING-dns-client; exit 42; fi
+test -x /run/gantry/bin/credhelper || { echo OPA-MISSING-credhelper; exit 42; }
+test -x /run/gantry/bin/gantry-guest || { echo OPA-MISSING-gantry-guest; exit 42; }
 echo OPA-PROBES-READY`
 
 func httpProbe(url string) string {

@@ -2,7 +2,8 @@
 
 Sign in to use your organization's sandbox policy and discover its remote
 managers. Organization login is optional; personal and standalone remotes do
-not require it.
+not require it. Unattended [policy feeds](organization-policy.md#receive-policy-updates)
+use a separate host mTLS identity rather than saved OIDC tokens.
 
 ## Sign in
 
@@ -38,14 +39,12 @@ See [Remote access](remote-access.md) for connecting to a standalone manager.
 
 ## Apply policy to an existing sandbox
 
-Login does not change existing sandboxes. To apply the selected policy, stop
-the sandbox first:
+Login does not change existing sandboxes. Apply the selected policy explicitly;
+a running sandbox updates live:
 
 ```sh
-gantry stop dev
 gantry org apply example-company dev
 gantry policy show dev
-gantry resume dev
 ```
 
 Organization policy cannot be combined with `-oauth-custody`.

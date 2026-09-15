@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/client"
+	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
@@ -50,6 +51,12 @@ func (d *daemonRuntime) startControl() error {
 		// in the split topology.
 		streamDial = func() (net.Conn, error) { return d.runner.DialStream(1026) }
 	}
+	liveNetworkPolicy := d.network.Policy
+	if liveNetworkPolicy == nil {
+		// Networking-disabled sandboxes still need a stable effective policy for
+		// the host credential egress gate when organization policy changes live.
+		liveNetworkPolicy = netpol.DefaultPolicy()
+	}
 	d.broker = &broker{
 		cfg:            d.cfg,
 		dir:            d.dir,
@@ -60,7 +67,7 @@ func (d *daemonRuntime) startControl() error {
 		store:          d.store,
 		shares:         d.shares,
 		ports:          d.ports,
-		netPolicy:      control.NewNetworkPolicyManagerWithCoordinator(d.store, d.network.Backend, d.network.Policy, d.networkTransactions),
+		netPolicy:      control.NewNetworkPolicyManagerWithCoordinator(d.store, d.network.Backend, liveNetworkPolicy, d.networkTransactions),
 		capture:        packetCaptureBackendFor(d.network, d.runner),
 		guestToolsDone: make(chan struct{}),
 		ideToolsDone:   make(chan struct{}),
@@ -71,6 +78,7 @@ func (d *daemonRuntime) startControl() error {
 	}
 	d.broker.devContainers.Store(d.cfg.DevContainers)
 	d.broker.configure = d.configureSandbox
+	d.broker.policyApply = d.applyOrganizationPolicy
 	d.secretStore.SetLogger(d.broker.auditf)
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
@@ -81,9 +89,7 @@ func (d *daemonRuntime) startControl() error {
 	// Credential broker: guest helpers reach it over vsock (the VMM dials
 	// <dir>/1027.sock when a guest connects to the broker port). The egress
 	// gate follows the live policy object.
-	if d.network != nil && d.network.Policy != nil {
-		d.broker.domainAllowed = d.network.Policy.DomainAllowed
-	}
+	d.broker.domainAllowed = d.broker.netPolicy.DomainAllowed
 	credLn, err := net.Listen("unix", filepath.Join(d.dir, credhelper.SockName))
 	if err != nil {
 		return fmt.Errorf("credential broker listener: %w", err)
@@ -134,39 +140,80 @@ func (d *daemonRuntime) startControl() error {
 func (d *daemonRuntime) supervise() int {
 	workerDead := closedWhenNetworkWorkerExits(d.network)
 	vmmDead := closedWhenVMMWorkerExits(d.runner)
-	var policyExpiry <-chan time.Time
-	if deadline := d.governance.ExpiresAt(); !deadline.IsZero() {
-		timer := time.NewTimer(max(0, time.Until(deadline)))
-		defer timer.Stop()
-		policyExpiry = timer.C
-	}
-
-	select {
-	case <-policyExpiry:
-		return d.gracefulStop("organization policy expired")
-	case sig := <-d.signals:
-		return d.gracefulStop("signal " + sig.String())
-	case <-d.shutdown:
-		return d.gracefulStop("control request")
-	case err := <-d.guestErr:
-		fmt.Fprintln(os.Stderr, "daemon: VM exited:", err)
-		return 1
-	case <-workerDead:
-		// Losing the network worker also loses the policy enforcement point.
-		// A VMM death closes the network data socket and can make both worker
-		// notifications ready together. Give the VMM watcher a brief chance to
-		// publish its authoritative process state so we do not report the
-		// dependent network EOF as the root cause.
-		if waitForClosed(vmmDead, 100*time.Millisecond) {
-			fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.runner.Err())
-			fmt.Fprintln(os.Stderr, "daemon: network worker also died:", d.network.Worker.Err())
-		} else {
-			fmt.Fprintln(os.Stderr, "daemon: network worker died:", d.network.Worker.Err())
+	var expiryTimer *time.Timer
+	defer func() {
+		if expiryTimer != nil {
+			expiryTimer.Stop()
 		}
-		return 1
-	case <-vmmDead:
-		fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.runner.Err())
-		return 1
+	}()
+
+	for {
+		var policyExpiry <-chan time.Time
+		if deadline := d.governance.ExpiresAt(); !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				current := d.governance.ExpiresAt()
+				if current.IsZero() || current.After(deadline) {
+					continue
+				}
+				return d.gracefulStop("organization policy expired")
+			}
+			if expiryTimer == nil {
+				expiryTimer = time.NewTimer(remaining)
+			} else {
+				if !expiryTimer.Stop() {
+					select {
+					case <-expiryTimer.C:
+					default:
+					}
+				}
+				expiryTimer.Reset(remaining)
+			}
+			policyExpiry = expiryTimer.C
+		} else if expiryTimer != nil {
+			if !expiryTimer.Stop() {
+				select {
+				case <-expiryTimer.C:
+				default:
+				}
+			}
+		}
+
+		select {
+		case <-policyExpiry:
+			// A replacement can race the previous timer becoming ready. Recheck
+			// the currently published engine before stopping for stale expiry.
+			deadline := d.governance.ExpiresAt()
+			if deadline.IsZero() || time.Now().Before(deadline) {
+				continue
+			}
+			return d.gracefulStop("organization policy expired")
+		case <-d.policyChanged:
+			continue
+		case sig := <-d.signals:
+			return d.gracefulStop("signal " + sig.String())
+		case <-d.shutdown:
+			return d.gracefulStop("control request")
+		case err := <-d.guestErr:
+			fmt.Fprintln(os.Stderr, "daemon: VM exited:", err)
+			return 1
+		case <-workerDead:
+			// Losing the network worker also loses the policy enforcement point.
+			// A VMM death closes the network data socket and can make both worker
+			// notifications ready together. Give the VMM watcher a brief chance to
+			// publish its authoritative process state so we do not report the
+			// dependent network EOF as the root cause.
+			if waitForClosed(vmmDead, 100*time.Millisecond) {
+				fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.runner.Err())
+				fmt.Fprintln(os.Stderr, "daemon: network worker also died:", d.network.Worker.Err())
+			} else {
+				fmt.Fprintln(os.Stderr, "daemon: network worker died:", d.network.Worker.Err())
+			}
+			return 1
+		case <-vmmDead:
+			fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.runner.Err())
+			return 1
+		}
 	}
 }
 

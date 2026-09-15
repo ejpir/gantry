@@ -38,4 +38,41 @@ func TestPolicyCLIUsesSignedProfileAndStrictCheckInput(t *testing.T) {
 			t.Errorf("%s: exit %d", tc.resource, got)
 		}
 	}
+
+	called := false
+	rollout := func(name string, snapshot *policy.Config) error {
+		called = true
+		if name != "dev" || snapshot == nil || snapshot.Profile != "dev" {
+			t.Fatalf("rollout = %q, %#v", name, snapshot)
+		}
+		return nil
+	}
+	args := append([]string{"set", "dev"}, flags...)
+	args = append(args, "--restart")
+	if got := CmdPolicyWithRollout(args, rollout); got != 0 || !called {
+		t.Fatalf("restart set = %d, called=%t", got, called)
+	}
+	called = false
+	if got := CmdPolicyWithRollout([]string{"clear", "dev", "--restart"}, func(name string, snapshot *policy.Config) error {
+		called = name == "dev" && snapshot == nil
+		return nil
+	}); got != 0 || !called {
+		t.Fatalf("restart clear = %d, called=%t", got, called)
+	}
+}
+
+func TestSetOrganizationPolicyUsesRunningDaemon(t *testing.T) {
+	useShortGantryHome(t)
+	candidate := policytest.Signed(t, policy.Profile{})
+	captured := fakeLiveSandbox(t, "policy-live", `{"ok":true}`)
+	if err := SetOrganizationPolicy("policy-live", candidate); err != nil {
+		t.Fatal(err)
+	}
+	request := <-captured
+	if request.Op != "policy.set" || request.Policy == nil || request.Policy.Clear || request.Policy.Snapshot == nil {
+		t.Fatalf("live policy request = %+v", request)
+	}
+	if request.Policy.Snapshot.Profile != candidate.Profile {
+		t.Fatalf("live policy profile = %q", request.Policy.Snapshot.Profile)
+	}
 }

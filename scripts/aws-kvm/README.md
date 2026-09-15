@@ -25,22 +25,35 @@ The scripts default to `eu-west-1`, `c5.metal`, and bucket
 `gantry-kvm-test-<account-id>`. Override these with `REGION`, `INSTANCE_TYPE`,
 and `BUCKET`.
 
-For routine x86_64 acceptance, the repository-level orchestrator builds and
-stages the current curated Dev Containers image, starts the reusable Linux KVM
-and Windows WHPX hosts, waits for SSM, tests real checksummed self-updates on
-disposable binaries, runs every maintained field battery, and stops both
-instances on exit:
+For routine acceptance, the repository-level orchestrator builds and stages
+current amd64 and arm64 Dev Containers images, starts the reusable Linux amd64
+KVM, Linux arm64 KVM, and Windows WHPX hosts, waits for SSM, tests real
+checksummed self-updates on disposable binaries, runs every maintained field
+battery, and stops all three instances on exit:
 
 ```sh
 source ~/keys
 sh scripts/aws-e2e-validation.sh
 ```
 
-Set `GANTRY_KEEP_INSTANCES=1` to leave both hosts running for investigation.
+Set `GANTRY_KEEP_INSTANCES=1` to leave all hosts running for investigation.
 Instance IDs and the bucket can be overridden with `GANTRY_LINUX_IID`,
-`GANTRY_WINDOWS_IID`, and `GANTRY_TEST_BUCKET`. The orchestrator needs a Docker-
-compatible builder for the x86-64 curated image; set `GANTRY_TEST_IDE_IMAGE` to
-an already-built EROFS image to skip that build.
+`GANTRY_ARM_IID`, `GANTRY_WINDOWS_IID`, and `GANTRY_TEST_BUCKET`. The
+orchestrator needs a Docker-compatible multi-platform builder; set
+`GANTRY_TEST_IDE_IMAGE` and `GANTRY_TEST_ARM_IDE_IMAGE` to already-built EROFS
+images to skip those builds. All three hosts run the signed-policy battery and
+the organization-wide live mTLS manager policy-feed battery; both Linux
+architectures also run SSH/Dev Containers and large-directory coverage.
+
+On Linux with `/dev/kvm`, the focused local mode runs the complete manager
+API/SSH/policy-feed battery and public-client OAuth/MCP custody battery. GitHub
+CI uses this mode with the kernel, rootfs, image, host binary, and guest helper
+built by its prerequisite jobs:
+
+```sh
+GANTRY_TEST_WORKLOAD_IMAGE=artifacts/gantry-default-image-x86_64.erofs \
+  sh scripts/aws-e2e-validation.sh linux
+```
 
 On Apple-silicon macOS, the same entry point can run the local HVF manager and
 a broad functional battery without loading AWS credentials or touching EC2. It
@@ -64,12 +77,14 @@ confirms that host policy permits Internet access only through a proxy; set
 `GANTRY_TEST_PUBLIC_EGRESS=required` to force those assertions.
 
 Both the Linux main battery and the macOS functional battery now include
-`scripts/oauth-custody-e2e.py`. It uses real VMs and the current guest helper,
-with local mock OAuth/MCP endpoints: no browser, GitHub account, real token, or
-public OAuth connection is required. It checks GitHub device polling and
-host-bound git credentials (including egress denial), custom MCP PKCE/resource
-binding, refresh-token rotation, access-token redaction, stop/resume persistence,
-expired/revoked credentials, and absence of guest auth files and audit leaks.
+`scripts/oauth-custody-e2e.py` and the disposable Go authorization server in
+`tests/e2e/oauthidp`. They use real VMs and the current guest helper; no browser,
+GitHub account, real token, or public OAuth connection is required. The local
+server implements authorization-code and device grants, S256 PKCE, single-use
+codes, refresh rotation, authorization-server metadata, and an audience-bound
+MCP resource. The battery checks host-bound git credentials (including egress
+denial), access-token redaction, stop/resume persistence, expired/revoked
+credentials, and absence of guest auth files and audit leaks.
 The pre-existing Claude auth-file custody checks remain in the shared battery.
 
 To rerun only the new OAuth scenarios after building/staging the binaries:
@@ -77,8 +92,11 @@ To rerun only the new OAuth scenarios after building/staging the binaries:
 ```sh
 # Apple silicon: rebuild and sign the current host/guest binaries first.
 sh scripts/build.sh
+go build -o /tmp/gantry-oauth-idp ./tests/e2e/oauthidp
+codesign --force --sign - /tmp/gantry-oauth-idp
 # Use a cached OCI reference or a local EROFS as --image.
 GANTRY_ARTIFACTS="$PWD/artifacts" python3 scripts/oauth-custody-e2e.py \
+  --idp /tmp/gantry-oauth-idp \
   --gantry artifacts/gantry-darwin-arm64 \
   --kernel artifacts/gantry-kernel-arm64 \
   --rootfs artifacts/nerdbox-rootfs-arm64.erofs \
@@ -134,7 +152,8 @@ before running the full battery or expect that section to fail.
 | `run-tests.sh` | Upload a fresh x86_64 binary, populate `/opt/gantry`, and run `test-battery.sh`. |
 | `run-tests-arm64.sh` | Upload current ARM64 binaries and boot assets, then run the maintained confinement/share/MCP battery on Graviton. |
 | `test-battery.sh` | Shared Linux KVM/macOS HVF functional battery, including secrets and Claude/GitHub/custom MCP OAuth custody. |
-| `../oauth-custody-e2e.py` | Standalone real-VM GitHub device and generic MCP/PKCE custody checks using local mock endpoints. |
+| `../oauth-custody-e2e.py` | Standalone real-VM GitHub device and generic MCP/PKCE custody orchestration. |
+| `../../tests/e2e/oauthidp` | Disposable protocol-level OAuth authorization server and MCP resource used by the custody battery. |
 | `ssh-devcontainers-validation.sh` | Exercise direct and managed SSH, SFTP, asynchronous helper readiness, nested Podman, and stop/resume state handling. |
 | `directory-validation.sh` | Exercise large shared-directory scans and host/guest coherence. |
 | `self-update-validation.sh` | Verify a disposable tagged binary updates in place from a checksummed GitHub release. |

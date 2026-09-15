@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/policy"
+	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
 	"github.com/ejpir/gantry/internal/sandbox/manager"
 )
 
@@ -26,6 +30,18 @@ func (managerLifecycle) Stop(name string) error {
 		return manager.ErrNotRunning
 	}
 	return err
+}
+
+func (managerLifecycle) ApplyOrganizationPolicy(_ context.Context, name string, snapshot *policy.Config) error {
+	return controlcmd.SetOrganizationPolicy(name, snapshot)
+}
+
+// RolloutOrganizationPolicy gives the local CLI the same controlled restart
+// transaction used by manager API and policy-feed updates.
+func RolloutOrganizationPolicy(name string, snapshot *policy.Config) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	return manager.RolloutOrganizationPolicy(ctx, managerLifecycle{}, name, snapshot, true, nil)
 }
 
 // Delete is idempotent: deleteSandbox removes the tree, so repeating it is a

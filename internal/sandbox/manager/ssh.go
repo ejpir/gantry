@@ -56,10 +56,15 @@ func (m *managerService) handleSSH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseSlot(m.sshSlots)
+	// Block new tunnels across organization-wide publication. Once admitted,
+	// the sandbox daemon's live enforcement update governs the existing SSH
+	// session without requiring the manager lock for its full lifetime.
+	m.organizationPolicyMu.RLock()
 	lock := m.sandboxLock(name)
 	lock.RLock()
 	guest, err := service.DialSSH(r.Context(), name)
 	lock.RUnlock()
+	m.organizationPolicyMu.RUnlock()
 	if err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, os.ErrNotExist) {

@@ -26,6 +26,21 @@ authority; it is not a scoped multi-tenant credential.
 CA to clients through a trusted channel. TLS verification is always enabled;
 plaintext listeners and insecure verification are unsupported.
 
+The same manager can receive signed organization policy generations through
+an outbound mTLS feed:
+
+```sh
+gantry serve -listen tls://0.0.0.0:8443 \
+  -tls-cert /secure/path/server.crt -tls-key /secure/path/server.key \
+  -token-file /secure/path/manager.token \
+  -policy-feed /secure/path/organization-feed.json
+```
+
+The policy feed uses a separate client certificate and never receives the
+manager bearer token. Its accepted generations govern all sandboxes managed by
+this server. See
+[Organization policy](organization-policy.md#receive-policy-updates).
+
 ## Add a client profile
 
 ```sh
@@ -86,9 +101,11 @@ The SSH host key is learned over authenticated TLS and pinned locally. A
 changed key is refused until you verify it and explicitly accept it.
 
 Remote image pulls and low-level `run` operations support idempotency keys and
-bounded operation results. Events are current-state snapshots, not durable
-history. See [Architecture](architecture.md#remote-manager-transport) for
-routing, operation, and tunnel details.
+bounded operation results. Organization-policy updates apply live by default;
+pass `restart: true` or use `gantry policy set ... --restart` to explicitly
+request controlled stop/update/resume. Events are current-state snapshots, not
+durable history. See [Architecture](architecture.md#remote-manager-transport)
+for routing, operation, and tunnel details.
 
 ## Create from the dashboard
 

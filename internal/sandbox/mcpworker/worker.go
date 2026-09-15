@@ -48,6 +48,7 @@ type Worker struct {
 
 	sessionMu           sync.RWMutex
 	sessionCapabilities map[string]struct{}
+	sessionConnections  map[string]net.Conn
 	closeOnce           sync.Once
 	closeErr            error
 }
@@ -98,6 +99,7 @@ func start(servers []Server, workdir, confinement string, audit func(mcpgw.Event
 		child: child, servers: serverMap, audit: audit,
 		sessions:            make(chan struct{}, 16),
 		sessionCapabilities: make(map[string]struct{}),
+		sessionConnections:  make(map[string]net.Conn),
 	}
 	fail := func(cause error) (*Worker, error) {
 		_ = child.Terminate(5 * time.Second)
@@ -329,6 +331,9 @@ func (worker *Worker) Serve(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("create MCP session capability: %w", err)
 	}
 	defer worker.revokeSessionCapability(capability)
+	if !worker.bindSessionConnection(capability, conn) {
+		return fmt.Errorf("MCP session revoked")
+	}
 
 	stream, err := worker.mux.Open(ctx, workerapi.OpenRequest{Kind: workerapi.StreamGuest, Session: capability})
 	if err != nil {
@@ -387,10 +392,46 @@ func (worker *Worker) registerSessionCapability() (string, error) {
 	}
 }
 
+func (worker *Worker) bindSessionConnection(capability string, conn net.Conn) bool {
+	worker.sessionMu.Lock()
+	defer worker.sessionMu.Unlock()
+	if _, active := worker.sessionCapabilities[capability]; !active {
+		return false
+	}
+	worker.sessionConnections[capability] = conn
+	return true
+}
+
 func (worker *Worker) revokeSessionCapability(capability string) {
 	worker.sessionMu.Lock()
 	delete(worker.sessionCapabilities, capability)
+	delete(worker.sessionConnections, capability)
 	worker.sessionMu.Unlock()
+}
+
+// CloseSessions revokes every current guest MCP capability and connection.
+// New sessions remain possible and will be evaluated against the controller's
+// newly published organization policy.
+func (worker *Worker) CloseSessions() {
+	if worker == nil {
+		return
+	}
+	worker.sessionMu.Lock()
+	connections := make([]net.Conn, 0, len(worker.sessionConnections))
+	for capability, connection := range worker.sessionConnections {
+		delete(worker.sessionCapabilities, capability)
+		delete(worker.sessionConnections, capability)
+		connections = append(connections, connection)
+	}
+	// A capability between registration and connection binding has no stream to
+	// close; deleting it makes bind fail before the mux is opened.
+	for capability := range worker.sessionCapabilities {
+		delete(worker.sessionCapabilities, capability)
+	}
+	worker.sessionMu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
 }
 
 func (worker *Worker) hasSessionCapability(capability string) bool {

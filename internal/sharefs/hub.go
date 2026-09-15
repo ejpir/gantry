@@ -49,12 +49,13 @@ type Hub struct {
 	// invalidations are available, so hot-add never depends on watcher health.
 	rootVer atomic.Int64
 
-	mu       sync.RWMutex
-	exports  map[string]*Export
-	all      map[*Export]struct{}
-	closed   bool
-	deadline time.Time // request lock; hard expiry of an optional host policy
-	nextSalt atomic.Uint64
+	mu            sync.RWMutex
+	exports       map[string]*Export
+	all           map[*Export]struct{}
+	closed        bool
+	policyBlocked bool      // request lock; fail-closed live-policy barrier
+	deadline      time.Time // request lock; hard expiry of an optional host policy
+	nextSalt      atomic.Uint64
 }
 
 // NewHub constructs an empty dynamic namespace. Persistent sandboxes add
@@ -389,11 +390,39 @@ func (h *Hub) SetNotificationSink(sink fusewire.NotificationSink) {
 }
 
 // SetDeadline bounds the lifetime of every export, including already-open
-// handles. Zero means no policy deadline. Set before exposing the hub.
+// handles. Zero means no policy deadline.
 func (h *Hub) SetDeadline(deadline time.Time) {
 	h.request.Lock()
 	defer h.request.Unlock()
 	h.deadline = deadline
+}
+
+// SetPolicyBlocked drains in-flight filesystem requests and makes every new
+// request fail closed while a live organization-policy update is reconciled.
+func (h *Hub) SetPolicyBlocked(blocked bool) {
+	if h == nil {
+		return
+	}
+	h.request.Lock()
+	defer h.request.Unlock()
+	h.policyBlocked = blocked
+}
+
+// SetPolicyAccess atomically publishes the policy deadline and per-export
+// denials. A denied export remains pinned and can be restored by a later
+// generation, but every node and already-open handle returns ESTALE.
+func (h *Hub) SetPolicyAccess(deadline time.Time, denied map[string]bool) {
+	if h == nil {
+		return
+	}
+	h.request.Lock()
+	defer h.request.Unlock()
+	h.deadline = deadline
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for export := range h.all {
+		export.policyDenied.Store(denied[export.Tag])
+	}
 }
 
 // HandleRequest serves one raw FUSE request. Hub remains transport-neutral;
@@ -403,6 +432,9 @@ func (h *Hub) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	defer h.request.RUnlock()
 	if h.closed {
 		return 0, fuse.EIO
+	}
+	if h.policyBlocked {
+		return 0, fuse.EACCES
 	}
 	if !h.deadline.IsZero() && !time.Now().Before(h.deadline) {
 		return 0, fuse.EACCES

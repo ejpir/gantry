@@ -91,7 +91,7 @@ gantry start governed -image alpine:latest \
 ```
 
 Or sign in with a trusted organization configuration, discover approved
-remotes, and apply its policy to a stopped sandbox:
+remotes, and apply its policy to an existing sandbox:
 
 ```sh
 gantry org login -config organization.json
@@ -99,7 +99,11 @@ gantry org remotes example-company
 gantry org apply example-company dev
 ```
 
-Organization discovery never supplies the separate remote-manager token. See
+Organization discovery never supplies the separate remote-manager token. A
+long-running manager can also receive generations of signed policy through an
+outbound mTLS channel with `gantry serve -policy-feed organization-feed.json`.
+Each generation applies to all saved sandboxes, updates running guests live,
+and is inherited by later manager-created sandboxes. See
 [Organization login](docs/gantry/organization-login.md) and
 [Organization policy](docs/gantry/organization-policy.md).
 
@@ -111,7 +115,7 @@ Organization discovery never supplies the separate remote-manager token. See
 - Host shares, egress policy, proxy routing, traffic inspection, and ports
 - Local SSH and an optional in-VM IDE container for VS Code Dev Containers
 - In-memory secrets, OAuth custody, and a credential-injecting MCP gateway
-- Signed organization policy and optional OIDC remote discovery
+- Signed organization policy, mTLS update feeds, and optional OIDC discovery
 - Standalone remote sandboxes over an authenticated HTTPS manager
 - Terminal dashboard and local HTTP/JSON manager API
 

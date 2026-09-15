@@ -161,13 +161,39 @@ type Policy struct {
 // DNS-learned allowances intentionally start empty in the replacement;
 // bounded TCP return-flow state is shared so established published
 // connections survive unless an explicit rule in the replacement denies them.
+// FailClosedPolicy returns a default-deny update barrier. When active UDP
+// forwards exist, only their fixed gateway reply range remains reachable; this
+// preserves already-published inbound service without permitting autonomous
+// guest egress.
+func FailClosedPolicy(allowGatewayUDPReplies bool) (*Policy, error) {
+	if !allowGatewayUDPReplies {
+		return Parse([]byte(`{"default":"deny"}`))
+	}
+	return Parse([]byte(fmt.Sprintf(`{"default":"deny","rules":[{"action":"allow","cidr":"%s/32","proto":"udp","ports":"%d-%d"}]}`,
+		gatewayIP, GatewayUDPFirstReplyPort, GatewayUDPLastReplyPort)))
+}
+
 func (p *Policy) Replace(next *Policy) error {
+	return p.replace(next, true)
+}
+
+// ReplaceExact atomically publishes a complete effective policy, including
+// its organization guard. Ordinary local-policy updates use Replace, which
+// preserves the existing guard; organization generation changes use this
+// exact form after constructing the full local-plus-organization result.
+func (p *Policy) ReplaceExact(next *Policy) error {
+	return p.replace(next, false)
+}
+
+func (p *Policy) replace(next *Policy, inheritGuard bool) error {
 	if p == nil || next == nil {
 		return fmt.Errorf("network policy replacement is nil")
 	}
 	current := p.current()
 	replacement := next.current()
-	InheritGuard(replacement, current)
+	if inheritGuard {
+		InheritGuard(replacement, current)
+	}
 	replacement.publishedFlows.Store(current.publishedFlowTable())
 	p.active.Store(replacement)
 	return nil

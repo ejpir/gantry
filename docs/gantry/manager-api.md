@@ -118,13 +118,22 @@ are:
 - `/v1/images`, `/v1/images/pull`, and `/v1/images/delete` for image operations;
 - `/v1/sandboxes/{name}/ssh` for an authenticated SSH upgrade;
 - `/v1/sandboxes/{name}/net-policy` for network policy;
-- `/v1/sandboxes/{name}/policy` for organization policy;
+- `/v1/sandboxes/{name}/policy` for live organization policy and controlled
+  restart rollout;
 - `/v1/sandboxes/{name}/audit` for a bounded audit tail;
 - `/v1/run` for a bounded low-level VM run; and
 - `/v1/operations/{id}` for operation state.
 
+Organization-policy mutation applies live to a running sandbox by default. Add
+`"restart": true` to explicitly request controlled stop/update/resume. A
+stopped sandbox remains stopped. The signed snapshot is always verified on the
+manager. After an organization-wide feed generation is active, per-sandbox
+replacement and clearing are refused; new manager-created sandboxes inherit the
+feed snapshot.
+
 Low-level run accepts manager-host asset paths and bounded input, output, and
-timeouts. It is not named-sandbox creation. See
+timeouts. It is not named-sandbox creation and is disabled while an
+organization-wide feed policy is active. See
 [Architecture](architecture.md#remote-manager-transport) for execution and SSH
 tunnel boundaries.
 

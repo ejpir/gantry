@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
@@ -28,8 +29,25 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 class FixtureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.build_dir = tempfile.TemporaryDirectory()
+        suffix = ".exe" if os.name == "nt" else ""
+        cls.idp_binary = str(Path(cls.build_dir.name) / ("oauth-idp" + suffix))
+        subprocess.run(
+            ["go", "build", "-o", cls.idp_binary, "./tests/e2e/oauthidp"],
+            cwd=Path(__file__).resolve().parent.parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.build_dir.cleanup()
+
     def setUp(self):
-        self.fixture = e2e.MockOAuth()
+        self.fixture = e2e.LocalIDP(self.idp_binary)
         self.addCleanup(self.fixture.close)
         self.client = build_opener(ProxyHandler({}), NoRedirect())
 
@@ -50,7 +68,13 @@ class FixtureTests(unittest.TestCase):
             response = response_error
         with response:
             raw = response.read()
-            return response.status, response.headers, json.loads(raw) if raw else {}
+            payload = (
+                json.loads(raw)
+                if raw
+                and response.headers.get_content_type() == "application/json"
+                else {}
+            )
+            return response.status, response.headers, payload
 
     def authorization(self, verifier="v" * 43):
         challenge = (
@@ -136,8 +160,7 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(token["access_token"], response["result"]["content"][0]["text"])
         self.assertEqual(self.fixture.observation("mcp_phases"), [2])
-        with self.fixture.lock:
-            self.fixture.revoked = True
+        self.fixture.revoke()
         status, _, error = self.request(
             "/token",
             {
@@ -368,6 +391,33 @@ class FixtureTests(unittest.TestCase):
         self.assertIn("received IDs [1]", str(failure.exception))
         self.assertIn(str(battery.last_command_log), str(failure.exception))
 
+    def test_linux_ci_runs_real_vm_manager_and_oauth_batteries(self):
+        workflow = Path(__file__).resolve().parent.parent.joinpath(
+            ".github/workflows/ci.yml"
+        ).read_text()
+        start = workflow.index("  native-smoke:")
+        end = workflow.index("\n  build:", start)
+        native = workflow[start:end]
+        self.assertIn("needs: [build, guest-assets, kernels, guest-tools]", native)
+        self.assertIn("scripts/aws-e2e-validation.sh linux", native)
+        self.assertIn("GANTRY_TEST_WORKLOAD_IMAGE", native)
+        self.assertNotIn("-api-only", native)
+        runner = Path(__file__).with_name("aws-e2e-validation.sh").read_text()
+        start = runner.index("run_linux_validation()")
+        end = runner.index('\ncase "$MODE"', start)
+        linux = runner[start:end]
+        self.assertIn("scripts/test-manager-api-e2e.sh", linux)
+        self.assertIn("scripts/oauth-custody-e2e.py", linux)
+        self.assertIn("./tests/e2e/oauthidp", linux)
+
+    def test_linux_runner_stages_current_idp_binary(self):
+        runner = (
+            Path(__file__).with_name("aws-kvm").joinpath("run-tests.sh").read_text()
+        )
+        self.assertIn("./tests/e2e/oauthidp", runner)
+        self.assertIn("gantry-oauth-idp-linux-amd64", runner)
+        self.assertIn("GANTRY_TEST_OAUTH_IDP=/opt/gantry/", runner)
+
     def test_shared_runner_requires_exit_success_and_completion_marker(self):
         battery = self.battery()
         shared = (
@@ -383,6 +433,7 @@ class FixtureTests(unittest.TestCase):
         env = dict(
             os.environ,
             GANTRY_TEST_OAUTH_E2E=str(fixture),
+            GANTRY_TEST_OAUTH_IDP=str(battery.root / "oauth-idp"),
             SECRET_TMP=str(battery.root),
             G="not-executed",
             KERNEL="kernel",
@@ -390,7 +441,11 @@ class FixtureTests(unittest.TestCase):
             CACHE_IMAGE="image",
         )
         for label, program, expected in (
-            ("success", 'print("OAuth E2E: 1 checks passed")', "SHARED_OK"),
+            (
+                "success",
+                'import sys; assert "--idp" in sys.argv; print("OAuth E2E: 1 checks passed")',
+                "SHARED_OK",
+            ),
             ("empty script", "pass", "SHARED_FAIL"),
             (
                 "failed cleanup",

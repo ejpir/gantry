@@ -83,7 +83,8 @@ paths:
         Run the existing low-level kernel/disk launcher in a helper on the
         manager host, not a named sandbox. Console I/O is bounded. The helper
         is killed and reaped on deadline, caller disconnect or manager shutdown.
-        Uses bounded lifecycle admission; raw runs are serialized. Repeat an
+        Uses bounded lifecycle admission; raw runs are serialized and refused
+        while an organization-wide feed policy is active. Repeat an
         Idempotency-Key to retrieve the same operation, never launch twice.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -294,7 +295,7 @@ paths:
             schema: { $ref: "#/components/schemas/OrganizationPolicyRequest" }
       responses:
         "200":
-          description: Signed snapshot verified server-side and saved; sandbox must be stopped
+          description: Signed snapshot verified server-side and applied live when running; restart=true selects controlled stop/update/resume; mutation is refused while an organization-wide feed policy is active
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Operation" }
@@ -485,7 +486,7 @@ components:
       properties:
         organizationPolicy:
           $ref: "#/components/schemas/OrganizationSnapshot"
-          description: Optional signed organization policy, verified before boot. Not a transferable organization login credential.
+          description: Optional signed organization policy, verified before boot. Not a transferable organization login credential. An active manager-wide feed snapshot is inherited and conflicting input is refused.
         name: { type: string }
         image: { type: string }
         kernel: { type: string }
@@ -592,10 +593,11 @@ components:
         allowLocal: { type: boolean }
     OrganizationPolicyRequest:
       type: object
-      description: Exactly one of snapshot or clear=true. Set/clear require a stopped sandbox.
+      description: Exactly one of snapshot or clear=true. Running sandboxes update live unless restart=true requests controlled stop/update/resume.
       properties:
         snapshot: { $ref: "#/components/schemas/OrganizationSnapshot" }
         clear: { type: boolean }
+        restart: { type: boolean, description: Explicitly stop, update coherently, and resume instead of applying live }
     OrganizationSnapshot:
       type: object
       required: [bundle, public_key, profile]

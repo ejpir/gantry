@@ -151,6 +151,34 @@ func TestFlattenWhiteoutsAndOrdering(t *testing.T) {
 	}
 }
 
+func TestFlattenAddsReadOnlyRuntimeBindTargets(t *testing.T) {
+	layer := writeLayer(t, tarEntry{"bin", tar.TypeDir, 0o755, 0, 0, "", "", 0, 0})
+	img, _ := flattenInto(t, layer)
+	for _, name := range []string{"etc/hosts", "etc/resolv.conf"} {
+		info, err := fs.Stat(img, name)
+		if err != nil {
+			t.Fatalf("runtime bind target %s: %v", name, err)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 {
+			t.Errorf("runtime bind target %s mode = %v", name, info.Mode())
+		}
+	}
+}
+
+func TestFlattenPreservesImageRuntimeBindTargets(t *testing.T) {
+	layer := writeLayer(t,
+		tarEntry{"etc/hosts", tar.TypeReg, 0o600, 12, 34, "image-hosts\n", "", 0, 0},
+		tarEntry{"etc/resolv.conf", tar.TypeReg, 0o644, 0, 0, "nameserver 9.9.9.9\n", "", 0, 0},
+	)
+	img, _ := flattenInto(t, layer)
+	if got := readBack(t, img, "etc/hosts"); got != "image-hosts\n" {
+		t.Fatalf("image hosts = %q", got)
+	}
+	if got := readBack(t, img, "etc/resolv.conf"); got != "nameserver 9.9.9.9\n" {
+		t.Fatalf("image resolv.conf = %q", got)
+	}
+}
+
 func TestFlattenOverwriteLastWins(t *testing.T) {
 	l1 := writeLayer(t, tarEntry{"etc/passwd", tar.TypeReg, 0o644, 0, 0, "old\n", "", 0, 0})
 	l2 := writeLayer(t, tarEntry{"etc/passwd", tar.TypeReg, 0o600, 33, 44, "new\n", "", 0, 0})

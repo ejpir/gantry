@@ -35,7 +35,11 @@ type daemonRuntime struct {
 
 	cfg         config.RunConfig
 	secretStore *secret.Store
-	governance  *policy.Engine
+	governance  *policy.Controller
+	// policyUpdateMu serializes live organization-policy generations inside the
+	// daemon. policyChanged wakes supervise so expiry follows the active engine.
+	policyUpdateMu sync.Mutex
+	policyChanged  chan struct{}
 	// audit owns the shared sink writer and bounded security-event trail
 	// (policy, secrets, credentials, custody) from early boot onward. The
 	// broker serves audit.tail; audit.log is the stopped-state fallback.

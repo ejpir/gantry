@@ -3,7 +3,8 @@
 This black-box test launches `gantry serve` on an isolated Unix socket and
 uses the local hypervisor to create, exec, stop, restart, and delete a real
 sandbox. The shell entry point first runs the M2 safety tests, SSH gateway
-unit tests and an OpenSSH protocol harness, then executes the black-box battery. It also checks the OpenAPI endpoint, strict JSON validation,
+unit tests and an OpenSSH protocol harness, then executes the black-box
+battery. It also checks the OpenAPI endpoint, strict JSON validation,
 idempotency, operation lookup, SSE lifecycle events, output/timeout bounds,
 and secret-value non-persistence.
 
@@ -14,8 +15,13 @@ printed fingerprint, the bearer-authentication matrix (missing/wrong tokens
 are indistinguishable 403s on every path), plaintext-HTTP refusal, live
 token-file rotation, and — once a sandbox is running — the mutation audit
 trail (remote address and token fingerprint logged, never the token value).
-The full lifecycle and SSE checks then use authenticated TLS. An additional
-real CLI battery uses a **separate client state tree/cwd**, covering
+The full lifecycle and SSE checks then use authenticated TLS. It also starts a
+separate local mTLS policy service, creates two running sandboxes, publishes a
+newly signed organization generation, waits for the aggregate acknowledgement,
+and verifies both sandboxes change without replacing either process. It also
+checks that the active feed policy cannot be cleared per sandbox or bypassed
+with a low-level raw VM. Before policy publication, an additional real CLI
+battery uses a **separate client state tree/cwd**, covering
 `start → exec → configure → stop → configure → resume → exec → delete` and a
 bounded low-level `run` against the same verified boot assets. Live resource
 changes must report restart-required without changing active allocation;
@@ -76,8 +82,9 @@ real client/helper binaries, and exercises all manager-only checks above. It
 uses stopped configuration fixtures and a deliberate missing-asset raw-run
 failure, not a fake successful VM. It neither downloads assets nor boots guests.
 `-api-only -tls=false` is rejected rather than silently skipping remote tests.
-A passing API-only run does **not** sign off VM boot, live configuration or
-resource application after restart, or guest SSH/SFTP; run the default battery
+A passing API-only run does **not** sign off VM boot, organization-wide live
+policy-feed updates, live configuration or resource application after restart,
+or guest SSH/SFTP; run the default battery
 on a suitable host. The script's protocol regression (`TestOpenSSHManagerTunnelHarness`)
 uses real OpenSSH, compiled Gantry helpers and the production manager/gateway
 with a fixture executor and in-memory SFTP filesystem. It validates the test

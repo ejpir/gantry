@@ -96,7 +96,6 @@ func (s *state) preparePolicy(req workerproto.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	netpol.InheritGuard(next, s.policy)
 	if s.hostLoopbackUnavailable && next.MayAllowLoopback() {
 		return nil, fmt.Errorf("policy permits host loopback, which is unavailable to the confined Windows network worker")
 	}
@@ -132,7 +131,7 @@ func (s *state) commitPolicy(req workerproto.Request) (any, error) {
 	if err := validatePolicyAgainstUDPForwards(s.pending, forwards); err != nil {
 		return nil, err
 	}
-	if err := s.policy.Replace(s.pending); err != nil {
+	if err := s.policy.ReplaceExact(s.pending); err != nil {
 		return nil, err
 	}
 	s.currentTxn = s.pendingTxn

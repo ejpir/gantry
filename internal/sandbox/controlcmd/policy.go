@@ -15,26 +15,32 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
+// PolicyRollout performs the CLI's explicit controlled restart path.
+type PolicyRollout func(name string, snapshot *policy.Config) error
+
 // CmdPolicy manages optional organization snapshots, not host enrollment.
-// Updating/clearing a snapshot requires a stopped sandbox so mounts, network,
-// MCP and credential gates always start from one verified generation.
-func CmdPolicy(argv []string) int {
+func CmdPolicy(argv []string) int { return CmdPolicyWithRollout(argv, nil) }
+
+// CmdPolicyWithRollout enables --restart when the top-level sandbox package
+// supplies its lifecycle adapter. Direct package callers remain stopped-only.
+func CmdPolicyWithRollout(argv []string, rollout PolicyRollout) int {
 	usage := func() {
 		fmt.Fprintln(os.Stderr, `usage:
   gantry policy generate -out DIR [-mount PATH ...] [-ttl 30d] [-profile developer]
   gantry policy sign -data data.json -out DIR (-signing-key private.pem | -ephemeral)
   gantry policy verify -bundle bundle.tar.gz -key public.pem -profile NAME
   gantry policy check -bundle bundle.tar.gz -key public.pem -profile NAME -action ACTION -resource JSON
-  gantry policy set NAME -bundle bundle.tar.gz -key public.pem -profile PROFILE
-  gantry policy clear NAME
+  gantry policy set NAME -bundle bundle.tar.gz -key public.pem -profile PROFILE [--restart]
+  gantry policy clear NAME [--restart]
   gantry policy show NAME
 
 generate/sign create source/data.json, bundle.tar.gz and public.pem in a NEW
 output directory. generate is default-deny except for explicit read-only mounts;
 it uses an ephemeral test key. Neither command saves a private key.
-set/clear require a stopped sandbox. This is optional, host-owned policy;
-there is no mandatory device enrollment. check evaluates the organization
-layer only; local network/tool rules and built-in safety checks still apply.`)
+set/clear apply live when the sandbox is running; --restart explicitly requests
+stop/update/resume. This is optional, host-owned policy; there is no mandatory
+device enrollment. check evaluates the organization layer only; local
+network/tool rules and built-in safety checks still apply.`)
 	}
 	if len(argv) == 0 || argv[0] == "-h" || argv[0] == "--help" {
 		usage()
@@ -69,6 +75,7 @@ layer only; local network/tool rules and built-in safety checks still apply.`)
 	profile := fs.String("profile", "", "organization profile")
 	action := fs.String("action", "", "authorization action (check only)")
 	resource := fs.String("resource", "{}", "resource object, without credentials or MCP arguments (check only)")
+	restart := fs.Bool("restart", false, "stop, update, and resume a running sandbox (set/clear only)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -76,18 +83,26 @@ layer only; local network/tool rules and built-in safety checks still apply.`)
 		return 2
 	}
 	fail := func(err error) int { fmt.Fprintln(os.Stderr, "gantry policy:", err); return 1 }
-	if fs.NArg() != 0 || op != "check" && (*action != "" || *resource != "{}") {
+	restartProvided := false
+	fs.Visit(func(f *flag.Flag) { restartProvided = restartProvided || f.Name == "restart" })
+	if fs.NArg() != 0 || op != "check" && (*action != "" || *resource != "{}") || op != "set" && op != "clear" && restartProvided {
 		usage()
 		return 2
 	}
 	var snapshot *policy.Config
 	var err error
-	if op == "show" || op == "clear" {
+	switch op {
+	case "show":
 		if fs.NFlag() != 0 {
 			usage()
 			return 2
 		}
-	} else {
+	case "clear":
+		if *bundlePath != "" || *keyPath != "" || *profile != "" {
+			usage()
+			return 2
+		}
+	default:
 		snapshot, err = policy.ReadConfig(*bundlePath, *keyPath, *profile)
 		if err != nil {
 			return fail(err)
@@ -97,11 +112,22 @@ layer only; local network/tool rules and built-in safety checks still apply.`)
 		}
 	}
 	if op == "set" || op == "clear" {
-		err = SetOrganizationPolicy(name, snapshot)
+		if *restart {
+			if rollout == nil {
+				return fail(fmt.Errorf("controlled restart is unavailable from this caller"))
+			}
+			err = rollout(name, snapshot)
+		} else {
+			err = SetOrganizationPolicy(name, snapshot)
+		}
 		if err != nil {
 			return fail(err)
 		}
-		fmt.Printf("organization policy %s: %s (takes effect on next start)\n", op, name)
+		if *restart {
+			fmt.Printf("organization policy %s: %s (controlled restart completed when needed)\n", op, name)
+		} else {
+			fmt.Printf("organization policy %s: %s (active now when running; saved when stopped)\n", op, name)
+		}
 		return 0
 	}
 	if op == "show" {

@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	"github.com/ejpir/gantry/internal/policy"
+	"github.com/ejpir/gantry/internal/policyfeed"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/inspection"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
@@ -85,6 +87,13 @@ type managerService struct {
 	sshSlots       chan struct{}
 	sandboxLocks   [64]sync.RWMutex
 	rawRunLock     sync.RWMutex
+
+	// organizationPolicyMu is the manager-wide admission barrier. Lifecycle
+	// operations and new exec/SSH sessions hold it for reading before taking a
+	// sandbox shard; a feed generation holds it for writing while it fans out
+	// and publishes the snapshot inherited by later creates.
+	organizationPolicyMu sync.RWMutex
+	organizationPolicy   *policy.Config
 }
 
 func newManagerService(lifecycle Lifecycle) *managerService {
@@ -186,6 +195,12 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(operation *managerapi.Operation) error {
+		if active := m.organizationPolicy; active != nil {
+			if request.OrganizationPolicy != nil && !sameOrganizationPolicy(request.OrganizationPolicy, active) {
+				return fmt.Errorf("organization-wide policy feed controls sandbox policy")
+			}
+			request.OrganizationPolicy = policy.CloneConfig(active)
+		}
 		result, err := m.lifecycle.Start(r.Context(), createStartRequest(request), nil)
 		m.setOperationWarnings(operation.ID, result.Warnings)
 		return err
@@ -198,6 +213,15 @@ func (m *managerService) handleStartSandbox(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(*managerapi.Operation) error {
+		if active := m.organizationPolicy; active != nil {
+			cfg, err := config.ReadSandboxConfig(layout.Dir(name))
+			if err != nil {
+				return err
+			}
+			if !sameOrganizationPolicy(cfg.OrgPolicy, active) {
+				return fmt.Errorf("sandbox has not accepted the active organization-wide policy generation")
+			}
+		}
 		_, err := m.lifecycle.Start(r.Context(), lifecycle.StartRequest{Name: name, Mode: lifecycle.Resume}, nil)
 		return err
 	})
@@ -234,6 +258,11 @@ func (m *managerService) handleExecSandbox(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	// A new exec must not enter a still-old sandbox after a manager-wide
+	// generation has begun fan-out. Existing execs retain the documented rule
+	// that already-delivered operations are not revoked.
+	m.organizationPolicyMu.RLock()
+	defer m.organizationPolicyMu.RUnlock()
 	lock := m.sandboxLock(name)
 	lock.RLock()
 	defer lock.RUnlock()
@@ -366,6 +395,11 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 		return
 	}
 	defer releaseSlot(m.lifecycleSlots)
+	// Feed rollout takes the write side before any sandbox shard. Keeping the
+	// same order here prevents creates, starts, deletes, or policy mutations
+	// from slipping between organization-wide enumeration and publication.
+	m.organizationPolicyMu.RLock()
+	defer m.organizationPolicyMu.RUnlock()
 	lock := m.sandboxLock(name)
 	if kind == "run" {
 		lock = &m.rawRunLock
@@ -802,7 +836,8 @@ func SocketPath() string {
 // boundary. -listen tls://ADDR:PORT opts into the network transport, which
 // requires bearer-token authentication (--token-file) and TLS material
 // (--self-signed or --tls-cert/--tls-key); plaintext network listeners are
-// refused. See docs/remote-sandbox-access.md (milestone 1).
+// refused. An optional -policy-feed adds one outbound mTLS organization-wide
+// policy receiver. See docs/gantry/remote-access.md.
 func Cmd(argv []string, lifecycle Lifecycle) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -813,6 +848,8 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 	tlsCert := flags.String("tls-cert", "", "TLS certificate chain file (requires --tls-key)")
 	tlsKey := flags.String("tls-key", "", "TLS private key file (requires --tls-cert)")
 	tokenFile := flags.String("token-file", "", "bearer token file, one token per line (required with tls://)")
+	var feedPaths policyFeedFlags
+	flags.Var(&feedPaths, "policy-feed", "organization-wide mTLS policy-feed configuration")
 	mintToken := flags.Bool("mint-token", false, "print a fresh bearer token and exit")
 	if err := flags.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -821,7 +858,7 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "usage: gantry serve [-listen unix://PATH | tls://ADDR:PORT] [--self-signed | --tls-cert C --tls-key K] [--token-file PATH]")
+		fmt.Fprintln(os.Stderr, "usage: gantry serve [-listen unix://PATH | tls://ADDR:PORT] [--self-signed | --tls-cert C --tls-key K] [--token-file PATH] [--policy-feed CONFIG]")
 		fmt.Fprintln(os.Stderr, "       gantry serve --mint-token")
 		return 2
 	}
@@ -839,9 +876,22 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 		fmt.Fprintln(os.Stderr, "gantry serve:", err)
 		return 2
 	}
+	if len(feedPaths) > 1 {
+		fmt.Fprintln(os.Stderr, "gantry serve: only one organization-wide policy feed may be configured")
+		return 2
+	}
+	feeds := make([]*policyfeed.Config, 0, len(feedPaths))
+	for _, path := range feedPaths {
+		feed, err := policyfeed.LoadConfig(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry serve:", err)
+			return 2
+		}
+		feeds = append(feeds, feed)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := serveWithOptions(ctx, serveOptions{plan: plan}, lifecycle); err != nil {
+	if err := serveWithOptions(ctx, serveOptions{plan: plan, policyFeeds: feeds}, lifecycle); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry serve:", err)
 		return 1
 	}
@@ -861,6 +911,18 @@ func (f *listenFlags) Set(value string) error {
 	return nil
 }
 
+type policyFeedFlags []string
+
+func (f *policyFeedFlags) String() string { return strings.Join(*f, ",") }
+
+func (f *policyFeedFlags) Set(value string) error {
+	if value == "" {
+		return errors.New("empty -policy-feed value")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
 // serveManager keeps the historical single-unix-socket entry point for
 // existing callers and tests.
 func serveManager(socketPath string, lifecycle Lifecycle) error {
@@ -873,9 +935,10 @@ func serveManager(socketPath string, lifecycle Lifecycle) error {
 
 // serveOptions carries the validated plan plus injectable log destinations.
 type serveOptions struct {
-	plan servePlan
-	// audit receives authentication and mutation records for tls://
-	// listeners; nil defaults to stderr.
+	plan        servePlan
+	policyFeeds []*policyfeed.Config
+	// audit receives authentication, mutation, and policy-feed records;
+	// nil defaults to stderr.
 	audit *log.Logger
 }
 
@@ -884,6 +947,9 @@ type serveOptions struct {
 // budget across listeners; each listener gets the handler appropriate to its
 // transport (same-user unix, or bearer-authenticated TLS).
 func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifecycle) error {
+	if len(options.policyFeeds) > 1 {
+		return fmt.Errorf("only one organization-wide policy feed may be configured")
+	}
 	plan := options.plan
 	audit := options.audit
 	if audit == nil {
@@ -1006,6 +1072,32 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 			server: server,
 			listen: &limitedListener{Listener: listener, slots: slots, sameUserOnly: sameUserOnly},
 		})
+	}
+
+	feedStateDir := filepath.Join(stateDir, "policy-feeds")
+	receivers := make([]*policyfeed.Receiver, 0, len(options.policyFeeds))
+	for _, feed := range options.policyFeeds {
+		receiver, err := policyfeed.NewReceiver(feed, feedStateDir, audit, service.applyReceivedOrganizationPolicy)
+		if err != nil {
+			for _, opened := range receivers {
+				opened.Close()
+			}
+			return err
+		}
+		// Restore the acknowledged signed generation before accepting manager
+		// requests. A failed target has already been stopped by the aggregate
+		// rollout; retain the receiver so its background loop can retry.
+		if err := receiver.Restore(ctx); err != nil && ctx.Err() == nil {
+			audit.Printf("policy feed %s: %v", feed.Organization, err)
+		}
+		receivers = append(receivers, receiver)
+	}
+	for _, receiver := range receivers {
+		service.background.Add(1)
+		go func() {
+			defer service.background.Done()
+			receiver.Run(service.context)
+		}()
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)

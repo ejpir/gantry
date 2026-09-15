@@ -5,13 +5,14 @@ import (
 
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
 // SetOrganizationPolicy is shared by the local CLI and HTTP manager. An
 // uploaded snapshot is verified here, never trusted just because a client
-// says it verified it. The launch lock and stopped-only restriction prevent
-// mixing policy generations across broker, mounts and network workers.
+// says it verified it. Running sandboxes reconcile through their daemon;
+// stopped sandboxes update the saved snapshot under the launch lock.
 func SetOrganizationPolicy(name string, snapshot *policy.Config) error {
 	if err := layout.ValidateName(name); err != nil {
 		return err
@@ -20,7 +21,17 @@ func SetOrganizationPolicy(name string, snapshot *policy.Config) error {
 		return err
 	}
 	return mutateRunningOrStopped(name, func() error {
-		return fmt.Errorf("stop %s before changing its organization policy", name)
+		response, err := controlproto.CallWithTimeout[controlproto.OrganizationPolicyResponse](name, controlproto.Request{
+			Op: "policy.set", ID: controlproto.NewRequestID("policy"),
+			Policy: &controlproto.OrganizationPolicyRequest{Snapshot: policy.CloneConfig(snapshot), Clear: snapshot == nil},
+		}, controlproto.ConfigureTimeout)
+		if err != nil {
+			return err
+		}
+		if !response.OK {
+			return fmt.Errorf("live organization policy: %s", response.Error)
+		}
+		return nil
 	}, func() error {
 		store, err := config.LoadConfigStore(layout.Dir(name))
 		if err != nil {

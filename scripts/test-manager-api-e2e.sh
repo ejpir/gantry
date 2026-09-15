@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 # Keep the milestone-2 safety checks coupled to the black-box battery. They
 # cover wire/flag parity, explicit false values, replay, launch locks, bounded
@@ -12,12 +12,13 @@ case "${1-}" in
 esac
 
 go test -count=1 ./cmd/gantry ./internal/runvm ./internal/remote \
-  ./internal/sandbox/manager ./internal/sandbox/controlcmd \
+  ./internal/policyfeed ./internal/sandbox/manager ./internal/sandbox/controlcmd \
   ./internal/sandbox/sshgw ./tests/e2e/managerapi
 go test -count=1 ./internal/sandbox -run '^(TestManagerRun|TestConfigure)'
 
-# Default: TLS lifecycle + real VM/raw-run + SSH exec/SFTP, channel-policy,
-# live-disable and host-key rotation checks (requires OpenSSH ssh and sftp).
+# Default: TLS lifecycle + real VM/raw-run + SSH exec/SFTP, live mTLS
+# organization-wide policy updates, SSH channel-policy, live-disable and host-key rotation
+# checks (requires OpenSSH ssh and sftp).
 # -api-only explicitly selects the no-assets/no-hypervisor manager subset;
 # it does not claim guest SSH/SFTP validation.
 exec go run ./tests/e2e/managerapi "$@"

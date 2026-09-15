@@ -169,12 +169,22 @@ func (h *harness) enforcement(ctx context.Context, allowed, denied *endpoint) er
 	if _, err := h.expect(ctx, "active rule inspection retains org guard", 0, "org:e2e-org:deny-port", "net-policy", "show", "pol-main"); err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "running org-policy clear refused", 1, "stop pol-main", "policy", "clear", "pol-main"); err != nil {
+	pidPath := filepath.Join(h.state, "pol-main", "vmm.pid")
+	pidBefore, err := os.ReadFile(pidPath)
+	if err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "running org-policy replacement refused", 1, "stop pol-main", "policy", "set", "pol-main", "-bundle", f.good, "-key", f.publicKey, "-profile", "dev"); err != nil {
+	if _, err := h.expect(ctx, "running org-policy replacement applies live", 0, "active now", "policy", "set", "pol-main", "-bundle", f.good, "-key", f.publicKey, "-profile", "dev"); err != nil {
 		return err
 	}
+	pidAfter, err := os.ReadFile(pidPath)
+	if err != nil {
+		return err
+	}
+	if string(pidAfter) != string(pidBefore) {
+		return fmt.Errorf("live organization-policy replacement changed sandbox PID: %q -> %q", pidBefore, pidAfter)
+	}
+	h.pass("live organization-policy replacement keeps the sandbox process")
 
 	audit, err := h.expect(ctx, "OPA decisions available in live audit", 0, `"organization":"e2e-org"`, "audit", "pol-main")
 	if err != nil {
@@ -237,41 +247,72 @@ func (h *harness) enforcement(ctx context.Context, allowed, denied *endpoint) er
 		return err
 	}
 
-	strict := f.profile
-	strict.Network.Rules = nil
+	strict := policy.Profile{}
 	updated, err := f.sign("updated", "fixture-2", time.Now().Add(time.Hour), strict)
 	if err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "stop before bundle update", 0, "", "stop", "pol-main"); err != nil {
+	pidBefore, err = os.ReadFile(pidPath)
+	if err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "stopped bundle update accepted", 0, "next start", "policy", "set", "pol-main", "-bundle", updated, "-key", f.publicKey, "-profile", "dev"); err != nil {
+	if _, err := h.expect(ctx, "running bundle update accepted", 0, "active now", "policy", "set", "pol-main", "-bundle", updated, "-key", f.publicKey, "-profile", "dev"); err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "updated snapshot boots", 0, "", "resume", "pol-main"); err != nil {
+	pidAfter, err = os.ReadFile(pidPath)
+	if err != nil {
 		return err
 	}
+	if string(pidAfter) != string(pidBefore) {
+		return fmt.Errorf("live restrictive policy changed sandbox PID: %q -> %q", pidBefore, pidAfter)
+	}
+	h.pass("restrictive live update keeps the sandbox process")
 	if _, err := h.expect(ctx, "new revision active", 0, `"revision":"fixture-2"`, "policy", "show", "pol-main"); err != nil {
 		return err
 	}
 	if _, err := h.guest(ctx, "updated bundle revokes prior network grant", httpProbe(allowed.guestURL()), deniedExit, "OPA-NET-DENIED"); err != nil {
 		return err
 	}
+	if _, err := h.guest(ctx, "updated bundle revokes mounted share", "cat /host/code/marker", 1, ""); err != nil {
+		return err
+	}
+	if _, err := h.expect(ctx, "revoked share reports policy state", 0, "policy-denied", "share", "ls", "pol-main"); err != nil {
+		return err
+	}
+	if err := h.credentialGrants(ctx, []bool{false, false}); err != nil {
+		return err
+	}
+	mcpListing, err := h.command(ctx, "", "mcp", "tools", "pol-main")
+	if err != nil {
+		return err
+	}
+	if strings.Contains(mcpListing.output, "mock__") || mcpListing.code != 0 && !strings.Contains(strings.ToLower(mcpListing.output), "denied") {
+		return fmt.Errorf("live organization policy did not revoke MCP tools: %s", h.redact(mcpListing.output))
+	}
+	h.pass("updated bundle revokes MCP tools")
 
-	if _, err := h.expect(ctx, "stop before host opt-out", 0, "", "stop", "pol-main"); err != nil {
+	pidBefore, err = os.ReadFile(pidPath)
+	if err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "host can clear stopped snapshot", 0, "next start", "policy", "clear", "pol-main"); err != nil {
+	if _, err := h.expect(ctx, "host can clear running snapshot", 0, "active now", "policy", "clear", "pol-main"); err != nil {
 		return err
 	}
+	pidAfter, err = os.ReadFile(pidPath)
+	if err != nil {
+		return err
+	}
+	if string(pidAfter) != string(pidBefore) {
+		return fmt.Errorf("live organization-policy clear changed sandbox PID: %q -> %q", pidBefore, pidAfter)
+	}
+	h.pass("live organization-policy clear keeps the sandbox process")
 	if _, err := h.expect(ctx, "unmanaged state explicit", 0, "unmanaged", "policy", "show", "pol-main"); err != nil {
 		return err
 	}
-	if _, err := h.expect(ctx, "local-only sandbox restarts", 0, "", "resume", "pol-main"); err != nil {
+	if _, err := h.guest(ctx, "clearing snapshot restores local network behavior", httpProbe(denied.guestURL()), 0, denied.marker); err != nil {
 		return err
 	}
-	if _, err := h.guest(ctx, "clearing snapshot restores local network behavior", httpProbe(denied.guestURL()), 0, denied.marker); err != nil {
+	if _, err := h.guest(ctx, "clearing snapshot restores mounted share", "cat /host/code/marker", 0, "OPA-SHARE-OK"); err != nil {
 		return err
 	}
 	if err := h.credentials(ctx, true); err != nil {
@@ -302,20 +343,27 @@ func (h *harness) network(ctx context.Context, allowed, denied *endpoint, label 
 	return err
 }
 func (h *harness) credentials(ctx context.Context, unmanaged bool) error {
-	for i, host := range []string{"git.allowed.test", "git.denied.test"} {
+	return h.credentialGrants(ctx, []bool{true, unmanaged})
+}
+
+func (h *harness) credentialGrants(ctx context.Context, grants []bool) error {
+	hosts := []string{"git.allowed.test", "git.denied.test"}
+	if len(grants) != len(hosts) {
+		return fmt.Errorf("credential grant fixture has %d entries, want %d", len(grants), len(hosts))
+	}
+	for i, host := range hosts {
 		query := fmt.Sprintf("printf 'protocol=https\\nhost=%s\\n\\n' | /run/gantry/bin/credhelper get", host)
 		text, err := h.guest(ctx, "credential helper executes for "+host, query, 0, "")
 		if err != nil {
 			return err
 		}
-		allowed := i == 0 || unmanaged
-		if allowed && !strings.Contains(text, "password="+h.secrets[i]) {
+		if grants[i] && !strings.Contains(text, "password="+h.secrets[i]) {
 			return fmt.Errorf("approved bound credential missing for %s", host)
 		}
-		if !allowed && (strings.Contains(text, "password=") || strings.Contains(text, h.secrets[i])) {
+		if !grants[i] && (strings.Contains(text, "password=") || strings.Contains(text, h.secrets[i])) {
 			return fmt.Errorf("organization denied credential was released")
 		}
-		h.pass(fmt.Sprintf("credential grant for %s = %t", host, allowed))
+		h.pass(fmt.Sprintf("credential grant for %s = %t", host, grants[i]))
 	}
 	return nil
 }

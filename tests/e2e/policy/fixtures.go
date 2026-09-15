@@ -39,6 +39,11 @@ func newFixtures(root string, allowPort, denyPort uint16) (*fixtures, error) {
 		if err := writeFile(filepath.Join(dir, "marker"), []byte("OPA-SHARE-OK\n"), 0644); err != nil {
 			return nil, err
 		}
+		// The field image deliberately runs as an unprivileged OCI user. Keep
+		// exported fixture roots traversable while private keys remain 0600.
+		if err := os.Chmod(dir, 0755); err != nil {
+			return nil, err
+		}
 	}
 	var err error
 	f.key, err = rsa.GenerateKey(rand.Reader, 2048)

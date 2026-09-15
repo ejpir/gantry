@@ -5,13 +5,62 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ejpir/gantry/internal/oauthprovider"
+	"github.com/ejpir/gantry/internal/orgauth/testidp"
 )
+
+func TestPublicClientAgainstDisposableAuthorizationServer(t *testing.T) {
+	provider := testidp.NewOAuth()
+	defer provider.Close()
+	spec, err := oauthprovider.Normalize(oauthprovider.Spec{
+		Provider: "company-mcp", AuthorizeURL: provider.URL() + "/authorize",
+		TokenURL: provider.URL() + "/token", ClientID: testidp.OAuthClientID,
+		RedirectURI: "http://127.0.0.1:53693/callback", Scope: testidp.OAuthScope,
+		Resource: provider.URL() + "/mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizeURL, state, verifier, redirect, err := spec.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := *provider.Server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Get(authorizeURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	callback, err := url.Parse(response.Header.Get("Location"))
+	if err != nil || response.StatusCode != http.StatusFound || callback.Query().Get("state") != state || callback.Query().Get("code") == "" {
+		t.Fatalf("authorization response: status=%d callback=%v error=%v", response.StatusCode, callback, err)
+	}
+	tokens, err := ExchangeCode(context.Background(), spec, callback.Query().Get("code"), verifier, spec.ClientID, redirect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens.AccessToken != testidp.MCPAccessPrefix+"0" || tokens.RefreshToken != testidp.MCPRefreshPrefix+"0" {
+		t.Fatal("authorization-code exchange returned the wrong tokens")
+	}
+	rotated, err := RefreshTokens(context.Background(), spec, tokens.RefreshToken, spec.ClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.AccessToken != testidp.MCPAccessPrefix+"1" || rotated.RefreshToken != testidp.MCPRefreshPrefix+"1" {
+		t.Fatal("refresh exchange did not rotate both tokens")
+	}
+	observations := provider.Observations()
+	if observations.Exchanges != 1 || observations.Refreshes != 1 || len(observations.Errors) != 0 {
+		t.Fatalf("authorization server observations: %+v", observations)
+	}
+}
 
 func TestGenericGrantsCarryResourceAndEncoding(t *testing.T) {
 	for _, encoding := range []string{oauthprovider.Form, oauthprovider.JSON} {

@@ -38,18 +38,29 @@ func (d *daemonRuntime) loadOrganizationPolicy() error {
 	if d.cfg.OrgPolicy != nil && d.cfg.OAuthCustodyEnabled() {
 		return fmt.Errorf("organization policy v1 does not support OAuth custody")
 	}
+	engine, err := d.newOrganizationPolicyEngine(d.cfg.OrgPolicy)
+	if err != nil {
+		return err
+	}
+	d.governance = policy.NewController(engine)
+	d.policyChanged = make(chan struct{}, 1)
+	return nil
+}
+
+func (d *daemonRuntime) newOrganizationPolicyEngine(snapshot *policy.Config) (*policy.Engine, error) {
 	// The daemon-wide writer is available before the control broker and is
 	// shared with it later, so early mount decisions persist and concurrent
 	// policy/broker events cannot race audit.log rotation.
-	engine, err := policy.New(d.cfg.OrgPolicy, func(decision policy.Decision) {
-		raw, _ := json.Marshal(decision)
-		d.audit.logf(d.dir, "policy: %s", raw)
+	engine, err := policy.New(snapshot, func(decision policy.Decision) {
+		if d.audit != nil {
+			raw, _ := json.Marshal(decision)
+			d.audit.logf(d.dir, "policy: %s", raw)
+		}
 	})
 	if err != nil {
-		return fmt.Errorf("organization policy: %w", err)
+		return nil, fmt.Errorf("organization policy: %w", err)
 	}
-	d.governance = engine
-	return nil
+	return engine, nil
 }
 
 func (d *daemonRuntime) credentialAllowed(host string) bool {
@@ -63,9 +74,6 @@ func (d *daemonRuntime) credentialAllowed(host string) bool {
 // transport. A host-side MCP upstream must not bypass the organization egress
 // guard merely because its socket is outside the guest netstack.
 func (d *daemonRuntime) authorizeMCPDial(ctx context.Context, host string, ip net.IP, port string) error {
-	if d.governance == nil {
-		return nil
-	}
 	if err := d.governance.Authorize(ctx, policy.NetworkResolve, policy.Resource{Host: host}); err != nil {
 		return err
 	}

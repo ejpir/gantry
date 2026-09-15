@@ -358,6 +358,41 @@ func TestPolicyTransactionsOrderingReplayAndAbort(t *testing.T) {
 	}
 }
 
+func TestPolicyTransactionExactlyReplacesOrganizationGuard(t *testing.T) {
+	oldGuard := netpol.GuardSpec{
+		Organization: "org", Revision: "old", ExpiresAt: time.Now().Add(time.Hour),
+		DNS: []string{"old.example"}, Rules: []netpol.GuardRule{{
+			ID: "old", Effect: "allow", CIDR: "1.1.1.1/32", Protocol: "tcp", Ports: []uint16{443},
+		}},
+	}
+	live, err := netpol.WithGuard(netpol.DefaultPolicy(), oldGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &state{policy: live, stack: &workerPortStackStub{}}
+	newGuard := oldGuard
+	newGuard.Revision = "new"
+	newGuard.DNS = []string{"new.example"}
+	newGuard.Rules = []netpol.GuardRule{{ID: "new", Effect: "allow", CIDR: "2.2.2.2/32", Protocol: "tcp", Ports: []uint16{80}}}
+	next, err := netpol.WithGuard(netpol.DefaultPolicy(), newGuard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := netpol.Marshal(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.preparePolicy(testRequest(t, PolicyPrepareRequest{Generation: 1, Transaction: "org-new", Policy: raw})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.commitPolicy(testRequest(t, PolicyGenerationRequest{Generation: 1, Transaction: "org-new"})); err != nil {
+		t.Fatal(err)
+	}
+	if live.DomainAllowed("old.example") || !live.DomainAllowed("new.example") {
+		t.Fatal("worker retained the old organization guard")
+	}
+}
+
 func TestHostLoopbackUnavailableRejectsPolicyAndPublish(t *testing.T) {
 	live, err := netpol.Parse([]byte(`{"default":"deny"}`))
 	if err != nil {

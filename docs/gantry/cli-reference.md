@@ -147,12 +147,13 @@ gantry policy generate -out DIR [-mount PATH ...] [-ttl 30d]
 gantry policy sign -data data.json -out DIR (-signing-key KEY | -ephemeral)
 gantry policy verify -bundle BUNDLE -key PUBLIC_KEY -profile PROFILE
 gantry policy check -bundle BUNDLE -key PUBLIC_KEY -profile PROFILE -action ACTION -resource JSON
-gantry policy set NAME -bundle BUNDLE -key PUBLIC_KEY -profile PROFILE
+gantry policy set NAME -bundle BUNDLE -key PUBLIC_KEY -profile PROFILE [--restart]
 gantry policy show NAME
-gantry policy clear NAME
+gantry policy clear NAME [--restart]
 ```
 
-`set` and `clear` require a stopped sandbox. See
+`set` and `clear` apply live to running sandboxes. `--restart` explicitly
+requests controlled stop/update/resume instead. See
 [Organization policy](organization-policy.md).
 
 ## Organization login
@@ -165,8 +166,8 @@ gantry org apply ORGANIZATION SANDBOX
 gantry org logout ORGANIZATION
 ```
 
-`apply` requires a current receipt and a stopped sandbox. See
-[Organization login](organization-login.md).
+`apply` requires a current receipt and applies live when the sandbox is
+running. See [Organization login](organization-login.md).
 
 ## MCP and OAuth
 
@@ -211,9 +212,15 @@ Press `?` inside it for keys.
 ## Manager and remote access
 
 ```text
-gantry serve [-socket PATH]
+gantry serve [-socket PATH] [-policy-feed CONFIG]
 gantry serve -listen tls://ADDR:PORT --token-file FILE [--self-signed]
+             [-policy-feed CONFIG]
 ```
+
+`-policy-feed` adds one organization-wide outbound mTLS policy receiver. Each
+accepted generation applies to all saved sandboxes, and later manager-created
+sandboxes inherit it. See
+[Organization policy](organization-policy.md#receive-policy-updates).
 
 See [Manager API](manager-api.md).
 
@@ -227,7 +234,9 @@ gantry remote rm NAME
 
 Remote-capable commands are `start`, `run`, `configure`, `exec`, `ls`, `stop`,
 `resume`, `delete`, `image`, `ssh`, `events`, `net-policy`, `policy`, and
-`audit`. Select a profile with `-remote NAME` or `GANTRY_REMOTE`;
+`audit`. Organization-policy changes apply live; `policy set` and `policy
+clear` accept `--restart` for a controlled update. Select a profile with
+`-remote NAME` or `GANTRY_REMOTE`;
 `-remote=""` forces local. There is no failure fallback to local.
 
 Remote CLI start is cache-only; run `gantry image pull REF -remote NAME` first.

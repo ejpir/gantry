@@ -1,9 +1,7 @@
 package controlcmd
 
 import (
-	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
@@ -22,7 +20,7 @@ func orgSessionFixture(t *testing.T) *orgauth.Session {
 	}
 }
 
-func TestOrgApplyIsStoppedOnlyAndPinsSnapshot(t *testing.T) {
+func TestOrgApplyPinsStoppedSnapshotAndUsesLiveDaemon(t *testing.T) {
 	useShortGantryHome(t)
 	session := orgSessionFixture(t)
 	dir := writeSandboxConfig(t, "stopped")
@@ -58,19 +56,13 @@ func TestOrgApplyIsStoppedOnlyAndPinsSnapshot(t *testing.T) {
 	if err != nil || cfg.OrgPolicy == nil {
 		t.Fatal("logout silently cleared pinned policy")
 	}
-	// No transport operation is needed: holding the daemon lifetime lock is
-	// enough for apply to reject a live sandbox, before any mutation.
-	dir = writeSandboxConfig(t, "live")
-	lock, err := layout.HoldLock(dir)
-	if err != nil {
+	captured := fakeLiveSandbox(t, "live", `{"ok":true}`)
+	if err := applyOrgSession("live", orgSessionFixture(t)); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = lock.Close() }()
-	if err := os.WriteFile(filepath.Join(dir, "vmm.pid"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := applyOrgSession("live", orgSessionFixture(t)); err == nil {
-		t.Fatal("live organization policy changed")
+	request := <-captured
+	if request.Op != "policy.set" || request.Policy == nil || request.Policy.Snapshot == nil {
+		t.Fatalf("live organization apply request = %+v", request)
 	}
 }
 

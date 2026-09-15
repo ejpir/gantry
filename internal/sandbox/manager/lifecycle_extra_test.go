@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	"github.com/ejpir/gantry/internal/policy"
+	"github.com/ejpir/gantry/internal/policy/policytest"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
@@ -225,6 +227,22 @@ func TestRunVMDefaultsResultBoundsReplayAndValidation(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatal("invalid body reached raw VM service")
+	}
+}
+
+func TestOrganizationWidePolicyDisablesRawVMRun(t *testing.T) {
+	var calls atomic.Int32
+	service := newManagerService(runLifecycleStub{run: func(context.Context, managerapi.RunVMRequest) (managerapi.ExecResult, error) {
+		calls.Add(1)
+		return managerapi.ExecResult{}, nil
+	}})
+	service.organizationPolicy = policytest.Signed(t, policy.Profile{})
+	response := managerRequest(t, service, http.MethodPost, "/v1/run", `{"kernel":"/k","rootfs":"/r"}`, nil)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "disabled while an organization-wide policy feed is active") {
+		t.Fatalf("raw run = %d %s", response.Code, response.Body.String())
+	}
+	if calls.Load() != 0 {
+		t.Fatal("organization-managed request reached raw VM backend")
 	}
 }
 

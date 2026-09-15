@@ -23,7 +23,7 @@ func TestOrganizationCredentialAndMCPDialGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &daemonRuntime{governance: engine, broker: &broker{domainAllowed: func(string) bool { return true }}}
+	d := &daemonRuntime{governance: policy.NewController(engine), broker: &broker{domainAllowed: func(string) bool { return true }}}
 	resolved := 0
 	broker := credhelper.New(func(string) (string, secret.Value, credhelper.Resolution) {
 		resolved++
@@ -49,6 +49,29 @@ func TestOrganizationCredentialAndMCPDialGates(t *testing.T) {
 		if (err == nil) != tc.allow {
 			t.Errorf("%+v: %v", tc, err)
 		}
+	}
+}
+
+func TestMCPAuthorizationClosureFollowsLiveController(t *testing.T) {
+	controller := policy.NewController(nil)
+	d := &daemonRuntime{governance: controller, broker: &broker{}, cfg: config.RunConfig{}}
+	servers, err := d.resolveMCPServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) == 0 || servers[0].Authorize == nil {
+		t.Fatal("unmanaged MCP server did not retain a live authorization closure")
+	}
+	if err := servers[0].Authorize(context.Background(), policy.MCPCall, "read_file"); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := policy.New(policytest.Signed(t, policy.Profile{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.Store(engine)
+	if err := servers[0].Authorize(context.Background(), policy.MCPCall, "read_file"); err == nil {
+		t.Fatal("existing MCP closure did not observe the live policy")
 	}
 }
 

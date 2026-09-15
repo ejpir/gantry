@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/policy"
@@ -29,12 +30,18 @@ import (
 // touched. Every step before the hub mutation is reversible, so a failure
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
+type organizationPolicy interface {
+	Authorize(context.Context, string, policy.Resource) error
+	Evaluate(context.Context, string, policy.Resource) policy.Decision
+	ExpiresAt() time.Time
+}
+
 type ShareManager struct {
 	dir        string
 	stateRoot  sharefs.Identity
 	hub        *sharefs.Hub
 	store      *config.ConfigStore
-	governance *policy.Engine
+	governance organizationPolicy
 	mu         sync.Mutex
 	exports    map[string]*managedShare
 	retired    []*managedShare
@@ -44,6 +51,7 @@ type ShareManager struct {
 	// writable-share add. A restart establishes a new barrier.
 	sourceBarriers []secret.NamedSource
 	generation     uint64
+	policyDeadline time.Time
 	failed         error
 	closed         bool
 }
@@ -99,8 +107,16 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 }
 
 func NewShareManagerWithPolicy(dir string, store *config.ConfigStore, engine *policy.Engine) (*ShareManager, []string, error) {
+	return newShareManager(dir, store, engine, engine == nil)
+}
+
+func NewShareManagerWithController(dir string, store *config.ConfigStore, controller *policy.Controller) (*ShareManager, []string, error) {
+	return newShareManager(dir, store, controller, controller == nil)
+}
+
+func newShareManager(dir string, store *config.ConfigStore, governance organizationPolicy, missing bool) (*ShareManager, []string, error) {
 	cfg := store.Snapshot()
-	if cfg.OrgPolicy != nil && engine == nil {
+	if cfg.OrgPolicy != nil && missing {
 		return nil, nil, fmt.Errorf("organization policy was not initialized")
 	}
 	stateIdentity, err := sharefs.Identify(layout.ProtectionRoot(dir))
@@ -108,7 +124,8 @@ func NewShareManagerWithPolicy(dir string, store *config.ConfigStore, engine *po
 		return nil, nil, fmt.Errorf("identify Gantry state root: %w", err)
 	}
 	m := &ShareManager{
-		governance:     engine,
+		governance:     governance,
+		policyDeadline: governance.ExpiresAt(),
 		dir:            dir,
 		stateRoot:      stateIdentity,
 		store:          store,
@@ -128,7 +145,7 @@ func NewShareManagerWithPolicy(dir string, store *config.ConfigStore, engine *po
 		return nil, nil, err
 	}
 	m.hub = hub
-	hub.SetDeadline(engine.ExpiresAt())
+	hub.SetDeadline(governance.ExpiresAt())
 	var warnings []string
 	configured, err := shares.ParseSpecs(cfg.Shares)
 	if err != nil {
@@ -414,12 +431,64 @@ func (m *ShareManager) preparePinnedAddLocked(share shares.Spec, replace bool) (
 }
 
 func (m *ShareManager) authorizeShare(share shares.Spec) error {
+	return authorizeShareWithPolicy(m.governance, share)
+}
+
+func authorizeShareWithPolicy(governance organizationPolicy, share shares.Spec) error {
 	resource := policy.Resource{Path: share.Path}
-	if err := m.governance.Authorize(context.Background(), policy.MountRead, resource); err != nil {
+	if err := governance.Authorize(context.Background(), policy.MountRead, resource); err != nil {
 		return err
 	}
 	if !share.RO {
-		return m.governance.Authorize(context.Background(), policy.MountWrite, resource)
+		return governance.Authorize(context.Background(), policy.MountWrite, resource)
+	}
+	return nil
+}
+
+// SetPolicyBlocked drains in-flight host filesystem operations and denies new
+// ones while the daemon reconciles a live organization-policy generation.
+func (m *ShareManager) SetPolicyBlocked(blocked bool) {
+	if m != nil && m.hub != nil {
+		m.hub.SetPolicyBlocked(blocked)
+	}
+}
+
+// ReconcileOrganizationPolicy atomically updates the deadline and access bit
+// for every export. Denied exports remain pinned so a later generation can
+// restore access without broadening the persisted share configuration.
+func (m *ShareManager) ReconcileOrganizationPolicy(engine *policy.Engine) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hub == nil {
+		return nil
+	}
+	if err := m.readyLocked(); err != nil {
+		return err
+	}
+	denied := make(map[string]bool, len(m.exports))
+	previous := make(map[string]bool, len(m.exports))
+	for tag, export := range m.exports {
+		previous[tag] = export.export != nil && export.export.PolicyDenied()
+		if export.internal {
+			continue
+		}
+		denied[tag] = authorizeShareWithPolicy(engine, export.share) != nil
+	}
+	oldDeadline := m.policyDeadline
+	m.hub.SetPolicyAccess(engine.ExpiresAt(), denied)
+	m.policyDeadline = engine.ExpiresAt()
+	m.generation++
+	if err := m.publishLocked(); err != nil {
+		m.hub.SetPolicyAccess(oldDeadline, previous)
+		m.policyDeadline = oldDeadline
+		m.generation++
+		if rollbackErr := m.publishLocked(); rollbackErr != nil {
+			return m.failLocked(errors.Join(fmt.Errorf("publish policy-updated share manifest: %w", err), fmt.Errorf("restore share manifest: %w", rollbackErr)))
+		}
+		return fmt.Errorf("publish policy-updated share manifest: %w", err)
 	}
 	return nil
 }
@@ -620,6 +689,16 @@ func (m *ShareManager) Generation() uint64 {
 	return m.generation
 }
 
+// Failed reports that an ambiguous share transaction closed the hub.
+func (m *ShareManager) Failed() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failed != nil
+}
+
 // Entries returns the live namespace plus exports still draining after a
 // removal. Stopped sandboxes use loadTUIMounts' sandbox.json fallback instead.
 func (m *ShareManager) Entries() []shares.Entry {
@@ -654,6 +733,9 @@ func (m *ShareManager) entry(ms *managedShare) shares.Entry {
 	state := "active"
 	if ms.export != nil {
 		state = ms.export.State().String()
+		if ms.export.PolicyDenied() {
+			state = "policy-denied"
+		}
 	} else if m.hub == nil {
 		state = "saved"
 	}
