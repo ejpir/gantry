@@ -89,7 +89,7 @@ func runTerminalBridge(gantry string) (int, error) {
 		return 1, fmt.Errorf("start Gantry in ConPTY: %w", err)
 	}
 	_ = windows.CloseHandle(process.Thread)
-	defer windows.CloseHandle(process.Process)
+	defer func() { _ = windows.CloseHandle(process.Process) }()
 
 	// CreatePseudoConsole retains the console-facing ends. Keeping our copies
 	// open would prevent the host-facing reader from observing terminal EOF.
