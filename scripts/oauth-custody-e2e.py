@@ -220,6 +220,8 @@ class Battery:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
@@ -229,10 +231,10 @@ class Battery:
             output = error.stdout or ""
             if isinstance(output, bytes):
                 output = output.decode("utf-8", errors="replace")
-            log.write_text(output)
+            log.write_text(output, encoding="utf-8")
             self.outputs.append(output)
             raise CommandTimeout(error, log) from error
-        log.write_text(result.stdout)
+        log.write_text(result.stdout, encoding="utf-8")
         self.outputs.append(result.stdout)
         if successful and result.returncode != 0:
             raise AssertionError(
@@ -307,7 +309,7 @@ class Battery:
 
     def login(self, sandbox, provider):
         log = self.root / (sandbox + "-login.log")
-        with log.open("w") as output:
+        with log.open("w", encoding="utf-8") as output:
             process = subprocess.Popen(
                 [
                     self.gantry,
@@ -320,10 +322,10 @@ class Battery:
             )
         self.logins.append(process)
         self.wait_for(
-            lambda: "Open this URL" in log.read_text() or process.poll() is not None,
+            lambda: "Open this URL" in log.read_text(encoding="utf-8", errors="replace") or process.poll() is not None,
             "login instructions (" + str(log) + ")",
         )
-        transcript = log.read_text()
+        transcript = log.read_text(encoding="utf-8", errors="replace")
         urls = re.findall(re.escape(self.fixture.origin) + r"/[^\s\x1b]+", transcript)
         self.check(
             bool(urls) and process.poll() is None,
@@ -333,7 +335,7 @@ class Battery:
 
     def finish_login(self, process, log):
         status = process.wait(timeout=45)
-        text = log.read_text()
+        text = log.read_text(encoding="utf-8", errors="replace")
         self.outputs.append(text)
         self.check(
             status == 0 and "tokens held on host" in text,
@@ -342,7 +344,7 @@ class Battery:
 
     def tokens(self, sandbox):
         path = self.root / "sandboxes" / sandbox / "oauth-tokens.json"
-        return json.loads(path.read_text()) if path.exists() else []
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
     def token(self, sandbox, provider):
         return next(
@@ -360,7 +362,7 @@ class Battery:
         token["expiry"] = "2000-01-01T00:00:00Z"
         path = self.root / "sandboxes" / sandbox / "oauth-tokens.json"
         temp = path.with_suffix(".tmp")
-        temp.write_text(json.dumps(tokens))
+        temp.write_text(json.dumps(tokens), encoding="utf-8")
         temp.chmod(0o600)
         temp.replace(path)
 
@@ -480,11 +482,11 @@ class Battery:
         self.credential("gh", "github.com")
         process, log, url = self.login("gh", "github")
         self.wait_for(
-            lambda: "Enter this code: " + USER_CODE in log.read_text(),
+            lambda: "Enter this code: " + USER_CODE in log.read_text(encoding="utf-8", errors="replace"),
             "public device code instructions",
         )
         self.check(
-            DEVICE_CODE not in log.read_text(),
+            DEVICE_CODE not in log.read_text(encoding="utf-8", errors="replace"),
             "GitHub exposes only the public device code",
         )
         self.wait_for(
@@ -510,7 +512,8 @@ class Battery:
         policy.write_text(
             json.dumps(
                 {"default": "deny", "allowLocal": True, "allowDomains": ["example.com"]}
-            )
+            ),
+            encoding="utf-8",
         )
         self.command("net-policy", "set", "gh", str(policy))
         self.credential("gh", "github.com")
@@ -545,7 +548,8 @@ class Battery:
                     "scope": self.fixture.scope,
                     "resource": self.fixture.origin + "/mcp",
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         refusal = self.start("bad", "-oauth-provider", str(provider), successful=False)
         self.check(
@@ -650,8 +654,10 @@ class Battery:
                 sandbox + " token store is mode 0600",
             )
             audit = self.command("audit", sandbox).stdout
-            config_text = (path.parent / "sandbox.json").read_text()
-            daemon_log = (path.parent / "daemon.log").read_text()
+            config_text = (path.parent / "sandbox.json").read_text(encoding="utf-8")
+            daemon_log = (path.parent / "daemon.log").read_text(
+                encoding="utf-8", errors="replace"
+            )
             self.check(
                 all(
                     value not in audit + config_text + daemon_log
@@ -679,7 +685,9 @@ class Battery:
         )
         self.no_guest_files("mcp")
         audit = self.command("audit", "mcp").stdout
-        daemon_log = (self.root / "sandboxes/mcp/daemon.log").read_text()
+        daemon_log = (self.root / "sandboxes/mcp/daemon.log").read_text(
+            encoding="utf-8", errors="replace"
+        )
         self.check(
             ERROR_CANARY not in audit + daemon_log + "".join(self.outputs),
             "token endpoint error body is not exposed",

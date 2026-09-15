@@ -13,7 +13,8 @@ import unittest
 SCRIPT = Path(__file__).with_name("aws-e2e-validation.sh")
 
 # Every external cloud/build tool is replaced inside a private fake checkout.
-# The one real Python invocation only renders a PowerShell command from stdin.
+# PowerShell command rendering still uses the real interpreter so Windows argv
+# quoting is tested without passing through an MSYS shebang shim.
 TOOL = r'''
 import json
 import os
@@ -22,8 +23,6 @@ import sys
 
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
-if name == "python3" and args and args[0] == "-":
-    os.execv(os.environ["REAL_PYTHON"], [os.environ["REAL_PYTHON"], *args])
 with open(os.environ["CALL_LOG"], "a", encoding="utf-8") as stream:
     stream.write(json.dumps({"tool": name, "args": args, "goos": os.environ.get("GOOS"), "goarch": os.environ.get("GOARCH")}) + "\n")
 failure = os.environ.get("FAKE_FAILURE", "")
@@ -40,16 +39,27 @@ elif name == "go":
     output.chmod(0o755)
 elif name == "uname":
     print("Darwin" if args == ["-s"] else "arm64")
-elif name == "python3" and "-c" in args:
-    command = args[args.index("-c") + 1]
-    if failure == "kvm" and "/opt/gantry/policy-e2e" in command:
-        sys.exit(9)
-    if failure == "whpx" and "C:/gantry/policy-e2e.exe" in command:
-        sys.exit(9)
 elif name == "policy-e2e":
     if failure == "macos":
         sys.exit(9)
     print("Policy E2E: 1 checks passed")
+'''
+
+SSM_TOOL = r'''
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["CALL_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"tool": "python3", "args": args, "goos": os.environ.get("GOOS"), "goarch": os.environ.get("GOARCH")}) + "\n")
+if "-c" in args:
+    command = args[args.index("-c") + 1]
+    failure = os.environ.get("FAKE_FAILURE", "")
+    if failure == "kvm" and "/opt/gantry/policy-e2e" in command:
+        raise SystemExit(9)
+    if failure == "whpx" and "C:/gantry/policy-e2e.exe" in command:
+        raise SystemExit(9)
 '''
 
 
@@ -68,10 +78,12 @@ class PolicyOrchestrationTests(unittest.TestCase):
             "aws-kvm/directory-validation.sh", "test-manager-api-e2e.sh",
         ):
             (scripts / relative).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        for relative in ("aws-kvm/ssm.py", "aws-whpx/ssm.py"):
+            (scripts / relative).write_text(SSM_TOOL, encoding="utf-8")
         (scripts / "build.sh").write_text(
             '#!/bin/sh\nmkdir -p "$GANTRY_ARTIFACTS"\n'
             'for name in gantry-darwin-arm64 gantry-guest-arm64; do\n'
-            '  printf dummy > "$GANTRY_ARTIFACTS/$name"\n'
+            '  printf "#!/bin/sh\\nexit 0\\n" > "$GANTRY_ARTIFACTS/$name"\n'
             '  chmod +x "$GANTRY_ARTIFACTS/$name"\ndone\n',
             encoding="utf-8",
         )
@@ -88,7 +100,7 @@ class PolicyOrchestrationTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-        for name in ("aws", "go", "python3", "uname", "codesign", "curl", "perl", "ssh", "sftp"):
+        for name in ("aws", "go", "uname", "codesign", "curl", "perl", "ssh", "sftp"):
             path = self.bin / name
             path.write_text(f"#!{shell_python}\n{TOOL}", encoding="utf-8")
             path.chmod(0o755)
@@ -99,8 +111,7 @@ class PolicyOrchestrationTests(unittest.TestCase):
         self.env.update({
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "HOME": str(self.root), "CALL_LOG": str(self.log),
-            "REAL_PYTHON": sys.executable, "SHELL_PYTHON": shell_python,
-            "TOOL_BODY": TOOL,
+            "SHELL_PYTHON": shell_python, "TOOL_BODY": TOOL,
             "AWS_ACCESS_KEY_ID": "not-a-real-credential",
             "GANTRY_LINUX_IID": "i-linux", "GANTRY_ARM_IID": "i-arm", "GANTRY_WINDOWS_IID": "i-windows",
             "GANTRY_TEST_IDE_IMAGE": str(image), "GANTRY_TEST_ARM_IDE_IMAGE": str(image),

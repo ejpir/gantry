@@ -24,6 +24,18 @@ e2e = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(e2e)
 
 
+def shell_path(path):
+    """Return a path consumable by the POSIX shell used by these tests."""
+    if os.name != "nt":
+        return str(path)
+    return subprocess.run(
+        ["cygpath", "-u", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -211,12 +223,13 @@ class FixtureTests(unittest.TestCase):
                         "registration": "hash",
                     }
                 ]
-            )
+            ),
+            encoding="utf-8",
         )
         battery.command = Mock()
         battery.expire_stopped("mcp", "company-mcp")
         battery.command.assert_called_once_with("stop", "mcp")
-        token = json.loads(token_file.read_text())[0]
+        token = json.loads(token_file.read_text(encoding="utf-8"))[0]
         self.assertEqual(token["expiry"], "2000-01-01T00:00:00Z")
         self.assertEqual(token["registration"], "hash")
         mode = stat.S_IMODE(token_file.stat().st_mode)
@@ -253,7 +266,8 @@ class FixtureTests(unittest.TestCase):
         battery = self.battery()
         helper = battery.root / "helper with spaces.py"
         helper.write_text(
-            'import sys\nprint("gantry-guest: custody: unknown provider", file=sys.stderr)\nraise SystemExit(1)\n'
+            'import sys\nprint("gantry-guest: custody: unknown provider", file=sys.stderr)\nraise SystemExit(1)\n',
+            encoding="utf-8",
         )
         helper_command = [sys.executable, str(helper)]
         real_run = subprocess.run
@@ -280,7 +294,10 @@ class FixtureTests(unittest.TestCase):
 
         with patch.object(e2e.subprocess, "run", side_effect=stdout_only_gantry):
             battery.reject_unconfigured_login("mcp", tuple(helper_command))
-        self.assertIn("unknown provider", battery.last_command_log.read_text())
+        self.assertIn(
+            "unknown provider",
+            battery.last_command_log.read_text(encoding="utf-8"),
+        )
 
     def test_guest_exec_wrapper_preserves_argv_stdin_and_exit_status(self):
         battery = self.battery()
@@ -342,7 +359,9 @@ class FixtureTests(unittest.TestCase):
                             *e2e.guest_exec_args("mcp", e2e.HELPER, "mcp-proxy")
                         )
                 self.assertIsInstance(failure.exception, subprocess.TimeoutExpired)
-                self.assertEqual(battery.last_command_log.read_text(), expected)
+                self.assertEqual(
+                    battery.last_command_log.read_text(encoding="utf-8"), expected
+                )
                 self.assertEqual(battery.outputs[-1], expected)
                 self.assertIn(str(battery.last_command_log), str(failure.exception))
                 self.assertEqual(battery.passed, 0)
@@ -382,7 +401,9 @@ class FixtureTests(unittest.TestCase):
                         ):
                             battery.mcp_probe()
                         self.assertEqual(battery.passed, before)
-                self.assertEqual(battery.last_command_log.read_text(), output)
+                self.assertEqual(
+                    battery.last_command_log.read_text(encoding="utf-8"), output
+                )
 
     def test_mcp_probe_missing_replies_reports_received_ids_and_log(self):
         battery = self.battery()
@@ -460,9 +481,9 @@ class FixtureTests(unittest.TestCase):
         fixture = battery.root / "fixture with spaces.py"
         env = dict(
             os.environ,
-            GANTRY_TEST_OAUTH_E2E=str(fixture),
-            GANTRY_TEST_OAUTH_IDP=str(battery.root / "oauth-idp"),
-            SECRET_TMP=str(battery.root),
+            GANTRY_TEST_OAUTH_E2E=shell_path(fixture),
+            GANTRY_TEST_OAUTH_IDP=shell_path(battery.root / "oauth-idp"),
+            SECRET_TMP=shell_path(battery.root),
             G="not-executed",
             KERNEL="kernel",
             ROOTFS="rootfs",
@@ -482,7 +503,7 @@ class FixtureTests(unittest.TestCase):
             ),
         ):
             with self.subTest(label=label):
-                fixture.write_text(program)
+                fixture.write_text(program, encoding="utf-8")
                 result = subprocess.run(
                     ["bash", "-c", script], env=env, capture_output=True, text=True
                 )
