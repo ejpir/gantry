@@ -479,6 +479,8 @@ class FixtureTests(unittest.TestCase):
             + shared[start:end]
         )
         fixture = battery.root / "fixture with spaces.py"
+        runner = battery.root / "shared runner with spaces.sh"
+        runner.write_text(script, encoding="utf-8")
         env = dict(
             os.environ,
             GANTRY_TEST_OAUTH_E2E=shell_path(fixture),
@@ -505,9 +507,16 @@ class FixtureTests(unittest.TestCase):
             with self.subTest(label=label):
                 fixture.write_text(program, encoding="utf-8")
                 result = subprocess.run(
-                    ["bash", "-c", script], env=env, capture_output=True, text=True
+                    ["bash", shell_path(runner)],
+                    env=env,
+                    capture_output=True,
+                    text=True,
                 )
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    "stdout:\n%s\nstderr:\n%s" % (result.stdout, result.stderr),
+                )
                 self.assertIn(expected, result.stdout)
                 self.assertNotIn(
                     "SHARED_FAIL" if expected == "SHARED_OK" else "SHARED_OK",
