@@ -33,9 +33,10 @@ func CmdSSHKnownHosts(argv []string) int {
 	return 0
 }
 
-func sshShellQuote(value string) string     { return sshconfig.ShellCommand(value) }
-func shellCommand(argv ...string) string    { return sshconfig.ShellCommand(argv...) }
-func quoteSSHConfigPath(path string) string { return sshconfig.QuotePath(path) }
+func sshShellQuote(value string) string       { return sshconfig.ShellCommand(value) }
+func shellCommand(argv ...string) string      { return sshconfig.ShellCommand(argv...) }
+func knownHostsCommand(argv ...string) string { return sshconfig.ArgvCommand(argv...) }
+func quoteSSHConfigPath(path string) string   { return sshconfig.QuotePath(path) }
 
 func ensureSSHKnownHostsFile() error {
 	if err := localsec.CreateManagerDir(sshInstallDir()); err != nil {

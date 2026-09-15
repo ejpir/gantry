@@ -27,7 +27,7 @@ func managedSSHBlock(self string) string {
 		"    User " + sshgw.DefaultUserSentinel,
 		// Use the original alias, not a HostName override.
 		"    ProxyCommand " + shellCommand(self, "ssh-proxy", "%n"),
-		"    KnownHostsCommand " + shellCommand(self, "ssh-known-hosts"),
+		"    KnownHostsCommand " + knownHostsCommand(self, "ssh-known-hosts"),
 		"    UserKnownHostsFile " + quoteSSHConfigPath(filepath.Join(sshInstallDir(), "known_hosts")),
 		"    StrictHostKeyChecking accept-new",
 		sshConfigEnd,

@@ -96,7 +96,7 @@ func CmdSSH(argv []string) int {
 	}
 	args := []string{
 		"-o", "ProxyCommand=" + shellCommand(self, "ssh-proxy", name),
-		"-o", "KnownHostsCommand=" + shellCommand(self, "ssh-known-hosts"),
+		"-o", "KnownHostsCommand=" + knownHostsCommand(self, "ssh-known-hosts"),
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + filepath.Join(sshInstallDir(), "known_hosts"),
 	}

@@ -47,7 +47,7 @@ func (m *m2Client) sshOptions() []string {
 		"-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
 		"-o", "ControlMaster=no", "-o", "ControlPath=none",
 		"-o", "ProxyCommand=" + sshconfig.ShellCommand(m.gantry, "ssh-proxy", "-remote", "m2", "%n"),
-		"-o", "KnownHostsCommand=" + sshconfig.ShellCommand(m.gantry, "ssh-known-hosts", "-remote", "m2", "%n"),
+		"-o", "KnownHostsCommand=" + sshconfig.ArgvCommand(m.gantry, "ssh-known-hosts", "-remote", "m2", "%n"),
 		"-o", "UserKnownHostsFile=" + sshconfig.QuotePath(m.sshPinPath()),
 		"-o", "GlobalKnownHostsFile=none", "-o", "StrictHostKeyChecking=yes"}
 }

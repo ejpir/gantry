@@ -26,7 +26,7 @@ func SetupSSH(target string, remove bool) error {
 		"Host *." + target + ".gantry",
 		"    User " + sshgw.DefaultUserSentinel,
 		"    ProxyCommand " + sshconfig.ShellCommand(self, "ssh-proxy", "-remote", target, "%n"),
-		"    KnownHostsCommand " + sshconfig.ShellCommand(self, "ssh-known-hosts", "-remote", target, "%n"),
+		"    KnownHostsCommand " + sshconfig.ArgvCommand(self, "ssh-known-hosts", "-remote", target, "%n"),
 		"    UserKnownHostsFile " + sshconfig.QuotePath(remoteKnownHostsPath(target)),
 		"    GlobalKnownHostsFile none",
 		"    StrictHostKeyChecking yes",
