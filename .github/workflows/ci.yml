@@ -275,7 +275,9 @@ jobs:
           go run ./tests/e2e/oidc -gantry "$RUNNER_TEMP/gantry-oidc.exe"
       - name: remote onboarding TUI E2E (native terminal and HTTPS fixtures, no VM)
         shell: bash
-        run: go run ./tests/e2e/remotetui -gantry "$RUNNER_TEMP/gantry-oidc.exe"
+        run: |
+          go build -o "$RUNNER_TEMP/gantry-remotetui.exe" ./tests/e2e/remotetui
+          "$RUNNER_TEMP/gantry-remotetui.exe" -gantry "$RUNNER_TEMP/gantry-oidc.exe"
       - name: M2 manager API and remote CLI E2E (no VM)
         shell: bash
         run: scripts/test-manager-api-e2e.sh -api-only -gantry "$RUNNER_TEMP/gantry-oidc.exe"

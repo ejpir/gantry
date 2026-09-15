@@ -58,8 +58,30 @@ func runTerminalBridge(gantry string) (int, error) {
 		return 1, fmt.Errorf("allocate ConPTY process attributes: %w", err)
 	}
 	defer attributes.Delete()
-	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, unsafe.Pointer(&console), unsafe.Sizeof(console)); err != nil {
+	// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE takes the HPCON value itself, unlike
+	// attributes such as PARENT_PROCESS that take a pointer to a handle.
+	consoleValue := *(*unsafe.Pointer)(unsafe.Pointer(&console))
+	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, consoleValue, unsafe.Sizeof(console)); err != nil {
 		return 1, fmt.Errorf("attach ConPTY process attribute: %w", err)
+	}
+
+	// Keep the TUI in a kill-on-close job. If the Python driver is interrupted
+	// and terminates this bridge, Windows then tears down the child instead of
+	// leaving it attached to an orphaned conhost process.
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 1, fmt.Errorf("create ConPTY process job: %w", err)
+	}
+	defer func() { _ = windows.CloseHandle(job) }()
+	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(
+		job,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&limits)),
+		uint32(unsafe.Sizeof(limits)),
+	); err != nil {
+		return 1, fmt.Errorf("configure ConPTY process job: %w", err)
 	}
 
 	application, err := windows.UTF16PtrFromString(gantry)
@@ -80,7 +102,7 @@ func runTerminalBridge(gantry string) (int, error) {
 		nil,
 		nil,
 		false,
-		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
+		windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_SUSPENDED,
 		nil,
 		nil,
 		&startup.StartupInfo,
@@ -88,8 +110,20 @@ func runTerminalBridge(gantry string) (int, error) {
 	); err != nil {
 		return 1, fmt.Errorf("start Gantry in ConPTY: %w", err)
 	}
+	defer func() {
+		if process.Thread != 0 {
+			_ = windows.CloseHandle(process.Thread)
+		}
+		_ = windows.CloseHandle(process.Process)
+	}()
+	if err := windows.AssignProcessToJobObject(job, process.Process); err != nil {
+		return 1, fmt.Errorf("assign Gantry to ConPTY process job: %w", err)
+	}
+	if _, err := windows.ResumeThread(process.Thread); err != nil {
+		return 1, fmt.Errorf("resume Gantry in ConPTY: %w", err)
+	}
 	_ = windows.CloseHandle(process.Thread)
-	defer func() { _ = windows.CloseHandle(process.Process) }()
+	process.Thread = 0
 
 	// CreatePseudoConsole retains the console-facing ends. Keeping our copies
 	// open would prevent the host-facing reader from observing terminal EOF.

@@ -198,6 +198,9 @@ class Terminal:
             return True
         return False
 
+    def diagnostics(self):
+        return self.text() + "\nterminal transcript tail: " + repr(self.transcript[-8192:])
+
     def wait(self, predicate, message, timeout=20):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -205,8 +208,10 @@ class Terminal:
             if predicate():
                 return
             if self.poll():
-                raise AssertionError(f"TUI exited {self.status} waiting for {message}\n{self.text()}")
-        raise AssertionError(f"timeout waiting for {message}\n{self.text()}")
+                raise AssertionError(
+                    f"TUI exited {self.status} waiting for {message}\n{self.diagnostics()}"
+                )
+        raise AssertionError(f"timeout waiting for {message}\n{self.diagnostics()}")
 
     def wait_text(self, text):
         self.wait(lambda: text.lower() in self.text().lower(), text)
@@ -225,18 +230,33 @@ class Terminal:
     def close(self):
         if self.process is not None:
             try:
+                # Give the TUI and bridge a chance to unwind and close their
+                # ConPTY handles before resorting to TerminateProcess.
+                if self.process.poll() is None and self.process.stdin:
+                    try:
+                        self.process.stdin.write(b"q")
+                        self.process.stdin.flush()
+                    except OSError:
+                        pass
+                    try:
+                        self.process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
                 if self.process.stdin:
                     try:
                         self.process.stdin.close()
                     except OSError:
                         pass
                 if self.process.poll() is None:
-                    self.process.terminate()
                     try:
-                        self.process.wait(timeout=2)
+                        self.process.wait(timeout=1)
                     except subprocess.TimeoutExpired:
-                        self.process.kill()
-                        self.process.wait(timeout=2)
+                        self.process.terminate()
+                        try:
+                            self.process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            self.process.kill()
+                            self.process.wait(timeout=2)
                 self.status = self.process.returncode
             finally:
                 if self.process.stdout:
