@@ -168,11 +168,35 @@ class Terminal:
     def close(self):
         try:
             if self.status is None:
-                os.kill(self.pid, signal.SIGTERM)
-                _, status = os.waitpid(self.pid, 0)
-                self.status = os.waitstatus_to_exitcode(status)
+                try:
+                    os.kill(self.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 2
+                while self.status is None and time.monotonic() < deadline:
+                    try:
+                        pid, status = os.waitpid(self.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if pid:
+                        self.status = os.waitstatus_to_exitcode(status)
+                        break
+                    time.sleep(0.02)
+                if self.status is None:
+                    try:
+                        os.kill(self.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        _, status = os.waitpid(self.pid, 0)
+                        self.status = os.waitstatus_to_exitcode(status)
+                    except ChildProcessError:
+                        pass
         finally:
-            os.close(self.fd)
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
 
     def quit(self):
         deadline = time.monotonic() + 5
@@ -193,10 +217,19 @@ def read_json(path):
         return {}
 
 
-def enter_create(terminal, name):
+def enter_create(terminal, name, remote):
     terminal.wait_text("Location: Remote")
     terminal.send(name + "\talpine" + "\t" * 9 + "\r")
     terminal.wait(lambda: any(c["name"] == name for c in (terminal.fixture_state().get("creates") or [])), "remote create request")
+    # The fixture records the request before the HTTP response is consumed.
+    # Wait for the TUI to return to its list before sending another shortcut;
+    # otherwise a loaded runner can deliver `q` into the still-open form and
+    # strand cleanup until the outer watchdog kills the PTY driver.
+    terminal.wait(
+        lambda: "location: remote" not in terminal.text().lower()
+        and ("remote: " + remote).lower() in terminal.text().lower(),
+        "sandbox list after remote create",
+    )
     terminal.settle()
     assert not (terminal.base / "sandboxes" / name).exists(), "remote creation created local state"
 
@@ -228,9 +261,8 @@ def standalone(fixture):
         probe = subprocess.run([fixture["gantry"], "remote", "test", "standalone", "-remote="], env=terminal.env, capture_output=True, text=True, timeout=20, check=False)
         assert probe.returncode != 0 and "chmod 600" in probe.stderr, "readable token was accepted"
         token_path.chmod(0o600)
-        enter_create(terminal, "standalone-dev")
+        enter_create(terminal, "standalone-dev", "standalone")
         assert not list(terminal.base.glob("sandboxes-orgs/*.json")), "standalone flow required organization login"
-        terminal.wait_text("Remote: standalone")
         before = terminal.fixture_state()["health"]
         terminal.send("t")
         terminal.wait(lambda: terminal.fixture_state()["health"] > before, "TUI health test")
@@ -264,7 +296,7 @@ def organization(fixture):
         terminal.wait_text("Manager token")
         terminal.send(fixture["token"] + "\t" * 3 + "\r")
         terminal.wait(lambda: len(terminal.profiles()) == 1, "organization remote registration")
-        enter_create(terminal, "organization-dev")
+        enter_create(terminal, "organization-dev", "org-team")
         created = next(c for c in terminal.fixture_state()["creates"] if c["name"] == "organization-dev")
         assert created["organizationPolicy"]["profile"] == "developer", "organization selection lost its signed policy"
         terminal.quit()
@@ -276,7 +308,9 @@ def organization(fixture):
 def main():
     fixture = read_json(sys.argv[1])
     try:
+        print("remote TUI E2E: starting standalone flow", flush=True)
         standalone(fixture)
+        print("remote TUI E2E: starting organization flow", flush=True)
         organization(fixture)
     except Exception as exc:
         # Even a failed terminal assertion must not expose the write-only token.

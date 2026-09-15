@@ -381,10 +381,23 @@ func (m *managerService) applyReceivedOrganizationPolicy(ctx context.Context, up
 }
 
 func organizationPolicySandboxNames() ([]string, error) {
-	entries, err := os.ReadDir(layout.Root())
+	root := layout.Root()
+	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return []string{}, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect organization-policy sandbox root: %w", err)
+	}
+	// Windows can successfully enumerate a regular file as an empty directory
+	// on some filesystems. Check the object type explicitly so a malformed or
+	// replaced manager root cannot turn a mandatory rollout into a false
+	// aggregate acknowledgement. Symlinks are equally ambiguous here and must
+	// fail closed even if their current target happens to be a directory.
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, fmt.Errorf("organization-policy sandbox root is not a secure directory")
+	}
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("enumerate organization-policy sandboxes: %w", err)
 	}
