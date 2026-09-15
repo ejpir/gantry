@@ -202,9 +202,15 @@ func TestOpenSSHOptionsAreIsolatedAndStrict(t *testing.T) {
 	base := t.TempDir()
 	m := m2Client{gantry: filepath.Join(base, executableName("gantry")), dir: filepath.Join(base, "client"), root: filepath.Join(base, "client", "sandboxes")}
 	options := strings.Join(m.sshOptions(), "\n")
-	for _, want := range []string{"-F\n" + filepath.Join(m.dir, "openssh.conf"), "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=none", "IdentityAgent=none", "IdentityFile=none", "CertificateFile=none", "KnownHostsCommand=", "ssh-known-hosts", "ProxyCommand=", "ssh-proxy", "known_hosts.m2"} {
+	for _, want := range []string{"-F\n" + filepath.Join(m.dir, "openssh.conf"), "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=none", "IdentityAgent=none", "IdentityFile=none", "CertificateFile=none", "ProxyCommand=", "ssh-proxy", "known_hosts.m2"} {
 		if !strings.Contains(options, want) {
 			t.Errorf("missing isolated option %q", want)
+		}
+	}
+	config := m.openSSHConfig()
+	for _, want := range []string{"Host *", "KnownHostsCommand ", "ssh-known-hosts"} {
+		if !strings.Contains(config, want) {
+			t.Errorf("missing isolated config value %q", want)
 		}
 	}
 }

@@ -29,10 +29,9 @@ func ShellCommand(argv ...string) string {
 }
 
 // ArgvCommand quotes a command for OpenSSH directives, such as
-// KnownHostsCommand, that OpenSSH splits directly without a shell. Single
-// quotes survive Windows CreateProcess argument decoding; double quotes do not
-// when a complete directive is supplied through `ssh -o`. Backslashes are
-// doubled because OpenSSH's argv_split treats them as escapes even in quotes.
+// KnownHostsCommand, that OpenSSH splits directly without a shell. Backslashes
+// are doubled because OpenSSH's argv_split treats them as escapes even inside
+// single quotes.
 func ArgvCommand(argv ...string) string {
 	quoted := make([]string, len(argv))
 	escape := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
