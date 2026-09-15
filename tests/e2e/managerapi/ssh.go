@@ -55,18 +55,26 @@ func (m *m2Client) sshPinPath() string {
 	return filepath.Join(filepath.Dir(m.root), "ssh", "known_hosts.m2")
 }
 
-func (m *m2Client) openSSHConfig() string {
+func (m *m2Client) openSSHConfig() (string, error) {
 	// Keep KnownHostsCommand in the configuration file, matching `gantry ssh
 	// setup`. Windows consumes directive quotes when a complete command is
 	// transported through CreateProcess as an `ssh -o` argument.
-	return "Host *\n    KnownHostsCommand " + sshconfig.ArgvCommand(m.gantry, "ssh-known-hosts", "-remote", "m2", "%n") + "\n"
+	helper, err := sshconfig.OpenSSHCommandPath(m.gantry)
+	if err != nil {
+		return "", err
+	}
+	return "Host *\n    KnownHostsCommand " + sshconfig.ArgvCommand(helper, "ssh-known-hosts", "-remote", "m2", "%n") + "\n", nil
 }
 
 func (m *m2Client) prepareSSH(ctx context.Context) error {
-	if err := os.WriteFile(filepath.Join(m.dir, "openssh.conf"), []byte(m.openSSHConfig()), 0o600); err != nil {
+	config, err := m.openSSHConfig()
+	if err != nil {
 		return err
 	}
-	_, _, err := m.cli(ctx, 0, "ssh-known-hosts", "-remote", "m2")
+	if err := os.WriteFile(filepath.Join(m.dir, "openssh.conf"), []byte(config), 0o600); err != nil {
+		return err
+	}
+	_, _, err = m.cli(ctx, 0, "ssh-known-hosts", "-remote", "m2")
 	return err
 }
 

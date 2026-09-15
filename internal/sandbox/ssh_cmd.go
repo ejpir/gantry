@@ -94,9 +94,14 @@ func CmdSSH(argv []string) int {
 		fmt.Fprintln(os.Stderr, "gantry ssh:", err)
 		return 1
 	}
+	knownHostsHelper, err := sshconfig.OpenSSHCommandPath(self)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry ssh:", err)
+		return 1
+	}
 	args := []string{
 		"-o", "ProxyCommand=" + shellCommand(self, "ssh-proxy", name),
-		"-o", "KnownHostsCommand=" + knownHostsCommand(self, "ssh-known-hosts"),
+		"-o", "KnownHostsCommand=" + knownHostsCommand(knownHostsHelper, "ssh-known-hosts"),
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + filepath.Join(sshInstallDir(), "known_hosts"),
 	}

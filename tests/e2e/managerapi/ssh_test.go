@@ -207,7 +207,10 @@ func TestOpenSSHOptionsAreIsolatedAndStrict(t *testing.T) {
 			t.Errorf("missing isolated option %q", want)
 		}
 	}
-	config := m.openSSHConfig()
+	config, err := m.openSSHConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{"Host *", "KnownHostsCommand ", "ssh-known-hosts"} {
 		if !strings.Contains(config, want) {
 			t.Errorf("missing isolated config value %q", want)

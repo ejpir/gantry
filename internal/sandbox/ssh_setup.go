@@ -20,14 +20,16 @@ const (
 
 var openSSHVersionRE = regexp.MustCompile(`OpenSSH(?:_for_Windows)?_([0-9]+)\.([0-9]+)`)
 
-func managedSSHBlock(self string) string {
+func managedSSHBlock(self string) string { return managedSSHBlockWithKnownHosts(self, self) }
+
+func managedSSHBlockWithKnownHosts(self, knownHostsHelper string) string {
 	return strings.Join([]string{
 		sshConfigBegin,
 		"Host *.gantry",
 		"    User " + sshgw.DefaultUserSentinel,
 		// Use the original alias, not a HostName override.
 		"    ProxyCommand " + shellCommand(self, "ssh-proxy", "%n"),
-		"    KnownHostsCommand " + knownHostsCommand(self, "ssh-known-hosts"),
+		"    KnownHostsCommand " + knownHostsCommand(knownHostsHelper, "ssh-known-hosts"),
 		"    UserKnownHostsFile " + quoteSSHConfigPath(filepath.Join(sshInstallDir(), "known_hosts")),
 		"    StrictHostKeyChecking accept-new",
 		sshConfigEnd,
@@ -52,7 +54,11 @@ func sshSetup(remove bool) error {
 	if err != nil {
 		return err
 	}
-	if err := sshconfig.Apply(sshInstallDir(), sshConfigBegin, sshConfigEnd, managedSSHBlock(self), remove, false); err != nil {
+	knownHostsHelper, err := sshconfig.OpenSSHCommandPath(self)
+	if err != nil {
+		return err
+	}
+	if err := sshconfig.Apply(sshInstallDir(), sshConfigBegin, sshConfigEnd, managedSSHBlockWithKnownHosts(self, knownHostsHelper), remove, false); err != nil {
 		return err
 	}
 	if err := ensureSSHKnownHostsFile(); err != nil {

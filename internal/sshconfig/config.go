@@ -36,7 +36,11 @@ func ArgvCommand(argv ...string) string {
 	quoted := make([]string, len(argv))
 	escape := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
 	for i, arg := range argv {
-		quoted[i] = "'" + escape.Replace(arg) + "'"
+		escaped := escape.Replace(arg)
+		if arg == "" || strings.ContainsAny(arg, " \t\"'") {
+			escaped = "'" + escaped + "'"
+		}
+		quoted[i] = escaped
 	}
 	return strings.Join(quoted, " ")
 }

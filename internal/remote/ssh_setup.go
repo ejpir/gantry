@@ -20,13 +20,17 @@ func SetupSSH(target string, remove bool) error {
 	if err != nil {
 		return err
 	}
+	knownHostsHelper, err := sshconfig.OpenSSHCommandPath(self)
+	if err != nil {
+		return err
+	}
 	begin, end := "# >>> gantry remote "+target, "# <<< gantry remote "+target
 	block := strings.Join([]string{
 		begin,
 		"Host *." + target + ".gantry",
 		"    User " + sshgw.DefaultUserSentinel,
 		"    ProxyCommand " + sshconfig.ShellCommand(self, "ssh-proxy", "-remote", target, "%n"),
-		"    KnownHostsCommand " + sshconfig.ArgvCommand(self, "ssh-known-hosts", "-remote", target, "%n"),
+		"    KnownHostsCommand " + sshconfig.ArgvCommand(knownHostsHelper, "ssh-known-hosts", "-remote", target, "%n"),
 		"    UserKnownHostsFile " + sshconfig.QuotePath(remoteKnownHostsPath(target)),
 		"    GlobalKnownHostsFile none",
 		"    StrictHostKeyChecking yes",
