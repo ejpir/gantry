@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -34,6 +35,18 @@ def shell_path(path):
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def bash_executable():
+    """Find Git Bash on Windows without accidentally selecting WSL bash.exe."""
+    if os.name != "nt":
+        return shutil.which("bash") or "bash"
+    sh = shutil.which("sh")
+    if sh:
+        candidate = Path(sh).with_name("bash.exe")
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("Git Bash is required for the shared shell-battery test")
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -507,7 +520,7 @@ class FixtureTests(unittest.TestCase):
             with self.subTest(label=label):
                 fixture.write_text(program, encoding="utf-8")
                 result = subprocess.run(
-                    ["bash", shell_path(runner)],
+                    [bash_executable(), shell_path(runner)],
                     env=env,
                     capture_output=True,
                     text=True,
