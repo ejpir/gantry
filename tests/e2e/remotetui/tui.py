@@ -305,10 +305,20 @@ class Terminal:
 
 
 def read_json(path):
-    try:
-        return json.loads(Path(path).read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    # MoveFileEx-based atomic replacement can briefly deny a concurrent open
+    # on Windows. Treat that sharing window as transient rather than failing
+    # the terminal driver; malformed or not-yet-created optional files still
+    # retain the existing empty-state behavior.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
 
 def make_token_insecure(path):
