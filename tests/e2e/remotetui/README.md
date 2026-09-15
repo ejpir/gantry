@@ -1,13 +1,21 @@
 # Remote onboarding TUI E2E
 
-Drive the **real Gantry binary** through a POSIX pseudo-terminal. No external
-account, catalog deployment, registry, Docker, VM, or hypervisor is needed.
-Requires Go and Python 3; the PTY driver uses only Python's standard library.
-Run from the repository root on Linux or macOS:
+Drive the **real Gantry binary** through a native terminal: a POSIX PTY on
+Linux/macOS or ConPTY on Windows. No external account, catalog deployment,
+registry, Docker, VM, or hypervisor is needed. Requires Go and Python 3; the
+terminal driver uses only Python's standard library. Run from the repository
+root:
 
 ```sh
+# Linux/macOS
 go build -o /tmp/gantry-remotetui ./cmd/gantry
 go run ./tests/e2e/remotetui -gantry /tmp/gantry-remotetui
+```
+
+```powershell
+# Windows
+go build -o "$env:TEMP\gantry-remotetui.exe" ./cmd/gantry
+go run ./tests/e2e/remotetui -gantry "$env:TEMP\gantry-remotetui.exe"
 ```
 
 Use a development build so automatic release checks remain disabled. Optional
@@ -21,8 +29,9 @@ fixture directory is private and secret metadata is never passed in argv.
   real rendered dialog and keyboard event loop.
 - **Standalone**: add a remote without any organization configuration/receipt;
   reject bad authentication without saving; retry with the masked manager token;
-  verify token-free profile JSON and a `0600` token file. The real CLI additionally
-  refuses that token after temporarily making it group-readable.
+  verify token-free profile JSON and private token permissions. The real CLI
+  additionally refuses that token after temporarily making it group-readable
+  on POSIX or granting the Windows Everyone SID read access.
 - Return from registration to the explicitly remote create form. A cold remote
   image cache triggers an authenticated, idempotent pull and operation polling,
   followed by creation on the chosen manager. No local sandbox state is created,
@@ -54,6 +63,6 @@ egress. Use `tests/e2e/managerapi` and the VM/policy batteries on a KVM/HVF/WHPX
 host for those checks. This is not certification against a production IdP or
 catalog service.
 
-The PTY driver is POSIX-only; CI runs it on Linux and macOS. Windows keeps the
-cross-platform Go unit/contract tests and standalone OIDC CLI E2E. No Windows
-TUI/ConPTY coverage is claimed.
+CI runs the same screen/keyboard flow on Linux, macOS, and Windows. The Windows
+runner launches the real TUI in a disposable ConPTY and replaces only its
+browser launcher with a copied test-driver executable.

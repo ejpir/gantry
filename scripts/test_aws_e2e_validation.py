@@ -36,7 +36,7 @@ if name == "aws":
         print("Online")
 elif name == "go":
     output = Path(args[args.index("-o") + 1])
-    output.write_text("#!" + os.environ["REAL_PYTHON"] + "\n" + os.environ["TOOL_BODY"], encoding="utf-8")
+    output.write_text("#!" + os.environ["SHELL_PYTHON"] + "\n" + os.environ["TOOL_BODY"], encoding="utf-8")
     output.chmod(0o755)
 elif name == "uname":
     print("Darwin" if args == ["-s"] else "arm64")
@@ -77,9 +77,20 @@ class PolicyOrchestrationTests(unittest.TestCase):
         )
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        shell_python = sys.executable
+        if os.name == "nt":
+            # Fake tools execute under Git for Windows' POSIX shell. Convert the
+            # native interpreter path for a valid shebang while retaining the
+            # native path for Python's os.execv below.
+            shell_python = subprocess.run(
+                ["cygpath", "-u", sys.executable],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
         for name in ("aws", "go", "python3", "uname", "codesign", "curl", "perl", "ssh", "sftp"):
             path = self.bin / name
-            path.write_text(f"#!{sys.executable}\n{TOOL}", encoding="utf-8")
+            path.write_text(f"#!{shell_python}\n{TOOL}", encoding="utf-8")
             path.chmod(0o755)
         self.log = self.root / "calls.jsonl"
         image = self.root / "fixture.erofs"
@@ -88,7 +99,8 @@ class PolicyOrchestrationTests(unittest.TestCase):
         self.env.update({
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "HOME": str(self.root), "CALL_LOG": str(self.log),
-            "REAL_PYTHON": sys.executable, "TOOL_BODY": TOOL,
+            "REAL_PYTHON": sys.executable, "SHELL_PYTHON": shell_python,
+            "TOOL_BODY": TOOL,
             "AWS_ACCESS_KEY_ID": "not-a-real-credential",
             "GANTRY_LINUX_IID": "i-linux", "GANTRY_ARM_IID": "i-arm", "GANTRY_WINDOWS_IID": "i-windows",
             "GANTRY_TEST_IDE_IMAGE": str(image), "GANTRY_TEST_ARM_IDE_IMAGE": str(image),

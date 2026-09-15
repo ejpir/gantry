@@ -183,8 +183,10 @@ class Battery:
         self.args = args
         self.fixture = fixture
         # Short, physical paths avoid Darwin's 104-byte AF_UNIX limit and
-        # /tmp -> /private/tmp symlinks. Never touch the caller's sandbox state.
-        self.root = Path(tempfile.mkdtemp(prefix="g-oauth-", dir="/tmp")).resolve()
+        # /tmp -> /private/tmp symlinks. Windows has no /tmp, so use its native
+        # temporary directory; no VM is launched by the host-only unit tests.
+        parent = "/tmp" if os.name != "nt" else None
+        self.root = Path(tempfile.mkdtemp(prefix="g-oauth-", dir=parent)).resolve()
         self.env = dict(
             os.environ,
             GANTRY_HOME=str(self.root / "sandboxes"),
@@ -276,9 +278,15 @@ class Battery:
     def guest(self, name, script):
         return self.command(*guest_exec_args(name, "sh", "-c", script)).stdout
 
-    def reject_unconfigured_login(self, sandbox):
+    def reject_unconfigured_login(self, sandbox, helper_command=(HELPER,)):
         result = self.command(
-            *guest_exec_args(sandbox, HELPER, "oauth", "login", "not-configured-e2e"),
+            *guest_exec_args(
+                sandbox,
+                *helper_command,
+                "oauth",
+                "login",
+                "not-configured-e2e",
+            ),
             successful=False,
         )
         self.check(

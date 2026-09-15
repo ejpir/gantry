@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Real Gantry TUI driver. POSIX PTY + a small screen reader; no dependencies."""
+"""Real Gantry TUI driver. Native PTY/ConPTY plus a small screen reader."""
 
 import codecs
-import fcntl
 import json
 import os
 from pathlib import Path
-import pty
+import queue
 import re
-import select
 import signal
 import struct
 import subprocess
 import sys
-import termios
+import threading
 import time
 import unicodedata
+
+if os.name != "nt":
+    import fcntl
+    import pty
+    import select
+    import termios
 
 
 class Terminal:
@@ -38,25 +42,68 @@ class Terminal:
         self.transcript = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.status = None
-        self.pid, self.fd = pty.fork()
-        if self.pid == 0:
-            os.execve(fixture["gantry"], [fixture["gantry"], "tui", "-remote="], self.env)
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", self.height, self.width, 0, 0))
+        self.process = None
+        self.fd = None
+        self.read_queue = None
+        if os.name == "nt":
+            self.read_queue = queue.Queue()
+            self.process = subprocess.Popen(
+                [fixture["terminal_helper"], "-terminal-bridge", "-gantry", fixture["gantry"]],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=self.env,
+            )
+            self.pid = self.process.pid
+            threading.Thread(target=self._read_windows, daemon=True).start()
+        else:
+            self.pid, self.fd = pty.fork()
+            if self.pid == 0:
+                os.execve(fixture["gantry"], [fixture["gantry"], "tui", "-remote="], self.env)
+            fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", self.height, self.width, 0, 0))
         self.wait_text("Press n to create one.")
 
     def text(self):
         return "\n".join("".join(row) for row in self.screen)
 
+    def _read_windows(self):
+        try:
+            while True:
+                data = os.read(self.process.stdout.fileno(), 65536)
+                self.read_queue.put(data)
+                if not data:
+                    return
+        except OSError:
+            self.read_queue.put(b"")
+
     def send(self, value):
-        os.write(self.fd, value.encode())
+        data = value.encode()
+        if self.process is not None:
+            self.process.stdin.write(data)
+            self.process.stdin.flush()
+        else:
+            os.write(self.fd, data)
 
     def pump(self, timeout=0.05):
-        if not select.select([self.fd], [], [], timeout)[0]:
-            return
-        try:
-            data = os.read(self.fd, 65536)
-        except OSError:
-            return
+        if self.process is not None:
+            try:
+                data = self.read_queue.get(timeout=timeout)
+            except queue.Empty:
+                return
+            chunks = [data]
+            while True:
+                try:
+                    chunks.append(self.read_queue.get_nowait())
+                except queue.Empty:
+                    break
+            data = b"".join(chunks)
+        else:
+            if not select.select([self.fd], [], [], timeout)[0]:
+                return
+            try:
+                data = os.read(self.fd, 65536)
+            except OSError:
+                return
         text = self.decoder.decode(data)
         self.transcript = (self.transcript + text)[-(4 << 20):]
         self.pending += text
@@ -139,15 +186,25 @@ class Terminal:
         elif command == "n" and first == 6:
             self.send(f"\x1b[{self.row + 1};{self.col + 1}R")
 
+    def poll(self):
+        if self.status is not None:
+            return True
+        if self.process is not None:
+            self.status = self.process.poll()
+            return self.status is not None
+        pid, status = os.waitpid(self.pid, os.WNOHANG)
+        if pid:
+            self.status = os.waitstatus_to_exitcode(status)
+            return True
+        return False
+
     def wait(self, predicate, message, timeout=20):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.pump()
             if predicate():
                 return
-            pid, status = os.waitpid(self.pid, os.WNOHANG)
-            if pid:
-                self.status = os.waitstatus_to_exitcode(status)
+            if self.poll():
                 raise AssertionError(f"TUI exited {self.status} waiting for {message}\n{self.text()}")
         raise AssertionError(f"timeout waiting for {message}\n{self.text()}")
 
@@ -166,6 +223,25 @@ class Terminal:
         return read_json(self.fixture["state"])
 
     def close(self):
+        if self.process is not None:
+            try:
+                if self.process.stdin:
+                    try:
+                        self.process.stdin.close()
+                    except OSError:
+                        pass
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=2)
+                self.status = self.process.returncode
+            finally:
+                if self.process.stdout:
+                    self.process.stdout.close()
+            return
         try:
             if self.status is None:
                 try:
@@ -203,9 +279,7 @@ class Terminal:
         while time.monotonic() < deadline and self.status is None:
             self.send("q")
             self.settle()
-            pid, status = os.waitpid(self.pid, os.WNOHANG)
-            if pid:
-                self.status = os.waitstatus_to_exitcode(status)
+            self.poll()
         assert self.status == 0, "TUI did not quit cleanly"
         assert self.fixture["token"] not in self.transcript, "manager token appeared in terminal output"
 
@@ -215,6 +289,32 @@ def read_json(path):
         return json.loads(Path(path).read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+
+
+def make_token_insecure(path):
+    if os.name == "nt":
+        result = subprocess.run(
+            ["icacls", str(path), "/grant", "*S-1-1-0:(R)"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, "could not make fixture token ACL permissive"
+    else:
+        path.chmod(0o640)
+
+
+def restore_token_security(path):
+    if os.name == "nt":
+        result = subprocess.run(
+            ["icacls", str(path), "/remove:g", "*S-1-1-0"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, "could not restore fixture token ACL"
+    else:
+        path.chmod(0o600)
 
 
 def enter_create(terminal, name, remote):
@@ -256,11 +356,16 @@ def standalone(fixture):
         terminal.wait(lambda: len(terminal.profiles()) == 1, "standalone registration")
         assert fixture["token"] not in (terminal.base / "remotes.json").read_text(), "token stored in profile"
         token_path = terminal.base / "remotes" / "standalone.token"
-        assert token_path.stat().st_mode & 0o777 == 0o600, "token is not private"
-        token_path.chmod(0o640)
-        probe = subprocess.run([fixture["gantry"], "remote", "test", "standalone", "-remote="], env=terminal.env, capture_output=True, text=True, timeout=20, check=False)
-        assert probe.returncode != 0 and "chmod 600" in probe.stderr, "readable token was accepted"
-        token_path.chmod(0o600)
+        if os.name != "nt":
+            assert token_path.stat().st_mode & 0o777 == 0o600, "token is not private"
+        probe_args = [fixture["gantry"], "remote", "test", "standalone", "-remote="]
+        private_probe = subprocess.run(probe_args, env=terminal.env, capture_output=True, text=True, timeout=20, check=False)
+        assert private_probe.returncode == 0, "new token did not pass platform security validation"
+        make_token_insecure(token_path)
+        probe = subprocess.run(probe_args, env=terminal.env, capture_output=True, text=True, timeout=20, check=False)
+        expected_acl_error = "insecure Windows ACL" if os.name == "nt" else "chmod 600"
+        assert probe.returncode != 0 and expected_acl_error in probe.stderr, "readable token was accepted"
+        restore_token_security(token_path)
         enter_create(terminal, "standalone-dev", "standalone")
         assert not list(terminal.base.glob("sandboxes-orgs/*.json")), "standalone flow required organization login"
         before = terminal.fixture_state()["health"]

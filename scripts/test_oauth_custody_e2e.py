@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -218,7 +219,11 @@ class FixtureTests(unittest.TestCase):
         token = json.loads(token_file.read_text())[0]
         self.assertEqual(token["expiry"], "2000-01-01T00:00:00Z")
         self.assertEqual(token["registration"], "hash")
-        self.assertEqual(stat.S_IMODE(token_file.stat().st_mode), 0o600)
+        mode = stat.S_IMODE(token_file.stat().st_mode)
+        if os.name == "nt":
+            self.assertTrue(mode & stat.S_IWRITE)
+        else:
+            self.assertEqual(mode, 0o600)
 
     def test_negative_credential_assertion_requires_a_working_exec(self):
         battery = self.battery()
@@ -246,17 +251,17 @@ class FixtureTests(unittest.TestCase):
 
     def test_unconfigured_login_captures_guest_stderr_with_stdout_only_transport(self):
         battery = self.battery()
-        helper = battery.root / "helper with spaces"
+        helper = battery.root / "helper with spaces.py"
         helper.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "gantry-guest: custody: unknown provider" >&2\nexit 1\n'
+            'import sys\nprint("gantry-guest: custody: unknown provider", file=sys.stderr)\nraise SystemExit(1)\n'
         )
-        helper.chmod(0o700)
+        helper_command = [sys.executable, str(helper)]
         real_run = subprocess.run
 
         # Match gantry's non-terminal transport: only guest stdout is forwarded.
         # Merging the *host* CLI's stderr cannot recover the guest's discarded fd 2.
         unwrapped = real_run(
-            [str(helper)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+            helper_command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
         )
         self.assertEqual(unwrapped.returncode, 1)
         self.assertEqual(unwrapped.stdout, "")
@@ -273,9 +278,8 @@ class FixtureTests(unittest.TestCase):
                 timeout=kwargs["timeout"],
             )
 
-        with patch.object(e2e, "HELPER", str(helper)):
-            with patch.object(e2e.subprocess, "run", side_effect=stdout_only_gantry):
-                battery.reject_unconfigured_login("mcp")
+        with patch.object(e2e.subprocess, "run", side_effect=stdout_only_gantry):
+            battery.reject_unconfigured_login("mcp", tuple(helper_command))
         self.assertIn("unknown provider", battery.last_command_log.read_text())
 
     def test_guest_exec_wrapper_preserves_argv_stdin_and_exit_status(self):
@@ -391,6 +395,29 @@ class FixtureTests(unittest.TestCase):
         self.assertIn("received IDs [1]", str(failure.exception))
         self.assertIn(str(battery.last_command_log), str(failure.exception))
 
+    def test_ci_runs_all_non_vm_batteries_on_each_host_platform(self):
+        workflow = Path(__file__).resolve().parent.parent.joinpath(
+            ".github/workflows/ci.yml"
+        ).read_text()
+        start = workflow.index("  test:")
+        end = workflow.index("\n  fuzz-virtqueue:", start)
+        native_tests = workflow[start:end]
+        self.assertNotIn("matrix.name != 'windows-amd64'", native_tests)
+        self.assertNotIn("matrix.quality", native_tests)
+        self.assertNotIn("matrix.race", native_tests)
+        self.assertIn("go test -race -count=1 ./...", native_tests)
+        self.assertIn("go run ./tests/e2e/remotetui", native_tests)
+        self.assertIn("scripts/test-manager-api-e2e.sh -api-only", native_tests)
+        fuzz_start = workflow.index("  fuzz-virtqueue:")
+        fuzz_end = workflow.index("\n  # GitHub's Linux runner", fuzz_start)
+        fuzz = workflow[fuzz_start:fuzz_end]
+        self.assertIn("windows-latest", fuzz)
+        self.assertIn("macos-latest", fuzz)
+        conpty = Path(__file__).resolve().parent.parent.joinpath(
+            "tests/e2e/remotetui/terminal_bridge_windows.go"
+        ).read_text()
+        self.assertIn("windows.CreatePseudoConsole", conpty)
+
     def test_linux_ci_runs_real_vm_manager_and_oauth_batteries(self):
         workflow = Path(__file__).resolve().parent.parent.joinpath(
             ".github/workflows/ci.yml"
@@ -399,6 +426,7 @@ class FixtureTests(unittest.TestCase):
         end = workflow.index("\n  build:", start)
         native = workflow[start:end]
         self.assertIn("needs: [build, guest-assets, kernels, guest-tools]", native)
+        self.assertNotIn("!startsWith(github.ref, 'refs/tags/v')", native)
         self.assertIn("scripts/aws-e2e-validation.sh linux", native)
         self.assertIn("GANTRY_TEST_WORKLOAD_IMAGE", native)
         self.assertNotIn("-api-only", native)

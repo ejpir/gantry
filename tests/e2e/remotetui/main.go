@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -132,17 +133,37 @@ func (m *managerFixture) save() {
 }
 
 func main() {
+	// On Windows the fixture copies this executable over rundll32.exe in its
+	// private PATH. That lets the real browser-launch path report the URL
+	// without opening a host browser or adding a production test bypass.
+	if runtime.GOOS == "windows" && strings.EqualFold(filepath.Base(os.Args[0]), "rundll32.exe") {
+		if len(os.Args) != 3 || os.Args[1] != "url.dll,FileProtocolHandler" || os.Getenv("GANTRY_E2E_BROWSER_URL") == "" {
+			fmt.Fprintln(os.Stderr, "invalid browser-shim invocation")
+			os.Exit(2)
+		}
+		if err := os.WriteFile(os.Getenv("GANTRY_E2E_BROWSER_URL"), []byte(os.Args[2]), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, "browser shim:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	gantry := flag.String("gantry", "", "path to Gantry development binary")
 	python := flag.String("python", "python3", "Python 3 executable (standard library only)")
-	script := flag.String("script", "tests/e2e/remotetui/tui.py", "PTY driver path")
+	script := flag.String("script", "tests/e2e/remotetui/tui.py", "terminal driver path")
+	terminalBridge := flag.Bool("terminal-bridge", false, "internal Windows ConPTY relay")
 	flag.Parse()
 	if *gantry == "" {
 		fmt.Fprintln(os.Stderr, "usage: go run ./tests/e2e/remotetui -gantry /path/to/gantry")
 		os.Exit(2)
 	}
-	if runtime.GOOS == "windows" {
-		fmt.Fprintln(os.Stderr, "remote TUI E2E requires a POSIX PTY (Linux or macOS)")
-		os.Exit(2)
+	if *terminalBridge {
+		status, err := runTerminalBridge(*gantry)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "remote TUI terminal bridge:", err)
+			os.Exit(1)
+		}
+		os.Exit(status)
 	}
 	if err := run(*gantry, *python, *script); err != nil {
 		fmt.Fprintln(os.Stderr, "remote TUI E2E:", err)
@@ -222,9 +243,19 @@ func run(gantry, python, script string) error {
 	}
 	// Replace only the OS browser launcher in the subprocess PATH. Gantry's
 	// production OIDC verifier and loopback callback remain unmodified.
-	for _, name := range []string{"xdg-open", "open"} {
-		if err := os.WriteFile(filepath.Join(shimDir, name), []byte("#!/bin/sh\nprintf '%s' \"$1\" > \"$GANTRY_E2E_BROWSER_URL\"\n"), 0o700); err != nil {
+	terminalHelper, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		if err := copyFixtureExecutable(terminalHelper, filepath.Join(shimDir, "rundll32.exe")); err != nil {
 			return err
+		}
+	} else {
+		for _, name := range []string{"xdg-open", "open"} {
+			if err := os.WriteFile(filepath.Join(shimDir, name), []byte("#!/bin/sh\nprintf '%s' \"$1\" > \"$GANTRY_E2E_BROWSER_URL\"\n"), 0o700); err != nil {
+				return err
+			}
 		}
 	}
 	browserCtx, stopBrowser := context.WithCancel(ctx)
@@ -249,7 +280,7 @@ func run(gantry, python, script string) error {
 		}
 	}()
 	defer func() { stopBrowser(); <-browserDone }()
-	metadata := map[string]string{"gantry": gantry, "root": dir, "manager": server.URL, "token": token, "ca": caPath, "config": configPath, "state": manager.path, "browser": browserFile, "shim": shimDir}
+	metadata := map[string]string{"gantry": gantry, "root": dir, "manager": server.URL, "token": token, "ca": caPath, "config": configPath, "state": manager.path, "browser": browserFile, "shim": shimDir, "terminal_helper": terminalHelper}
 	metadataPath := filepath.Join(dir, "fixture.json")
 	data, err = json.Marshal(metadata)
 	if err != nil {
@@ -296,4 +327,21 @@ func run(gantry, python, script string) error {
 	}
 	fmt.Println("PASS real-binary TUI onboarding (standalone + organization; no VM boot)")
 	return nil
+}
+
+func copyFixtureExecutable(source, destination string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = input.Close() }()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	return output.Close()
 }

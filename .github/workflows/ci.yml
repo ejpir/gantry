@@ -221,15 +221,19 @@ jobs:
         run: '"$(go env GOPATH)/bin/golangci-lint" run ./...'
 
 
+  # Keep non-virtualized coverage symmetric: each supported host runs static
+  # checks, native tests, protocol E2Es, terminal onboarding, manager API,
+  # vendored portable tests, and both race-detector suites. Only VM boot is
+  # isolated to native-smoke/linux because hosted Windows/macOS lack WHPX/HVF.
   test:
     name: test/${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: linux, os: ubuntu-latest, quality: true, race: true }
-          - { name: windows-amd64, os: windows-latest, quality: false, race: false }
-          - { name: macos, os: macos-latest, quality: false, race: false }
+          - { name: linux, os: ubuntu-latest }
+          - { name: windows-amd64, os: windows-latest }
+          - { name: macos, os: macos-latest }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -237,52 +241,69 @@ jobs:
         with:
           go-version: "1.26.6"
       - name: genproto check
-        if: matrix.quality
-        run: scripts/genproto.sh --check
-
-      - name: gofmt
-        if: matrix.quality
         shell: bash
         run: |
-          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v third_party))
+          if [ "$RUNNER_OS" = Windows ]; then
+            TMPDIR=$(cygpath -u "$RUNNER_TEMP")
+            export TMPDIR
+          fi
+          scripts/genproto.sh --check
+
+      - name: gofmt
+        shell: bash
+        run: |
+          # Repository Go paths contain no whitespace; preserve Bash 3.2
+          # compatibility on macOS instead of relying on mapfile.
+          # shellcheck disable=SC2046
+          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v '^third_party/'))
           if [ -n "$unformatted" ]; then
             echo "run gofmt -w:"
             echo "$unformatted"
             exit 1
           fi
       - name: go vet
-        if: matrix.quality
         run: go vet ./...
       - name: go test
         run: go test -count=1 ./...
       - name: OAuth and field-runner orchestration tests
-        if: matrix.quality
+        shell: bash
         run: python3 -m unittest -v scripts.test_oauth_custody_e2e scripts.test_aws_e2e_validation
       - name: standalone OIDC E2E (local HTTPS IdP, no VM)
         shell: bash
         run: |
           go build -o "$RUNNER_TEMP/gantry-oidc.exe" ./cmd/gantry
           go run ./tests/e2e/oidc -gantry "$RUNNER_TEMP/gantry-oidc.exe"
-      - name: remote onboarding TUI E2E (PTY and HTTPS fixtures, no VM)
-        if: matrix.name != 'windows-amd64'
+      - name: remote onboarding TUI E2E (native terminal and HTTPS fixtures, no VM)
         shell: bash
         run: go run ./tests/e2e/remotetui -gantry "$RUNNER_TEMP/gantry-oidc.exe"
       - name: M2 manager API and remote CLI E2E (no VM)
-        if: matrix.name != 'windows-amd64'
         shell: bash
         run: scripts/test-manager-api-e2e.sh -api-only -gantry "$RUNNER_TEMP/gantry-oidc.exe"
       - name: vendored go-fuse security tests
-        if: matrix.name != 'windows-amd64'
+        shell: bash
         working-directory: third_party/go-fuse
-        run: go test -count=1 ./fs ./fuse ./internal/vhostuser
+        run: |
+          packages=(./fs ./fuse)
+          if [ "$RUNNER_OS" != Windows ]; then
+            # vhost-user is a Unix SCM_RIGHTS/mmap transport and is not part of
+            # the Windows backend. The portable go-fuse packages still run.
+            packages+=(./internal/vhostuser)
+          fi
+          go test -count=1 "${packages[@]}"
       - name: vendored go-fuse race tests
-        if: matrix.race
+        shell: bash
         working-directory: third_party/go-fuse
-        run: go test -race -count=1 ./internal/vhostuser
+        run: |
+          packages=(./fs ./fuse)
+          if [ "$RUNNER_OS" != Windows ]; then
+            packages+=(./internal/vhostuser)
+          fi
+          go test -race -count=1 "${packages[@]}"
       - name: go test -race
-        if: matrix.race
         run: go test -race -count=1 ./...
 
+  # Keep the established Linux check name for branch protection; the sibling
+  # matrix runs the same non-virtualized fuzz targets on the other host OSes.
   fuzz-virtqueue:
     name: fuzz/virtqueue
     runs-on: ubuntu-latest
@@ -293,6 +314,7 @@ jobs:
         with:
           go-version: "1.26.6"
       - name: fuzz virtqueue parser and MMIO transport
+        shell: bash
         env:
           GOMEMLIMIT: 512MiB
         run: |
@@ -313,11 +335,47 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  fuzz-virtqueue-platforms:
+    name: fuzz/virtqueue/${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-amd64, os: windows-latest }
+          - { name: macos, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      - name: fuzz virtqueue parser and MMIO transport
+        shell: bash
+        env:
+          GOMEMLIMIT: 512MiB
+        run: |
+          for target in FuzzVirtqueueChain FuzzVirtqueueMMIO; do
+            go test ./internal/virtio \
+              -run='^$' \
+              -fuzz="^${target}$" \
+              -fuzztime=30s \
+              -parallel=2 \
+              -timeout=2m
+          done
+      - name: upload minimized failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtqueue-fuzz-${{ matrix.name }}-failure
+          path: internal/virtio/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 7
+
   # GitHub's Linux runner exposes KVM, so this job goes beyond boot smoke: it
   # runs the full manager/SSH/policy-feed and public-client OAuth/MCP batteries
   # against the exact host, kernel, rootfs, image, and guest-helper artifacts.
   native-smoke:
-    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     name: native-smoke/${{ matrix.name }}
     needs: [build, guest-assets, kernels, guest-tools]
     timeout-minutes: 30
@@ -575,11 +633,13 @@ jobs:
           if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
             version="$REF_NAME"
           fi
-          for pair in "amd64 x86_64" "arm64 arm64"; do
-            set -- $pair
-            GOOS=linux GOARCH=$1 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version}" \
-              -o "$RUNNER_TEMP/guest-tools/gantry-guest-$2" ./cmd/gantry-guest
-          done
+          while read -r goarch suffix; do
+            GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+              -o "$RUNNER_TEMP/guest-tools/gantry-guest-$suffix" ./cmd/gantry-guest
+          done <<'EOF'
+          amd64 x86_64
+          arm64 arm64
+          EOF
           ls -lh "$RUNNER_TEMP/guest-tools"
       - uses: actions/upload-artifact@v4
         with:
@@ -590,7 +650,7 @@ jobs:
   release:
     name: release/${{ github.ref_name }}
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [build, windows-sign, kernels, guest-assets, guest-tools]
+    needs: [build, windows-sign, kernels, guest-assets, guest-tools, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
