@@ -1,54 +1,51 @@
 # Manager API
 
-The Gantry manager exposes local sandbox lifecycle and bounded command
-execution over HTTP/1.1 on a Unix-domain socket.
+The manager exposes sandbox lifecycle and bounded command execution over
+HTTP/1.1. Use it when an agent or development tool needs structured results.
+The installed server exposes the exact [OpenAPI contract](../../api/managerapi/openapi.yaml).
 
-Use the API when a local agent harness or development tool needs structured
-results instead of terminal-oriented CLI output.
-
-## Start the manager
+## Start a local manager
 
 ```console
 $ gantry serve
 ```
 
-The default socket is `~/.gantry/manager.sock`. Choose another path with:
-
-```console
-$ gantry serve -socket /run/user/1000/gantry-manager.sock
-```
-
-The production listener restricts the socket and verifies same-user local
-connections. It is not a TCP authentication protocol and must not be exposed
-through a network proxy or shared with untrusted users.
-
-## Check health
-
-Use `curl` with Unix-socket transport:
+The default endpoint is `~/.gantry/manager.sock`. Choose another Unix socket
+with `-socket`.
 
 ```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" \
     http://gantry.local/v1/health
-```
-
-Fetch the exact API contract served by the installed build:
-
-```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" \
     http://gantry.local/v1/openapi.yaml
 ```
 
-The repository also contains the
-[OpenAPI 3.1 contract](../../api/managerapi/openapi.yaml).
+The socket is private and same-user authenticated. Do not expose it through a
+network proxy or share it with untrusted users.
+
+## Serve over TLS
+
+Remote listeners require TLS and a bearer token:
+
+```console
+$ gantry serve --mint-token > ~/.gantry/manager.token
+$ chmod 600 ~/.gantry/manager.token
+$ gantry serve -listen tls://0.0.0.0:8443 \
+    --self-signed --token-file ~/.gantry/manager.token
+```
+
+Every request needs `Authorization: Bearer TOKEN`. Plaintext network listeners
+are refused. Use `--tls-cert` and `--tls-key` for your own PKI. The token file
+is reloaded when replaced.
+
+A token grants host-shell authority. Keep the listener on a trusted network and
+treat the token like a private key. See [Remote access](remote-access.md) for
+client profiles and TLS trust.
 
 ## Create a sandbox
 
-The manager create path is cache-only, so an API request does not trigger a
-registry transfer. Warm the image cache with the CLI first:
-
-```console
-$ gantry image pull alpine:latest
-```
+The API is cache-only: pull the image on the manager first, or call
+`POST /v1/images/pull`.
 
 ```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" \
@@ -60,54 +57,43 @@ $ curl --unix-socket "$HOME/.gantry/manager.sock" \
       "rw": true,
       "memoryMiB": 1024,
       "cpus": 2,
-      "shares": ["workspace=/absolute/project/path,mount=/workspace,ro"],
-      "networkPolicy": "/absolute/policy.json"
+      "shares": ["workspace=/absolute/project,mount=/workspace,ro"]
     }' \
     http://gantry.local/v1/sandboxes
 ```
 
-Lifecycle mutations return an operation object. Supply an `Idempotency-Key`
-when a caller may retry after losing a response. Reusing a key with the same
-request returns the existing operation; reusing it for a different request is
+Lifecycle mutations return an operation. Use an `Idempotency-Key` when a caller
+may retry: the same key and request replay the operation; different content is
 rejected.
 
-## List and inspect sandboxes
+`organizationPolicy` may contain a signed snapshot (`bundle`, `public_key`, and
+`profile`). Gantry verifies it before boot. It cannot be combined with OAuth
+custody.
+
+## Inspect and control sandboxes
 
 ```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" \
     http://gantry.local/v1/sandboxes
-
 $ curl --unix-socket "$HOME/.gantry/manager.sock" \
     http://gantry.local/v1/sandboxes/api-dev
-```
-
-## Stop, start, and delete
-
-Sandbox inspection reports `starting` until both guest RPC and the local
-control broker are ready, then `running`. A stopped daemon reports `stopped`.
-The CLI and dashboard use the same readiness definition.
-
-The `desired` object describes saved boot settings; `active` describes the
-current VM allocation. Changing memory, CPUs, process isolation, or the
-Dev Containers topology sets `restartRequired` until the next start.
-Existing top-level `cpus` and `memoryMiB` fields retain their saved-setting
-meaning. `active` is absent for stopped sandboxes and older daemons that
-have not published a boot snapshot.
-
-```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" -X POST \
     http://gantry.local/v1/sandboxes/api-dev/stop
-
 $ curl --unix-socket "$HOME/.gantry/manager.sock" -X POST \
     http://gantry.local/v1/sandboxes/api-dev/start
-
 $ curl --unix-socket "$HOME/.gantry/manager.sock" -X DELETE \
     http://gantry.local/v1/sandboxes/api-dev
 ```
 
-## Execute a command
+Inspection reports `starting`, `running`, or `stopped`. `desired` contains
+saved next-boot settings; `active` contains current VM resources.
+`restartRequired` shows when they differ.
 
-The exec endpoint captures combined output with explicit time and size bounds:
+`PATCH /v1/sandboxes/{name}` updates only supplied `ssh`, `devContainers`,
+`memoryMiB`, `cpus`, or `processIsolation` fields. It never replaces
+`sandbox.json`.
+
+## Execute a command
 
 ```console
 $ curl --unix-socket "$HOME/.gantry/manager.sock" \
@@ -121,14 +107,40 @@ $ curl --unix-socket "$HOME/.gantry/manager.sock" \
     http://gantry.local/v1/sandboxes/api-dev/exec
 ```
 
-A non-zero guest exit is still an HTTP `200` result with `exitCode`, `output`,
-and `truncated` fields. Infrastructure timeouts and invalid or oversized
-requests use HTTP error responses.
+A guest nonzero exit is an HTTP `200` response with `exitCode`, `output`, and
+`truncated`. Invalid requests and infrastructure failures use HTTP errors.
+
+## Other routes
+
+The OpenAPI contract defines all request and response shapes. Main route groups
+are:
+
+- `/v1/images`, `/v1/images/pull`, and `/v1/images/delete` for image operations;
+- `/v1/sandboxes/{name}/ssh` for an authenticated SSH upgrade;
+- `/v1/sandboxes/{name}/net-policy` for network policy;
+- `/v1/sandboxes/{name}/policy` for live organization policy and controlled
+  restart rollout;
+- `/v1/sandboxes/{name}/audit` for a bounded audit tail;
+- `/v1/run` for a bounded low-level VM run; and
+- `/v1/operations/{id}` for operation state.
+
+Organization-policy mutation applies live to a running sandbox by default. Add
+`"restart": true` to explicitly request controlled stop/update/resume. A
+stopped sandbox remains stopped. The signed snapshot is always verified on the
+manager. After an organization-wide feed generation is active, per-sandbox
+replacement and clearing are refused; new manager-created sandboxes inherit the
+feed snapshot.
+
+Low-level run accepts manager-host asset paths and bounded input, output, and
+timeouts. It is not named-sandbox creation and is disabled while an
+organization-wide feed policy is active. See
+[Architecture](architecture.md#remote-manager-transport) for execution and SSH
+tunnel boundaries.
 
 ## Pass secrets by name
 
 The API never accepts secret values. Start the manager with values in its own
-environment, then put only the names in `secretNames`:
+environment and send only names:
 
 ```console
 $ export GITHUB_TOKEN=...
@@ -136,24 +148,17 @@ $ gantry serve
 ```
 
 ```json
-{
-  "name": "agent",
-  "image": "alpine:latest",
-  "secretNames": ["GITHUB_TOKEN"]
-}
+{"name": "agent", "image": "alpine:latest", "secretNames": ["GITHUB_TOKEN"]}
 ```
 
-The same [secret lifecycle](shares-secrets.md#secret-lifecycle) applies as it
-does to the CLI.
+The normal [secret lifecycle](shares-secrets.md#secret-lifecycle) applies.
 
-## Watch lifecycle events
-
-Subscribe to the bounded server-sent event stream:
+## Watch events
 
 ```console
 $ curl -N --unix-socket "$HOME/.gantry/manager.sock" \
     http://gantry.local/v1/events
 ```
 
-Events report current operation transitions. The stream does not replay
-historical events; use `/v1/operations/{id}` to inspect a known operation.
+The server-sent stream reports current operation transitions but does not
+replay history. Query a known operation ID for its retained result.

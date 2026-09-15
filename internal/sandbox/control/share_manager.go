@@ -1,14 +1,17 @@
 package control
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/secret"
@@ -27,20 +30,28 @@ import (
 // touched. Every step before the hub mutation is reversible, so a failure
 // anywhere rolls all three back; a crash anywhere leaves on-disk state the
 // next boot can either replay (config) or regenerate (manifest).
+type organizationPolicy interface {
+	Authorize(context.Context, string, policy.Resource) error
+	Evaluate(context.Context, string, policy.Resource) policy.Decision
+	ExpiresAt() time.Time
+}
+
 type ShareManager struct {
-	dir       string
-	stateRoot sharefs.Identity
-	hub       *sharefs.Hub
-	store     *config.ConfigStore
-	mu        sync.Mutex
-	exports   map[string]*managedShare
-	retired   []*managedShare
+	dir        string
+	stateRoot  sharefs.Identity
+	hub        *sharefs.Hub
+	store      *config.ConfigStore
+	governance organizationPolicy
+	mu         sync.Mutex
+	exports    map[string]*managedShare
+	retired    []*managedShare
 	// sourceBarriers is the launch-time file-source capability set. It is
 	// intentionally sticky for the daemon lifetime: removing a source cannot
 	// make a concurrent or already-running host resolver safe for a live
 	// writable-share add. A restart establishes a new barrier.
 	sourceBarriers []secret.NamedSource
 	generation     uint64
+	policyDeadline time.Time
 	failed         error
 	closed         bool
 }
@@ -50,6 +61,7 @@ type managedShare struct {
 	identity  sharefs.Identity
 	export    *sharefs.Export
 	ephemeral bool
+	internal  bool // daemon-owned payload; ordinary share mutations cannot replace/remove it
 }
 
 // shareAddCandidate owns a pinned root until commit publishes it. Publish and
@@ -87,12 +99,33 @@ type shareAddTransaction struct {
 // per-device path for an empty configuration. The store is the broker-owned
 // configuration owner; boot state is read from its snapshot.
 func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []string, error) {
+	engine, err := policy.New(store.Snapshot().OrgPolicy, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return NewShareManagerWithPolicy(dir, store, engine)
+}
+
+func NewShareManagerWithPolicy(dir string, store *config.ConfigStore, engine *policy.Engine) (*ShareManager, []string, error) {
+	return newShareManager(dir, store, engine, engine == nil)
+}
+
+func NewShareManagerWithController(dir string, store *config.ConfigStore, controller *policy.Controller) (*ShareManager, []string, error) {
+	return newShareManager(dir, store, controller, controller == nil)
+}
+
+func newShareManager(dir string, store *config.ConfigStore, governance organizationPolicy, missing bool) (*ShareManager, []string, error) {
 	cfg := store.Snapshot()
+	if cfg.OrgPolicy != nil && missing {
+		return nil, nil, fmt.Errorf("organization policy was not initialized")
+	}
 	stateIdentity, err := sharefs.Identify(layout.ProtectionRoot(dir))
 	if err != nil {
 		return nil, nil, fmt.Errorf("identify Gantry state root: %w", err)
 	}
 	m := &ShareManager{
+		governance:     governance,
+		policyDeadline: governance.ExpiresAt(),
 		dir:            dir,
 		stateRoot:      stateIdentity,
 		store:          store,
@@ -112,6 +145,7 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 		return nil, nil, err
 	}
 	m.hub = hub
+	hub.SetDeadline(governance.ExpiresAt())
 	var warnings []string
 	configured, err := shares.ParseSpecs(cfg.Shares)
 	if err != nil {
@@ -138,6 +172,11 @@ func NewShareManager(dir string, store *config.ConfigStore) (*ShareManager, []st
 		}
 		identity := prepared.Identity()
 		share.Path = canonical
+		if err := m.authorizeShare(share); err != nil {
+			prepared.Close()
+			_ = m.Close()
+			return nil, nil, err
+		}
 		if err := config.ValidateSecretSourcePinnedShare(m.isolationSourcesLocked(), share, identity); err != nil {
 			prepared.Close()
 			_ = m.Close()
@@ -209,6 +248,13 @@ func (m *ShareManager) ConfigureRestart(spec string, replace bool) (shares.Spec,
 	defer m.mu.Unlock()
 	if err := m.readyLocked(); err != nil {
 		return shares.Spec{}, err
+	}
+	share, err := shares.ParseSpec(spec)
+	if err != nil {
+		return shares.Spec{}, err
+	}
+	if existing := m.exports[share.Tag]; existing != nil && existing.internal {
+		return shares.Spec{}, fmt.Errorf("share %q is reserved for guest-tools delivery", share.Tag)
 	}
 	return m.store.SetShareForRestart(spec, replace)
 }
@@ -317,10 +363,25 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 	if share.CtrPath != "" {
 		return nil, fmt.Errorf("live shares always appear at /host/<tag>; mount=CTRPATH requires sandbox restart")
 	}
+	share.CtrPath = config.DefaultHubCtrPath(share.Tag)
+	candidate, err := m.preparePinnedAddLocked(share, replace)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.authorizeShare(candidate.share); err != nil {
+		candidate.Close()
+		return nil, err
+	}
+	return candidate, nil
+}
+
+// preparePinnedAddLocked validates and pins an export but does not authorize
+// organization mount access. User exports must go through prepareAddLocked.
+// The only other caller stages daemon-owned helper bytes, never a caller path.
+func (m *ShareManager) preparePinnedAddLocked(share shares.Spec, replace bool) (*shareAddCandidate, error) {
 	if !filepath.IsAbs(share.Path) {
 		return nil, fmt.Errorf("share path must be absolute (got %q)", share.Path)
 	}
-	share.CtrPath = config.DefaultHubCtrPath(share.Tag)
 	if err := validateShareTarget(share); err != nil {
 		return nil, err
 	}
@@ -328,6 +389,9 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 		return nil, err
 	}
 	existing := m.exports[share.Tag]
+	if existing != nil && existing.internal {
+		return nil, fmt.Errorf("share %q is reserved for guest-tools delivery", share.Tag)
+	}
 	if existing == nil && len(m.exports) >= config.MaxManagedShares {
 		return nil, fmt.Errorf("too many shares (max %d)", config.MaxManagedShares)
 	}
@@ -364,6 +428,69 @@ func (m *ShareManager) prepareAddLocked(spec string, replace bool) (*shareAddCan
 		return nil, err
 	}
 	return candidate, nil
+}
+
+func (m *ShareManager) authorizeShare(share shares.Spec) error {
+	return authorizeShareWithPolicy(m.governance, share)
+}
+
+func authorizeShareWithPolicy(governance organizationPolicy, share shares.Spec) error {
+	resource := policy.Resource{Path: share.Path}
+	if err := governance.Authorize(context.Background(), policy.MountRead, resource); err != nil {
+		return err
+	}
+	if !share.RO {
+		return governance.Authorize(context.Background(), policy.MountWrite, resource)
+	}
+	return nil
+}
+
+// SetPolicyBlocked drains in-flight host filesystem operations and denies new
+// ones while the daemon reconciles a live organization-policy generation.
+func (m *ShareManager) SetPolicyBlocked(blocked bool) {
+	if m != nil && m.hub != nil {
+		m.hub.SetPolicyBlocked(blocked)
+	}
+}
+
+// ReconcileOrganizationPolicy atomically updates the deadline and access bit
+// for every export. Denied exports remain pinned so a later generation can
+// restore access without broadening the persisted share configuration.
+func (m *ShareManager) ReconcileOrganizationPolicy(engine *policy.Engine) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hub == nil {
+		return nil
+	}
+	if err := m.readyLocked(); err != nil {
+		return err
+	}
+	denied := make(map[string]bool, len(m.exports))
+	previous := make(map[string]bool, len(m.exports))
+	for tag, export := range m.exports {
+		previous[tag] = export.export != nil && export.export.PolicyDenied()
+		if export.internal {
+			continue
+		}
+		denied[tag] = authorizeShareWithPolicy(engine, export.share) != nil
+	}
+	oldDeadline := m.policyDeadline
+	m.hub.SetPolicyAccess(engine.ExpiresAt(), denied)
+	m.policyDeadline = engine.ExpiresAt()
+	m.generation++
+	if err := m.publishLocked(); err != nil {
+		m.hub.SetPolicyAccess(oldDeadline, previous)
+		m.policyDeadline = oldDeadline
+		m.generation++
+		if rollbackErr := m.publishLocked(); rollbackErr != nil {
+			return m.failLocked(errors.Join(fmt.Errorf("publish policy-updated share manifest: %w", err), fmt.Errorf("restore share manifest: %w", rollbackErr)))
+		}
+		return fmt.Errorf("publish policy-updated share manifest: %w", err)
+	}
+	return nil
 }
 
 func (m *ShareManager) isolationSourcesLocked() []secret.NamedSource {
@@ -492,6 +619,9 @@ func shareOwnerEqual(a, b shares.Spec) bool {
 func (m *ShareManager) Remove(tag string, persistent, force bool) (shares.Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if existing := m.exports[tag]; existing != nil && existing.internal {
+		return shares.Entry{}, fmt.Errorf("share %q is reserved for guest-tools delivery", tag)
+	}
 	return m.removeLocked(tag, persistent, force)
 }
 
@@ -559,6 +689,16 @@ func (m *ShareManager) Generation() uint64 {
 	return m.generation
 }
 
+// Failed reports that an ambiguous share transaction closed the hub.
+func (m *ShareManager) Failed() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.failed != nil
+}
+
 // Entries returns the live namespace plus exports still draining after a
 // removal. Stopped sandboxes use loadTUIMounts' sandbox.json fallback instead.
 func (m *ShareManager) Entries() []shares.Entry {
@@ -593,6 +733,9 @@ func (m *ShareManager) entry(ms *managedShare) shares.Entry {
 	state := "active"
 	if ms.export != nil {
 		state = ms.export.State().String()
+		if ms.export.PolicyDenied() {
+			state = "policy-denied"
+		}
 	} else if m.hub == nil {
 		state = "saved"
 	}

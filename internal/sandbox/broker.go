@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
@@ -72,8 +73,9 @@ type broker struct {
 	// restarting the VM, and newly created user sessions read it atomically.
 	devContainers atomic.Bool
 	configure     func(controlproto.ConfigureRequest) (bool, error)
-	// audit is the bounded security-event trail served by audit.tail. auditMu
-	// serializes all sinks, including on-disk rotation and LogFunc callbacks.
+	policyApply   func(*policy.Config) error
+	// audit is the daemon-wide trail and sink writer shared with early boot
+	// and policy callbacks. auditMu is only the no-ring standalone fallback.
 	audit   *auditRing
 	auditMu sync.Mutex
 
@@ -176,6 +178,8 @@ func (br *broker) handle(c net.Conn) {
 		br.configureControl(c, req)
 	case "netpolicy.set", "netpolicy.get":
 		br.networkPolicyControl(c, req)
+	case "policy.set":
+		br.organizationPolicyControl(c, req)
 	case "secret.set", "secret.remove":
 		br.secretControl(c, req)
 	case "mcp.remote.set", "mcp.remote.remove", "mcp.filesystem.set":
@@ -191,6 +195,23 @@ func (br *broker) handle(c net.Conn) {
 	default:
 		_, _ = fmt.Fprintln(c, `{"error":"unknown op"}`)
 	}
+}
+
+func (br *broker) organizationPolicyControl(c net.Conn, req controlproto.Request) {
+	respond := func(resp controlproto.OrganizationPolicyResponse) { _ = json.NewEncoder(c).Encode(&resp) }
+	if br.policyApply == nil {
+		respond(controlproto.OrganizationPolicyResponse{Error: "live organization policy is unavailable"})
+		return
+	}
+	if req.Policy == nil || req.Policy.Clear == (req.Policy.Snapshot != nil) {
+		respond(controlproto.OrganizationPolicyResponse{Error: "supply exactly one of snapshot or clear=true"})
+		return
+	}
+	if err := br.policyApply(req.Policy.Snapshot); err != nil {
+		respond(controlproto.OrganizationPolicyResponse{Error: err.Error()})
+		return
+	}
+	respond(controlproto.OrganizationPolicyResponse{OK: true})
 }
 
 func (br *broker) secretControl(c net.Conn, req controlproto.Request) {
@@ -282,7 +303,7 @@ func (br *broker) secretEnv() []string {
 	env := secret.Env(resolved)
 	// With a bound secret held and the helper staged, point git at the
 	// broker via ephemeral env config — no guest file is ever written.
-	if bound > 0 && br.guestToolsReady.Load() {
+	if (bound > 0 || br.cfg.OAuthCustodyEnabled()) && br.guestToolsReady.Load() {
 		env = append(env,
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=credential.helper",
@@ -323,7 +344,7 @@ func (br *broker) bindings() map[string]string {
 // — the broker answers empty and audits the failure.
 func (br *broker) resolveCredential(host string) (string, secret.Value, credhelper.Resolution) {
 	if br.secretStore == nil {
-		return "", "", credhelper.NoBinding
+		return br.resolveCustodyCredential(host)
 	}
 	bindings := br.bindings()
 	names := make([]string, 0, len(bindings))
@@ -341,7 +362,7 @@ func (br *broker) resolveCredential(host string) (string, secret.Value, credhelp
 		}
 		return name, v, credhelper.OK
 	}
-	return "", "", credhelper.NoBinding
+	return br.resolveCustodyCredential(host)
 }
 
 func (br *broker) mcpControl(c net.Conn, req controlproto.Request) {

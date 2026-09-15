@@ -9,29 +9,31 @@ package controlproto
 
 import (
 	"github.com/ejpir/gantry/internal/packetcapture"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
 )
 
 type Request struct {
-	Op        string                 `json:"op"` // sessions plus bounded share/port/resource/secret/MCP control operations
-	ID        string                 `json:"id"`
-	V         int                    `json:"v,omitempty"` // sessionctl: SessionProtocolVersion
-	Args      []string               `json:"args,omitempty"`
-	Cwd       string                 `json:"cwd,omitempty"`
-	Cols      uint32                 `json:"cols,omitempty"`
-	Rows      uint32                 `json:"rows,omitempty"`
-	Terminal  bool                   `json:"terminal,omitempty"`
-	Quiet     bool                   `json:"quiet,omitempty"`
-	Share     *ShareRequest          `json:"share,omitempty"`
-	Port      *PortRequest           `json:"port,omitempty"`
-	Resources *ResourceRequest       `json:"resources,omitempty"`
-	Configure *ConfigureRequest      `json:"configure,omitempty"`
-	NetPolicy *NetworkPolicyRequest  `json:"net_policy,omitempty"`
-	Secret    *SecretRequest         `json:"secret,omitempty"`
-	MCP       *MCPRequest            `json:"mcp,omitempty"`
-	Capture   *packetcapture.Request `json:"capture,omitempty"`
+	Op        string                     `json:"op"` // sessions plus bounded share/port/resource/secret/MCP control operations
+	ID        string                     `json:"id"`
+	V         int                        `json:"v,omitempty"` // sessionctl: SessionProtocolVersion
+	Args      []string                   `json:"args,omitempty"`
+	Cwd       string                     `json:"cwd,omitempty"`
+	Cols      uint32                     `json:"cols,omitempty"`
+	Rows      uint32                     `json:"rows,omitempty"`
+	Terminal  bool                       `json:"terminal,omitempty"`
+	Quiet     bool                       `json:"quiet,omitempty"`
+	Share     *ShareRequest              `json:"share,omitempty"`
+	Port      *PortRequest               `json:"port,omitempty"`
+	Resources *ResourceRequest           `json:"resources,omitempty"`
+	Configure *ConfigureRequest          `json:"configure,omitempty"`
+	NetPolicy *NetworkPolicyRequest      `json:"net_policy,omitempty"`
+	Policy    *OrganizationPolicyRequest `json:"policy,omitempty"`
+	Secret    *SecretRequest             `json:"secret,omitempty"`
+	MCP       *MCPRequest                `json:"mcp,omitempty"`
+	Capture   *packetcapture.Request     `json:"capture,omitempty"`
 }
 
 type ResourceRequest struct {
@@ -132,6 +134,16 @@ type NetworkPolicyResponse struct {
 	OK     bool                        `json:"ok"`
 	Error  string                      `json:"error,omitempty"`
 	Policy *control.NetworkPolicyEntry `json:"policy,omitempty"`
+}
+
+type OrganizationPolicyRequest struct {
+	Snapshot *policy.Config `json:"snapshot,omitempty"`
+	Clear    bool           `json:"clear,omitempty"`
+}
+
+type OrganizationPolicyResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // SessionProtocolVersion versions the session-control channel: the

@@ -346,5 +346,25 @@ func flattenLayers(w *erofs.Writer, layers []*os.File, logf func(string, ...any)
 	if emitter.hardlinkMisses > 0 && logf != nil {
 		logf("flatten: %d hardlink(s) with unresolvable targets skipped", emitter.hardlinkMisses)
 	}
+	// Container engines inject these files as runtime mounts, so they are
+	// commonly absent from OCI layers and docker-export archives. crun cannot
+	// create a missing bind target inside an immutable EROFS root; materialize
+	// harmless placeholders so explicitly read-only sandboxes can start.
+	for _, name := range []string{"etc/hosts", "etc/resolv.conf"} {
+		if _, exists := idx.entries[name]; exists {
+			continue
+		}
+		file, err := w.Create("/" + name)
+		if err != nil {
+			return nil, err
+		}
+		if err := file.Chmod(0o644); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+	}
 	return idx, nil
 }

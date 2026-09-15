@@ -8,13 +8,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/ejpir/gantry/internal/dashboard"
-	"github.com/ejpir/gantry/internal/gutil"
 	"github.com/ejpir/gantry/internal/mcpworker"
 	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/remote"
+	"github.com/ejpir/gantry/internal/runvm"
 	"github.com/ejpir/gantry/internal/sandbox"
 	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
 	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
@@ -44,12 +44,15 @@ usage:
   gantry mcp <name> [tools]         # MCP gateway: configured servers; live tool list
   gantry ssh NAME [-- CMD]          # SSH through the sandbox-local socket
   gantry tui                        # interactive local sandbox dashboard
-  gantry serve                      # local HTTP/JSON manager on ~/.gantry/manager.sock
+  gantry serve                      # manager API and optional organization-wide mTLS policy feed
+  gantry remote <verb>              # remote manager profiles: add|ls|rm|test
   gantry pi [flags] [-- PI_ARGS]    # run the pi coding agent inside a sandbox
   gantry image <verb>               # OCI images: ls|pull|import|rm|prune|login|logout|credentials
   gantry share <verb>               # live host shares: add|remove|ls
   gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
   gantry net-policy <verb>          # live egress policy: set|default|show
+  gantry policy <verb>              # signed org policy: generate|sign|verify|check|set|clear|show
+  gantry org <verb>                 # host OIDC membership: login|status|logout|apply
   gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
   gantry export [options] <name>    # package a stopped sandbox as a portable OCI archive
   gantry stop <name>                # stop a sandbox
@@ -67,6 +70,10 @@ tar, or a plain .erofs file. Examples:
   gantry export dev -o dev.oci.tar
   gantry image import dev.oci.tar
 Run 'gantry start --help' or 'gantry exec --help' for all flags.
+
+Remote managers: start, exec, ls, stop, delete, and resume accept
+-remote NAME (or GANTRY_REMOTE) to run against a manager served with
+gantry serve -listen tls://... — see docs/gantry/remote-access.md.
 `)
 }
 
@@ -88,7 +95,48 @@ func runMain(args []string) int {
 		return 2
 	}
 
+	// Accept the selector before the command as well as among verb flags.
+	if remote.FlagPresent(args[:1]) {
+		count := 1
+		if args[0] == "-remote" || args[0] == "--remote" {
+			count = 2
+		}
+		if len(args) <= count {
+			fmt.Fprintln(os.Stderr, "usage: gantry -remote NAME COMMAND [args]")
+			return 2
+		}
+		args = append(append([]string{args[count]}, args[:count]...), args[count+1:]...)
+	}
 	command, argv := args[0], args[1:]
+	// Remote dispatch (docs/remote-sandbox-access.md milestone 2):
+	// -remote/--remote NAME or GANTRY_REMOTE routes lifecycle verbs to a
+	// remote manager. Verbs without a remote implementation fail loudly on
+	// an explicit -remote rather than silently acting on the local host.
+	if remote.VerbSupported(command) {
+		target, rest, err := remote.ExtractTarget(argv, os.Getenv("GANTRY_REMOTE"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if target != "" {
+			return remote.RunVerb(command, target, rest)
+		}
+		argv = rest
+	} else if remote.FlagPresent(argv) {
+		// Deny by default: adding a new local verb cannot accidentally make
+		// an explicitly remote request fall through to local execution.
+		target, rest, err := remote.ExtractTarget(argv, "")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if target != "" {
+			fmt.Fprintf(os.Stderr, "gantry: -remote %q is not supported for %q (see docs/gantry/remote-access.md)\n", target, command)
+			return 2
+		}
+		// Explicitly empty is a deliberate local request, not a fallback.
+		argv = rest
+	}
 	if status, ok := runSimpleCommand(command, argv); ok {
 		return status
 	}
@@ -121,6 +169,8 @@ func runMain(args []string) int {
 		return sandbox.CmdResume(name)
 	case "serve":
 		return sandbox.CmdServe(argv)
+	case "remote":
+		return remote.Cmd(argv)
 	case "version":
 		return cmdVersion(argv)
 	case "update":
@@ -228,6 +278,10 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return controlcmd.CmdPorts(argv), true
 	case "net-policy":
 		return controlcmd.CmdNetworkPolicy(argv), true
+	case "policy":
+		return controlcmd.CmdPolicyWithRollout(argv, sandbox.RolloutOrganizationPolicy), true
+	case "org":
+		return controlcmd.CmdOrg(argv), true
 	case "import":
 		return sandbox.CmdImport(argv), true
 	case "export":
@@ -247,30 +301,19 @@ func validSandboxName(name string) (string, bool) {
 
 func cmdRun(argv []string) int {
 	run := flag.NewFlagSet("run", flag.ContinueOnError)
-	kernel := run.String("kernel", "", "path to arm64 Linux kernel Image (required)")
-	initrd := run.String("initrd", "", "path to initramfs cpio.gz")
-	rootfs := run.String("rootfs", "", "path to rootfs image attached as virtio-blk /dev/vda (e.g. nerdbox EROFS)")
-	var disks gutil.StrList
-	run.Var(&disks, "disk", "extra virtio-blk image (repeatable): /dev/vdb, /dev/vdc, ...")
-	var shareArgs gutil.StrList
-	run.Var(&shareArgs, "share", "host directory exported through virtio-fs as TAG=PATH[,mount=CTRPATH][,ro] (repeatable)")
-	netEndpoint := run.String("net", "", "Unix datagram raw-Ethernet backend (e.g. gvproxy vfkit socket)")
-	netMACArg := run.String("net-mac", "5a:94:ef:e4:0c:ee", "virtio-net MAC address")
-	netVFKIT := run.Bool("net-vfkit", true, "send the VFKT registration datagram to the network backend")
-	netDHCP := run.Bool("net-dhcp", true, "ask vminitd to configure the interface using DHCP")
-	vsockFwd := run.String("vsockfwd", "", "host dir for vsock forwarding (sockets at <dir>/<port>.sock)")
-	guestCID := run.Uint64("guestcid", 3, "guest vsock context ID")
-	vsockListen := run.String("vsocklisten", "1026", "comma-separated guest ports accepting host connections (unix sockets at <vsockfwd>/listen-N.sock)")
-	memMB := run.Uint("mem", 512, "guest RAM in MiB")
-	vcpus := run.Int("cpus", 1, fmt.Sprintf("guest vCPU count (SMP via PSCI CPU_ON; max %d on this host)", vmm.MaxSupportedVCPUs()))
-	append_ := run.String("append", "", "kernel cmdline (default depends on -rootfs)")
+	request := runvm.BindFlags(run)
+	kernel, initrd, rootfs := &request.Kernel, &request.Initrd, &request.Rootfs
+	netEndpoint, netMACArg := &request.NetworkEndpoint, &request.NetworkMAC
+	netVFKIT, netDHCP := request.NetworkVFKIT, request.NetworkDHCP
+	vsockFwd, guestCID, vsockListen := &request.VsockForward, &request.GuestCID, request.VsockListen
+	memMB, vcpus, append_ := &request.MemoryMiB, &request.CPUs, &request.CommandLine
 	if err := run.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if *kernel == "" || (*initrd == "" && *rootfs == "") {
+	if run.NArg() != 0 || *kernel == "" || (*initrd == "" && *rootfs == "") {
 		run.Usage()
 		return 2
 	}
@@ -293,7 +336,7 @@ func cmdRun(argv []string) int {
 		}
 		copy(netMAC[:], hw)
 	}
-	hostShares, err := shares.ParseSpecs(shareArgs)
+	hostShares, err := shares.ParseSpecs(request.Shares)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry: invalid -share:", err)
 		return 2
@@ -332,7 +375,7 @@ func cmdRun(argv []string) int {
 		opened = append(opened, rootfsF)
 	}
 	var diskFs []*os.File
-	for _, d := range disks {
+	for _, d := range request.Disks {
 		f, err := os.OpenFile(d, os.O_RDWR, 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gantry run: disk %s: %v\n", d, err)
@@ -485,16 +528,4 @@ func prepareRunFilesystems(specs []shares.Spec, vsockFwd *sharefs.Identity) (fil
 	return filesystems, nil
 }
 
-func parseListenPorts(value string) ([]uint32, error) {
-	parts := strings.Split(value, ",")
-	ports := make([]uint32, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		port, err := strconv.ParseUint(part, 10, 32)
-		if err != nil || port == 0 {
-			return nil, fmt.Errorf("invalid guest port %q", part)
-		}
-		ports = append(ports, uint32(port))
-	}
-	return ports, nil
-}
+func parseListenPorts(value string) ([]uint32, error) { return runvm.ParseListenPorts(value) }

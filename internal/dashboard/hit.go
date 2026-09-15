@@ -193,7 +193,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 			if m.busyAction != "" {
 				return m, nil
 			}
-			return m, m.openCreateDialog()
+			return m, m.openCreateWizard()
 		case "help":
 			m.dialog = tuiHelpDialog
 			m.dialogScroll = 0
@@ -252,7 +252,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		if target.index != m.cursor || !m.onNewCard() || !m.dashboardDoubleClick("create", target.index) {
 			return m, nil
 		}
-		return m, m.openCreateDialog()
+		return m, m.openCreateWizard()
 	case "entry":
 		wasSelected := target.index == m.cursor
 		m.setCursor(target.index)
@@ -262,7 +262,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		}
 		if m.page == tuiOverviewPage {
 			if m.onNewCard() {
-				return m, m.openCreateDialog()
+				return m, m.openCreateWizard()
 			}
 			m.setPage(tuiSandboxesPage)
 			return m, nil

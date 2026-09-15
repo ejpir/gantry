@@ -50,6 +50,8 @@ func pageDisplayTitle(page tuiPage) string {
 	switch page {
 	case tuiOverviewPage:
 		return "Overview"
+	case tuiRemotesPage:
+		return "Remotes"
 	case tuiTrafficPage:
 		return "Traffic"
 	case tuiRulesPage:
@@ -62,6 +64,8 @@ func pageDisplayTitle(page tuiPage) string {
 		return "Secrets"
 	case tuiMCPPage:
 		return "MCP"
+	case tuiAuditPage:
+		return "Audit"
 	case tuiPacketsPage:
 		return "Packets"
 	case tuiImagesPage:

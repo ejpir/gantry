@@ -25,14 +25,14 @@ func (w *vmmWorker) startShareVhost(hub *sharefs.Hub) error {
 	if hub == nil {
 		return fmt.Errorf("share hub unavailable")
 	}
-	if w.shareE != nil {
+	if w.shareDone != nil {
 		return fmt.Errorf("share backend already started")
 	}
 	conn, ok := w.share.(*net.UnixConn)
 	if !ok {
 		return fmt.Errorf("vhost share control is %T, want Unix connection", w.share)
 	}
-	w.shareE = make(chan error, 1)
+	w.shareDone = make(chan struct{})
 	debug := os.Getenv("GANTRY_DEBUG_FS") != ""
 	stats := newVhostShareStats()
 	go w.monitorShareServe(func() error {

@@ -49,6 +49,15 @@ func NewNetworkTransactionCoordinator() *NetworkTransactionCoordinator {
 	return &NetworkTransactionCoordinator{}
 }
 
+// Run serializes fn with every live network-policy and port transaction using
+// this coordinator. It lets daemon-wide policy reconciliation participate in
+// the same rollback domain without exposing the mutex itself.
+func (coordinator *NetworkTransactionCoordinator) Run(fn func() error) error {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	return fn()
+}
+
 type localNetworkStack interface {
 	Publish(proto, local, remote string) error
 	Unpublish(proto, local string) error
@@ -121,7 +130,7 @@ func (b *localBackend) SetPolicy(policy *netpol.Policy) error {
 	if err := validatePolicyAgainstUDPForwards(policy, forwards); err != nil {
 		return err
 	}
-	return b.live.Replace(policy)
+	return b.live.ReplaceExact(policy)
 }
 
 func validatePolicyAgainstUDPForwards(policy *netpol.Policy, forwards []vnet.Forward) error {
@@ -164,9 +173,9 @@ func (b *policyMirrorBackend) SetPolicy(policy *netpol.Policy) error {
 	if err := b.NetworkBackend.SetPolicy(policy); err != nil {
 		return err
 	}
-	// live and policy were checked above, so Replace cannot fail after the
-	// split backend has committed the policy.
-	return b.live.Replace(policy)
+	// live and policy were checked above, so ReplaceExact cannot fail after the
+	// split backend has committed the complete effective policy.
+	return b.live.ReplaceExact(policy)
 }
 
 // VMMPolicyPusher is the slice of the _vmm-worker the policy fan-out

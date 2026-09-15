@@ -20,7 +20,7 @@ BUF_VERSION=v1.32.2
 PROTOC_GEN_GO_VERSION=v1.28.1
 TTRPC_VERSION=v1.2.9
 
-REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 # Private scratch area for the tool binaries (and, in --check mode, the
 # regeneration output). Never a predictable path, always cleaned up.
@@ -41,6 +41,9 @@ if [ "${1:-}" = "--check" ]; then
 	mkdir -p "$WORK/src"
 	cp -a "$REPO/api/proto" "$REPO/api/buf.yaml" "$REPO/api/buf.gen.yaml" "$WORK/src/"
 	(cd "$WORK/src" && buf generate)
+	# The protobuf source-info comments retain input line endings on some
+	# Windows toolchains. Canonical gofmt output is the committed contract.
+	find "$WORK/src/services" -type f -name '*.go' -exec gofmt -w {} +
 	# Compare exactly the files buf produced (the checked-in tree may
 	# additionally carry hand-written files like doc.go).
 	drift=0
@@ -58,5 +61,6 @@ if [ "${1:-}" = "--check" ]; then
 	echo "genproto --check OK: api/services/ matches the vendored proto sources."
 else
 	(cd "$REPO/api" && buf generate)
+	find "$REPO/api/services" -type f -name '*.go' -exec gofmt -w {} +
 	echo "regenerated api/services/ from api/proto/."
 fi

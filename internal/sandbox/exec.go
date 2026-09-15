@@ -299,7 +299,15 @@ func CmdSandboxExec(name string, argv []string) int {
 	}()
 
 	done := make(chan struct{})
-	go func() { _, _ = io.Copy(c, os.Stdin) }()
+	go func() {
+		_, _ = io.Copy(c, os.Stdin)
+		// Forward EOF on the broker's input half, just as captured exec does.
+		// Leaving it open strands readers such as cat and mcp-proxy; closing
+		// the whole connection would instead discard their final output.
+		if unix, ok := c.(*net.UnixConn); ok {
+			_ = unix.CloseWrite()
+		}
+	}()
 	go func() {
 		// r (not c): the handshake line came through the bufio reader.
 		// The stream is a pure byte pipe now — no in-band status to strip.

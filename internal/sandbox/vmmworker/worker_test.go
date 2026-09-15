@@ -587,11 +587,14 @@ func TestVMMWorkerShareBrokerExitStopsWorker(t *testing.T) {
 	if !ok {
 		t.Fatalf("worker share handler = %T, want broker client", (*h.fake).opts.Filesystems[0].Handler)
 	}
+	waitOut := make(chan error, 1)
+	go func() { waitOut <- h.w.Wait() }()
 	if err := client.Close(); err != nil {
 		t.Fatal(err)
 	}
 	select {
-	case err := <-h.w.shareE:
+	case <-h.w.shareDone:
+		err := h.w.shareFailure()
 		if err == nil || !strings.Contains(err.Error(), "closed unexpectedly") {
 			t.Fatalf("share broker exit = %v", err)
 		}
@@ -602,9 +605,20 @@ func TestVMMWorkerShareBrokerExitStopsWorker(t *testing.T) {
 		t.Fatal("share broker did not report the closed relay")
 	}
 	select {
+	case err := <-waitOut:
+		if err == nil || !strings.Contains(err.Error(), "closed unexpectedly") {
+			t.Fatalf("vm.wait lost share broker failure: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("share broker exit did not cancel vm.wait")
+	}
+	select {
 	case <-h.w.Done():
 	case <-time.After(15 * time.Second):
 		t.Fatal("share broker exit did not stop the VMM worker")
+	}
+	if err := h.w.Close(); err == nil || !strings.Contains(err.Error(), "closed unexpectedly") {
+		t.Fatalf("vm.close lost share broker failure: %v", err)
 	}
 }
 
@@ -623,8 +637,8 @@ func TestVMMWorkerNormalCloseDoesNotReportBrokerFailure(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	select {
-	case err := <-h.w.shareE:
-		t.Fatalf("normal close reported broker failure: %v", err)
+	case <-h.w.shareDone:
+		t.Fatalf("normal close reported broker failure: %v", h.w.shareFailure())
 	case <-time.After(100 * time.Millisecond):
 	}
 }

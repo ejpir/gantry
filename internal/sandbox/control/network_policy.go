@@ -101,6 +101,7 @@ func (m *NetworkPolicyManager) Set(path string, allowLocal bool) (NetworkPolicyE
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}
+	netpol.InheritGuard(policy, m.current)
 	if err := ValidatePolicyAgainstSavedUDPPorts(policy, cfg.Ports); err != nil {
 		return NetworkPolicyEntry{}, err
 	}
@@ -147,6 +148,64 @@ func ValidatePolicyAgainstSavedUDPPorts(policy *netpol.Policy, specs []string) e
 	return nil
 }
 
+// CurrentPolicy returns an immutable copy of the effective live policy.
+func (m *NetworkPolicyManager) CurrentPolicy() (*netpol.Policy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return ClonePolicy(m.current)
+}
+
+// DomainAllowed evaluates the effective live DNS policy without exposing its
+// mutable holder to the credential broker.
+func (m *NetworkPolicyManager) DomainAllowed(host string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.current != nil && m.current.DomainAllowed(host)
+}
+
+// FailClosedPolicy builds the narrow update barrier required by the active
+// forward set. The caller must hold the shared NetworkTransactionCoordinator.
+func (m *NetworkPolicyManager) FailClosedPolicy() (*netpol.Policy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	allowUDPReplies := false
+	if m.backend != nil {
+		forwards, err := m.backend.Forwards()
+		if err != nil {
+			return nil, fmt.Errorf("list active port forwards: %w", err)
+		}
+		for _, forward := range forwards {
+			if forward.Protocol == "udp" {
+				allowUDPReplies = true
+				break
+			}
+		}
+	}
+	return netpol.FailClosedPolicy(allowUDPReplies)
+}
+
+// ReplaceEffectivePolicy swaps the complete local-plus-organization policy
+// and updates the manager's rollback snapshot. The caller must hold the shared
+// NetworkTransactionCoordinator across its larger transaction.
+func (m *NetworkPolicyManager) ReplaceEffectivePolicy(next *netpol.Policy) error {
+	snapshot, err := ClonePolicy(next)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current == nil {
+		return fmt.Errorf("live network policy is unavailable")
+	}
+	if m.backend != nil {
+		if err := m.backend.SetPolicy(next); err != nil {
+			return err
+		}
+	}
+	m.current = snapshot
+	return nil
+}
+
 func (m *NetworkPolicyManager) Get() (NetworkPolicyEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -162,6 +221,10 @@ func (m *NetworkPolicyManager) Get() (NetworkPolicyEntry, error) {
 		return NetworkPolicyEntry{}, err
 	}
 	policy, err = cfg.ApplyProxyPolicy(policy)
+	if err != nil {
+		return NetworkPolicyEntry{}, err
+	}
+	policy, err = cfg.ApplyOrganizationPolicy(policy)
 	if err != nil {
 		return NetworkPolicyEntry{}, err
 	}

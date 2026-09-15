@@ -56,6 +56,23 @@ func TestAuditRingBoundsBytesAndEscapesControlCharacters(t *testing.T) {
 	}
 }
 
+func TestAuditSinksUseIdenticalBoundedSanitizedLines(t *testing.T) {
+	dir := t.TempDir()
+	r := &auditRing{}
+	r.logf(dir, "%s", "event\nforged\r"+strings.Repeat("x", 2*auditLineMaxBytes))
+	lines := r.tail()
+	if len(lines) != 1 || len(lines[0]) > auditLineMaxBytes || strings.ContainsAny(lines[0], "\r\n") {
+		t.Fatalf("invalid live line: %v", lines)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "audit.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != lines[0]+"\n" {
+		t.Fatal("disk and live audit sanitization differ")
+	}
+}
+
 func TestWarnBoundSecretsVsPolicy(t *testing.T) {
 	dir := t.TempDir()
 	pol := filepath.Join(dir, "policy.json")

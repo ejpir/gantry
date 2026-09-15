@@ -2,7 +2,7 @@
 # Build the current Linux/ARM64 binaries, stage the ARM boot assets, and run
 # the maintained KVM confinement/share/MCP battery on the Graviton host.
 set -euo pipefail
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT"
 HERE="$ROOT/scripts/aws-kvm"
 
@@ -28,6 +28,7 @@ ROOTFS="$ARTIFACTS/nerdbox-rootfs-arm64.erofs"
 [ -s "$ROOTFS" ] || { echo "missing ARM64 rootfs: $ROOTFS" >&2; exit 1; }
 # The large Ubuntu test image is retained in the shared field-test bucket.
 aws s3api head-object --bucket "$BUCKET" --key ubuntu-arm64.erofs >/dev/null
+aws s3api head-object --bucket "$BUCKET" --key gantry-ide-image-arm64.erofs >/dev/null
 
 echo "== uploading current ARM64 test artifacts =="
 aws s3 cp "$BIN" "s3://$BUCKET/gantry-linux-arm64-current" --quiet
@@ -36,7 +37,7 @@ aws s3 cp "$KERNEL" "s3://$BUCKET/gantry-kernel-arm64" --quiet
 aws s3 cp "$ROOTFS" "s3://$BUCKET/nerdbox-rootfs-arm64.erofs" --quiet
 
 DL='mkdir -p /opt/gantry && cd /opt/gantry'
-for asset in gantry-linux-arm64-current gantry-guest-arm64 gantry-kernel-arm64 nerdbox-rootfs-arm64.erofs ubuntu-arm64.erofs; do
+for asset in gantry-linux-arm64-current gantry-guest-arm64 gantry-kernel-arm64 nerdbox-rootfs-arm64.erofs ubuntu-arm64.erofs gantry-ide-image-arm64.erofs; do
 	url=$(aws s3 presign "s3://$BUCKET/$asset" --expires-in 7200)
 	case "$asset" in
 	gantry-linux-arm64-current|gantry-guest-arm64|gantry-kernel-arm64|nerdbox-rootfs-arm64.erofs)
@@ -47,6 +48,11 @@ mv -f '$asset.new' '$asset'"
 	ubuntu-arm64.erofs)
 		DL="$DL
 [ -s '$asset' ] || { for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$asset.new' '$url' && break; sleep 3; done; mv -f '$asset.new' '$asset'; }"
+		;;
+	gantry-ide-image-arm64.erofs)
+		DL="$DL
+for _ in 1 2 3 4 5; do curl -fSL --retry 3 -o '$asset.new' '$url' && break; sleep 3; done
+mv -f '$asset.new' '$asset'"
 		;;
 	esac
 done

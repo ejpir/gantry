@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func testBridge(t *testing.T, replay func(port int, uri string) (replayResult, error)) *Bridge {
+func testBridge(t *testing.T, replay func(port int, request replayRequest) (replayResult, error)) *Bridge {
 	t.Helper()
 	b := &Bridge{
 		replay:           replay,
@@ -73,8 +73,8 @@ func TestBridgeEndToEndFromDiscoveredListener(t *testing.T) {
 	}))
 	defer guest.Close()
 
-	b := testBridge(t, func(_ int, uri string) (replayResult, error) {
-		resp, err := http.Get(guest.URL + uri)
+	b := testBridge(t, func(_ int, request replayRequest) (replayResult, error) {
+		resp, err := http.Get(guest.URL + request.uri)
 		if err != nil {
 			return replayResult{}, err
 		}
@@ -107,7 +107,7 @@ func TestBridgeEndToEndFromDiscoveredListener(t *testing.T) {
 
 func TestTransparentGateAcceptsOnlyOAuthResults(t *testing.T) {
 	var calls atomic.Int32
-	b := testBridge(t, func(_ int, _ string) (replayResult, error) {
+	b := testBridge(t, func(_ int, _ replayRequest) (replayResult, error) {
 		calls.Add(1)
 		return replayResult{status: http.StatusOK}, nil
 	})
@@ -140,7 +140,7 @@ func TestTransparentGateAcceptsOnlyOAuthResults(t *testing.T) {
 }
 
 func TestBridgeDoesNotForwardGuestRedirectOrMetadata(t *testing.T) {
-	b := testBridge(t, func(_ int, _ string) (replayResult, error) {
+	b := testBridge(t, func(_ int, _ replayRequest) (replayResult, error) {
 		raw := "HTTP/1.1 302 Found\r\n" +
 			"Content-Type: application/javascript\r\n" +
 			"Location: https://attacker.example/from-guest\r\n\r\n" +
@@ -160,7 +160,7 @@ func TestBridgeDoesNotForwardGuestRedirectOrMetadata(t *testing.T) {
 
 func TestCustodyListenerFailsClosed(t *testing.T) {
 	var replayCalls atomic.Int32
-	b := testBridge(t, func(int, string) (replayResult, error) {
+	b := testBridge(t, func(int, replayRequest) (replayResult, error) {
 		replayCalls.Add(1)
 		return replayResult{status: http.StatusOK}, nil
 	})
@@ -279,16 +279,16 @@ func (closedTestListener) Accept() (net.Conn, error) { return nil, net.ErrClosed
 func (closedTestListener) Close() error              { return nil }
 func (closedTestListener) Addr() net.Addr            { return &net.TCPAddr{} }
 
-func TestBridgeRejectsNonGETAndOversizeURI(t *testing.T) {
-	b := testBridge(t, func(int, string) (replayResult, error) {
+func TestBridgeRejectsUnsupportedMethodAndOversizeURI(t *testing.T) {
+	b := testBridge(t, func(int, replayRequest) (replayResult, error) {
 		t.Fatal("invalid request must not be replayed")
 		return replayResult{}, nil
 	})
 	l := &listener{port: 1}
-	post := httptest.NewRecorder()
-	b.handleCallback(l)(post, httptest.NewRequest(http.MethodPost, "/?code=x&state=s", nil))
-	if post.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST status = %d", post.Code)
+	put := httptest.NewRecorder()
+	b.handleCallback(l)(put, httptest.NewRequest(http.MethodPut, "/?code=x&state=s", nil))
+	if put.Code != http.StatusMethodNotAllowed || put.Header().Get("Allow") != "GET, POST" {
+		t.Fatalf("PUT status/Allow = %d/%q", put.Code, put.Header().Get("Allow"))
 	}
 	oversize := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/?code=x&state="+strings.Repeat("x", maxRequestURIBytes), nil)
@@ -301,7 +301,7 @@ func TestBridgeRejectsNonGETAndOversizeURI(t *testing.T) {
 func TestBridgeCapsConcurrentReplays(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{}, maxConcurrentReplays)
-	b := testBridge(t, func(int, string) (replayResult, error) {
+	b := testBridge(t, func(int, replayRequest) (replayResult, error) {
 		started <- struct{}{}
 		<-release
 		return replayResult{status: http.StatusOK}, nil
@@ -335,7 +335,7 @@ func TestBridgeCapsConcurrentReplays(t *testing.T) {
 
 func TestBridgeReplayTimeoutKeepsSlotCharged(t *testing.T) {
 	release := make(chan struct{})
-	b := testBridge(t, func(int, string) (replayResult, error) {
+	b := testBridge(t, func(int, replayRequest) (replayResult, error) {
 		<-release
 		return replayResult{status: http.StatusOK}, nil
 	})
@@ -356,7 +356,7 @@ func TestBridgeReplayTimeoutKeepsSlotCharged(t *testing.T) {
 }
 
 func TestBridgeReplayFailureReturnsSafeBadGateway(t *testing.T) {
-	b := testBridge(t, func(int, string) (replayResult, error) {
+	b := testBridge(t, func(int, replayRequest) (replayResult, error) {
 		return replayResult{}, fmt.Errorf(`<script>attack()</script>`)
 	})
 	rec := httptest.NewRecorder()
@@ -382,10 +382,10 @@ func assertSafeBrowserHeaders(t *testing.T, header http.Header) {
 func TestReplayViaDevTCPPreservesEmptyRedirectTerminator(t *testing.T) {
 	response := "HTTP/1.0 302 Found\r\nLocation: http://localhost/success\r\n\r\n"
 	for _, suffix := range []string{"", "\nclient: task exited, status 0\n"} {
-		b := &Bridge{exec: func([]string, time.Duration) ([]byte, int, error) {
+		b := &Bridge{exec: func(io.Reader, []string, time.Duration) ([]byte, int, error) {
 			return []byte(response + suffix), 0, nil
 		}}
-		res, err := b.replayViaDevTCP(1455, "/?code=abc&state=s")
+		res, err := b.replayViaDevTCP(1455, replayRequest{method: http.MethodGet, uri: "/?code=abc&state=s"})
 		if err != nil || res.status != http.StatusFound {
 			t.Fatalf("suffix %q: response=%+v err=%v", suffix, res, err)
 		}
@@ -413,7 +413,7 @@ func TestParseRawHTTPResponse(t *testing.T) {
 }
 
 func TestNewDefaultsOnWithExplicitOverrides(t *testing.T) {
-	exec := func([]string, time.Duration) ([]byte, int, error) { return nil, 0, nil }
+	exec := func(io.Reader, []string, time.Duration) ([]byte, int, error) { return nil, 0, nil }
 	t.Setenv("GANTRY_OAUTH_BRIDGE", "")
 	if New(exec, true) == nil || New(exec, false) != nil {
 		t.Fatal("persisted OAuth bridge setting was not respected")
@@ -438,7 +438,7 @@ func TestDevTCPReplayScriptShape(t *testing.T) {
 	if strings.Contains(devTCPReplayScript, "curl") || strings.Contains(devTCPReplayScript, "wget") {
 		t.Fatal("script must not depend on external HTTP tools")
 	}
-	if !strings.Contains(devTCPReplayScript, "printf 'GET %s HTTP/1.0") {
-		t.Fatal("script must issue exactly one GET")
+	if !strings.Contains(devTCPReplayScript, "cat >&3") || strings.Contains(devTCPReplayScript, "$2") {
+		t.Fatal("script must read the callback from stdin, not argv")
 	}
 }

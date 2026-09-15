@@ -88,6 +88,29 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 			row.Redact[j] = safeUILine(row.Redact[j])
 		}
 	}
+	snapshot.Audit = append([]dashboardapi.AuditEvent(nil), snapshot.Audit...)
+	for i := range snapshot.Audit {
+		row := &snapshot.Audit[i]
+		row.Sandbox = safeUILine(row.Sandbox)
+		row.Line = safeUILine(row.Line)
+		row.Error = safeUILine(row.Error)
+		if row.Decision != nil {
+			// Detach nested data before sanitizing so refreshes and open detail
+			// dialogs never share mutable decision fields with the service.
+			d := *row.Decision
+			d.Effect = safeUILine(d.Effect)
+			d.Action = safeUILine(d.Action)
+			d.Reason = safeUILine(d.Reason)
+			d.Organization = safeUILine(d.Organization)
+			d.Revision = safeUILine(d.Revision)
+			d.Profile = safeUILine(d.Profile)
+			d.Rules = append([]string(nil), d.Rules...)
+			for j := range d.Rules {
+				d.Rules[j] = safeUILine(d.Rules[j])
+			}
+			row.Decision = &d
+		}
+	}
 	for i := range snapshot.Images {
 		row := &snapshot.Images[i]
 		row.Ref = safeUILine(row.Ref)

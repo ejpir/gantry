@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/packetcapture"
 )
 
@@ -25,6 +26,7 @@ func queryTestModel() sandboxTUIModel {
 	m.ports = []tuiPortRow{{Sandbox: "Zulu", Bind: "127.0.0.1:9000", Guest: 100, Proto: "udp", State: "saved"}, {Sandbox: "alpha", Bind: "127.0.0.1:8000", Guest: 20, Proto: "tcp", State: "bound"}}
 	m.secrets = []tuiSecretRow{{Sandbox: "Zulu", Name: "Z", State: "required"}, {Sandbox: "alpha", Name: "A", State: "loaded"}}
 	m.mcpServers = []tuiMCPRow{{Sandbox: "Zulu", Name: "z", Type: "remote", URL: "https://z.test", AuthKind: "bearer", State: "saved"}, {Sandbox: "alpha", Name: "a", Type: "local", Root: "/a", State: "active"}}
+	m.auditEvents = []tuiAuditRow{{Sandbox: "Zulu", Line: "denied", Decision: &dashboardapi.AuditDecision{Effect: "deny", Action: "mcp.tools.call", Reason: "no_match"}}, {Sandbox: "alpha", Line: "allowed", Decision: &dashboardapi.AuditDecision{Effect: "allow", Action: "credential.use", Reason: "matched_allow"}}}
 	m.images = []tuiImageRow{{Ref: "z:latest", Digest: "z", Arch: "arm64", Size: 10, Created: "2026-01-01T10:00:00Z", InUse: true}, {Ref: "a:latest", Digest: "a", Arch: "amd64", Size: 2, Created: "2026-01-01T10:30:00+01:00"}}
 	m.registries = []tuiRegistryRow{{Registry: "z.test", Username: "z", Source: "helper", HasSecret: true}, {Registry: "a.test", Username: "a", Source: "config"}}
 	m.packets = []tuiPacketRow{{Sandbox: "Zulu", Sequence: 2, Timestamp: time.Unix(100, 0), Direction: packetcapture.TX, Length: 100, Source: "z", Target: "z", Protocol: "udp", Info: "Z"}, {Sandbox: "alpha", Sequence: 1, Timestamp: time.Unix(20, 0), Direction: packetcapture.RX, Length: 20, Source: "a", Target: "a", Protocol: "tcp", Info: "A", Allowed: true}}
@@ -48,7 +50,7 @@ func TestSandboxFilterKeyboardApplyCancelClear(t *testing.T) {
 	if m.sandboxFilter != "ALP" || len(m.traffic) != 1 || m.selectedTraffic().Sandbox != "alpha" {
 		t.Fatalf("filter failed: %q %+v", m.sandboxFilter, m.traffic)
 	}
-	for _, page := range []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiMountsPage, tuiPortsPage, tuiSecretsPage, tuiMCPPage, tuiPacketsPage} {
+	for _, page := range []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiMountsPage, tuiPortsPage, tuiSecretsPage, tuiMCPPage, tuiAuditPage, tuiPacketsPage} {
 		m.setPage(page)
 		if m.pageRowCount(page) != 1 {
 			t.Fatalf("page %d did not share filter", page)
@@ -140,6 +142,10 @@ func currentSortValues(m sandboxTUIModel, key string) []tuiSortValue {
 		for _, r := range m.mcpServers {
 			values = append(values, mcpSortValue(r, key))
 		}
+	case tuiAuditPage:
+		for _, r := range m.auditEvents {
+			values = append(values, auditSortValue(r, key))
+		}
 	case tuiPacketsPage:
 		for _, r := range m.packets {
 			values = append(values, packetSortValue(r, key))
@@ -182,6 +188,9 @@ func TestEveryViewSortFieldAndIndependentPreferences(t *testing.T) {
 		}
 	}
 	for scope, state := range m.sorts {
+		if scope == int(tuiRemotesPage) {
+			continue
+		} // source-grouped inventory has no sortable columns
 		if state.column == "" || !state.desc {
 			t.Fatalf("scope %d lost independent sort preference", scope)
 		}
@@ -196,7 +205,9 @@ func TestSortedHeadersAndFilterToolbarGeometry(t *testing.T) {
 			m.applySandboxFilter("a")
 			for page := tuiSandboxesPage; page < tuiPageCount; page++ {
 				m.setPage(page)
-				m.chooseSort(m.sortColumns()[0].id)
+				if columns := m.sortColumns(); len(columns) > 0 {
+					m.chooseSort(columns[0].id)
+				}
 				view := m.View().Content
 				if lipgloss.Width(view) != width || lipgloss.Height(view) != m.height {
 					t.Fatalf("dark=%t width=%d page=%d overflow", dark, width, page)

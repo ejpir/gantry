@@ -77,5 +77,11 @@ func (service sandboxLifecycle) Start(ctx context.Context, request lifecycle.Sta
 	}
 	result.PID, err = launchSandboxLockedCore(ctx, request.Name, resolved.Config, resolved.Secrets,
 		request.Mode != lifecycle.Resume, false, startSandboxDaemon, service.milestone, observer)
+	if err == nil {
+		// Any successful boot satisfies an interrupted controlled-rollout
+		// request, including an operator's manual recovery before the policy
+		// receiver reconnects.
+		_ = os.Remove(filepath.Join(layout.Dir(request.Name), "policy-rollout.json"))
+	}
 	return result, err
 }

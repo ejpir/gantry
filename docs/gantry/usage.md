@@ -1,69 +1,31 @@
 # Use Gantry
 
-Use this page as a command-oriented guide to everyday sandbox operations.
+This page covers everyday sandbox operations. Use `gantry COMMAND --help` for
+all flags.
 
-## Choose persistent or one-shot execution
+## Persistent and one-shot sandboxes
 
-A named sandbox keeps its writable disk and configuration between starts:
+A named sandbox keeps its configuration and writable disk:
 
 ```console
 $ gantry start dev -image python:3.12
 $ gantry exec dev -- python --version
 $ gantry stop dev
 $ gantry resume dev
+$ gantry delete dev
 ```
 
-A one-shot sandbox exists only for one command:
+A one-shot sandbox exists for one command:
 
 ```console
 $ gantry exec -image python:3.12 -- python --version
 ```
 
-Both modes use the same supervisor, worker, network-policy, share, and guest
-execution paths.
+With no command, Gantry uses the image entrypoint and command, then `/bin/sh`
+as a fallback.
 
-## Start, stop, and delete
-
-The basic lifecycle is:
-
-```console
-$ gantry start dev -image alpine:latest
-$ gantry ls
-$ gantry stop dev
-$ gantry resume dev
-$ gantry delete dev
-```
-
-`stop` asks the trusted guest system service to sync filesystems, flushes
-devices, and preserves `sandbox.json` and the writable disk. It never executes
-a shutdown helper from the workload image. `resume` boots the saved
-configuration. `delete` stops
-a running sandbox, removes its saved state, and removes its Gantry-managed
-default writable layer. An explicitly supplied `-rwlayer` remains at its
-original path.
-
-Sandbox names may contain letters, digits, `.`, `_`, and `-`, and may be at
-most 64 characters. `.` and `..` are not valid names.
-
-## Execute processes
-
-With no explicit command, Gantry uses the OCI image's entrypoint and command,
-falling back to `/bin/sh`:
-
-```console
-$ gantry exec -image alpine:latest
-```
-
-Pass a command after `--`:
-
-```console
-$ gantry exec -image debian:bookworm-slim -- apt-cache policy
-$ gantry exec dev -- /usr/bin/env
-```
-
-Named attach mode does not accept execution flags. Terminal detection, window
-size, standard input/output, signals, and the guest process exit code are
-relayed through the sandbox's local control broker.
+Sandbox names may contain letters, digits, `.`, `_`, and `-`, up to 64
+characters. `.` and `..` are invalid.
 
 ## Configure resources
 
@@ -73,16 +35,15 @@ Set resources when creating a sandbox:
 $ gantry start build -image golang:latest -cpus 4 -mem 4096 -disk-size 4096
 ```
 
-- `-cpus` sets the number of virtual CPUs, up to the limit reported in
-  `gantry start --help` for the current host.
-- `-mem` sets guest memory in MiB.
-- `-disk-size` sets the initial private writable-layer size in MiB. It is used
-  only when Gantry creates that layer.
+- `-cpus` sets virtual CPUs.
+- `-mem` sets memory in MiB.
+- `-disk-size` sets the initial private writable-disk size.
+- `-process-isolation` selects `auto`, `required`, or `off`.
 
-The dashboard can save CPU, memory, and process-isolation changes for the next
-boot. Stop and resume the sandbox to apply them.
+Save CPU, memory, process-isolation, SSH, or Dev Containers changes later with
+`gantry configure`. Some changes require a stop and resume.
 
-## Choose a guest runtime
+## Choose a runtime
 
 Gantry uses `crun` in the guest by default:
 
@@ -90,70 +51,47 @@ Gantry uses `crun` in the guest by default:
 $ gantry start dev -image alpine:latest -runtime crun
 ```
 
-Use gVisor inside the VM for an additional workload boundary:
+Use `-runtime runsc` to add a gVisor boundary inside the microVM. Gantry
+downloads matching guest assets when needed.
 
-```console
-$ gantry start dev-gvisor -image alpine:latest -runtime runsc
-```
+## Control persistence
 
-`runsc` selects matching gVisor guest assets. On Apple silicon it also needs
-the 4 KiB-page Gantry kernel. The first start downloads the matching release
-assets when available.
-
-## Control the writable root
-
-Named sandboxes receive a private writable ext4 layer by default. To run with
-a read-only container root:
+Named sandboxes receive a private writable ext4 layer by default. Disable it
+for a read-only container root:
 
 ```console
 $ gantry start readonly -image alpine:latest -rw=false
 ```
 
-Host shares require a writable container root because the guest must create
-the mount points. A writable layer must never be attached to two running VMs.
-Gantry's per-sandbox default avoids that unsafe sharing.
+Host shares require a writable root so the guest can create mount points.
+Writable layers must not be attached to two running VMs. Snapshots are not
+supported.
 
-Snapshots are not supported.
+## Use the terminal dashboard
 
-## Open the terminal dashboard
-
-Run Gantry without a subcommand in an interactive terminal:
+Run:
 
 ```console
-$ gantry
+$ gantry tui
 ```
 
-`gantry tui` opens the same dashboard explicitly. From it you can create,
-start, stop, enter, edit, and remove sandboxes; inspect storage and isolation;
-and manage network rules, traffic, packet capture, shares, ports, secrets, and MCP servers.
-Press `?` for an aligned list of navigation, current-view actions, and application shortcuts.
+The dashboard can create and manage sandboxes, images, network rules, traffic,
+packet capture, shares, ports, secrets, and MCP servers. Press `?` for keys.
 
-- Click a table column heading to sort it; click it again to reverse the order.
-  Press `S` to choose any sort field, including fields hidden on narrow terminals,
-  or select **Default order** to reset it. Each view remembers its own sort order
-  during the session, including across live refreshes.
-- Press `/` to filter by a case-insensitive substring of the sandbox name.
-  Press Enter to apply, or Escape to cancel. Apply an empty value (or click
-  **Clear**) to show all sandboxes again. The filter is shared across
-  sandbox-scoped views; cached images and registry credentials remain host-wide.
-- Sorting and filtering preserve the selected record when it remains visible.
-  They do not change network policy, packet-capture scope, or retained traffic;
-  clearing a filter restores hidden rows immediately.
+Useful controls:
 
-## Inspect local state
+- `/` filters sandbox-scoped views by sandbox name.
+- `S` chooses a sort field; selecting a column sorts by that column.
+- `n` opens the create flow.
+- `A` opens the audit view.
 
-By default, persistent state is under `~/.gantry`:
+Sorting and filtering affect only the display.
 
-```text
-~/.gantry/
-├── sandboxes/<name>/    configuration, logs, sockets, runtime state
-├── rwlayers/            private persistent ext4 disks
-├── images/              digest-addressed flattened OCI images
-└── credentials.json     Gantry registry credentials, when no helper is used
-```
+## Find local state
 
-Set `GANTRY_HOME` to override the sandbox-state root, or `GANTRY_IMAGES` to
-override the image cache. These overrides are primarily useful for testing
-and controlled packaging.
+Persistent state is under `~/.gantry` by default. `GANTRY_HOME` changes the
+sandbox-state root, and `GANTRY_IMAGES` changes the image cache. These
+overrides are mainly for testing and managed installations.
 
-See [Architecture](architecture.md) for the complete state and process model.
+See [Architecture](architecture.md#on-disk-state) for the complete layout and
+[CLI reference](cli-reference.md) for every command.

@@ -161,6 +161,10 @@ func isPublicIP(ip net.IP) bool {
 // address, so DNS rebinding between check and connect has no window.
 // TLS ServerName is still derived from the URL hostname by net/http.
 func pinnedTransport(loopbackOnly bool) *http.Transport {
+	return pinnedTransportWithPolicy(loopbackOnly, nil)
+}
+
+func pinnedTransportWithPolicy(loopbackOnly bool, authorize func(context.Context, string, net.IP, string) error) *http.Transport {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	resolver := &net.Resolver{}
 	t := &http.Transport{
@@ -190,6 +194,11 @@ func pinnedTransport(loopbackOnly bool) *http.Transport {
 		} else if !isPublicIP(ip) {
 			return nil, fmt.Errorf("ssrf: %s resolved to non-public %s — refused", host, ip)
 		}
+		if authorize != nil {
+			if err := authorize(ctx, host, ip, port); err != nil {
+				return nil, err
+			}
+		}
 		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 	}
 	return t
@@ -200,6 +209,12 @@ func pinnedTransport(loopbackOnly bool) *http.Transport {
 // path; callers receive only the connected stream. TLS remains in the MCP
 // worker and therefore is not parsed in the supervisor.
 func DialRemote(ctx context.Context, rawURL string) (net.Conn, error) {
+	return DialRemoteWithPolicy(ctx, rawURL, nil)
+}
+
+// DialRemoteWithPolicy additionally authorizes the exact resolved address
+// before dialing; it preserves all existing SSRF and TLS boundaries.
+func DialRemoteWithPolicy(ctx context.Context, rawURL string, authorize func(context.Context, string, net.IP, string) error) (net.Conn, error) {
 	loopbackOnly, err := ValidateRemoteURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -216,7 +231,7 @@ func DialRemote(ctx context.Context, rawURL string) (net.Conn, error) {
 			port = "80"
 		}
 	}
-	return pinnedTransport(loopbackOnly).DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
+	return pinnedTransportWithPolicy(loopbackOnly, authorize).DialContext(ctx, "tcp", net.JoinHostPort(u.Hostname(), port))
 }
 
 // httpUpstream speaks MCP streamable-HTTP to one remote server: each

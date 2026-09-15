@@ -9,6 +9,8 @@ import (
 
 	"github.com/atotto/clipboard"
 	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
+	"github.com/ejpir/gantry/internal/remote"
+	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/secret"
 
 	"charm.land/bubbles/v2/textinput"
@@ -38,6 +40,8 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m, nil
 	}
 	switch m.dialog {
+	case tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog, tuiOrganizationRemotesDialog, tuiRemoteAddDialog, tuiRemoteRemoveDialog:
+		return m.updateOnboardingKey(msg)
 	case tuiSandboxFilterDialog:
 		return m.updateFilterDialogKey(msg)
 	case tuiSortDialog:
@@ -66,7 +70,7 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 		return m.updateRegistryLoginDialogKey(msg)
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog, tuiImagePruneDialog, tuiRegistryLogoutDialog:
 		return m.updateConfirmationDialogKey(msg.String())
-	case tuiHelpDialog, tuiInfoDialog, tuiPacketDetailDialog:
+	case tuiHelpDialog, tuiInfoDialog, tuiPacketDetailDialog, tuiAuditDetailDialog:
 		switch msg.String() {
 		case "c":
 			return m, m.copyDialogCmd()
@@ -92,6 +96,8 @@ func (m *sandboxTUIModel) updateDialogKey(msg tea.KeyPressMsg) (tea.Model, tea.C
 func (m *sandboxTUIModel) updateFocusedDialogInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.dialog {
+	case tuiOrganizationLoginDialog, tuiRemoteAddDialog:
+		return m, m.updateOnboardInput(msg)
 	case tuiSandboxFilterDialog:
 		m.sandboxFilterInput, cmd = m.sandboxFilterInput.Update(msg)
 	case tuiCreateDialog:
@@ -315,6 +321,15 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		if m.pullFocus == 1 {
 			return m.pullArch, "image architecture"
 		}
+	case tuiOrganizationLoginDialog:
+		if m.onboardURL != "" {
+			return m.onboardURL, "organization authorization URL"
+		}
+	case tuiRemoteAddDialog:
+		if m.onboardFocus == 2 {
+			return "", "manager token is write-only"
+		}
+		// Whole-dialog copy contains only masked token characters.
 	case tuiRegistryLoginDialog:
 		switch m.loginFocus {
 		case 0:
@@ -327,6 +342,8 @@ func (m sandboxTUIModel) dialogCopyValue() (value, label string) {
 		return wholeDialog("sandbox details")
 	case tuiPacketDetailDialog:
 		return wholeDialog("packet details")
+	case tuiAuditDetailDialog:
+		return wholeDialog("audit event")
 	case tuiHelpDialog:
 		return wholeDialog("keyboard help")
 	}
@@ -355,6 +372,8 @@ func (m *sandboxTUIModel) updateConfirmationDialogKey(key string) (tea.Model, te
 
 func (m *sandboxTUIModel) submitConfirmationDialog() (tea.Model, tea.Cmd) {
 	switch m.dialog {
+	case tuiRemoteRemoveDialog:
+		return m, m.manageRemoteCmd("remove", m.onboardRemove)
 	case tuiRemoveDialog:
 		return m.removeSelected()
 	case tuiShareRemoveDialog:
@@ -544,18 +563,35 @@ func (m *sandboxTUIModel) setCreateSliderBoundary(maximum bool) bool {
 	return true
 }
 
-func (m *sandboxTUIModel) openCreateDialog() tea.Cmd {
+func (m *sandboxTUIModel) openCreateDialog() tea.Cmd { return m.openCreateForm("", "") }
+
+func (m *sandboxTUIModel) openCreateForm(target, organization string) tea.Cmd {
+	m.resetOnboarding()
+	m.createRemote, m.createOrganization = target, organization
+	m.createEndpoint = remote.Profile{}
+	if target != "" {
+		m.createEndpoint, _, _ = remote.Lookup(target)
+	}
 	m.dialog = tuiCreateDialog
 	m.dialogScroll = 0
 	m.formError = ""
 	m.createErrFocus = -1
 	m.createName.Reset()
 	m.createImage.Reset()
-	m.createCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, 1)
-	m.createMemory = newMemorySlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), 512)
+	maxCPUs, maxMemory := m.limits.MaxVCPUs, int(m.limits.MaxMemoryMB)
+	if target != "" {
+		// A remote may be larger than this client. Use protocol/runtime
+		// ceilings, not the desktop's RAM; the manager validates capacity.
+		maxCPUs, maxMemory = config.MaxSandboxVCPUs(), int(config.MaxSandboxMemMB)
+	}
+	m.createCPUs = newResourceSlider(1, maxCPUs, 1, 1)
+	m.createMemory = newMemorySlider(int(m.limits.MinMemoryMB), maxMemory, 512)
 	m.createDisk = newResourceSlider(int(m.limits.MinDiskSizeMiB), int(m.limits.MaxDiskSizeMiB), 512, int(m.limits.DefaultDiskSizeMiB))
 	m.createRuntime = "crun"
-	m.createKernels = m.service.KernelChoices()
+	m.createKernels = nil
+	if target == "" {
+		m.createKernels = m.service.KernelChoices()
+	}
 	m.createKernel = 0
 	m.createIsolation = "auto"
 	m.createSSH = false
@@ -580,6 +616,9 @@ func (m *sandboxTUIModel) focusCreate(index int) tea.Cmd {
 }
 
 func (m *sandboxTUIModel) submitCreate() (tea.Model, tea.Cmd) {
+	if m.createRemote != "" {
+		return m.submitRemoteCreate()
+	}
 	name := strings.TrimSpace(m.createName.Value())
 	if err := m.service.ValidateCreate(name, uint(m.createMemory.Value), uint(m.createDisk.Value), m.createCPUs.Value, m.createIsolation); err != nil {
 		m.formError = err.Error()
@@ -1503,9 +1542,12 @@ func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
 }
 
 func (m *sandboxTUIModel) closeDialog() {
+	m.resetOnboarding()
+	m.createRemote, m.createOrganization = "", ""
 	m.dialog = tuiNoDialog
 	m.dialogScroll = 0
 	m.packetDetail = nil
+	m.auditDetail = nil
 	m.confirmRemove = false
 	m.formError = ""
 	m.sandboxFilterInput.Blur()
@@ -1652,6 +1694,8 @@ func (m *sandboxTUIModel) ensureDialogFocusVisible() {
 
 func (m sandboxTUIModel) dialogFocusAtStart() bool {
 	switch m.dialog {
+	case tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog, tuiRemoteAddDialog, tuiOrganizationRemotesDialog:
+		return m.onboardFocus == 0
 	case tuiCreateDialog:
 		return m.createFocus == 0
 	case tuiEditDialog:
@@ -1715,6 +1759,22 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 		return choose(m.mcpFSFocus, []string{"Sandbox", "Guest root", "Unprivileged guest user", "Save"}), m.mcpFSFocus == 3
 	case tuiImagePullDialog:
 		return choose(m.pullFocus, []string{"Image reference", "Architecture", "Pull"}), m.pullFocus == tuiImagePullSubmitFocus
+	case tuiOrganizationLoginDialog, tuiRemoteAddDialog:
+		_, _, button, labels := m.onboardLabels()
+		return choose(m.onboardFocus, append(append([]string(nil), labels...), button)), m.onboardFocus == len(labels)
+	case tuiCreateLocationDialog:
+		return choose(m.onboardFocus, []string{"Local", "Remote", "Organization"}), false
+	case tuiRemoteProfilesDialog:
+		if m.onboardFocus < len(m.onboardProfiles) {
+			return m.onboardProfiles[m.onboardFocus].Name, false
+		}
+		return "Add remote", true
+	case tuiOrganizationRemotesDialog:
+		if m.onboardFocus < len(m.onboardChoices) {
+			choice := m.onboardChoices[m.onboardFocus]
+			return choice.Organization + " / " + choice.Profile.Name, false
+		}
+		return "", false
 	case tuiRegistryLoginDialog:
 		return choose(m.loginFocus, []string{"Registry", "Username", "Password / token", "Store login"}), m.loginFocus == tuiRegistryLoginSubmitFocus
 	default:
@@ -1762,6 +1822,10 @@ func (m *sandboxTUIModel) resizeInputs() {
 	m.loginRegistry.SetWidth(imageFieldWidth)
 	m.loginUsername.SetWidth(imageFieldWidth)
 	m.loginPassword.SetWidth(imageFieldWidth)
+	onboardWidth, _ := m.dialogSize(m.dialog)
+	for i := range m.onboardInputs {
+		m.onboardInputs[i].SetWidth(maxInt(12, onboardWidth-10))
+	}
 	filterWidth, _ := m.dialogSize(tuiSandboxFilterDialog)
 	m.sandboxFilterInput.SetWidth(maxInt(1, filterWidth-10))
 }
@@ -1803,6 +1867,9 @@ func (m *sandboxTUIModel) applyInputTheme() {
 	m.loginRegistry.SetStyles(styles)
 	m.loginUsername.SetStyles(styles)
 	m.loginPassword.SetStyles(styles)
+	for i := range m.onboardInputs {
+		m.onboardInputs[i].SetStyles(styles)
+	}
 	m.spinner.Style = lipgloss.NewStyle().Foreground(theme.accent)
 }
 
@@ -2032,6 +2099,8 @@ func (m *sandboxTUIModel) updateDialogMouseClick(mouse tea.Mouse) (tea.Model, te
 		return m.updateMCPFilesystemDialogMouse(mouse, bounds)
 	case tuiImagePullDialog:
 		return m.updateImagePullDialogMouse(mouse, bounds)
+	case tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog, tuiOrganizationRemotesDialog, tuiRemoteAddDialog, tuiRemoteRemoveDialog:
+		return m.updateOnboardingMouse(mouse, bounds)
 	case tuiRegistryLoginDialog:
 		return m.updateRegistryLoginDialogMouse(mouse, bounds)
 	default:
@@ -2054,7 +2123,7 @@ func (m *sandboxTUIModel) updateConfirmationDialogMouse(mouse tea.Mouse, bounds 
 
 func (m sandboxTUIModel) confirmationActionLabel() string {
 	switch m.dialog {
-	case tuiRemoveDialog, tuiShareRemoveDialog, tuiRuleRemoveDialog:
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiRuleRemoveDialog, tuiRemoteRemoveDialog:
 		return "Remove"
 	case tuiPortUnpublishDialog:
 		return "Unpublish"

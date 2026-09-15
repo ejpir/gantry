@@ -141,10 +141,14 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 		body = m.renderSecretsView(theme, layout)
 	case tuiMCPPage:
 		body = m.renderMCPView(theme, layout)
+	case tuiAuditPage:
+		body = m.renderAuditView(theme, layout)
 	case tuiPacketsPage:
 		body = m.renderPacketsView(theme, layout)
 	case tuiImagesPage:
 		body = m.renderImagesView(theme, layout)
+	case tuiRemotesPage:
+		body = m.renderRemotes(theme, layout)
 	default:
 		if m.usesMasterDetail(layout) {
 			body = m.renderSandboxMasterDetail(theme, layout)
@@ -152,7 +156,7 @@ func (m *sandboxTUIModel) renderScreen(theme tuiTheme) string {
 			body = m.renderCardGrid(theme, layout)
 		}
 	}
-	if m.sandboxFilter != "" && !m.loading && m.page != tuiImagesPage && m.page != tuiOverviewPage && m.page != tuiSandboxesPage && m.pageRowCount(m.page) == 0 {
+	if m.sandboxFilter != "" && !m.loading && m.page != tuiRemotesPage && m.page != tuiImagesPage && m.page != tuiOverviewPage && m.page != tuiSandboxesPage && m.pageRowCount(m.page) == 0 {
 		body = m.renderTableEmpty(theme, layout, "No matching rows", "Press / to change or clear the sandbox filter.")
 	}
 	status := m.renderStatusBar(theme, layout.screenWidth)
@@ -319,7 +323,9 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 		{page: tuiMountsPage, label: "mounts", active: m.page == tuiMountsPage},
 		{page: tuiSecretsPage, label: "secrets", active: m.page == tuiSecretsPage},
 		{page: tuiMCPPage, label: "mcp", active: m.page == tuiMCPPage},
+		{page: tuiAuditPage, label: "audit", active: m.page == tuiAuditPage},
 		{page: tuiImagesPage, label: "images", active: m.page == tuiImagesPage},
+		{page: tuiRemotesPage, label: "remotes", active: m.page == tuiRemotesPage},
 	}
 	x := navigationStart
 	for index := range items {
@@ -422,6 +428,23 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 		summary := fmt.Sprintf("%d servers  •  %d remote", len(m.mcpServers), remotes)
 		if restart > 0 {
 			summary += fmt.Sprintf("  •  %d restart", restart)
+		}
+		return lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
+	case tuiAuditPage:
+		events, denied, unavailable := 0, 0, 0
+		for _, row := range m.auditEvents {
+			if row.Error != "" {
+				unavailable++
+			} else {
+				events++
+				if auditStatus(row) == "DENY" {
+					denied++
+				}
+			}
+		}
+		summary := fmt.Sprintf("%d retained · %d policy denies", events, denied)
+		if unavailable > 0 {
+			summary += fmt.Sprintf(" · %d unavailable", unavailable)
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
 	case tuiPacketsPage:
@@ -660,6 +683,9 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 		updated = "updated never"
 	}
 	rightText := updated
+	if notice := m.remoteNotice(); notice != "" {
+		rightText = truncateText(notice, max(1, width/2))
+	}
 	if m.page != tuiOverviewPage && width >= 72 {
 		rightText += "  ·  " + position
 	}
@@ -713,6 +739,8 @@ func (m sandboxTUIModel) contextHints() [][2]string {
 
 func (m sandboxTUIModel) pageContextHints() [][2]string {
 	switch m.page {
+	case tuiRemotesPage:
+		return [][2]string{{"↑/↓", "scroll"}, {"0", "local overview"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiOverviewPage:
 		if len(m.sandboxes) == 0 {
 			return [][2]string{{"enter", "create"}, {"n", "new"}, {"r", "refresh"}, {"?", "help"}}
@@ -730,6 +758,8 @@ func (m sandboxTUIModel) pageContextHints() [][2]string {
 		return [][2]string{{"a", "add secret"}, {"d", "delete"}, {"tab", "next view"}, {"r", "refresh"}, {"esc", "sandboxes"}, {"?", "help"}}
 	case tuiMCPPage:
 		return [][2]string{{"a", "add remote"}, {"f", "filesystem"}, {"e", "edit"}, {"d", "remove"}, {"tab", "next view"}, {"?", "help"}}
+	case tuiAuditPage:
+		return [][2]string{{"enter", "details"}, {"r", "refresh"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiPacketsPage:
 		return [][2]string{{"↑/↓", "select"}, {"d", "details"}, {"space", "pause"}, {"c", "clear"}, {"tab", "next view"}, {"?", "help"}}
 	case tuiImagesPage:
@@ -835,7 +865,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 110
 	case tuiInfoDialog:
 		idealWidth = 68
-	case tuiPacketDetailDialog:
+	case tuiPacketDetailDialog, tuiAuditDetailDialog:
 		idealWidth = 96
 	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog, tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog, tuiImagePruneDialog, tuiRegistryLogoutDialog:
 		idealWidth = 54
@@ -847,7 +877,7 @@ func (m sandboxTUIModel) dialogMeasured(theme tuiTheme, kind tuiDialog) (width, 
 		idealWidth = 68
 	case tuiShareAddDialog:
 		idealWidth = 68
-	case tuiNetworkPolicyDialog, tuiRuleAddDialog, tuiSecretAddDialog, tuiMCPRemoteDialog, tuiMCPFilesystemDialog, tuiImagePullDialog, tuiRegistryLoginDialog:
+	case tuiNetworkPolicyDialog, tuiRuleAddDialog, tuiSecretAddDialog, tuiMCPRemoteDialog, tuiMCPFilesystemDialog, tuiImagePullDialog, tuiRegistryLoginDialog, tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog, tuiOrganizationRemotesDialog, tuiRemoteAddDialog:
 		idealWidth = 68
 	}
 	width = minInt(idealWidth, maxInt(24, m.width-4))
@@ -956,6 +986,8 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 		content = m.renderInfoDialog(theme, innerWidth)
 	case tuiPacketDetailDialog:
 		content = m.renderPacketDetailDialog(theme, innerWidth)
+	case tuiAuditDetailDialog:
+		content = m.renderAuditDetailDialog(theme, innerWidth)
 	case tuiRemoveDialog:
 		content = m.renderRemoveDialog(theme, innerWidth)
 		border = theme.error
@@ -1008,6 +1040,8 @@ func (m sandboxTUIModel) dialogContent(theme tuiTheme, kind tuiDialog, innerWidt
 	case tuiRegistryLogoutDialog:
 		content = m.renderRegistryLogoutDialog(theme, innerWidth)
 		border = theme.error
+	case tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog, tuiOrganizationRemotesDialog, tuiRemoteAddDialog, tuiRemoteRemoveDialog:
+		content = m.renderOnboardingDialog(theme, innerWidth)
 	}
 	return content, border
 }

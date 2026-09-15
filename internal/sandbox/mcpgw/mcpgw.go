@@ -77,6 +77,8 @@ type Server struct {
 	Credentials func(context.Context, string) (CredentialSet, error)                         `json:"-"`
 	Spawn       func(context.Context, string) (io.WriteCloser, io.ReadCloser, func(), error) `json:"-"`
 	TLSRoots    *x509.CertPool                                                               `json:"-"`
+	// Authorize receives bounded names only, never arguments or raw MCP JSON.
+	Authorize func(context.Context, string, string, string) error `json:"-"`
 }
 
 // CredentialSet is one server-scoped, per-session credential release.
@@ -399,6 +401,11 @@ func (s *session) dispatch(ctx context.Context, req *rpcRequest) (int, int) {
 // upstream returns the started upstream for srv, spawning (local) or
 // connecting (remote) and handshaking it on first use.
 func (s *session) upstream(ctx context.Context, srv Server) (upstream, error) {
+	if srv.Authorize != nil {
+		if err := srv.Authorize(ctx, s.token, "mcp.connect", ""); err != nil {
+			return nil, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if u, ok := s.upstreams[srv.Name]; ok {
@@ -499,6 +506,8 @@ type toolDescriptor struct {
 }
 
 func (s *session) toolsList(ctx context.Context, req *rpcRequest) {
+	ctx, cancelList := context.WithTimeout(ctx, s.g.callTimeout)
+	defer cancelList()
 	var out []toolDescriptor
 	hidden := 0
 	for _, name := range s.g.order {
@@ -521,8 +530,15 @@ func (s *session) toolsList(ctx context.Context, req *rpcRequest) {
 			s.g.emit(Event{Type: EventToolsMalformed, Server: name})
 			continue
 		}
+		if len(result.Tools) > 1024 { // bound authorization work from an upstream list
+			s.g.emit(Event{Type: EventToolsMalformed, Server: name})
+			continue
+		}
 		for _, t := range result.Tools {
-			if !toolExposed(srv, t.Name) {
+			if ctx.Err() != nil {
+				break
+			}
+			if !toolExposed(srv, t.Name) || !s.authorized(ctx, srv, "mcp.tools.list", t.Name) {
 				hidden++
 				continue
 			}
@@ -535,6 +551,13 @@ func (s *session) toolsList(ctx context.Context, req *rpcRequest) {
 	}
 	s.g.emit(Event{Type: EventToolsServed, Count: int64(len(out)), Count2: int64(len(s.g.order)), Count3: int64(hidden)})
 	s.reply(req.ID, map[string]any{"tools": out}, nil)
+}
+
+func (s *session) authorized(ctx context.Context, server Server, action, tool string) bool {
+	if len(tool) == 0 || len(tool) > maxToolNameBytes {
+		return false
+	}
+	return server.Authorize == nil || server.Authorize(ctx, s.token, action, tool) == nil
 }
 
 // toolsCall routes one call. It returns 1 when policy denied the call
@@ -557,7 +580,7 @@ func (s *session) toolsCall(ctx context.Context, req *rpcRequest) int {
 		s.reply(req.ID, nil, &rpcError{codeServerError, "unknown or disallowed tool"})
 		return 1
 	}
-	if !ok || !known || !toolExposed(srv, tool) {
+	if !ok || !known || !toolExposed(srv, tool) || !s.authorized(ctx, srv, "mcp.tools.call", tool) {
 		return deny()
 	}
 	u, err := s.upstream(ctx, srv)

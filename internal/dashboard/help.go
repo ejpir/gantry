@@ -41,6 +41,8 @@ func renderHelpSection(theme tuiTheme, section tuiHelpSection, width int) string
 func (m sandboxTUIModel) helpViewActions() tuiHelpSection {
 	section := tuiHelpSection{title: strings.ToUpper(pageDisplayTitle(m.page)) + " ACTIONS"}
 	switch m.page {
+	case tuiRemotesPage:
+		section.rows = [][2]string{{"a", "Add standalone remote (no org required)"}, {"enter", "Create on remote / add suggestion"}, {"t", "Test selected remote"}, {"d", "Remove profile and token only"}, {"L", "Organization sign-in / discovery"}}
 	case tuiOverviewPage, tuiSandboxesPage:
 		section.title = "SANDBOX ACTIONS"
 		enter := "Open or start sandbox"
@@ -63,6 +65,8 @@ func (m sandboxTUIModel) helpViewActions() tuiHelpSection {
 		section.rows = [][2]string{{"a", "Add secret"}, {"d", "Delete secret"}, {"r", "Refresh names"}}
 	case tuiMCPPage:
 		section.rows = [][2]string{{"a", "Add remote server"}, {"f", "Configure filesystem server"}, {"e", "Edit selected server"}, {"d", "Remove remote server"}}
+	case tuiAuditPage:
+		section.rows = [][2]string{{"enter / d", "Inspect audit event"}, {"r", "Refresh audit trail"}, {"g", "Newest retained event in default order"}}
 	case tuiPacketsPage:
 		section.rows = [][2]string{{"enter / d", "Inspect packet"}, {"space", "Pause / resume display"}, {"c", "Clear packet capture"}, {"r", "Refresh capture"}}
 	case tuiImagesPage:
@@ -77,7 +81,7 @@ func (m sandboxTUIModel) helpViewActions() tuiHelpSection {
 func (m sandboxTUIModel) renderKeyboardHelp(theme tuiTheme, width int) string {
 	navigation := tuiHelpSection{"NAVIGATION", [][2]string{
 		{"↑/↓ or j/k", "Move selection"}, {"tab / shift+tab", "Switch views"},
-		{"0…9", "Jump to a view"}, {"g / G", "First / last row"},
+		{"0…9 / A / B", "Jump to view / Audit / Remotes"}, {"g / G", "First / last row"},
 		{"Mouse wheel", "Scroll"}, {"Click", "Select row or action"},
 	}}
 	if m.page != tuiOverviewPage {
@@ -88,7 +92,7 @@ func (m sandboxTUIModel) renderKeyboardHelp(theme tuiTheme, width int) string {
 		{"S", "Choose sort field / order"}, {"Click header", "Sort / reverse column"},
 	}}
 	application := tuiHelpSection{"APPLICATION", [][2]string{
-		{"n", "Create sandbox"}, {"?", "Open / close help"},
+		{"n", "Create: Local / Remote / Organization"}, {"?", "Open / close help"},
 		{"esc", "Close dialog"}, {"q / ctrl+c", "Quit outside dialogs"},
 		{"ctrl+c / ctrl+v", "Copy / paste in forms"},
 	}}

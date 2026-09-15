@@ -12,6 +12,7 @@ import (
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sshconfig"
 )
 
 var runSSHProcess = runAttachedCommand
@@ -93,9 +94,14 @@ func CmdSSH(argv []string) int {
 		fmt.Fprintln(os.Stderr, "gantry ssh:", err)
 		return 1
 	}
+	knownHostsHelper, err := sshconfig.OpenSSHCommandPath(self)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry ssh:", err)
+		return 1
+	}
 	args := []string{
 		"-o", "ProxyCommand=" + shellCommand(self, "ssh-proxy", name),
-		"-o", "KnownHostsCommand=" + shellCommand(self, "ssh-known-hosts"),
+		"-o", "KnownHostsCommand=" + knownHostsCommand(knownHostsHelper, "ssh-known-hosts"),
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + filepath.Join(sshInstallDir(), "known_hosts"),
 	}
@@ -142,10 +148,4 @@ func readSSHConfig(name string) (config.RunConfig, error) {
 	return cfg, nil
 }
 
-func remoteSSHCommand(argv []string) string {
-	quoted := make([]string, len(argv))
-	for index, value := range argv {
-		quoted[index] = "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
-	}
-	return strings.Join(quoted, " ")
-}
+func remoteSSHCommand(argv []string) string { return sshconfig.GuestCommand(argv) }

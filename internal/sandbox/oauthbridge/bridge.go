@@ -41,9 +41,10 @@ package oauthbridge
 // the documented fixed callback ports or the dynamic OAuth range. Listener
 // count, replay concurrency, duration, request size, and response size are all
 // bounded. Transparent callbacks must carry state and code/error; the guest
-// CLI remains authoritative for state and PKCE validation. Only GET path+query
-// is replayed to guest loopback; browser headers and cookies never cross the
-// boundary.
+// CLI remains authoritative for state and PKCE validation. GET query results
+// and bounded form_post bodies are replayed to guest loopback, preserving the
+// method. Browser headers and cookies never cross the boundary; callback data
+// travels on exec stdin, not argv.
 //
 // This mirrors the reference sandbox stack's behavior (host-side callback
 // listener + replay via in-sandbox exec) without its TLS-intercepting
@@ -51,8 +52,10 @@ package oauthbridge
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -68,6 +71,7 @@ const (
 	maxFailedPorts        = 64
 	maxConcurrentReplays  = 2
 	maxRequestURIBytes    = 8 << 10
+	maxRequestBodyBytes   = 16 << 10
 	MaxReplayResponseSize = 256 << 10
 	ReplayTimeout         = 15 * time.Second
 	listenerLifetime      = 10 * time.Minute
@@ -80,13 +84,13 @@ const (
 // Exec runs one command inside the sandbox container and returns its captured
 // stdout and exit status. The daemon supplies it; the bridge never learns how
 // the guest is reached.
-type Exec func(args []string, timeout time.Duration) ([]byte, int, error)
+type Exec func(stdin io.Reader, args []string, timeout time.Duration) ([]byte, int, error)
 
 type Bridge struct {
 	exec Exec
-	// replay executes one HTTP GET against guest loopback and returns the
-	// parsed response; a field so tests can substitute a local fake guest.
-	replay func(port int, requestURI string) (replayResult, error)
+	// replay executes one validated HTTP callback against guest loopback and
+	// returns the parsed response; tests can substitute a local fake guest.
+	replay func(port int, request replayRequest) (replayResult, error)
 	// logf defaults to the daemon log; tests capture it.
 	logf func(format string, a ...any)
 
@@ -358,13 +362,22 @@ func (b *Bridge) releaseReplay() { <-b.replaySlots }
 func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setBrowserSecurityHeaders(w)
-		if r.Method != http.MethodGet {
-			http.Error(w, "gantry oauth bridge: only GET callbacks are replayed", http.StatusMethodNotAllowed)
+		if r.Method != http.MethodGet && (r.Method != http.MethodPost || l.custody) {
+			allow := "GET, POST"
+			if l.custody {
+				allow = "GET"
+			}
+			w.Header().Set("Allow", allow)
+			http.Error(w, "gantry oauth bridge: unsupported callback method", http.StatusMethodNotAllowed)
 			return
 		}
 		uri := r.URL.RequestURI()
 		if len(uri) > maxRequestURIBytes {
 			http.Error(w, "gantry oauth bridge: callback URL too long", http.StatusRequestURITooLong)
+			return
+		}
+		if !strings.HasPrefix(uri, "/") || strings.ContainsAny(uri, "\x00\r\n\t ") {
+			http.Error(w, "gantry oauth bridge: invalid callback URL", http.StatusBadRequest)
 			return
 		}
 		if l.custody {
@@ -384,13 +397,20 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			// Its refreshed lifetime, rather than one callback, closes it.
 			return
 		}
-		q := r.URL.Query()
-		if q.Get("state") == "" || (q.Get("code") == "" && q.Get("error") == "") {
-			http.Error(w, "gantry oauth bridge: not an OAuth callback result", http.StatusNotFound)
-			return
-		}
 		if !b.acquireReplay() {
 			http.Error(w, "gantry oauth bridge: too many callbacks are already being replayed", http.StatusTooManyRequests)
+			return
+		}
+		// Charge body reads/parsing to the same bound as replay. A saturated
+		// bridge refuses new requests without consuming their bodies.
+		releaseSlot := true
+		defer func() {
+			if releaseSlot {
+				b.releaseReplay()
+			}
+		}()
+		request, ok := readReplayRequest(w, r, uri)
+		if !ok {
 			return
 		}
 		type outcome struct {
@@ -402,19 +422,19 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			var out outcome
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					out = outcome{err: fmt.Errorf("callback replay panic: %v", recovered)}
+					out = outcome{err: errors.New("callback replay panicked")}
 				}
 				done <- out
 			}()
-			out.res, out.err = b.replayIntoGuest(l.port, uri)
+			out.res, out.err = b.replayIntoGuest(l.port, request)
 		}()
 		timer := time.NewTimer(b.timeout())
 		var out outcome
 		select {
 		case out = <-done:
 			timer.Stop()
-			b.releaseReplay()
 		case <-timer.C:
+			releaseSlot = false
 			// Keep the slot charged until the underlying replay actually
 			// unwinds. Even a guest/RPC bug that ignores cancellation can
 			// therefore strand at most maxConcurrentReplays goroutines.
@@ -426,6 +446,7 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 			return
 		case <-r.Context().Done():
 			timer.Stop()
+			releaseSlot = false
 			go func() {
 				<-done
 				b.releaseReplay()
@@ -456,6 +477,76 @@ func (b *Bridge) handleCallback(l *listener) func(http.ResponseWriter, *http.Req
 	}
 }
 
+// replayRequest contains only callback data, never browser headers or cookies.
+// POST bodies stay byte-for-byte intact; validation never merges query values
+// into the form, as that would change MSAL's POST-only callback semantics.
+type replayRequest struct {
+	method string
+	uri    string
+	body   string
+}
+
+func readReplayRequest(w http.ResponseWriter, r *http.Request, uri string) (replayRequest, bool) {
+	request := replayRequest{method: r.Method, uri: uri}
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		http.Error(w, "gantry oauth bridge: malformed callback query", http.StatusBadRequest)
+		return replayRequest{}, false
+	}
+	if r.Method == http.MethodPost {
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/x-www-form-urlencoded" ||
+			len(r.Header.Values("Content-Type")) != 1 || r.Header.Get("Content-Encoding") != "" ||
+			(len(params) > 0 && (len(params) != 1 || !strings.EqualFold(params["charset"], "utf-8"))) {
+			http.Error(w, "gantry oauth bridge: expected an unencoded URL-encoded form", http.StatusUnsupportedMediaType)
+			return replayRequest{}, false
+		}
+		// Keep OAuth result fields in exactly one place. Some guest handlers
+		// merge query and form values while MSAL reads only the POST body.
+		for _, key := range []string{"state", "code", "error"} {
+			if values.Has(key) {
+				http.Error(w, "gantry oauth bridge: POST result fields must be in the form only", http.StatusBadRequest)
+				return replayRequest{}, false
+			}
+		}
+		if r.ContentLength > maxRequestBodyBytes {
+			http.Error(w, "gantry oauth bridge: callback form too large", http.StatusRequestEntityTooLarge)
+			return replayRequest{}, false
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
+		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, "gantry oauth bridge: callback form too large", http.StatusRequestEntityTooLarge)
+			} else {
+				http.Error(w, "gantry oauth bridge: cannot read callback form", http.StatusBadRequest)
+			}
+			return replayRequest{}, false
+		}
+		request.body = string(body)
+		values, err = url.ParseQuery(request.body)
+		if err != nil {
+			http.Error(w, "gantry oauth bridge: malformed callback form", http.StatusBadRequest)
+			return replayRequest{}, false
+		}
+	}
+	if !isOAuthResult(values) {
+		http.Error(w, "gantry oauth bridge: not an OAuth callback result", http.StatusNotFound)
+		return replayRequest{}, false
+	}
+	return request, true
+}
+
+func isOAuthResult(values url.Values) bool {
+	// Exactly one nonempty state and either code or error, never both or
+	// duplicated fields. The guest still owns state and PKCE verification.
+	if len(values["state"]) != 1 || values.Get("state") == "" {
+		return false
+	}
+	return (len(values["code"]) == 1 && values.Get("code") != "" && !values.Has("error")) ||
+		(len(values["error"]) == 1 && values.Get("error") != "" && !values.Has("code"))
+}
+
 func setBrowserSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -480,39 +571,51 @@ type replayResult struct {
 	status int
 }
 
-// replayIntoGuest performs the callback GET inside the sandbox through the
+// replayIntoGuest performs the callback inside the sandbox through the
 // configured replay function (the real one execs bash /dev/tcp).
-func (b *Bridge) replayIntoGuest(port int, requestURI string) (replayResult, error) {
+func (b *Bridge) replayIntoGuest(port int, request replayRequest) (replayResult, error) {
 	if b.replay != nil {
-		return b.replay(port, requestURI)
+		return b.replay(port, request)
 	}
-	return b.replayViaDevTCP(port, requestURI)
+	return b.replayViaDevTCP(port, request)
 }
 
-// devTCPReplayScript is run inside the sandbox with: bash -c script -- PORT URI
-// It opens a TCP connection to the CLI's loopback listener via bash's
-// /dev/tcp, writes one HTTP/1.0 GET, and prints the raw response to stdout.
+// devTCPReplayScript is run inside the sandbox with: bash -c script -- PORT
+// It copies one host-constructed HTTP/1.0 request from stdin to guest loopback
+// and prints the raw response to stdout. Callback data never appears in argv
+// or shell source. No browser headers are passed through.
 // bash is present in every gantry image (the default shell); containers share
 // the VM netns. Using localhost lets the resolver reach IPv4 or IPv6 loopback.
 const devTCPReplayScript = `set -u
-port=$1; uri=$2
+port=$1
 exec 3<>"/dev/tcp/localhost/$port" || { echo "oauth-replay: cannot connect to localhost:$port (CLI not listening?)" >&2; exit 97; }
-printf 'GET %s HTTP/1.0\r\nHost: localhost:%s\r\nUser-Agent: gantry-oauth-bridge\r\nAccept: */*\r\nConnection: close\r\n\r\n' "$uri" "$port" >&3 || { echo "oauth-replay: write failed" >&2; exit 98; }
+cat >&3 || { echo "oauth-replay: write failed" >&2; exit 98; }
 cat <&3
 `
 
 // replayViaDevTCP execs the replay script in the sandbox container and
 // parses the CLI listener's raw HTTP response.
-func (b *Bridge) replayViaDevTCP(port int, requestURI string) (replayResult, error) {
+func (b *Bridge) replayViaDevTCP(port int, request replayRequest) (replayResult, error) {
+	var wire strings.Builder
+	fmt.Fprintf(&wire, "%s %s HTTP/1.0\r\nHost: localhost:%d\r\nUser-Agent: gantry-oauth-bridge\r\nAccept: */*\r\nConnection: close\r\n",
+		request.method, request.uri, port)
+	if request.method == http.MethodPost {
+		fmt.Fprintf(&wire, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n", len(request.body))
+	}
+	wire.WriteString("\r\n")
+	wire.WriteString(request.body)
 	stdout, status, err := b.exec(
-		[]string{"bash", "-c", devTCPReplayScript, "--", strconv.Itoa(port), requestURI},
+		strings.NewReader(wire.String()),
+		[]string{"bash", "-c", devTCPReplayScript, "--", strconv.Itoa(port)},
 		b.timeout(),
 	)
 	if err != nil {
-		return replayResult{}, fmt.Errorf("in-sandbox replay exec: %w", err)
+		// Guest errors may reflect the callback, including its authorization
+		// code. Keep diagnostics categorical, never log raw output/errors.
+		return replayResult{}, errors.New("in-sandbox replay exec failed")
 	}
 	if status != 0 {
-		return replayResult{}, fmt.Errorf("in-sandbox replay exited %d: %s", status, strings.TrimSpace(string(tailBytes(stdout, 512))))
+		return replayResult{}, fmt.Errorf("in-sandbox replay exited %d", status)
 	}
 	// The isolated session task may append a "client: task exited, status N"
 	// trailer to stdout. Strip only that trailer: trimming newlines generally
@@ -532,16 +635,16 @@ func parseRawHTTPResponse(raw []byte) (replayResult, error) {
 	}
 	head, _, lineEnding, ok := splitHTTPResponseHead(raw)
 	if !ok {
-		return replayResult{}, fmt.Errorf("no HTTP response from the in-sandbox listener: %.200s", raw)
+		return replayResult{}, errors.New("no HTTP response from the in-sandbox listener")
 	}
 	statusLine, _, _ := bytes.Cut(head, lineEnding)
 	fields := bytes.Fields(statusLine)
 	if len(fields) < 2 || !bytes.HasPrefix(fields[0], []byte("HTTP/")) {
-		return replayResult{}, fmt.Errorf("malformed HTTP status line: %.100s", statusLine)
+		return replayResult{}, errors.New("malformed HTTP status line")
 	}
 	status, err := strconv.Atoi(string(fields[1]))
 	if err != nil {
-		return replayResult{}, fmt.Errorf("malformed HTTP status code: %.100s", statusLine)
+		return replayResult{}, errors.New("malformed HTTP status code")
 	}
 	if status < 200 || status > 599 {
 		return replayResult{}, fmt.Errorf("invalid HTTP status code %d", status)
@@ -560,12 +663,4 @@ func splitHTTPResponseHead(raw []byte) (head, body, lineEnding []byte, ok bool) 
 	default:
 		return nil, nil, nil, false
 	}
-}
-
-// tailBytes returns the last n bytes of b (for error messages).
-func tailBytes(b []byte, n int) []byte {
-	if len(b) > n {
-		return b[len(b)-n:]
-	}
-	return b
 }

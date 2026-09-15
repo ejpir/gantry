@@ -48,6 +48,10 @@ func SetNetworkPolicy(name, path string, allowLocal bool) (control.NetworkPolicy
 		if err != nil {
 			return control.NetworkPolicyEntry{}, err
 		}
+		policy, err = cfg.ApplyOrganizationPolicy(policy)
+		if err != nil {
+			return control.NetworkPolicyEntry{}, err
+		}
 		if err := control.ValidatePolicyAgainstSavedUDPPorts(policy, cfg.Ports); err != nil {
 			return control.NetworkPolicyEntry{}, err
 		}

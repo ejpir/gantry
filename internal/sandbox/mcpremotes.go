@@ -26,10 +26,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 
 	"github.com/ejpir/gantry/internal/mcpspec"
 	mcpworkerapi "github.com/ejpir/gantry/internal/mcpworker"
+	"github.com/ejpir/gantry/internal/oauthprovider"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/mcpgw"
 	mcpworkersup "github.com/ejpir/gantry/internal/sandbox/mcpworker"
@@ -86,8 +89,13 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 				return nil, fmt.Errorf("-mcp-remote %s: redact secret %s: %w", spec.Name, name, err)
 			}
 		}
-		if spec.AuthKind == "custody" && d.broker.custodyRegistry == nil {
-			return nil, fmt.Errorf("-mcp-remote %s: auth=custody: needs -oauth-custody", spec.Name)
+		if spec.AuthKind == "custody" {
+			if d.broker.custodyRegistry == nil {
+				return nil, fmt.Errorf("-mcp-remote %s: auth=custody: needs -oauth-custody", spec.Name)
+			}
+			if _, ok := oauthprovider.Lookup(d.cfg.OAuthProviders, spec.AuthRef); !ok {
+				return nil, fmt.Errorf("-mcp-remote %s: unknown custody provider %q", spec.Name, spec.AuthRef)
+			}
 		}
 
 		serverSpec := spec
@@ -111,11 +119,11 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 					}
 					response.Headers = map[string]string{header: raw}
 				case "custody":
-					set, ok := d.broker.custodyRegistry.Get(serverSpec.AuthRef)
-					if !ok || set.AccessToken == "" {
+					token, ok := d.broker.custodyRegistry.AccessToken(serverSpec.AuthRef)
+					if !ok {
 						return response, fmt.Errorf("custody access token unavailable")
 					}
-					response.Headers = map[string]string{"Authorization": "Bearer " + set.AccessToken}
+					response.Headers = map[string]string{"Authorization": "Bearer " + token}
 				}
 				for _, name := range serverSpec.RedactNames {
 					value, err := d.broker.secretStore.Resolve(name)
@@ -136,6 +144,18 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 		}
 		d.broker.auditf("mcp: remote %s configured (%s, auth %s)", spec.Name, mcpgw.AuditRemoteOrigin(spec.URL), authDesc)
 		servers = append(servers, server)
+	}
+	for i := range servers {
+		server := &servers[i]
+		name := server.Config.Name
+		host := ""
+		if u, err := url.Parse(server.Config.URL); err == nil {
+			host = u.Hostname()
+		}
+		server.Authorize = func(ctx context.Context, action, tool string) error {
+			return d.governance.Authorize(ctx, action, policy.Resource{Server: name, Tool: tool, Host: host})
+		}
+		server.AuthorizeDial = d.authorizeMCPDial
 	}
 	return servers, nil
 }

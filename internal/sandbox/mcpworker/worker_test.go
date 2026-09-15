@@ -200,6 +200,37 @@ func containsString(values []string, wanted string) bool {
 	return false
 }
 
+func TestCloseSessionsRevokesBoundAndUnboundCapabilities(t *testing.T) {
+	worker := &Worker{
+		sessionCapabilities: make(map[string]struct{}),
+		sessionConnections:  make(map[string]net.Conn),
+	}
+	bound, err := worker.registerSessionCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	left, right := net.Pipe()
+	defer func() { _ = right.Close() }()
+	if !worker.bindSessionConnection(bound, left) {
+		t.Fatal("failed to bind active capability")
+	}
+	unbound, err := worker.registerSessionCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.CloseSessions()
+	if worker.hasSessionCapability(bound) || worker.hasSessionCapability(unbound) {
+		t.Fatal("session capability survived revocation")
+	}
+	if worker.bindSessionConnection(unbound, right) {
+		t.Fatal("revoked capability accepted a late connection")
+	}
+	_ = right.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := right.Read(make([]byte, 1)); err == nil {
+		t.Fatal("bound MCP connection remained open")
+	}
+}
+
 func fakeSpawn(ctx context.Context) (io.WriteCloser, io.ReadCloser, func(), error) {
 	stdinReader, stdinWriter := io.Pipe()
 	stdoutReader, stdoutWriter := io.Pipe()

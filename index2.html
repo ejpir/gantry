@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101210">
+  <meta name="description" content="Gantry is an open-source VMM and CLI for running OCI images in local Linux microVMs, with a private kernel per sandbox and no telemetry.">
+  <meta property="og:title" content="Gantry — Local Linux microVMs">
+  <meta property="og:description" content="Run OCI images in local Linux microVMs with project-directory mounts, configurable network policies, and SSH, MCP, and API access.">
+  <meta property="og:type" content="website">
+  <title>Gantry — Local Linux microVMs</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%23c2f36b'/%3E%3Cpath d='M10 29V11h20v18M17 29V18h6v11' fill='none' stroke='%23101210' stroke-width='4'/%3E%3C/svg%3E">
+  <script>
+    try {
+      if (localStorage.getItem('gantry-docs-theme') === 'light') {
+        document.documentElement.dataset.theme = 'light';
+        document.querySelector('meta[name="theme-color"]').content = '#f7f8f3';
+      }
+    } catch (_) { /* The page also works with storage disabled. */ }
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101210;
+      --surface: #171c15;
+      --raised: #20271b;
+      --line: #343e2d;
+      --line-strong: #536445;
+      --text: #eff2e9;
+      --muted: #a5b09a;
+      --accent: #c2f36b;
+      --accent-ink: #1a280e;
+      --accent-soft: #28351b;
+      --danger: #f0aaa0;
+      --header: rgb(16 18 16 / 94%);
+      --grid: #3b4930;
+      --shadow: 0 24px 80px rgb(0 0 0 / 22%);
+      --sans: Inter, "Helvetica Neue", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f7f8f3;
+      --surface: #eef1e8;
+      --raised: #e5ebdc;
+      --line: #d0d9c4;
+      --line-strong: #a4b58f;
+      --text: #202819;
+      --muted: #58674b;
+      --accent: #365b19;
+      --accent-ink: #fff;
+      --accent-soft: #e3edda;
+      --danger: #a33a30;
+      --header: rgb(247 248 243 / 94%);
+      --grid: #c8d3bb;
+      --shadow: 0 24px 80px rgb(41 60 23 / 8%);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 100px; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.65 var(--sans); -webkit-font-smoothing: antialiased; }
+    ::selection { background: var(--accent); color: var(--accent-ink); }
+    a { color: inherit; text-decoration: none; }
+    button, select { font: inherit; }
+    button { cursor: pointer; color: inherit; }
+    button:disabled { cursor: wait; }
+    button, a, select, summary { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
+    [tabindex="-1"]:focus { outline: none; }
+    [hidden] { display: none !important; }
+    h1, h2, h3, p, figure, pre, dl, dd { margin: 0; }
+    h1, h2, h3 { text-wrap: balance; }
+    svg { display: block; }
+    code, pre { font-family: var(--mono); }
+    .wrap { width: min(1280px, calc(100% - 112px)); margin-inline: auto; }
+    .icon { width: 20px; height: 20px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-sm { width: 16px; height: 16px; }
+    .mono { font-family: var(--mono); }
+    .eyebrow { font: 10px/1.5 var(--mono); letter-spacing: .11em; text-transform: uppercase; }
+    .accent { color: var(--accent); }
+    .muted { color: var(--muted); }
+    .status-dot { width: 6px; height: 6px; background: currentColor; border-radius: 50%; display: inline-block; flex: 0 0 auto; }
+    .button { min-height: 46px; display: inline-flex; align-items: center; justify-content: space-between; gap: 28px; padding: 12px 19px; background: var(--accent); color: var(--accent-ink); border: 1px solid transparent; border-radius: 4px; font-size: 12px; font-weight: 650; transition: transform .2s, box-shadow .2s; }
+    .button:hover { transform: translateY(-2px); box-shadow: 0 5px 0 var(--accent-soft); }
+    .text-link { display: inline-flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 550; }
+    .text-link .icon { transition: transform .2s; }
+    .text-link:hover { color: var(--accent); }
+    .text-link:hover .icon { transform: translate(2px, -2px); }
+    .icon-button { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; min-width: 36px; padding: 7px; background: transparent; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); }
+    .icon-button:hover { color: var(--accent); border-color: var(--line-strong); background: var(--surface); }
+    .skip-link { position: fixed; top: 10px; left: 10px; z-index: 100; padding: 10px 18px; color: var(--accent-ink); background: var(--accent); transform: translateY(-160%); }
+    .skip-link:focus { transform: translateY(0); }
+    .site-header { position: sticky; top: 0; z-index: 20; background: var(--header); backdrop-filter: blur(16px); border-bottom: 1px solid var(--line); }
+    .header-inner { min-height: 80px; display: flex; align-items: center; gap: 36px; }
+    .brand { display: inline-flex; align-items: center; gap: 8px; font-size: 29px; font-weight: 650; letter-spacing: -.055em; flex-shrink: 0; }
+    .brand-mark { width: 29px; height: 30px; color: var(--accent); transform: translateY(2px); }
+    .brand-period { color: var(--accent); }
+    .brand-caption { border-left: 1px solid var(--line); padding-left: 22px; margin-left: -14px; color: var(--muted); font: 9px/1.7 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .nav-links { display: flex; align-items: center; gap: 26px; margin-left: auto; font-size: 11px; color: var(--muted); }
+    .nav-links a:hover { color: var(--accent); }
+    .header-tools { display: flex; align-items: center; gap: 10px; }
+    .header-tools .button { min-height: 36px; padding: 7px 13px; font-size: 11px; gap: 21px; }
+    .menu-button { display: none; }
+    .hero { padding-top: 51px; }
+    .hero-meta { display: flex; align-items: center; justify-content: space-between; gap: 20px; color: var(--muted); margin-bottom: 35px; }
+    .hero-meta .eyebrow:first-child { display: flex; align-items: center; gap: 10px; color: var(--accent); }
+    .hero-intro { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 52px; align-items: end; margin-bottom: 44px; }
+    h1 { font-size: clamp(65px, 7.35vw, 106px); font-weight: 550; line-height: 1.02; letter-spacing: -.07em; }
+    h1 > span { display: block; white-space: nowrap; }
+    .hero-deck { padding-bottom: 4px; }
+    .hero-deck > p { color: var(--muted); font-size: 14px; line-height: 1.85; max-width: 355px; }
+    .hero-actions { display: flex; align-items: center; gap: 21px; margin-top: 23px; }
+    .hero-actions .text-link { white-space: nowrap; font-size: 11px; }
+    .hero-actions .button { gap: 19px; }
+    .workbench { border: 1px solid var(--line-strong); background: var(--surface); border-radius: 8px; box-shadow: var(--shadow); position: relative; }
+    .workbench::before, .workbench::after { content: "+"; position: absolute; font: 15px var(--mono); color: var(--line-strong); top: -9px; background: var(--bg); width: 15px; height: 15px; display: grid; place-items: center; }
+    .workbench::before { left: -8px; }
+    .workbench::after { right: -8px; }
+    .bench-top { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 16px 22px; border-bottom: 1px solid var(--line); }
+    .bench-label { display: flex; align-items: center; gap: 10px; font: 10px var(--mono); color: var(--text); }
+    .bench-label .icon { color: var(--accent); }
+    .bench-caption { color: var(--muted); font: 9px var(--mono); }
+    .bench-body { display: grid; grid-template-columns: 190px minmax(0, 1fr); }
+    .scenario-tabs { padding: 21px 12px; border-right: 1px solid var(--line); }
+    .rail-label { color: var(--muted); font: 8px var(--mono); letter-spacing: .1em; padding: 0 12px 12px; }
+    .scenario-tab { display: grid; grid-template-columns: 20px 1fr; text-align: left; width: 100%; align-items: start; column-gap: 7px; padding: 14px 11px; margin-bottom: 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); }
+    .scenario-tab .tab-number { font: 9px/1.7 var(--mono); padding-top: 1px; opacity: .8; }
+    .scenario-tab strong { display: block; font-size: 12px; font-weight: 550; }
+    .scenario-tab small { display: block; font: 9px/1.5 var(--mono); margin-top: 4px; }
+    .scenario-tab[aria-selected="true"] { background: var(--accent-soft); border-color: var(--line-strong); color: var(--accent); }
+    .scenario-tab:hover { color: var(--text); background: var(--raised); }
+    .scenario-panels { min-width: 0; grid-column: 1 / -1; }
+    .js .scenario-panels { grid-column: auto; }
+    .scenario { display: grid; grid-template-columns: minmax(0, 1fr) 242px; min-width: 0; }
+    .scenario + .scenario { border-top: 1px solid var(--line); }
+    .js .scenario { border-top: 0; }
+    .terminal {
+      color-scheme: dark;
+      --text: #edf1e7;
+      --muted: #a5b09a;
+      --line: #333e2b;
+      --line-strong: #5b6f46;
+      --accent: #c2f36b;
+      --accent-ink: #19260d;
+      --surface: #1b2415;
+      background: #10150e;
+      color: var(--text);
+      min-width: 0;
+    }
+    .scenario-terminal { margin: 16px; padding: 19px 21px 21px; border: 1px solid var(--line); border-radius: 5px; min-height: 337px; }
+    .terminal-top { display: flex; align-items: center; gap: 10px; color: var(--muted); font: 9px var(--mono); padding-bottom: 17px; margin-bottom: 17px; border-bottom: 1px solid var(--line); }
+    .terminal-top .file-label { margin-right: auto; }
+    .terminal-dots { display: flex; gap: 5px; }
+    .terminal-dots i { width: 5px; height: 5px; background: #71865b; border-radius: 50%; }
+    .copy-code { padding: 5px; border: 0; background: transparent; min-width: 27px; min-height: 27px; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; }
+    .copy-code:hover { background: var(--surface); color: var(--accent); }
+    .scenario pre { font: 11px/1.95 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
+    .cmd { color: var(--accent); }
+    .comment { color: var(--muted); }
+    .scenario-docs { display: inline-flex; align-items: center; gap: 7px; color: var(--accent); font-size: 10px; margin-top: 21px; text-decoration: underline; text-underline-offset: 4px; }
+    .manifest { padding: 27px 24px 22px 10px; min-width: 0; }
+    .manifest-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; font: 9px var(--mono); color: var(--muted); }
+    .manifest-heading strong { color: var(--accent); font-weight: 400; }
+    .machine-art { height: 116px; display: grid; place-items: center; position: relative; background: radial-gradient(var(--grid) .7px, transparent .7px) center / 12px 12px; margin-block: 12px; }
+    .machine-art::before { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 22px 12px var(--surface); pointer-events: none; }
+    .machine-art svg { width: 84px; height: 84px; color: var(--accent); position: relative; }
+    .manifest-image { font: 10px/1.6 var(--mono); text-align: center; overflow-wrap: anywhere; }
+    .kernel-caption { display: flex; align-items: center; justify-content: center; gap: 6px; font: 8px var(--mono); color: var(--muted); margin-top: 7px; }
+    .kernel-caption .icon { width: 12px; height: 12px; }
+    .manifest dl { font: 9px/1.6 var(--mono); margin-top: 19px; }
+    .manifest dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); }
+    .manifest dt { color: var(--muted); }
+    .manifest dd { text-align: right; }
+    .bench-bottom { border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 16px; padding: 11px 22px; color: var(--muted); font: 8px/1.6 var(--mono); }
+    .bench-bottom a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+    .principles { display: grid; grid-template-columns: repeat(4, 1fr); padding-block: 29px; border-bottom: 1px solid var(--line); }
+    .principle { display: flex; align-items: center; justify-content: center; gap: 9px; font: 10px var(--mono); color: var(--muted); }
+    .principle + .principle { border-left: 1px solid var(--line); }
+    .principle .icon { color: var(--accent); width: 16px; height: 16px; }
+    .section { padding-block: 95px; }
+    .section-heading { display: grid; grid-template-columns: 1fr 355px; gap: 60px; align-items: end; margin-bottom: 37px; }
+    .section-heading .eyebrow, .architecture-copy > .eyebrow, .install-copy > .eyebrow { margin-bottom: 20px; color: var(--accent); }
+    h2 { font-size: clamp(34px, 4.1vw, 57px); font-weight: 500; line-height: 1.08; letter-spacing: -.055em; }
+    .section-heading > p { color: var(--muted); font-size: 13px; line-height: 1.9; }
+    .controls-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-block: 1px solid var(--line); }
+    .control-card { padding: 30px 28px 28px; position: relative; display: flex; flex-direction: column; min-width: 0; }
+    .control-card:first-child { padding-left: 0; }
+    .control-card:last-child { padding-right: 0; }
+    .control-card + .control-card { border-left: 1px solid var(--line); }
+    .control-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 31px; color: var(--muted); font: 9px var(--mono); }
+    .control-top .icon { color: var(--accent); }
+    .control-card h3 { font-size: 21px; font-weight: 500; letter-spacing: -.03em; line-height: 1.3; }
+    .control-card > p { color: var(--muted); font-size: 12px; line-height: 1.9; margin-top: 12px; }
+    .control-demo { margin-top: auto; padding-top: 26px; }
+    .directory-row { display: flex; align-items: center; gap: 8px; padding: 9px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 3px; font: 9px var(--mono); }
+    .directory-row + .directory-row { margin-top: 7px; background: transparent; color: var(--muted); border-style: dashed; }
+    .directory-row .icon { width: 13px; height: 13px; }
+    .directory-row span:last-child { margin-left: auto; color: var(--accent); font-size: 8px; }
+    .directory-row + .directory-row span:last-child { color: var(--muted); }
+    .demo-caption { color: var(--muted); font: 8px/1.7 var(--mono); margin-top: 9px; }
+    .policy-flow { display: grid; grid-template-columns: auto minmax(12px, 1fr) auto minmax(22px, 1fr) auto; align-items: center; gap: 7px; font: 9px var(--mono); min-height: 74px; }
+    .flow-in { position: relative; border-top: 1px dashed var(--muted); }
+    .flow-in::after { content: ""; position: absolute; top: -3px; right: 0; width: 5px; height: 5px; border-top: 1px solid var(--muted); border-right: 1px solid var(--muted); transform: rotate(45deg); }
+    .policy-gate { display: grid; justify-items: center; gap: 5px; color: var(--accent); }
+    .flow-branches { width: 100%; height: 64px; fill: none; stroke: var(--muted); stroke-width: 1; }
+    .flow-branches .allow, .flow-branches .deny { stroke: currentColor; }
+    .flow-results { display: grid; grid-template-rows: 32px 32px; align-items: center; }
+    .allow { color: var(--accent); }
+    .deny { color: var(--danger); }
+    .interface-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .interface-grid a { display: flex; align-items: center; justify-content: space-between; gap: 9px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); font: 9px var(--mono); padding: 10px; }
+    .interface-grid a:hover { color: var(--accent); border-color: var(--line-strong); }
+    .control-link { align-self: start; margin-top: 23px; color: var(--text); font-size: 10px; }
+    .architecture { background: var(--surface); border-block: 1px solid var(--line); }
+    .architecture-layout { display: grid; grid-template-columns: 1.05fr 1fr; gap: 96px; align-items: center; }
+    .architecture-copy > p:not(.eyebrow) { font-size: 13px; line-height: 1.9; color: var(--muted); margin-top: 22px; }
+    .architecture-copy h2 { max-width: 420px; }
+    .architecture-copy details { border-bottom: 1px solid var(--line); }
+    .architecture-copy details:first-of-type { margin-top: 23px; border-top: 1px solid var(--line); }
+    .architecture-copy summary { list-style: none; cursor: pointer; font-size: 12px; font-weight: 550; display: flex; align-items: center; gap: 14px; padding: 15px 0; }
+    .architecture-copy summary::-webkit-details-marker { display: none; }
+    .architecture-copy summary .detail-number { font: 9px var(--mono); color: var(--muted); }
+    .architecture-copy summary::after { content: "+"; font: 18px var(--mono); color: var(--accent); margin-left: auto; }
+    .architecture-copy details[open] summary::after { content: "−"; }
+    .architecture-copy details p { padding: 0 22px 17px 28px; color: var(--muted); font-size: 12px; line-height: 1.85; }
+    .architecture-copy > .text-link { margin-top: 23px; color: var(--accent); }
+    .host-figure { min-width: 0; }
+    .figure-caption { display: flex; justify-content: space-between; gap: 12px; font: 9px var(--mono); color: var(--muted); margin-bottom: 17px; }
+    .host-frame { border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg); padding: 25px; position: relative; }
+    .host-heading { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font: 9px var(--mono); padding-bottom: 26px; }
+    .host-heading span { display: flex; align-items: center; gap: 8px; }
+    .host-heading .icon { color: var(--accent); }
+    .vm-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
+    .vm { border: 1px dashed var(--line-strong); padding: 12px; background: var(--accent-soft); border-radius: 3px; min-width: 0; }
+    .vm-label { font: 8px var(--mono); color: var(--accent); margin-bottom: 15px; display: flex; align-items: center; justify-content: space-between; }
+    .workload-block { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding-block: 21px; border: 1px solid var(--line-strong); background: var(--bg); font: 10px var(--mono); }
+    .workload-block .icon { width: 24px; height: 24px; color: var(--accent); }
+    .private-kernel { font: 9px var(--mono); text-align: center; color: #1a280e; background: #c2f36b; padding: 12px 4px; margin-top: 10px; }
+    .pair-connectors { display: flex; justify-content: space-around; height: 26px; }
+    .pair-connectors::before, .pair-connectors::after { content: ""; border-left: 1px dashed var(--line-strong); }
+    .host-workers { border: 1px solid var(--line-strong); background: var(--surface); padding: 15px 8px; text-align: center; font: 11px/1.7 var(--mono); }
+    .host-workers small { display: block; font-size: 8px; color: var(--muted); margin-top: 3px; }
+    .host-backend { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 10px; padding: 16px 8px 0; margin-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font: 8px/1.6 var(--mono); }
+    .host-backend span + span::before { content: "/"; margin-right: 10px; color: var(--line-strong); }
+    .security-note { display: flex; align-items: start; gap: 10px; color: var(--muted); font-size: 10px; line-height: 1.8; margin-top: 20px; }
+    .security-note .icon { margin-top: 2px; }
+    .security-note strong { color: var(--text); font-weight: 550; }
+    .security-note a { text-decoration: underline; text-underline-offset: 3px; }
+    .install-section {
+      --accent: #20390e;
+      --accent-ink: #fff;
+      --text: #1c2a10;
+      --muted: #485c30;
+      --line: #a5cd68;
+      --line-strong: #718f45;
+      --accent-soft: #acd95c;
+      background: #c2f36b;
+      color: var(--text);
+      position: relative;
+      padding-block: 76px;
+    }
+    .install-section::before { content: ""; position: absolute; inset: 0 0 auto; height: 6px; background: repeating-linear-gradient(120deg, transparent 0 10px, #8fb44e 10px 11px); }
+    .install-layout { display: grid; grid-template-columns: .9fr 1.1fr; gap: 85px; align-items: center; }
+    .install-copy h2 { font-size: clamp(40px, 4.8vw, 65px); max-width: 460px; }
+    .install-copy > p:not(.eyebrow) { font-size: 13px; line-height: 1.9; color: var(--muted); margin-top: 22px; max-width: 340px; }
+    .install-copy > .text-link { margin-top: 22px; }
+    .install-facts { display: flex; flex-wrap: wrap; gap: 9px 20px; margin-top: 31px; font: 9px var(--mono); color: var(--muted); }
+    .install-facts span { display: inline-flex; align-items: center; gap: 6px; }
+    .install-facts .icon { width: 13px; height: 13px; }
+    .install-terminal { border: 1px solid #4e6336; border-radius: 6px; box-shadow: 0 14px 40px rgb(36 63 8 / 17%); overflow: hidden; }
+    .install-tabs { display: flex; border-bottom: 1px solid var(--line); padding: 0 18px; background: #192013; gap: 19px; }
+    .install-tab { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 51px; padding: 11px 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 11px; }
+    .install-tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+    .install-tab .icon { width: 14px; height: 14px; }
+    .install-panel { padding: 21px; }
+    .install-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; font: 9px var(--mono); color: var(--muted); }
+    .arch-control { display: flex; align-items: center; gap: 7px; }
+    .arch-control select { background: #242e1c; color: var(--text); border: 1px solid var(--line-strong); border-radius: 3px; font: 9px var(--mono); padding: 4px 6px; }
+    .install-code { font: 10px/1.9 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; min-height: 76px; }
+    .install-launch { padding-top: 15px; margin-top: 16px; border-top: 1px solid var(--line); }
+    .install-launch p { color: var(--muted); font: 9px var(--mono); margin-bottom: 10px; }
+    .install-launch pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.9 var(--mono); color: var(--accent); }
+    .install-note { font-size: 10px; line-height: 1.8; color: var(--muted); margin-top: 16px; min-height: 36px; }
+    .install-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-top: 19px; }
+    .copy-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 8px 11px; background: #26381a; border: 1px solid var(--line-strong); color: var(--accent); border-radius: 3px; font: 9px var(--mono); }
+    .copy-button:hover { background: #334925; }
+    .install-footer > a { color: var(--text); font-size: 9px; text-decoration: underline; text-underline-offset: 3px; }
+    .site-footer { padding-block: 38px 23px; }
+    .footer-top { display: flex; align-items: center; justify-content: space-between; gap: 30px; }
+    .footer-identity { display: flex; align-items: center; gap: 27px; }
+    .footer-identity p { color: var(--muted); font-size: 11px; border-left: 1px solid var(--line); padding-left: 27px; }
+    .footer-links { display: flex; flex-wrap: wrap; gap: 23px; color: var(--muted); font-size: 11px; }
+    .footer-links a:hover { color: var(--accent); }
+    .footer-bottom { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; color: var(--muted); font: 9px/1.8 var(--mono); border-top: 1px solid var(--line); margin-top: 27px; padding-top: 20px; }
+    .footer-bottom a { text-decoration: underline; text-underline-offset: 3px; }
+    .toast { position: fixed; z-index: 50; bottom: 24px; left: 50%; transform: translate(-50%, 10px); background: var(--accent); color: var(--accent-ink); padding: 12px 18px; border-radius: 4px; font: 11px/1.6 var(--mono); box-shadow: var(--shadow); max-width: calc(100% - 32px); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; text-align: center; }
+    .toast.visible { opacity: 1; transform: translate(-50%, 0); }
+    @keyframes arrive { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    h1 { animation: arrive .65s both; }
+    .hero-deck { animation: arrive .7s .08s both; }
+    .workbench { animation: arrive .75s .12s both; }
+    @media (max-width: 1150px) {
+      .wrap { width: calc(100% - 72px); }
+      .brand-caption { display: none; }
+      .hero-intro { grid-template-columns: minmax(0, 1fr) 270px; gap: 30px; }
+      h1 { font-size: 7.1vw; }
+      .hero-deck > p { font-size: 13px; }
+      .bench-body { grid-template-columns: 165px minmax(0, 1fr); }
+      .scenario { grid-template-columns: minmax(0, 1fr) 190px; }
+      .scenario-tab { padding-inline: 8px; column-gap: 4px; }
+      .scenario-tab strong { font-size: 11px; }
+      .scenario-tab small { font-size: 8px; }
+      .scenario-terminal { padding-inline: 16px; margin: 13px; }
+      .scenario pre { font-size: 10px; }
+      .manifest { padding-right: 17px; padding-left: 2px; }
+      .manifest dl { font-size: 8px; }
+      .architecture-layout { gap: 50px; }
+      .install-layout { gap: 45px; }
+      .section-heading { grid-template-columns: 1fr 320px; gap: 35px; }
+      .control-card { padding-inline: 21px; }
+      .policy-flow { gap: 5px; font-size: 8px; }
+    }
+    @media (max-width: 900px) {
+      .header-inner { min-height: 72px; gap: 22px; }
+      .nav-links { gap: 18px; }
+      .hero { padding-top: 36px; }
+      .hero-intro { grid-template-columns: 1fr; gap: 24px; }
+      h1 { font-size: clamp(60px, 10.1vw, 91px); }
+      .hero-deck { display: flex; justify-content: space-between; align-items: center; gap: 35px; }
+      .hero-deck > p { font-size: 13px; max-width: 340px; }
+      .hero-actions { flex-shrink: 0; margin-top: 0; gap: 16px; }
+      .bench-body { grid-template-columns: 1fr; }
+      .scenario-tabs { display: flex; gap: 9px; padding: 13px 16px 0; border-right: 0; }
+      .scenario-tabs .rail-label { display: none; }
+      .scenario-tab { margin: 0; padding: 12px; align-items: center; }
+      .scenario-tab small { display: none; }
+      .scenario-tab strong { font-size: 11px; }
+      .scenario { grid-template-columns: minmax(0, 1fr) 220px; }
+      .scenario pre { font-size: 11px; }
+      .manifest { padding-right: 23px; padding-left: 4px; }
+      .manifest dl { font-size: 9px; }
+      .principle { font-size: 9px; gap: 7px; }
+      .section { padding-block: 65px; }
+      .section-heading { grid-template-columns: 1fr; gap: 22px; margin-bottom: 31px; }
+      .section-heading > p { max-width: 440px; }
+      .control-card { padding-inline: 17px; }
+      .control-card h3 { font-size: 19px; }
+      .control-card > p { font-size: 11px; }
+      .directory-row { font-size: 8px; padding-inline: 7px; gap: 5px; }
+      .directory-row span:last-child { font-size: 7px; }
+      .policy-flow { grid-template-columns: auto 1fr auto; gap: 4px; }
+      .policy-flow > .flow-in, .policy-flow > .flow-source { display: none; }
+      .interface-grid a { padding-inline: 7px; font-size: 8px; }
+      .architecture-layout { gap: 35px; grid-template-columns: 1fr 1fr; align-items: start; }
+      .host-frame { padding: 16px; }
+      .vm-pair { gap: 10px; }
+      .vm { padding: 9px; }
+      .private-kernel { font-size: 8px; }
+      .architecture-copy h2 { font-size: 38px; }
+      .architecture-copy > p:not(.eyebrow) { font-size: 12px; }
+      .install-layout { grid-template-columns: 1fr 1.15fr; gap: 32px; }
+      .install-copy h2 { font-size: 44px; }
+      .footer-identity p { display: none; }
+    }
+    @media (max-width: 640px) {
+      html { scroll-padding-top: 88px; }
+      .wrap { width: calc(100% - 40px); }
+      .header-inner { flex-wrap: wrap; justify-content: space-between; min-height: 69px; padding-block: 12px; gap: 0 15px; }
+      .brand { font-size: 27px; }
+      .brand-mark { width: 26px; height: 27px; }
+      .header-tools .button { display: none; }
+      .header-tools { gap: 8px; }
+      .js .menu-button { display: inline-flex; }
+      .nav-links { order: 3; width: 100%; margin: 0; justify-content: space-between; padding-block: 16px 4px; gap: 13px; }
+      .js .nav-links { display: none; }
+      .js .nav-links.open { display: flex; }
+      .hero { padding-top: 30px; }
+      .hero-meta { margin-bottom: 26px; }
+      .hero-meta .eyebrow { font-size: 8px; letter-spacing: .06em; }
+      .hero-meta .edition { display: none; }
+      h1 { font-size: clamp(32px, 9.7vw, 65px); }
+      .hero-intro { gap: 22px; margin-bottom: 31px; }
+      .hero-deck { display: block; }
+      .hero-deck > p { font-size: 13px; max-width: 355px; }
+      .hero-actions { margin-top: 21px; gap: 23px; }
+      .bench-top { padding: 14px; gap: 12px; }
+      .bench-label { font-size: 9px; gap: 7px; }
+      .bench-label .icon { width: 15px; height: 15px; }
+      .bench-caption { font-size: 8px; max-width: 105px; text-align: right; line-height: 1.5; }
+      .scenario-tabs { padding: 10px 10px 0; gap: 5px; }
+      .scenario-tab { display: flex; justify-content: center; padding: 11px 5px; min-height: 44px; }
+      .scenario-tab .tab-number { display: none; }
+      .scenario-tab strong { font-size: 10px; }
+      .scenario-tab:last-child strong { font-size: 9px; }
+      .scenario { grid-template-columns: 1fr; }
+      .scenario-terminal { margin: 10px; padding: 14px; min-height: 0; }
+      .terminal-top { padding-bottom: 12px; margin-bottom: 15px; }
+      .scenario pre { font-size: 10px; line-height: 2; }
+      .scenario-docs { font-size: 9px; line-height: 1.7; margin-top: 18px; }
+      .manifest { display: grid; grid-template-columns: 1fr 1fr; align-items: start; gap: 0 18px; padding: 10px 20px 19px; }
+      .manifest-heading { grid-column: 1 / -1; margin-bottom: 13px; padding-bottom: 11px; border-bottom: 1px solid var(--line); }
+      .machine-art { display: none; }
+      .manifest-image { text-align: left; font-size: 9px; padding-top: 3px; }
+      .kernel-caption { justify-content: start; font-size: 7px; }
+      .manifest dl { margin-top: 0; font-size: 8px; grid-column: 2; grid-row: 2 / 4; }
+      .manifest dl > div { padding: 6px 0; }
+      .manifest dl > div:first-child { border-top: 0; padding-top: 0; }
+      .bench-bottom { padding: 11px 14px; font-size: 7px; flex-wrap: wrap; gap: 5px; }
+      .principles { grid-template-columns: 1fr 1fr; padding-block: 22px; gap: 21px 0; }
+      .principle { font-size: 8px; }
+      .principle:nth-child(3) { border-left: 0; }
+      .section { padding-block: 52px; }
+      .section-heading .eyebrow, .architecture-copy > .eyebrow { font-size: 9px; margin-bottom: 17px; }
+      h2 { font-size: 37px; }
+      .section-heading > p { font-size: 12px; }
+      .controls-grid { grid-template-columns: 1fr; }
+      .control-card, .control-card:first-child, .control-card:last-child { padding: 25px 0; }
+      .control-card + .control-card { border-left: 0; border-top: 1px solid var(--line); }
+      .control-top { margin-bottom: 17px; }
+      .control-card h3 { font-size: 23px; }
+      .control-card > p { font-size: 12px; }
+      .control-demo { padding-top: 22px; }
+      .directory-row { font-size: 10px; padding: 12px; }
+      .directory-row span:last-child { font-size: 9px; }
+      .demo-caption { font-size: 8px; }
+      .policy-flow { grid-template-columns: auto minmax(12px, 1fr) auto minmax(22px, 1fr) auto; gap: 8px; font-size: 10px; }
+      .policy-flow > .flow-in, .policy-flow > .flow-source { display: block; }
+      .interface-grid a { font-size: 11px; padding: 13px; }
+      .control-link { margin-top: 17px; }
+      .architecture-layout { grid-template-columns: 1fr; gap: 33px; }
+      .architecture-copy { order: -1; }
+      .architecture-copy h2 { font-size: 38px; }
+      .host-frame { padding: 20px; }
+      .vm-pair { gap: 13px; }
+      .vm { padding: 10px; }
+      .private-kernel { font-size: 9px; }
+      .install-section { padding-block: 51px; }
+      .install-layout { grid-template-columns: 1fr; gap: 31px; }
+      .install-copy h2 { font-size: clamp(39px, 12.4vw, 49px); }
+      .install-copy > p:not(.eyebrow) { font-size: 12px; }
+      .install-copy > .text-link { margin-top: 17px; }
+      .install-facts { margin-top: 21px; }
+      .install-panel { padding: 18px; }
+      .install-tabs { gap: 19px; padding-inline: 18px; }
+      .install-tab { font-size: 10px; gap: 5px; }
+      .install-code { font-size: 9px; }
+      .install-launch pre { font-size: 9px; }
+      .install-note { min-height: 0; }
+      .site-footer { padding-block: 29px 22px; }
+      .footer-top { align-items: start; flex-direction: column; gap: 22px; }
+      .footer-links { gap: 20px; font-size: 10px; }
+      .footer-bottom { font-size: 8px; margin-top: 23px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+      .button:hover, .text-link:hover .icon { transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Self-contained: no fonts, scripts, analytics, or other third-party requests. -->
+  <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" style="position:absolute;overflow:hidden">
+    <defs>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-up-right" viewBox="0 0 24 24"><path d="M6 18 18 6M6 6h12v12"/></symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m4 6 6 6-6 6m9 0h7"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></symbol>
+      <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 3 9 5v9l-9 5-9-5V8l9-5Zm0 10 9-5m-9 5L3 8m9 5v9M7.5 5.5l9 5"/></symbol>
+      <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4m6-4v4M9 18v4m6-4v4M2 9h4m-4 6h4m12-6h4m-4 6h4M10 10h4v4h-4z"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7V5h6l2 3h10v12H3V7Z"/><path d="M3 11h18"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 4-4 7-8 9-4-2-8-5-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+      <symbol id="i-network" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="5" rx="1"/><rect x="2" y="17" width="6" height="5" rx="1"/><rect x="16" y="17" width="6" height="5" rx="1"/><path d="M12 7v5M5 17v-5h14v5"/></symbol>
+      <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 3l-4 18"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z"/></symbol>
+      <symbol id="i-linux" viewBox="0 0 24 24"><path d="M8 10V7a4 4 0 0 1 8 0v3l3 6-2 4H7l-2-4 3-6Z"/><path d="m10 10 2 2 2-2M9 7h.01M15 7h.01M4 21h5m6 0h5"/></symbol>
+      <symbol id="i-apple" viewBox="0 0 24 24"><path d="M15 2c0 3-2 4-4 4 0-2 1-4 4-4ZM12 8c2 0 2-1 4-1 1 0 2 1 3 2-4 2-3 6 1 7-1 3-3 6-5 6-1 0-2-1-3-1s-2 1-3 1c-3 0-7-7-6-11 1-4 4-5 6-4l3 1Z"/></symbol>
+      <symbol id="i-windows" viewBox="0 0 24 24"><path d="m3 5 8-1v7H3V5Zm10-1 8-1v8h-8V4ZM3 13h8v7l-8-1v-6Zm10 0h8v8l-8-1v-7Z"/></symbol>
+      <symbol id="machine-mark" viewBox="0 0 100 100"><g fill="none" stroke="currentColor"><path d="M19 29V13h16M65 13h16v16M19 71v16h16M65 87h16V71" opacity=".5"/><path d="M27 74V25h46v49M39 74V39h22v35" stroke-width="5"/><path d="M27 82h46M11 36v28M89 36v28" opacity=".3"/></g></symbol>
+    </defs>
+  </svg>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <nav class="header-inner wrap" aria-label="Main navigation">
+      <a class="brand" href="#" aria-label="Gantry home"><svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M3 28V4h26v24M11 28V12h10v16" stroke="currentColor" stroke-width="4"/></svg><span>gantry<span class="brand-period">.</span></span></a>
+      <span class="brand-caption">Standalone<br>VMM and CLI</span>
+      <div class="nav-links" id="nav-links"><a href="#workspaces">Workspaces</a><a href="#architecture">Architecture</a><a href="docs/gantry/index.html">Docs ↗</a></div>
+      <div class="header-tools">
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="Switch to light theme" hidden data-enhance><svg class="icon icon-sm" aria-hidden="true"><use href="#i-sun"/></svg></button>
+        <a class="button" href="#install">Get Gantry <svg class="icon icon-sm" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        <button class="icon-button menu-button" id="menu-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="nav-links" hidden data-enhance><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-meta"><p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Open-source Linux microVMs</p><span class="eyebrow edition">Linux · macOS · Windows (experimental)</span></div>
+      <div class="hero-intro">
+        <h1 id="hero-title"><span>Run OCI images</span><span>in <span class="accent">local microVMs.</span></span></h1>
+        <div class="hero-deck"><p>Each sandbox has a private Linux kernel. Mount a project directory, run commands, and retain the sandbox’s private disk across stop and resume.</p><div class="hero-actions"><a class="button" href="#install">Get started <svg class="icon icon-sm" aria-hidden="true"><use href="#i-arrow"/></svg></a><a class="text-link" href="https://github.com/ejpir/gantry">View source <svg class="icon icon-sm" aria-hidden="true"><use href="#i-up-right"/></svg></a></div></div>
+      </div>
+
+      <div class="workbench" id="workspaces" aria-label="Interactive CLI examples">
+        <div class="bench-top"><p class="bench-label"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-terminal"/></svg> gantry / CLI examples</p><span class="bench-caption">Illustrative examples · not a live session</span></div>
+        <div class="bench-body">
+          <div class="scenario-tabs" id="scenario-tabs" role="tablist" aria-label="Workspace examples" aria-orientation="vertical" hidden data-enhance>
+            <p class="rail-label" role="presentation">CHOOSE AN EXAMPLE</p>
+            <button class="scenario-tab" id="tab-project" type="button" role="tab" aria-selected="true" aria-controls="scenario-project" tabindex="0"><span class="tab-number" aria-hidden="true">01</span><span><strong>Project</strong><small>Build, stop, resume</small></span></button>
+            <button class="scenario-tab" id="tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="scenario-mcp" tabindex="-1"><span class="tab-number" aria-hidden="true">02</span><span><strong>MCP gateway</strong><small>Scoped agent tools</small></span></button>
+            <button class="scenario-tab" id="tab-ssh" type="button" role="tab" aria-selected="false" aria-controls="scenario-ssh" tabindex="-1"><span class="tab-number" aria-hidden="true">03</span><span><strong>SSH / Dev Containers</strong><small>SSH + nested Podman</small></span></button>
+          </div>
+          <div class="scenario-panels">
+            <section class="scenario" id="scenario-project" role="region" aria-label="Persistent project example" tabindex="0">
+              <div class="terminal scenario-terminal">
+                <div class="terminal-top"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="file-label">project.sh</span><button class="copy-code" type="button" data-copy="code-project" aria-label="Copy project commands" hidden data-enhance><svg class="icon icon-sm" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+                <pre><code id="code-project"><span class="comment"># Run from your project directory</span>
+<span class="cmd">gantry start</span> dev -image debian:bookworm-slim \
+  -share "workspace=$PWD,mount=/workspace"
+
+<span class="cmd">gantry exec</span> dev -- /bin/bash
+<span class="comment"># In the guest: cd /workspace, work, then exit</span>
+
+<span class="cmd">gantry stop</span> dev
+<span class="cmd">gantry resume</span> dev</code></pre>
+                <a class="scenario-docs" href="docs/gantry/index.html#get-started">Walk through your first workspace <span aria-hidden="true">↗</span></a>
+              </div>
+              <aside class="manifest" aria-label="Project example configuration">
+                <p class="manifest-heading"><span>MICROVM / 01</span><strong>dev</strong></p>
+                <div class="machine-art" aria-hidden="true"><svg><use href="#machine-mark"/></svg></div>
+                <div><p class="manifest-image">debian:bookworm-slim</p><p class="kernel-caption"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg> Private Linux kernel</p></div>
+                <dl><div><dt>Mount</dt><dd>/workspace</dd></div><div><dt>Share</dt><dd>read / write</dd></div><div><dt>Private disk</dt><dd>persistent</dd></div></dl>
+              </aside>
+            </section>
+            <section class="scenario" id="scenario-mcp" role="region" aria-label="MCP gateway example" tabindex="0">
+              <div class="terminal scenario-terminal">
+                <div class="terminal-top"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="file-label">agent-tools.sh</span><button class="copy-code" type="button" data-copy="code-mcp" aria-label="Copy MCP gateway commands" hidden data-enhance><svg class="icon icon-sm" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+                <pre><code id="code-mcp"><span class="comment"># Read-only project access for agent tools</span>
+<span class="cmd">gantry start</span> tools -image alpine:latest \
+  -share "code=$PWD,mount=/workspace,ro,uid=1000,gid=1000" \
+  -mcp -mcp-fs-root /workspace \
+  -mcp-fs-user 1000:1000
+
+<span class="comment"># Inspect enabled tools and recorded calls</span>
+<span class="cmd">gantry mcp tools</span> tools
+<span class="cmd">gantry audit</span> tools</code></pre>
+                <a class="scenario-docs" href="docs/gantry/index.html#mcp-gateway">Connect your agent to the gateway <span aria-hidden="true">↗</span></a>
+              </div>
+              <aside class="manifest" aria-label="MCP example configuration">
+                <p class="manifest-heading"><span>MICROVM / 02</span><strong>tools</strong></p>
+                <div class="machine-art" aria-hidden="true"><svg><use href="#machine-mark"/></svg></div>
+                <div><p class="manifest-image">alpine:latest</p><p class="kernel-caption"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg> Private Linux kernel</p></div>
+                <dl><div><dt>Scope</dt><dd>/workspace</dd></div><div><dt>Share</dt><dd>read-only</dd></div><div><dt>Tool user</dt><dd>1000:1000</dd></div></dl>
+              </aside>
+            </section>
+            <section class="scenario" id="scenario-ssh" role="region" aria-label="SSH and Dev Containers example" tabindex="0">
+              <div class="terminal scenario-terminal">
+                <div class="terminal-top"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="file-label">devcontainer.sh</span><button class="copy-code" type="button" data-copy="code-ssh" aria-label="Copy SSH and Dev Containers commands" hidden data-enhance><svg class="icon icon-sm" aria-hidden="true"><use href="#i-copy"/></svg></button></div>
+                <pre><code id="code-ssh"><span class="cmd">gantry start</span> ide -ssh -devcontainers \
+  -share "code=$PWD,mount=/workspace,uid=1000,gid=1000"
+<span class="cmd">gantry ssh doctor</span> ide
+<span class="cmd">gantry ssh setup</span>
+<span class="cmd">gantry ssh</span> ide
+
+<span class="comment"># Exit SSH; requires VS Code + Remote SSH</span>
+<span class="cmd">code</span> --remote ssh-remote+ide.gantry /workspace
+<span class="comment"># Dev Containers: Reopen in Container</span></code></pre>
+                <a class="scenario-docs" href="docs/gantry/index.html#ssh-access">Editor setup and nested Podman <span aria-hidden="true">↗</span></a>
+              </div>
+              <aside class="manifest" aria-label="SSH example configuration">
+                <p class="manifest-heading"><span>MICROVM / 03</span><strong>ide</strong></p>
+                <div class="machine-art" aria-hidden="true"><svg><use href="#machine-mark"/></svg></div>
+                <div><p class="manifest-image">Workload + curated IDE</p><p class="kernel-caption"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg> One private Linux kernel</p></div>
+                <dl><div><dt>Mount</dt><dd>/workspace</dd></div><div><dt>Connect</dt><dd>ide.gantry</dd></div><div><dt>Nested runtime</dt><dd>Podman</dd></div></dl>
+              </aside>
+            </section>
+          </div>
+        </div>
+        <div class="bench-bottom"><span>Linux / macOS shell · Gantry must be on PATH</span><span>Shared edits change host files. <a href="docs/gantry/index.html#usage">Private disks survive stop / resume ↗</a></span></div>
+      </div>
+      <div class="principles" aria-label="Project principles">
+        <p class="principle"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg> One standalone binary</p>
+        <p class="principle"><svg class="icon" aria-hidden="true"><use href="#i-chip"/></svg> No Docker required</p>
+        <p class="principle"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg> No telemetry</p>
+        <p class="principle"><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg> Apache-2.0</p>
+      </div>
+    </section>
+
+    <section class="section wrap" aria-labelledby="controls-title">
+      <div class="section-heading"><div><p class="eyebrow">01 / Features</p><h2 id="controls-title">Sharing and access controls</h2></div><p>Configure host-directory mounts, egress rules, and the interfaces used by editors and agents.</p></div>
+      <div class="controls-grid">
+        <article class="control-card">
+          <div class="control-top"><span>01.A / FILESYSTEM</span><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg></div>
+          <h3>Directory-level sharing</h3><p>Export individual host directories with read-only or read/write access. Writable shares update the original host files.</p>
+          <div class="control-demo"><div class="directory-row"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><code>./project</code><span>→ /workspace</span></div><div class="directory-row"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg><code>~/.ssh</code><span>not shared</span></div><p class="demo-caption">Example: only the project directory is mounted.</p></div>
+          <a class="text-link control-link" href="docs/gantry/index.html#shares-secrets">Shares &amp; secrets <svg class="icon icon-sm" aria-hidden="true"><use href="#i-up-right"/></svg></a>
+        </article>
+        <article class="control-card">
+          <div class="control-top"><span>01.B / NETWORK</span><svg class="icon" aria-hidden="true"><use href="#i-network"/></svg></div>
+          <h3>Policy-controlled egress</h3><p>Allow the destinations your workload needs. Route through proxies, publish ports, and inspect traffic in the terminal dashboard.</p>
+          <div class="control-demo"><div class="policy-flow" role="img" aria-label="Sandbox traffic passes through the policy shield. Matching connections are allowed and others are blocked in this default-deny example."><span class="flow-source" aria-hidden="true">sandbox</span><span class="flow-in" aria-hidden="true"></span><span class="policy-gate" aria-hidden="true"><svg class="icon"><use href="#i-shield"/></svg><span>policy</span></span><svg class="flow-branches" viewBox="0 0 60 64" preserveAspectRatio="none" aria-hidden="true"><path d="M0 32H12M12 16V48"/><path class="allow" d="M12 16H56M51 12l5 4-5 4"/><path class="deny" d="M12 48H56M56 44v8"/></svg><span class="flow-results" aria-hidden="true"><span class="allow">✓ Allow</span><span class="deny">× Block</span></span></div><p class="demo-caption">Example: a configured default-deny policy.</p></div>
+          <a class="text-link control-link" href="docs/gantry/index.html#networking">Network policy guide <svg class="icon icon-sm" aria-hidden="true"><use href="#i-up-right"/></svg></a>
+        </article>
+        <article class="control-card">
+          <div class="control-top"><span>01.C / INTERFACES</span><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg></div>
+          <h3>Editor and API integration</h3><p>Connect editors over SSH, provide scoped MCP tools to agents, or automate sandbox lifecycles with the local HTTP/JSON API.</p>
+          <div class="control-demo"><div class="interface-grid"><a href="docs/gantry/index.html#ssh-access">SSH <span aria-hidden="true">↗</span></a><a href="docs/gantry/index.html#ssh-access">Dev Containers <span aria-hidden="true">↗</span></a><a href="docs/gantry/index.html#mcp-gateway">MCP <span aria-hidden="true">↗</span></a><a href="docs/gantry/index.html#manager-api">HTTP API <span aria-hidden="true">↗</span></a></div><p class="demo-caption">The manager API runs locally.</p></div>
+          <a class="text-link control-link" href="docs/gantry/index.html#coding-agents">Coding agent setup <svg class="icon icon-sm" aria-hidden="true"><use href="#i-up-right"/></svg></a>
+        </article>
+      </div>
+    </section>
+
+    <section class="section architecture" id="architecture" aria-labelledby="architecture-title">
+      <div class="wrap architecture-layout">
+        <figure class="host-figure">
+          <figcaption class="figure-caption"><span>THE STACK / TWO SANDBOXES</span><span>SIMPLIFIED VIEW</span></figcaption>
+          <div class="host-frame">
+            <p class="host-heading"><span><svg class="icon icon-sm" aria-hidden="true"><use href="#i-chip"/></svg> YOUR MACHINE</span><span class="eyebrow">Local host</span></p>
+            <div class="vm-pair">
+              <div class="vm"><p class="vm-label"><span>MICROVM / dev</span><span aria-hidden="true">↘</span></p><div class="workload-block"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg> OCI image</div><p class="private-kernel">Private kernel</p></div>
+              <div class="vm"><p class="vm-label"><span>MICROVM / tools</span><span aria-hidden="true">↙</span></p><div class="workload-block"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg> OCI image</div><p class="private-kernel">Private kernel</p></div>
+            </div>
+            <div class="pair-connectors" aria-hidden="true"></div>
+            <div class="host-workers">Gantry supervisor + workers<small>VMM · networking · shared filesystem</small></div>
+            <div class="host-backend"><span>KVM</span><span>Hypervisor.framework</span><span>WHPX</span></div>
+          </div>
+          <div class="security-note"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-info"/></svg><p><strong>Experimental software.</strong> Gantry is not yet a hardened boundary for hostile public multi-tenancy. <a href="docs/gantry/index.html#security">Read the security model and platform limits.</a></p></div>
+        </figure>
+        <div class="architecture-copy">
+          <p class="eyebrow">02 / Architecture</p><h2 id="architecture-title">Runtime architecture</h2><p>A standalone Go VMM and CLI, connected directly to your host’s virtualization backend. No Docker, containerd, QEMU, or libkrun required.</p>
+          <details open><summary><span class="detail-number">01</span> A kernel for every sandbox</summary><p>Your OCI workload runs under a private Linux guest kernel, with crun by default and optional gVisor inside the VM.</p></details>
+          <details><summary><span class="detail-number">02</span> Separate guest-facing workers</summary><p>The host supervisor coordinates VMM, network, and shared-filesystem workers. Guest-facing work is confined where the platform supports it; the details differ by host.</p></details>
+          <details><summary><span class="detail-number">03</span> Native host virtualization</summary><p>Linux uses KVM on x86-64 and arm64. Apple silicon Macs use Hypervisor.framework on macOS 13+. Windows x86-64 uses WHPX and remains experimental.</p></details>
+          <a class="text-link" href="docs/gantry/index.html#architecture">Architecture documentation <svg class="icon icon-sm" aria-hidden="true"><use href="#i-up-right"/></svg></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="install-section" id="install" aria-labelledby="install-title">
+      <div class="wrap install-layout">
+        <div class="install-copy"><p class="eyebrow">03 / Get started</p><h2 id="install-title">Install Gantry</h2><p>Download Gantry for your host, then run an OCI image. First use fetches verified guest assets and the image; cached assets are reused on later starts.</p><p>Hardware virtualization is required. Inside another VM, you’ll need nested virtualization.</p><a class="text-link" href="https://github.com/ejpir/gantry/releases/latest">Browse the latest release <svg class="icon icon-sm" aria-hidden="true"><use href="#i-up-right"/></svg></a><div class="install-facts"><span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg> Linux</span><span><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg> Apple silicon</span><span>Windows · experimental</span></div></div>
+        <div class="terminal install-terminal">
+          <div class="install-tabs" id="install-tabs" role="tablist" aria-label="Installation platform" hidden data-enhance>
+            <button class="install-tab" type="button" role="tab" id="install-linux" aria-controls="install-panel" aria-selected="true" tabindex="0" data-os="linux"><svg class="icon" aria-hidden="true"><use href="#i-linux"/></svg> Linux</button>
+            <button class="install-tab" type="button" role="tab" id="install-macos" aria-controls="install-panel" aria-selected="false" tabindex="-1" data-os="macos"><svg class="icon" aria-hidden="true"><use href="#i-apple"/></svg> macOS</button>
+            <button class="install-tab" type="button" role="tab" id="install-windows" aria-controls="install-panel" aria-selected="false" tabindex="-1" data-os="windows"><svg class="icon" aria-hidden="true"><use href="#i-windows"/></svg> Windows</button>
+          </div>
+          <div class="install-panel" id="install-panel" role="region" aria-label="Linux x86-64 installation" tabindex="0">
+            <div class="install-toolbar"><span id="install-shell">01 / DOWNLOAD · LINUX</span><label class="arch-control" id="arch-control" hidden data-enhance>CPU <select id="linux-arch"><option value="amd64">x86-64</option><option value="arm64">ARM64</option></select></label></div>
+            <pre class="install-code"><code id="install-code">curl -fL https://github.com/ejpir/gantry/releases/latest/download/gantry-linux-amd64 -o gantry
+chmod +x gantry</code></pre>
+            <div class="install-launch"><p>02 / START A DISPOSABLE SANDBOX</p><pre><code id="launch-code">./gantry exec -image alpine:latest -- /bin/sh</code></pre></div>
+            <p class="install-note" id="install-note">Linux x86-64 · Your user needs read/write access to /dev/kvm. Choose ARM64 for an Arm host.</p>
+            <div class="install-footer"><button class="copy-button" id="copy-install" type="button" hidden data-enhance><svg class="icon icon-sm" aria-hidden="true"><use href="#i-copy"/></svg> Copy commands</button><a href="docs/gantry/index.html#install">Full installation guide ↗</a></div>
+            <noscript><p class="install-note">These commands target Linux x86-64. See the installation guide for Linux ARM64, macOS, and Windows.</p></noscript>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer wrap">
+    <div class="footer-top"><div class="footer-identity"><a class="brand" href="#" aria-label="Gantry home"><svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M3 28V4h26v24M11 28V12h10v16" stroke="currentColor" stroke-width="4"/></svg><span>gantry<span class="brand-period">.</span></span></a><p>Standalone microVM runtime.</p></div><nav class="footer-links" aria-label="Footer navigation"><a href="https://github.com/ejpir/gantry">GitHub ↗</a><a href="docs/gantry/index.html">Documentation ↗</a><a href="https://github.com/ejpir/gantry/releases">Releases ↗</a></nav></div>
+    <div class="footer-bottom"><span><a href="https://github.com/ejpir/gantry/blob/main/LICENSE">Apache-2.0 licensed.</a></span><span>This page uses no analytics.</span></div>
+  </footer>
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script>
+    (() => {
+      'use strict';
+      const byId = id => document.getElementById(id);
+      const themeButton = byId('theme-toggle');
+      function updateTheme(theme) {
+        const light = theme === 'light';
+        document.documentElement.dataset.theme = light ? 'light' : 'dark';
+        themeButton.setAttribute('aria-label', `Switch to ${light ? 'dark' : 'light'} theme`);
+        themeButton.querySelector('use').setAttribute('href', light ? '#i-moon' : '#i-sun');
+        document.querySelector('meta[name="theme-color"]').content = light ? '#f7f8f3' : '#101210';
+      }
+      themeButton.addEventListener('click', () => {
+        const theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+        updateTheme(theme);
+        try { localStorage.setItem('gantry-docs-theme', theme); } catch (_) {}
+      });
+      window.addEventListener('storage', event => {
+        if (event.key === 'gantry-docs-theme' || event.key === null) updateTheme(event.newValue);
+      });
+      updateTheme(document.documentElement.dataset.theme);
+
+      const menuButton = byId('menu-toggle');
+      const menu = byId('nav-links');
+      function closeMenu(focus = false) {
+        menu.classList.remove('open');
+        menuButton.setAttribute('aria-expanded', 'false');
+        menuButton.setAttribute('aria-label', 'Open navigation');
+        if (focus) menuButton.focus();
+      }
+      menuButton.addEventListener('click', () => {
+        const open = menu.classList.toggle('open');
+        menuButton.setAttribute('aria-expanded', String(open));
+        menuButton.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+      });
+      menu.querySelectorAll('a').forEach(link => link.addEventListener('click', () => closeMenu()));
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && menu.classList.contains('open')) closeMenu(true);
+      });
+      document.addEventListener('click', event => {
+        if (!event.target.closest('.header-inner')) closeMenu();
+      });
+      window.matchMedia('(min-width: 641px)').addEventListener('change', () => closeMenu());
+
+      // One keyboard model for both tab sets; panels are ordinary regions without JS.
+      function wireTabs(tablist, onSelect) {
+        const tabs = Array.from(tablist.querySelectorAll('[role="tab"]'));
+        function select(tab, focus = false) {
+          tabs.forEach(item => {
+            item.setAttribute('aria-selected', String(item === tab));
+            item.tabIndex = item === tab ? 0 : -1;
+          });
+          onSelect(tab);
+          if (focus) tab.focus();
+        }
+        tabs.forEach((tab, index) => {
+          tab.addEventListener('click', () => select(tab));
+          tab.addEventListener('keydown', event => {
+            const vertical = tablist.getAttribute('aria-orientation') === 'vertical';
+            let next;
+            if (event.key === (vertical ? 'ArrowDown' : 'ArrowRight')) next = (index + 1) % tabs.length;
+            if (event.key === (vertical ? 'ArrowUp' : 'ArrowLeft')) next = (index - 1 + tabs.length) % tabs.length;
+            if (event.key === 'Home') next = 0;
+            if (event.key === 'End') next = tabs.length - 1;
+            if (next === undefined) return;
+            event.preventDefault();
+            select(tabs[next], true);
+          });
+        });
+        return select;
+      }
+      const scenarioTabs = byId('scenario-tabs');
+      scenarioTabs.querySelectorAll('[role="tab"]').forEach(tab => {
+        const panel = byId(tab.getAttribute('aria-controls'));
+        panel.setAttribute('role', 'tabpanel');
+        panel.setAttribute('aria-labelledby', tab.id);
+        panel.removeAttribute('aria-label');
+      });
+      const selectScenario = wireTabs(scenarioTabs, tab => {
+        document.querySelectorAll('.scenario').forEach(panel => {
+          panel.hidden = panel.id !== tab.getAttribute('aria-controls');
+        });
+      });
+      const railQuery = window.matchMedia('(min-width: 901px)');
+      function orientRail() { scenarioTabs.setAttribute('aria-orientation', railQuery.matches ? 'vertical' : 'horizontal'); }
+      railQuery.addEventListener('change', orientRail);
+      orientRail();
+      selectScenario(byId('tab-project'));
+
+      const releaseBase = 'https://github.com/ejpir/gantry/releases/latest/download/';
+      const installCode = byId('install-code');
+      const launchCode = byId('launch-code');
+      const linuxArch = byId('linux-arch');
+      let activeOS = 'linux';
+      function renderInstall() {
+        let command, launch, note, shell;
+        if (activeOS === 'macos') {
+          command = `curl -fL ${releaseBase}gantry-darwin-arm64 -o gantry\nchmod +x gantry\nxattr -d com.apple.quarantine gantry`;
+          launch = './gantry exec -image alpine:latest -- /bin/sh';
+          shell = '01 / DOWNLOAD · MACOS';
+          note = 'Apple silicon · macOS 13+. Intel Macs are not supported. The quarantine attribute may already be absent after a command-line download.';
+        } else if (activeOS === 'windows') {
+          command = `Invoke-WebRequest \`\n  ${releaseBase}gantry-windows-amd64.exe \`\n  -OutFile gantry.exe`;
+          launch = '.\\gantry.exe exec -image alpine:latest -- /bin/sh';
+          shell = '01 / DOWNLOAD · POWERSHELL';
+          note = 'Experimental · Windows x86-64. Enable Windows Hypervisor Platform (WHPX). Hardware virtualization must be available to the host.';
+        } else {
+          command = `curl -fL ${releaseBase}gantry-linux-${linuxArch.value} -o gantry\nchmod +x gantry`;
+          launch = './gantry exec -image alpine:latest -- /bin/sh';
+          shell = '01 / DOWNLOAD · LINUX';
+          note = `Linux ${linuxArch.value === 'arm64' ? 'ARM64' : 'x86-64'} · Your user needs read/write access to /dev/kvm. Nested VMs must expose hardware virtualization.`;
+        }
+        installCode.textContent = command;
+        launchCode.textContent = launch;
+        byId('install-shell').textContent = shell;
+        byId('install-note').textContent = note;
+        byId('arch-control').hidden = activeOS !== 'linux';
+        byId('install-panel').setAttribute('aria-labelledby', `install-${activeOS}`);
+      }
+      byId('install-panel').setAttribute('role', 'tabpanel');
+      byId('install-panel').removeAttribute('aria-label');
+      const selectOS = wireTabs(byId('install-tabs'), tab => {
+        activeOS = tab.dataset.os;
+        renderInstall();
+      });
+      linuxArch.addEventListener('change', renderInstall);
+      const ua = navigator.userAgent;
+      const detectedOS = /Windows/i.test(ua) ? 'windows' : /Macintosh|Mac OS X/i.test(ua) && !/iPhone|iPad/i.test(ua) ? 'macos' : 'linux';
+
+      let toastTimer;
+      function notify(message) {
+        clearTimeout(toastTimer);
+        const toast = byId('toast');
+        toast.textContent = message;
+        toast.classList.add('visible');
+        toastTimer = setTimeout(() => toast.classList.remove('visible'), 4000);
+      }
+      async function copyText(text, button) {
+        button.disabled = true;
+        let copied = false;
+        try {
+          if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+          }
+        } catch (_) { /* Fall back for local files or denied clipboard access. */ }
+        if (!copied) {
+          const field = document.createElement('textarea');
+          field.value = text;
+          field.setAttribute('aria-label', 'Commands to copy');
+          field.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0;';
+          document.body.appendChild(field);
+          field.select();
+          try { copied = document.execCommand('copy'); } catch (_) {}
+          field.remove();
+          button.disabled = false;
+          button.focus({ preventScroll: true });
+        }
+        button.disabled = false;
+        notify(copied ? 'Commands copied.' : 'Copy unavailable. Select and copy the command text instead.');
+      }
+      document.querySelectorAll('[data-copy]').forEach(button => {
+        button.addEventListener('click', () => copyText(byId(button.dataset.copy).textContent, button));
+      });
+      byId('copy-install').addEventListener('click', event => {
+        copyText(`${installCode.textContent}\n\n${launchCode.textContent}`, event.currentTarget);
+      });
+
+      document.documentElement.classList.add('js');
+      document.querySelectorAll('[data-enhance]').forEach(element => { element.hidden = false; });
+      selectOS(byId(`install-${detectedOS}`));
+    })();
+  </script>
+</body>
+</html>

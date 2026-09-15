@@ -107,6 +107,19 @@ docker export "$CID" >"$ROOTFS_TAR"
 docker rm "$CID" >/dev/null
 CID=""
 
+# Docker/Podman inject /etc/hosts and /etc/resolv.conf as runtime mounts and
+# may omit them from `export`. They must still exist as bind targets because
+# crun cannot create a file inside an explicitly read-only EROFS root.
+RUNTIME_TARGETS="$WORK/runtime-targets"
+mkdir -p "$RUNTIME_TARGETS/etc"
+: >"$RUNTIME_TARGETS/etc/hosts"
+: >"$RUNTIME_TARGETS/etc/resolv.conf"
+for target in etc/hosts etc/resolv.conf; do
+  if ! tar -tf "$ROOTFS_TAR" | grep -Eq "^(\\./)?$target$"; then
+    tar -rf "$ROOTFS_TAR" -C "$RUNTIME_TARGETS" "$target"
+  fi
+done
+
 # EROFS volume_name is a 16-byte field including its terminating NUL. Build
 # the filesystem in local scratch space: OUT is commonly on Gantry's macOS
 # shared filesystem, where mkfs's metadata/random writes are extremely slow.

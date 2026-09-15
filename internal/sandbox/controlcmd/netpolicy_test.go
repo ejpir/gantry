@@ -19,7 +19,7 @@ func TestPrintNetworkPolicyShow(t *testing.T) {
 	}
 	entry := control.MakeNetworkPolicyEntry("/Users/test/.gantry/policy.json", false, policy, "active")
 	var output bytes.Buffer
-	printNetworkPolicyShow(&output, "codex-dev", entry)
+	PrintNetworkPolicyShow(&output, "codex-dev", entry)
 	got := output.String()
 	for _, want := range []string{
 		"SANDBOX", "STATE", "LOCAL NET", "POLICY",
@@ -45,12 +45,12 @@ func TestPrintNetworkPolicyShowUsesAllowLocal(t *testing.T) {
 	// AllowLocal field — the older-daemon compat path leaves Description
 	// empty, and description text is not state.
 	var out strings.Builder
-	printNetworkPolicyShow(&out, "sb", control.NetworkPolicyEntry{State: "active", AllowLocal: true, Description: ""})
+	PrintNetworkPolicyShow(&out, "sb", control.NetworkPolicyEntry{State: "active", AllowLocal: true, Description: ""})
 	if !strings.Contains(out.String(), "allow") {
 		t.Fatalf("AllowLocal=true must print allow, got:\n%s", out.String())
 	}
 	out.Reset()
-	printNetworkPolicyShow(&out, "sb", control.NetworkPolicyEntry{State: "active", AllowLocal: false, Description: "policy: default allow, local net allowed, domains: x"})
+	PrintNetworkPolicyShow(&out, "sb", control.NetworkPolicyEntry{State: "active", AllowLocal: false, Description: "policy: default allow, local net allowed, domains: x"})
 	if !strings.Contains(out.String(), "deny") || strings.Contains(out.String(), "allow") {
 		t.Fatalf("AllowLocal=false must print deny even when description says otherwise, got:\n%s", out.String())
 	}

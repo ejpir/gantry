@@ -221,15 +221,19 @@ jobs:
         run: '"$(go env GOPATH)/bin/golangci-lint" run ./...'
 
 
+  # Keep non-virtualized coverage symmetric: each supported host runs static
+  # checks, native tests, protocol E2Es, terminal onboarding, manager API,
+  # vendored portable tests, and both race-detector suites. Only VM boot is
+  # isolated to native-smoke/linux because hosted Windows/macOS lack WHPX/HVF.
   test:
     name: test/${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: linux, os: ubuntu-latest, quality: true, race: true }
-          - { name: windows-amd64, os: windows-latest, quality: false, race: false }
-          - { name: macos, os: macos-latest, quality: false, race: false }
+          - { name: linux, os: ubuntu-latest }
+          - { name: windows-amd64, os: windows-latest }
+          - { name: macos, os: macos-latest }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -237,36 +241,71 @@ jobs:
         with:
           go-version: "1.26.6"
       - name: genproto check
-        if: matrix.quality
-        run: scripts/genproto.sh --check
-
-      - name: gofmt
-        if: matrix.quality
         shell: bash
         run: |
-          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v third_party))
+          if [ "$RUNNER_OS" = Windows ]; then
+            TMPDIR=$(cygpath -u "$RUNNER_TEMP")
+            export TMPDIR
+          fi
+          scripts/genproto.sh --check
+
+      - name: gofmt
+        shell: bash
+        run: |
+          # Repository Go paths contain no whitespace; preserve Bash 3.2
+          # compatibility on macOS instead of relying on mapfile.
+          # shellcheck disable=SC2046
+          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v '^third_party/'))
           if [ -n "$unformatted" ]; then
             echo "run gofmt -w:"
             echo "$unformatted"
             exit 1
           fi
       - name: go vet
-        if: matrix.quality
         run: go vet ./...
       - name: go test
         run: go test -count=1 ./...
+      - name: OAuth and field-runner orchestration tests
+        shell: bash
+        run: python3 -m unittest -v scripts.test_oauth_custody_e2e scripts.test_aws_e2e_validation
+      - name: standalone OIDC E2E (local HTTPS IdP, no VM)
+        shell: bash
+        run: |
+          go build -o "$RUNNER_TEMP/gantry-oidc.exe" ./cmd/gantry
+          go run ./tests/e2e/oidc -gantry "$RUNNER_TEMP/gantry-oidc.exe"
+      - name: remote onboarding TUI E2E (native terminal and HTTPS fixtures, no VM)
+        shell: bash
+        run: |
+          go build -o "$RUNNER_TEMP/gantry-remotetui.exe" ./tests/e2e/remotetui
+          "$RUNNER_TEMP/gantry-remotetui.exe" -gantry "$RUNNER_TEMP/gantry-oidc.exe"
+      - name: M2 manager API and remote CLI E2E (no VM)
+        shell: bash
+        run: scripts/test-manager-api-e2e.sh -api-only -gantry "$RUNNER_TEMP/gantry-oidc.exe"
       - name: vendored go-fuse security tests
-        if: matrix.name != 'windows-amd64'
+        shell: bash
         working-directory: third_party/go-fuse
-        run: go test -count=1 ./fs ./fuse ./internal/vhostuser
+        run: |
+          packages=(./fs ./fuse)
+          if [ "$RUNNER_OS" != Windows ]; then
+            # vhost-user is a Unix SCM_RIGHTS/mmap transport and is not part of
+            # the Windows backend. The portable go-fuse packages still run.
+            packages+=(./internal/vhostuser)
+          fi
+          go test -count=1 "${packages[@]}"
       - name: vendored go-fuse race tests
-        if: matrix.race
+        shell: bash
         working-directory: third_party/go-fuse
-        run: go test -race -count=1 ./internal/vhostuser
+        run: |
+          packages=(./fs ./fuse)
+          if [ "$RUNNER_OS" != Windows ]; then
+            packages+=(./internal/vhostuser)
+          fi
+          go test -race -count=1 "${packages[@]}"
       - name: go test -race
-        if: matrix.race
         run: go test -race -count=1 ./...
 
+  # Keep the established Linux check name for branch protection; the sibling
+  # matrix runs the same non-virtualized fuzz targets on the other host OSes.
   fuzz-virtqueue:
     name: fuzz/virtqueue
     runs-on: ubuntu-latest
@@ -277,6 +316,7 @@ jobs:
         with:
           go-version: "1.26.6"
       - name: fuzz virtqueue parser and MMIO transport
+        shell: bash
         env:
           GOMEMLIMIT: 512MiB
         run: |
@@ -297,11 +337,50 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  fuzz-virtqueue-platforms:
+    name: fuzz/virtqueue/${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-amd64, os: windows-latest }
+          - { name: macos, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+      - name: fuzz virtqueue parser and MMIO transport
+        shell: bash
+        env:
+          GOMEMLIMIT: 512MiB
+        run: |
+          for target in FuzzVirtqueueChain FuzzVirtqueueMMIO; do
+            go test ./internal/virtio \
+              -run='^$' \
+              -fuzz="^${target}$" \
+              -fuzztime=30s \
+              -parallel=2 \
+              -timeout=2m
+          done
+      - name: upload minimized failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtqueue-fuzz-${{ matrix.name }}-failure
+          path: internal/virtio/testdata/fuzz/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # GitHub's Linux runner exposes KVM, so this job goes beyond boot smoke: it
+  # runs the full manager/SSH/policy-feed and public-client OAuth/MCP batteries
+  # against the exact host, kernel, rootfs, image, and guest-helper artifacts.
   native-smoke:
-    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     name: native-smoke/${{ matrix.name }}
-    needs: [build, guest-assets, kernels]
-    timeout-minutes: 15
+    needs: [build, guest-assets, kernels, guest-tools]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -310,6 +389,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
       - uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -322,8 +404,14 @@ jobs:
         with:
           name: gantry-kernel-x86_64
           path: ${{ runner.temp }}/kernels
-      - name: make binary executable
-        run: chmod +x "${{ runner.temp }}/gantry-artifact/${{ matrix.binary }}"
+      - uses: actions/download-artifact@v4
+        with:
+          name: gantry-guest-tools
+          path: ${{ runner.temp }}/guest-tools
+      - name: make binaries executable
+        run: |
+          chmod +x "${{ runner.temp }}/gantry-artifact/${{ matrix.binary }}"
+          chmod +x "${{ runner.temp }}/guest-tools/gantry-guest-x86_64"
       - name: Enable KVM group perms
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -374,12 +462,25 @@ jobs:
             exit "$exec_rc"
           fi
           printf '%s\n' "$output" | tr -d '\r' | grep -Fqx 'hello world'
+      - name: manager, policy-feed, and public-client OAuth real-VM E2E
+        shell: bash
+        env:
+          GANTRY_ARTIFACTS: ${{ runner.temp }}/guest-tools
+          GANTRY_TEST_EXE: ${{ runner.temp }}/gantry-artifact/${{ matrix.binary }}
+          GANTRY_TEST_KERNEL: ${{ runner.temp }}/kernels/gantry-kernel-x86_64
+          GANTRY_TEST_ROOTFS: ${{ runner.temp }}/guest-assets/nerdbox-rootfs.erofs
+          GANTRY_TEST_WORKLOAD_IMAGE: ${{ runner.temp }}/guest-assets/alpine.erofs
+          GANTRY_E2E_WORK_DIR: ${{ runner.temp }}/native-e2e
+        run: scripts/aws-e2e-validation.sh linux
       - name: upload VM logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: native-smoke-${{ matrix.name }}-logs
-          path: ${{ runner.temp }}/gantry-home/
+          name: native-e2e-${{ matrix.name }}-logs
+          path: |
+            ${{ runner.temp }}/gantry-home/
+            ${{ runner.temp }}/native-e2e/
+            /tmp/g-oauth-*/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -441,6 +542,72 @@ jobs:
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
 
+  # Release-tag Windows executables are Authenticode-signed on a fresh Windows
+  # runner after the cross-platform build. Azure Artifact Signing keeps the
+  # private key in managed hardware and GitHub OIDC avoids a stored client
+  # secret. Configure AZURE_CLIENT_ID, AZURE_TENANT_ID, and
+  # AZURE_SUBSCRIPTION_ID as repository secrets, plus these repository vars:
+  # AZURE_ARTIFACT_SIGNING_ENDPOINT, AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME, and
+  # AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME.
+  windows-sign:
+    name: sign/windows-amd64
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gantry-windows-amd64
+          path: ${{ runner.temp }}\windows-release
+      - name: authenticate to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Authenticode-sign and timestamp Windows executables
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files-folder: ${{ runner.temp }}\windows-release
+          files-folder-filter: exe
+          files-folder-recurse: false
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Gantry
+          description-url: https://github.com/ejpir/gantry
+      - name: verify Authenticode signatures and timestamps
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\windows-release" -Filter *.exe)
+          if ($files.Count -eq 0) {
+            throw "no Windows executables found after signing"
+          }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "$($file.Name) has invalid Authenticode status: $($signature.Status) $($signature.StatusMessage)"
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "$($file.Name) has no RFC 3161 timestamp"
+            }
+            Write-Host "$($file.Name): signed by $($signature.SignerCertificate.Subject)"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          # Keep this outside the release job's broad gantry-* download; the
+          # release explicitly overlays these signed files exactly once.
+          name: windows-authenticode-amd64
+          path: ${{ runner.temp }}\windows-release\*
+          if-no-files-found: error
+          retention-days: 1
+
   # The multicall guest helper binary (cmd/gantry-guest), built for both
   # guest architectures. Downloaded on first start by sandboxes that
   # configure host-bound secrets (docs/credential-brokering.md).
@@ -468,11 +635,13 @@ jobs:
           if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]; then
             version="$REF_NAME"
           fi
-          for pair in "amd64 x86_64" "arm64 arm64"; do
-            set -- $pair
-            GOOS=linux GOARCH=$1 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version}" \
-              -o "$RUNNER_TEMP/guest-tools/gantry-guest-$2" ./cmd/gantry-guest
-          done
+          while read -r goarch suffix; do
+            GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+              -o "$RUNNER_TEMP/guest-tools/gantry-guest-$suffix" ./cmd/gantry-guest
+          done <<'EOF'
+          amd64 x86_64
+          arm64 arm64
+          EOF
           ls -lh "$RUNNER_TEMP/guest-tools"
       - uses: actions/upload-artifact@v4
         with:
@@ -483,7 +652,7 @@ jobs:
   release:
     name: release/${{ github.ref_name }}
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [build, kernels, guest-assets, guest-tools]
+    needs: [build, windows-sign, kernels, guest-assets, guest-tools, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -499,6 +668,13 @@ jobs:
         with:
           pattern: guest-assets-*
           path: ${{ runner.temp }}/guest
+      - name: download signed Windows executables
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-authenticode-amd64
+          path: ${{ runner.temp }}/signed-windows
+      - name: replace unsigned Windows build outputs
+        run: cp "${{ runner.temp }}"/signed-windows/*.exe "${{ runner.temp }}/release/"
       - name: stage guest rootfs assets
         run: |
           cp "${{ runner.temp }}/guest/guest-assets-arm64/nerdbox-rootfs.erofs" \
@@ -517,7 +693,9 @@ jobs:
             "${{ runner.temp }}/release/gantry-ide-image-arm64.erofs"
           cp "${{ runner.temp }}/guest/guest-assets-amd64/ide.erofs" \
             "${{ runner.temp }}/release/gantry-ide-image-x86_64.erofs"
-      - name: checksum sidecars
+      # Signing changes PE bytes. Generate every checksum only after the signed
+      # Windows executables have replaced the unsigned build outputs.
+      - name: checksum final release artifacts
         run: |
           cd "${{ runner.temp }}/release"
           for f in *; do [ -f "$f" ] && sha256sum "$f" > "$f.sha256"; done
