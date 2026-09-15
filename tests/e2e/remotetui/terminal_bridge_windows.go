@@ -94,6 +94,10 @@ func runTerminalBridge(gantry string) (int, error) {
 	}
 	startup := windows.StartupInfoEx{}
 	startup.Cb = uint32(unsafe.Sizeof(startup))
+	// ConPTY substitutes its console handles for these zero-valued standard
+	// handles. Without STARTF_USESTDHANDLES, a process launched by a redirected
+	// CI helper can retain the helper's pipe handles and fail GetConsoleMode.
+	startup.Flags = windows.STARTF_USESTDHANDLES
 	startup.ProcThreadAttributeList = attributes.List()
 	var process windows.ProcessInformation
 	if err := windows.CreateProcess(

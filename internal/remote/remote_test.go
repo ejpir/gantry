@@ -88,6 +88,33 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRemoveDoesNotPublishBeforeTokenRevocation(t *testing.T) {
+	testHome(t)
+	addTestProfile(t, "cloud")
+	path := tokenPath("cloud")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "locked"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Remove("cloud")
+	if err == nil || !strings.Contains(err.Error(), "token could not be removed") {
+		t.Fatalf("Remove with non-removable token path = %v", err)
+	}
+	profiles, listErr := List()
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(profiles) != 1 || profiles[0].Name != "cloud" {
+		t.Fatalf("profile was published as removed before token revocation: %+v", profiles)
+	}
+}
+
 func TestStoreRejectsDuplicatesAndUnknownListsConfigured(t *testing.T) {
 	testHome(t)
 	addTestProfile(t, "a")

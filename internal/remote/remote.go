@@ -200,12 +200,18 @@ func Remove(name string) error {
 	if !found {
 		return fmt.Errorf("unknown remote %q", name)
 	}
+	// Revoke the credential before publishing the profile removal. Watchers may
+	// observe the store update before Remove returns; publishing first would
+	// briefly report success while the bearer token was still on disk, and a
+	// later unlink failure would strand it with no profile through which to
+	// retry removal. If the store write then fails, the profile remains visible
+	// but is fail-closed until removal is retried.
+	if err := os.Remove(tokenPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remote token could not be removed: %w", err)
+	}
 	store.Remotes = kept
 	if err := saveStore(store); err != nil {
-		return err
-	}
-	if err := os.Remove(tokenPath(name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("profile removed, but the token file could not be: %w", err)
+		return fmt.Errorf("remote token removed, but profile could not be removed: %w", err)
 	}
 	return nil
 }
