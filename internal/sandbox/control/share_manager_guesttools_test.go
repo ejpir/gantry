@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,17 +130,51 @@ func TestGuestToolsShareCannotBeReplacedRemovedOrPromotedByOrdinaryAPI(t *testin
 	}
 }
 
+type guestToolsDeadlinePolicy struct {
+	mu      sync.RWMutex
+	expires time.Time
+}
+
+func (p *guestToolsDeadlinePolicy) Authorize(context.Context, string, policy.Resource) error {
+	return nil
+}
+
+func (p *guestToolsDeadlinePolicy) Evaluate(context.Context, string, policy.Resource) policy.Decision {
+	return policy.Decision{Effect: "allow", Reason: "test"}
+}
+
+func (p *guestToolsDeadlinePolicy) ExpiresAt() time.Time {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.expires
+}
+
+func (p *guestToolsDeadlinePolicy) SetDeadline(deadline time.Time) {
+	p.mu.Lock()
+	p.expires = deadline
+	p.mu.Unlock()
+}
+
 func TestGuestToolsShareRespectsExpiryAndCancellation(t *testing.T) {
-	expires := time.Now().Add(2 * time.Second)
-	org := policytest.Document(t, policy.Document{Version: 1, Organization: "org", Revision: "r1", ExpiresAt: expires, Profiles: map[string]policy.Profile{"dev": {}}})
-	m, _ := newGuestToolsShareManager(t, org)
+	m, _ := newGuestToolsShareManager(t, nil)
+	governance := &guestToolsDeadlinePolicy{}
+	setDeadline := func(deadline time.Time) {
+		governance.SetDeadline(deadline)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.governance = governance
+		m.policyDeadline = deadline
+		m.hub.SetDeadline(deadline)
+	}
+	setDeadline(time.Now().Add(time.Hour))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := m.WithGuestToolsShare(ctx, []byte("helper"), func(shares.Entry) error { t.Fatal("canceled delivery used payload"); return nil }); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	err := m.WithGuestToolsShare(context.Background(), []byte("helper"), func(shares.Entry) error {
-		time.Sleep(max(0, time.Until(expires)) + time.Millisecond)
+		setDeadline(time.Now().Add(-time.Second))
 		if n, status := m.Hub().HandleRequest(nil, nil); n != 0 || status != fuse.EACCES {
 			t.Fatalf("expired infrastructure export served a request: %d %v", n, status)
 		}
