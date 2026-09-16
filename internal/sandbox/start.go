@@ -241,14 +241,7 @@ func (p *execSandboxDaemon) SendHandshake(ctx context.Context, payload string) e
 	}
 	handshake := p.handshake
 	p.handshake = nil
-	stop := context.AfterFunc(ctx, func() { _ = handshake.Close() })
-	defer stop()
-	written, writeErr := io.WriteString(handshake, payload)
-	if writeErr == nil && written != len(payload) {
-		writeErr = io.ErrShortWrite
-	}
-	closeErr := handshake.Close()
-	return errors.Join(ctx.Err(), writeErr, closeErr)
+	return writeDaemonHandshake(ctx, handshake, payload)
 }
 
 func (p *execSandboxDaemon) Wait() error { return p.cmd.Wait() }
