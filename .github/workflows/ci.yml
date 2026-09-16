@@ -542,72 +542,6 @@ jobs:
           path: ${{ runner.temp }}/dist/
           if-no-files-found: error
 
-  # Release-tag Windows executables are Authenticode-signed on a fresh Windows
-  # runner after the cross-platform build. Azure Artifact Signing keeps the
-  # private key in managed hardware and GitHub OIDC avoids a stored client
-  # secret. Configure AZURE_CLIENT_ID, AZURE_TENANT_ID, and
-  # AZURE_SUBSCRIPTION_ID as repository secrets, plus these repository vars:
-  # AZURE_ARTIFACT_SIGNING_ENDPOINT, AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME, and
-  # AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME.
-  windows-sign:
-    name: sign/windows-amd64
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: build
-    runs-on: windows-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: gantry-windows-amd64
-          path: ${{ runner.temp }}\windows-release
-      - name: authenticate to Azure with GitHub OIDC
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Authenticode-sign and timestamp Windows executables
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
-          files-folder: ${{ runner.temp }}\windows-release
-          files-folder-filter: exe
-          files-folder-recurse: false
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: Gantry
-          description-url: https://github.com/ejpir/gantry
-      - name: verify Authenticode signatures and timestamps
-        shell: pwsh
-        run: |
-          $files = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\windows-release" -Filter *.exe)
-          if ($files.Count -eq 0) {
-            throw "no Windows executables found after signing"
-          }
-          foreach ($file in $files) {
-            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
-            if ($signature.Status -ne 'Valid') {
-              throw "$($file.Name) has invalid Authenticode status: $($signature.Status) $($signature.StatusMessage)"
-            }
-            if ($null -eq $signature.TimeStamperCertificate) {
-              throw "$($file.Name) has no RFC 3161 timestamp"
-            }
-            Write-Host "$($file.Name): signed by $($signature.SignerCertificate.Subject)"
-          }
-      - uses: actions/upload-artifact@v4
-        with:
-          # Keep this outside the release job's broad gantry-* download; the
-          # release explicitly overlays these signed files exactly once.
-          name: windows-authenticode-amd64
-          path: ${{ runner.temp }}\windows-release\*
-          if-no-files-found: error
-          retention-days: 1
-
   # The multicall guest helper binary (cmd/gantry-guest), built for both
   # guest architectures. Downloaded on first start by sandboxes that
   # configure host-bound secrets (docs/credential-brokering.md).
@@ -652,7 +586,7 @@ jobs:
   release:
     name: release/${{ github.ref_name }}
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [build, windows-sign, kernels, guest-assets, guest-tools, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
+    needs: [build, kernels, guest-assets, guest-tools, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -668,13 +602,6 @@ jobs:
         with:
           pattern: guest-assets-*
           path: ${{ runner.temp }}/guest
-      - name: download signed Windows executables
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-authenticode-amd64
-          path: ${{ runner.temp }}/signed-windows
-      - name: replace unsigned Windows build outputs
-        run: cp "${{ runner.temp }}"/signed-windows/*.exe "${{ runner.temp }}/release/"
       - name: stage guest rootfs assets
         run: |
           cp "${{ runner.temp }}/guest/guest-assets-arm64/nerdbox-rootfs.erofs" \
@@ -693,8 +620,6 @@ jobs:
             "${{ runner.temp }}/release/gantry-ide-image-arm64.erofs"
           cp "${{ runner.temp }}/guest/guest-assets-amd64/ide.erofs" \
             "${{ runner.temp }}/release/gantry-ide-image-x86_64.erofs"
-      # Signing changes PE bytes. Generate every checksum only after the signed
-      # Windows executables have replaced the unsigned build outputs.
       - name: checksum final release artifacts
         run: |
           cd "${{ runner.temp }}/release"

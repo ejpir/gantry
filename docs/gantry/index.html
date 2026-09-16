@@ -3485,8 +3485,8 @@ browser responses remain rejected.</p>
 permissive files are rejected before use.</li>
 <li>Windows onboarding tests now validate token security through the platform ACL
 implementation instead of assuming Unix mode-bit behavior.</li>
-<li>Tagged Windows artifacts are Authenticode-signed and RFC 3161 timestamped
-through Azure signing before SHA-256 sidecars are generated.</li>
+<li>Windows release binaries are published directly from the reproducible build;
+Authenticode signing is temporarily disabled.</li>
 <li>Organization network policy is compiled into a validated native packet guard;
 tests compare it with the policy decision and retain packet-bypass cases.</li>
 <li>Policy-feed tests cover mTLS client authentication, pinned signing trust,
