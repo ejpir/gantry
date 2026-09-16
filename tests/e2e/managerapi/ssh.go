@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,10 +22,12 @@ import (
 
 const sshCommandMarker = "manager-ssh: spaces ' quotes $literal"
 
+var resolveOpenSSHProgram = sshconfig.OpenSSHProgram
+
 func requireOpenSSH() error {
 	for _, program := range []string{"ssh", "sftp"} {
-		if _, err := exec.LookPath(program); err != nil {
-			return fmt.Errorf("full TLS/SSH battery requires OpenSSH %s in PATH (use -api-only for the no-VM subset): %w", program, err)
+		if _, err := resolveOpenSSHProgram(program); err != nil {
+			return fmt.Errorf("full TLS/SSH battery requires OpenSSH %s (use -api-only for the no-VM subset): %w", program, err)
 		}
 	}
 	return nil
@@ -34,8 +35,9 @@ func requireOpenSSH() error {
 
 // sshOptions uses only this test's config and trust store. In particular it
 // never invokes `ssh setup`, writes ~/.ssh/config, reads user identities or
-// disables host-key verification. Both commands exercise the real Gantry
-// ProxyCommand and KnownHostsCommand helpers; bearer tokens stay in files.
+// disables host-key verification. It exercises the real Gantry ProxyCommand;
+// the host-key helper is invoked directly before OpenSSH, matching the remote
+// CLI's pin-before-connect flow. Bearer tokens stay in files.
 func (m *m2Client) sshOptions() []string {
 	return []string{"-F", filepath.Join(m.dir, "openssh.conf"),
 		"-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ConnectionAttempts=1",
@@ -47,6 +49,7 @@ func (m *m2Client) sshOptions() []string {
 		"-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
 		"-o", "ControlMaster=no", "-o", "ControlPath=none",
 		"-o", "ProxyCommand=" + sshconfig.ShellCommand(m.gantry, "ssh-proxy", "-remote", "m2", "%n"),
+		"-o", "KnownHostsCommand=none",
 		"-o", "UserKnownHostsFile=" + sshconfig.QuotePath(m.sshPinPath()),
 		"-o", "GlobalKnownHostsFile=none", "-o", "StrictHostKeyChecking=yes"}
 }
@@ -55,26 +58,11 @@ func (m *m2Client) sshPinPath() string {
 	return filepath.Join(filepath.Dir(m.root), "ssh", "known_hosts.m2")
 }
 
-func (m *m2Client) openSSHConfig() (string, error) {
-	// Keep KnownHostsCommand in the configuration file, matching `gantry ssh
-	// setup`. Windows consumes directive quotes when a complete command is
-	// transported through CreateProcess as an `ssh -o` argument.
-	helper, err := sshconfig.OpenSSHCommandPath(m.gantry)
-	if err != nil {
-		return "", err
-	}
-	return "Host *\n    KnownHostsCommand " + sshconfig.ArgvCommand(helper, "ssh-known-hosts", "-remote", "m2", "%n") + "\n", nil
-}
-
 func (m *m2Client) prepareSSH(ctx context.Context) error {
-	config, err := m.openSSHConfig()
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(m.dir, "openssh.conf"), nil, 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(m.dir, "openssh.conf"), []byte(config), 0o600); err != nil {
-		return err
-	}
-	_, _, err = m.cli(ctx, 0, "ssh-known-hosts", "-remote", "m2")
+	_, _, err := m.cli(ctx, 0, "ssh-known-hosts", "-remote", "m2")
 	return err
 }
 
@@ -84,9 +72,13 @@ func (m *m2Client) sshCommand(ctx context.Context, name string, want int, argv .
 }
 
 func (m *m2Client) sshProcess(ctx context.Context, program string, stdin io.Reader, want int, args ...string) (string, string, error) {
+	resolved, err := resolveOpenSSHProgram(program)
+	if err != nil {
+		return "", "", err
+	}
 	bounded, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	return m.command(bounded, program, stdin, want, args...)
+	return m.command(bounded, resolved, stdin, want, args...)
 }
 
 func (m *m2Client) sshExecCheck(ctx context.Context, name string) error {
@@ -188,7 +180,7 @@ func (m *m2Client) sshChangedKeyCheck(ctx context.Context, name string, before [
 	if err != nil {
 		return err
 	}
-	if out != "" || !strings.Contains(diagnostic, "REMOTE SSH HOST KEY CHANGED") {
+	if out != "" || !strings.Contains(diagnostic, "REMOTE HOST IDENTIFICATION HAS CHANGED") {
 		return fmt.Errorf("OpenSSH did not refuse changed key: stdout=%q stderr=%q", out, diagnostic)
 	}
 	after, err := os.ReadFile(m.sshPinPath())

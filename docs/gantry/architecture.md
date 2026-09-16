@@ -119,10 +119,12 @@ it listens on `ssh.sock` in the sandbox's private state directory and verifies
 the connecting process's UID; Windows uses a protected local endpoint. No TCP
 SSH listener is created. `gantry ssh` supplies OpenSSH with a `ProxyCommand`
 and `KnownHostsCommand`; `gantry ssh setup` installs the equivalent managed
-wildcard configuration using locked, atomic writes. Win32 OpenSSH requires the
-helper executable to be an unquoted absolute token, so Gantry uses its DOS
-short path when the installed path needs quoting. One install-wide Ed25519
-host key identifies Gantry's local gateways.
+wildcard configuration using locked, atomic writes. On Windows Gantry selects
+the native system OpenSSH explicitly rather than an MSYS client with a
+different path namespace. Win32 OpenSSH requires the helper executable to be
+an unquoted absolute token, so Gantry uses its DOS short path when the installed
+path needs quoting. One install-wide Ed25519 host key identifies Gantry's local
+gateways.
 
 After the SSH handshake, the gateway maps each session, PTY, SFTP, or guest
 loopback-forward request onto the supervisor's existing session broker. SSH

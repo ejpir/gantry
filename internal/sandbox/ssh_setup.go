@@ -79,7 +79,11 @@ func sshSetup(remove bool) error {
 }
 
 func sshSupportsKnownHostsCommand() (bool, string, error) {
-	output, err := exec.Command("ssh", "-V").CombinedOutput()
+	sshProgram, err := sshconfig.OpenSSHProgram("ssh")
+	if err != nil {
+		return false, "", err
+	}
+	output, err := exec.Command(sshProgram, "-V").CombinedOutput()
 	if err != nil {
 		return false, "", fmt.Errorf("run ssh -V: %w", err)
 	}

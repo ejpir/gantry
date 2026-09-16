@@ -273,6 +273,10 @@ func remoteSSH(ctx context.Context, out, errs io.Writer, input *os.File, target 
 	if err != nil {
 		return fail(err)
 	}
+	sshProgram, err := sshconfig.OpenSSHProgram("ssh")
+	if err != nil {
+		return fail(err)
+	}
 	args := []string{"-o", "ProxyCommand=" + sshconfig.ShellCommand(self, "ssh-proxy", "-remote", target, name),
 		"-o", "UserKnownHostsFile=" + sshconfig.QuotePath(remoteKnownHostsPath(target)),
 		"-o", "GlobalKnownHostsFile=none", "-o", "StrictHostKeyChecking=yes", "-o", "KnownHostsCommand=none",
@@ -280,7 +284,7 @@ func remoteSSH(ctx context.Context, out, errs io.Writer, input *os.File, target 
 	if len(command) > 0 {
 		args = append(args, sshconfig.GuestCommand(command))
 	}
-	process := exec.CommandContext(ctx, "ssh", args...)
+	process := exec.CommandContext(ctx, sshProgram, args...)
 	process.Stdin, process.Stdout, process.Stderr = input, out, errs
 	if err := process.Run(); err != nil {
 		var exit *exec.ExitError

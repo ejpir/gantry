@@ -99,6 +99,11 @@ func CmdSSH(argv []string) int {
 		fmt.Fprintln(os.Stderr, "gantry ssh:", err)
 		return 1
 	}
+	sshProgram, err := sshconfig.OpenSSHProgram("ssh")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry ssh:", err)
+		return 1
+	}
 	args := []string{
 		"-o", "ProxyCommand=" + shellCommand(self, "ssh-proxy", name),
 		"-o", "KnownHostsCommand=" + knownHostsCommand(knownHostsHelper, "ssh-known-hosts"),
@@ -119,7 +124,7 @@ func CmdSSH(argv []string) int {
 		// on Windows and Unix alike.
 		args = append(args, remoteSSHCommand(command))
 	}
-	return runSSHProcess("ssh", args, os.Stdin, os.Stdout, os.Stderr)
+	return runSSHProcess(sshProgram, args, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func runAttachedCommand(name string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {

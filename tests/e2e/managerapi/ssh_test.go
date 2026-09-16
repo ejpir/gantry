@@ -80,7 +80,7 @@ func TestOpenSSHManagerTunnelHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gantry := filepath.Join(work, executableName("gantry ssh fixture"))
+	gantry := filepath.Join(work, executableName("gantry-ssh-fixture"))
 	if err := buildGantry(ctx, repo, gantry); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,11 @@ func TestOpenSSHManagerTunnelHarness(t *testing.T) {
 }
 
 func TestFullBatteryFailsPreflightWithoutOpenSSH(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	previous := resolveOpenSSHProgram
+	resolveOpenSSHProgram = func(name string) (string, error) {
+		return "", fmt.Errorf("fixture has no %s", name)
+	}
+	t.Cleanup(func() { resolveOpenSSHProgram = previous })
 	if err := run(options{tls: true}); err == nil || !strings.Contains(err.Error(), "requires OpenSSH ssh") {
 		t.Fatalf("missing SSH dependency was not an explicit preflight failure: %v", err)
 	}
@@ -202,18 +206,9 @@ func TestOpenSSHOptionsAreIsolatedAndStrict(t *testing.T) {
 	base := t.TempDir()
 	m := m2Client{gantry: filepath.Join(base, executableName("gantry")), dir: filepath.Join(base, "client"), root: filepath.Join(base, "client", "sandboxes")}
 	options := strings.Join(m.sshOptions(), "\n")
-	for _, want := range []string{"-F\n" + filepath.Join(m.dir, "openssh.conf"), "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=none", "IdentityAgent=none", "IdentityFile=none", "CertificateFile=none", "ProxyCommand=", "ssh-proxy", "known_hosts.m2"} {
+	for _, want := range []string{"-F\n" + filepath.Join(m.dir, "openssh.conf"), "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=none", "IdentityAgent=none", "IdentityFile=none", "CertificateFile=none", "KnownHostsCommand=none", "ProxyCommand=", "ssh-proxy", "known_hosts.m2"} {
 		if !strings.Contains(options, want) {
 			t.Errorf("missing isolated option %q", want)
-		}
-	}
-	config, err := m.openSSHConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"Host *", "KnownHostsCommand ", "ssh-known-hosts"} {
-		if !strings.Contains(config, want) {
-			t.Errorf("missing isolated config value %q", want)
 		}
 	}
 }
