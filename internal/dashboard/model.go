@@ -32,6 +32,10 @@ func Run(service dashboardapi.Service) int {
 		tea.WithInput(os.Stdin),
 		tea.WithOutput(os.Stdout),
 	)
+	watchCtx, stopWatches := context.WithCancel(context.Background())
+	defer stopWatches()
+	stopRemotes := startRemoteWatches(watchCtx, program.Send)
+	defer stopRemotes()
 	final, err := program.Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gantry tui:", err)
@@ -62,6 +66,8 @@ const (
 	tuiPacketsPage
 	tuiImagesPage
 	tuiOverviewPage
+	tuiAuditPage
+	tuiRemotesPage
 	tuiPageCount
 )
 
@@ -72,6 +78,7 @@ type tuiMountRow = dashboardapi.Mount
 type tuiPortRow = dashboardapi.Port
 type tuiSecretRow = dashboardapi.Secret
 type tuiMCPRow = dashboardapi.MCPServer
+type tuiAuditRow = dashboardapi.AuditEvent
 type tuiImageRow = dashboardapi.Image
 type tuiRegistryRow = dashboardapi.RegistryAuth
 
@@ -105,6 +112,7 @@ const (
 	tuiMCPRemoveDialog
 	tuiUpdateDialog
 	tuiPacketDetailDialog
+	tuiAuditDetailDialog
 	tuiImagePullDialog
 	tuiImageRemoveDialog
 	tuiImagePruneDialog
@@ -112,6 +120,12 @@ const (
 	tuiRegistryLogoutDialog
 	tuiSandboxFilterDialog
 	tuiSortDialog
+	tuiCreateLocationDialog
+	tuiRemoteProfilesDialog
+	tuiOrganizationLoginDialog
+	tuiOrganizationRemotesDialog
+	tuiRemoteAddDialog
+	tuiRemoteRemoveDialog
 )
 
 type tuiToastKind uint8
@@ -138,6 +152,7 @@ type tuiRefreshMsg struct {
 	ports      []tuiPortRow
 	secrets    []tuiSecretRow
 	mcp        []tuiMCPRow
+	audit      []tuiAuditRow
 	images     []tuiImageRow
 	registries []tuiRegistryRow
 	err        error
@@ -183,10 +198,13 @@ type sandboxTUIModel struct {
 	service    dashboardapi.Service
 	limits     dashboardapi.ResourceLimits
 
-	page      tuiPage
-	sandboxes []tuiSandbox
-	cursor    int // len(sandboxes) is the trailing "New Sandbox" card
-	scrollRow int
+	remotes      map[string]remoteSection
+	remoteCursor int
+	remoteScroll int
+	page         tuiPage
+	sandboxes    []tuiSandbox
+	cursor       int // len(sandboxes) is the trailing "New Sandbox" card
+	scrollRow    int
 
 	viewSource         *tuiRefreshMsg
 	packetSource       []tuiPacketRow
@@ -213,6 +231,10 @@ type sandboxTUIModel struct {
 	mcpServers     []tuiMCPRow
 	mcpCursor      int
 	mcpScroll      int
+	auditEvents    []tuiAuditRow
+	auditCursor    int
+	auditScroll    int
+	auditDetail    *tuiAuditRow
 	images         []tuiImageRow
 	imageCursor    int
 	imageScroll    int
@@ -256,6 +278,7 @@ type sandboxTUIModel struct {
 	dialogScroll  int
 	confirmRemove bool
 	createDialogModel
+	remoteOnboarding
 	editFocus         int
 	editCPUs          resourceSlider
 	editMemory        resourceSlider
@@ -540,6 +563,45 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.animating = false
 		return m, nil
+	case remoteSectionMsg:
+		if m.remoteGenerations == nil {
+			m.remoteGenerations = make(map[string]uint64)
+		}
+		name := msg.snapshot.Remote
+		if msg.generation < m.remoteGenerations[name] {
+			return m, nil
+		}
+		m.remoteGenerations[name] = msg.generation
+		if m.remotes == nil {
+			m.remotes = make(map[string]remoteSection)
+		}
+		if msg.removed {
+			delete(m.remotes, name)
+		} else {
+			m.remotes[name] = remoteSection(msg.snapshot)
+		}
+		m.ensureTableCursorVisible()
+		return m, nil
+	case remoteConfigMsg:
+		m.remoteConfigError = msg.error
+		return m, nil
+	case remoteCatalogMsg:
+		m.availableRemotes = msg.available
+		m.ensureTableCursorVisible()
+		return m, nil
+	case onboardResultMsg:
+		return m, m.handleOnboardResult(msg)
+	case onboardURLMsg:
+		if msg.generation == m.onboardGeneration {
+			m.onboardURL, m.onboardStatus = msg.url, "Waiting for browser sign-in… esc cancels."
+			if msg.browserFailed {
+				m.onboardStatus = "Browser could not open automatically. Use the URL below; esc cancels."
+			}
+		}
+		return m, nil
+	case onboardStreamMsg:
+		_, cmd := m.Update(msg.event)
+		return m, tea.Batch(cmd, waitOnboardStream(msg.stream))
 	case tuiRefreshMsg:
 		return m.handleRefresh(msg)
 	case tuiTickMsg:
@@ -614,11 +676,13 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	}
 	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey := m.selectedTableKeys()
 	packetKey := m.selectedPacketKey()
+	auditKey := m.selectedAuditKey()
 	m.sampleSandboxTraffic(msg.sandboxes)
 	m.rememberViewSource()
 	m.viewSource = &msg
 	m.rebuildRows()
 	m.restorePacketSelection(packetKey)
+	m.restoreAuditSelection(auditKey)
 	m.dashboardHits = nil
 
 	target := m.selectNext
@@ -733,6 +797,9 @@ func (m *sandboxTUIModel) updateBusyKey(key string) tea.Cmd {
 
 func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 	switch m.page {
+	case tuiRemotesPage:
+		return m.updateRemoteActionKey(key)
+
 	case tuiTrafficPage:
 		switch key {
 		case "a":
@@ -895,6 +962,11 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			return nil, true
 		}
 		return nil, false
+	case tuiAuditPage:
+		if key == "enter" || key == "d" || key == "i" {
+			m.openAuditDetail()
+			return nil, true
+		}
 	case tuiPacketsPage:
 		return m.updatePacketActionKey(key)
 	}
@@ -911,7 +983,7 @@ func (m *sandboxTUIModel) updateGlobalKey(key string) (tea.Cmd, bool) {
 	case "q", "ctrl+c":
 		return tea.Quit, true
 	case "n":
-		return m.openCreateDialog(), true
+		return m.openCreateWizard(), true
 	case "r":
 		return m.refreshCmd(), true
 	case "U":
@@ -980,6 +1052,10 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 		m.setPage(tuiPacketsPage)
 	case "9":
 		m.setPage(tuiImagesPage)
+	case "A":
+		m.setPage(tuiAuditPage)
+	case "B":
+		m.setPage(tuiRemotesPage)
 	case "tab", "]":
 		m.cyclePage(1)
 	case "shift+tab", "[":
@@ -1046,7 +1122,7 @@ func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 		m.setCursor(len(m.sandboxes) - 1)
 	case "enter", "o":
 		if len(m.sandboxes) == 0 {
-			return m.openCreateDialog()
+			return m.openCreateWizard()
 		}
 		m.setPage(tuiSandboxesPage)
 	case "t":
@@ -1137,7 +1213,7 @@ func (m *sandboxTUIModel) updateSandboxKey(key string) tea.Cmd {
 
 func (m *sandboxTUIModel) primaryAction() (tea.Model, tea.Cmd) {
 	if m.onNewCard() {
-		return m, m.openCreateDialog()
+		return m, m.openCreateWizard()
 	}
 	selected := m.selected()
 	if selected == nil {
@@ -1573,7 +1649,7 @@ func (m *sandboxTUIModel) setPage(page tuiPage) {
 }
 
 func (m *sandboxTUIModel) cyclePage(delta int) {
-	pages := []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiPortsPage, tuiPacketsPage, tuiMountsPage, tuiSecretsPage, tuiMCPPage, tuiImagesPage}
+	pages := []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiPortsPage, tuiPacketsPage, tuiMountsPage, tuiSecretsPage, tuiMCPPage, tuiAuditPage, tuiImagesPage, tuiRemotesPage}
 	current := 0
 	for index, page := range pages {
 		if page == m.page {
@@ -1599,6 +1675,10 @@ func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
 		return &m.secretCursor, &m.secretScroll, len(m.secrets)
 	case tuiMCPPage:
 		return &m.mcpCursor, &m.mcpScroll, len(m.mcpServers)
+	case tuiAuditPage:
+		return &m.auditCursor, &m.auditScroll, len(m.auditEvents)
+	case tuiRemotesPage:
+		return &m.remoteCursor, &m.remoteScroll, len(m.remoteLines())
 	case tuiImagesPage:
 		if m.imageSection == tuiImageSectionCredentials {
 			return &m.registryCursor, &m.registryScroll, len(m.registries)
@@ -1772,7 +1852,7 @@ func refreshSandboxesCmd(service dashboardapi.Service) tea.Cmd {
 		return tuiRefreshMsg{
 			sandboxes: data.Sandboxes, traffic: data.Traffic,
 			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, secrets: data.Secrets,
-			mcp: data.MCPServers, images: data.Images, registries: data.Registries,
+			mcp: data.MCPServers, audit: data.Audit, images: data.Images, registries: data.Registries,
 			err: err, at: time.Now(),
 		}
 	}

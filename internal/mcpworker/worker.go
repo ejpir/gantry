@@ -113,6 +113,11 @@ func Run(control, broker, streams net.Conn) (retErr error) {
 			Name: serverConfig.Name, URL: serverConfig.URL, Tools: serverConfig.Tools,
 			TLSRoots: roots,
 		}
+		if serverConfig.Authorize {
+			server.Authorize = func(ctx context.Context, session, action, tool string) error {
+				return brokerClient.CallContext(ctx, OpAuthorize, AuthorizationRequest{Server: serverConfig.Name, Session: session, Action: action, Tool: tool}, nil)
+			}
+		}
 		if serverConfig.Local {
 			// Argv is a non-empty marker for the engine's local-server branch. It
 			// is never sent to the supervisor or executed by this worker.

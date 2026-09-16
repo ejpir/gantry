@@ -21,7 +21,7 @@ func TestAuditPersistenceRejectsPreplantedEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	br := &broker{dir: dir}
-	br.persistAuditLine("must not follow")
+	br.auditf("must not follow")
 	got, err := os.ReadFile(target)
 	if err != nil || string(got) != "unchanged" {
 		t.Fatalf("audit symlink target = %q, %v", got, err)
@@ -35,7 +35,7 @@ func TestAuditPersistenceRejectsPreplantedEndpoints(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		br.persistAuditLine("must not block")
+		br.auditf("must not block")
 		close(done)
 	}()
 	select {

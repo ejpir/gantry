@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +78,41 @@ func TestLifecycleCancellationBeforeStartDoesNoIO(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("cancelled request touched storage: %v", err)
+	}
+}
+
+func TestDaemonHandshakeDeliversLargePayload(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	payload := strings.Repeat("handshake", 1<<15)
+	readDone := make(chan []byte, 1)
+	go func() {
+		// Force the writer through a full-pipe wait before draining it.
+		time.Sleep(20 * time.Millisecond)
+		data, _ := io.ReadAll(reader)
+		readDone <- data
+	}()
+	writeDone := make(chan error, 1)
+	process := &execSandboxDaemon{handshake: writer}
+	go func() { writeDone <- process.SendHandshake(context.Background(), payload) }()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handshake write stayed blocked")
+	}
+	select {
+	case got := <-readDone:
+		if string(got) != payload {
+			t.Fatalf("handshake payload length = %d, want %d", len(got), len(payload))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handshake reader did not see EOF")
 	}
 }
 

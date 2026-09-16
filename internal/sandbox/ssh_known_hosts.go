@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/sshgw"
+	"github.com/ejpir/gantry/internal/sshconfig"
 )
 
 // CmdSSHKnownHosts implements OpenSSH KnownHostsCommand.
@@ -34,27 +33,10 @@ func CmdSSHKnownHosts(argv []string) int {
 	return 0
 }
 
-func sshShellQuote(value string) string {
-	if runtime.GOOS == "windows" {
-		return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
-func shellCommand(argv ...string) string {
-	quoted := make([]string, len(argv))
-	for index, value := range argv {
-		// OpenSSH expands tokens such as %h before handing ProxyCommand and
-		// KnownHostsCommand to the user's shell. Keep the token inside shell
-		// quotes so a HostName override cannot become shell syntax first.
-		quoted[index] = sshShellQuote(value)
-	}
-	return strings.Join(quoted, " ")
-}
-
-func quoteSSHConfigPath(path string) string {
-	return `"` + strings.ReplaceAll(path, `\`, `\\`) + `"`
-}
+func sshShellQuote(value string) string       { return sshconfig.ShellCommand(value) }
+func shellCommand(argv ...string) string      { return sshconfig.ShellCommand(argv...) }
+func knownHostsCommand(argv ...string) string { return sshconfig.ArgvCommand(argv...) }
+func quoteSSHConfigPath(path string) string   { return sshconfig.QuotePath(path) }
 
 func ensureSSHKnownHostsFile() error {
 	if err := localsec.CreateManagerDir(sshInstallDir()); err != nil {

@@ -97,7 +97,10 @@ function Start-TestSandbox([string]$Name, [string[]]$ExtraArgs) {
         "-kernel", $script:Kernel,
         "-rootfs", $script:Rootfs,
         "-image", $script:Image,
-        "-mem", "256",
+        # Helper-backed OAuth/MCP startup must not race a 256 MiB guest under
+        # a loaded reusable metal host; this battery validates security, not
+        # minimum-memory operation.
+        "-mem", "512",
         "-cpus", "1",
         "-process-isolation", "auto"
     ) + $ExtraArgs
@@ -338,7 +341,9 @@ try {
     Invoke-Gantry @("resume", $OAuthSandbox)
     Start-Sleep -Seconds 4
     $daemonLog = Get-Content -Raw (Join-Path (Join-Path $StateRoot $OAuthSandbox) "daemon.log")
-    Assert-Contains "custody: Windows session restored after restart" $daemonLog "session restored and access token pushed"
+    Assert-Contains "custody: Windows session restored after restart" $daemonLog "session restored; configured delivery ready"
+    $guestAuth = Invoke-GantryCapture @("exec", $OAuthSandbox, "--", "cat", "/root/.claude/.credentials.json")
+    Assert-Contains "custody: restored access token available in Windows-hosted guest" $guestAuth "at-win-refreshed"
 
     "===== Windows MCP filesystem gateway ====="
     Start-TestSandbox $MCPSandbox @(

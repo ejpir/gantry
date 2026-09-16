@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	"github.com/ejpir/gantry/internal/policy"
+	"github.com/ejpir/gantry/internal/policyfeed"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/inspection"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
@@ -50,88 +53,15 @@ const (
 	managerShutdownGracePeriod = 10 * time.Second
 )
 
-type managerOperation struct {
-	ID       string    `json:"id"`
-	Kind     string    `json:"kind"`
-	Sandbox  string    `json:"sandbox,omitempty"`
-	State    string    `json:"state"`
-	Error    string    `json:"error,omitempty"`
-	Warnings []string  `json:"warnings,omitempty"`
-	Created  time.Time `json:"createdAt"`
-	Updated  time.Time `json:"updatedAt"`
+// operationRecord is the manager's internal bookkeeping for one lifecycle
+// operation. The wire shape lives in api/managerapi (the canonical protocol
+// definition); only the idempotency metadata is manager-private and is never
+// serialized.
+type operationRecord struct {
+	managerapi.Operation
 
 	idempotencyKey string
 	fingerprint    string
-}
-
-type managerEvent struct {
-	ID          uint64    `json:"id"`
-	Type        string    `json:"type"`
-	OperationID string    `json:"operationId,omitempty"`
-	Sandbox     string    `json:"sandbox,omitempty"`
-	State       string    `json:"state,omitempty"`
-	Time        time.Time `json:"time"`
-}
-
-type managerSandbox struct {
-	Desired         inspection.BootSettings  `json:"desired"`
-	Active          *inspection.BootSettings `json:"active,omitempty"`
-	RestartRequired bool                     `json:"restartRequired"`
-	Name            string                   `json:"name"`
-	State           string                   `json:"state"`
-	PID             int                      `json:"pid,omitempty"`
-	Image           string                   `json:"image,omitempty"`
-	ImageRef        string                   `json:"imageRef,omitempty"`
-	ImageDigest     string                   `json:"imageDigest,omitempty"`
-	CPUs            int                      `json:"cpus,omitempty"`
-	MemoryMiB       uint                     `json:"memoryMiB,omitempty"`
-	Writable        bool                     `json:"writable"`
-	Proxy           string                   `json:"proxy,omitempty"`
-	NoProxy         string                   `json:"noProxy,omitempty"`
-	ProxyEnforce    bool                     `json:"proxyEnforce,omitempty"`
-}
-
-type managerCreateRequest struct {
-	Name              string   `json:"name"`
-	Image             string   `json:"image"`
-	Kernel            string   `json:"kernel,omitempty"`
-	Rootfs            string   `json:"rootfs,omitempty"`
-	Runtime           string   `json:"runtime,omitempty"`
-	RW                *bool    `json:"rw,omitempty"`
-	RWLayer           string   `json:"rwlayer,omitempty"`
-	Shares            []string `json:"shares,omitempty"`
-	Publish           []string `json:"publish,omitempty"`
-	Net               *bool    `json:"net,omitempty"`
-	NetworkPolicy     string   `json:"networkPolicy,omitempty"`
-	AllowLocalNetwork bool     `json:"allowLocalNetwork,omitempty"`
-	Proxy             string   `json:"proxy,omitempty"`
-	NoProxy           string   `json:"noProxy,omitempty"`
-	ProxyEnforce      bool     `json:"proxyEnforce,omitempty"`
-	OAuthBridge       *bool    `json:"oauthBridge,omitempty"`
-	ProcessIsolation  string   `json:"processIsolation,omitempty"`
-	MemoryMiB         uint     `json:"memoryMiB,omitempty"`
-	DiskSizeMiB       uint     `json:"diskSizeMiB,omitempty"`
-	CPUs              int      `json:"cpus,omitempty"`
-	SecretNames       []string `json:"secretNames,omitempty"`
-}
-
-type managerExecRequest struct {
-	Argv           []string `json:"argv"`
-	Cwd            string   `json:"cwd,omitempty"`
-	Stdin          string   `json:"stdin,omitempty"`
-	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
-	MaxOutputBytes int64    `json:"maxOutputBytes,omitempty"`
-}
-
-type managerExecResponse struct {
-	ExitCode  int    `json:"exitCode"`
-	Output    string `json:"output"`
-	Truncated bool   `json:"truncated"`
-}
-
-type managerErrorResponse struct {
-	Error       string `json:"error"`
-	OperationID string `json:"operationId,omitempty"`
 }
 
 type managerIdempotency struct {
@@ -140,28 +70,44 @@ type managerIdempotency struct {
 }
 
 type managerService struct {
-	lifecycle Lifecycle
+	lifecycle  Lifecycle
+	context    context.Context
+	cancel     context.CancelFunc
+	background sync.WaitGroup
 
 	mu             sync.Mutex
-	operations     map[string]*managerOperation
+	operations     map[string]*operationRecord
 	operationOrder []string
 	idempotency    map[string]managerIdempotency
-	subscribers    map[uint64]chan managerEvent
+	subscribers    map[uint64]chan managerapi.Event
 	nextSubscriber uint64
 	nextEvent      uint64
 	lifecycleSlots chan struct{}
 	execSlots      chan struct{}
+	sshSlots       chan struct{}
 	sandboxLocks   [64]sync.RWMutex
+	rawRunLock     sync.RWMutex
+
+	// organizationPolicyMu is the manager-wide admission barrier. Lifecycle
+	// operations and new exec/SSH sessions hold it for reading before taking a
+	// sandbox shard; a feed generation holds it for writing while it fans out
+	// and publishes the snapshot inherited by later creates.
+	organizationPolicyMu sync.RWMutex
+	organizationPolicy   *policy.Config
 }
 
 func newManagerService(lifecycle Lifecycle) *managerService {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &managerService{
 		lifecycle:      lifecycle,
-		operations:     make(map[string]*managerOperation),
+		context:        ctx,
+		cancel:         cancel,
+		operations:     make(map[string]*operationRecord),
 		idempotency:    make(map[string]managerIdempotency),
-		subscribers:    make(map[uint64]chan managerEvent),
+		subscribers:    make(map[uint64]chan managerapi.Event),
 		lifecycleSlots: make(chan struct{}, managerMaxLifecycleOps),
 		execSlots:      make(chan struct{}, managerMaxExecs),
+		sshSlots:       make(chan struct{}, managerMaxExecs),
 	}
 }
 
@@ -171,13 +117,25 @@ func (m *managerService) handler() http.Handler {
 	mux.HandleFunc("GET /v1/openapi.yaml", m.handleOpenAPI)
 	mux.HandleFunc("GET /v1/sandboxes", m.handleListSandboxes)
 	mux.HandleFunc("POST /v1/sandboxes", m.handleCreateSandbox)
+	mux.HandleFunc("POST /v1/run", m.handleRunVM)
+	mux.HandleFunc("PATCH /v1/sandboxes/{name}", m.handleConfigureSandbox)
 	mux.HandleFunc("GET /v1/sandboxes/{name}", m.handleGetSandbox)
 	mux.HandleFunc("DELETE /v1/sandboxes/{name}", m.handleDeleteSandbox)
 	mux.HandleFunc("POST /v1/sandboxes/{name}/start", m.handleStartSandbox)
 	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", m.handleStopSandbox)
 	mux.HandleFunc("POST /v1/sandboxes/{name}/exec", m.handleExecSandbox)
+	mux.HandleFunc("GET /v1/sandboxes/{name}/net-policy", m.handleGetNetworkPolicy)
+	mux.HandleFunc("PUT /v1/sandboxes/{name}/net-policy", m.handleSetNetworkPolicy)
+	mux.HandleFunc("GET /v1/sandboxes/{name}/policy", m.handleGetOrganizationPolicy)
+	mux.HandleFunc("PUT /v1/sandboxes/{name}/policy", m.handleSetOrganizationPolicy)
+	mux.HandleFunc("GET /v1/sandboxes/{name}/audit", m.handleAudit)
+	mux.HandleFunc("GET /v1/ssh/hostkey", m.handleSSHHostKey)
+	mux.HandleFunc("POST /v1/sandboxes/{name}/ssh", m.handleSSH)
 	mux.HandleFunc("GET /v1/operations/{id}", m.handleGetOperation)
 	mux.HandleFunc("GET /v1/events", m.handleEvents)
+	mux.HandleFunc("GET /v1/images", m.handleListImages)
+	mux.HandleFunc("POST /v1/images/pull", m.handlePullImage)
+	mux.HandleFunc("POST /v1/images/delete", m.handleDeleteImage)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		mux.ServeHTTP(w, r)
@@ -185,7 +143,7 @@ func (m *managerService) handler() http.Handler {
 }
 
 func (m *managerService) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeManagerJSON(w, http.StatusOK, map[string]any{"ok": true, "version": managerAPIVersion})
+	writeManagerJSON(w, http.StatusOK, managerapi.Health{OK: true, Version: managerAPIVersion})
 }
 
 func (m *managerService) handleOpenAPI(w http.ResponseWriter, _ *http.Request) {
@@ -222,7 +180,7 @@ func (m *managerService) handleGetSandbox(w http.ResponseWriter, r *http.Request
 }
 
 func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
-	var request managerCreateRequest
+	var request managerapi.CreateSandboxRequest
 	body, err := decodeManagerJSON(r, &request)
 	if err != nil {
 		writeManagerError(w, http.StatusBadRequest, err, "")
@@ -236,8 +194,14 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 		writeManagerError(w, http.StatusBadRequest, errors.New("image is required"), "")
 		return
 	}
-	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(operation *managerOperation) error {
-		result, err := m.lifecycle.Start(r.Context(), request.startRequest(), nil)
+	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(operation *managerapi.Operation) error {
+		if active := m.organizationPolicy; active != nil {
+			if request.OrganizationPolicy != nil && !sameOrganizationPolicy(request.OrganizationPolicy, active) {
+				return fmt.Errorf("organization-wide policy feed controls sandbox policy")
+			}
+			request.OrganizationPolicy = policy.CloneConfig(active)
+		}
+		result, err := m.lifecycle.Start(r.Context(), createStartRequest(request), nil)
 		m.setOperationWarnings(operation.ID, result.Warnings)
 		return err
 	})
@@ -248,7 +212,16 @@ func (m *managerService) handleStartSandbox(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(*managerOperation) error {
+	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(*managerapi.Operation) error {
+		if active := m.organizationPolicy; active != nil {
+			cfg, err := config.ReadSandboxConfig(layout.Dir(name))
+			if err != nil {
+				return err
+			}
+			if !sameOrganizationPolicy(cfg.OrgPolicy, active) {
+				return fmt.Errorf("sandbox has not accepted the active organization-wide policy generation")
+			}
+		}
 		_, err := m.lifecycle.Start(r.Context(), lifecycle.StartRequest{Name: name, Mode: lifecycle.Resume}, nil)
 		return err
 	})
@@ -259,7 +232,7 @@ func (m *managerService) handleStopSandbox(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "stop", name, nil, http.StatusOK, func(*managerOperation) error {
+	m.runLifecycle(w, r, "stop", name, nil, http.StatusOK, func(*managerapi.Operation) error {
 		err := m.lifecycle.Stop(name)
 		if errors.Is(err, ErrNotRunning) {
 			if _, statErr := os.Stat(filepath.Join(layout.Dir(name), "sandbox.json")); statErr == nil {
@@ -275,7 +248,7 @@ func (m *managerService) handleDeleteSandbox(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "delete", name, nil, http.StatusOK, func(*managerOperation) error {
+	m.runLifecycle(w, r, "delete", name, nil, http.StatusOK, func(*managerapi.Operation) error {
 		return m.lifecycle.Delete(name)
 	})
 }
@@ -285,10 +258,15 @@ func (m *managerService) handleExecSandbox(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	// A new exec must not enter a still-old sandbox after a manager-wide
+	// generation has begun fan-out. Existing execs retain the documented rule
+	// that already-delivered operations are not revoked.
+	m.organizationPolicyMu.RLock()
+	defer m.organizationPolicyMu.RUnlock()
 	lock := m.sandboxLock(name)
 	lock.RLock()
 	defer lock.RUnlock()
-	var request managerExecRequest
+	var request managerapi.ExecRequest
 	if _, err := decodeManagerJSON(r, &request); err != nil {
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
@@ -323,7 +301,7 @@ func (m *managerService) handleExecSandbox(w http.ResponseWriter, r *http.Reques
 		writeManagerError(w, status, err, "")
 		return
 	}
-	writeManagerJSON(w, http.StatusOK, managerExecResponse{
+	writeManagerJSON(w, http.StatusOK, managerapi.ExecResult{
 		ExitCode:  result.ExitCode,
 		Output:    string(result.Output),
 		Truncated: result.Truncated,
@@ -359,7 +337,10 @@ func (m *managerService) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
-	_, _ = fmt.Fprintf(w, ": connected subscriber=%d\n\n", id)
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+	_, _ = fmt.Fprintf(w, ": connected subscriber=%d\nretry: 1000\n\n", id)
 	flusher.Flush()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -369,23 +350,27 @@ func (m *managerService) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
+			_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			payload, _ := json.Marshal(event)
 			if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, payload); err != nil {
 				return
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
+			_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
 				return
 			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
+		case <-m.context.Done():
+			return
 		}
 	}
 }
 
-func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, kind, name string, body []byte, successStatus int, run func(*managerOperation) error) {
+func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, kind, name string, body []byte, successStatus int, run func(*managerapi.Operation) error) {
 	fingerprint := managerFingerprint(r.Method, r.URL.Path, body)
 	operation, replay, err := m.beginOperation(kind, name, r.Header.Get("Idempotency-Key"), fingerprint)
 	if err != nil {
@@ -410,9 +395,40 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 		return
 	}
 	defer releaseSlot(m.lifecycleSlots)
+	// Feed rollout takes the write side before any sandbox shard. Keeping the
+	// same order here prevents creates, starts, deletes, or policy mutations
+	// from slipping between organization-wide enumeration and publication.
+	m.organizationPolicyMu.RLock()
+	defer m.organizationPolicyMu.RUnlock()
 	lock := m.sandboxLock(name)
-	lock.Lock()
+	if kind == "run" {
+		lock = &m.rawRunLock
+	}
+	// Waiting behind a long-running operation must not outlive the request
+	// or manager. Admission above bounds the number of waiters.
+	for !lock.TryLock() {
+		select {
+		case <-r.Context().Done():
+			operation = m.finishOperation(operation.ID, r.Context().Err())
+			writeManagerError(w, http.StatusRequestTimeout, r.Context().Err(), operation.ID)
+			return
+		case <-m.context.Done():
+			operation = m.finishOperation(operation.ID, context.Canceled)
+			writeManagerError(w, http.StatusServiceUnavailable, context.Canceled, operation.ID)
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	defer lock.Unlock()
+	requestErr := r.Context().Err()
+	if requestErr == nil {
+		requestErr = m.context.Err()
+	}
+	if err := requestErr; err != nil {
+		operation = m.finishOperation(operation.ID, err)
+		writeManagerError(w, http.StatusRequestTimeout, err, operation.ID)
+		return
+	}
 	// Another request may have completed while this one waited on its sandbox
 	// shard. Recheck the key under the execution lock so identical concurrent
 	// retries never perform the lifecycle transition twice.
@@ -431,7 +447,11 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 	err = run(operation)
 	operation = m.finishOperation(operation.ID, err)
 	if err != nil {
-		writeManagerError(w, http.StatusConflict, err, operation.ID)
+		status := http.StatusConflict
+		if errors.Is(err, ErrImageNotFound) || errors.Is(err, os.ErrNotExist) {
+			status = http.StatusNotFound
+		}
+		writeManagerError(w, status, err, operation.ID)
 		return
 	}
 	writeManagerJSON(w, successStatus, operation)
@@ -442,7 +462,7 @@ func (m *managerService) sandboxLock(name string) *sync.RWMutex {
 	return &m.sandboxLocks[int(digest[0])%len(m.sandboxLocks)]
 }
 
-func (m *managerService) beginOperation(kind, name, key, fingerprint string) (*managerOperation, bool, error) {
+func (m *managerService) beginOperation(kind, name, key, fingerprint string) (*managerapi.Operation, bool, error) {
 	if err := validateIdempotencyKey(key); err != nil {
 		return nil, false, err
 	}
@@ -464,10 +484,13 @@ func (m *managerService) beginOperation(kind, name, key, fingerprint string) (*m
 		return nil, false, fmt.Errorf("operation capacity is full")
 	}
 	now := time.Now().UTC()
-	operation := &managerOperation{
-		ID: newManagerOperationID(), Kind: kind, Sandbox: name,
-		State: "running", Created: now, Updated: now,
-		idempotencyKey: key, fingerprint: fingerprint,
+	operation := &operationRecord{
+		Operation: managerapi.Operation{
+			ID: newManagerOperationID(), Kind: kind, Sandbox: name,
+			State: "running", Created: now, Updated: now,
+		},
+		idempotencyKey: key,
+		fingerprint:    fingerprint,
 	}
 	m.operations[operation.ID] = operation
 	m.operationOrder = append(m.operationOrder, operation.ID)
@@ -488,12 +511,12 @@ func (m *managerService) setOperationWarnings(id string, warnings []string) {
 	}
 }
 
-func (m *managerService) finishOperation(id string, operationErr error) *managerOperation {
+func (m *managerService) finishOperation(id string, operationErr error) *managerapi.Operation {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	operation := m.operations[id]
 	if operation == nil {
-		return &managerOperation{ID: id, State: "failed", Error: "operation record lost"}
+		return &managerapi.Operation{ID: id, State: "failed", Error: "operation record lost"}
 	}
 	if operationErr != nil {
 		operation.State = "failed"
@@ -506,22 +529,28 @@ func (m *managerService) finishOperation(id string, operationErr error) *manager
 	return cloneManagerOperation(operation)
 }
 
-func (m *managerService) operation(id string) (*managerOperation, bool) {
+func (m *managerService) operation(id string) (*managerapi.Operation, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	operation, ok := m.operations[id]
 	return cloneManagerOperation(operation), ok
 }
 
-func cloneManagerOperation(operation *managerOperation) *managerOperation {
-	if operation == nil {
+func cloneManagerOperation(record *operationRecord) *managerapi.Operation {
+	if record == nil {
 		return nil
 	}
-	copy := *operation
-	copy.Warnings = append([]string(nil), operation.Warnings...)
-	copy.idempotencyKey = ""
-	copy.fingerprint = ""
-	return &copy
+	clone := record.Operation
+	clone.Warnings = append([]string(nil), record.Warnings...)
+	if record.Configure != nil {
+		result := *record.Configure
+		clone.Configure = &result
+	}
+	if record.Run != nil {
+		result := *record.Run
+		clone.Run = &result
+	}
+	return &clone
 }
 
 func (m *managerService) pruneOperationsLocked() {
@@ -548,9 +577,9 @@ func (m *managerService) removeOldestCompletedOperationLocked() bool {
 	return false
 }
 
-func (m *managerService) publishLocked(eventType string, operation *managerOperation) {
+func (m *managerService) publishLocked(eventType string, operation *operationRecord) {
 	m.nextEvent++
-	event := managerEvent{
+	event := managerapi.Event{
 		ID: m.nextEvent, Type: eventType, OperationID: operation.ID,
 		Sandbox: operation.Sandbox, State: operation.State, Time: time.Now().UTC(),
 	}
@@ -564,7 +593,7 @@ func (m *managerService) publishLocked(eventType string, operation *managerOpera
 	}
 }
 
-func (m *managerService) subscribe() (uint64, <-chan managerEvent, func(), bool) {
+func (m *managerService) subscribe() (uint64, <-chan managerapi.Event, func(), bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.subscribers) >= managerMaxSubscribers {
@@ -572,7 +601,7 @@ func (m *managerService) subscribe() (uint64, <-chan managerEvent, func(), bool)
 	}
 	m.nextSubscriber++
 	id := m.nextSubscriber
-	channel := make(chan managerEvent, managerEventBuffer)
+	channel := make(chan managerapi.Event, managerEventBuffer)
 	m.subscribers[id] = channel
 	cancel := func() {
 		m.mu.Lock()
@@ -585,7 +614,7 @@ func (m *managerService) subscribe() (uint64, <-chan managerEvent, func(), bool)
 	return id, channel, cancel, true
 }
 
-func (request managerCreateRequest) startRequest() lifecycle.StartRequest {
+func createStartRequest(request managerapi.CreateSandboxRequest) lifecycle.StartRequest {
 	options := config.DefaultRunOptions()
 	options.Name, options.Image = request.Name, request.Image
 	if request.Kernel != "" {
@@ -602,6 +631,8 @@ func (request managerCreateRequest) startRequest() lifecycle.StartRequest {
 	if request.ProcessIsolation != "" {
 		options.ProcessIsolation = request.ProcessIsolation
 	}
+	options.OrganizationSnapshot = request.OrganizationPolicy
+	options.SSH, options.DevContainers = request.SSH, request.DevContainers
 	options.RWLayer = request.RWLayer
 	// HTTP creation has always defaulted to read-only. Presence is explicit
 	// so the common resolver does not infer a writable layer.
@@ -633,15 +664,15 @@ func (request managerCreateRequest) startRequest() lifecycle.StartRequest {
 	return lifecycle.StartRequest{Name: request.Name, Mode: lifecycle.Create, Options: options, CachedOnly: true}
 }
 
-func listManagerSandboxes() ([]managerSandbox, error) {
+func listManagerSandboxes() ([]managerapi.Sandbox, error) {
 	entries, err := os.ReadDir(layout.Root())
 	if errors.Is(err, os.ErrNotExist) {
-		return []managerSandbox{}, nil
+		return []managerapi.Sandbox{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	result := make([]managerSandbox, 0, len(entries))
+	result := make([]managerapi.Sandbox, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() || !layout.ValidName(entry.Name()) {
 			continue
@@ -654,13 +685,13 @@ func listManagerSandboxes() ([]managerSandbox, error) {
 	return result, nil
 }
 
-func inspectManagerSandbox(name string) (managerSandbox, error) {
+func inspectManagerSandbox(name string) (managerapi.Sandbox, error) {
 	snapshot, err := inspection.Inspect(name)
 	if err != nil {
-		return managerSandbox{}, err
+		return managerapi.Sandbox{}, err
 	}
 	if snapshot.ConfigError != nil {
-		return managerSandbox{}, snapshot.ConfigError
+		return managerapi.Sandbox{}, snapshot.ConfigError
 	}
 	cfg := snapshot.Desired
 	imageName := filepath.Base(cfg.Image)
@@ -671,7 +702,7 @@ func inspectManagerSandbox(name string) (managerSandbox, error) {
 	if cfg.ProxyURL != "" && noProxy == "" {
 		noProxy = config.DefaultNoProxy
 	}
-	return managerSandbox{
+	return managerapi.Sandbox{
 		Name: name, State: string(snapshot.State), PID: snapshot.PID, Image: imageName,
 		Desired: inspection.Settings(cfg), Active: snapshot.Active, RestartRequired: snapshot.RestartRequired,
 		ImageRef: cfg.ImageRef, ImageDigest: cfg.ImageDigest,
@@ -680,7 +711,7 @@ func inspectManagerSandbox(name string) (managerSandbox, error) {
 	}, nil
 }
 
-func validateManagerExec(request *managerExecRequest) error {
+func validateManagerExec(request *managerapi.ExecRequest) error {
 	if len(request.Argv) == 0 || len(request.Argv) > 256 {
 		return fmt.Errorf("argv must contain between 1 and 256 entries")
 	}
@@ -753,7 +784,7 @@ func writeManagerError(w http.ResponseWriter, status int, err error, operationID
 	if err != nil && err.Error() != "" {
 		message = err.Error()
 	}
-	writeManagerJSON(w, status, managerErrorResponse{Error: message, OperationID: operationID})
+	writeManagerJSON(w, status, managerapi.ErrorResponse{Error: message, OperationID: operationID})
 }
 
 func managerFingerprint(method, path string, body []byte) string {
@@ -800,118 +831,334 @@ func SocketPath() string {
 	return filepath.Join(managerBaseDir(), "manager.sock")
 }
 
-// Cmd runs the same-user local HTTP/JSON manager over lifecycle. It
-// deliberately accepts only a filesystem Unix-socket path; remote transport
-// requires a separate, explicitly authenticated mTLS gateway.
+// Cmd runs the HTTP/JSON manager over lifecycle. The default listener is the
+// same-user Unix socket, whose filesystem permissions are the authentication
+// boundary. -listen tls://ADDR:PORT opts into the network transport, which
+// requires bearer-token authentication (--token-file) and TLS material
+// (--self-signed or --tls-cert/--tls-key); plaintext network listeners are
+// refused. An optional -policy-feed adds one outbound mTLS organization-wide
+// policy receiver. See docs/gantry/remote-access.md.
 func Cmd(argv []string, lifecycle Lifecycle) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	socket := flags.String("socket", SocketPath(), "Unix-domain manager socket")
+	socket := flags.String("socket", "", "deprecated alias for -listen unix://PATH")
+	var listens listenFlags
+	flags.Var(&listens, "listen", "manager listener: unix://PATH or tls://ADDR:PORT (repeatable); default unix://"+SocketPath())
+	selfSigned := flags.Bool("self-signed", false, "generate or reuse self-signed TLS material under <root>/serve/")
+	tlsCert := flags.String("tls-cert", "", "TLS certificate chain file (requires --tls-key)")
+	tlsKey := flags.String("tls-key", "", "TLS private key file (requires --tls-cert)")
+	tokenFile := flags.String("token-file", "", "bearer token file, one token per line (required with tls://)")
+	var feedPaths policyFeedFlags
+	flags.Var(&feedPaths, "policy-feed", "organization-wide mTLS policy-feed configuration")
+	mintToken := flags.Bool("mint-token", false, "print a fresh bearer token and exit")
 	if err := flags.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if flags.NArg() != 0 || *socket == "" || strings.ContainsRune(*socket, 0) {
-		fmt.Fprintln(os.Stderr, "usage: gantry serve [-socket ~/.gantry/manager.sock]")
+	if flags.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage: gantry serve [-listen unix://PATH | tls://ADDR:PORT] [--self-signed | --tls-cert C --tls-key K] [--token-file PATH] [--policy-feed CONFIG]")
+		fmt.Fprintln(os.Stderr, "       gantry serve --mint-token")
 		return 2
 	}
-	if err := serveManager(*socket, lifecycle); err != nil {
+	if *mintToken {
+		token, err := MintToken()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry serve:", err)
+			return 1
+		}
+		fmt.Println(token)
+		return 0
+	}
+	plan, err := resolveServePlan(*socket, listens, *tlsCert, *tlsKey, *selfSigned, *tokenFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gantry serve:", err)
+		return 2
+	}
+	if len(feedPaths) > 1 {
+		fmt.Fprintln(os.Stderr, "gantry serve: only one organization-wide policy feed may be configured")
+		return 2
+	}
+	feeds := make([]*policyfeed.Config, 0, len(feedPaths))
+	for _, path := range feedPaths {
+		feed, err := policyfeed.LoadConfig(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gantry serve:", err)
+			return 2
+		}
+		feeds = append(feeds, feed)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serveWithOptions(ctx, serveOptions{plan: plan, policyFeeds: feeds}, lifecycle); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry serve:", err)
 		return 1
 	}
 	return 0
 }
 
+// listenFlags collects repeated -listen occurrences.
+type listenFlags []string
+
+func (f *listenFlags) String() string { return strings.Join(*f, ",") }
+
+func (f *listenFlags) Set(value string) error {
+	if value == "" {
+		return errors.New("empty -listen value")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+type policyFeedFlags []string
+
+func (f *policyFeedFlags) String() string { return strings.Join(*f, ",") }
+
+func (f *policyFeedFlags) Set(value string) error {
+	if value == "" {
+		return errors.New("empty -policy-feed value")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+// serveManager keeps the historical single-unix-socket entry point for
+// existing callers and tests.
 func serveManager(socketPath string, lifecycle Lifecycle) error {
-	// The default manager endpoint shares Gantry's application root. Secure
-	// each predictable fallback component before MkdirAll can traverse it.
-	if os.Getenv("GANTRY_MANAGER_SOCKET") == "" && filepath.Clean(socketPath) == filepath.Clean(SocketPath()) {
-		if err := layout.EnsureRoot(); err != nil {
+	plan, err := resolveServePlan(socketPath, nil, "", "", false, "")
+	if err != nil {
+		return err
+	}
+	return serveWithOptions(context.Background(), serveOptions{plan: plan}, lifecycle)
+}
+
+// serveOptions carries the validated plan plus injectable log destinations.
+type serveOptions struct {
+	plan        servePlan
+	policyFeeds []*policyfeed.Config
+	// audit receives authentication, mutation, and policy-feed records;
+	// nil defaults to stderr.
+	audit *log.Logger
+}
+
+// serveWithOptions runs every planned listener until ctx cancels or one
+// fails. One manager process holds one state lock and shares one connection
+// budget across listeners; each listener gets the handler appropriate to its
+// transport (same-user unix, or bearer-authenticated TLS).
+func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifecycle) error {
+	if len(options.policyFeeds) > 1 {
+		return fmt.Errorf("only one organization-wide policy feed may be configured")
+	}
+	plan := options.plan
+	audit := options.audit
+	if audit == nil {
+		audit = log.New(os.Stderr, "gantry serve: audit: ", log.LstdFlags)
+	}
+	service := newManagerService(lifecycle)
+	defer service.cancel()
+
+	var tlsMaterial *serveTLS
+	var auth *tokenAuth
+	if plan.hasTLS() {
+		var err error
+		tlsMaterial, err = loadServeTLS(plan)
+		if err != nil {
+			return err
+		}
+		auth, err = newTokenAuth(plan.tokenFile, audit)
+		if err != nil {
 			return err
 		}
 	}
-	base := filepath.Dir(socketPath)
-	if err := localsec.CreateManagerDir(base); err != nil {
+
+	// The lock directory derives from the first unix listener (historical
+	// behavior) or the manager base for TLS-only plans, so two managers can
+	// never believe they own the same state tree.
+	lockBase := managerBaseDir()
+	for _, spec := range plan.listeners {
+		if spec.network == "unix" {
+			lockBase = filepath.Dir(spec.address)
+			break
+		}
+	}
+	for _, spec := range plan.listeners {
+		// The default manager endpoint shares Gantry's application root.
+		// Secure each predictable fallback component before MkdirAll can
+		// traverse it.
+		if spec.network == "unix" && os.Getenv("GANTRY_MANAGER_SOCKET") == "" && filepath.Clean(spec.address) == filepath.Clean(SocketPath()) {
+			if err := layout.EnsureRoot(); err != nil {
+				return err
+			}
+		}
+	}
+	if err := localsec.CreateManagerDir(lockBase); err != nil {
 		return fmt.Errorf("secure manager directory: %w", err)
 	}
-	stateDir := filepath.Join(base, "manager-state")
+	stateDir := filepath.Join(lockBase, "manager-state")
 	if err := localsec.CreateManagerDir(stateDir); err != nil {
 		return fmt.Errorf("create manager state directory: %w", err)
 	}
 	lock, err := layout.HoldLock(stateDir)
 	if err != nil {
-		return fmt.Errorf("another manager holds %s: %w", socketPath, err)
+		return fmt.Errorf("another manager holds the state lock: %w", err)
 	}
 	defer func() { _ = lock.Close() }()
 
-	if conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond); err == nil {
-		_ = conn.Close()
-		return fmt.Errorf("manager is already listening on %s", socketPath)
+	slots := make(chan struct{}, managerMaxConnections)
+	type managedServer struct {
+		server *http.Server
+		listen net.Listener
 	}
-	if info, err := os.Lstat(socketPath); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
-			return fmt.Errorf("refusing to remove non-socket manager endpoint %s", socketPath)
+	var servers []managedServer
+	cleanup := func() {
+		for _, managed := range servers {
+			_ = managed.listen.Close()
 		}
-		if err := os.Remove(socketPath); err != nil {
-			return fmt.Errorf("remove stale socket: %w", err)
+	}
+	defer cleanup()
+
+	for _, spec := range plan.listeners {
+		handler := service.handler()
+		var listener net.Listener
+		sameUserOnly := false
+		switch spec.network {
+		case "unix":
+			socketPath := spec.address
+			if conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond); err == nil {
+				_ = conn.Close()
+				cleanup()
+				return fmt.Errorf("manager is already listening on %s", socketPath)
+			}
+			if info, err := os.Lstat(socketPath); err == nil {
+				if info.Mode()&os.ModeSocket == 0 {
+					return fmt.Errorf("refusing to remove non-socket manager endpoint %s", socketPath)
+				}
+				if err := os.Remove(socketPath); err != nil {
+					return fmt.Errorf("remove stale socket: %w", err)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("inspect stale socket: %w", err)
+			}
+			listener, err = net.Listen("unix", socketPath)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = os.Remove(socketPath) }()
+			if err := localsec.SecureEndpoint(socketPath); err != nil {
+				return fmt.Errorf("secure manager endpoint: %w", err)
+			}
+			sameUserOnly = true
+			fmt.Printf("gantry serve: listening on %s\n", spec)
+		case "tls":
+			plain, err := net.Listen("tcp", spec.address)
+			if err != nil {
+				return err
+			}
+			listener = tls.NewListener(plain, tlsMaterial.config)
+			handler = service.authenticatedHandler(auth, audit)
+			fmt.Printf("gantry serve: listening on %s (tls fingerprint %s; bearer auth required)\n", spec, tlsMaterial.fingerprint)
+		default:
+			return fmt.Errorf("unsupported listener network %q", spec.network)
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect stale socket: %w", err)
-	}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = listener.Close()
-		_ = os.Remove(socketPath)
-	}()
-	if err := localsec.SecureEndpoint(socketPath); err != nil {
-		return fmt.Errorf("secure manager endpoint: %w", err)
+		server := &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+			IdleTimeout:       2 * time.Minute,
+			MaxHeaderBytes:    16 << 10,
+			ErrorLog:          log.New(os.Stderr, "gantry serve: http: ", log.LstdFlags),
+		}
+		servers = append(servers, managedServer{
+			server: server,
+			listen: &limitedListener{Listener: listener, slots: slots, sameUserOnly: sameUserOnly},
+		})
 	}
 
-	service := newManagerService(lifecycle)
-	server := &http.Server{
-		Handler:           service.handler(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    16 << 10,
-		ErrorLog:          log.New(os.Stderr, "gantry serve: http: ", log.LstdFlags),
+	feedStateDir := filepath.Join(stateDir, "policy-feeds")
+	receivers := make([]*policyfeed.Receiver, 0, len(options.policyFeeds))
+	for _, feed := range options.policyFeeds {
+		receiver, err := policyfeed.NewReceiver(feed, feedStateDir, audit, service.applyReceivedOrganizationPolicy)
+		if err != nil {
+			for _, opened := range receivers {
+				opened.Close()
+			}
+			return err
+		}
+		// Restore the acknowledged signed generation before accepting manager
+		// requests. A failed target has already been stopped by the aggregate
+		// rollout; retain the receiver so its background loop can retry.
+		if err := receiver.Restore(ctx); err != nil && ctx.Err() == nil {
+			audit.Printf("policy feed %s: %v", feed.Organization, err)
+		}
+		receivers = append(receivers, receiver)
 	}
-	secureListener := &sameUserManagerListener{Listener: listener, slots: make(chan struct{}, managerMaxConnections)}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	for _, receiver := range receivers {
+		service.background.Add(1)
+		go func() {
+			defer service.background.Done()
+			receiver.Run(service.context)
+		}()
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	serveErrors := make(chan error, len(servers))
+	var running sync.WaitGroup
+	for _, managed := range servers {
+		running.Add(1)
+		go func(server *http.Server, listener net.Listener) {
+			defer running.Done()
+			if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+				serveErrors <- err
+				cancel()
+			}
+		}(managed.server, managed.listen)
+	}
 	shutdownDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), managerShutdownGracePeriod)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-		close(shutdownDone)
+		defer close(shutdownDone)
+		<-runCtx.Done()
+		service.cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), managerShutdownGracePeriod)
+		defer shutdownCancel()
+		for _, managed := range servers {
+			_ = managed.server.Shutdown(shutdownCtx)
+		}
 	}()
-	fmt.Printf("gantry serve: listening on %s\n", socketPath)
-	err = server.Serve(secureListener)
-	if errors.Is(err, http.ErrServerClosed) {
-		<-shutdownDone
-		return nil
+
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case err := <-serveErrors:
+		serveErr = err
 	}
-	return err
+	cancel()
+	running.Wait()
+	<-shutdownDone
+	service.background.Wait()
+	return serveErr
 }
 
-type sameUserManagerListener struct {
+// limitedListener bounds concurrent connections and optionally restricts
+// accepted peers to the same account (unix sockets; TLS peers authenticate
+// at the HTTP layer instead).
+type limitedListener struct {
 	net.Listener
-	slots chan struct{}
+	slots        chan struct{}
+	sameUserOnly bool
 }
 
-func (l *sameUserManagerListener) Accept() (net.Conn, error) {
+func (l *limitedListener) Accept() (net.Conn, error) {
 	for {
 		connection, err := l.Listener.Accept()
 		if err != nil {
 			return nil, err
 		}
-		if !localsec.PeerSameUser(connection) || !tryAcquireSlot(l.slots) {
+		if l.sameUserOnly && !localsec.PeerSameUser(connection) {
+			_ = connection.Close()
+			continue
+		}
+		if !tryAcquireSlot(l.slots) {
 			_ = connection.Close()
 			continue
 		}

@@ -1,0 +1,8 @@
+# CI compares generated sources byte-for-byte. Keep source and generator inputs
+# canonical even when a Windows checkout has core.autocrlf enabled.
+*.go text eol=lf
+*.proto text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf

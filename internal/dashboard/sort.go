@@ -65,6 +65,9 @@ func (m sandboxTUIModel) sortScope() int {
 
 func (m sandboxTUIModel) sortColumns() []tuiSortColumn {
 	switch m.page {
+	case tuiRemotesPage:
+		return nil // grouped by source; never sorted as local sandbox rows
+
 	case tuiTrafficPage:
 		return []tuiSortColumn{{"status", "Status", "STATUS"}, {"sandbox", "Sandbox", "SANDBOX"}, {"host", "Host / destination", "HOST / DESTINATION|HOST"}, {"proto", "Protocol", "PROTO"}, {"tx", "TX bytes", "↑ TX"}, {"rx", "RX bytes", "↓ RX"}, {"packets", "Packets", "PACKETS"}, {"last", "Last seen", "LAST"}, {"port", "Port", ""}}
 	case tuiRulesPage:
@@ -77,6 +80,8 @@ func (m sandboxTUIModel) sortColumns() []tuiSortColumn {
 		return []tuiSortColumn{{"sandbox", "Sandbox", "SANDBOX"}, {"name", "Name", "NAME"}, {"state", "State", "STATE"}}
 	case tuiMCPPage:
 		return []tuiSortColumn{{"state", "State", "STATE"}, {"sandbox", "Sandbox", "SANDBOX"}, {"name", "Server", "SERVER"}, {"type", "Type", "TYPE"}, {"endpoint", "Endpoint / root", "ENDPOINT / ROOT|ENDPOINT"}, {"auth", "Authentication", "AUTH"}}
+	case tuiAuditPage:
+		return []tuiSortColumn{{"result", "Result", "RESULT"}, {"sandbox", "Sandbox", "SANDBOX"}, {"action", "Action", "ACTION"}, {"message", "Detail", "DETAIL"}}
 	case tuiPacketsPage:
 		return []tuiSortColumn{{"time", "Time", "TIME"}, {"sandbox", "Sandbox", "SANDBOX|VM"}, {"direction", "Direction", "DIR|D"}, {"source", "Source", "SOURCE"}, {"target", "Destination", "DESTINATION|DEST"}, {"proto", "Protocol", "PROTO"}, {"length", "Length", "LEN"}, {"info", "Info", "INFO"}, {"status", "Decision", ""}}
 	case tuiImagesPage:

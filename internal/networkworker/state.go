@@ -131,7 +131,7 @@ func (s *state) commitPolicy(req workerproto.Request) (any, error) {
 	if err := validatePolicyAgainstUDPForwards(s.pending, forwards); err != nil {
 		return nil, err
 	}
-	if err := s.policy.Replace(s.pending); err != nil {
+	if err := s.policy.ReplaceExact(s.pending); err != nil {
 		return nil, err
 	}
 	s.currentTxn = s.pendingTxn

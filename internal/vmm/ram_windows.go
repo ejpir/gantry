@@ -37,9 +37,8 @@ func allocGuestRAM(size, initialCommit uint64, backing *os.File) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("reserve %d bytes of Windows guest RAM: %w", size, err)
 	}
-	// VirtualAlloc and MapViewOfFile return live allocation bases; converting
-	// those API results is the intended use.
-	ram := unsafe.Slice((*byte)(unsafe.Pointer(base)), int(size)) //nolint:govet
+	// VirtualAlloc and MapViewOfFile return live allocation bases.
+	ram := windowsByteSlice(base, int(size))
 	if err := commitGuestRAM(ram, 0, initialCommit); err != nil {
 		if shared {
 			_ = windows.UnmapViewOfFile(base)

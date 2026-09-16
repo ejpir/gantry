@@ -10,11 +10,11 @@ import (
 	"sync"
 )
 
-// auditRing is a bounded in-memory trail of security-relevant broker
-// events: credential deliveries and withholds, secret-source errors, and
-// OAuth custody events. daemon.log remains the primary record; the ring
-// backs the audit.tail control op so `gantry audit` can read events back
-// from a running sandbox without touching the host filesystem.
+// auditRing is the daemon-wide security trail: policy decisions, credential
+// deliveries and withholds, secret-source errors, and OAuth custody events.
+// logf serializes its sinks from early boot through broker teardown. The ring
+// backs audit.tail while running; audit.log provides the bounded stopped-state
+// fallback. daemon.log remains the primary record.
 //
 // Lines MUST never carry secret material — the trail names secrets, it
 // does not quote them. The adversarial-input test
@@ -26,9 +26,12 @@ const (
 )
 
 type auditRing struct {
-	mu    sync.Mutex
-	lines []string
-	bytes int
+	// Separate sink serialization from the ring lock so disk I/O does not
+	// block live audit.tail readers. All producers share this writer lock.
+	writeMu sync.Mutex
+	mu      sync.Mutex
+	lines   []string
+	bytes   int
 }
 
 func (r *auditRing) append(line string) {
@@ -56,16 +59,34 @@ func (r *auditRing) tail() []string {
 	return append([]string(nil), r.lines...)
 }
 
-// auditf records a security-relevant event: it lands on the daemon's
-// stderr (daemon.log, the primary record) and in the bounded audit ring
-// for control-socket readback.
+// logf is shared by early daemon events and the control broker. A writer
+// scoped only to the broker would race policy callbacks during file rotation.
+func (r *auditRing) logf(dir, format string, a ...any) {
+	line := sanitizeAuditLine(fmt.Sprintf(format, a...))
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+	writeAuditLine(r, dir, line)
+}
+
 func (br *broker) auditf(format string, a ...any) {
+	if br.audit != nil {
+		br.audit.logf(br.dir, format, a...)
+		return
+	}
+	// Standalone brokers may have no live ring. Preserve their console/disk
+	// sinks; production brokers always share the daemon's initialized ring.
 	line := sanitizeAuditLine(fmt.Sprintf(format, a...))
 	br.auditMu.Lock()
 	defer br.auditMu.Unlock()
-	br.audit.append(line)
+	writeAuditLine(nil, br.dir, line)
+}
+
+// writeAuditLine requires a sanitized line and the caller's sink lock,
+// including for rotation.
+func writeAuditLine(r *auditRing, dir, line string) {
+	r.append(line)
 	fmt.Printf("daemon: %s\n", line)
-	br.persistAuditLine(line)
+	persistAuditLine(dir, line)
 }
 
 // sanitizeAuditLine enforces the audit trail's line-oriented, bounded schema.
@@ -110,12 +131,13 @@ const auditLogCap = 1 << 20
 
 // persistAuditLine appends to <dir>/audit.log so `gantry audit` works after
 // the daemon stops. Never fails loudly: disk trouble must not break the
-// custody paths that audit.
-func (br *broker) persistAuditLine(line string) {
-	if br.dir == "" {
+// authorization or credential paths that audit. The caller holds the shared
+// sink lock across both rotation and append.
+func persistAuditLine(dir, line string) {
+	if dir == "" {
 		return
 	}
-	path := filepath.Join(br.dir, "audit.log")
+	path := filepath.Join(dir, "audit.log")
 	st, statErr := os.Lstat(path)
 	if statErr == nil && (st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular()) {
 		return // never follow or block on a pre-planted audit endpoint

@@ -72,9 +72,11 @@ The ordinary command paths are:
 - `exec <name>` connects to that supervisor's local session broker.
 - one-shot `exec` creates a randomly named transient sandbox, runs one
   session, and deletes it.
-- `tui` uses the same local lifecycle and control surfaces as the CLI.
-- `serve` provides a structured local HTTP API and delegates lifecycle work
-  to the same implementation.
+- `tui` uses the same local lifecycle and control surfaces as the CLI, with
+  separate source-scoped clients for remote rows.
+- `serve` provides the HTTP/JSON manager API on a Unix socket by default, or
+  on explicitly configured TLS listeners with bearer authentication. It
+  delegates lifecycle work to the same implementation.
 
 Create and resume use the typed `internal/sandbox/lifecycle` application
 contract. CLI flags, HTTP JSON, and dashboard form inputs are converted into
@@ -117,8 +119,12 @@ it listens on `ssh.sock` in the sandbox's private state directory and verifies
 the connecting process's UID; Windows uses a protected local endpoint. No TCP
 SSH listener is created. `gantry ssh` supplies OpenSSH with a `ProxyCommand`
 and `KnownHostsCommand`; `gantry ssh setup` installs the equivalent managed
-wildcard configuration using locked, atomic writes. One install-wide Ed25519
-host key identifies Gantry's local gateways.
+wildcard configuration using locked, atomic writes. On Windows Gantry selects
+the native system OpenSSH explicitly rather than an MSYS client with a
+different path namespace. Win32 OpenSSH requires the helper executable to be
+an unquoted absolute token, so Gantry uses its DOS short path when the installed
+path needs quoting. One install-wide Ed25519 host key identifies Gantry's local
+gateways.
 
 After the SSH handshake, the gateway maps each session, PTY, SFTP, or guest
 loopback-forward request onto the supervisor's existing session broker. SSH
@@ -313,6 +319,26 @@ The guest receives several block-backed filesystems:
 OCI image cache entries are immutable and shared between sandboxes by digest.
 Writable ext4 layers are private and must not be shared by running VMs.
 
+### OCI image preparation and export
+
+For commands and workflows, see [Images](images.md).
+
+For OCI inputs, the host resolver selects the guest architecture, verifies the
+manifest and blobs, preserves execution configuration, and publishes a
+flattened EROFS image plus metadata under the platform-manifest digest. Local
+OCI layouts, OCI archives, and Docker save archives enter the same verified
+cache. Native layer sets instead attach an fsmeta image and ordered immutable
+EROFS layers directly.
+
+Export requires a stopped sandbox and an exclusive writable-layer lock. A
+read-only ext4 view replays committed journal metadata in memory, then emits an
+OCI image-layout archive containing the immutable base plus workload changes.
+Overlay whiteouts, opaque directories, ownership, modes, links, sparse files,
+device metadata, and supported extended attributes are translated without
+mounting the filesystem. Host shares and the separate Dev Containers IDE layer
+are excluded. Logical file data is bounded by the writable device size or
+64 GiB, whichever is smaller, and output is atomically replaced.
+
 Host directories use a single multiplexed virtio-fs share hub. Each admitted
 tag appears in the guest namespace and is bind-mounted into the container at
 its selected path. The supervisor retains the host roots and applies
@@ -469,22 +495,483 @@ in-guest filesystem hardening work.
 
 ### OAuth bridge and custody
 
-The callback bridge recognizes supported guest loopback authorization URLs
-and creates a short-lived listener on host loopback. It validates the captured
-path and, when the authorization URL includes one, state; it accepts one
-callback and replays that callback to the guest loopback service. Custody-owned
-listeners fail closed when no pending state claims a callback. The host returns
-its own CSP-locked completion page; guest status, headers, redirects, body, and
-error details are never rendered in the browser. The bridge is separate from
-general port publishing.
+For setup and login commands, see [OAuth](oauth.md).
 
-With custody enabled, the supervisor performs the provider-specific code
-exchange. It writes the refresh token to `oauth-tokens.json` in the protected
-sandbox state directory, while the guest provider file receives an access
-token and a sentinel in place of the refresh token. The refresh loop updates
-the host registry atomically and pushes replacement access tokens into the
-guest. On resume, the supervisor restores that registry before restarting the
-refresh loop.
+A daemon-owned guest helper discovers loopback TCP listeners without reading
+application output. The callback bridge mirrors allowed ports on host loopback
+and closes transparent gates when the guest socket disappears. It accepts
+OAuth-shaped GET queries and `application/x-www-form-urlencoded` POST results
+with one non-empty state and either code or error. The guest CLI validates its
+own state and PKCE; the bridge does not infer them from authorization URLs.
+
+POST preserves the original form bytes and method, including MSAL's POST-only
+`response_mode=form_post` flow. Duplicate result fields and query/form mixing
+are rejected. URLs are bounded to 8 KiB, forms to 16 KiB, and form reads share
+the two-slot replay limit. A fixed bash `/dev/tcp/localhost/PORT` helper receives
+a host-constructed HTTP request on stdin, keeping callback data out of argv and
+shell source. Only synthetic headers are sent; browser cookies and headers
+never cross into the guest. Replay errors omit guest-controlled text.
+
+Custody-owned listeners stay GET-only and fail closed when no exact pending
+state claims a callback. The host returns its own CSP-locked completion page;
+guest status, headers, redirects, body, and error details are never rendered
+in the browser. The bridge is separate from general port publishing.
+
+With custody enabled, the supervisor performs code or device-grant exchanges
+using host-approved provider metadata. It stores tokens in the protected
+`oauth-tokens.json` registry and refreshes it atomically. Explicit delivery
+adapters select guest access-token files, credential-broker use, or host-side
+MCP injection; file adapters use a sentinel instead of exposing a refresh token.
+On resume, the supervisor restores the registry and configured delivery paths.
+This guest/tool custody mechanism is independent of organization OIDC login.
+The real-VM acceptance battery launches the disposable authorization server in
+`internal/orgauth/testidp`: it owns single-use codes, validates S256 PKCE and
+resource/callback binding, rotates refresh tokens, and protects a local MCP
+resource instead of returning canned token responses.
+
+## Organization identity and discovery
+
+For everyday commands, see [Organization login](organization-login.md).
+Organization login is optional, host-owned trust configuration, not mandatory
+enrollment or guest/tool OAuth login. The host owner remains trusted. Membership
+is never inferred from an email domain, Git remote or coding-tool account.
+A verified identity selects a profile in a separately signed policy bundle;
+login alone does not mutate a sandbox or authorize a manager connection.
+
+### OIDC trust configuration
+
+Host-side discovery and ID-token verification use `coreos/go-oidc/v3` v3.21.0,
+with `golang.org/x/oauth2` for Authorization Code + S256 PKCE. Register a public
+native client with no client secret and a redirect URI of
+`http://127.0.0.1:PORT/oidc/callback`. Omit `redirect_port` only if the IdP accepts
+variable loopback ports; otherwise configure the exact registered port.
+
+Obtain the issuer, client ID, group mappings, bundle and verification key from
+a trusted administrative channel. For example:
+
+```json
+{
+  "version": 1,
+  "organization": "example-company",
+  "issuer": "https://idp.example.com/realms/company",
+  "client_id": "gantry-cli",
+  "redirect_port": 8765,
+  "scopes": ["groups"],
+  "group_claim": "groups",
+  "group_profiles": {
+    "gantry-developers": "developer",
+    "gantry-administrators": "admin"
+  },
+  "bundle": "policy/bundle.tar.gz",
+  "public_key": "trusted/org-public.pem"
+}
+```
+
+Paths are relative to the configuration file. Both profiles must exist in the
+signed bundle, and its organization must match the configuration. Optional
+`ca_file` adds public PEM CA certificates for a private IdP. Configuration and
+CA files must be regular, not symlinks. Normal certificate-chain and hostname
+verification stays enabled; HTTP issuers and insecure TLS are not supported.
+The policy, key, provider configuration and CA are pinned before browser login.
+Changing their source files cannot retarget an in-flight login or later apply.
+
+`group_claim` names one exact top-level ID-token claim, including namespaced
+claim names. Its value must be a string or array of strings. Matching is exact
+and case-sensitive: no wildcards, nested-claim traversal or fallback profile.
+An unmapped user is denied. Multiple authorized profiles require explicit
+`-profile` selection, which cannot grant an unauthorized profile. Administrators
+must select an authoritative membership claim and control its assignment.
+Gantry does not query UserInfo, follow distributed claims or fetch group-overage
+APIs. `openid` is always requested; additional scopes supply provider-specific
+claims. `offline_access` is not supported because these logins retain no refresh
+tokens.
+
+[`examples/organization.json`](../../examples/organization.json) is a local-test
+template using the included `developer` profile and fixed port 8765. Its bundle
+and key are test-only, host-path-specific, and expire on 2026-10-13; they do not
+establish a real organization's identity. Replace IdP settings and regenerate
+or obtain a suitable policy before using it elsewhere.
+
+### Login validation and receipts
+
+Random state binds the callback and S256 PKCE binds code redemption. Gantry
+validates the ID-token signature, exact issuer, client audience, expiry, issue
+time, nonce, authorized-party (`azp`) claim, and access-token hash when supplied.
+Multiple audiences require `azp`. Callbacks are GET-only, loopback-only, bounded
+and one-shot. The browser must reach the CLI host's loopback listener. Login
+defaults to five minutes; `-timeout` permits 1s–15m.
+
+Discovery, token and JWKS requests use HTTPS, bounded responses and deadlines,
+and refuse redirects. Token bodies, authorization codes, unfiltered claims and
+upstream error descriptions do not enter diagnostics. The authorization URL is
+intentionally displayed for browser navigation; treat it as private while the
+login is active. Denial, cancellation, malformed callbacks, token errors and
+unmapped membership do not replace an earlier successful receipt.
+
+Only a token-free receipt is persisted: organization, issuer/client ID, subject,
+selected profile, expiry, pinned signed policy/key, and optional public catalog.
+No ID/access/refresh tokens, authorization codes, PKCE verifiers or group lists
+are saved. No login credential is delivered to a guest or added to sandbox
+configuration. Receipts live in `~/.gantry/orgs`, or `${GANTRY_HOME}-orgs` when
+the sandbox root is overridden, using private permissions/Windows ACLs and
+atomic replacement. Existing guest-share state-root protections cover them.
+They are local host state, not portable signed proofs for remote services.
+
+A receipt expires at the earlier of ID-token and signed-policy expiry. Expired
+receipts cannot be applied; login is explicit, with no background token refresh.
+`org apply` revalidates the receipt and applies its snapshot through the same
+live-or-stopped mutation path as `policy set`. A pinned sandbox policy then
+follows its own signed expiry independently of the receipt. Logout, group
+removal or login expiry does not stop sandboxes or clear their policies. Logout
+removes the local receipt, not provider SSO or upstream tokens. Revocation
+requires an explicit sandbox policy update or clear. Continuous membership
+checks, protected enrollment, automatic OIDC-driven bundle refresh and
+multi-organization composition are not implemented. Governed sandboxes currently reject guest/tool OAuth custody.
+
+### Dynamic remote catalog
+
+An IdP provides membership, not a standard remote inventory. Optional discovery
+uses an organization-owned HTTPS catalog in the trusted configuration:
+
+```json
+"remote_catalog": {
+  "url": "https://catalog.example.com/v1/remotes",
+  "resource": "https://catalog.example.com",
+  "scope": "gantry.catalog.read",
+  "ca_file": "trusted/catalog-ca.pem"
+}
+```
+
+`ca_file` is optional with public PKI. Endpoint and resource must use the same
+HTTPS host/port and contain no credentials, query or fragment. The endpoint,
+resource, scope and CA are pinned before browser navigation, never inferred
+from email or ID-token URLs.
+
+The IdP must support RFC 8707 resource indicators and a dedicated catalog scope.
+Gantry requests both during authorization and code exchange. Only after identity
+and membership verification does it send the resource-scoped access token in one
+GET to the exact trusted catalog endpoint. ID and refresh tokens are not sent;
+redirects are refused. The catalog must independently validate issuer, audience,
+scope, client and current membership, and return only permitted suggestions.
+Gantry supplies neither a production catalog server nor manager-side OIDC auth.
+
+```json
+{
+  "version": 1,
+  "organization": "example-company",
+  "subject": "verified-idp-subject",
+  "expires_at": "2027-01-01T00:00:00Z",
+  "remotes": [
+    { "name": "team-dev", "url": "https://gantry.example.com:8443" }
+  ]
+}
+```
+
+The date is illustrative, not a recommended TTL. Subject and organization must
+match the verified login, including deployments using pairwise subjects. The
+response must be unexpired, fit in 384 KiB, and contain at most 128 uniquely
+named remotes. Optional profile fields are `fingerprint` (`sha256:` followed by
+64 lowercase hex characters) and `caCert` (only public PEM certificates, at most
+64 KiB). Unknown fields, including credentials, are rejected. Catalog lifetime
+is capped at receipt expiry.
+
+Discovery never installs profiles, changes a default target, or contacts a
+manager with an OIDC credential. Registration requires a separate private
+manager bearer token and a verified connection. That token grants host-shell
+authority, not organization-scoped authorization. Name collisions require an
+explicit local alias; organization creation binds even renamed profiles to the
+receipt's exact endpoint and TLS trust, rechecking after long image pulls.
+Uploaded policy is verified as policy, not proof of remote user membership.
+
+Catalog failure is fail-soft for identity login: save the new receipt with a
+warning but without stale suggestions. Organization remote creation cannot
+continue without live discovery and never falls back to local creation. Login
+again, or use **Remotes → L**, to refresh; no hidden token cache refreshes it.
+Logout/expiry removes suggestions, not independently registered profiles.
+
+### Identity validation tooling
+
+The [standalone OIDC E2E](../../tests/e2e/oidc/README.md) drives real Gantry CLI
+subprocesses against a disposable local HTTPS IdP and synthetic browser flow:
+
+```sh
+go build -o /tmp/gantry ./cmd/gantry
+go run ./tests/e2e/oidc -gantry /tmp/gantry
+```
+
+Use a writable `.exe` path on Windows. It requires no external account, IdP
+installation, Docker, VM, policy server or private-key upload. The fixture
+implicitly authenticates a synthetic user; it is not a production IdP or a test
+of vendor consent/MFA UI. CI runs the CLI battery on Linux, Windows and macOS.
+The [remote TUI E2E](../../tests/e2e/remotetui/README.md) adds POSIX PTY onboarding
+and catalog-to-manager flows, without claiming VM boot or production IdP support.
+
+## Organization policy engine
+
+See [Organization policy](organization-policy.md) for practical commands. V1
+protects against guest/agent activity while trusting the host owner, who can
+remove the policy or use another runtime. It supports named and one-shot
+sandboxes. Policy provenance comes from a trusted signing public key, not an
+email domain, tool OAuth account or bundle received alongside an untrusted key.
+
+### Bundle format and signing
+
+Only data-only, RS256-signed OPA bundles are accepted. The decision combiner is
+embedded in `internal/policy/authz.rego`; bundles cannot add executable Rego.
+Compressed input is limited to 256 KiB and total decompression to 2 MiB. Only
+root `data.json`, `.signatures.json` and optional `.manifest` files are accepted,
+without filesystem extraction. RSA verification keys must have at least 2048
+bits; private/HMAC keys, verification exclusions and unsigned fallback are
+rejected. Local rules cannot assert an organization origin.
+
+`data.json` contains one `gantry` object with `version: 1`, bounded non-empty
+`organization` and `revision`, mandatory RFC 3339 `expires_at`, and 1–32 named
+`profiles`. Each profile contains `rules` and `network`. Unknown fields,
+unsupported actions/predicates, duplicate rule IDs, oversized input and expired
+activation fail closed. Signing validates every profile and verifies its output
+through the normal bundle verifier.
+
+Native `policy generate` and `policy sign` need no OPA/OpenSSL executables.
+They publish only `source/data.json`, `bundle.tar.gz` and `public.pem` into a new
+output directory, creating parents and using owner-only permissions where
+supported. Existing output is never overwritten and no sandbox is changed.
+Generation defaults to organization `local-test`, profile `developer`, a timestamp
+revision and 30-day expiry. `-organization`, `-profile`, `-revision` and `-ttl`
+override them; TTL accepts whole days or durations from 1s through 365d.
+Repeatable `-mount` resolves an existing directory to its canonical host path
+and grants read-only access to it and descendants. Other governed access denies.
+
+Generation uses an in-memory RSA-3072 test signer whose private key is not saved.
+`policy sign` requires exactly one of `-ephemeral` or `-signing-key`, with no
+silent fallback. A stable signer must be a single unencrypted PKCS#1/PKCS#8 RSA
+PEM with at least 2048 bits, kept outside source/output directories, guest shares
+and version control. Re-signing does not normalize mount paths, increment
+revision, extend expiry or change permissions automatically. Ephemeral signing
+rotates the public key and changes no already-pinned policy.
+
+For manual signing, copy [the example data](../../examples/org-policy/data.json)
+into a separate bundle directory, replace the host path and expiry, then use
+OPA v1 and OpenSSL. Keep the key outside that directory and guest shares:
+
+```sh
+mkdir -p /tmp/gantry-policy
+cp examples/org-policy/data.json /tmp/gantry-policy/data.json
+# Edit the copied data before signing; /secure/gantry must be a private directory.
+(umask 077; openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 \
+  -out /secure/gantry/org-private.pem)
+openssl pkey -in /secure/gantry/org-private.pem -pubout -out /tmp/org-public.pem
+opa build -b /tmp/gantry-policy --signing-key /secure/gantry/org-private.pem \
+  -o /tmp/org-policy.tar.gz
+gantry policy verify -bundle /tmp/org-policy.tar.gz -key /tmp/org-public.pem \
+  -profile developer
+```
+
+### Policy snapshots and decisions
+
+The three launch flags `-org-policy`, `-org-policy-key` and `-policy-profile` must
+be supplied together and also work with one-shot `exec`. Bundle bytes and public
+key are pinned in `sandbox.json` and reverified at boot. Source-file changes do
+not alter that snapshot. `policy set/clear`, `org apply`, and manager API
+updates reconcile their selected running daemon live. A manager policy-feed
+generation fans out through the same path to every saved sandbox; stopped
+updates use the launch lock and affect the next boot. `--restart` or `restart: true` explicitly selects
+controlled stop/update/resume. `policy show` verifies the saved snapshot, while
+`net-policy show` reports effective live rules when running. Neither signing
+private keys nor organization login tokens are persisted in sandbox config.
+
+Each rule has `id`, `effect` (`allow` or `deny`), `action`, and only the selectors
+for that action:
+
+| Action | Selectors | Meaning |
+|---|---|---|
+| `mount.read` | `path` | Export a pinned host directory and descendants. |
+| `mount.write` | `path` | Additionally required for writable exports. |
+| `mcp.connect` | `server` | Open the configured upstream. |
+| `mcp.tools.list` | `server`, `tool` | Show a tool. |
+| `mcp.tools.call` | `server`, `tool` | Independently invoke a tool. |
+| `credential.use` | `host` | Release a brokered host-bound credential. |
+
+Deny wins regardless of order; absence of an allow denies. Interactive `ask` is
+unsupported. Server/tool selectors are exact names, `*`, or one trailing `*`
+prefix pattern. Host selectors are lowercase ASCII names, `*.suffix` (including
+the suffix itself), or `*`. Mount paths are clean, absolute, canonical host paths
+in the target host's syntax. A subdirectory denial also prevents exporting its
+ancestor. Authorization uses the actual pinned root, retaining alias, state-root,
+secret-source, read-only and revocation protections.
+
+Daemon-owned guest-tool delivery is not a user directory grant. A bytes-only API
+stages only `gantry-guest` in a private read-only ephemeral share, then revokes it
+after installation. It accepts no arbitrary host path and needs no `/tmp` grant.
+Ordinary operations cannot replace, promote or remove the payload during delivery;
+using its tag in a user share request grants no exception. Existing isolation and
+policy expiry remain authoritative.
+
+MCP parsing stays in the confined worker. It submits only bounded action, server,
+tool and supervisor-issued session-capability metadata. The supervisor chooses
+identity/profile; the worker cannot supply URLs, identities or arbitrary Rego
+input. Arguments/results never enter OPA. A permitted listing does not grant
+execution; direct calls are independently checked. Existing tool policy,
+unsupported-method rejection, authorization-tool bans and credential redaction
+remain in force. Remote MCP dials check organization DNS and IP/port rules on the
+exact resolved address used, retaining SSRF protection. Credential release checks
+the configured upstream hostname before resolving its secret.
+
+### Policy distribution and live rollout
+
+`gantry serve` can run one optional host-side organization policy receiver
+configured by `-policy-feed`. Its configuration pins an organization, one
+profile applied manager-wide, an exact HTTPS endpoint, the organization RSA
+verification key, TLS CA, and mTLS client certificate/key. Paths are resolved
+and read once at manager startup. Files must be regular and symlink-free; the
+client key also requires owner-only Unix permissions or a protected Windows
+DACL. Feed credentials never enter a guest, manager API response, or sandbox
+configuration.
+
+The endpoint is polled immediately and then every 5–3600 seconds (30 seconds by
+default). Requests refuse redirects, require normal hostname verification plus
+the configured client certificate, use bounded headers and deadlines, and send
+`If-None-Match` with the last ETag. The last successfully applied generation and
+digest are returned in bounded request headers so the service can observe
+rollout progress. `Prefer: wait=30` lets a service implement a long poll without
+requiring a distinct streaming protocol. Responses are strict, bounded JSON
+containing version 1, the exact organization, a nonzero
+monotonic generation and one base64-encoded signed bundle. Profile and public
+key come only from local configuration.
+
+The receiver verifies the bundle through the normal policy engine before
+lifecycle mutation. Feed state stores the endpoint identity, applied and
+pending generations, bundle digests, ETags, and signed bundles in the protected
+manager state tree. Desired state is staged durably before fan-out. A restarted
+manager restores mandatory admission and attempts any pending fan-out before
+accepting lifecycle requests; unsuccessful targets remain stopped and retry in
+the background. An applied snapshot is restored before a 304 or unavailable
+feed response. The mTLS private key is never copied there. An
+older generation is rejected, and reusing a generation with different content
+is also rejected. Transport authentication controls which service can assign a
+generation, while the separately pinned bundle signature establishes policy
+provenance.
+
+A changed generation takes the manager-wide policy write barrier, enumerates
+all saved sandboxes, and then uses the existing per-sandbox mutation locks in
+stable order. Lifecycle requests and new exec/SSH admission take the read side
+before a sandbox lock, so creation, start, deletion, manual policy mutation, or
+a new remote session cannot cross the fan-out boundary. The new snapshot is
+also retained for later manager-created
+sandboxes. Per-sandbox policy replacement/clear and unmanaged low-level VM runs
+are refused while that snapshot is active; a failed target cannot be resumed
+through the manager until its saved snapshot matches.
+
+For each running sandbox, the daemon first verifies and compiles the candidate
+without changing active state. It then enables fail-closed credential/MCP and
+filesystem barriers, enters the network policy/port transaction domain,
+installs a default-deny network barrier (retaining only required replies for
+active UDP forwards), and:
+
+1. derives the local network policy from the active in-memory snapshot rather
+   than rereading a source path, then exactly replaces its organization guard;
+2. atomically marks each now-denied user export inaccessible and updates the
+   share expiry deadline, without revoking daemon-owned helper delivery;
+3. persists the snapshot through the daemon's single `ConfigStore` owner;
+4. publishes the immutable authorization engine, resets the expiry timer, and
+   releases the barriers.
+
+The embedded stack, split network worker and degraded split-VMM topology all
+receive the complete effective network policy. Worker generations use
+prepare/commit/status reconciliation; an unconfirmed worker update fails closed.
+Local network-policy and port changes share the outer transaction lock, so they
+land wholly before or after the organization generation. Existing MCP sessions
+are closed at the barrier; new sessions, authorization, and credential release
+read the controller for the active generation. Denied exports stay
+pinned but all new and already-open-handle operations fail; a later generation
+can restore them without changing the user's share configuration.
+
+A confirmed failure before persistence restores the old network and share
+state. For an organization-wide generation, any target that does not reach the
+new snapshot is stopped even if its local rollback succeeded; fan-out continues
+to the remaining targets. The receiver records and reports its aggregate cursor
+only after every saved sandbox succeeds, so a partial rollout is retried. A
+stopped sandbox is updated without being started.
+
+`restart: true` and `--restart` retain the controlled rollout path. A private
+marker records intent before stopping; retries resume an already-saved
+snapshot, while failures remain stopped and recoverable. This fallback is also
+useful for topology changes which cannot support a live organization policy.
+
+### Native network restrictions
+
+Rego's `network_plan` query materializes a validated native guard rather than
+running Rego per packet. Each network rule has `id`, `effect`, canonical IPv4
+`cidr`, `protocol` (`tcp`, `udp`, `icmp`, `any`), and individual `ports` 1–65535
+for TCP/UDP. An empty ports list means all ports. Deny overrides allow, and
+unmatched organization egress denies:
+
+```text
+allow = local policy allows AND organization network plan allows
+```
+
+Local JSON retains first-match semantics, DNS-learned state and its default
+public-internet posture. Organization policy cannot relax the local-network
+wall. Live `net-policy` updates and dashboard overrides inherit the current
+guard; an organization-policy generation exactly replaces or removes it.
+
+`network.dns` permits queries through the gateway resolver; an empty list denies
+queries. DNS permission does not grant returned IP access: a matching IP/port
+rule is also needed. Conversely, an allowed IP is not bound to a hostname. This
+is not HTTP, SNI, URL or TLS filtering. The example allows public IPv4 HTTPS,
+not only the listed DNS hosts; use explicit CIDRs when needed. Arbitrary
+Rego-to-firewall compilation and domain-derived organization IP grants are
+unsupported.
+
+ARP, valid DHCP and tracked replies to host-published TCP connections keep their
+infrastructure treatment; DNS content remains filtered. UDP publishing requires
+the gateway's full reply range in both policies. Governed fragments fail closed
+because they cannot independently satisfy IP/port authorization. IPv6 is
+unsupported and organization policy requires the embedded network backend.
+
+### Policy expiry, audit and limits
+
+Evaluation errors, timeouts, invalid input and undefined/malformed results deny.
+Prepared queries have bounded contexts and a small builtin capability allowlist:
+no HTTP, DNS, filesystem access or wall-clock reads. The host wrapper enforces
+expiry independently of Rego. At expiry, new authorization, egress and DNS deny;
+share requests, including already-open handles, fail; and the daemon initiates
+shutdown. Already delivered credentials/results, cached contents and in-progress
+operations cannot be recalled. Invalid configured policy never downgrades to
+local-only enforcement.
+
+Decisions record effect, reason, matching rule IDs, organization, revision,
+profile and action in the bounded live audit ring, `audit.log` and `daemon.log`.
+Early-boot and broker producers share a serialized writer, including rotation.
+Live and stopped `gantry audit` and the read-only dashboard **Audit** view use
+these tails. The disk trail is bounded and best-effort, not tamper-resistant
+compliance storage. No MCP arguments/results, tokens or resource contents are
+logged. Packets retain bounded traffic summaries, not per-packet Rego decisions.
+
+V1 excludes arbitrary bundle Rego, argument-based MCP rules, interactive
+approvals, mandatory host enrollment, continuous SSO checks and multi-org
+composition. Policy feeds prevent generation rollback locally but
+do not turn free-form bundle revisions into a globally ordered revision scheme.
+OAuth custody is rejected until host-side refresh/delivery is governed. Host
+image/asset downloads and other administrative activity are outside this policy.
+Explicit environment/file secrets remain host-selected inputs; their eventual
+confidentiality depends on permitted guest network and MCP activity.
+
+`policy check` evaluates the organization layer offline, exits 0 for allow and
+1 for deny/error, and does not append sandbox audit events. Its allow cannot
+override local policy or built-in safety. Examples:
+
+```sh
+gantry policy check -bundle bundle.tar.gz -key public.pem -profile developer \
+  -action mcp.tools.call -resource '{"server":"fs","tool":"read_file"}'
+gantry policy check -bundle bundle.tar.gz -key public.pem -profile developer \
+  -action network.connect -resource '{"ip":"1.1.1.1","protocol":"tcp","port":443}'
+gantry policy check -bundle bundle.tar.gz -key public.pem -profile developer \
+  -action network.resolve -resource '{"host":"github.com"}'
+```
+
+Tests compare OPA network reference decisions with the native packet plan and
+retain the packet-bypass regressions. The [policy E2E battery](../../tests/e2e/policy/README.md)
+adds real guest enforcement with short-lived, locally signed fixtures.
 
 ## Network flow
 
@@ -522,6 +1009,48 @@ Keeping the exit status out of the byte stream means guest output cannot forge
 process state. The manager API uses the same broker with explicit timeout and
 output-size bounds.
 
+## Remote manager transport
+
+For setup and everyday commands, see [Remote access](remote-access.md).
+
+`gantry serve` exposes the lifecycle service over HTTP/1.1. A local Unix socket
+uses same-user authentication; network listeners require TLS and a bearer token.
+Plaintext listeners, credentialed redirects, and disabled certificate
+verification are not supported. Self-signed mode persists a local CA; clients
+may also pin the exact leaf fingerprint.
+
+A client profile stores only endpoint and public trust metadata in
+`remotes.json`. Its bearer token is a separate owner-only file, validated with
+Unix mode bits or a protected Windows DACL. Registration verifies TLS,
+authentication, and health before saving either. The token grants the same host
+control as the manager API and is not scoped by organization identity.
+
+The optional policy feed is an outbound mTLS connection owned by the manager
+and uses a separate client identity. It does not expose or reuse the manager
+bearer token. Feed-triggered fan-out shares bounded lifecycle admission and the
+same per-sandbox serialization as API operations, behind a manager-wide policy
+barrier.
+
+Remote dispatch resolves an explicit `-remote` or `GANTRY_REMOTE` before local
+command execution. Unsupported or failed remote operations do not fall back to
+local. Manager-host paths remain manager-host paths; only APIs defined as
+uploads, such as network policy documents and signed organization snapshots,
+read bytes on the client.
+
+Lifecycle mutations use bounded operation records and optional idempotency
+keys. Image pulls may outlive a disconnected client, while operation records
+and server-sent events remain in memory and do not provide durable history.
+Exec and low-level run have explicit input, output, and deadline bounds.
+
+Remote SSH upgrades one authenticated TLS request into a tunnel to the selected
+sandbox's existing host-side SSH gateway. It cannot select another socket or
+destination. The client learns the install host key over authenticated TLS and
+pins it per profile; rotation requires explicit acceptance.
+
+Organization discovery remains separate. A catalog suggests endpoint and trust
+metadata, but never supplies a manager token or changes the manager's bearer
+authentication boundary.
+
 ## On-disk state
 
 The default layout is:
@@ -532,8 +1061,13 @@ The default layout is:
 
 ~/.gantry/
 ├── credentials.json
+├── manager-state/policy-feeds/ # feed generations, digests, ETags and signed bundle
+├── orgs/                       # token-free organization login receipts
+├── remotes.json                # public remote profile metadata
+├── remotes/<profile>.token     # private manager bearer tokens
 ├── ssh/
-│   ├── config                    # managed Host *.gantry block
+│   ├── config                    # managed local and remote Host blocks
+│   ├── known_hosts.<profile>    # pinned remote manager SSH key
 │   └── host_ed25519              # install-wide SSH host key
 ├── images/
 │   ├── index.json
@@ -554,6 +1088,7 @@ The default layout is:
     ├── worker-vmm.log
     ├── worker-mcp.log          # when MCP is enabled
     ├── mcp-restart-required    # saved MCP config differs from the live worker
+    ├── policy-rollout.json     # only while a controlled restart is incomplete
     └── runtime locks, sockets, and readiness files
 ```
 

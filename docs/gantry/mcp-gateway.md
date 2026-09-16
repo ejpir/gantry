@@ -1,67 +1,43 @@
 # MCP gateway
 
-The MCP gateway lets tools inside a sandbox use local and remote
-[Model Context Protocol](https://modelcontextprotocol.io) servers. Gantry
-applies a tool allowlist, injects remote credentials at the host-side
-upstream, and records calls without recording arguments, results, or
-credential values.
+The MCP gateway lets sandbox tools use local and remote Model Context Protocol
+servers. Gantry filters tools, injects remote credentials on the host side, and
+audits calls without storing arguments, results, or secret values.
 
 ## Enable the gateway
 
-Start a sandbox with the built-in read-only filesystem server:
+Start with the built-in read-only filesystem server:
 
 ```console
 $ gantry start dev -image alpine:latest -mcp
 ```
 
-Connect an agent to the in-guest proxy. For Claude Code, for example:
+Point an agent at the guest proxy. For Claude Code:
 
 ```console
 # claude mcp add gantry -- gantry-guest mcp-proxy
 ```
 
-Guest tools are installed in `/run/gantry/bin`, which Gantry adds to `PATH`
-for new sessions. In an older sandbox, use the full command:
-
-```console
-# /run/gantry/bin/gantry-guest mcp-proxy
-```
+Gantry installs guest helpers in `/run/gantry/bin` and adds that directory to
+`PATH` for new sessions.
 
 ## Limit filesystem access
 
-The built-in server exposes two tools:
-
-- `fs__read_file`
-- `fs__list_directory`
-
-Set the directory visible to those tools with `-mcp-fs-root`:
+The built-in server exposes `fs__read_file` and `fs__list_directory`. Restrict
+it to a guest path and run it as an unprivileged user:
 
 ```console
-$ gantry start dev -image alpine:latest -mcp \
-    -mcp-fs-root /workspace
+$ gantry start dev -image alpine:latest \
+    -mcp -mcp-fs-root /workspace -mcp-fs-user 1000:1000
 ```
 
-The root is an absolute path inside the Linux guest. Reads outside it,
-including symlink escapes, are refused.
-
-The server runs as `nobody` by default. Select another unprivileged guest
-identity with `-mcp-fs-user`:
-
-```console
-$ gantry start dev -image alpine:latest -mcp \
-    -mcp-fs-root /workspace \
-    -mcp-fs-user 1000:1000
-```
-
-The value can be a guest account name, a numeric UID found in the guest
-password database, or an explicit `UID:GID`. Gantry refuses root.
+`-mcp-fs-user` accepts an account name, numeric UID from the guest password
+database, or `UID:GID`. Root is refused.
 
 ### Read a mounted workspace through MCP
 
-The built-in filesystem server can read a host share when the share's
-container mount point is inside `-mcp-fs-root` and `-mcp-fs-user` has read
-permission. For example, mount a project at `/workspace` and expose exactly
-that directory:
+The MCP root uses paths inside the guest. To expose a host project, align it
+with a read-only share:
 
 ```console
 $ gantry start dev -image alpine:latest \
@@ -69,57 +45,44 @@ $ gantry start dev -image alpine:latest \
     -mcp -mcp-fs-root /workspace -mcp-fs-user 1000:1000
 ```
 
-A share without an explicit container path appears at `/host/TAG`. This
-configuration therefore exposes the default `code` share:
+A share without `mount=` appears at `/host/TAG`. The MCP user must have read
+permission. Prefer a narrow root instead of `/`.
 
-```console
-$ gantry start dev -image alpine:latest \
-    -share "code=$PWD,ro,uid=1000,gid=1000" \
-    -mcp -mcp-fs-root /host/code -mcp-fs-user 1000:1000
-```
-
-Use the same paths in the dashboard's **Mounts** and **MCP → Filesystem**
-forms. Prefer a narrow filesystem root rather than `/`. The filesystem server
-is read-only at the tool layer; a read-only share also enforces that boundary
-at the host export.
-
-Remote MCP servers do **not** receive direct access to guest files or mounts.
-They receive only MCP requests that the agent sends through the gateway. An
-agent can still copy data from a filesystem-tool result into a remote tool
-call, so keep remote tool allowlists and network policy narrow.
+Remote MCP servers do not receive direct filesystem access, but an agent can
+copy local tool results into a remote call. Keep remote allowlists narrow.
 
 ## Add a remote server
 
-Declare each streamable-HTTP server with a repeatable `-mcp-remote` flag:
+Use one repeatable `-mcp-remote` flag per streamable-HTTP server:
 
 ```console
 $ export GITHUB_TOKEN=...
 $ gantry start dev -image alpine:latest -mcp \
     -secret GITHUB_TOKEN@api.githubcopilot.com \
-    -mcp-remote 'name=github,url=https://api.githubcopilot.com/mcp/,auth=bearer:GITHUB_TOKEN,allow=*'
+    -mcp-remote 'name=github,url=https://api.githubcopilot.com/mcp/,auth=bearer:GITHUB_TOKEN,allow=get_*,allow=list_*'
 ```
 
-A remote specification is a comma-separated list of `k=v` fields:
+Fields:
 
 | Field | Meaning |
-| --- | --- |
-| `name=ID` | Server ID. Its tools appear as `ID__tool`. Required. |
-| `url=URL` | Streamable-HTTP endpoint. Required. |
-| `auth=bearer:SECRET` | Send `Authorization: Bearer <SECRET>`. |
-| `auth=header:NAME:SECRET` | Send a custom credential header. |
-| `auth=custody:PROVIDER` | Use the live OAuth custody access token. |
-| `allow=GLOB` | Expose matching tools. Repeatable; the default exposes none. |
-| `deny=GLOB` | Hide matching tools even when allowed. Repeatable. |
-| `redact=SECRET` | Remove another secret value from responses. Repeatable. |
+|---|---|
+| `name=ID` | Server ID; tools appear as `ID__tool`. |
+| `url=URL` | Streamable-HTTP endpoint. |
+| `auth=bearer:SECRET` | Bearer token from a named secret. |
+| `auth=header:NAME:SECRET` | Custom credential header. |
+| `auth=custody:PROVIDER` | Current access token from OAuth custody. |
+| `allow=GLOB` | Expose matching tools; repeatable. Default: none. |
+| `deny=GLOB` | Hide matching tools; repeatable and higher priority. |
+| `redact=SECRET` | Mask another named secret in responses. |
 
-Remote URLs must use HTTPS. Plain HTTP is accepted only for an explicit
-loopback address, which is useful for local development. Gantry refuses
-private, link-local, cloud-metadata, and other non-public destinations.
-Invalid specifications fail before the sandbox starts.
+URLs require HTTPS. Literal loopback HTTP is allowed only for local
+development. Private, link-local, metadata, and other non-public destinations
+are refused.
 
 ## Choose remote credentials
 
-Use a normal secret source for bearer or custom-header authentication:
+Bind normal secrets to the upstream host so they stay out of guest
+environments:
 
 ```console
 $ gantry start dev -image alpine:latest -mcp \
@@ -127,100 +90,64 @@ $ gantry start dev -image alpine:latest -mcp \
     -mcp-remote 'name=corp,url=https://mcp.example.com/,auth=header:X-Api-Key:CORP_MCP_KEY,allow=search_*'
 ```
 
-Binding the secret to the upstream host keeps it out of the guest environment.
-The gateway resolves it on the host when starting an MCP session. To reduce
-accidental reflection, Gantry masks exact occurrences of injected and
-configured secrets in decoded JSON strings, including JSON escape spellings.
 See [Host shares and secrets](shares-secrets.md#refreshable-secret-sources) for
-environment and file sources.
+source and rotation rules.
 
-> [!WARNING]
-> Give a credential only to an MCP server you trust with that credential.
-> Redaction is not a data-loss-prevention boundary: a server that receives a
-> secret can split, encode, or otherwise transform it in a tool result. Use
-> endpoint-bound, least-privilege, revocable credentials.
-
-Use a provider token held by OAuth custody when the remote accepts it:
+Use OAuth custody when the server accepts an OAuth access token:
 
 ```console
 $ gantry start dev -image ubuntu:latest -mcp -oauth-custody \
-    -mcp-remote 'name=ai,url=https://mcp.example.com/,auth=custody:claude,allow=read_*'
+    -oauth-provider ./company-oauth.json \
+    -mcp-remote 'name=company,url=https://mcp.example.com/mcp,auth=custody:company-mcp,allow=read_*'
+$ gantry exec dev -- gantry-guest oauth login company-mcp
 ```
 
-Log in with `gantry-guest oauth login claude` before using that remote. New
-MCP sessions pick up refreshed access tokens automatically.
+See [OAuth](oauth.md#configure-a-public-oauth-client) for provider setup.
+
+> [!WARNING]
+> A configured upstream receives its credential. Redaction reduces accidental
+> reflection but cannot stop a malicious server from transforming or encoding
+> a secret. Use endpoint-bound, least-privilege credentials.
 
 ## Restrict tools
 
-Remote servers expose no tools until an `allow=` pattern matches. Add narrow
-patterns where possible:
-
-```console
--mcp-remote 'name=github,url=https://example.com/mcp,auth=bearer:GITHUB_TOKEN,allow=get_*,allow=list_*,deny=delete_*'
-```
-
-`deny=` takes precedence over `allow=`. Gantry also refuses authorization and
-revocation-style tools regardless of the configured patterns.
-
-Tool names and descriptions are supplied by the remote server. Connect only
-servers you trust, and treat `allow=*` as a deliberate grant.
+Remote servers expose no tools until an `allow=` pattern matches. `deny=` wins
+over `allow=`. Gantry also blocks authorization and revocation-style tools.
+Tool names and descriptions come from the server; connect only servers you
+trust.
 
 ## Inspect servers and tools
 
-Show saved configuration without resolving or printing credential values:
+Show saved configuration without resolving credentials:
 
 ```console
 $ gantry mcp dev
-SERVER  TYPE   DETAIL
-fs      local  read-only filesystem: root /workspace, user 1000:1000, tools read_file,list_directory
-github  remote https://api.githubcopilot.com/mcp/, auth bearer:GITHUB_TOKEN, allow=*
 ```
 
-Probe the effective tool list of a running sandbox:
+Probe the effective tools of a running sandbox:
 
 ```console
 $ gantry mcp tools dev
-fs: list_directory, read_file
-github: get_me, list_repos, search_code
 ```
 
-The live probe contacts configured upstreams and applies `allow` and `deny`,
-so it is useful for finding an unavailable server or an unexpected policy.
+The live probe contacts upstreams and applies allow/deny rules.
 
-## Manage servers in the terminal dashboard
+## Manage servers in the dashboard
 
-Open `gantry tui` and select the **MCP** view (key `7`). From that view:
-
-- press `a` to add a remote streamable-HTTP server;
-- press `f` to configure or enable the built-in filesystem server;
-- press `e` to edit the selected remote or built-in filesystem server; and
-- press `d` to remove a selected remote.
-
-The dashboard stores credential references and redaction secret names, never
-credential values. MCP workers have immutable capability tables, so changes to
-a running sandbox are marked **restart** and take effect after it is restarted.
-Stopped-sandbox changes apply on its next start.
+Open **MCP** (key `7`) to add, edit, or remove remote servers and configure the
+filesystem server. The dashboard stores credential references, never values.
+MCP capability tables are fixed for a worker lifetime, so changes to a running
+sandbox take effect after restart.
 
 ## Inspect activity
 
-Read the host-side security audit trail:
-
 ```console
 $ gantry audit dev
-...
-mcp: remote github configured (https://api.githubcopilot.com/mcp/, auth bearer (secret GITHUB_TOKEN))
-mcp: call fs__read_file
-mcp: denied call "fs__write_file" (policy)
-mcp: call github__get_me
 ```
 
-The audit records server and tool names, policy decisions, and sanitized
-upstream failures. It does not record arguments, results, or credential
-values.
+The audit records server/tool names, decisions, and sanitized failures—not
+arguments, results, or credentials.
 
-For the host/guest request flow, credential injection, redaction, and resource
-limits, see [Architecture](architecture.md#mcp-and-credential-flow). For the
-trust boundary and operational cautions, see [Security](security.md#credentials).
-The gateway runs in a per-sandbox confined worker. Its capability protocol,
-platform enforcement, residual risks, and remaining guest-helper work are in
-the [MCP worker confinement design](mcp-worker-confinement.md).
+See [Architecture](architecture.md#mcp-and-credential-flow) for request and
+credential flow, [Security](security.md#credentials) for cautions, and
+[MCP confinement](mcp-worker-confinement.md) for worker boundaries.

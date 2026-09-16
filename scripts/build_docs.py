@@ -52,6 +52,7 @@ GROUPS = (
         (
             ("images.md", "Images & registries", "layers"),
             ("networking.md", "Networking", "network"),
+            ("organization-policy.md", "Organization policy", "shield"),
             ("shares-secrets.md", "Host shares & secrets", "key"),
         ),
     ),
@@ -60,6 +61,9 @@ GROUPS = (
         (
             ("coding-agents.md", "Coding agents", "spark"),
             ("ssh-access.md", "SSH & Dev Containers", "code"),
+            ("remote-access.md", "Remote access", "network"),
+            ("organization-login.md", "Organization login", "key"),
+            ("oauth.md", "OAuth", "key"),
             ("mcp-gateway.md", "MCP gateway", "network"),
             ("manager-api.md", "Manager API", "braces"),
         ),

@@ -47,7 +47,7 @@ func (state *workerState) setPolicy(request workerproto.Request) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("net.policy: %w", err)
 	}
-	return nil, state.policy.Replace(next)
+	return nil, state.policy.ReplaceExact(next)
 }
 
 func (state *workerState) trafficSnapshot(workerproto.Request) (any, error) {

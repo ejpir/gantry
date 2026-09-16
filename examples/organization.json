@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "organization": "local-test",
+  "issuer": "https://idp.example.com/realms/company",
+  "client_id": "gantry-cli",
+  "redirect_port": 8765,
+  "scopes": ["groups"],
+  "group_claim": "groups",
+  "group_profiles": {
+    "gantry-developers": "developer"
+  },
+  "bundle": "org-policy-test/bundle.tar.gz",
+  "public_key": "org-policy-test/public.pem"
+}

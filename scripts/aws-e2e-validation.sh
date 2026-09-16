@@ -1,22 +1,36 @@
 #!/bin/sh
 # Run the complete field validation. With no arguments this drives the
-# repository's reusable AWS Linux KVM and Windows WHPX hosts. `macos` instead
-# runs the maintained cross-platform batteries locally on Apple silicon HVF
-# without loading AWS credentials or touching EC2 instances.
+# repository's reusable AWS Linux amd64/arm64 KVM and Windows WHPX hosts.
+# `linux` runs the manager and OAuth batteries on local amd64 KVM (including
+# GitHub-hosted CI); `macos` runs the maintained local Apple-silicon batteries.
 #
 #   sh scripts/aws-e2e-validation.sh          # AWS Linux + Windows
+#   sh scripts/aws-e2e-validation.sh linux    # local Linux KVM / CI
 #   sh scripts/aws-e2e-validation.sh macos    # local Apple-silicon macOS
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
 usage() {
 	cat <<'EOF'
-usage: scripts/aws-e2e-validation.sh [aws|macos]
+usage: scripts/aws-e2e-validation.sh [aws|linux|macos]
 
-  aws      validate the reusable AWS Linux KVM and Windows WHPX hosts (default)
+  aws      validate AWS Linux amd64/arm64 KVM and Windows WHPX hosts (default)
+  linux    validate manager/policy-feed and OAuth custody on local Linux KVM
   macos    validate the local Apple-silicon macOS HVF backend
+
+All modes include signed OPA policy validation with real VMs and loopback-only
+fixtures (no OPA/OpenSSL installation or public egress needed on test hosts).
+
+Linux overrides:
+  GANTRY_ARTIFACTS               guest-helper directory (default: ./artifacts)
+  GANTRY_TEST_EXE                native Gantry executable
+  GANTRY_TEST_KERNEL             guest kernel for the host architecture
+  GANTRY_TEST_ROOTFS             matching Nerdbox rootfs
+  GANTRY_TEST_WORKLOAD_IMAGE     local workload EROFS image
+  GANTRY_TEST_OAUTH_IDP          prebuilt disposable OAuth fixture
+  GANTRY_E2E_WORK_DIR            retained test workspace
 
 macOS overrides:
   GANTRY_ARTIFACTS               artifact directory (default: ./artifacts)
@@ -37,6 +51,7 @@ fi
 if [ "$#" -eq 1 ]; then
 	case "$1" in
 	aws|--aws) MODE=aws ;;
+	linux|--linux) MODE=linux ;;
 	macos|darwin|--macos) MODE=macos ;;
 	-h|--help) usage; exit 0 ;;
 	*) usage >&2; exit 2 ;;
@@ -80,7 +95,8 @@ run_macos_validation() {
 	MAC_TMP=$(mktemp -d /tmp/gantry-me2e.XXXXXX)
 	MAC_ARTIFACTS=${GANTRY_ARTIFACTS:-$ROOT/artifacts}
 	mkdir -p "$MAC_ARTIFACTS"
-	MAC_ARTIFACTS=$(CDPATH= cd -- "$MAC_ARTIFACTS" && pwd)
+	MAC_ARTIFACTS=$(CDPATH='' cd -- "$MAC_ARTIFACTS" && pwd)
+	# shellcheck disable=SC2317 # Called indirectly by the EXIT trap.
 	cleanup_macos() {
 		status=$?
 		trap - EXIT HUP INT TERM
@@ -96,6 +112,10 @@ run_macos_validation() {
 	MAC_GUEST=$MAC_ARTIFACTS/gantry-guest-arm64
 	[ -x "$MAC_GANTRY" ] || { echo "missing host binary: $MAC_GANTRY" >&2; exit 1; }
 	[ -s "$MAC_GUEST" ] || { echo "missing guest helper: $MAC_GUEST" >&2; exit 1; }
+	MAC_OAUTH_IDP=$MAC_TMP/gantry-oauth-idp
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+		-o "$MAC_OAUTH_IDP" ./tests/e2e/oauthidp
+	codesign --force --sign - "$MAC_OAUTH_IDP"
 
 	MAC_KERNEL=${GANTRY_TEST_KERNEL:-$MAC_ARTIFACTS/gantry-kernel-arm64}
 	MAC_ROOTFS=${GANTRY_TEST_ROOTFS:-$MAC_ARTIFACTS/nerdbox-rootfs-arm64.erofs}
@@ -116,10 +136,11 @@ run_macos_validation() {
 		exit 1
 	}
 
-	echo "===== macOS HVF: core CLI, runtime, networking, credentials, and MCP battery ====="
+	echo "===== macOS HVF: core CLI, networking, credentials, GitHub/MCP OAuth custody, and MCP battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" \
 		GANTRY_TEST_PUBLIC_EGRESS="$MAC_PUBLIC_EGRESS" \
 		GANTRY_TEST_ROOT="$ROOT" \
+		GANTRY_TEST_OAUTH_IDP="$MAC_OAUTH_IDP" \
 		GANTRY_TEST_EXE="$MAC_GANTRY" \
 		GANTRY_TEST_KERNEL="$MAC_KERNEL" \
 		GANTRY_TEST_ROOTFS="$MAC_ROOTFS" \
@@ -129,6 +150,13 @@ run_macos_validation() {
 		GANTRY_IMAGES="$MAC_TMP/functional/images" \
 		GANTRY_STORE_URL='' \
 		bash scripts/aws-kvm/test-battery.sh
+
+	echo "===== macOS HVF: signed OPA organization-policy battery ====="
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build \
+		-o "$MAC_TMP/policy-e2e" ./tests/e2e/policy
+	"$MAC_TMP/policy-e2e" \
+		-gantry "$MAC_GANTRY" -kernel "$MAC_KERNEL" -rootfs "$MAC_ROOTFS" \
+		-image "$MAC_WORKLOAD" -artifacts "$MAC_ARTIFACTS"
 
 	if [ "${GANTRY_SKIP_DEVCONTAINERS:-0}" = 1 ]; then
 		echo "===== macOS HVF: SSH/Dev Containers and directory batteries skipped ====="
@@ -199,8 +227,91 @@ run_macos_validation() {
 	echo "===== macOS E2E VALIDATION PASSED ====="
 }
 
+run_linux_validation() {
+	[ "$(uname -s)" = Linux ] || {
+		echo "linux validation must run on Linux" >&2
+		exit 1
+	}
+	case $(uname -m) in
+	x86_64|amd64) LINUX_ASSET_ARCH=x86_64 ;;
+	aarch64|arm64) LINUX_ASSET_ARCH=arm64 ;;
+	*) echo "local Linux validation does not support $(uname -m)" >&2; exit 1 ;;
+	esac
+	[ -c /dev/kvm ] || { echo "local Linux validation requires /dev/kvm" >&2; exit 1; }
+	for command_name in go python3 ssh sftp; do
+		command -v "$command_name" >/dev/null 2>&1 || {
+			echo "required command not found: $command_name" >&2
+			exit 1
+		}
+	done
+
+	linux_absolute() {
+		case $1 in
+		/*) printf '%s\n' "$1" ;;
+		*) printf '%s/%s\n' "$ROOT" "$1" ;;
+		esac
+	}
+	LINUX_ARTIFACTS=$(linux_absolute "${GANTRY_ARTIFACTS:-artifacts}")
+	LINUX_GANTRY=$(linux_absolute "${GANTRY_TEST_EXE:-$LINUX_ARTIFACTS/gantry}")
+	LINUX_KERNEL=$(linux_absolute "${GANTRY_TEST_KERNEL:-$LINUX_ARTIFACTS/gantry-kernel-$LINUX_ASSET_ARCH}")
+	LINUX_ROOTFS=$(linux_absolute "${GANTRY_TEST_ROOTFS:-$LINUX_ARTIFACTS/nerdbox-rootfs-$LINUX_ASSET_ARCH.erofs}")
+	LINUX_IMAGE=$(linux_absolute "${GANTRY_TEST_WORKLOAD_IMAGE:-$LINUX_ARTIFACTS/gantry-default-image-$LINUX_ASSET_ARCH.erofs}")
+	for executable in "$LINUX_GANTRY" "$LINUX_ARTIFACTS/gantry-guest-$LINUX_ASSET_ARCH"; do
+		[ -x "$executable" ] || { echo "missing executable: $executable" >&2; exit 1; }
+	done
+	for asset in "$LINUX_KERNEL" "$LINUX_ROOTFS" "$LINUX_IMAGE"; do
+		[ -s "$asset" ] || { echo "missing guest asset: $asset" >&2; exit 1; }
+	done
+
+	LINUX_OWNED_WORK=0
+	if [ -n "${GANTRY_E2E_WORK_DIR:-}" ]; then
+		LINUX_WORK=$GANTRY_E2E_WORK_DIR
+		mkdir -p "$LINUX_WORK"
+	else
+		LINUX_WORK=$(mktemp -d /tmp/gantry-le2e.XXXXXX)
+		LINUX_OWNED_WORK=1
+	fi
+	LINUX_WORK=$(CDPATH='' cd -- "$LINUX_WORK" && pwd -P)
+	# shellcheck disable=SC2317 # Called indirectly by the EXIT trap.
+	cleanup_linux() {
+		status=$?
+		trap - EXIT HUP INT TERM
+		if [ "$LINUX_OWNED_WORK" -eq 1 ] && [ "$status" -eq 0 ]; then
+			rm -rf -- "$LINUX_WORK"
+		else
+			echo "Linux E2E workspace: $LINUX_WORK"
+		fi
+		exit "$status"
+	}
+	trap cleanup_linux EXIT
+	trap 'exit 130' HUP INT TERM
+
+	LINUX_OAUTH_IDP=$(linux_absolute "${GANTRY_TEST_OAUTH_IDP:-$LINUX_WORK/gantry-oauth-idp}")
+	if [ -z "${GANTRY_TEST_OAUTH_IDP:-}" ]; then
+		echo "===== Linux KVM: build disposable OAuth authorization server ====="
+		CGO_ENABLED=0 go build -o "$LINUX_OAUTH_IDP" ./tests/e2e/oauthidp
+	fi
+	[ -x "$LINUX_OAUTH_IDP" ] || { echo "missing OAuth fixture: $LINUX_OAUTH_IDP" >&2; exit 1; }
+
+	echo "===== Linux KVM: manager API, SSH, and organization policy-feed battery ====="
+	rm -rf -- "$LINUX_WORK/manager"
+	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" scripts/test-manager-api-e2e.sh \
+		-gantry "$LINUX_GANTRY" -artifacts "$LINUX_ARTIFACTS" \
+		-kernel "$LINUX_KERNEL" -rootfs "$LINUX_ROOTFS" -image "$LINUX_IMAGE" \
+		-image-store "$LINUX_WORK/manager-images" -pull=false \
+		-work-dir "$LINUX_WORK/manager" -timeout 12m
+
+	echo "===== Linux KVM: public-client OAuth custody and MCP battery ====="
+	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" python3 scripts/oauth-custody-e2e.py \
+		--idp "$LINUX_OAUTH_IDP" --gantry "$LINUX_GANTRY" \
+		--kernel "$LINUX_KERNEL" --rootfs "$LINUX_ROOTFS" --image "$LINUX_IMAGE"
+
+	echo "===== Linux KVM E2E VALIDATION PASSED ====="
+}
+
 case "$MODE" in
 aws) ;;
+linux) run_linux_validation; exit 0 ;;
 macos) run_macos_validation; exit 0 ;;
 *) echo "unknown GANTRY_E2E_TARGET: $MODE" >&2; usage >&2; exit 2 ;;
 esac
@@ -214,7 +325,7 @@ if [ -z "${AWS_ACCESS_KEY_ID:-}" ] && [ -f "$KEYS_FILE" ]; then
 fi
 
 REGION=${GANTRY_TEST_REGION:-eu-west-1}
-export AWS_DEFAULT_REGION=$REGION
+export AWS_DEFAULT_REGION="$REGION"
 ACCOUNT=$(aws sts get-caller-identity --region "$REGION" --query Account --output text)
 BUCKET=${GANTRY_TEST_BUCKET:-gantry-kvm-test-$ACCOUNT}
 
@@ -226,21 +337,25 @@ instance_by_name() {
 }
 
 LINUX_IID=${GANTRY_LINUX_IID:-$(instance_by_name gantry-kvm-test)}
+ARM_IID=${GANTRY_ARM_IID:-$(instance_by_name gantry-kvm-test-arm64)}
 WINDOWS_IID=${GANTRY_WINDOWS_IID:-$(instance_by_name gantry-whpx-test)}
-[ -n "$LINUX_IID" ] || { echo "Linux KVM instance not found (set GANTRY_LINUX_IID)" >&2; exit 1; }
+[ -n "$LINUX_IID" ] || { echo "Linux amd64 KVM instance not found (set GANTRY_LINUX_IID)" >&2; exit 1; }
+[ -n "$ARM_IID" ] || { echo "Linux arm64 KVM instance not found (set GANTRY_ARM_IID)" >&2; exit 1; }
 [ -n "$WINDOWS_IID" ] || { echo "Windows WHPX instance not found (set GANTRY_WINDOWS_IID)" >&2; exit 1; }
 
 DIRECTORY_RUN=
 IDE_BUILD_DIR=
+POLICY_BUILD_DIR=
 cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	[ -z "$DIRECTORY_RUN" ] || rm -f -- "$DIRECTORY_RUN"
 	[ -z "$IDE_BUILD_DIR" ] || rm -rf -- "$IDE_BUILD_DIR"
+	[ -z "$POLICY_BUILD_DIR" ] || rm -rf -- "$POLICY_BUILD_DIR"
 	if [ "${GANTRY_KEEP_INSTANCES:-0}" != 1 ]; then
 		echo "== stopping AWS validation instances =="
 		aws ec2 stop-instances --region "$REGION" \
-			--instance-ids "$LINUX_IID" "$WINDOWS_IID" >/dev/null 2>&1 || true
+			--instance-ids "$LINUX_IID" "$ARM_IID" "$WINDOWS_IID" >/dev/null 2>&1 || true
 	else
 		echo "== GANTRY_KEEP_INSTANCES=1: leaving instances running =="
 	fi
@@ -249,19 +364,72 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
-# Build the curated x86_64 image from the current Dockerfile so the field run
-# validates these source changes rather than a stale release or S3 object. A
-# caller may provide an already-built image when replaying in an air-gapped
-# environment.
+# Compile the black-box policy driver from this checkout before starting EC2.
+# It signs short-lived fixtures on each host: no stale signatures, controller-
+# specific mount paths, private-key uploads, or remote Go/OPA dependencies.
+POLICY_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gantry-policy-e2e.XXXXXX")
+echo "== build Linux and Windows field-test drivers =="
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/policy-linux-amd64" ./tests/e2e/policy
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/policy-linux-arm64" ./tests/e2e/policy
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/policy-windows-amd64.exe" ./tests/e2e/policy
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/manager-api-linux-amd64" ./tests/e2e/managerapi
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/manager-api-linux-arm64" ./tests/e2e/managerapi
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build \
+	-o "$POLICY_BUILD_DIR/manager-api-windows-amd64.exe" ./tests/e2e/managerapi
+
+# Keep a host-provided Docker API out of the HTTP proxy. Sandboxed callers use
+# this endpoint to reach the host engine, and proxying it turns `_ping` into an
+# unrelated outbound HTTP request.
+case ${DOCKER_HOST:-} in
+	tcp://host.docker.internal:*)
+		case ,${NO_PROXY:-}, in
+			*,host.docker.internal,*) ;;
+			*) NO_PROXY=${NO_PROXY:+$NO_PROXY,}host.docker.internal ;;
+		esac
+		no_proxy=$NO_PROXY
+		export NO_PROXY no_proxy
+		;;
+esac
+
+# Build curated images from the current Dockerfile so the field run validates
+# these source changes rather than stale release or S3 objects. A caller may
+# provide already-built images when replaying in an air-gapped environment.
 IDE_IMAGE=${GANTRY_TEST_IDE_IMAGE:-}
+ARM_IDE_IMAGE=${GANTRY_TEST_ARM_IDE_IMAGE:-}
+if [ -z "$IDE_IMAGE" ] || [ -z "$ARM_IDE_IMAGE" ]; then
+	IDE_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gantry-ide-images.XXXXXX")
+fi
 if [ -z "$IDE_IMAGE" ]; then
-	IDE_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gantry-ide-x86_64.XXXXXX")
 	IDE_IMAGE=$IDE_BUILD_DIR/gantry-ide-image-x86_64.erofs
 	sh scripts/mkideimage.sh "$IDE_IMAGE" linux/amd64
 fi
-[ -s "$IDE_IMAGE" ] || { echo "curated IDE image missing: $IDE_IMAGE" >&2; exit 1; }
-echo "== staging current curated IDE image =="
+if [ -z "$ARM_IDE_IMAGE" ]; then
+	ARM_IDE_IMAGE=$IDE_BUILD_DIR/gantry-ide-image-arm64.erofs
+	sh scripts/mkideimage.sh "$ARM_IDE_IMAGE" linux/arm64
+fi
+[ -s "$IDE_IMAGE" ] || { echo "curated amd64 IDE image missing: $IDE_IMAGE" >&2; exit 1; }
+[ -s "$ARM_IDE_IMAGE" ] || { echo "curated arm64 IDE image missing: $ARM_IDE_IMAGE" >&2; exit 1; }
+echo "== staging current curated IDE images =="
 aws s3 cp "$IDE_IMAGE" "s3://$BUCKET/gantry-ide-image-x86_64.erofs" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$ARM_IDE_IMAGE" "s3://$BUCKET/gantry-ide-image-arm64.erofs" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/policy-linux-amd64" "s3://$BUCKET/e2e/policy-linux-amd64" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/policy-linux-arm64" "s3://$BUCKET/e2e/policy-linux-arm64" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/policy-windows-amd64.exe" "s3://$BUCKET/e2e/policy-windows-amd64.exe" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/manager-api-linux-amd64" "s3://$BUCKET/e2e/manager-api-linux-amd64" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/manager-api-linux-arm64" "s3://$BUCKET/e2e/manager-api-linux-arm64" \
+	--region "$REGION" --only-show-errors
+aws s3 cp "$POLICY_BUILD_DIR/manager-api-windows-amd64.exe" "s3://$BUCKET/e2e/manager-api-windows-amd64.exe" \
 	--region "$REGION" --only-show-errors
 
 instance_state() {
@@ -316,8 +484,10 @@ wait_ssm() {
 
 echo "== starting AWS validation instances =="
 start_instance "$LINUX_IID"
+start_instance "$ARM_IID"
 start_instance "$WINDOWS_IID"
 wait_ssm "$LINUX_IID"
+wait_ssm "$ARM_IID"
 wait_ssm "$WINDOWS_IID"
 
 if [ "${GANTRY_SKIP_SELFUPDATE:-0}" = 1 ]; then
@@ -333,15 +503,141 @@ echo "===== Windows WHPX: field + security + SSH/Dev Containers + directory batt
 GANTRY_TEST_IID=$WINDOWS_IID GANTRY_TEST_BUCKET=$BUCKET \
 	GANTRY_TEST_REGION=$REGION sh scripts/aws-whpx/replay.sh
 
-echo "===== Linux KVM: main field battery ====="
+echo "===== Linux amd64 KVM: main field battery (including GitHub/MCP OAuth custody) ====="
 GANTRY_TEST_IID=$LINUX_IID BUCKET=$BUCKET REGION=$REGION \
 	sh scripts/aws-kvm/run-tests.sh 1800
 
-echo "===== Linux KVM: SSH/Dev Containers battery ====="
+echo "===== Linux arm64 KVM: required-confinement/share/MCP battery ====="
+GANTRY_TEST_IID=$ARM_IID BUCKET=$BUCKET REGION=$REGION \
+	sh scripts/aws-kvm/run-tests-arm64.sh 1800
+
+# The preceding replays staged the current Gantry binaries and guest assets.
+# Always replace the driver too, rather than reusing a prior field battery.
+echo "===== Linux amd64 KVM: signed OPA organization-policy battery ====="
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/policy-linux-amd64 /opt/gantry/policy-e2e 600
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py -c '
+chmod +x /opt/gantry/policy-e2e
+/opt/gantry/policy-e2e -gantry /opt/gantry/gantry-linux-amd64 \
+  -kernel /opt/gantry/nerdbox-kernel-x86_64 \
+  -rootfs /opt/gantry/nerdbox-rootfs-x86_64.erofs \
+  -image /opt/gantry/gantry-ide-image-x86_64.erofs -artifacts /opt/gantry
+' 1200
+
+echo "===== Linux arm64 KVM: signed OPA organization-policy battery ====="
+GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/policy-linux-arm64 /opt/gantry/policy-e2e 600
+GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py -c '
+chmod +x /opt/gantry/policy-e2e
+/opt/gantry/policy-e2e -gantry /opt/gantry/gantry-linux-arm64-current \
+  -kernel /opt/gantry/gantry-kernel-arm64 \
+  -rootfs /opt/gantry/nerdbox-rootfs-arm64.erofs \
+  -image /opt/gantry/gantry-ide-image-arm64.erofs -artifacts /opt/gantry
+' 1200
+
+echo "===== Windows WHPX: signed OPA organization-policy battery ====="
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
+	--s3-download "$BUCKET" e2e/policy-windows-amd64.exe C:/gantry/policy-e2e.exe 600
+# Quote host paths as PowerShell literals, including paths containing apostrophes.
+WINDOWS_POLICY_COMMAND=$(python3 - \
+	"${GANTRY_TEST_EXE:-C:/gantry/gantry-field.exe}" \
+	"${GANTRY_TEST_CURRENT_KERNEL:-C:/gantry/gantry-kernel-x86_64}" \
+	"${GANTRY_TEST_CURRENT_ROOTFS:-C:/gantry/nerdbox-rootfs-x86_64.erofs}" \
+	"${GANTRY_TEST_POLICY_IMAGE:-C:/gantry/gantry-ide-image-x86_64.erofs}" \
+	"${GANTRY_TEST_ROOT:-C:/gantry}" <<'PY'
+import sys
+
+values = sys.argv[1:]
+args = ["C:/gantry/policy-e2e.exe"]
+for flag, value in zip(("-gantry", "-kernel", "-rootfs", "-image", "-artifacts"), values):
+    args.extend((flag, value))
+command = " ".join("'" + value.replace("'", "''") + "'" for value in args)
+print("$ErrorActionPreference='Stop'; & " + command + "; exit $LASTEXITCODE")
+PY
+)
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
+	-c "$WINDOWS_POLICY_COMMAND" 1200
+
+echo "===== Linux amd64 KVM: live manager API and policy-feed battery ====="
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-amd64 /opt/gantry/manager-api-e2e 600
+GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py -c '
+chmod +x /opt/gantry/manager-api-e2e
+rm -rf /opt/gantry/manager-e2e-run
+/opt/gantry/manager-api-e2e -gantry /opt/gantry/gantry-linux-amd64 \
+  -kernel /opt/gantry/nerdbox-kernel-x86_64 \
+  -rootfs /opt/gantry/nerdbox-rootfs-x86_64.erofs \
+  -image /opt/gantry/gantry-ide-image-x86_64.erofs -artifacts /opt/gantry \
+  -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
+' 1800
+
+echo "===== Linux arm64 KVM: live manager API and policy-feed battery ====="
+GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-arm64 /opt/gantry/manager-api-e2e 600
+GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py -c '
+chmod +x /opt/gantry/manager-api-e2e
+rm -rf /opt/gantry/manager-e2e-run
+/opt/gantry/manager-api-e2e -gantry /opt/gantry/gantry-linux-arm64-current \
+  -kernel /opt/gantry/gantry-kernel-arm64 \
+  -rootfs /opt/gantry/nerdbox-rootfs-arm64.erofs \
+  -image /opt/gantry/gantry-ide-image-arm64.erofs -artifacts /opt/gantry \
+  -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
+' 1800
+
+echo "===== Windows WHPX: live manager API and policy-feed battery ====="
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
+	--s3-download "$BUCKET" e2e/manager-api-windows-amd64.exe C:/gantry/manager-api-e2e.exe 600
+WINDOWS_MANAGER_COMMAND=$(python3 - \
+	"${GANTRY_TEST_EXE:-C:/gantry/gantry-field.exe}" \
+	"${GANTRY_TEST_CURRENT_KERNEL:-C:/gantry/gantry-kernel-x86_64}" \
+	"${GANTRY_TEST_CURRENT_ROOTFS:-C:/gantry/nerdbox-rootfs-x86_64.erofs}" \
+	"${GANTRY_TEST_MANAGER_IMAGE:-C:/gantry/gantry-ide-image-x86_64.erofs}" \
+	"${GANTRY_TEST_ROOT:-C:/gantry}" <<'PY'
+import sys
+
+values = sys.argv[1:]
+args = ["C:/gantry/manager-api-e2e.exe"]
+for flag, value in zip(("-gantry", "-kernel", "-rootfs", "-image", "-artifacts"), values):
+    args.extend((flag, value))
+args.extend(("-pull=false", "-work-dir", "C:/gantry/manager-e2e-run", "-timeout", "15m"))
+command = " ".join("'" + value.replace("'", "''") + "'" for value in args)
+print("$ErrorActionPreference='Stop'; Remove-Item -Recurse -Force C:/gantry/manager-e2e-run -ErrorAction SilentlyContinue; & " + command + "; exit $LASTEXITCODE")
+PY
+)
+GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
+	-c "$WINDOWS_MANAGER_COMMAND" 1800
+
+echo "===== Linux amd64 KVM: SSH/Dev Containers battery ====="
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py scripts/aws-kvm/ssh-devcontainers-validation.sh 1800
 
-echo "===== Linux KVM: large-directory battery ====="
+echo "===== Linux arm64 KVM: SSH/Dev Containers battery ====="
+DIRECTORY_RUN=$(mktemp "${TMPDIR:-/tmp}/gantry-arm64-ssh.XXXXXX.sh")
+{
+	cat <<'EOF'
+export GANTRY_TEST_ROOT=/opt/gantry
+export GANTRY_TEST_EXE=/opt/gantry/gantry-linux-arm64-current
+export GANTRY_TEST_KERNEL=/opt/gantry/gantry-kernel-arm64
+export GANTRY_TEST_ROOTFS=/opt/gantry/nerdbox-rootfs-arm64.erofs
+export GANTRY_TEST_IDE_IMAGE=/opt/gantry/gantry-ide-image-arm64.erofs
+export GANTRY_TEST_WORKLOAD_IMAGE=/opt/gantry/ubuntu-arm64.erofs
+export GANTRY_TEST_GUEST=/opt/gantry/gantry-guest-arm64
+export GANTRY_TEST_SANDBOX=ssh-devcontainers-arm64-kvm
+export GANTRY_TEST_PLATFORM='Linux arm64 KVM'
+export GANTRY_HOME=/opt/gantry/state-ssh-devcontainers-arm64
+EOF
+	cat scripts/aws-kvm/ssh-devcontainers-validation.sh
+} >"$DIRECTORY_RUN"
+GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py "$DIRECTORY_RUN" 1800
+rm -f -- "$DIRECTORY_RUN"
+DIRECTORY_RUN=
+
+echo "===== Linux amd64 KVM: large-directory battery ====="
 DIRECTORY_RUN=$(mktemp "${TMPDIR:-/tmp}/gantry-linux-directory.XXXXXX.sh")
 {
 	cat <<'EOF'
@@ -359,7 +655,28 @@ GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
 rm -f -- "$DIRECTORY_RUN"
 DIRECTORY_RUN=
 
-echo "===== Linux KVM: required-confinement battery ====="
+echo "===== Linux arm64 KVM: large-directory battery ====="
+DIRECTORY_RUN=$(mktemp "${TMPDIR:-/tmp}/gantry-arm64-directory.XXXXXX.sh")
+{
+	cat <<'EOF'
+export GANTRY_TEST_ARCH=arm64
+export GANTRY_TEST_ROOT=/opt/gantry
+export GANTRY_TEST_EXE=/opt/gantry/gantry-linux-arm64-current
+export GANTRY_TEST_KERNEL=/opt/gantry/gantry-kernel-arm64
+export GANTRY_TEST_ROOTFS=/opt/gantry/nerdbox-rootfs-arm64.erofs
+export GANTRY_TEST_IMAGE=/opt/gantry/gantry-ide-image-arm64.erofs
+export GANTRY_TEST_GUEST_DIR=/home/gantry/gantry-dirscan
+export GANTRY_TEST_SANDBOX=dirscan-arm64-current
+export GANTRY_HOME=/opt/gantry/state-directory-arm64
+EOF
+	cat scripts/aws-kvm/directory-validation.sh
+} >"$DIRECTORY_RUN"
+GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
+	python3 scripts/aws-kvm/ssm.py "$DIRECTORY_RUN" 2400
+rm -f -- "$DIRECTORY_RUN"
+DIRECTORY_RUN=
+
+echo "===== Linux amd64 KVM: required-confinement battery ====="
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py scripts/aws-kvm/confinement-battery.sh 1200
 

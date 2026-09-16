@@ -1,38 +1,35 @@
 package sandbox
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
-	"github.com/ejpir/gantry/internal/atomicfile"
-	"github.com/ejpir/gantry/internal/gutil"
-	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/remote"
 	"github.com/ejpir/gantry/internal/sandbox/sshgw"
+	"github.com/ejpir/gantry/internal/sshconfig"
 )
 
 const (
 	sshConfigBegin = "# >>> gantry sandboxes"
 	sshConfigEnd   = "# <<< gantry sandboxes"
-	sshSetupWait   = 5 * time.Second
 )
 
 var openSSHVersionRE = regexp.MustCompile(`OpenSSH(?:_for_Windows)?_([0-9]+)\.([0-9]+)`)
 
-func managedSSHBlock(self string) string {
+func managedSSHBlock(self string) string { return managedSSHBlockWithKnownHosts(self, self) }
+
+func managedSSHBlockWithKnownHosts(self, knownHostsHelper string) string {
 	return strings.Join([]string{
 		sshConfigBegin,
 		"Host *.gantry",
 		"    User " + sshgw.DefaultUserSentinel,
-		// %n is the original alias that matched *.gantry. Unlike %h/%H, it is
-		// not replaced by a HostName override from another SSH config source.
+		// Use the original alias, not a HostName override.
 		"    ProxyCommand " + shellCommand(self, "ssh-proxy", "%n"),
-		"    KnownHostsCommand " + shellCommand(self, "ssh-known-hosts"),
+		"    KnownHostsCommand " + knownHostsCommand(knownHostsHelper, "ssh-known-hosts"),
 		"    UserKnownHostsFile " + quoteSSHConfigPath(filepath.Join(sshInstallDir(), "known_hosts")),
 		"    StrictHostKeyChecking accept-new",
 		sshConfigEnd,
@@ -40,50 +37,10 @@ func managedSSHBlock(self string) string {
 }
 
 func updateManagedSSHBlock(content, block string, remove bool) (string, error) {
-	content = strings.ReplaceAll(content, "\r\n", "\n")
-	begin := strings.Index(content, sshConfigBegin)
-	end := strings.Index(content, sshConfigEnd)
-	if strings.Count(content, sshConfigBegin) > 1 || strings.Count(content, sshConfigEnd) > 1 ||
-		(begin >= 0) != (end >= 0) || (begin >= 0 && end < begin) {
-		return "", fmt.Errorf("managed SSH markers are incomplete; repair the file by hand before retrying")
-	}
-	if begin >= 0 {
-		end += len(sshConfigEnd)
-		if end < len(content) && content[end] == '\n' {
-			end++
-		}
-		content = content[:begin] + content[end:]
-	}
-	content = strings.TrimRight(content, "\n")
-	if remove {
-		if content == "" {
-			return "", nil
-		}
-		return content + "\n", nil
-	}
-	if content != "" {
-		content += "\n\n"
-	}
-	return content + block + "\n", nil
+	return sshconfig.Update(content, sshConfigBegin, sshConfigEnd, block, remove, false)
 }
 
-func lockSSHSetup(path string) (*os.File, error) {
-	deadline := time.Now().Add(sshSetupWait)
-	var lastErr error
-	for {
-		lock, err := gutil.TryLockFile(path)
-		if err == nil {
-			return lock, nil
-		}
-		lastErr = err
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for SSH setup lock %s: %w", path, lastErr)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-func sshSetup(remove bool) (resultErr error) {
+func sshSetup(remove bool) error {
 	if !remove {
 		supported, version, err := sshSupportsKnownHostsCommand()
 		if err != nil {
@@ -93,85 +50,40 @@ func sshSetup(remove bool) (resultErr error) {
 			return fmt.Errorf("OpenSSH %s does not support KnownHostsCommand; version 8.4 or newer is required", version)
 		}
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	sshDir := filepath.Join(home, ".ssh")
-	if err := localsec.CreateManagerDir(sshDir); err != nil {
-		return err
-	}
-	if err := localsec.CreateManagerDir(sshInstallDir()); err != nil {
-		return err
-	}
-	lockPath := filepath.Join(sshInstallDir(), "config.lock")
-	lock, err := lockSSHSetup(lockPath)
-	if err != nil {
-		return err
-	}
-	defer func() { resultErr = errors.Join(resultErr, lock.Close()) }()
-
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	managedPath := filepath.Join(sshInstallDir(), "config")
-	managed, err := os.ReadFile(managedPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	nextManaged, err := updateManagedSSHBlock(string(managed), managedSSHBlock(self), remove)
+	knownHostsHelper, err := sshconfig.OpenSSHCommandPath(self)
 	if err != nil {
-		return fmt.Errorf("%s: %w", managedPath, err)
-	}
-	if err := atomicfile.WriteFileDurable(managedPath, []byte(nextManaged), 0o600); err != nil {
 		return err
 	}
-	if err := localsec.SecureRegularFile(managedPath); err != nil {
+	if err := sshconfig.Apply(sshInstallDir(), sshConfigBegin, sshConfigEnd, managedSSHBlockWithKnownHosts(self, knownHostsHelper), remove, false); err != nil {
 		return err
 	}
 	if err := ensureSSHKnownHostsFile(); err != nil {
 		return err
 	}
-
-	mainPath := filepath.Join(sshDir, "config")
-	mainData, err := os.ReadFile(mainPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	profiles, err := remote.List()
+	if err != nil {
 		return err
 	}
-	mainContent := strings.ReplaceAll(string(mainData), "\r\n", "\n")
-	include := "Include " + quoteSSHConfigPath(managedPath)
-	lines := strings.Split(mainContent, "\n")
-	filtered := lines[:0]
-	found := false
-	for _, line := range lines {
-		if strings.TrimSpace(line) == include {
-			found = true
-			if remove {
-				continue
-			}
-		}
-		filtered = append(filtered, line)
-	}
-	mainContent = strings.TrimRight(strings.Join(filtered, "\n"), "\n")
-	if !remove && !found {
-		if mainContent != "" {
-			mainContent = include + "\n" + mainContent
-		} else {
-			mainContent = include
+	for _, profile := range profiles {
+		// Offline-safe: first use fetches and pins the key over authenticated
+		// TLS. Each remote block is prepended ahead of the broad local one.
+		if err := remote.SetupSSH(profile.Name, remove); err != nil {
+			return err
 		}
 	}
-	if mainContent != "" {
-		mainContent += "\n"
-	}
-	if err := atomicfile.WriteFileDurable(mainPath, []byte(mainContent), 0o600); err != nil {
-		return err
-	}
-	return localsec.SecureRegularFile(mainPath)
+	return nil
 }
 
 func sshSupportsKnownHostsCommand() (bool, string, error) {
-	output, err := exec.Command("ssh", "-V").CombinedOutput()
+	sshProgram, err := sshconfig.OpenSSHProgram("ssh")
+	if err != nil {
+		return false, "", err
+	}
+	output, err := exec.Command(sshProgram, "-V").CombinedOutput()
 	if err != nil {
 		return false, "", fmt.Errorf("run ssh -V: %w", err)
 	}

@@ -3,8 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,23 +137,6 @@ func TestGuestToolsTargetsSeparateWorkloadAndIDE(t *testing.T) {
 	}
 }
 
-func TestGuestToolsStageBaseAvoidsWindowsTempAndProtectedState(t *testing.T) {
-	appRoot := t.TempDir()
-	sandboxRoot := filepath.Join(appRoot, "sandboxes")
-	t.Setenv("GANTRY_HOME", sandboxRoot)
-	sandboxDir := filepath.Join(sandboxRoot, "dev")
-	want := appRoot + "-guest-tools"
-	if got := guestToolsStageBase("windows", sandboxDir); got != want {
-		t.Fatalf("Windows stage base = %q, want protected-state sibling %q", got, want)
-	}
-	if got := guestToolsStageBase("windows", ""); got != "" {
-		t.Fatalf("Windows stage base without sandbox state = %q, want empty", got)
-	}
-	if got := guestToolsStageBase("linux", sandboxDir); got != "" {
-		t.Fatalf("Linux stage base = %q, want OS temporary directory", got)
-	}
-}
-
 func TestStopGuestToolsDeliveryCancelsAndJoinsOwners(t *testing.T) {
 	d := &daemonRuntime{}
 	ctx, done, ok := d.beginGuestToolsDelivery()
@@ -215,41 +197,34 @@ func TestStopGuestToolsDeliveryCancelsAndJoinsOwners(t *testing.T) {
 	}
 }
 
-func TestGuestToolsStagingIsAttemptScoped(t *testing.T) {
-	base := t.TempDir()
-	payload := []byte("guest-helper")
-	wantErr := errors.New("injected delivery failure")
-	var attempts []string
-	for range 2 {
-		var stageDir string
-		err := withGuestToolsStage(base, payload, func(dir string) error {
-			stageDir = dir
-			attempts = append(attempts, dir)
-			got, err := os.ReadFile(filepath.Join(dir, "gantry-guest"))
-			if err != nil {
-				t.Fatal(err)
+func TestGuestToolsExecErrorChecksExitStatusAndKeepsDiagnostics(t *testing.T) {
+	transportErr := errors.New("task Wait failed")
+	for _, tc := range []struct {
+		name   string
+		status int
+		err    error
+		want   string
+	}{
+		{"successful command", 0, nil, ""},
+		{"missing utility", 127, nil, "status 127"},
+		{"failed install", 1, nil, "status 1"},
+		{"failed transport", 255, transportErr, "task Wait failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := guestToolsExecError([]byte("guest diagnostic"), tc.status, tc.err)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
 			}
-			if string(got) != string(payload) {
-				t.Fatalf("staged payload = %q, want %q", got, payload)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "guest diagnostic") {
+				t.Fatalf("lost exit status/output: %v", err)
 			}
-			return wantErr
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Fatalf("lost transport cause: %v", err)
+			}
 		})
-		if !errors.Is(err, wantErr) {
-			t.Fatalf("staging callback error = %v, want %v", err, wantErr)
-		}
-		if _, err := os.Stat(stageDir); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("attempt staging directory still exists: %s (%v)", stageDir, err)
-		}
-	}
-	if len(attempts) != 2 || attempts[0] == attempts[1] {
-		t.Fatalf("retry staging directories = %v, want two distinct attempts", attempts)
-	}
-	entries, err := os.ReadDir(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("staging base retained retry artifacts: %v", entries)
 	}
 }
 

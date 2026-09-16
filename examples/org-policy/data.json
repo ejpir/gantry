@@ -1,0 +1,27 @@
+{
+  "gantry": {
+    "version": 1,
+    "organization": "example-company",
+    "revision": "example-1",
+    "expires_at": "2030-01-01T00:00:00Z",
+    "profiles": {
+      "developer": {
+        "rules": [
+          {"id": "project-read", "effect": "allow", "action": "mount.read", "path": "/path/to/project"},
+          {"id": "fs-connect", "effect": "allow", "action": "mcp.connect", "server": "fs"},
+          {"id": "fs-list", "effect": "allow", "action": "mcp.tools.list", "server": "fs", "tool": "*"},
+          {"id": "fs-read", "effect": "allow", "action": "mcp.tools.call", "server": "fs", "tool": "read_file"},
+          {"id": "fs-directory", "effect": "allow", "action": "mcp.tools.call", "server": "fs", "tool": "list_directory"},
+          {"id": "github-credential", "effect": "allow", "action": "credential.use", "host": "github.com"}
+        ],
+        "network": {
+          "rules": [
+            {"id": "https", "effect": "allow", "cidr": "0.0.0.0/0", "protocol": "tcp", "ports": [443]},
+            {"id": "metadata", "effect": "deny", "cidr": "169.254.0.0/16", "protocol": "any", "ports": []}
+          ],
+          "dns": ["github.com", "*.githubusercontent.com", "*.docker.io"]
+        }
+      }
+    }
+  }
+}

@@ -376,6 +376,26 @@ func TestPolicyGatewayRequiresExplicitLocalAccess(t *testing.T) {
 	}
 }
 
+func TestFailClosedPolicyAllowsOnlyRequiredPublishedUDPReplies(t *testing.T) {
+	strict, err := FailClosedPolicy(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strict.Allows([4]byte{8, 8, 8, 8}, protoTCP, 443) || strict.AllowsGatewayUDPReplies() {
+		t.Fatal("strict update barrier permits network access")
+	}
+	withReplies, err := FailClosedPolicy(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !withReplies.AllowsGatewayUDPReplies() {
+		t.Fatal("UDP-compatible update barrier blocks published replies")
+	}
+	if withReplies.Allows([4]byte{8, 8, 8, 8}, protoTCP, 443) || withReplies.Allows([4]byte{192, 168, 127, 1}, protoUDP, 53) {
+		t.Fatal("UDP-compatible update barrier permits unrelated egress")
+	}
+}
+
 func TestAllowsGatewayUDPRepliesRequiresCompleteEffectiveRange(t *testing.T) {
 	tests := []struct {
 		name string

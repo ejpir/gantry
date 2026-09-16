@@ -1,9 +1,9 @@
 // Package oauthtokens is the host-side custody registry for OAuth token
 // sets (docs/credential-brokering.md workstream 3). In custody mode the
 // daemon exchanges the authorization code itself: the REFRESH token never
-// enters the guest — the guest's auth file carries the current access
-// token plus a sentinel refresh token, and a daemon-side loop refreshes
-// ahead of expiry and pushes the fresh access token into the guest.
+// enters the guest. Access tokens are delivered through separate CLI auth-file,
+// host-bound credential-helper, or MCP adapters; a daemon loop refreshes
+// expiring sessions ahead of expiry.
 //
 // Storage mirrors the reference implementation's SyncWithDisk semantics: memory is the fast path
 // and the source of truth while the daemon runs; an optional 0600 file
@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,8 +32,7 @@ import (
 
 // TokenSet is one provider's token material held in custody.
 type TokenSet struct {
-	// AccessToken is pushed into the guest auth file and kept fresh by
-	// the refresh loop.
+	// AccessToken is kept fresh for configured delivery adapters.
 	AccessToken string `json:"accessToken"`
 	// RefreshToken stays host-side. May be empty for providers that
 	// issue non-rotating refresh material or none at all.
@@ -48,6 +48,8 @@ type TokenSet struct {
 	// ClientID is the public OAuth client_id the flow ran under — needed
 	// for refreshes after a daemon restart.
 	ClientID string `json:"clientId,omitempty"`
+	// Registration binds refresh material to its host-configured OAuth context.
+	Registration string `json:"registration,omitempty"`
 }
 
 // RefreshDue reports when the next refresh should happen: leeway before
@@ -112,6 +114,29 @@ func (r *Registry) Put(set TokenSet) error {
 	return r.syncLocked()
 }
 
+// UpdateIfCurrent replaces (or deletes, for nil next) a token set only if it
+// is still the one a refresh started with. A stale in-flight refresh must not
+// resurrect revoked credentials or overwrite a newer login.
+func (r *Registry) UpdateIfCurrent(expected TokenSet, next *TokenSet) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.loadLocked(); err != nil {
+		return false, err
+	}
+	if current, ok := r.sets[expected.Provider]; !ok || current != expected {
+		return false, nil
+	}
+	if next == nil {
+		delete(r.sets, expected.Provider)
+	} else {
+		if next.Provider != expected.Provider {
+			return false, fmt.Errorf("cannot change custody registration during refresh")
+		}
+		r.sets[expected.Provider] = *next
+	}
+	return true, r.syncLocked()
+}
+
 // Get returns the current set for provider.
 func (r *Registry) Get(provider string) (TokenSet, bool) {
 	r.mu.Lock()
@@ -121,6 +146,16 @@ func (r *Registry) Get(provider string) (TokenSet, bool) {
 	}
 	set, ok := r.sets[provider]
 	return set, ok
+}
+
+// AccessToken is the delivery view: expired, missing, or revoked credentials
+// fail closed. Callers never need to handle refresh material for delivery.
+func (r *Registry) AccessToken(provider string) (string, bool) {
+	set, ok := r.Get(strings.ToLower(provider))
+	if !ok || set.AccessToken == "" || (!set.Expiry.IsZero() && !r.now().Before(set.Expiry)) {
+		return "", false
+	}
+	return set.AccessToken, true
 }
 
 // Delete removes a provider's set and syncs.
@@ -195,7 +230,7 @@ func (r *Registry) loadLocked() error {
 		}
 		set := TokenSet{AccessToken: ps.AccessToken, RefreshToken: ps.RefreshToken,
 			IDToken: ps.IDToken, AccountID: ps.AccountID, Expiry: exp,
-			Provider: ps.Provider, ClientID: ps.ClientID}
+			Provider: ps.Provider, ClientID: ps.ClientID, Registration: ps.Registration}
 		if _, exists := r.sets[set.Provider]; !exists {
 			r.sets[set.Provider] = set
 		}
@@ -226,6 +261,7 @@ type persistedSet struct {
 	Expiry       json.RawMessage `json:"expiry,omitempty"`
 	Provider     string          `json:"provider"`
 	ClientID     string          `json:"clientId,omitempty"`
+	Registration string          `json:"registration,omitempty"`
 }
 
 // expiryTime parses expiry as RFC3339 (current schema) or unix seconds

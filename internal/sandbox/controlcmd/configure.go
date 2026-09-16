@@ -78,14 +78,36 @@ func configureRequestEmpty(request controlproto.ConfigureRequest) bool {
 		request.VCPUs == nil && request.ProcessIsolation == nil
 }
 
+// ValidateConfigureRequest checks a partial update without opening sandbox
+// state. Full, state-dependent validation remains in the existing transaction.
+func ValidateConfigureRequest(request controlproto.ConfigureRequest) error {
+	if configureRequestEmpty(request) {
+		return fmt.Errorf("at least one setting is required")
+	}
+	memory, cpus := uint(config.MinSandboxMemMB), 1
+	if request.MemMB != nil {
+		memory = *request.MemMB
+	}
+	if request.VCPUs != nil {
+		cpus = *request.VCPUs
+	}
+	if err := config.ValidateSandboxResourceBounds(memory, cpus); err != nil {
+		return err
+	}
+	if request.ProcessIsolation != nil {
+		return config.ValidateProcessIsolation(*request.ProcessIsolation)
+	}
+	return nil
+}
+
 var prepareConfiguredDevContainersProfile = devcontainersprofile.Prepare
 
 func Configure(name string, request controlproto.ConfigureRequest) (bool, error) {
 	if err := layout.ValidateName(name); err != nil {
 		return false, err
 	}
-	if configureRequestEmpty(request) {
-		return false, fmt.Errorf("at least one setting is required")
+	if err := ValidateConfigureRequest(request); err != nil {
+		return false, err
 	}
 	return mutateRunningOrStoppedResult(name,
 		func() (bool, error) {

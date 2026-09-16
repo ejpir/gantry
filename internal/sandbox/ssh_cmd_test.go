@@ -22,7 +22,7 @@ func TestShellCommandQuotesOpenSSHTokens(t *testing.T) {
 
 	block := managedSSHBlock("gantry executable")
 	wantProxy := "ProxyCommand " + shellCommand("gantry executable", "ssh-proxy", "%n")
-	wantKnownHosts := "KnownHostsCommand " + shellCommand("gantry executable", "ssh-known-hosts")
+	wantKnownHosts := "KnownHostsCommand " + knownHostsCommand("gantry executable", "ssh-known-hosts")
 	if !strings.Contains(block, wantProxy) || !strings.Contains(block, wantKnownHosts) {
 		t.Fatalf("managed SSH commands are not safely constructed:\n%s", block)
 	}

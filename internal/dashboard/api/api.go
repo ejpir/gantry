@@ -220,6 +220,28 @@ type MCPFilesystemRequest struct {
 	User    string
 }
 
+// AuditEvent is a bounded audit-tail entry, not a credential or MCP payload.
+// Entries have no timestamps or durable IDs. Occurrence distinguishes identical
+// lines within one sandbox's tail, counted from newest to oldest.
+type AuditEvent struct {
+	Sandbox    string
+	Line       string
+	Occurrence int
+	Decision   *AuditDecision
+	Error      string
+}
+
+// AuditDecision contains only the provenance recorded by the policy engine.
+type AuditDecision struct {
+	Effect       string   `json:"effect"`
+	Action       string   `json:"action"`
+	Reason       string   `json:"reason"`
+	Rules        []string `json:"rules"`
+	Organization string   `json:"organization"`
+	Revision     string   `json:"revision"`
+	Profile      string   `json:"profile"`
+}
+
 type Snapshot struct {
 	Sandboxes  []Sandbox
 	Traffic    []Traffic
@@ -228,6 +250,7 @@ type Snapshot struct {
 	Ports      []Port
 	Secrets    []Secret
 	MCPServers []MCPServer
+	Audit      []AuditEvent
 	Images     []Image
 	Registries []RegistryAuth
 }

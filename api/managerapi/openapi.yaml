@@ -3,8 +3,11 @@ info:
   title: Gantry Local Manager API
   version: 1.0.0
   description: >-
-    Same-user local sandbox lifecycle API. The production endpoint is an
+    Same-user local sandbox lifecycle API. The default endpoint is an
     HTTP/1.1 Unix-domain socket; it is not a network authentication boundary.
+    `gantry serve` may additionally opt into a TLS listener
+    (`-listen tls://ADDR:PORT --token-file PATH`), on which every request —
+    including /v1/health and this document — requires a valid bearer token.
 servers:
   - url: http://gantry.local
 paths:
@@ -73,9 +76,80 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Operation"
+  /v1/run:
+    post:
+      operationId: runVM
+      description: >-
+        Run the existing low-level kernel/disk launcher in a helper on the
+        manager host, not a named sandbox. Console I/O is bounded. The helper
+        is killed and reaped on deadline, caller disconnect or manager shutdown.
+        Uses bounded lifecycle admission; raw runs are serialized and refused
+        while an organization-wide feed policy is active. Repeat an
+        Idempotency-Key to retrieve the same operation, never launch twice.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RunVMRequest" }
+      responses:
+        "200":
+          description: Completed operation with run console/exit result (124 deadline, 130 cancellation)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "202":
+          description: Matching idempotent run is still active
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "408":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /v1/sandboxes/{name}:
     parameters:
       - $ref: "#/components/parameters/SandboxName"
+    patch:
+      operationId: configureSandbox
+      description: >-
+        Partial update through the existing live/stopped configuration path.
+        Omitted settings are preserved; explicit false disables a feature.
+        Resource and Dev Containers topology changes require restart when
+        running. Stopped changes take the launch lock. Result is in configure.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfigureSandboxRequest" }
+      responses:
+        "200":
+          description: Configuration committed, including idempotent replays
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "202":
+          description: Matching update is still in progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
     get:
       operationId: getSandbox
       responses:
@@ -165,6 +239,161 @@ paths:
                 $ref: "#/components/schemas/Operation"
         "404":
           $ref: "#/components/responses/Error"
+  /v1/sandboxes/{name}/net-policy:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: getNetworkPolicy
+      responses:
+        "200":
+          description: Effective live or saved network policy, including organization constraints
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkPolicy" }
+        "409":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setNetworkPolicy
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetworkPolicyRequest" }
+      responses:
+        "200":
+          description: Policy validated, persisted and applied live when running; organization constraints remain in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{name}/policy:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: getOrganizationPolicy
+      responses:
+        "200":
+          description: Organization policy provenance only, never sandbox credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationPolicy" }
+        "404":
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: setOrganizationPolicy
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrganizationPolicyRequest" }
+      responses:
+        "200":
+          description: Signed snapshot verified server-side and applied live when running; restart=true selects controlled stop/update/resume; mutation is refused while an organization-wide feed policy is active
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /v1/sandboxes/{name}/audit:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    get:
+      operationId: getAuditTail
+      responses:
+        "200":
+          description: Bounded broker audit tail, falling back to persisted audit.log when stopped
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditTail" }
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/ssh/hostkey:
+    get:
+      operationId: getSSHHostKey
+      responses:
+        "200":
+          description: Install SSH public key (authenticated TLS is the initial trust channel)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SSHHostKey" }
+  /v1/sandboxes/{name}/ssh:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: sshTunnel
+      description: Bodyless HTTP/1.1 request with Connection Upgrade and Upgrade gantry-ssh. After 101, bytes splice only to the named sandbox's SSH gateway. Session limits apply.
+      responses:
+        "101":
+          description: Switching to the bidirectional SSH byte stream
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: Sandbox stopped or SSH disabled; refused before upgrade
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/images:
+    get:
+      operationId: listImages
+      responses:
+        "200":
+          description: Cached images on the manager host
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImageList" }
+  /v1/images/pull:
+    post:
+      operationId: pullImage
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImagePullRequest"
+      responses:
+        "202":
+          description: Pull running; poll /v1/operations/{id} for progress and completion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "400":
+          $ref: "#/components/responses/Error"
+  /v1/images/delete:
+    post:
+      operationId: deleteImage
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImageDeleteRequest"
+      responses:
+        "200":
+          description: Image removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "404":
+          $ref: "#/components/responses/Error"
   /v1/events:
     get:
       operationId: events
@@ -176,6 +405,15 @@ paths:
               schema:
                 type: string
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Required on every request when the manager serves a tls:// listener.
+        Tokens are provisioned out of band in the --token-file; authentication
+        failures are an indistinguishable 403 and are audited by token
+        fingerprint, never by value.
   parameters:
     SandboxName:
       name: name
@@ -246,6 +484,9 @@ components:
       type: object
       required: [name, image]
       properties:
+        organizationPolicy:
+          $ref: "#/components/schemas/OrganizationSnapshot"
+          description: Optional signed organization policy, verified before boot. Not a transferable organization login credential. An active manager-wide feed snapshot is inherited and conflicting input is refused.
         name: { type: string }
         image: { type: string }
         kernel: { type: string }
@@ -265,6 +506,8 @@ components:
         proxy: { type: string, format: uri }
         noProxy: { type: string }
         proxyEnforce: { type: boolean, default: false }
+        ssh: { type: boolean, default: false }
+        devContainers: { type: boolean, default: false }
         oauthBridge: { type: boolean, default: true }
         processIsolation: { type: string, enum: [auto, required, off], default: auto }
         memoryMiB: { type: integer, default: 512 }
@@ -274,6 +517,150 @@ components:
           description: Names resolved from the manager's startup environment; values are never accepted over HTTP or persisted.
           type: array
           items: { type: string }
+    ConfigureSandboxRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        ssh: { type: boolean }
+        devContainers: { type: boolean }
+        memoryMiB: { type: integer, minimum: 1 }
+        cpus: { type: integer, minimum: 1 }
+        processIsolation: { type: string, enum: [auto, required, off] }
+    ConfigureSandboxResult:
+      type: object
+      required: [restartRequired]
+      properties:
+        restartRequired: { type: boolean }
+    RunVMRequest:
+      type: object
+      additionalProperties: false
+      required: [kernel]
+      anyOf:
+        - required: [initrd]
+        - required: [rootfs]
+      description: Explicit raw boot assets on the manager host. Not an arbitrary argv/shell endpoint. Strings except stdin are limited to 4096 bytes and may not contain NUL.
+      properties:
+        kernel: { type: string, minLength: 1, maxLength: 4096 }
+        initrd: { type: string, maxLength: 4096 }
+        rootfs: { type: string, maxLength: 4096 }
+        disks:
+          type: array
+          maxItems: 16
+          items: { type: string, minLength: 1, maxLength: 4096 }
+        shares:
+          type: array
+          maxItems: 16
+          items: { type: string, maxLength: 4096 }
+        networkEndpoint: { type: string, maxLength: 4096 }
+        networkMAC: { type: string, default: "5a:94:ef:e4:0c:ee" }
+        networkVFKIT: { type: boolean, default: true }
+        networkDHCP: { type: boolean, default: true }
+        vsockForward: { type: string, maxLength: 4096 }
+        vsockListen: { type: string, default: "1026", description: Comma-separated uint32 guest ports; an explicit empty string disables listening }
+        guestCID: { type: integer, default: 3 }
+        memoryMiB: { type: integer, minimum: 1, default: 512 }
+        cpus: { type: integer, minimum: 1, default: 1 }
+        commandLine: { type: string, maxLength: 4096 }
+        stdin: { type: string, maxLength: 65536 }
+        timeoutSeconds: { type: integer, minimum: 1, maximum: 3600, default: 300 }
+        maxOutputBytes: { type: integer, minimum: 1, maximum: 65536, default: 16384 }
+    NetworkPolicy:
+      type: object
+      required: [allow_local, description, state]
+      properties:
+        path: { type: string }
+        allow_local: { type: boolean }
+        description: { type: string }
+        state: { type: string, enum: [active, saved] }
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/NetworkRuleSummary" }
+    NetworkRuleSummary:
+      type: object
+      properties:
+        action: { type: string }
+        target: { type: string }
+        protocol: { type: string }
+        ports: { type: string }
+        source: { type: string }
+    NetworkPolicyRequest:
+      type: object
+      description: Exactly one of policy (JSON document) or default=true. Documents resolve on the server and cannot relax organization constraints.
+      properties:
+        policy: { type: object }
+        default: { type: boolean }
+        allowLocal: { type: boolean }
+    OrganizationPolicyRequest:
+      type: object
+      description: Exactly one of snapshot or clear=true. Running sandboxes update live unless restart=true requests controlled stop/update/resume.
+      properties:
+        snapshot: { $ref: "#/components/schemas/OrganizationSnapshot" }
+        clear: { type: boolean }
+        restart: { type: boolean, description: Explicitly stop, update coherently, and resume instead of applying live }
+    OrganizationSnapshot:
+      type: object
+      required: [bundle, public_key, profile]
+      properties:
+        bundle: { type: string, contentEncoding: base64, maxLength: 349528, description: Signed data-only OPA bundle; at most 256 KiB decoded }
+        public_key: { type: string, maxLength: 16384, description: RSA PUBLIC key PEM, never a signing key }
+        profile: { type: string }
+    OrganizationPolicy:
+      type: object
+      required: [managed]
+      properties:
+        managed: { type: boolean }
+        info: { $ref: "#/components/schemas/OrganizationInfo" }
+    OrganizationInfo:
+      type: object
+      required: [organization, revision, profile, expires_at]
+      properties:
+        organization: { type: string }
+        revision: { type: string }
+        profile: { type: string }
+        expires_at: { type: string, format: date-time }
+    AuditTail:
+      type: object
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          items: { type: string }
+    SSHHostKey:
+      type: object
+      required: [publicKey]
+      properties:
+        publicKey: { type: string, description: OpenSSH authorized-key formatted public key }
+    ImageList:
+      type: object
+      required: [images]
+      properties:
+        images:
+          type: array
+          items: { $ref: "#/components/schemas/Image" }
+    Image:
+      type: object
+      required: [ref, digest, arch, size, created]
+      properties:
+        ref: { type: string }
+        digest: { type: string }
+        arch: { type: string }
+        size: { type: integer }
+        created: { type: string }
+    ImagePullRequest:
+      type: object
+      required: [ref]
+      properties:
+        ref: { type: string, minLength: 1, maxLength: 512 }
+        platform:
+          description: Target architecture ("arm64", "linux/arm64", ...); defaults to the manager host's architecture.
+          type: string
+          maxLength: 64
+    ImageDeleteRequest:
+      type: object
+      required: [ref]
+      properties:
+        ref: { type: string, minLength: 1, maxLength: 512 }
     ExecRequest:
       type: object
       required: [argv]
@@ -306,6 +693,11 @@ components:
         warnings:
           type: array
           items: { type: string }
+        configure: { $ref: "#/components/schemas/ConfigureSandboxResult" }
+        run: { $ref: "#/components/schemas/ExecResult" }
+        progress:
+          description: Latest progress line while running; a summary once succeeded.
+          type: string
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     Event:

@@ -1,251 +1,159 @@
 # Security
 
-Gantry uses a microVM boundary, host-enforced shares, network policy, and
-confined worker processes to reduce the impact of running untrusted or
-prompt-influenced code. This page describes the boundary; it is not a claim
-that Gantry is suitable for hostile public multi-tenancy.
+Gantry combines a microVM, host-enforced shares and network policy, and
+confined worker processes. It reduces the impact of untrusted or
+prompt-influenced code, but is not presented as a hostile public multi-tenant
+platform.
 
 ## Threat model
 
-Gantry is designed to limit two common failures of local automation and
-coding agents:
+Gantry aims to stop sandbox code from:
 
-- code inside the sandbox reads or changes host files outside explicitly
-  shared directories;
-- code uses network access to reach host/LAN services or exfiltrate data to
-  destinations the operator did not allow.
+- reading or changing host files outside explicit shares; and
+- reaching host, LAN, or Internet destinations the operator did not allow.
 
-The workload, its dependencies, the container runtime, and the guest kernel
-are treated as less trusted than the host supervisor. The user who launches
-Gantry remains trusted.
+The workload, its dependencies, guest runtime, and guest kernel are less
+trusted than the host supervisor. The host user who launches Gantry remains
+trusted.
 
 ## Isolation boundaries
 
 ### MicroVM
 
-Each sandbox has its own Linux kernel, RAM, vCPUs, device model, filesystem,
-and network. Guest processes do not share the host kernel. Memory and CPU
-limits are VM allocations rather than container accounting.
+Each sandbox has its own Linux kernel, RAM, vCPUs, filesystems, devices, and
+network. Guest processes do not share the host kernel.
 
-The hypervisor boundary still has attack surface: the host hypervisor API,
-Gantry's VMM, and emulated virtio devices process guest-controlled input.
-Gantry fuzzes and tests these paths, but a VM is not proof against every
-escape.
+The host hypervisor API, Gantry VMM, and virtio devices still process
+adversarial guest input. A VM narrows the boundary; it does not prove that no
+escape exists.
 
 ### Host filesystem
 
-The guest receives only pre-opened boot disks and directories named with
-`-share`. Read-only shares are rejected by the host backend before a mutating
-filesystem operation reaches the host.
+The guest receives boot disks and only directories named with `-share`.
+Read-only shares are enforced by the host backend. Roots are pinned before use,
+and traversal, state-directory overlap, kernel-control filesystems, and special
+file creation are rejected.
 
-Share roots are pinned before use. Gantry rejects roots that overlap its
-sandbox state, vsock-forwarding directory, or another export, including Linux
-bind-mount aliases and protected mounts nested below an otherwise ordinary
-directory. Host kernel-control filesystems such as procfs, sysfs, cgroupfs,
-debugfs and securityfs cannot be exported. The backend also rejects guest
-creation, opening, linking, or mutation of device nodes, FIFOs and sockets.
+A writable share is intentionally writable. Guest code can read, change, or
+delete anything there that the host user can access. Share the smallest useful
+directory; avoid homes, credential stores, and container-engine sockets.
 
-A read-write share is deliberately writable. A compromised guest can read,
-change, or delete any content within that export that the launching user can
-access. Avoid sharing home directories, credential stores, Docker sockets,
-or broad source roots.
-
-Namespace serialization is local to one Gantry supervisor. Do not expose the
-same writable host tree from two concurrently running Gantry processes; host
-changes made after a root is validated are actions by the trusted operator.
-
-The trusted supervisor itself runs as the launching user and therefore has
-that user's host access. Gantry is not a privilege-separation boundary between
-the user and the supervisor.
+Do not expose the same writable tree from multiple Gantry supervisors at once.
+The supervisor itself runs as the launching user and retains that user's host
+authority.
 
 ### Network
 
-With the embedded stack, egress filtering happens on the host side of the
-virtio-net link. Guest processes cannot reconfigure or bypass that enforcement
-point from inside the VM.
+Egress filtering runs on the host side of virtio-net. The default blocks local,
+LAN, metadata, and special-use destinations but allows public Internet access.
+That default is not safe against exfiltration; use a default-deny policy for
+sensitive data.
 
-The default permits public internet access. It is not an exfiltration-safe
-default for secrets. Use a default-deny policy with explicit CIDR or domain
-allowances for sensitive workloads.
+DNS allowlists temporarily map names to addresses. Once traffic has an IP,
+explicit L3/L4 rules and the default action are authoritative. Any allowed
+destination can receive data.
 
-DNS allowlists are name-to-address conveniences. Explicit L3/L4 rules and the
-default action are the hard policy once a packet has an address. Anything a
-policy allows remains a possible data destination.
-
-Published ports create an inbound path to the guest. They bind to host
-loopback by default; an explicit `0.0.0.0` bind can expose the guest service to
-the LAN or beyond.
+Published ports add inbound access. Host loopback is the default bind; an
+explicit non-loopback address widens exposure.
 
 ### Worker processes
 
-In `auto` mode, Gantry attempts to separate the VMM and network data planes
-from the trusted supervisor. MCP-enabled sandboxes always run MCP parsing in a
-separate worker, even when OS confinement is set to `off`. Workers receive an
-allowlisted descriptor table and authenticated bootstrap channels, then apply
-platform confinement:
+Gantry can separate VMM, network, and MCP data planes from the trusted
+supervisor. Workers receive exact handles and authenticated channels, then use
+platform controls:
 
-- Linux uses user, mount, and PID namespaces when available, a private root,
-  capability removal, task limits, descriptor closure, `no_new_privs`,
-  Landlock, and a seccomp-BPF syscall policy. VMM and MCP workers receive a
-  deny-all Landlock filesystem ruleset. The network worker can read only exact
-  private snapshots of `/etc/hosts`, `/etc/nsswitch.conf`, and
-  `/etc/resolv.conf`; no directory subtree is allowlisted.
-- macOS uses Seatbelt profiles with role-specific file and network access.
-- Windows runs MCP and VMM device emulation in zero-capability AppContainers
-  inside one-process Jobs. Because WHPX rejects that token, a separate narrow
-  Job-confined broker owns only the partition/vCPUs and shared RAM. The network
-  worker uses a separate AppContainer with an exact network-capability set;
-  filesystem and exec denials are actively verified before its stack starts.
+- Linux namespaces, private roots, Landlock, seccomp, capability removal, and
+  task limits;
+- macOS deny-default Seatbelt profiles; and
+- Windows AppContainers and one-process Jobs, with a narrow WHPX broker where
+  needed.
 
-Workers probe the controls from inside the confined process. Gantry writes
-the measured properties to `isolation.json`; the TUI currently shows the
-configured isolation mode rather than the full per-role report. `auto` may
-report degradation and continue. `required` fails startup unless
-the required split-worker properties are verified. `off` disables this
-defense-in-depth layer.
+Workers probe their effective controls and write results to `isolation.json`.
+`auto` may continue with reported degradation, `required` fails unless required
+properties are verified, and `off` disables this defense-in-depth layer.
 
 ```console
-$ gantry start sensitive -image alpine:latest \
-    -process-isolation=required
+$ gantry start sensitive -image alpine:latest -process-isolation=required
 ```
 
-`required` is supported only where the platform can establish and verify the
-full required boundary. On Windows it requires brokered WHPX and, when
-networking is enabled, the embedded network worker with a policy that does not
-permit host loopback. An intentionally offline `-net=false` sandbox still uses
-the split VMM. Windows AppContainer network isolation cannot support
-host-loopback access or published ports without a privileged machine-wide
-exemption, so strict mode rejects those options rather than weakening the
-worker token.
+On Windows, strict mode does not support host-loopback network access or
+published ports. An offline `-net=false` sandbox remains compatible.
 
-The host MCP gateway is a separate capability-limited worker. The supervisor
-keeps destination selection, DNS pinning, secret and OAuth stores, fixed guest
-helper argv, and audit persistence. It relays bounded opaque streams and
-releases only the credential mapped to the requested configured server ID.
-Killing this worker disables MCP without killing the VM. The built-in
-filesystem helper remains a separate unprivileged guest process; its `os.Root`
-path containment and remaining hardening work are documented in the
-[MCP worker confinement design](mcp-worker-confinement.md).
-
-A credentialed MCP upstream receives its own configured credential by design
-and must be trusted with it. The gateway masks exact secret substrings in
-decoded JSON strings to contain accidental reflection, but a malicious server
-can split or transform a credential over its functional response channel.
+MCP parsing always stays in a separate worker when enabled. A configured MCP
+server receives its own credential by design; response redaction cannot stop a
+malicious server from transforming it. See
+[MCP confinement](mcp-worker-confinement.md).
 
 ### Runtime inside the VM
 
-`-runtime runsc` adds a gVisor boundary between the workload and the guest
-kernel. It is defense in depth, not a replacement for the VM or host-side
-network and share policies.
+`-runtime runsc` adds gVisor between the workload and guest kernel. It is
+defense in depth, not a replacement for the VM or host-side policies.
 
-Gantry does not place locked OCI masks or read-only overmounts below a workload's
-`/proc`. That permits tools such as bubblewrap to mount a fresh procfs after
-creating child user and PID namespaces; Linux rejects the mount if the parent
-procfs is partly hidden. The procfs still cannot expose host processes or the
-host kernel because both are outside the microVM. It can expose guest-kernel
-state, and a root workload can change settings that the guest kernel permits
-with Gantry's reduced capability set; such changes affect its own dedicated VM.
-`/sys/firmware` remains masked. Use `-runtime runsc` when a workload also needs
-defense in depth from the guest kernel.
+Workload procfs permits nested user/PID-namespace tools such as bubblewrap. It
+still exposes only guest-kernel and workload-namespace state, not host
+processes or the host kernel.
 
 ## Credentials
 
-Registry credentials remain in the host-side image resolver. Workload secrets
-are sent through an inherited stdin handshake, kept in the supervisor's
-memory, and added to guest process environments. Only their names persist.
+Registry credentials stay in the host image resolver. Ordinary workload
+secrets stay in supervisor memory and enter selected guest process
+environments; only names and source references persist.
 
-Secrets are still visible to code running as the relevant guest user and may
-be inherited by child processes. A guest process can send them to any allowed
-network destination or write them to a writable share. Constrain both egress
-and filesystem access.
+Guest code can read an injected secret and send it through any allowed network,
+MCP, or writable-share path. Use narrow egress and filesystem grants.
 
-Host command-backed secret sources are disabled: guest-triggered commands need
-a dedicated host-confinement boundary, and per-sandbox path checks cannot rule
-out inputs poisoned by another sandbox or an earlier run. File-backed secret
-paths must name existing single-link regular files through absolute, clean,
-symlink/reparse-free paths. Each component is opened relative to a pinned
-parent descriptor, and paths inside or aliased beneath a writable share are
-rejected. The prepared share handle is checked again before publication. These
-rules prevent on-demand credential resolution from becoming supervisor code
-execution or an arbitrary host-file read, including when another sandbox
-previously wrote the path.
+File-backed sources must be existing single-link regular files reached through
+clean, absolute, symlink-free paths. Sources inside or aliased beneath writable
+shares are rejected. Command-backed sources are disabled.
 
-The legacy external `-gvproxy` backend is also disabled because it launches a
-configurable host executable. The embedded network stack avoids making a
-guest-writable executable path part of the supervisor's restart behavior.
+Bound secrets remain host-side until the credential broker releases one for an
+allowed destination. OAuth custody keeps refresh tokens host-side but may
+release current access tokens to configured adapters. Already delivered values
+cannot be recalled.
 
-OAuth bridging uses a trusted guest helper to discover loopback TCP listeners
-without tracing applications or parsing terminal output. Matching host ports
-are bounded to fixed callback ports and the Linux ephemeral range. Transparent
-listeners accept only GET requests carrying `code`/`error` and non-empty
-`state`; the guest CLI remains authoritative for state and PKCE validation.
-Custody listeners additionally require an exact pending host-side flow. After
-delivery, the browser receives only a fixed, CSP-locked host page. Guest status,
-headers, redirects, bodies, and error details are discarded. Disable the bridge
-with `-oauth-bridge=false` when unused.
+The OAuth callback bridge accepts only bounded OAuth-shaped loopback callbacks;
+the guest still validates state and PKCE. The host does not render guest
+responses. Disable it when unused.
 
-If upgrading from a build that rendered the guest callback response, clear
-browser site data for any `localhost:<callback-port>` or
-`127.0.0.1:<callback-port>` origin previously used for sign-in. Hardened
-responses request cache and storage clearing, but an already-installed service
-worker can intercept navigation before that response is received.
+See [Host shares and secrets](shares-secrets.md), [OAuth](oauth.md), and
+[Architecture](architecture.md#host-capability-bridges) for operational and
+protocol details.
 
 ## Local control surfaces
 
-Sandbox control sockets and the manager socket are local, user-owned endpoints
-with same-user checks or protected ACLs. They assume processes running as the
-same host user are trusted. Do not forward these sockets to a network or grant
-another user access to the Gantry state directory.
+Sandbox and manager sockets are private same-user endpoints, using peer checks
+or protected Windows ACLs. Same-host-user processes are trusted. Do not forward
+these sockets or grant another account access to Gantry state.
 
-The manager API accepts secret names but never values, and bounds request
-bodies, execution time, and captured output. Interactive CLI sessions use a
-separate out-of-band exit-status channel so guest bytes cannot imitate control
-messages.
-
-Each interactive or internal command has its own guest container/PID namespace
-while bind-mounting the sandbox's persistent root. Ending or killing a session
-therefore removes its full process tree instead of leaving daemonized children
-inside the base container. Concurrent sessions retain independent task and I/O
-lifecycles.
+The manager API accepts secret names, not values, and bounds requests, time,
+and output. Interactive execution carries exit status outside guest output, so
+guest bytes cannot forge control state.
 
 ## Integrity and persistence
 
-Gantry's self-updater and guest-asset downloader verify release files against
-SHA-256 sidecars before installation. Image cache files are content-addressed
-by the selected manifest digest and published atomically after construction.
+Release updates and guest assets are checked against SHA-256 sidecars. OCI
+cache entries are content-addressed and atomically published.
 
-Sandbox writable layers are mutable and persist across stop/resume. Gantry
-checks each layer's association with its workload or IDE image to reduce
-accidental reuse, but they are not cryptographically sealed snapshots. Do not
-attach one writable layer to multiple running VMs.
+Writable layers persist but are not sealed snapshots. Never attach one to two
+running VMs. Export requires a stopped sandbox and includes every guest-created
+file in the workload layer, including credentials or history. Review archives
+before sharing.
 
-`gantry export` requires the sandbox to be stopped, verifies the ext4 health
-state, replays committed journal metadata into a read-only in-memory view, and
-holds its exclusive disk lock while producing an OCI archive. The source disk
-is not modified. Host shares and the optional Dev Containers IDE layer are not
-included. Every file persisted in the workload layer is included, however, so
-an export may contain login state, keys, history, or other credentials. Exports
-are atomically published with private
-permissions and a protected Windows DACL, but must still be reviewed before
-being shared.
+Organization audit logs are bounded and best-effort, not tamper-resistant
+compliance storage.
 
 ## Known limitations
 
-- Gantry is experimental and has not established a stable security boundary
-  for hostile public multi-tenancy.
-- Windows support is experimental; strict mode does not support host-loopback
-  access, published ports, or host-path packet capture.
-- Live/incremental snapshots and snapshot rollback are not supported; portable
-  OCI export requires a stopped sandbox.
-- The embedded guest network is IPv4-only.
-- A default policy permits the public internet.
-- Proxy enforcement targets direct web traffic on TCP 80/443 and UDP 443; it
-  is not a universal transparent proxy.
-- Writable shares and published non-loopback ports intentionally weaken the
-  sandbox boundary.
-- Removing a sandbox permanently removes its Gantry-managed workload and IDE
-  writable layers; Gantry does not provide recovery or snapshot rollback.
-  Explicit `-rwlayer` paths remain caller-owned.
+- Gantry is experimental and not a proven hostile multi-tenant boundary.
+- Windows support is experimental.
+- Snapshots and rollback are unsupported; OCI export requires a stopped
+  sandbox.
+- Guest networking is IPv4-only.
+- Public Internet is allowed by default.
+- Proxy enforcement covers direct web traffic, not every protocol.
+- Writable shares and non-loopback published ports intentionally weaken
+  isolation.
+- Deleting a sandbox permanently removes Gantry-managed writable layers.
 
 Report vulnerabilities privately as described in
 [SECURITY.md](../../SECURITY.md).

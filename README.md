@@ -67,6 +67,46 @@ Open the terminal dashboard:
 ./gantry tui
 ```
 
+## Remote sandboxes and organization policy
+
+A standalone remote manager needs HTTPS and its own bearer token; organization
+login is not required:
+
+```sh
+gantry remote add team https://gantry.example.com:8443 --ca manager-ca.pem
+gantry image pull alpine:latest -remote team
+gantry start dev -image alpine:latest -remote team
+gantry exec dev -remote team -- uname -a
+```
+
+See [Remote access](docs/gantry/remote-access.md) to configure the manager,
+TLS trust, SSH, and the dashboard flow.
+
+Apply a signed organization policy when starting a sandbox:
+
+```sh
+gantry start governed -image alpine:latest \
+  -org-policy bundle.tar.gz -org-policy-key public.pem \
+  -policy-profile developer
+```
+
+Or sign in with a trusted organization configuration, discover approved
+remotes, and apply its policy to an existing sandbox:
+
+```sh
+gantry org login -config organization.json
+gantry org remotes example-company
+gantry org apply example-company dev
+```
+
+Organization discovery never supplies the separate remote-manager token. A
+long-running manager can also receive generations of signed policy through an
+outbound mTLS channel with `gantry serve -policy-feed organization-feed.json`.
+Each generation applies to all saved sandboxes, updates running guests live,
+and is inherited by later manager-created sandboxes. See
+[Organization login](docs/gantry/organization-login.md) and
+[Organization policy](docs/gantry/organization-policy.md).
+
 ## Highlights
 
 - OCI registry images, layouts, archives, Docker saves, and EROFS images
@@ -75,6 +115,8 @@ Open the terminal dashboard:
 - Host shares, egress policy, proxy routing, traffic inspection, and ports
 - Local SSH and an optional in-VM IDE container for VS Code Dev Containers
 - In-memory secrets, OAuth custody, and a credential-injecting MCP gateway
+- Signed organization policy, mTLS update feeds, and optional OIDC discovery
+- Standalone remote sandboxes over an authenticated HTTPS manager
 - Terminal dashboard and local HTTP/JSON manager API
 
 See the [Gantry manual](docs/gantry/README.md) for usage, configuration,

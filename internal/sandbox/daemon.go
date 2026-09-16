@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
@@ -34,9 +35,14 @@ type daemonRuntime struct {
 
 	cfg         config.RunConfig
 	secretStore *secret.Store
-	// audit is the daemon-wide security-event trail (secret source errors,
-	// credhelper decisions, custody events); the broker serves it over
-	// audit.tail once the control socket is up.
+	governance  *policy.Controller
+	// policyUpdateMu serializes live organization-policy generations inside the
+	// daemon. policyChanged wakes supervise so expiry follows the active engine.
+	policyUpdateMu sync.Mutex
+	policyChanged  chan struct{}
+	// audit owns the shared sink writer and bounded security-event trail
+	// (policy, secrets, credentials, custody) from early boot onward. The
+	// broker serves audit.tail; audit.log is the stopped-state fallback.
 	audit   *auditRing
 	store   *config.ConfigStore
 	lock    *os.File

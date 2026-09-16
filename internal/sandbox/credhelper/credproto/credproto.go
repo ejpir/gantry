@@ -36,15 +36,16 @@ const (
 	// authorization-code exchange to the daemon, which holds the refresh
 	// token host-side and pushes fresh access tokens into the guest auth
 	// file. Op empty means the classic credential-get.
-	OpOAuthBegin  = "oauth.begin"
+	OpOAuthLogin  = "oauth.login" // name-only; host generates PKCE or starts device authorization
+	OpOAuthBegin  = "oauth.begin" // legacy Claude/Codex guest helpers
 	OpOAuthStatus = "oauth.status"
 )
 
 // Request is one guest query. For a credential get: the host a credential
 // is wanted for, plus optionally the repo path git supplied (audit only).
-// For oauth.begin: the PKCE material and endpoints of the flow the daemon
-// should complete host-side. The verifier is PKCE proof material — it
-// travels only over this trusted vsock channel, never the network.
+// For oauth.login only Provider is used; the host owns the flow. The legacy
+// oauth.begin fields carry PKCE material from older Claude/Codex helpers,
+// but never authorize a new token endpoint or a credential binding.
 type Request struct {
 	Op   string `json:"op,omitempty"`
 	Host string `json:"host"`
@@ -66,7 +67,10 @@ type Response struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 
-	OK      bool   `json:"ok,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Message string `json:"message,omitempty"`
+	OK           bool   `json:"ok,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Message      string `json:"message,omitempty"`
+	State        string `json:"state,omitempty"`
+	AuthorizeURL string `json:"authorizeUrl,omitempty"`
+	UserCode     string `json:"userCode,omitempty"` // public device verification code, not the device token
 }

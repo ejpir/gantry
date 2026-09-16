@@ -211,7 +211,7 @@ func TestCreateAreaDoubleClickOpensCreateDialog(t *testing.T) {
 	}
 	model, cmd = m.updateMouseClick(mouse)
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.dialog != tuiCreateDialog {
+	if cmd != nil || m.dialog != tuiCreateLocationDialog {
 		t.Fatalf("create-area double-click = dialog %d cmd=%v", m.dialog, cmd)
 	}
 }
@@ -288,7 +288,7 @@ func TestTopNavigationAndNewSandboxModal(t *testing.T) {
 	}
 	model, cmd = m.updateMouseClick(tea.Mouse{X: newTarget.rect.x + newTarget.rect.w/2, Y: newTarget.rect.y, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.dialog != tuiCreateDialog {
+	if cmd != nil || m.dialog != tuiCreateLocationDialog {
 		t.Fatalf("New sandbox click = dialog %d cmd=%v", m.dialog, cmd)
 	}
 }

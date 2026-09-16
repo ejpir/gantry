@@ -4,6 +4,7 @@ package sharefs
 
 import (
 	"fmt"
+	"time"
 )
 
 // ExportState mirrors the Unix/Windows implementations for
@@ -35,6 +36,7 @@ type Export struct{}
 
 func (e *Export) State() ExportState { return ExportGone }
 func (e *Export) Identity() Identity { return Identity{} }
+func (e *Export) PolicyDenied() bool { return false }
 
 type Prepared struct{}
 
@@ -59,4 +61,7 @@ func (h *Hub) Swap(p *Prepared) (old, export *Export, err error) {
 func (h *Hub) Export(tag string) *Export                      { return nil }
 func (h *Hub) Exports() []*Export                             { return nil }
 func (h *Hub) Remove(tag string, force bool) (*Export, error) { return nil, errUnsupported }
+func (h *Hub) SetDeadline(time.Time)                          {}
+func (h *Hub) SetPolicyBlocked(bool)                          {}
+func (h *Hub) SetPolicyAccess(time.Time, map[string]bool)     {}
 func (h *Hub) Close() error                                   { return nil }

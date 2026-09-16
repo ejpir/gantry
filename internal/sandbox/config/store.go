@@ -14,6 +14,8 @@ import (
 	"github.com/ejpir/gantry/internal/atomicfile"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/mcpspec"
+	"github.com/ejpir/gantry/internal/oauthprovider"
+	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/sharefs"
@@ -60,6 +62,9 @@ func ReadSandboxConfig(dir string) (RunConfig, error) {
 	}
 	if err := ValidateProxyConfig(cfg); err != nil {
 		return RunConfig{}, fmt.Errorf("invalid sandbox proxy: %w", err)
+	}
+	if err := NormalizeOAuthProviders(&cfg); err != nil {
+		return RunConfig{}, err
 	}
 	if err := ValidateDevContainers(cfg); err != nil {
 		return RunConfig{}, fmt.Errorf("invalid devcontainers profile: %w", err)
@@ -158,11 +163,25 @@ func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 	return nil
 }
 
+// SetOrganizationPolicy persists the verified snapshot through the running
+// daemon's single configuration owner.
+func (s *ConfigStore) SetOrganizationPolicy(snapshot *policy.Config) error {
+	return s.Mutate(func(cfg *RunConfig) error {
+		if snapshot != nil && cfg.OAuthCustodyEnabled() {
+			return fmt.Errorf("organization policy v1 does not support OAuth custody")
+		}
+		cfg.OrgPolicy = policy.CloneConfig(snapshot)
+		return nil
+	})
+}
+
 func cloneRunConfig(cfg RunConfig) RunConfig {
+	cfg.OrgPolicy = policy.CloneConfig(cfg.OrgPolicy)
 	cfg.Shares = append([]string(nil), cfg.Shares...)
 	cfg.Ports = append([]string(nil), cfg.Ports...)
 	cfg.SecretNames = append([]string(nil), cfg.SecretNames...)
 	cfg.MCPRemotes = append([]string(nil), cfg.MCPRemotes...)
+	cfg.OAuthProviders = oauthprovider.Clone(cfg.OAuthProviders)
 	cfg.SecretSources = append([]secret.NamedSource(nil), cfg.SecretSources...)
 	for i := range cfg.SecretSources {
 		cfg.SecretSources[i].Source.Argv = append([]string(nil), cfg.SecretSources[i].Source.Argv...)
@@ -576,12 +595,25 @@ func (s *ConfigStore) Configure(update SandboxUpdate) error {
 	return tx.Commit()
 }
 
-func ValidateSandboxResources(memMB uint, vcpus int) error {
+// ValidateSandboxResourceBounds is transport-safe: it checks the supported
+// value space without querying this machine's hypervisor. Remote clients must
+// leave the target host/backend capacity checks to ValidateSandboxResources.
+func ValidateSandboxResourceBounds(memMB uint, vcpus int) error {
 	if uint64(memMB) < MinSandboxMemMB {
 		return fmt.Errorf("memory must be at least %d MiB", MinSandboxMemMB)
 	}
 	if uint64(memMB) > MaxSandboxMemMB {
 		return fmt.Errorf("memory must be at most %d MiB", MaxSandboxMemMB)
+	}
+	if vcpus < 1 || vcpus > vmm.MaxVCPUs {
+		return fmt.Errorf("CPUs must be between 1 and %d", vmm.MaxVCPUs)
+	}
+	return nil
+}
+
+func ValidateSandboxResources(memMB uint, vcpus int) error {
+	if err := ValidateSandboxResourceBounds(memMB, vcpus); err != nil {
+		return err
 	}
 	return vmm.ValidateResources(uint64(memMB)<<20, vcpus)
 }

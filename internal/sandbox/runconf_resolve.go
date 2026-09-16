@@ -14,6 +14,7 @@ import (
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/mcpspec"
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/oauthprovider"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/rwlayer"
@@ -72,6 +73,7 @@ func resolveRunOptions(ctx context.Context, options config.RunOptions, progress 
 		milestone string
 	}{
 		{r.initialize, ""},
+		{r.resolveOrganizationPolicy, ""},
 		{r.resolveSessionOptions, ""},
 		{r.resolveSecrets, ""},
 		{r.resolveRuntime, "launcher runtime resolved"},
@@ -438,6 +440,19 @@ func (r *runResolver) resolveSessionOptions() error {
 	if custody && !enabled {
 		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
 	}
+	if len(r.options.OAuthProviderFiles) > oauthprovider.MaxProviders {
+		return fmt.Errorf("too many -oauth-provider values (max %d)", oauthprovider.MaxProviders)
+	}
+	for _, file := range r.options.OAuthProviderFiles {
+		provider, err := config.ReadOAuthProvider(file)
+		if err != nil {
+			return fmt.Errorf("-oauth-provider: %w", err)
+		}
+		r.cfg.OAuthProviders = append(r.cfg.OAuthProviders, provider)
+	}
+	if err := config.NormalizeOAuthProviders(&r.cfg); err != nil {
+		return err
+	}
 	r.cfg.MCP = r.options.MCP
 	r.cfg.SSH = r.options.SSH
 	r.cfg.DevContainers = r.options.DevContainers
@@ -469,6 +484,14 @@ func (r *runResolver) resolveSessionOptions() error {
 			return fmt.Errorf("-mcp-remote %q: duplicate server name %q", spec, remote.Name)
 		}
 		seenMCPNames[remote.Name] = true
+		if remote.AuthKind == "custody" {
+			if !custody {
+				return fmt.Errorf("-mcp-remote %s: auth=custody: needs -oauth-custody", remote.Name)
+			}
+			if _, ok := oauthprovider.Lookup(r.cfg.OAuthProviders, remote.AuthRef); !ok {
+				return fmt.Errorf("-mcp-remote %s: unknown custody provider %q", remote.Name, remote.AuthRef)
+			}
+		}
 	}
 	if r.cfg.MCP {
 		root, user, err := config.NormalizeMCPFilesystem(r.cfg.MCPFSRoot, r.cfg.MCPFSUser)

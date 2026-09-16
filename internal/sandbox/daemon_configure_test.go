@@ -196,18 +196,21 @@ func TestConfigureRollsBackRevisionWhenServiceReconciliationFails(t *testing.T) 
 	daemon := &daemonRuntime{
 		dir: dir, store: store, broker: &broker{}, guestToolsStopping: true,
 	}
-	if restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{SSH: &enabled}); restart || err == nil ||
+	// A combined SSH/resource update must remain atomic when the helper
+	// cannot be verified: neither SSH nor the new desired allocation survives.
+	memory := uint(768)
+	if restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{SSH: &enabled, MemMB: &memory}); restart || err == nil ||
 		!strings.Contains(err.Error(), "verified guest tools") {
 		t.Fatalf("configure result = restart %t, err %v; want reconciliation failure", restart, err)
 	}
-	if got := store.Snapshot(); got.SSH || got.SettingsRevision != 2 {
+	if got := store.Snapshot(); got.SSH || got.MemMB != initial.MemMB || got.SettingsRevision != 2 {
 		t.Fatalf("failed service reconciliation left desired settings committed: %+v", got)
 	}
 	persisted, err := config.ReadSandboxConfig(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.SSH || persisted.SettingsRevision != 2 {
+	if persisted.SSH || persisted.MemMB != initial.MemMB || persisted.SettingsRevision != 2 {
 		t.Fatalf("rollback did not converge memory and disk: %+v", persisted)
 	}
 }

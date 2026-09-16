@@ -10,71 +10,18 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/ejpir/gantry/internal/oauthprovider"
 )
 
-// Custody-mode host-side token endpoint client (workstream 3). The
-// transparent bridge needs no provider knowledge; custody needs exactly
-// one: where to POST the code exchange and refresh. client_id and
-// redirect_uri are taken from the authorize URL the guest advertised
-// (they are public, loopback-bound values), so the registry carries only
-// the token endpoint and guest auth-file shape per provider.
-//
-// GANTRY_OAUTH_TOKEN_URL_<PROVIDER> (uppercased) overrides the endpoint —
-// used by tests with a mock authorization server, and an escape hatch if
-// a provider moves its endpoint.
+// CustodySpec is public, host-owned provider metadata. Delivery adapters are
+// independent of the standard OAuth grant client below.
+type CustodySpec = oauthprovider.Spec
 
-type tokenRequestEncoding uint8
-
-const (
-	tokenRequestJSON tokenRequestEncoding = iota
-	tokenRequestForm
-)
-
-// CustodySpec describes a provider the daemon can hold tokens for. Token
-// endpoint contracts differ by provider and, for Codex, by grant: the initial
-// authorization-code exchange is form-encoded while refreshes are JSON.
-type CustodySpec struct {
-	Provider         string
-	TokenURL         string
-	GuestAuthFile    string
-	exchangeEncoding tokenRequestEncoding
-	refreshEncoding  tokenRequestEncoding
-}
-
-// custodySpecs lists providers with custody support. Unknown providers
-// are refused loudly at login: custody must never silently degrade to
-// guest-held tokens.
-var custodySpecs = map[string]CustodySpec{
-	"claude": {
-		Provider:         "claude",
-		TokenURL:         "https://console.anthropic.com/v1/oauth/token",
-		GuestAuthFile:    "$HOME/.claude/.credentials.json",
-		exchangeEncoding: tokenRequestJSON,
-		refreshEncoding:  tokenRequestJSON,
-	},
-	"codex": {
-		Provider:         "codex",
-		TokenURL:         "https://auth.openai.com/oauth/token",
-		GuestAuthFile:    "$HOME/.codex/auth.json",
-		exchangeEncoding: tokenRequestForm,
-		refreshEncoding:  tokenRequestJSON,
-	},
-}
-
-// CustodySpecFor resolves a provider's custody spec, honouring the
-// endpoint override.
 func CustodySpecFor(provider string) (CustodySpec, bool) {
-	spec, ok := custodySpecs[strings.ToLower(provider)]
-	if !ok {
-		return CustodySpec{}, false
-	}
-	if override := os.Getenv("GANTRY_OAUTH_TOKEN_URL_" + strings.ToUpper(provider)); override != "" {
-		spec.TokenURL = override
-	}
-	return spec, true
+	return oauthprovider.Builtin(provider)
 }
 
 // TokenResponse is the subset of a token endpoint response gantry uses.
@@ -84,6 +31,7 @@ type TokenResponse struct {
 	IDToken      string `json:"id_token,omitempty"`
 	ExpiresIn    int64  `json:"expires_in"` // seconds; Codex uses JWT exp instead
 	AccountID    string `json:"account_id,omitempty"`
+	TokenType    string `json:"token_type,omitempty"`
 }
 
 // ExpiryAt returns the access-token expiry. Providers that omit expires_in
@@ -111,26 +59,33 @@ const tokenHTTPTimeout = 30 * time.Second
 type TokenEndpointError struct {
 	StatusCode int
 	Status     string
+	// Code is a recognized OAuth error only, never arbitrary endpoint text.
+	Code string
 }
 
-func (e *TokenEndpointError) Error() string { return "token endpoint returned " + e.Status }
+func (e *TokenEndpointError) Error() string {
+	if e.Code != "" {
+		return "token endpoint returned " + e.Status + " (" + e.Code + ")"
+	}
+	return "token endpoint returned " + e.Status
+}
 
 // IsPermanentTokenError reports OAuth statuses for which retrying the same
 // refresh token cannot help.
 func IsPermanentTokenError(err error) bool {
 	var endpointErr *TokenEndpointError
-	return errors.As(err, &endpointErr) && (endpointErr.StatusCode == http.StatusBadRequest || endpointErr.StatusCode == http.StatusUnauthorized)
+	return errors.As(err, &endpointErr) && (endpointErr.Code == "invalid_grant" || endpointErr.Code == "invalid_client" || endpointErr.Code == "unauthorized_client" || endpointErr.StatusCode == http.StatusUnauthorized || (endpointErr.StatusCode == http.StatusBadRequest && endpointErr.Code == ""))
 }
 
-// postToken posts one provider-specific grant and decodes the bounded token
-// response. Failures include the status code but never response bodies.
-func postToken(ctx context.Context, spec CustodySpec, grant map[string]string, encoding tokenRequestEncoding, requireIDToken bool) (TokenResponse, error) {
+// postGrant posts one provider-specific grant and reads a bounded response.
+// Failures include the status and recognized error codes, never body text.
+func postGrant(ctx context.Context, endpoint string, grant map[string]string, encoding string) ([]byte, error) {
 	var (
 		body        io.Reader
 		contentType string
 	)
 	switch encoding {
-	case tokenRequestForm:
+	case oauthprovider.Form:
 		values := make(url.Values, len(grant))
 		for key, value := range grant {
 			values.Set(key, value)
@@ -140,14 +95,14 @@ func postToken(ctx context.Context, spec CustodySpec, grant map[string]string, e
 	default:
 		raw, err := json.Marshal(grant)
 		if err != nil {
-			return TokenResponse{}, err
+			return nil, err
 		}
 		body = bytes.NewReader(raw)
 		contentType = "application/json"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, spec.TokenURL, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
-		return TokenResponse{}, err
+		return nil, fmt.Errorf("invalid token endpoint request")
 	}
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
@@ -159,19 +114,46 @@ func postToken(ctx context.Context, spec CustodySpec, grant map[string]string, e
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return TokenResponse{}, err
+		// Transport errors may include endpoint query parameters.
+		return nil, fmt.Errorf("token endpoint request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 {
+		return nil, fmt.Errorf("token endpoint response unreadable or oversized")
+	}
+	var failure struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &failure)
+	if failure.Error != "" || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		code := ""
+		switch failure.Error {
+		case "authorization_pending", "slow_down", "access_denied", "expired_token", "invalid_grant", "invalid_client", "unauthorized_client", "invalid_scope", "unsupported_grant_type", "temporarily_unavailable", "server_error":
+			code = failure.Error
+		}
+		return nil, &TokenEndpointError{StatusCode: resp.StatusCode, Status: fmt.Sprintf("HTTP %d", resp.StatusCode), Code: code}
+	}
+	return raw, nil
+}
+
+func postToken(ctx context.Context, spec CustodySpec, grant map[string]string, encoding string, requireIDToken bool) (TokenResponse, error) {
+	if spec.Resource != "" {
+		grant["resource"] = spec.Resource
+	}
+	raw, err := postGrant(ctx, spec.TokenURL, grant, encoding)
 	if err != nil {
 		return TokenResponse{}, err
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return TokenResponse{}, &TokenEndpointError{StatusCode: resp.StatusCode, Status: resp.Status}
-	}
 	var tok TokenResponse
 	if err := json.Unmarshal(raw, &tok); err != nil {
-		return TokenResponse{}, fmt.Errorf("decode token response: %w", err)
+		return TokenResponse{}, fmt.Errorf("invalid token response JSON")
+	}
+	if tok.TokenType != "" && !strings.EqualFold(tok.TokenType, "bearer") {
+		return TokenResponse{}, fmt.Errorf("unsupported token_type (expected bearer)")
+	}
+	if tok.ExpiresIn < 0 || tok.ExpiresIn > int64((1<<63-1)/time.Second) {
+		return TokenResponse{}, fmt.Errorf("invalid access-token lifetime")
 	}
 	if tok.AccessToken == "" {
 		return TokenResponse{}, fmt.Errorf("token response carried no access_token")
@@ -185,7 +167,7 @@ func postToken(ctx context.Context, spec CustodySpec, grant map[string]string, e
 		}
 		claims, err := decodeJWTClaims(tok.IDToken)
 		if err != nil {
-			return TokenResponse{}, fmt.Errorf("codex token response carried an invalid id_token: %w", err)
+			return TokenResponse{}, fmt.Errorf("codex token response carried an invalid id_token")
 		}
 		tok.AccountID = codexAccountID(claims)
 	}
@@ -217,10 +199,8 @@ func codexAccountID(claims map[string]any) string {
 	return account
 }
 
-// ExchangeCode exchanges an authorization code host-side. The verifier
-// is the PKCE verifier the guest helper generated and handed to the
-// daemon over the trusted broker channel — it never traverses the
-// network from the host except to the provider's token endpoint.
+// ExchangeCode exchanges an authorization code host-side. The PKCE verifier
+// never traverses the network except to the configured token endpoint.
 func ExchangeCode(ctx context.Context, spec CustodySpec, code, verifier, clientID, redirectURI string) (TokenResponse, error) {
 	return postToken(ctx, spec, map[string]string{
 		"grant_type":    "authorization_code",
@@ -228,7 +208,7 @@ func ExchangeCode(ctx context.Context, spec CustodySpec, code, verifier, clientI
 		"redirect_uri":  redirectURI,
 		"client_id":     clientID,
 		"code_verifier": verifier,
-	}, spec.exchangeEncoding, strings.EqualFold(spec.Provider, "codex"))
+	}, spec.ExchangeEncoding, strings.EqualFold(spec.Provider, "codex"))
 }
 
 // RefreshTokens exchanges a refresh token for a fresh access token. A
@@ -239,7 +219,7 @@ func RefreshTokens(ctx context.Context, spec CustodySpec, refreshToken, clientID
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
 		"client_id":     clientID,
-	}, spec.refreshEncoding, false)
+	}, spec.RefreshEncoding, false)
 }
 
 // SentinelRefresh is the marker written into the guest auth file in place

@@ -65,6 +65,9 @@ func (dashboardService) Command(ctx context.Context, argv ...string) (*exec.Cmd,
 		return nil, err
 	}
 	command := exec.CommandContext(ctx, executable, argv...)
+	// This service owns only local rows. An ambient remote default must
+	// never retarget a dashboard action at a same-named remote sandbox.
+	command.Env = append(os.Environ(), "GANTRY_REMOTE=")
 	command.WaitDelay = 2 * time.Second
 	return command, nil
 }
@@ -805,6 +808,7 @@ func loadDashboardSnapshot() (dashboardapi.Snapshot, error) {
 			data.Ports = append(data.Ports, loadDashboardPorts(name, cfg, sandbox.State == dashboardapi.Running)...)
 			data.MCPServers = append(data.MCPServers, loadDashboardMCPServers(name, cfg, sandbox.State == dashboardapi.Running)...)
 		}
+		data.Audit = append(data.Audit, loadDashboardAudit(sandbox)...)
 		data.Sandboxes = append(data.Sandboxes, sandbox)
 	}
 

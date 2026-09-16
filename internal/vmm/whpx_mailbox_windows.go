@@ -171,9 +171,7 @@ func (view *whpxMailboxView) slot(vp uint32) ([]byte, error) {
 		return nil, fmt.Errorf("invalid WHPX mailbox vCPU %d", vp)
 	}
 	base := view.base + uintptr(vp)*whpxMailboxStride
-	// MapViewOfFile returns the mapped address as uintptr; converting that
-	// validated in-range address is the Windows API boundary.
-	return unsafe.Slice((*byte)(unsafe.Pointer(base)), whpxMailboxStride), nil //nolint:govet
+	return windowsByteSlice(base, whpxMailboxStride), nil
 }
 
 func mailboxState(slot []byte) *uint32 {

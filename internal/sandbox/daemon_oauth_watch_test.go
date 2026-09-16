@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func freeOAuthWatchPort(t *testing.T) int {
 
 func testOAuthWatchBridge(t *testing.T) *oauthbridge.Bridge {
 	t.Helper()
-	b := oauthbridge.New(func([]string, time.Duration) ([]byte, int, error) {
+	b := oauthbridge.New(func(io.Reader, []string, time.Duration) ([]byte, int, error) {
 		return []byte("HTTP/1.0 200 OK\r\n\r\n"), 0, nil
 	}, true)
 	if b == nil {

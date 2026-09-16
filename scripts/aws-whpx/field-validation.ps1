@@ -158,6 +158,9 @@ try {
     Invoke-Gantry @("exec", $Sandbox, "--", "cat", "/host/$rwTag/host-after.txt")
     "PASS persistent shares survived a cold daemon restart"
 
+    # These small-memory fixtures validate network/VMM isolation only. OAuth
+    # helper delivery has its own security battery and would add unrelated
+    # startup pressure, especially to the offline 128 MiB guest.
     $null = Invoke-GantryBestEffort @("delete", $NetSandbox)
     Invoke-Gantry @(
         "start", $NetSandbox,
@@ -166,6 +169,7 @@ try {
         "-image", $NetprobeImage,
         "-mem", "128",
         "-cpus", "1",
+        "-oauth-bridge=false",
         "-process-isolation", "auto"
     )
     Invoke-Gantry @("exec", $NetSandbox, "--", "getent", "ahostsv4", $TargetHost)
@@ -180,6 +184,7 @@ try {
         "-image", $NetprobeImage,
         "-mem", "128",
         "-cpus", "1",
+        "-oauth-bridge=false",
         "-process-isolation", "required"
     )
     $requiredIsolation = Join-Path (Join-Path $StateRoot $RequiredSandbox) "isolation.json"
@@ -204,6 +209,7 @@ try {
         "-mem", "128",
         "-cpus", "1",
         "-net=false",
+        "-oauth-bridge=false",
         "-process-isolation", "required"
     )
     $offlineIsolation = Join-Path (Join-Path $StateRoot $OfflineSandbox) "isolation.json"

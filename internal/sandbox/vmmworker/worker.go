@@ -43,7 +43,9 @@ type vmmWorker struct {
 	bridge      net.Conn
 	bridgeE     chan error
 	share       net.Conn // fd 6 peer: supervisor side of the FUSE relay
-	shareE      chan error
+	shareMu     sync.Mutex
+	shareErr    error
+	shareDone   chan struct{}
 	lifecycle   *worker.Lifecycle
 	waitMu      sync.Mutex // protects lazy lifecycle-context initialization
 	waitCtx     context.Context
@@ -161,10 +163,10 @@ func (w *vmmWorker) startShareBroker(hub *sharefs.Hub) error {
 	if hub == nil {
 		return fmt.Errorf("share hub unavailable")
 	}
-	if w.shareE != nil {
+	if w.shareDone != nil {
 		return fmt.Errorf("share broker already started")
 	}
-	w.shareE = make(chan error, 1)
+	w.shareDone = make(chan struct{})
 	go w.monitorShareServe(func() error { return sharebroker.Serve(w.share, hub) }, "share broker", true)
 	return nil
 }
@@ -183,7 +185,7 @@ func (w *vmmWorker) monitorShareServe(serve func() error, label string, closeImm
 	} else {
 		err = fmt.Errorf("%s: %w", label, err)
 	}
-	w.shareE <- err
+	w.publishShareFailure(err)
 	// A broker failure is independently fatal. A vhost control EOF, however,
 	// normally follows Machine.Run returning and closing its frontend. Give
 	// vm.wait a brief chance to publish that primary hypervisor error instead
@@ -204,21 +206,36 @@ func (w *vmmWorker) monitorShareServe(serve func() error, label string, closeImm
 	_ = w.Close()
 }
 
+// publishShareFailure records one immutable relay failure and then wakes every
+// observer. A buffered error channel cannot be used here: Wait, Close, and
+// diagnostics would race to consume its sole value, allowing another observer
+// to miss a fatal backend exit indefinitely.
+func (w *vmmWorker) publishShareFailure(err error) {
+	w.shareMu.Lock()
+	defer w.shareMu.Unlock()
+	if w.shareErr != nil {
+		return
+	}
+	w.shareErr = err
+	close(w.shareDone)
+}
+
+func (w *vmmWorker) shareFailure() error {
+	w.shareMu.Lock()
+	defer w.shareMu.Unlock()
+	return w.shareErr
+}
+
 // Wait parks until the guest exits (the split-mode guestErr).
 func (w *vmmWorker) Wait() error {
 	ctx := w.waitContext()
 	var out vmmworkerapi.WaitResponse
 	if err := w.client.CallContext(ctx, "vm.wait", nil, &out); err != nil {
 		if errors.Is(err, context.Canceled) {
-			// An unexpected share-relay failure initiates Close. Prefer its
-			// actionable cause over the lifecycle cancellation it triggered.
-			select {
-			case shareErr := <-w.shareE:
-				if shareErr == nil {
-					shareErr = fmt.Errorf("share broker: share relay closed unexpectedly")
-				}
+			// An unexpected share-relay failure is stored before it initiates
+			// Close. Prefer that actionable cause over lifecycle cancellation.
+			if shareErr := w.shareFailure(); shareErr != nil {
 				return shareErr
-			default:
 			}
 			// setDead publishes the process result and closes Done before it
 			// cancels this call, so a death-triggered cancellation retains
@@ -263,13 +280,7 @@ func (w *vmmWorker) Close() error {
 		// A relay-triggered Close carries its original protocol cause here.
 		// During an intentional shutdown the broker observes Stopping and does
 		// not publish an error.
-		if w.shareE != nil {
-			select {
-			case err := <-w.shareE:
-				shutdownErr = errors.Join(shutdownErr, err)
-			default:
-			}
-		}
+		shutdownErr = errors.Join(shutdownErr, w.shareFailure())
 		if w.bridge != nil {
 			_ = w.bridge.Close()
 		}

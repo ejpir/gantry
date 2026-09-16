@@ -11,12 +11,21 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 )
 
-// persistedAudit reads the daemon's on-disk audit tee (<dir>/audit.log).
-func persistedAudit(name string) ([]string, error) {
+// PersistedAuditTail reads the bounded on-disk trail without dialing the broker.
+// Callers that already know a sandbox is stopped can avoid connection retries.
+func PersistedAuditTail(name string) ([]string, error) {
 	if !layout.ValidName(name) {
 		return nil, fmt.Errorf("invalid sandbox name %q", name)
 	}
-	f, err := os.Open(filepath.Join(layout.Dir(name), "audit.log"))
+	path := filepath.Join(layout.Dir(name), "audit.log")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("audit.log must be a regular file")
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -47,9 +56,10 @@ func persistedAudit(name string) ([]string, error) {
 }
 
 // AuditTail reads the sandbox daemon's bounded in-memory trail of
-// security-relevant events (credential deliveries and withholds, secret
-// source errors, OAuth custody events) over ctl.sock. The trail names
-// secrets but never quotes their values.
+// security-relevant events (organization policy decisions, credential
+// deliveries and withholds, secret-source errors, OAuth custody events) over
+// ctl.sock, falling back to audit.log after shutdown. The trail names secrets
+// but never quotes their values.
 func AuditTail(name string) ([]string, error) {
 	resp, err := controlproto.Call[controlproto.AuditResponse](name, controlproto.Request{
 		Op: "audit.tail",
@@ -59,7 +69,7 @@ func AuditTail(name string) ([]string, error) {
 		// Daemon down: serve the persisted trail instead of a bare dial
 		// error. The ring is authoritative while running; audit.log is its
 		// disk tee.
-		if lines, ferr := persistedAudit(name); ferr == nil {
+		if lines, ferr := PersistedAuditTail(name); ferr == nil {
 			return lines, nil
 		}
 		return nil, err
