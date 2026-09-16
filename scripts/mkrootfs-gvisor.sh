@@ -7,9 +7,10 @@
 #   ./scripts/mkrootfs-gvisor.sh artifacts/nerdbox-rootfs-arm64.erofs
 #   → artifacts/nerdbox-rootfs-gvisor-arm64.erofs (use with: -runtime runsc)
 #
-# Needs: mkfs.erofs, fsck.erofs, curl, go. Downloads the matching runsc
-# release binary (static, ~45 MB) from the gVisor release bucket, and
-# builds the crunshim /dev fixer (guest/crunshim) for the target arch.
+# Needs: mkfs.erofs, fsck.erofs, wget, tar with zstd support, sha512sum,
+# and go. Downloads and verifies the matching gVisor release archive, then
+# installs its runsc binary and builds the crunshim /dev fixer
+# (guest/crunshim) for the target arch.
 set -e
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
@@ -34,12 +35,17 @@ echo "== extracting $IN"
 fsck.erofs --extract="$WORK/rootfs" --no-preserve "$IN" >/dev/null
 [ -x "$WORK/rootfs/sbin/crun" ] || { echo "no /sbin/crun in $IN — is this a nerdbox rootfs?" >&2; exit 1; }
 
-echo "== downloading runsc ($RUNSC_ARCH)"
+echo "== downloading gVisor release ($RUNSC_ARCH)"
 BASE=https://storage.googleapis.com/gvisor/releases/release/latest/$RUNSC_ARCH
-curl -fsSL "$BASE/runsc" -o "$WORK/runsc"
-curl -fsSL "$BASE/runsc.sha512" -o "$WORK/runsc.sha512"
-(cd "$WORK" && sed -i 's/  runsc/  runsc/' runsc.sha512 && sha512sum -c runsc.sha512 >/dev/null)
-chmod +x "$WORK/runsc"
+(
+	cd "$WORK"
+	wget "$BASE/gvisor.tar.zstd" "$BASE/gvisor.tar.zstd.sha512"
+	sha512sum -c gvisor.tar.zstd.sha512
+	mkdir gvisor
+	tar --zstd -xf gvisor.tar.zstd -C gvisor
+)
+[ -f "$WORK/gvisor/runsc" ] || { echo "gVisor release archive does not contain runsc" >&2; exit 1; }
+chmod +x "$WORK/gvisor/runsc"
 
 echo "== building crunshim ($GO_ARCH)"
 (cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=$GO_ARCH \
@@ -47,7 +53,7 @@ echo "== building crunshim ($GO_ARCH)"
 
 echo "== installing: /sbin/crun = crunshim -> /sbin/crun.runsc (crun -> crun.runc)"
 mv "$WORK/rootfs/sbin/crun" "$WORK/rootfs/sbin/crun.runc"
-cp "$WORK/runsc" "$WORK/rootfs/sbin/crun.runsc"
+cp "$WORK/gvisor/runsc" "$WORK/rootfs/sbin/crun.runsc"
 cp "$WORK/crunshim" "$WORK/rootfs/sbin/crun"
 
 LABEL=$(basename "$OUT" .erofs | tr -cd 'a-zA-Z0-9._-' | cut -c1-15)
