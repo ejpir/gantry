@@ -45,13 +45,17 @@ images to skip those builds. All three hosts run the signed-policy battery and
 the organization-wide live mTLS manager policy-feed battery; both Linux
 architectures also run SSH/Dev Containers and large-directory coverage.
 
-On Linux with `/dev/kvm`, the focused local mode runs the complete manager
-API/SSH/policy-feed battery and public-client OAuth/MCP custody battery. GitHub
-CI uses this mode with the kernel, rootfs, image, host binary, and guest helper
-built by its prerequisite jobs:
+On Linux with `/dev/kvm`, local mode mirrors the maintained macOS coverage: it
+runs the manager API/SSH/policy-feed battery, the shared core CLI/networking/
+credentials/OAuth/MCP functional battery, signed-policy checks, SSH/Dev
+Containers, and large-directory validation. GitHub CI uses this mode with the
+kernel, crun/runsc root filesystems, workload and IDE images, host binary, and
+guest helper built by its prerequisite jobs:
 
 ```sh
 GANTRY_TEST_WORKLOAD_IMAGE=artifacts/gantry-default-image-x86_64.erofs \
+GANTRY_TEST_RUNSC_KERNEL=artifacts/gantry-kernel-x86_64 \
+GANTRY_TEST_RUNSC_ROOTFS=artifacts/nerdbox-rootfs-gvisor-x86_64.erofs \
   sh scripts/aws-e2e-validation.sh linux
 ```
 

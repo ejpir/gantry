@@ -374,13 +374,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # GitHub's Linux runner exposes KVM, so this job goes beyond boot smoke: it
-  # runs the full manager/SSH/policy-feed and public-client OAuth/MCP batteries
-  # against the exact host, kernel, rootfs, image, and guest-helper artifacts.
+  # GitHub's Linux runner exposes KVM, so this job runs the same maintained
+  # local batteries as macOS: manager/policy-feed, the shared functional
+  # surface, policy, SSH/Dev Containers, and large-directory coverage against
+  # the exact host, kernel, rootfs, workload, IDE, and guest-helper artifacts.
   native-smoke:
     name: native-smoke/${{ matrix.name }}
     needs: [build, guest-assets, kernels, guest-tools]
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -462,7 +463,7 @@ jobs:
             exit "$exec_rc"
           fi
           printf '%s\n' "$output" | tr -d '\r' | grep -Fqx 'hello world'
-      - name: manager, policy-feed, and public-client OAuth real-VM E2E
+      - name: full local Linux KVM E2E
         shell: bash
         env:
           GANTRY_ARTIFACTS: ${{ runner.temp }}/guest-tools
@@ -470,6 +471,9 @@ jobs:
           GANTRY_TEST_KERNEL: ${{ runner.temp }}/kernels/gantry-kernel-x86_64
           GANTRY_TEST_ROOTFS: ${{ runner.temp }}/guest-assets/nerdbox-rootfs.erofs
           GANTRY_TEST_WORKLOAD_IMAGE: ${{ runner.temp }}/guest-assets/alpine.erofs
+          GANTRY_TEST_RUNSC_KERNEL: ${{ runner.temp }}/kernels/gantry-kernel-x86_64
+          GANTRY_TEST_RUNSC_ROOTFS: ${{ runner.temp }}/guest-assets/nerdbox-rootfs-gvisor.erofs
+          GANTRY_TEST_IDE_IMAGE: ${{ runner.temp }}/guest-assets/ide.erofs
           GANTRY_E2E_WORK_DIR: ${{ runner.temp }}/native-e2e
         run: scripts/aws-e2e-validation.sh linux
       - name: upload VM logs on failure
