@@ -1,8 +1,8 @@
 #!/bin/sh
 # Run the complete field validation. With no arguments this drives the
 # repository's reusable AWS Linux amd64/arm64 KVM and Windows WHPX hosts.
-# `linux` runs the manager and OAuth batteries on local amd64 KVM (including
-# GitHub-hosted CI); `macos` runs the maintained local Apple-silicon batteries.
+# `linux` and `macos` run the maintained local batteries on KVM and Apple
+# silicon HVF respectively (including Linux KVM on GitHub-hosted CI).
 #
 #   sh scripts/aws-e2e-validation.sh          # AWS Linux + Windows
 #   sh scripts/aws-e2e-validation.sh linux    # local Linux KVM / CI
@@ -17,7 +17,7 @@ usage() {
 usage: scripts/aws-e2e-validation.sh [aws|linux|macos]
 
   aws      validate AWS Linux amd64/arm64 KVM and Windows WHPX hosts (default)
-  linux    validate manager/policy-feed and OAuth custody on local Linux KVM
+  linux    validate the local Linux KVM backend
   macos    validate the local Apple-silicon macOS HVF backend
 
 All modes include signed OPA policy validation with real VMs and loopback-only
@@ -29,7 +29,12 @@ Linux overrides:
   GANTRY_TEST_KERNEL             guest kernel for the host architecture
   GANTRY_TEST_ROOTFS             matching Nerdbox rootfs
   GANTRY_TEST_WORKLOAD_IMAGE     local workload EROFS image
+  GANTRY_TEST_RUNSC_KERNEL       optional gVisor-capable guest kernel
+  GANTRY_TEST_RUNSC_ROOTFS       optional matching gVisor Nerdbox rootfs
   GANTRY_TEST_OAUTH_IDP          prebuilt disposable OAuth fixture
+  GANTRY_TEST_IDE_IMAGE          curated Dev Containers EROFS image
+  GANTRY_TEST_PUBLIC_EGRESS      required or skip (default: probe host capability)
+  GANTRY_SKIP_DEVCONTAINERS=1    skip SSH/Dev Containers and directory batteries
   GANTRY_E2E_WORK_DIR            retained test workspace
 
 macOS overrides:
@@ -233,12 +238,20 @@ run_linux_validation() {
 		exit 1
 	}
 	case $(uname -m) in
-	x86_64|amd64) LINUX_ASSET_ARCH=x86_64 ;;
-	aarch64|arm64) LINUX_ASSET_ARCH=arm64 ;;
+	x86_64|amd64)
+		LINUX_ASSET_ARCH=x86_64
+		LINUX_GOARCH=amd64
+		LINUX_EXPECTED_ARCH=x86_64
+		;;
+	aarch64|arm64)
+		LINUX_ASSET_ARCH=arm64
+		LINUX_GOARCH=arm64
+		LINUX_EXPECTED_ARCH=aarch64
+		;;
 	*) echo "local Linux validation does not support $(uname -m)" >&2; exit 1 ;;
 	esac
 	[ -c /dev/kvm ] || { echo "local Linux validation requires /dev/kvm" >&2; exit 1; }
-	for command_name in go python3 ssh sftp; do
+	for command_name in go python3 curl ssh sftp; do
 		command -v "$command_name" >/dev/null 2>&1 || {
 			echo "required command not found: $command_name" >&2
 			exit 1
@@ -253,15 +266,38 @@ run_linux_validation() {
 	}
 	LINUX_ARTIFACTS=$(linux_absolute "${GANTRY_ARTIFACTS:-artifacts}")
 	LINUX_GANTRY=$(linux_absolute "${GANTRY_TEST_EXE:-$LINUX_ARTIFACTS/gantry}")
+	LINUX_GUEST=$LINUX_ARTIFACTS/gantry-guest-$LINUX_ASSET_ARCH
 	LINUX_KERNEL=$(linux_absolute "${GANTRY_TEST_KERNEL:-$LINUX_ARTIFACTS/gantry-kernel-$LINUX_ASSET_ARCH}")
 	LINUX_ROOTFS=$(linux_absolute "${GANTRY_TEST_ROOTFS:-$LINUX_ARTIFACTS/nerdbox-rootfs-$LINUX_ASSET_ARCH.erofs}")
 	LINUX_IMAGE=$(linux_absolute "${GANTRY_TEST_WORKLOAD_IMAGE:-$LINUX_ARTIFACTS/gantry-default-image-$LINUX_ASSET_ARCH.erofs}")
-	for executable in "$LINUX_GANTRY" "$LINUX_ARTIFACTS/gantry-guest-$LINUX_ASSET_ARCH"; do
+	LINUX_RUNSC_KERNEL=
+	LINUX_RUNSC_ROOTFS=
+	[ -z "${GANTRY_TEST_RUNSC_KERNEL:-}" ] || LINUX_RUNSC_KERNEL=$(linux_absolute "$GANTRY_TEST_RUNSC_KERNEL")
+	[ -z "${GANTRY_TEST_RUNSC_ROOTFS:-}" ] || LINUX_RUNSC_ROOTFS=$(linux_absolute "$GANTRY_TEST_RUNSC_ROOTFS")
+	if { [ -n "$LINUX_RUNSC_KERNEL" ] && [ -z "$LINUX_RUNSC_ROOTFS" ]; } ||
+		{ [ -z "$LINUX_RUNSC_KERNEL" ] && [ -n "$LINUX_RUNSC_ROOTFS" ]; }; then
+		echo "GANTRY_TEST_RUNSC_KERNEL and GANTRY_TEST_RUNSC_ROOTFS must be set together" >&2
+		exit 1
+	fi
+	for executable in "$LINUX_GANTRY" "$LINUX_GUEST"; do
 		[ -x "$executable" ] || { echo "missing executable: $executable" >&2; exit 1; }
 	done
-	for asset in "$LINUX_KERNEL" "$LINUX_ROOTFS" "$LINUX_IMAGE"; do
+	set -- "$LINUX_KERNEL" "$LINUX_ROOTFS" "$LINUX_IMAGE"
+	[ -z "$LINUX_RUNSC_KERNEL" ] || set -- "$@" "$LINUX_RUNSC_KERNEL" "$LINUX_RUNSC_ROOTFS"
+	for asset in "$@"; do
 		[ -s "$asset" ] || { echo "missing guest asset: $asset" >&2; exit 1; }
 	done
+
+	LINUX_PUBLIC_EGRESS=${GANTRY_TEST_PUBLIC_EGRESS:-}
+	if [ -z "$LINUX_PUBLIC_EGRESS" ]; then
+		if python3 -c 'import socket; s = socket.create_connection(("1.1.1.1", 443), 5); s.close()' \
+			>/dev/null 2>&1; then
+			LINUX_PUBLIC_EGRESS=required
+		else
+			LINUX_PUBLIC_EGRESS=skip
+			echo "Linux host has no direct public TCP path; public guest egress checks will be skipped" >&2
+		fi
+	fi
 
 	LINUX_OWNED_WORK=0
 	if [ -n "${GANTRY_E2E_WORK_DIR:-}" ]; then
@@ -301,10 +337,89 @@ run_linux_validation() {
 		-image-store "$LINUX_WORK/manager-images" -pull=false \
 		-work-dir "$LINUX_WORK/manager" -timeout 12m
 
-	echo "===== Linux KVM: public-client OAuth custody and MCP battery ====="
-	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" python3 scripts/oauth-custody-e2e.py \
-		--idp "$LINUX_OAUTH_IDP" --gantry "$LINUX_GANTRY" \
-		--kernel "$LINUX_KERNEL" --rootfs "$LINUX_ROOTFS" --image "$LINUX_IMAGE"
+	echo "===== Linux KVM: core CLI, networking, credentials, OAuth custody, and MCP battery ====="
+	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" \
+		GANTRY_TEST_PUBLIC_EGRESS="$LINUX_PUBLIC_EGRESS" \
+		GANTRY_TEST_ROOT="$ROOT" \
+		GANTRY_TEST_OAUTH_E2E="$ROOT/scripts/oauth-custody-e2e.py" \
+		GANTRY_TEST_OAUTH_IDP="$LINUX_OAUTH_IDP" \
+		GANTRY_TEST_EXE="$LINUX_GANTRY" \
+		GANTRY_TEST_KERNEL="$LINUX_KERNEL" \
+		GANTRY_TEST_ROOTFS="$LINUX_ROOTFS" \
+		GANTRY_TEST_IMAGE="$LINUX_IMAGE" \
+		GANTRY_TEST_RUNSC_KERNEL="$LINUX_RUNSC_KERNEL" \
+		GANTRY_TEST_RUNSC_ROOTFS="$LINUX_RUNSC_ROOTFS" \
+		GANTRY_TEST_EXPECTED_ARCH="$LINUX_EXPECTED_ARCH" \
+		GANTRY_HOME="$LINUX_WORK/functional/sandboxes" \
+		GANTRY_IMAGES="$LINUX_WORK/functional/images" \
+		GANTRY_STORE_URL='' \
+		bash scripts/aws-kvm/test-battery.sh
+
+	echo "===== Linux KVM: signed OPA organization-policy battery ====="
+	CGO_ENABLED=0 go build -o "$LINUX_WORK/policy-e2e" ./tests/e2e/policy
+	"$LINUX_WORK/policy-e2e" \
+		-gantry "$LINUX_GANTRY" -kernel "$LINUX_KERNEL" -rootfs "$LINUX_ROOTFS" \
+		-image "$LINUX_IMAGE" -artifacts "$LINUX_ARTIFACTS"
+
+	if [ "${GANTRY_SKIP_DEVCONTAINERS:-0}" = 1 ]; then
+		echo "===== Linux KVM: SSH/Dev Containers and directory batteries skipped ====="
+	else
+		LINUX_IDE_IMAGE=
+		[ -z "${GANTRY_TEST_IDE_IMAGE:-}" ] || LINUX_IDE_IMAGE=$(linux_absolute "$GANTRY_TEST_IDE_IMAGE")
+		if [ -z "$LINUX_IDE_IMAGE" ] && [ -s "$LINUX_ARTIFACTS/gantry-ide-image-$LINUX_ASSET_ARCH.erofs" ]; then
+			LINUX_IDE_IMAGE=$LINUX_ARTIFACTS/gantry-ide-image-$LINUX_ASSET_ARCH.erofs
+		fi
+		if [ -z "$LINUX_IDE_IMAGE" ]; then
+			for command_name in docker mkfs.erofs; do
+				command -v "$command_name" >/dev/null 2>&1 || {
+					echo "required to build the curated IDE image: $command_name" >&2
+					echo "set GANTRY_TEST_IDE_IMAGE or GANTRY_SKIP_DEVCONTAINERS=1 to continue without building it" >&2
+					exit 1
+				}
+			done
+			LINUX_IDE_IMAGE=$LINUX_WORK/gantry-ide-image-$LINUX_ASSET_ARCH.erofs
+			echo "===== Linux KVM: build current curated IDE image ====="
+			sh scripts/mkideimage.sh "$LINUX_IDE_IMAGE" "linux/$LINUX_GOARCH"
+		fi
+		[ -s "$LINUX_IDE_IMAGE" ] || { echo "curated IDE image missing: $LINUX_IDE_IMAGE" >&2; exit 1; }
+
+		LINUX_FIELD_ASSETS=$LINUX_WORK/field-assets
+		mkdir -p "$LINUX_FIELD_ASSETS"
+		stage_linux_asset() {
+			source_path=$1
+			destination_path=$2
+			rm -f -- "$destination_path"
+			ln "$source_path" "$destination_path" 2>/dev/null || cp "$source_path" "$destination_path"
+		}
+		stage_linux_asset "$LINUX_IDE_IMAGE" "$LINUX_FIELD_ASSETS/gantry-ide-image-$LINUX_ASSET_ARCH.erofs"
+		stage_linux_asset "$LINUX_GUEST" "$LINUX_FIELD_ASSETS/gantry-guest-$LINUX_ASSET_ARCH"
+		LINUX_IDE_IMAGE=$LINUX_FIELD_ASSETS/gantry-ide-image-$LINUX_ASSET_ARCH.erofs
+
+		echo "===== Linux KVM: SSH/Dev Containers battery ====="
+		GANTRY_TEST_ROOT="$LINUX_FIELD_ASSETS" \
+			GANTRY_TEST_EXE="$LINUX_GANTRY" \
+			GANTRY_TEST_KERNEL="$LINUX_KERNEL" \
+			GANTRY_TEST_ROOTFS="$LINUX_ROOTFS" \
+			GANTRY_TEST_IDE_IMAGE="$LINUX_IDE_IMAGE" \
+			GANTRY_TEST_WORKLOAD_IMAGE="$LINUX_IMAGE" \
+			GANTRY_TEST_GUEST="$LINUX_FIELD_ASSETS/gantry-guest-$LINUX_ASSET_ARCH" \
+			GANTRY_TEST_SANDBOX="ssh-devcontainers-$LINUX_ASSET_ARCH-kvm" \
+			GANTRY_TEST_PLATFORM="Linux $LINUX_ASSET_ARCH KVM" \
+			GANTRY_HOME="$LINUX_WORK/ssh/sandboxes" \
+			bash scripts/aws-kvm/ssh-devcontainers-validation.sh
+
+		echo "===== Linux KVM: large-directory battery ====="
+		GANTRY_TEST_ARCH="$LINUX_ASSET_ARCH" \
+			GANTRY_TEST_ROOT="$LINUX_FIELD_ASSETS" \
+			GANTRY_TEST_EXE="$LINUX_GANTRY" \
+			GANTRY_TEST_KERNEL="$LINUX_KERNEL" \
+			GANTRY_TEST_ROOTFS="$LINUX_ROOTFS" \
+			GANTRY_TEST_IMAGE="$LINUX_IDE_IMAGE" \
+			GANTRY_TEST_GUEST_DIR=/home/gantry/gantry-dirscan \
+			GANTRY_TEST_SANDBOX="dirscan-$LINUX_ASSET_ARCH-kvm" \
+			GANTRY_HOME="$LINUX_WORK/directory/sandboxes" \
+			sh scripts/aws-kvm/directory-validation.sh
+	fi
 
 	echo "===== Linux KVM E2E VALIDATION PASSED ====="
 }
