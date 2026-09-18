@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func managerRequest(t *testing.T, service *managerService, method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -41,19 +40,19 @@ func TestManagerHealthAndOpenAPI(t *testing.T) {
 func TestManagerIdempotencyReplaysAndRejectsMismatch(t *testing.T) {
 	service := newManagerService(stubLifecycle{})
 	body := []byte(`{"name":"alpha"}`)
-	first, replay, err := service.beginOperation("create", "alpha", "key-1", managerFingerprint("POST", "/v1/sandboxes", body))
-	if err != nil || replay {
-		t.Fatalf("first begin = %+v replay=%v err=%v", first, replay, err)
+	first, err := service.beginOperation("create", "alpha", "key-1", managerFingerprint("POST", "/v1/sandboxes", body))
+	if err != nil || first.Replay {
+		t.Fatalf("first begin = %+v err=%v", first, err)
 	}
-	finished := service.finishOperation(first.ID, nil)
+	finished := service.finishOperation(first.Owner, nil)
 	if finished.State != "succeeded" {
 		t.Fatalf("finished state = %q", finished.State)
 	}
-	second, replay, err := service.beginOperation("create", "alpha", "key-1", managerFingerprint("POST", "/v1/sandboxes", body))
-	if err != nil || !replay || second.ID != first.ID || second.State != "succeeded" {
-		t.Fatalf("replay = %+v replay=%v err=%v", second, replay, err)
+	second, err := service.beginOperation("create", "alpha", "key-1", managerFingerprint("POST", "/v1/sandboxes", body))
+	if err != nil || !second.Replay || second.Operation.ID != first.Operation.ID || second.Phase != operationSucceeded {
+		t.Fatalf("replay = %+v err=%v", second, err)
 	}
-	if _, _, err := service.beginOperation("delete", "alpha", "key-1", managerFingerprint("DELETE", "/v1/sandboxes/alpha", nil)); err == nil {
+	if _, err := service.beginOperation("delete", "alpha", "key-1", managerFingerprint("DELETE", "/v1/sandboxes/alpha", nil)); err == nil {
 		t.Fatal("idempotency key reuse with a different request succeeded")
 	}
 }
@@ -74,16 +73,15 @@ func TestManagerDecodeRejectsUnknownAndOversizedRequests(t *testing.T) {
 func TestManagerOperationsAreBounded(t *testing.T) {
 	service := newManagerService(stubLifecycle{})
 	for index := range managerMaxOperations + 20 {
-		operation, replay, err := service.beginOperation("test", "sandbox", "", managerFingerprint("POST", "/", []byte{byte(index)}))
-		if err != nil || replay {
-			t.Fatalf("begin %d: replay=%v err=%v", index, replay, err)
+		operation, err := service.beginOperation("test", "sandbox", "", managerFingerprint("POST", "/", []byte{byte(index)}))
+		if err != nil || operation.Replay {
+			t.Fatalf("begin %d: replay=%v err=%v", index, operation.Replay, err)
 		}
-		service.finishOperation(operation.ID, nil)
+		service.finishOperation(operation.Owner, nil)
 	}
-	service.mu.Lock()
-	defer service.mu.Unlock()
-	if len(service.operations) > managerMaxOperations || len(service.operationOrder) > managerMaxOperations {
-		t.Fatalf("operations grew beyond bound: map=%d order=%d", len(service.operations), len(service.operationOrder))
+	records, order, _ := service.operationState.counts()
+	if records > managerMaxOperations || order > managerMaxOperations {
+		t.Fatalf("operations grew beyond bound: map=%d order=%d", records, order)
 	}
 }
 
@@ -95,17 +93,13 @@ func TestManagerEventsDropsSlowSubscriber(t *testing.T) {
 	}
 	defer cancel()
 	for index := range managerEventBuffer + 1 {
-		operation := &operationRecord{Operation: managerapi.Operation{ID: "event", Sandbox: "test", State: "running", Created: time.Now(), Updated: time.Now()}}
-		service.mu.Lock()
-		service.publishLocked("operation", operation)
-		service.mu.Unlock()
-		_ = index
+		if _, err := service.beginOperation("event", "test", "", managerFingerprint("POST", "/", []byte{byte(index)})); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for range events {
 	}
-	service.mu.Lock()
-	remaining := len(service.subscribers)
-	service.mu.Unlock()
+	_, _, remaining := service.operationState.counts()
 	if remaining != 0 {
 		t.Fatalf("slow subscriber retained: %d", remaining)
 	}

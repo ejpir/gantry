@@ -3,7 +3,6 @@ package manager
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -53,35 +52,14 @@ const (
 	managerShutdownGracePeriod = 10 * time.Second
 )
 
-// operationRecord is the manager's internal bookkeeping for one lifecycle
-// operation. The wire shape lives in api/managerapi (the canonical protocol
-// definition); only the idempotency metadata is manager-private and is never
-// serialized.
-type operationRecord struct {
-	managerapi.Operation
-
-	idempotencyKey string
-	fingerprint    string
-}
-
-type managerIdempotency struct {
-	operationID string
-	fingerprint string
-}
-
 type managerService struct {
 	lifecycle  Lifecycle
 	context    context.Context
 	cancel     context.CancelFunc
-	background sync.WaitGroup
+	requests   managerTaskGroup
+	background managerTaskGroup
 
-	mu             sync.Mutex
-	operations     map[string]*operationRecord
-	operationOrder []string
-	idempotency    map[string]managerIdempotency
-	subscribers    map[uint64]chan managerapi.Event
-	nextSubscriber uint64
-	nextEvent      uint64
+	operationState operationStore
 	lifecycleSlots chan struct{}
 	execSlots      chan struct{}
 	sshSlots       chan struct{}
@@ -102,9 +80,7 @@ func newManagerService(lifecycle Lifecycle) *managerService {
 		lifecycle:      lifecycle,
 		context:        ctx,
 		cancel:         cancel,
-		operations:     make(map[string]*operationRecord),
-		idempotency:    make(map[string]managerIdempotency),
-		subscribers:    make(map[uint64]chan managerapi.Event),
+		operationState: newOperationStore(),
 		lifecycleSlots: make(chan struct{}, managerMaxLifecycleOps),
 		execSlots:      make(chan struct{}, managerMaxExecs),
 		sshSlots:       make(chan struct{}, managerMaxExecs),
@@ -194,7 +170,7 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 		writeManagerError(w, http.StatusBadRequest, errors.New("image is required"), "")
 		return
 	}
-	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(operation *managerapi.Operation) error {
+	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(owner operationOwner) error {
 		if active := m.organizationPolicy; active != nil {
 			if request.OrganizationPolicy != nil && !sameOrganizationPolicy(request.OrganizationPolicy, active) {
 				return fmt.Errorf("organization-wide policy feed controls sandbox policy")
@@ -202,8 +178,7 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 			request.OrganizationPolicy = policy.CloneConfig(active)
 		}
 		result, err := m.lifecycle.Start(r.Context(), createStartRequest(request), nil)
-		m.setOperationWarnings(operation.ID, result.Warnings)
-		return err
+		return errors.Join(err, m.operationState.setWarnings(owner, result.Warnings))
 	})
 }
 
@@ -212,7 +187,7 @@ func (m *managerService) handleStartSandbox(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(*managerapi.Operation) error {
+	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(operationOwner) error {
 		if active := m.organizationPolicy; active != nil {
 			cfg, err := config.ReadSandboxConfig(layout.Dir(name))
 			if err != nil {
@@ -232,7 +207,7 @@ func (m *managerService) handleStopSandbox(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "stop", name, nil, http.StatusOK, func(*managerapi.Operation) error {
+	m.runLifecycle(w, r, "stop", name, nil, http.StatusOK, func(operationOwner) error {
 		err := m.lifecycle.Stop(name)
 		if errors.Is(err, ErrNotRunning) {
 			if _, statErr := os.Stat(filepath.Join(layout.Dir(name), "sandbox.json")); statErr == nil {
@@ -248,7 +223,7 @@ func (m *managerService) handleDeleteSandbox(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "delete", name, nil, http.StatusOK, func(*managerapi.Operation) error {
+	m.runLifecycle(w, r, "delete", name, nil, http.StatusOK, func(operationOwner) error {
 		return m.lifecycle.Delete(name)
 	})
 }
@@ -370,18 +345,23 @@ func (m *managerService) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, kind, name string, body []byte, successStatus int, run func(*managerapi.Operation) error) {
+func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, kind, name string, body []byte, successStatus int, run func(operationOwner) error) {
 	fingerprint := managerFingerprint(r.Method, r.URL.Path, body)
-	operation, replay, err := m.beginOperation(kind, name, r.Header.Get("Idempotency-Key"), fingerprint)
+	started, err := m.beginOperation(kind, name, r.Header.Get("Idempotency-Key"), fingerprint)
 	if err != nil {
-		writeManagerError(w, http.StatusConflict, err, "")
+		status := http.StatusConflict
+		if errors.Is(err, errManagerStopping) {
+			status = http.StatusServiceUnavailable
+		}
+		writeManagerError(w, status, err, "")
 		return
 	}
-	if replay {
-		switch operation.State {
-		case "running":
+	operation, owner := started.Operation, started.Owner
+	if started.Replay {
+		switch started.Phase {
+		case operationRunning:
 			writeManagerJSON(w, http.StatusAccepted, operation)
-		case "succeeded":
+		case operationSucceeded:
 			writeManagerJSON(w, http.StatusOK, operation)
 		default:
 			writeManagerError(w, http.StatusConflict, errors.New(operation.Error), operation.ID)
@@ -390,7 +370,7 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 	}
 	if !tryAcquireSlot(m.lifecycleSlots) {
 		err = errors.New("too many concurrent lifecycle operations")
-		operation = m.finishOperation(operation.ID, err)
+		operation = m.finishOperation(owner, err)
 		writeManagerError(w, http.StatusServiceUnavailable, err, operation.ID)
 		return
 	}
@@ -409,11 +389,11 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 	for !lock.TryLock() {
 		select {
 		case <-r.Context().Done():
-			operation = m.finishOperation(operation.ID, r.Context().Err())
+			operation = m.finishOperation(owner, r.Context().Err())
 			writeManagerError(w, http.StatusRequestTimeout, r.Context().Err(), operation.ID)
 			return
 		case <-m.context.Done():
-			operation = m.finishOperation(operation.ID, context.Canceled)
+			operation = m.finishOperation(owner, context.Canceled)
 			writeManagerError(w, http.StatusServiceUnavailable, context.Canceled, operation.ID)
 			return
 		case <-time.After(10 * time.Millisecond):
@@ -425,27 +405,21 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 		requestErr = m.context.Err()
 	}
 	if err := requestErr; err != nil {
-		operation = m.finishOperation(operation.ID, err)
+		operation = m.finishOperation(owner, err)
 		writeManagerError(w, http.StatusRequestTimeout, err, operation.ID)
 		return
 	}
 	// Another request may have completed while this one waited on its sandbox
 	// shard. Recheck the key under the execution lock so identical concurrent
 	// retries never perform the lifecycle transition twice.
-	if key := r.Header.Get("Idempotency-Key"); key != "" {
-		m.mu.Lock()
-		current := m.idempotency[key]
-		owner := current.operationID == operation.ID
-		m.mu.Unlock()
-		if !owner {
-			operation = m.finishOperation(operation.ID, errors.New("idempotent operation was superseded"))
-			writeManagerJSON(w, http.StatusAccepted, operation)
-			return
-		}
+	if key := r.Header.Get("Idempotency-Key"); key != "" && !m.operationState.ownsIdempotency(owner, key) {
+		operation = m.finishOperation(owner, errors.New("idempotent operation was superseded"))
+		writeManagerJSON(w, http.StatusAccepted, operation)
+		return
 	}
 
-	err = run(operation)
-	operation = m.finishOperation(operation.ID, err)
+	err = run(owner)
+	operation = m.finishOperation(owner, err)
 	if err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, ErrImageNotFound) || errors.Is(err, os.ErrNotExist) {
@@ -462,156 +436,55 @@ func (m *managerService) sandboxLock(name string) *sync.RWMutex {
 	return &m.sandboxLocks[int(digest[0])%len(m.sandboxLocks)]
 }
 
-func (m *managerService) beginOperation(kind, name, key, fingerprint string) (*managerapi.Operation, bool, error) {
-	if err := validateIdempotencyKey(key); err != nil {
-		return nil, false, err
+func (m *managerService) beginOperation(kind, name, key, fingerprint string) (operationStart, error) {
+	if m.context.Err() != nil {
+		return operationStart{}, errManagerStopping
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if key != "" {
-		if existing, ok := m.idempotency[key]; ok {
-			if existing.fingerprint != fingerprint {
-				return nil, false, fmt.Errorf("idempotency key was already used for a different request")
-			}
-			operation, ok := m.operations[existing.operationID]
-			if !ok {
-				return nil, false, fmt.Errorf("idempotency record expired; use a new key")
-			}
-			return cloneManagerOperation(operation), true, nil
+	return m.operationState.begin(kind, name, key, fingerprint)
+}
+
+func (m *managerService) ownedHandler(inner http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		done, ok := m.requests.Acquire()
+		if !ok {
+			writeManagerError(w, http.StatusServiceUnavailable, errManagerStopping, "")
+			return
 		}
-	}
-	if len(m.operations) >= managerMaxOperations && !m.removeOldestCompletedOperationLocked() {
-		return nil, false, fmt.Errorf("operation capacity is full")
-	}
-	now := time.Now().UTC()
-	operation := &operationRecord{
-		Operation: managerapi.Operation{
-			ID: newManagerOperationID(), Kind: kind, Sandbox: name,
-			State: "running", Created: now, Updated: now,
-		},
-		idempotencyKey: key,
-		fingerprint:    fingerprint,
-	}
-	m.operations[operation.ID] = operation
-	m.operationOrder = append(m.operationOrder, operation.ID)
-	if key != "" {
-		m.idempotency[key] = managerIdempotency{operationID: operation.ID, fingerprint: fingerprint}
-	}
-	m.pruneOperationsLocked()
-	m.publishLocked("operation", operation)
-	return cloneManagerOperation(operation), false, nil
+		defer done()
+		inner.ServeHTTP(w, r)
+	})
 }
 
-func (m *managerService) setOperationWarnings(id string, warnings []string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if operation := m.operations[id]; operation != nil {
-		operation.Warnings = append([]string(nil), warnings...)
-		operation.Updated = time.Now().UTC()
-	}
+func (m *managerService) startBackground(run func(context.Context)) bool {
+	return m.background.Start(func() { run(m.context) })
 }
 
-func (m *managerService) finishOperation(id string, operationErr error) *managerapi.Operation {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	operation := m.operations[id]
-	if operation == nil {
-		return &managerapi.Operation{ID: id, State: "failed", Error: "operation record lost"}
+func (m *managerService) stopAdmission() {
+	m.requests.StopAdmission()
+	m.background.StopAdmission()
+	m.cancel()
+}
+
+func (m *managerService) joinRequests()   { m.requests.Wait() }
+func (m *managerService) joinBackground() { m.background.Wait() }
+
+func (m *managerService) finishOperation(owner operationOwner, operationErr error) *managerapi.Operation {
+	operation, err := m.operationState.finish(owner, operationErr)
+	if err == nil {
+		return operation
 	}
-	if operationErr != nil {
-		operation.State = "failed"
-		operation.Error = operationErr.Error()
-	} else {
-		operation.State = "succeeded"
+	if current, ok := m.operationState.operation(owner.ID()); ok {
+		return current
 	}
-	operation.Updated = time.Now().UTC()
-	m.publishLocked("operation", operation)
-	return cloneManagerOperation(operation)
+	return &managerapi.Operation{ID: owner.ID(), Kind: owner.kind, Sandbox: owner.sandbox, State: operationFailed.String(), Error: err.Error()}
 }
 
 func (m *managerService) operation(id string) (*managerapi.Operation, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	operation, ok := m.operations[id]
-	return cloneManagerOperation(operation), ok
-}
-
-func cloneManagerOperation(record *operationRecord) *managerapi.Operation {
-	if record == nil {
-		return nil
-	}
-	clone := record.Operation
-	clone.Warnings = append([]string(nil), record.Warnings...)
-	if record.Configure != nil {
-		result := *record.Configure
-		clone.Configure = &result
-	}
-	if record.Run != nil {
-		result := *record.Run
-		clone.Run = &result
-	}
-	return &clone
-}
-
-func (m *managerService) pruneOperationsLocked() {
-	for len(m.operations) > managerMaxOperations {
-		if !m.removeOldestCompletedOperationLocked() {
-			return
-		}
-	}
-}
-
-func (m *managerService) removeOldestCompletedOperationLocked() bool {
-	for index, id := range m.operationOrder {
-		operation := m.operations[id]
-		if operation != nil && operation.State == "running" {
-			continue
-		}
-		m.operationOrder = append(m.operationOrder[:index], m.operationOrder[index+1:]...)
-		delete(m.operations, id)
-		if operation != nil && operation.idempotencyKey != "" {
-			delete(m.idempotency, operation.idempotencyKey)
-		}
-		return true
-	}
-	return false
-}
-
-func (m *managerService) publishLocked(eventType string, operation *operationRecord) {
-	m.nextEvent++
-	event := managerapi.Event{
-		ID: m.nextEvent, Type: eventType, OperationID: operation.ID,
-		Sandbox: operation.Sandbox, State: operation.State, Time: time.Now().UTC(),
-	}
-	for id, subscriber := range m.subscribers {
-		select {
-		case subscriber <- event:
-		default:
-			close(subscriber)
-			delete(m.subscribers, id)
-		}
-	}
+	return m.operationState.operation(id)
 }
 
 func (m *managerService) subscribe() (uint64, <-chan managerapi.Event, func(), bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.subscribers) >= managerMaxSubscribers {
-		return 0, nil, nil, false
-	}
-	m.nextSubscriber++
-	id := m.nextSubscriber
-	channel := make(chan managerapi.Event, managerEventBuffer)
-	m.subscribers[id] = channel
-	cancel := func() {
-		m.mu.Lock()
-		if current, ok := m.subscribers[id]; ok && current == channel {
-			delete(m.subscribers, id)
-			close(channel)
-		}
-		m.mu.Unlock()
-	}
-	return id, channel, cancel, true
+	return m.operationState.subscribe()
 }
 
 func createStartRequest(request managerapi.CreateSandboxRequest) lifecycle.StartRequest {
@@ -807,14 +680,6 @@ func validateIdempotencyKey(key string) error {
 	return nil
 }
 
-func newManagerOperationID() string {
-	var entropy [16]byte
-	if _, err := rand.Read(entropy[:]); err == nil {
-		return hex.EncodeToString(entropy[:])
-	}
-	return fmt.Sprintf("op-%d", time.Now().UnixNano())
-}
-
 func managerBaseDir() string {
 	if home := os.Getenv("GANTRY_HOME"); home != "" {
 		return filepath.Dir(filepath.Clean(home))
@@ -956,7 +821,8 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 		audit = log.New(os.Stderr, "gantry serve: audit: ", log.LstdFlags)
 	}
 	service := newManagerService(lifecycle)
-	defer service.cancel()
+	owner := newManagerRuntime(service)
+	defer func() { _ = owner.Close() }()
 
 	var tlsMaterial *serveTLS
 	var auth *tokenAuth
@@ -1003,31 +869,22 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	if err != nil {
 		return fmt.Errorf("another manager holds the state lock: %w", err)
 	}
-	defer func() { _ = lock.Close() }()
+	if err := owner.SetLock(lock); err != nil {
+		_ = lock.Close()
+		return err
+	}
 
 	slots := make(chan struct{}, managerMaxConnections)
-	type managedServer struct {
-		server *http.Server
-		listen net.Listener
-	}
-	var servers []managedServer
-	cleanup := func() {
-		for _, managed := range servers {
-			_ = managed.listen.Close()
-		}
-	}
-	defer cleanup()
-
 	for _, spec := range plan.listeners {
 		handler := service.handler()
 		var listener net.Listener
+		endpoint := ""
 		sameUserOnly := false
 		switch spec.network {
 		case "unix":
 			socketPath := spec.address
 			if conn, err := net.DialTimeout("unix", socketPath, 200*time.Millisecond); err == nil {
 				_ = conn.Close()
-				cleanup()
 				return fmt.Errorf("manager is already listening on %s", socketPath)
 			}
 			if info, err := os.Lstat(socketPath); err == nil {
@@ -1044,10 +901,12 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 			if err != nil {
 				return err
 			}
-			defer func() { _ = os.Remove(socketPath) }()
 			if err := localsec.SecureEndpoint(socketPath); err != nil {
+				_ = listener.Close()
+				_ = os.Remove(socketPath)
 				return fmt.Errorf("secure manager endpoint: %w", err)
 			}
+			endpoint = socketPath
 			sameUserOnly = true
 			fmt.Printf("gantry serve: listening on %s\n", spec)
 		case "tls":
@@ -1061,6 +920,7 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 		default:
 			return fmt.Errorf("unsupported listener network %q", spec.network)
 		}
+		handler = service.ownedHandler(handler)
 		server := &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: readHeaderTimeout,
@@ -1068,10 +928,14 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 			MaxHeaderBytes:    16 << 10,
 			ErrorLog:          log.New(os.Stderr, "gantry serve: http: ", log.LstdFlags),
 		}
-		servers = append(servers, managedServer{
-			server: server,
-			listen: &limitedListener{Listener: listener, slots: slots, sameUserOnly: sameUserOnly},
-		})
+		limited := &limitedListener{Listener: listener, slots: slots, sameUserOnly: sameUserOnly}
+		if err := owner.AddServer(server, limited, endpoint); err != nil {
+			_ = listener.Close()
+			if endpoint != "" {
+				_ = os.Remove(endpoint)
+			}
+			return err
+		}
 	}
 
 	feedStateDir := filepath.Join(stateDir, "policy-feeds")
@@ -1092,51 +956,31 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 		}
 		receivers = append(receivers, receiver)
 	}
-	for _, receiver := range receivers {
-		service.background.Add(1)
-		go func() {
-			defer service.background.Done()
-			receiver.Run(service.context)
-		}()
+	ownedReceivers := make([]managerReceiver, len(receivers))
+	for index, receiver := range receivers {
+		ownedReceivers[index] = receiver
 	}
-
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	serveErrors := make(chan error, len(servers))
-	var running sync.WaitGroup
-	for _, managed := range servers {
-		running.Add(1)
-		go func(server *http.Server, listener net.Listener) {
-			defer running.Done()
-			if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
-				serveErrors <- err
-				cancel()
-			}
-		}(managed.server, managed.listen)
-	}
-	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		<-runCtx.Done()
-		service.cancel()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), managerShutdownGracePeriod)
-		defer shutdownCancel()
-		for _, managed := range servers {
-			_ = managed.server.Shutdown(shutdownCtx)
+	if err := owner.FeedsReady(ownedReceivers); err != nil {
+		for _, receiver := range receivers {
+			receiver.Close()
 		}
-	}()
+		return err
+	}
+	for _, receiver := range receivers {
+		if !service.startBackground(func(ctx context.Context) { receiver.Run(ctx) }) {
+			return errManagerStopping
+		}
+	}
+	if err := owner.StartServers(); err != nil {
+		return err
+	}
 
 	var serveErr error
 	select {
 	case <-ctx.Done():
-	case err := <-serveErrors:
-		serveErr = err
+	case serveErr = <-owner.ServeErrors():
 	}
-	cancel()
-	running.Wait()
-	<-shutdownDone
-	service.background.Wait()
-	return serveErr
+	return errors.Join(serveErr, owner.Close())
 }
 
 // limitedListener bounds concurrent connections and optionally restricts

@@ -58,7 +58,7 @@ func (m *managerService) handleSetNetworkPolicy(w http.ResponseWriter, r *http.R
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
 	}
-	m.runLifecycle(w, r, "net-policy", name, body, http.StatusOK, func(op *managerapi.Operation) error {
+	m.runLifecycle(w, r, "net-policy", name, body, http.StatusOK, func(owner operationOwner) error {
 		// Check existence before creating an upload directory. Policy uploads
 		// must not manufacture a sandbox or overwrite its current policy.
 		if _, err := config.ReadSandboxConfig(layout.Dir(name)); err != nil {
@@ -83,7 +83,7 @@ func (m *managerService) handleSetNetworkPolicy(w http.ResponseWriter, r *http.R
 		}
 		entry, err := controlcmd.SetNetworkPolicy(name, path, request.AllowLocal)
 		if err == nil {
-			m.setOperationProgress(op.ID, "network policy "+entry.State+": "+entry.Description)
+			err = m.operationState.setProgress(owner, "network policy "+entry.State+": "+entry.Description)
 		}
 		return err
 	})
@@ -131,12 +131,12 @@ func (m *managerService) handleSetOrganizationPolicy(w http.ResponseWriter, r *h
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
 	}
-	m.runLifecycle(w, r, "policy", name, body, http.StatusOK, func(op *managerapi.Operation) error {
+	m.runLifecycle(w, r, "policy", name, body, http.StatusOK, func(owner operationOwner) error {
 		if active := m.organizationPolicy; active != nil && !sameOrganizationPolicy(request.Snapshot, active) {
 			return fmt.Errorf("organization-wide policy feed controls sandbox policy")
 		}
 		return m.setOrganizationPolicyLocked(r.Context(), name, request.Snapshot, request.Restart, func(message string) {
-			m.setOperationProgress(op.ID, message)
+			_ = m.operationState.setProgress(owner, message)
 		})
 	})
 }

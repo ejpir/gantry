@@ -142,3 +142,45 @@ func TestDashboardOperationOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Manager operation records are mutated only by operationStore after it
+// validates the private completion owner and typed transition.
+func TestManagerOperationOwnership(t *testing.T) {
+	root := filepath.Join("..", "..", "internal", "sandbox", "manager")
+	owned := map[string]bool{
+		"State": true, "Error": true, "Warnings": true, "Configure": true,
+		"Run": true, "Progress": true, "Updated": true,
+	}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || filepath.Base(path) == "operation_state.go" {
+			return nil
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			assignment, ok := node.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, expression := range assignment.Lhs {
+				ast.Inspect(expression, func(node ast.Node) bool {
+					selector, ok := node.(*ast.SelectorExpr)
+					if ok && owned[selector.Sel.Name] {
+						t.Errorf("%s writes manager operation-owned field %s", path, selector.Sel.Name)
+					}
+					return true
+				})
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

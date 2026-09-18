@@ -26,7 +26,7 @@ func (m *managerService) handleConfigureSandbox(w http.ResponseWriter, r *http.R
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
 	}
-	m.runLifecycle(w, r, "configure", name, body, http.StatusOK, func(op *managerapi.Operation) error {
+	m.runLifecycle(w, r, "configure", name, body, http.StatusOK, func(owner operationOwner) error {
 		// Do not manufacture a missing sandbox by taking its launch lock.
 		if _, err := config.ReadSandboxConfig(layout.Dir(name)); err != nil {
 			return err
@@ -35,9 +35,6 @@ func (m *managerService) handleConfigureSandbox(w http.ResponseWriter, r *http.R
 		if err != nil {
 			return err
 		}
-		m.mu.Lock()
-		m.operations[op.ID].Configure = &managerapi.ConfigureSandboxResult{RestartRequired: restart}
-		m.mu.Unlock()
-		return nil
+		return m.operationState.setConfigure(owner, managerapi.ConfigureSandboxResult{RestartRequired: restart})
 	})
 }
