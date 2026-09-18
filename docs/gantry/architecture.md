@@ -266,6 +266,10 @@ The network worker runs the userspace IPv4 stack, DNS gateway, egress policy,
 host-to-guest forwarding, and traffic accounting. Frames leaving the VM cross
 the policy point before they reach a host socket. DNS replies cross it on the
 way back so the policy can maintain bounded, TTL-limited domain allowances.
+Traffic aggregation, DNS attribution, snapshot persistence, and periodic
+publication have separate owners. Per-worker epoch capabilities merge only
+monotonic, bounded deltas, and the publisher joins its final flush before
+reporting shutdown complete.
 
 The network worker necessarily retains restricted stream and datagram socket
 creation authority. It does not receive secrets, writable disks, guest RAM,

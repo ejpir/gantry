@@ -119,6 +119,50 @@ func TestApplicationBoundaries(t *testing.T) {
 	}
 }
 
+// TrafficRecorder is a public facade. Mutable aggregates and publisher
+// lifecycle state belong to their dedicated owners rather than accumulating on
+// the facade again.
+func TestNetpolTrafficRecorderDelegatesOwnership(t *testing.T) {
+	path := filepath.Join("..", "..", "internal", "netpol", "traffic.go")
+	parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"observer": true, "publisher": true}
+	found := false
+	for _, declaration := range parsed.Decls {
+		generic, ok := declaration.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range generic.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok || typeSpec.Name.Name != "TrafficRecorder" {
+				continue
+			}
+			structure, ok := typeSpec.Type.(*ast.StructType)
+			if !ok {
+				t.Fatal("TrafficRecorder is not a struct")
+			}
+			found = true
+			for _, field := range structure.Fields.List {
+				for _, name := range field.Names {
+					if !want[name.Name] {
+						t.Errorf("TrafficRecorder directly owns %s; delegate mutable state to a traffic owner", name.Name)
+					}
+					delete(want, name.Name)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("TrafficRecorder declaration not found")
+	}
+	for name := range want {
+		t.Errorf("TrafficRecorder no longer delegates to %s", name)
+	}
+}
+
 // Export and coherence phases have dedicated state owners. Resource code may
 // request transitions through their adapters but cannot replace those owners.
 func TestShareFSStateOwnership(t *testing.T) {
