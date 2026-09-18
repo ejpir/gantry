@@ -46,6 +46,7 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/sharefs/lifecycle":              noShareFSParent,
 		"internal/sharefs/exportstate":            noShareFSParent,
 		"internal/sharefs/coherencestate":         noShareFSParent,
+		"internal/sharefs/preparedstate":          noShareFSParent,
 		"internal/sandbox/lifecycle": func(path string) bool {
 			return path == "flag" || path == "os/exec" || strings.Contains(path, "/internal/dashboard") || strings.Contains(path, "/sandbox/manager")
 		},
@@ -121,6 +122,7 @@ func TestShareFSStateOwnership(t *testing.T) {
 	owned := map[string]string{
 		"exportState":    "export.go",
 		"coherenceState": "coherence.go",
+		"preparedState":  "export.go",
 	}
 	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

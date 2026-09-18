@@ -156,15 +156,20 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 
 // Publish atomically exposes a prepared export as /<tag> in the hub root.
 func (h *Hub) Publish(p *Prepared) (*Export, error) {
-	if p == nil || p.export == nil {
+	exp, lease, ok := p.acquire()
+	if !ok || exp == nil {
 		return nil, fmt.Errorf("nil prepared share")
+	}
+	consumed := false
+	defer func() { p.complete(lease, consumed) }()
+	if exp.hub != h {
+		return nil, fmt.Errorf("prepared share belongs to another hub")
 	}
 	// Publication may reuse a path whose gracefully removed export has just
 	// reached OnForget. Drain old readers before a new independently locked
 	// namespace can become reachable.
 	h.request.Lock()
 	defer h.request.Unlock()
-	exp := p.export
 	h.mu.Lock()
 	if h.lifecycle.Phase() != sharelifecycle.Active {
 		h.mu.Unlock()
@@ -187,7 +192,7 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 	exp.finishDrain = h.scheduleFinish
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
-	p.export = nil
+	consumed = true
 	h.mu.Unlock()
 	h.bumpRootVer()
 	_ = h.root.NotifyEntry(exp.Tag)
@@ -200,8 +205,14 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 // earlier failure, the working export is still live. The revoked export's
 // nodes and handles fail ESTALE from here on.
 func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
-	if p == nil || p.export == nil {
+	candidate, lease, ok := p.acquire()
+	if !ok || candidate == nil {
 		return nil, nil, fmt.Errorf("nil prepared share")
+	}
+	consumed := false
+	defer func() { p.complete(lease, consumed) }()
+	if candidate.hub != h {
+		return nil, nil, fmt.Errorf("prepared share belongs to another hub")
 	}
 	// A replacement must not publish a second export over the same host tree
 	// while an old request is between its policy check and host operation.
@@ -210,7 +221,7 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 	// lifecycle state change together.
 	h.request.Lock()
 	defer h.request.Unlock()
-	exp = p.export
+	exp = candidate
 	h.mu.Lock()
 	if h.lifecycle.Phase() != sharelifecycle.Active {
 		h.mu.Unlock()
@@ -239,7 +250,7 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 	exp.finishDrain = h.scheduleFinish
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
-	p.export = nil
+	consumed = true
 	h.mu.Unlock()
 	if oldChild != nil {
 		oldChild.ForgetPersistent()

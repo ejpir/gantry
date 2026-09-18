@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/ejpir/gantry/internal/sharefs/exportstate"
+	"github.com/ejpir/gantry/internal/sharefs/preparedstate"
 	"github.com/hanwen/go-fuse/v2/fs"
 )
 
@@ -155,22 +156,60 @@ func (e *Export) finishNow() {
 // persist sandbox.json before making an infallible map swap. Publish and Swap
 // consume it on success; Close releases it on failure.
 type Prepared struct {
-	export *Export
+	preparedState preparedstate.Owner
+	export        *Export
 }
 
-// Close releases a prepared export that was never published.
-func (p *Prepared) Close() {
-	if p != nil && p.export != nil {
-		export := p.export
+func (p *Prepared) acquire() (*Export, preparedstate.Lease, bool) {
+	if p == nil {
+		return nil, preparedstate.Lease{}, false
+	}
+	lease, ok := p.preparedState.Acquire()
+	if !ok {
+		return nil, preparedstate.Lease{}, false
+	}
+	return p.export, lease, true
+}
+
+func (p *Prepared) complete(lease preparedstate.Lease, consumed bool) {
+	if p == nil {
+		return
+	}
+	if consumed {
 		p.export = nil
+	}
+	p.preparedState.Complete(lease, consumed)
+}
+
+// Close releases a prepared export that was never published. If publication
+// is in flight, Close joins that attempt before deciding which owner must
+// release the pinned root.
+func (p *Prepared) Close() {
+	if p == nil {
+		return
+	}
+	leader, done := p.preparedState.BeginClose()
+	if !leader {
+		<-done
+		return
+	}
+	defer p.preparedState.FinishClose()
+	export := p.export
+	p.export = nil
+	if export != nil {
 		export.finishNow()
 	}
 }
 
 // Identity returns the candidate's pinned root identity.
 func (p *Prepared) Identity() Identity {
-	if p == nil || p.export == nil {
+	export, lease, ok := p.acquire()
+	if !ok {
 		return Identity{}
 	}
-	return p.export.identity
+	defer p.complete(lease, false)
+	if export == nil {
+		return Identity{}
+	}
+	return export.identity
 }

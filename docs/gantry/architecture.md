@@ -465,7 +465,9 @@ before descriptors, handles, dispatch callbacks, and queues are released.
 `active → draining → revoked → gone`, with `gone` published only after watcher
 and root release complete. `sharefs/coherencestate.Owner` separately owns cache
 health and joins watcher/cache closure, preventing stale host notifications from
-mutating a closing export.
+mutating a closing export. `sharefs/preparedstate.Owner` makes each pinned,
+unpublished root single-use: publication attempts serialize, failed attempts
+return ownership, and successful publication or close consumes it exactly once.
 
 The guest mounts the multiplexed virtio-fs hub once, then bind-mounts admitted
 tags into the workload container. Live add and remove mutate the hub manifest
