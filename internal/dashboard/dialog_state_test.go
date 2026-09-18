@@ -2,6 +2,15 @@ package dashboard
 
 import "testing"
 
+func TestTUIDialogRoutingFamiliesPreserveRemoteRemovalSemantics(t *testing.T) {
+	if !tuiRemoteRemoveDialog.isOnboarding() || tuiRemoteRemoveDialog.usesConfirmationKeys() || !tuiRemoteRemoveDialog.usesConfirmationMouse() {
+		t.Fatal("remote removal must keep onboarding keys and confirmation mouse actions")
+	}
+	if !tuiHelpDialog.isReadOnly() || tuiCreateDialog.isReadOnly() {
+		t.Fatal("read-only dialog classification is incorrect")
+	}
+}
+
 func TestTUIDialogStateTransitions(t *testing.T) {
 	var state tuiDialogState
 	if state.phase() != tuiDialogClosed {
@@ -33,6 +42,19 @@ func TestTUIDialogStateTransitions(t *testing.T) {
 	}
 	if state.dismiss() {
 		t.Fatal("duplicate close was accepted")
+	}
+}
+
+func TestTUIDialogStateReleaseClearsTransientStateOnce(t *testing.T) {
+	state := tuiDialogState{dialog: tuiCreateDialog, dialogScroll: 7, confirmRemove: true, formError: "invalid", generation: 4}
+	state.release()
+	if state.phase() != tuiDialogClosed || state.dialogScroll != 0 || state.confirmRemove || state.formError != "" {
+		t.Fatalf("released state = %+v", state)
+	}
+	generation := state.generation
+	state.release()
+	if state.generation != generation {
+		t.Fatalf("duplicate release advanced generation from %d to %d", generation, state.generation)
 	}
 }
 

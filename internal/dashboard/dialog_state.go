@@ -19,6 +19,40 @@ type tuiDialogState struct {
 	generation    uint64
 }
 
+func (dialog tuiDialog) isOnboarding() bool {
+	switch dialog {
+	case tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog,
+		tuiOrganizationRemotesDialog, tuiRemoteAddDialog, tuiRemoteRemoveDialog:
+		return true
+	default:
+		return false
+	}
+}
+
+func (dialog tuiDialog) usesConfirmationKeys() bool {
+	switch dialog {
+	case tuiRemoveDialog, tuiShareRemoveDialog, tuiPortUnpublishDialog, tuiRuleRemoveDialog,
+		tuiSecretRemoveDialog, tuiMCPRemoveDialog, tuiUpdateDialog, tuiImageRemoveDialog,
+		tuiImagePruneDialog, tuiRegistryLogoutDialog:
+		return true
+	default:
+		return false
+	}
+}
+
+func (dialog tuiDialog) usesConfirmationMouse() bool {
+	return dialog == tuiRemoteRemoveDialog || dialog.usesConfirmationKeys()
+}
+
+func (dialog tuiDialog) isReadOnly() bool {
+	switch dialog {
+	case tuiHelpDialog, tuiInfoDialog, tuiPacketDetailDialog, tuiAuditDetailDialog:
+		return true
+	default:
+		return false
+	}
+}
+
 func (state *tuiDialogState) phase() tuiDialogPhase {
 	if state.dialog == tuiNoDialog {
 		return tuiDialogClosed
@@ -60,4 +94,10 @@ func (state *tuiDialogState) dismiss() bool {
 	state.dialog = tuiNoDialog
 	state.dialogScroll = 0
 	return true
+}
+
+func (state *tuiDialogState) release() {
+	state.dismiss()
+	state.confirmRemove = false
+	state.formError = ""
 }

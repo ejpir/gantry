@@ -82,3 +82,57 @@ type imageDialogState struct {
 	loginUsername textinput.Model
 	loginPassword textinput.Model
 }
+
+func (state *shareDialogState) releaseFocus() {
+	state.shareTag.Blur()
+	state.sharePath.Blur()
+	state.shareOwner.Blur()
+	state.shareSandbox.open = false
+	state.shareReplace = false
+}
+
+func (state *portDialogState) releaseFocus() {
+	state.portBind.Blur()
+	state.portGuest.Blur()
+	state.portSandbox.open = false
+}
+
+func (state *policyDialogState) releaseFocus() {
+	state.policyPath.Blur()
+	state.policySandbox.open = false
+}
+
+func (state *ruleDialogState) releaseFocus() {
+	state.ruleTarget.Blur()
+	state.rulePorts.Blur()
+	state.ruleSandbox.open = false
+}
+
+func (state *secretDialogState) releaseFocus() {
+	state.secretName.Blur()
+	state.secretValue.Blur()
+	state.secretValue.Reset()
+	state.secretSandbox.open = false
+}
+
+func (state *mcpDialogState) releaseFocus() {
+	state.mcpName.Blur()
+	state.mcpURL.Blur()
+	state.mcpAuthHeader.Blur()
+	state.mcpAuthRef.Blur()
+	state.mcpAllow.Blur()
+	state.mcpDeny.Blur()
+	state.mcpRedact.Blur()
+	state.mcpFSRoot.Blur()
+	state.mcpFSUser.Blur()
+	state.mcpSandbox.open = false
+	state.mcpEditing = false
+}
+
+func (state *imageDialogState) releaseFocus() {
+	state.pullRef.Blur()
+	state.loginRegistry.Blur()
+	state.loginUsername.Blur()
+	state.loginPassword.Blur()
+	state.loginPassword.Reset()
+}

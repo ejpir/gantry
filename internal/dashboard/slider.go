@@ -45,6 +45,14 @@ func (s *resourceSlider) Adjust(steps int) {
 	s.Set(s.Value + steps*s.Step)
 }
 
+func (s *resourceSlider) SetBoundary(maximum bool) {
+	if maximum {
+		s.Set(s.Max)
+	} else {
+		s.Set(s.Min)
+	}
+}
+
 func (s *resourceSlider) SetFraction(position, width int) {
 	if width <= 1 || s.Max <= s.Min {
 		return

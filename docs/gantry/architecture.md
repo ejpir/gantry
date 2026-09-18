@@ -106,7 +106,8 @@ scoped completion capabilities, so a delayed result cannot complete a later
 operation with the same action and target. `dashboard/refreshstate.State` uses
 the same ownership rule: only the newest admitted generation may publish rows.
 Modal open, replacement, and close transitions are centralized in the dialog state
-owner while dialog-specific fields remain with their form owners.
+owner while dialog-specific fields remain with their form owners. Closing a
+modal delegates focus release and sensitive-value clearing to each form owner.
 `dashboard/pagestate.Owner` owns bounded page transitions and explicit cycling
 order, while `dashboard/notificationstate.Owner` owns toast replacement and
 expiry generations. `dashboard/selectionstate.Owner` owns all table and card

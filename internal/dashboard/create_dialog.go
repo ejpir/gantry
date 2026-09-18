@@ -35,6 +35,12 @@ type createDialogModel struct {
 	createDevContainers bool
 }
 
+func (m *createDialogModel) releaseFocus() {
+	m.createRemote, m.createOrganization = "", ""
+	m.createName.Blur()
+	m.createImage.Blur()
+}
+
 func (m *createDialogModel) updateInput(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	switch m.createFocus {

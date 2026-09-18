@@ -287,6 +287,42 @@ func TestDashboardOperationOwnership(t *testing.T) {
 	}
 }
 
+func TestDashboardDialogCleanupDelegatesToFormOwners(t *testing.T) {
+	path := filepath.Join("..", "..", "internal", "dashboard", "dialog_cleanup.go")
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"createDialogModel": false, "shareDialogState": false, "portDialogState": false,
+		"policyDialogState": false, "ruleDialogState": false, "secretDialogState": false,
+		"mcpDialogState": false, "imageDialogState": false,
+	}
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		method, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		owner, ok := method.X.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if _, exists := want[owner.Sel.Name]; exists && method.Sel.Name == "releaseFocus" {
+			want[owner.Sel.Name] = true
+		}
+		return true
+	})
+	for owner, delegated := range want {
+		if !delegated {
+			t.Errorf("closeDialog does not delegate cleanup to %s", owner)
+		}
+	}
+}
+
 // Dashboard modal transitions and refresh publication have dedicated owners.
 // Rendering and input handlers may inspect these fields but cannot bypass the
 // generation and transition checks.
