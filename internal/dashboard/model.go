@@ -202,12 +202,9 @@ type sandboxTUIModel struct {
 	limits     dashboardapi.ResourceLimits
 
 	tuiPageState
-	remotes      map[string]remoteSection
-	remoteCursor int
-	remoteScroll int
-	sandboxes    []tuiSandbox
-	cursor       int // len(sandboxes) is the trailing "New Sandbox" card
-	scrollRow    int
+	tuiSelectionState
+	remotes   map[string]remoteSection
+	sandboxes []tuiSandbox
 
 	viewSource         *tuiRefreshMsg
 	packetSource       []tuiPacketRow
@@ -216,44 +213,24 @@ type sandboxTUIModel struct {
 	sorts              [tuiPageCount + 1]tuiSortState
 	sortCursor         int
 
-	traffic        []tuiTrafficRow
-	trafficCursor  int
-	trafficScroll  int
-	rules          []tuiRuleRow
-	rulesCursor    int
-	rulesScroll    int
-	mounts         []tuiMountRow
-	mountCursor    int
-	mountScroll    int
-	ports          []tuiPortRow
-	portCursor     int
-	portScroll     int
-	secrets        []tuiSecretRow
-	secretCursor   int
-	secretScroll   int
-	mcpServers     []tuiMCPRow
-	mcpCursor      int
-	mcpScroll      int
-	auditEvents    []tuiAuditRow
-	auditCursor    int
-	auditScroll    int
-	auditDetail    *tuiAuditRow
-	images         []tuiImageRow
-	imageCursor    int
-	imageScroll    int
-	registries     []tuiRegistryRow
-	registryCursor int
-	registryScroll int
-	imageSection   string
-	packets        []tuiPacketRow
-	packetCursor   int
-	packetScroll   int
-	packetAfter    map[string]uint64
-	packetLoading  bool
-	packetPaused   bool
-	packetError    string
-	packetEvicted  uint64
-	packetDetail   *tuiPacketRow
+	traffic       []tuiTrafficRow
+	rules         []tuiRuleRow
+	mounts        []tuiMountRow
+	ports         []tuiPortRow
+	secrets       []tuiSecretRow
+	mcpServers    []tuiMCPRow
+	auditEvents   []tuiAuditRow
+	auditDetail   *tuiAuditRow
+	images        []tuiImageRow
+	registries    []tuiRegistryRow
+	imageSection  string
+	packets       []tuiPacketRow
+	packetAfter   map[string]uint64
+	packetLoading bool
+	packetPaused  bool
+	packetError   string
+	packetEvicted uint64
+	packetDetail  *tuiPacketRow
 
 	width  int
 	height int
@@ -275,60 +252,14 @@ type sandboxTUIModel struct {
 	tuiDialogState
 	createDialogModel
 	remoteOnboarding
-	editFocus         int
-	editCPUs          resourceSlider
-	editMemory        resourceSlider
-	editIsolation     string
-	editSSH           bool
-	editDevContainers bool
-	shareFocus        int
-	shareSandbox      sandboxPicker
-	shareTag          textinput.Model
-	sharePath         textinput.Model
-	shareMount        textinput.Model
-	shareOwner        textinput.Model
-	shareRO           bool
-	shareReplace      bool
-	portFocus         int
-	portSandbox       sandboxPicker
-	portBind          textinput.Model
-	portGuest         textinput.Model
-	portUDP           bool
-	policyFocus       int
-	policySandbox     sandboxPicker
-	policyPath        textinput.Model
-	policyLocal       bool
-	ruleFocus         int
-	ruleSandbox       sandboxPicker
-	ruleTarget        textinput.Model
-	rulePorts         textinput.Model
-	ruleAction        string
-	ruleProtocol      string
-	secretFocus       int
-	secretSandbox     sandboxPicker
-	secretName        textinput.Model
-	secretValue       textinput.Model
-	mcpFocus          int
-	mcpSandbox        sandboxPicker
-	mcpName           textinput.Model
-	mcpURL            textinput.Model
-	mcpAuthKind       string
-	mcpAuthHeader     textinput.Model
-	mcpAuthRef        textinput.Model
-	mcpAllow          textinput.Model
-	mcpDeny           textinput.Model
-	mcpRedact         textinput.Model
-	mcpEditing        bool
-	mcpFSFocus        int
-	mcpFSRoot         textinput.Model
-	mcpFSUser         textinput.Model
-	pullFocus         int
-	pullRef           textinput.Model
-	pullArch          string
-	loginFocus        int
-	loginRegistry     textinput.Model
-	loginUsername     textinput.Model
-	loginPassword     textinput.Model
+	editDialogState
+	shareDialogState
+	portDialogState
+	policyDialogState
+	ruleDialogState
+	secretDialogState
+	mcpDialogState
+	imageDialogState
 
 	lastClickIndex int
 	lastClickKind  string
@@ -480,36 +411,24 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 			createRuntime:   "crun",
 			createIsolation: "auto",
 		},
-		editCPUs:       editCPUs,
-		editMemory:     editMemory,
-		shareTag:       shareTag,
-		sharePath:      sharePath,
-		shareMount:     shareMount,
-		shareOwner:     shareOwner,
-		shareRO:        true,
-		portBind:       portBind,
-		portGuest:      portGuest,
-		policyPath:     policyPath,
-		ruleTarget:     ruleTarget,
-		rulePorts:      rulePorts,
-		ruleAction:     "deny",
-		ruleProtocol:   "tcp",
-		secretName:     secretName,
-		secretValue:    secretValue,
-		mcpName:        mcpName,
-		mcpURL:         mcpURL,
-		mcpAuthHeader:  mcpAuthHeader,
-		mcpAuthRef:     mcpAuthRef,
-		mcpAllow:       mcpAllow,
-		mcpDeny:        mcpDeny,
-		mcpRedact:      mcpRedact,
-		mcpFSRoot:      mcpFSRoot,
-		mcpFSUser:      mcpFSUser,
-		pullRef:        pullRef,
-		pullArch:       "auto",
-		loginRegistry:  loginRegistry,
-		loginUsername:  loginUsername,
-		loginPassword:  loginPassword,
+		editDialogState: editDialogState{editCPUs: editCPUs, editMemory: editMemory},
+		shareDialogState: shareDialogState{
+			shareTag: shareTag, sharePath: sharePath, shareMount: shareMount, shareOwner: shareOwner, shareRO: true,
+		},
+		portDialogState:   portDialogState{portBind: portBind, portGuest: portGuest},
+		policyDialogState: policyDialogState{policyPath: policyPath},
+		ruleDialogState: ruleDialogState{
+			ruleTarget: ruleTarget, rulePorts: rulePorts, ruleAction: "deny", ruleProtocol: "tcp",
+		},
+		secretDialogState: secretDialogState{secretName: secretName, secretValue: secretValue},
+		mcpDialogState: mcpDialogState{
+			mcpName: mcpName, mcpURL: mcpURL, mcpAuthHeader: mcpAuthHeader, mcpAuthRef: mcpAuthRef,
+			mcpAllow: mcpAllow, mcpDeny: mcpDeny, mcpRedact: mcpRedact, mcpFSRoot: mcpFSRoot, mcpFSUser: mcpFSUser,
+		},
+		imageDialogState: imageDialogState{
+			pullRef: pullRef, pullArch: "auto", loginRegistry: loginRegistry,
+			loginUsername: loginUsername, loginPassword: loginPassword,
+		},
 		imageSection:   tuiImageSectionImages,
 		lastClickIndex: -1,
 		packetAfter:    make(map[string]uint64),
@@ -694,7 +613,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	if target != "" {
 		for i := range m.sandboxes {
 			if m.sandboxes[i].Name == target {
-				m.cursor = i
+				m.tuiSelectionState.setCardCursor(i, m.entryCount())
 				found = true
 				break
 			}
@@ -707,9 +626,9 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 		m.tuiOperationState.clearSelection()
 	}
 	if !found && selectedNewCard {
-		m.cursor = len(m.sandboxes)
+		m.tuiSelectionState.setCardCursor(len(m.sandboxes), m.entryCount())
 	} else if !found && m.cursor > len(m.sandboxes) {
-		m.cursor = len(m.sandboxes)
+		m.tuiSelectionState.setCardCursor(len(m.sandboxes), m.entryCount())
 	}
 	m.restoreTableSelections(trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey)
 	m.ensureCursorVisible()
@@ -1080,13 +999,9 @@ func (m *sandboxTUIModel) updateTableKey(key string) {
 }
 
 func (m *sandboxTUIModel) moveTableCursorToBoundary(end bool) {
-	cursor, _, count := m.tableState()
-	if cursor == nil || count == 0 {
+	slot, count, ok := m.tableSelection()
+	if !ok || !m.tuiSelectionState.tableBoundary(slot, end, count) {
 		return
-	}
-	*cursor = 0
-	if end {
-		*cursor = count - 1
 	}
 	m.ensureTableCursorVisible()
 }
@@ -1112,7 +1027,7 @@ func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 		if selected != nil {
 			for index, row := range m.traffic {
 				if row.Sandbox == selected.Name {
-					m.trafficCursor = index
+					m.tuiSelectionState.setTableCursor(tuiTrafficSelection, index, len(m.traffic))
 					m.ensureTableCursorVisible()
 					break
 				}
@@ -1548,21 +1463,22 @@ func (m *sandboxTUIModel) setCursor(index int) {
 	if m.page == tuiOverviewPage {
 		count = len(m.sandboxes)
 	}
-	m.cursor = clampInt(index, 0, maxInt(0, count-1))
+	m.tuiSelectionState.setCardCursor(index, count)
 	m.ensureCursorVisible()
 }
 
 func (m *sandboxTUIModel) moveCursor(dx, dy int) {
 	layout := m.dashboardLayout()
+	candidate := m.cursor
 	if dx != 0 {
 		row := m.cursor / layout.cols
-		candidate := m.cursor + dx
-		if candidate >= 0 && candidate < m.entryCount() && candidate/layout.cols == row {
-			m.cursor = candidate
+		horizontal := m.cursor + dx
+		if horizontal >= 0 && horizontal < m.entryCount() && horizontal/layout.cols == row {
+			candidate = horizontal
 		}
 	}
 	if dy != 0 {
-		candidate := m.cursor + dy*layout.cols
+		candidate = m.cursor + dy*layout.cols
 		if candidate < 0 {
 			candidate = 0
 		}
@@ -1570,8 +1486,8 @@ func (m *sandboxTUIModel) moveCursor(dx, dy int) {
 			lastRowStart := ((m.entryCount() - 1) / layout.cols) * layout.cols
 			candidate = minInt(m.entryCount()-1, lastRowStart+(m.cursor%layout.cols))
 		}
-		m.cursor = candidate
 	}
+	m.tuiSelectionState.setCardCursor(candidate, m.entryCount())
 	m.ensureCursorVisible()
 }
 
@@ -1584,36 +1500,14 @@ func (m *sandboxTUIModel) pageCursor(direction int) {
 func (m *sandboxTUIModel) ensureCursorVisible() {
 	layout := m.dashboardLayout()
 	if m.page == tuiOverviewPage {
-		visible := m.overviewNavigationCapacity(layout)
-		m.cursor = clampInt(m.cursor, 0, maxInt(0, len(m.sandboxes)-1))
-		if m.cursor < m.scrollRow {
-			m.scrollRow = m.cursor
-		}
-		if m.cursor >= m.scrollRow+visible {
-			m.scrollRow = m.cursor - visible + 1
-		}
-		m.scrollRow = clampInt(m.scrollRow, 0, maxInt(0, len(m.sandboxes)-visible))
+		m.tuiSelectionState.ensureCardListVisible(len(m.sandboxes), m.overviewNavigationCapacity(layout))
 		return
 	}
 	if m.usesMasterDetail(layout) {
-		visible := m.masterVisibleItems(layout)
-		if m.cursor < m.scrollRow {
-			m.scrollRow = m.cursor
-		}
-		if m.cursor >= m.scrollRow+visible {
-			m.scrollRow = m.cursor - visible + 1
-		}
-		m.scrollRow = clampInt(m.scrollRow, 0, maxInt(0, m.entryCount()-visible))
+		m.tuiSelectionState.ensureCardListVisible(m.entryCount(), m.masterVisibleItems(layout))
 		return
 	}
-	row := m.cursor / layout.cols
-	if row < m.scrollRow {
-		m.scrollRow = row
-	}
-	if row >= m.scrollRow+layout.visibleRows {
-		m.scrollRow = row - layout.visibleRows + 1
-	}
-	m.scrollRow = clampInt(m.scrollRow, 0, layout.maxScrollRow(m.entryCount()))
+	m.tuiSelectionState.ensureCardGridVisible(m.entryCount(), layout.cols, layout.visibleRows, layout.maxScrollRow(m.entryCount()))
 }
 
 func (m *sandboxTUIModel) setPage(page tuiPage) {
@@ -1631,63 +1525,59 @@ func (m *sandboxTUIModel) cyclePage(delta int) {
 	m.setPage(m.tuiPageState.cycle(delta))
 }
 
-func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {
+func (m *sandboxTUIModel) tableSelection() (slot tuiSelectionSlot, count int, ok bool) {
 	switch m.page {
 	case tuiTrafficPage:
-		return &m.trafficCursor, &m.trafficScroll, len(m.traffic)
+		return tuiTrafficSelection, len(m.traffic), true
 	case tuiRulesPage:
-		return &m.rulesCursor, &m.rulesScroll, len(m.rules)
+		return tuiRulesSelection, len(m.rules), true
 	case tuiMountsPage:
-		return &m.mountCursor, &m.mountScroll, len(m.mounts)
+		return tuiMountsSelection, len(m.mounts), true
 	case tuiPortsPage:
-		return &m.portCursor, &m.portScroll, len(m.ports)
+		return tuiPortsSelection, len(m.ports), true
 	case tuiSecretsPage:
-		return &m.secretCursor, &m.secretScroll, len(m.secrets)
+		return tuiSecretsSelection, len(m.secrets), true
 	case tuiMCPPage:
-		return &m.mcpCursor, &m.mcpScroll, len(m.mcpServers)
+		return tuiMCPSelection, len(m.mcpServers), true
 	case tuiAuditPage:
-		return &m.auditCursor, &m.auditScroll, len(m.auditEvents)
+		return tuiAuditSelection, len(m.auditEvents), true
 	case tuiRemotesPage:
-		return &m.remoteCursor, &m.remoteScroll, len(m.remoteLines())
+		return tuiRemoteSelection, len(m.remoteLines()), true
 	case tuiImagesPage:
 		if m.imageSection == tuiImageSectionCredentials {
-			return &m.registryCursor, &m.registryScroll, len(m.registries)
+			return tuiRegistrySelection, len(m.registries), true
 		}
-		return &m.imageCursor, &m.imageScroll, len(m.images)
+		return tuiImageSelection, len(m.images), true
 	case tuiPacketsPage:
-		return &m.packetCursor, &m.packetScroll, len(m.packets)
+		return tuiPacketSelection, len(m.packets), true
 	default:
-		return nil, nil, 0
+		return 0, 0, false
 	}
 }
 
+func (m *sandboxTUIModel) tableState() (cursor, scroll, count int, ok bool) {
+	slot, count, ok := m.tableSelection()
+	if !ok {
+		return 0, 0, 0, false
+	}
+	cursor, scroll, ok = m.tuiSelectionState.tablePosition(slot)
+	return cursor, scroll, count, ok
+}
+
 func (m *sandboxTUIModel) moveTableCursor(delta int) {
-	cursor, _, count := m.tableState()
-	if cursor == nil || count == 0 {
+	slot, count, ok := m.tableSelection()
+	if !ok || !m.tuiSelectionState.moveTable(slot, delta, count) {
 		return
 	}
-	*cursor = clampInt(*cursor+delta, 0, count-1)
 	m.ensureTableCursorVisible()
 }
 
 func (m *sandboxTUIModel) ensureTableCursorVisible() {
-	cursor, scroll, count := m.tableState()
-	if cursor == nil {
+	slot, count, ok := m.tableSelection()
+	if !ok {
 		return
 	}
-	if count == 0 {
-		*cursor, *scroll = 0, 0
-		return
-	}
-	*cursor = clampInt(*cursor, 0, count-1)
-	visible := m.tableVisibleRows()
-	if *cursor < *scroll {
-		*scroll = *cursor
-	}
-	if *cursor >= *scroll+visible {
-		*scroll = *cursor - visible + 1
-	}
-	*scroll = clampInt(*scroll, 0, maxInt(0, count-visible))
+	m.tuiSelectionState.ensureTableVisible(slot, count, m.tableVisibleRows())
 }
 
 func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret, mcp, image, registry string) {
@@ -1721,60 +1611,60 @@ func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret
 func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, secret, mcp, image, registry string) {
 	for i := range m.traffic {
 		if traffic != "" && trafficRowKey(m.traffic[i]) == traffic {
-			m.trafficCursor = i
+			m.tuiSelectionState.setTableCursor(tuiTrafficSelection, i, len(m.traffic))
 			break
 		}
 	}
 	for i := range m.rules {
 		if rule != "" && ruleRowKey(m.rules[i]) == rule {
-			m.rulesCursor = i
+			m.tuiSelectionState.setTableCursor(tuiRulesSelection, i, len(m.rules))
 			break
 		}
 	}
 	for i := range m.mounts {
 		if mount != "" && mountRowKey(m.mounts[i]) == mount {
-			m.mountCursor = i
+			m.tuiSelectionState.setTableCursor(tuiMountsSelection, i, len(m.mounts))
 			break
 		}
 	}
 	for i := range m.ports {
 		if port != "" && portRowKey(m.ports[i]) == port {
-			m.portCursor = i
+			m.tuiSelectionState.setTableCursor(tuiPortsSelection, i, len(m.ports))
 			break
 		}
 	}
 	for i := range m.secrets {
 		if secret != "" && secretRowKey(m.secrets[i]) == secret {
-			m.secretCursor = i
+			m.tuiSelectionState.setTableCursor(tuiSecretsSelection, i, len(m.secrets))
 			break
 		}
 	}
 	for i := range m.mcpServers {
 		if mcp != "" && mcpRowKey(m.mcpServers[i]) == mcp {
-			m.mcpCursor = i
+			m.tuiSelectionState.setTableCursor(tuiMCPSelection, i, len(m.mcpServers))
 			break
 		}
 	}
 	for i := range m.images {
 		if image != "" && imageRowKey(m.images[i]) == image {
-			m.imageCursor = i
+			m.tuiSelectionState.setTableCursor(tuiImageSelection, i, len(m.images))
 			break
 		}
 	}
 	for i := range m.registries {
 		if registry != "" && m.registries[i].Registry == registry {
-			m.registryCursor = i
+			m.tuiSelectionState.setTableCursor(tuiRegistrySelection, i, len(m.registries))
 			break
 		}
 	}
-	m.trafficCursor = clampTableCursor(m.trafficCursor, len(m.traffic))
-	m.rulesCursor = clampTableCursor(m.rulesCursor, len(m.rules))
-	m.mountCursor = clampTableCursor(m.mountCursor, len(m.mounts))
-	m.portCursor = clampTableCursor(m.portCursor, len(m.ports))
-	m.secretCursor = clampTableCursor(m.secretCursor, len(m.secrets))
-	m.mcpCursor = clampTableCursor(m.mcpCursor, len(m.mcpServers))
-	m.imageCursor = clampTableCursor(m.imageCursor, len(m.images))
-	m.registryCursor = clampTableCursor(m.registryCursor, len(m.registries))
+	m.tuiSelectionState.setTableCursor(tuiTrafficSelection, m.trafficCursor, len(m.traffic))
+	m.tuiSelectionState.setTableCursor(tuiRulesSelection, m.rulesCursor, len(m.rules))
+	m.tuiSelectionState.setTableCursor(tuiMountsSelection, m.mountCursor, len(m.mounts))
+	m.tuiSelectionState.setTableCursor(tuiPortsSelection, m.portCursor, len(m.ports))
+	m.tuiSelectionState.setTableCursor(tuiSecretsSelection, m.secretCursor, len(m.secrets))
+	m.tuiSelectionState.setTableCursor(tuiMCPSelection, m.mcpCursor, len(m.mcpServers))
+	m.tuiSelectionState.setTableCursor(tuiImageSelection, m.imageCursor, len(m.images))
+	m.tuiSelectionState.setTableCursor(tuiRegistrySelection, m.registryCursor, len(m.registries))
 }
 
 func trafficRowKey(row tuiTrafficRow) string {

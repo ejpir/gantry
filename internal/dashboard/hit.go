@@ -89,11 +89,11 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 			}
 		}
 		rowY := layout.contentY + tuiTableHeaderHeight
-		_, scroll, count := m.tableState()
-		if scroll != nil {
-			for row := 0; row < m.tableVisibleRows() && *scroll+row < count; row++ {
+		_, scroll, count, ok := m.tableState()
+		if ok {
+			for row := 0; row < m.tableVisibleRows() && scroll+row < count; row++ {
 				targets = append(targets, tuiHitTarget{
-					kind: "table-row", index: *scroll + row,
+					kind: "table-row", index: scroll + row,
 					rect: tuiRect{x: layout.contentX, y: rowY + row, w: layout.width, h: 1},
 				})
 			}
@@ -217,9 +217,9 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		}
 		return m, nil
 	case "table-row":
-		cursor, _, count := m.tableState()
-		if cursor != nil && target.index >= 0 && target.index < count {
-			*cursor = target.index
+		slot, count, ok := m.tableSelection()
+		if ok && target.index >= 0 && target.index < count {
+			m.tuiSelectionState.setTableCursor(slot, target.index, count)
 			m.ensureTableCursorVisible()
 		}
 		return m, nil

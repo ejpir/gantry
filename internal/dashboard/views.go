@@ -712,14 +712,14 @@ func (m sandboxTUIModel) renderActiveScrollbar(theme tuiTheme, layout tuiDashboa
 		}
 		return m.renderCardScrollbar(theme, layout)
 	}
-	_, scroll, count := m.tableState()
+	_, scroll, count, ok := m.tableState()
 	visible := m.tableVisibleRows()
-	if scroll == nil || count <= visible || layout.contentHeight < 2 {
+	if !ok || count <= visible || layout.contentHeight < 2 {
 		return ""
 	}
 	trackHeight := layout.contentHeight
 	thumbHeight := maxInt(1, trackHeight*visible/count)
-	thumbTop := (trackHeight - thumbHeight) * *scroll / maxInt(1, count-visible)
+	thumbTop := (trackHeight - thumbHeight) * scroll / maxInt(1, count-visible)
 	lines := make([]string, trackHeight)
 	for index := range lines {
 		glyph, color := "│", theme.borderMuted

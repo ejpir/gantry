@@ -155,6 +155,13 @@ func TestDashboardViewStateOwnership(t *testing.T) {
 	owned := map[string]bool{
 		"dialog": true, "refreshing": true, "refreshVisible": true,
 		"page": true, "toast": true, "toastGen": true,
+		"cursor": true, "scrollRow": true,
+		"trafficCursor": true, "trafficScroll": true, "rulesCursor": true, "rulesScroll": true,
+		"mountCursor": true, "mountScroll": true, "portCursor": true, "portScroll": true,
+		"secretCursor": true, "secretScroll": true, "mcpCursor": true, "mcpScroll": true,
+		"auditCursor": true, "auditScroll": true, "remoteCursor": true, "remoteScroll": true,
+		"imageCursor": true, "imageScroll": true, "registryCursor": true, "registryScroll": true,
+		"packetCursor": true, "packetScroll": true,
 	}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -163,7 +170,8 @@ func TestDashboardViewStateOwnership(t *testing.T) {
 		base := filepath.Base(path)
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
 			base == "dialog_state.go" || base == "refresh_state.go" ||
-			base == "page_state.go" || base == "notification_state.go" {
+			base == "page_state.go" || base == "notification_state.go" ||
+			base == "selection_state.go" || base == "sandbox_picker.go" {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)

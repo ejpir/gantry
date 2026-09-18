@@ -82,16 +82,17 @@ func packetRowKey(r tuiPacketRow) string {
 	return fmt.Sprintf("%s\x00%d\x00%s", r.Sandbox, r.Sequence, r.Timestamp.Format("2006-01-02T15:04:05.999999999Z07:00"))
 }
 func (m *sandboxTUIModel) restorePacketSelection(key string) {
+	index := m.packetCursor
 	if key != "" {
-		m.packetCursor = 0
+		index = 0
 		for i, row := range m.packets {
 			if packetRowKey(row) == key {
-				m.packetCursor = i
+				index = i
 				break
 			}
 		}
 	}
-	m.packetCursor = clampTableCursor(m.packetCursor, len(m.packets))
+	m.tuiSelectionState.setTableCursor(tuiPacketSelection, index, len(m.packets))
 }
 
 func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
@@ -105,24 +106,26 @@ func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
 	audit := m.selectedAuditKey()
 	m.rebuildRows()
 	if resetScroll {
-		m.cursor, m.scrollRow = 0, 0
-		m.trafficCursor, m.trafficScroll, m.rulesCursor, m.rulesScroll = 0, 0, 0, 0
-		m.mountCursor, m.mountScroll, m.portCursor, m.portScroll = 0, 0, 0, 0
-		m.secretCursor, m.secretScroll, m.mcpCursor, m.mcpScroll = 0, 0, 0, 0
-		m.packetCursor, m.packetScroll = 0, 0
-		m.auditCursor, m.auditScroll = 0, 0
+		m.tuiSelectionState.resetCards()
+		for _, slot := range []tuiSelectionSlot{
+			tuiTrafficSelection, tuiRulesSelection, tuiMountsSelection, tuiPortsSelection,
+			tuiSecretsSelection, tuiMCPSelection, tuiPacketSelection, tuiAuditSelection,
+		} {
+			m.tuiSelectionState.resetTable(slot)
+		}
 	}
+	cardIndex := 0
 	if newCard {
-		m.cursor = len(m.sandboxes)
+		cardIndex = len(m.sandboxes)
 	} else {
-		m.cursor = 0
 		for i, row := range m.sandboxes {
 			if row.Name == name {
-				m.cursor = i
+				cardIndex = i
 				break
 			}
 		}
 	}
+	m.tuiSelectionState.setCardCursor(cardIndex, m.entryCount())
 	m.restoreTableSelections(t, r, mount, port, secret, mcp, image, registry)
 	m.restorePacketSelection(packet)
 	m.restoreAuditSelection(audit)

@@ -788,11 +788,11 @@ func (m sandboxTUIModel) pagePosition() string {
 	if m.page == tuiSandboxesPage {
 		return fmt.Sprintf("%d/%d", m.cursor+1, m.entryCount())
 	}
-	cursor, _, count := m.tableState()
-	if count == 0 || cursor == nil {
+	cursor, _, count, ok := m.tableState()
+	if count == 0 || !ok {
 		return "0/0"
 	}
-	return fmt.Sprintf("%d/%d", *cursor+1, count)
+	return fmt.Sprintf("%d/%d", cursor+1, count)
 }
 
 func (m sandboxTUIModel) renderCardScrollbar(theme tuiTheme, layout tuiDashboardLayout) string {
