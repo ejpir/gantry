@@ -30,6 +30,8 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/manager/operationstate"
+	"github.com/ejpir/gantry/internal/sandbox/manager/runtimeowner"
 )
 
 const (
@@ -56,10 +58,10 @@ type managerService struct {
 	lifecycle  Lifecycle
 	context    context.Context
 	cancel     context.CancelFunc
-	requests   managerTaskGroup
-	background managerTaskGroup
+	requests   runtimeowner.TaskGroup
+	background runtimeowner.TaskGroup
 
-	operationState operationStore
+	operationState *operationstate.Store
 	lifecycleSlots chan struct{}
 	execSlots      chan struct{}
 	sshSlots       chan struct{}
@@ -80,7 +82,7 @@ func newManagerService(lifecycle Lifecycle) *managerService {
 		lifecycle:      lifecycle,
 		context:        ctx,
 		cancel:         cancel,
-		operationState: newOperationStore(),
+		operationState: operationstate.New(managerMaxOperations, managerMaxSubscribers, managerEventBuffer),
 		lifecycleSlots: make(chan struct{}, managerMaxLifecycleOps),
 		execSlots:      make(chan struct{}, managerMaxExecs),
 		sshSlots:       make(chan struct{}, managerMaxExecs),
@@ -170,7 +172,7 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 		writeManagerError(w, http.StatusBadRequest, errors.New("image is required"), "")
 		return
 	}
-	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(owner operationOwner) error {
+	m.runLifecycle(w, r, "create", request.Name, body, http.StatusCreated, func(owner operationstate.Owner) error {
 		if active := m.organizationPolicy; active != nil {
 			if request.OrganizationPolicy != nil && !sameOrganizationPolicy(request.OrganizationPolicy, active) {
 				return fmt.Errorf("organization-wide policy feed controls sandbox policy")
@@ -178,7 +180,7 @@ func (m *managerService) handleCreateSandbox(w http.ResponseWriter, r *http.Requ
 			request.OrganizationPolicy = policy.CloneConfig(active)
 		}
 		result, err := m.lifecycle.Start(r.Context(), createStartRequest(request), nil)
-		return errors.Join(err, m.operationState.setWarnings(owner, result.Warnings))
+		return errors.Join(err, m.operationState.SetWarnings(owner, result.Warnings))
 	})
 }
 
@@ -187,7 +189,7 @@ func (m *managerService) handleStartSandbox(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(operationOwner) error {
+	m.runLifecycle(w, r, "start", name, nil, http.StatusOK, func(operationstate.Owner) error {
 		if active := m.organizationPolicy; active != nil {
 			cfg, err := config.ReadSandboxConfig(layout.Dir(name))
 			if err != nil {
@@ -207,7 +209,7 @@ func (m *managerService) handleStopSandbox(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "stop", name, nil, http.StatusOK, func(operationOwner) error {
+	m.runLifecycle(w, r, "stop", name, nil, http.StatusOK, func(operationstate.Owner) error {
 		err := m.lifecycle.Stop(name)
 		if errors.Is(err, ErrNotRunning) {
 			if _, statErr := os.Stat(filepath.Join(layout.Dir(name), "sandbox.json")); statErr == nil {
@@ -223,7 +225,7 @@ func (m *managerService) handleDeleteSandbox(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	m.runLifecycle(w, r, "delete", name, nil, http.StatusOK, func(operationOwner) error {
+	m.runLifecycle(w, r, "delete", name, nil, http.StatusOK, func(operationstate.Owner) error {
 		return m.lifecycle.Delete(name)
 	})
 }
@@ -345,7 +347,7 @@ func (m *managerService) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, kind, name string, body []byte, successStatus int, run func(operationOwner) error) {
+func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, kind, name string, body []byte, successStatus int, run func(operationstate.Owner) error) {
 	fingerprint := managerFingerprint(r.Method, r.URL.Path, body)
 	started, err := m.beginOperation(kind, name, r.Header.Get("Idempotency-Key"), fingerprint)
 	if err != nil {
@@ -359,9 +361,9 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 	operation, owner := started.Operation, started.Owner
 	if started.Replay {
 		switch started.Phase {
-		case operationRunning:
+		case operationstate.Running:
 			writeManagerJSON(w, http.StatusAccepted, operation)
-		case operationSucceeded:
+		case operationstate.Succeeded:
 			writeManagerJSON(w, http.StatusOK, operation)
 		default:
 			writeManagerError(w, http.StatusConflict, errors.New(operation.Error), operation.ID)
@@ -412,7 +414,7 @@ func (m *managerService) runLifecycle(w http.ResponseWriter, r *http.Request, ki
 	// Another request may have completed while this one waited on its sandbox
 	// shard. Recheck the key under the execution lock so identical concurrent
 	// retries never perform the lifecycle transition twice.
-	if key := r.Header.Get("Idempotency-Key"); key != "" && !m.operationState.ownsIdempotency(owner, key) {
+	if key := r.Header.Get("Idempotency-Key"); key != "" && !m.operationState.OwnsIdempotency(owner, key) {
 		operation = m.finishOperation(owner, errors.New("idempotent operation was superseded"))
 		writeManagerJSON(w, http.StatusAccepted, operation)
 		return
@@ -436,11 +438,11 @@ func (m *managerService) sandboxLock(name string) *sync.RWMutex {
 	return &m.sandboxLocks[int(digest[0])%len(m.sandboxLocks)]
 }
 
-func (m *managerService) beginOperation(kind, name, key, fingerprint string) (operationStart, error) {
+func (m *managerService) beginOperation(kind, name, key, fingerprint string) (operationstate.Start, error) {
 	if m.context.Err() != nil {
-		return operationStart{}, errManagerStopping
+		return operationstate.Start{}, errManagerStopping
 	}
-	return m.operationState.begin(kind, name, key, fingerprint)
+	return m.operationState.Begin(kind, name, key, fingerprint)
 }
 
 func (m *managerService) ownedHandler(inner http.Handler) http.Handler {
@@ -468,23 +470,23 @@ func (m *managerService) stopAdmission() {
 func (m *managerService) joinRequests()   { m.requests.Wait() }
 func (m *managerService) joinBackground() { m.background.Wait() }
 
-func (m *managerService) finishOperation(owner operationOwner, operationErr error) *managerapi.Operation {
-	operation, err := m.operationState.finish(owner, operationErr)
+func (m *managerService) finishOperation(owner operationstate.Owner, operationErr error) *managerapi.Operation {
+	operation, err := m.operationState.Finish(owner, operationErr)
 	if err == nil {
 		return operation
 	}
-	if current, ok := m.operationState.operation(owner.ID()); ok {
+	if current, ok := m.operationState.Operation(owner.ID()); ok {
 		return current
 	}
-	return &managerapi.Operation{ID: owner.ID(), Kind: owner.kind, Sandbox: owner.sandbox, State: operationFailed.String(), Error: err.Error()}
+	return &managerapi.Operation{ID: owner.ID(), Kind: owner.Kind(), Sandbox: owner.Sandbox(), State: operationstate.Failed.String(), Error: err.Error()}
 }
 
 func (m *managerService) operation(id string) (*managerapi.Operation, bool) {
-	return m.operationState.operation(id)
+	return m.operationState.Operation(id)
 }
 
 func (m *managerService) subscribe() (uint64, <-chan managerapi.Event, func(), bool) {
-	return m.operationState.subscribe()
+	return m.operationState.Subscribe()
 }
 
 func createStartRequest(request managerapi.CreateSandboxRequest) lifecycle.StartRequest {
@@ -665,21 +667,6 @@ func managerFingerprint(method, path string, body []byte) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func validateIdempotencyKey(key string) error {
-	if key == "" {
-		return nil
-	}
-	if len(key) > 128 {
-		return fmt.Errorf("idempotency key exceeds 128 bytes")
-	}
-	for _, character := range key {
-		if character < 0x21 || character > 0x7e {
-			return fmt.Errorf("idempotency key must contain printable non-space ASCII")
-		}
-	}
-	return nil
-}
-
 func managerBaseDir() string {
 	if home := os.Getenv("GANTRY_HOME"); home != "" {
 		return filepath.Dir(filepath.Clean(home))
@@ -821,7 +808,11 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 		audit = log.New(os.Stderr, "gantry serve: audit: ", log.LstdFlags)
 	}
 	service := newManagerService(lifecycle)
-	owner := newManagerRuntime(service)
+	owner := runtimeowner.New(runtimeowner.Hooks{
+		StopAdmission:  service.stopAdmission,
+		JoinRequests:   service.joinRequests,
+		JoinBackground: service.joinBackground,
+	}, managerShutdownGracePeriod)
 	defer func() { _ = owner.Close() }()
 
 	var tlsMaterial *serveTLS
@@ -956,7 +947,7 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 		}
 		receivers = append(receivers, receiver)
 	}
-	ownedReceivers := make([]managerReceiver, len(receivers))
+	ownedReceivers := make([]runtimeowner.Receiver, len(receivers))
 	for index, receiver := range receivers {
 		ownedReceivers[index] = receiver
 	}

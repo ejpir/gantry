@@ -57,7 +57,7 @@ func TestQueuedRawRunCancellationDoesNotStartHelper(t *testing.T) {
 	if called || response.Code != http.StatusRequestTimeout {
 		t.Fatalf("queued cancellation started=%v status=%d", called, response.Code)
 	}
-	if running := service.operationState.runningCount(); running != 0 {
+	if running := service.operationState.Stats().Running; running != 0 {
 		t.Fatalf("canceled waiter kept %d running operations", running)
 	}
 }

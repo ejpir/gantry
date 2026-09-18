@@ -8,6 +8,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/layout"
+	"github.com/ejpir/gantry/internal/sandbox/manager/operationstate"
 )
 
 func (m *managerService) handleConfigureSandbox(w http.ResponseWriter, r *http.Request) {
@@ -26,7 +27,7 @@ func (m *managerService) handleConfigureSandbox(w http.ResponseWriter, r *http.R
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
 	}
-	m.runLifecycle(w, r, "configure", name, body, http.StatusOK, func(owner operationOwner) error {
+	m.runLifecycle(w, r, "configure", name, body, http.StatusOK, func(owner operationstate.Owner) error {
 		// Do not manufacture a missing sandbox by taking its launch lock.
 		if _, err := config.ReadSandboxConfig(layout.Dir(name)); err != nil {
 			return err
@@ -35,6 +36,6 @@ func (m *managerService) handleConfigureSandbox(w http.ResponseWriter, r *http.R
 		if err != nil {
 			return err
 		}
-		return m.operationState.setConfigure(owner, managerapi.ConfigureSandboxResult{RestartRequired: restart})
+		return m.operationState.SetConfigure(owner, managerapi.ConfigureSandboxResult{RestartRequired: restart})
 	})
 }

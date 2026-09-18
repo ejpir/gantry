@@ -78,11 +78,11 @@ The ordinary command paths are:
   on explicitly configured TLS listeners with bearer authentication. It
   delegates lifecycle work to the same implementation.
 
-Manager operation state has one owner. `operationStore` advances the typed
+Manager operation state has one owner. `manager/operationstate.Store` advances the typed
 `running → succeeded|failed` machine, owns idempotency routing and event
 publication, and issues private completion capabilities so stale or duplicate
 progress/results cannot mutate a record. Wire state strings remain unchanged.
-The process-level `managerRuntime` advances
+The process-level `manager/runtimeowner.Owner` advances
 `new → locked → listening → feeds-ready → serving → stopping → stopped|failed`
 and owns the state lock, listeners, HTTP servers, policy receivers, and joined
 background work. Shutdown closes admission, cancels work, drains servers, joins

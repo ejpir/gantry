@@ -23,6 +23,7 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/layout"
 	"github.com/ejpir/gantry/internal/sandbox/lifecycle"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	"github.com/ejpir/gantry/internal/sandbox/manager/operationstate"
 )
 
 func (m *managerService) handleGetNetworkPolicy(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +59,7 @@ func (m *managerService) handleSetNetworkPolicy(w http.ResponseWriter, r *http.R
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
 	}
-	m.runLifecycle(w, r, "net-policy", name, body, http.StatusOK, func(owner operationOwner) error {
+	m.runLifecycle(w, r, "net-policy", name, body, http.StatusOK, func(owner operationstate.Owner) error {
 		// Check existence before creating an upload directory. Policy uploads
 		// must not manufacture a sandbox or overwrite its current policy.
 		if _, err := config.ReadSandboxConfig(layout.Dir(name)); err != nil {
@@ -83,7 +84,7 @@ func (m *managerService) handleSetNetworkPolicy(w http.ResponseWriter, r *http.R
 		}
 		entry, err := controlcmd.SetNetworkPolicy(name, path, request.AllowLocal)
 		if err == nil {
-			err = m.operationState.setProgress(owner, "network policy "+entry.State+": "+entry.Description)
+			err = m.operationState.SetProgress(owner, "network policy "+entry.State+": "+entry.Description)
 		}
 		return err
 	})
@@ -131,12 +132,12 @@ func (m *managerService) handleSetOrganizationPolicy(w http.ResponseWriter, r *h
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
 	}
-	m.runLifecycle(w, r, "policy", name, body, http.StatusOK, func(owner operationOwner) error {
+	m.runLifecycle(w, r, "policy", name, body, http.StatusOK, func(owner operationstate.Owner) error {
 		if active := m.organizationPolicy; active != nil && !sameOrganizationPolicy(request.Snapshot, active) {
 			return fmt.Errorf("organization-wide policy feed controls sandbox policy")
 		}
 		return m.setOrganizationPolicyLocked(r.Context(), name, request.Snapshot, request.Restart, func(message string) {
-			_ = m.operationState.setProgress(owner, message)
+			_ = m.operationState.SetProgress(owner, message)
 		})
 	})
 }

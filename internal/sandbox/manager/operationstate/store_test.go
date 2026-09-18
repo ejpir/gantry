@@ -1,4 +1,4 @@
-package manager
+package operationstate
 
 import (
 	"errors"
@@ -8,24 +8,24 @@ import (
 )
 
 func TestOperationPhaseTransitions(t *testing.T) {
-	for _, terminal := range []operationPhase{operationSucceeded, operationFailed} {
-		record := &operationRecord{phase: operationRunning}
+	for _, terminal := range []Phase{Succeeded, Failed} {
+		record := &record{phase: Running}
 		if err := record.transition(terminal); err != nil {
 			t.Fatalf("running -> %s: %v", terminal, err)
 		}
 		if record.phase != terminal || record.State != terminal.String() {
 			t.Fatalf("transition result phase=%s state=%q", record.phase, record.State)
 		}
-		if err := record.transition(operationFailed); err == nil {
+		if err := record.transition(Failed); err == nil {
 			t.Fatalf("terminal phase %s accepted another transition", terminal)
 		}
 	}
-	for _, transition := range []struct{ from, to operationPhase }{
-		{operationRunning, operationRunning},
-		{operationSucceeded, operationRunning},
-		{operationFailed, operationSucceeded},
+	for _, transition := range []struct{ from, to Phase }{
+		{Running, Running},
+		{Succeeded, Running},
+		{Failed, Succeeded},
 	} {
-		record := &operationRecord{phase: transition.from}
+		record := &record{phase: transition.from}
 		if err := record.transition(transition.to); err == nil {
 			t.Errorf("transition %s -> %s succeeded", transition.from, transition.to)
 		}
@@ -33,34 +33,34 @@ func TestOperationPhaseTransitions(t *testing.T) {
 }
 
 func TestOperationStoreRejectsStaleAndMismatchedUpdates(t *testing.T) {
-	store := newOperationStore()
-	started, err := store.begin("create", "dev", "", "fingerprint")
+	store := New(1024, 64, 32)
+	started, err := store.Begin("create", "dev", "", "fingerprint")
 	if err != nil {
 		t.Fatal(err)
 	}
 	mismatched := started.Owner
 	mismatched.generation++
-	if err := store.setProgress(mismatched, "stale"); !errors.Is(err, errOperationCompletionRejected) {
+	if err := store.SetProgress(mismatched, "stale"); !errors.Is(err, ErrCompletionRejected) {
 		t.Fatalf("mismatched update = %v", err)
 	}
-	if _, err := store.finish(started.Owner, nil); err != nil {
+	if _, err := store.Finish(started.Owner, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.setWarnings(started.Owner, []string{"late"}); !errors.Is(err, errOperationCompletionRejected) {
+	if err := store.SetWarnings(started.Owner, []string{"late"}); !errors.Is(err, ErrCompletionRejected) {
 		t.Fatalf("late warning update = %v", err)
 	}
-	if _, err := store.finish(started.Owner, nil); !errors.Is(err, errOperationCompletionRejected) {
+	if _, err := store.Finish(started.Owner, nil); !errors.Is(err, ErrCompletionRejected) {
 		t.Fatalf("duplicate completion = %v", err)
 	}
-	operation, ok := store.operation(started.Owner.ID())
-	if !ok || operation.State != operationSucceeded.String() || operation.Progress != "" || len(operation.Warnings) != 0 {
+	operation, ok := store.Operation(started.Owner.ID())
+	if !ok || operation.State != Succeeded.String() || operation.Progress != "" || len(operation.Warnings) != 0 {
 		t.Fatalf("stale update changed operation: %+v", operation)
 	}
 }
 
 func TestOperationStoreConcurrentCompletionHasOneOwner(t *testing.T) {
-	store := newOperationStore()
-	started, err := store.begin("start", "dev", "", "fingerprint")
+	store := New(1024, 64, 32)
+	started, err := store.Begin("start", "dev", "", "fingerprint")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,9 +70,9 @@ func TestOperationStoreConcurrentCompletionHasOneOwner(t *testing.T) {
 		callers.Add(1)
 		go func() {
 			defer callers.Done()
-			if _, err := store.finish(started.Owner, nil); err == nil {
+			if _, err := store.Finish(started.Owner, nil); err == nil {
 				succeeded.Add(1)
-			} else if errors.Is(err, errOperationCompletionRejected) {
+			} else if errors.Is(err, ErrCompletionRejected) {
 				rejected.Add(1)
 			} else {
 				t.Errorf("unexpected completion error: %v", err)
@@ -86,22 +86,22 @@ func TestOperationStoreConcurrentCompletionHasOneOwner(t *testing.T) {
 }
 
 func TestOperationStoreReplayDoesNotGrantCompletionOwnership(t *testing.T) {
-	store := newOperationStore()
-	started, err := store.begin("create", "dev", "key", "fingerprint")
+	store := New(1024, 64, 32)
+	started, err := store.Begin("create", "dev", "key", "fingerprint")
 	if err != nil {
 		t.Fatal(err)
 	}
-	replay, err := store.begin("create", "dev", "key", "fingerprint")
+	replay, err := store.Begin("create", "dev", "key", "fingerprint")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !replay.Replay || replay.Owner.ID() != "" || replay.Phase != operationRunning {
+	if !replay.Replay || replay.Owner.ID() != "" || replay.Phase != Running {
 		t.Fatalf("replay unexpectedly owns completion: %+v", replay)
 	}
-	if _, err := store.finish(replay.Owner, nil); !errors.Is(err, errOperationCompletionRejected) {
+	if _, err := store.Finish(replay.Owner, nil); !errors.Is(err, ErrCompletionRejected) {
 		t.Fatalf("replay completion = %v", err)
 	}
-	if _, err := store.finish(started.Owner, nil); err != nil {
+	if _, err := store.Finish(started.Owner, nil); err != nil {
 		t.Fatal(err)
 	}
 }

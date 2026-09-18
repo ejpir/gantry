@@ -3,6 +3,7 @@ package manager
 import (
 	"bytes"
 	"github.com/ejpir/gantry/api/managerapi"
+	"github.com/ejpir/gantry/internal/sandbox/manager/operationstate"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,7 +50,7 @@ func TestManagerIdempotencyReplaysAndRejectsMismatch(t *testing.T) {
 		t.Fatalf("finished state = %q", finished.State)
 	}
 	second, err := service.beginOperation("create", "alpha", "key-1", managerFingerprint("POST", "/v1/sandboxes", body))
-	if err != nil || !second.Replay || second.Operation.ID != first.Operation.ID || second.Phase != operationSucceeded {
+	if err != nil || !second.Replay || second.Operation.ID != first.Operation.ID || second.Phase != operationstate.Succeeded {
 		t.Fatalf("replay = %+v err=%v", second, err)
 	}
 	if _, err := service.beginOperation("delete", "alpha", "key-1", managerFingerprint("DELETE", "/v1/sandboxes/alpha", nil)); err == nil {
@@ -79,9 +80,9 @@ func TestManagerOperationsAreBounded(t *testing.T) {
 		}
 		service.finishOperation(operation.Owner, nil)
 	}
-	records, order, _ := service.operationState.counts()
-	if records > managerMaxOperations || order > managerMaxOperations {
-		t.Fatalf("operations grew beyond bound: map=%d order=%d", records, order)
+	stats := service.operationState.Stats()
+	if stats.Records > managerMaxOperations || stats.Order > managerMaxOperations {
+		t.Fatalf("operations grew beyond bound: map=%d order=%d", stats.Records, stats.Order)
 	}
 }
 
@@ -99,8 +100,7 @@ func TestManagerEventsDropsSlowSubscriber(t *testing.T) {
 	}
 	for range events {
 	}
-	_, _, remaining := service.operationState.counts()
-	if remaining != 0 {
+	if remaining := service.operationState.Stats().Subscribers; remaining != 0 {
 		t.Fatalf("slow subscriber retained: %d", remaining)
 	}
 }

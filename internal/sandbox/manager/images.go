@@ -10,6 +10,7 @@ import (
 
 	"github.com/ejpir/gantry/api/managerapi"
 	"github.com/ejpir/gantry/internal/image"
+	"github.com/ejpir/gantry/internal/sandbox/manager/operationstate"
 )
 
 func (m *managerService) imageService(w http.ResponseWriter) (ImageService, bool) {
@@ -93,10 +94,10 @@ func (m *managerService) handlePullImage(w http.ResponseWriter, r *http.Request)
 			ctx, cancel := context.WithTimeout(managerCtx, time.Hour)
 			defer cancel()
 			img, err := service.PullImage(ctx, request.Ref, request.Platform, func(line string) {
-				_ = m.operationState.setProgress(owner, line)
+				_ = m.operationState.SetProgress(owner, line)
 			})
 			if err == nil {
-				err = m.operationState.setProgress(owner, fmt.Sprintf("cached %s as %s", img.Ref, img.Digest))
+				err = m.operationState.SetProgress(owner, fmt.Sprintf("cached %s as %s", img.Ref, img.Digest))
 			}
 			m.finishOperation(owner, err)
 		}) {
@@ -108,7 +109,7 @@ func (m *managerService) handlePullImage(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	status := http.StatusAccepted
-	if started.Phase != operationRunning {
+	if started.Phase != operationstate.Running {
 		status = http.StatusOK
 	}
 	writeManagerJSON(w, status, operation)
@@ -125,10 +126,10 @@ func (m *managerService) handleDeleteImage(w http.ResponseWriter, r *http.Reques
 		writeManagerError(w, http.StatusBadRequest, errors.New("ref is required (maximum 512 bytes)"), "")
 		return
 	}
-	m.runLifecycle(w, r, "image-delete", "", body, http.StatusOK, func(owner operationOwner) error {
+	m.runLifecycle(w, r, "image-delete", "", body, http.StatusOK, func(owner operationstate.Owner) error {
 		_, err := service.DeleteImage(request.Ref)
 		if err == nil {
-			err = m.operationState.setProgress(owner, "removed "+request.Ref)
+			err = m.operationState.SetProgress(owner, "removed "+request.Ref)
 		}
 		return err
 	})

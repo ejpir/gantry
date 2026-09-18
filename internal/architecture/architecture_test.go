@@ -19,20 +19,24 @@ func TestApplicationBoundaries(t *testing.T) {
 	noSandboxParent := func(path string) bool { return path == sandboxRoot }
 	const vmmRoot = "github.com/ejpir/gantry/internal/vmm"
 	noVMMParent := func(path string) bool { return path == vmmRoot }
+	const managerRoot = "github.com/ejpir/gantry/internal/sandbox/manager"
+	noManagerParent := func(path string) bool { return path == managerRoot }
 	rules := map[string]func(string) bool{
 		"internal/dashboard": func(path string) bool {
 			const sandbox = "github.com/ejpir/gantry/internal/sandbox"
 			return (path == sandbox || strings.HasPrefix(path, sandbox+"/")) &&
 				path != sandbox+"/config" && path != sandbox+"/lifecycle"
 		},
-		"internal/sandbox/supervisor":   noSandboxParent,
-		"internal/sandbox/guestplane":   noSandboxParent,
-		"internal/sandbox/hostplane":    noSandboxParent,
-		"internal/sandbox/controlplane": noSandboxParent,
-		"internal/sandbox/sshgw":        noSandboxParent,
-		"internal/sandbox/mcpgw":        noSandboxParent,
-		"internal/vmm/boot":             noVMMParent,
-		"internal/vmm/devices":          noVMMParent,
+		"internal/sandbox/supervisor":             noSandboxParent,
+		"internal/sandbox/guestplane":             noSandboxParent,
+		"internal/sandbox/hostplane":              noSandboxParent,
+		"internal/sandbox/controlplane":           noSandboxParent,
+		"internal/sandbox/sshgw":                  noSandboxParent,
+		"internal/sandbox/mcpgw":                  noSandboxParent,
+		"internal/vmm/boot":                       noVMMParent,
+		"internal/vmm/devices":                    noVMMParent,
+		"internal/sandbox/manager/operationstate": noManagerParent,
+		"internal/sandbox/manager/runtimeowner":   noManagerParent,
 		"internal/sandbox/lifecycle": func(path string) bool {
 			return path == "flag" || path == "os/exec" || strings.Contains(path, "/internal/dashboard") || strings.Contains(path, "/sandbox/manager")
 		},
@@ -143,7 +147,7 @@ func TestDashboardOperationOwnership(t *testing.T) {
 	}
 }
 
-// Manager operation records are mutated only by operationStore after it
+// Manager operation records are mutated only by operationstate.Store after it
 // validates the private completion owner and typed transition.
 func TestManagerOperationOwnership(t *testing.T) {
 	root := filepath.Join("..", "..", "internal", "sandbox", "manager")
@@ -155,7 +159,8 @@ func TestManagerOperationOwnership(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || filepath.Base(path) == "operation_state.go" {
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			strings.Contains(filepath.ToSlash(path), "/manager/operationstate/") {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
