@@ -61,7 +61,7 @@ func TestCoherenceRenameResetSerializesPathMappings(t *testing.T) {
 		reverse: make(map[*fs.Inode]map[string]struct{}),
 		watcher: watcher,
 	}
-	c.healthy.Store(true)
+	c.coherenceState.Activate()
 	c.addPathLocked("victim", victim)
 
 	done := make(chan struct{})
@@ -143,7 +143,7 @@ func TestCoherenceForgetSerializesReplacementWatch(t *testing.T) {
 		reverse: make(map[*fs.Inode]map[string]struct{}),
 		watcher: watcher,
 	}
-	c.healthy.Store(true)
+	c.coherenceState.Activate()
 	c.addPathLocked("", root)
 	c.addPathLocked("dir", oldDir)
 

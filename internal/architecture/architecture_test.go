@@ -44,6 +44,8 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/dashboard/operationstate":       noDashboardParent,
 		"internal/dashboard/refreshstate":         noDashboardParent,
 		"internal/sharefs/lifecycle":              noShareFSParent,
+		"internal/sharefs/exportstate":            noShareFSParent,
+		"internal/sharefs/coherencestate":         noShareFSParent,
 		"internal/sandbox/lifecycle": func(path string) bool {
 			return path == "flag" || path == "os/exec" || strings.Contains(path, "/internal/dashboard") || strings.Contains(path, "/sandbox/manager")
 		},
@@ -112,9 +114,48 @@ func TestApplicationBoundaries(t *testing.T) {
 	}
 }
 
-// Foreground dashboard operations have one state owner. Keeping writes in its
-// transition methods prevents a form or mouse handler from silently replacing
-// an in-flight command while its asynchronous result is still routed.
+// Export and coherence phases have dedicated state owners. Resource code may
+// request transitions through their adapters but cannot replace those owners.
+func TestShareFSStateOwnership(t *testing.T) {
+	root := filepath.Join("..", "..", "internal", "sharefs")
+	owned := map[string]string{
+		"exportState":    "export.go",
+		"coherenceState": "coherence.go",
+	}
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		base := filepath.Base(path)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			var field string
+			switch value := node.(type) {
+			case *ast.SelectorExpr:
+				field = value.Sel.Name
+			case *ast.KeyValueExpr:
+				if ident, ok := value.Key.(*ast.Ident); ok {
+					field = ident.Name
+				}
+			}
+			owner, exists := owned[field]
+			if exists && base != owner {
+				t.Errorf("%s accesses sharefs-owned state %s outside %s", path, field, owner)
+			}
+			return true
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDashboardOperationOwnership(t *testing.T) {
 	root := filepath.Join("..", "..", "internal", "dashboard")
 	owned := map[string]bool{

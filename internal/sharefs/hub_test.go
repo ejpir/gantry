@@ -1246,7 +1246,6 @@ func TestShareHubSwapRevokesReplacedExport(t *testing.T) {
 
 func TestExportStateCannotRegressAfterFinish(t *testing.T) {
 	export := &Export{}
-	export.state.Store(int32(ExportActive))
 	export.finish()
 
 	// Hub.Close can race an inode's OnForget. A late revoke must not move a
@@ -1591,7 +1590,6 @@ func TestShareHubCloseDrainsRequestsBeforeRelease(t *testing.T) {
 	handler := newBlockingFuseHandler()
 	released := make(chan struct{})
 	export := &Export{release: func() { close(released) }}
-	export.state.Store(int32(ExportActive))
 	hub := &Hub{
 		handler: handler,
 		exports: map[string]*Export{"code": export},
@@ -1609,7 +1607,6 @@ func TestShareServerCloseDrainsRequestsBeforeRelease(t *testing.T) {
 	handler := newBlockingFuseHandler()
 	released := make(chan struct{})
 	export := &Export{release: func() { close(released) }}
-	export.state.Store(int32(ExportActive))
 	server := &Server{handler: handler, export: export}
 
 	assertCloseDrainsRequest(t, &server.request, handler,

@@ -138,7 +138,6 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 		return nil, "", fmt.Errorf("share uid=/gid= ownership mapping is not supported on this platform")
 	}
 	exp := &Export{Tag: tag, RO: ro, UID: uid, GID: gid, hub: h, watchRootFD: -1}
-	exp.state.Store(int32(ExportActive))
 	node, identity, release, err := newExportNode(exp, path, h.nextSalt.Add(1)<<32)
 	if err != nil {
 		return nil, "", err

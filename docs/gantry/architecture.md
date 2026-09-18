@@ -461,9 +461,11 @@ upgrade run as owned workers; shutdown stops worker admission and joins every
 admitted worker before publishing `closed`. Linux, Windows, and macOS watcher
 shutdown uses the same joined lifecycle, so duplicate closes cannot return
 before descriptors, handles, dispatch callbacks, and queues are released.
-Export state advances through
+`sharefs/exportstate.Owner` advances each export through
 `active → draining → revoked → gone`, with `gone` published only after watcher
-and root release complete.
+and root release complete. `sharefs/coherencestate.Owner` separately owns cache
+health and joins watcher/cache closure, preventing stale host notifications from
+mutating a closing export.
 
 The guest mounts the multiplexed virtio-fs hub once, then bind-mounts admitted
 tags into the workload container. Live add and remove mutate the hub manifest

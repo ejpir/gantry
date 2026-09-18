@@ -300,7 +300,6 @@ func TestWinExportFSNativePassthrough(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("readdir errno %d", fuse.ToStatus(errno))
 	}
-	stream.export.state.Store(int32(ExportActive))
 	defer stream.Close()
 	seen := map[string]bool{}
 	for stream.HasNext() {
@@ -383,7 +382,6 @@ func TestWinDirStreamReplaysForwardCookie(t *testing.T) {
 	}
 	defer func() { _ = backend.Close() }()
 	export := &Export{}
-	export.state.Store(int32(ExportActive))
 
 	first, errno := backend.readdir("", export)
 	if errno != 0 {

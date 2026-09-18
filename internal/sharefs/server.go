@@ -36,7 +36,6 @@ func NewServer(tag, root string, readOnly bool) (*Server, error) {
 		return nil, err
 	}
 	export := &Export{Tag: tag, RO: readOnly}
-	export.state.Store(int32(ExportActive))
 	node, identity, release, err := newExportNode(export, root, 1<<32)
 	if err != nil {
 		return nil, err

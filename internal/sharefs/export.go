@@ -7,17 +7,8 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/ejpir/gantry/internal/sharefs/exportstate"
 	"github.com/hanwen/go-fuse/v2/fs"
-)
-
-// ExportState is the lifecycle of one logical share beneath the hub.
-type ExportState int32
-
-const (
-	ExportActive ExportState = iota
-	ExportDraining
-	ExportRevoked
-	ExportGone
 )
 
 // FUSE carries Linux renameat2 flags on every host. NOREPLACE and EXCHANGE
@@ -30,19 +21,6 @@ func validateGuestRenameFlags(flags uint32) syscall.Errno {
 		return syscall.EPERM
 	}
 	return 0
-}
-
-func (s ExportState) String() string {
-	switch s {
-	case ExportActive:
-		return "active"
-	case ExportDraining:
-		return "draining"
-	case ExportRevoked:
-		return "revoked"
-	default:
-		return "gone"
-	}
 }
 
 // Export is one prepared or published child of a Hub.
@@ -62,7 +40,7 @@ type Export struct {
 	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
 	coherence       *exportCoherence
 
-	state        atomic.Int32
+	exportState  exportstate.Owner
 	policyDenied atomic.Bool
 	// namespace serializes guest-originated name mutations with the
 	// lstat/open policy check. The host is trusted, but concurrent FUSE
@@ -89,7 +67,7 @@ func (e *Export) State() ExportState {
 	if e == nil {
 		return ExportGone
 	}
-	return ExportState(e.state.Load())
+	return e.exportState.Phase()
 }
 
 // Identity returns the kernel-object identity pinned by this export.
@@ -106,38 +84,11 @@ func (e *Export) PolicyDenied() bool {
 	return e != nil && e.policyDenied.Load()
 }
 
-func validExportTransition(current, next ExportState) bool {
-	switch current {
-	case ExportActive:
-		return next == ExportDraining || next == ExportRevoked
-	case ExportDraining:
-		return next == ExportRevoked
-	case ExportRevoked:
-		return next == ExportGone
-	default:
-		return false
-	}
-}
-
 // advanceState performs a validated monotonic transition. Repeated or stale
 // transitions are harmless, which lets forced removal, OnForget, and owner
 // shutdown race without regressing or skipping release phases.
 func (e *Export) advanceState(next ExportState) bool {
-	if e == nil {
-		return false
-	}
-	for {
-		current := ExportState(e.state.Load())
-		if current == next {
-			return true
-		}
-		if !validExportTransition(current, next) {
-			return false
-		}
-		if e.state.CompareAndSwap(int32(current), int32(next)) {
-			return true
-		}
-	}
+	return e != nil && e.exportState.Transition(next)
 }
 
 func (e *Export) usable() bool {

@@ -45,12 +45,11 @@ func TestExportLifecycleTransitions(t *testing.T) {
 func TestExportFinishReleasesWatcherBeforePinnedRoot(t *testing.T) {
 	var events []string
 	export := &Export{release: func() { events = append(events, "root") }}
-	export.state.Store(int32(ExportActive))
 	export.coherence = &exportCoherence{
 		export: export, paths: make(map[string]coherencePath), reverse: make(map[*fs.Inode]map[string]struct{}),
 		watcher: &recordingShareWatcher{events: &events},
 	}
-	export.coherence.healthy.Store(true)
+	export.coherence.coherenceState.Activate()
 	export.finishNow()
 	if want := []string{"watcher", "root"}; !reflect.DeepEqual(events, want) {
 		t.Fatalf("release order = %v, want %v", events, want)
@@ -64,7 +63,6 @@ func TestExportFinishPublishesGoneAfterRelease(t *testing.T) {
 		close(releaseEntered)
 		<-releaseContinue
 	}}
-	export.state.Store(int32(ExportActive))
 	done := make(chan struct{})
 	go func() {
 		export.finishNow()

@@ -56,7 +56,6 @@ func assertConcurrentCloseJoins(t *testing.T, hubOwner bool) {
 		close(releaseEntered)
 		<-releaseContinue
 	}}
-	export.state.Store(int32(ExportActive))
 
 	var closeOwner func() error
 	var phase func() sharelifecycle.Phase
