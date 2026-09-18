@@ -3,8 +3,10 @@
 package vmmworker
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
@@ -62,8 +64,9 @@ func boot(opts vmm.Opts) (Runner, error) {
 	return machineRunner{machine: machine}, nil
 }
 
-// Serve authenticates the bootstrap channels, applies confinement, boots the
-// VM, and serves control requests until shutdown or channel failure.
+// Serve authenticates the bootstrap channels, prepares the VM from inherited
+// capabilities, applies confinement before guest execution, and serves control
+// requests until shutdown or channel failure.
 func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) error {
 	if control == nil || bridge == nil || fdChannel == nil {
 		return fmt.Errorf("vmm worker: nil bootstrap channel")
@@ -112,11 +115,21 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 		return fmt.Errorf("share channel nonce: %w", err)
 	}
 
-	confinement, err := rt.confine(config, control, bridge, fdChannel, assets)
+	// The file-size ceiling must precede preparation because writable block
+	// devices verify it while they are adopted. Path and syscall confinement is
+	// installed below, after inherited boot assets have been consumed.
+	confinement := workerconf.DisabledReport(runtime.GOOS, config.Confinement)
+	fileLimitNote, err := applyVMMFileLimit(config)
 	if err != nil {
+		_ = workerproto.WriteMessage(control, BootAck{Error: err.Error(), Confinement: confinement})
 		return err
 	}
 
+	// Boot preparation reads only supervisor-opened capabilities and processes no
+	// guest input. It deliberately precedes pivot_root: some host AppArmor
+	// profiles deny metadata operations on inherited files once their original
+	// paths are disconnected from the worker's private root. Confinement still
+	// completes before the boot acknowledgement and before runner.Run starts.
 	fds := workerproto.NewFDMux(fdChannel)
 	defer func() { _ = fds.Close() }()
 	bridgeClient := workerproto.NewClient(bridge)
@@ -129,7 +142,6 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 	} else {
 		filesystem := vmm.Filesystem{Tag: shares.HubTag}
 		if config.VhostShares {
-			confinement.Notes = append(confinement.Notes, "virtio-fs data plane uses shared guest RAM and doorbell pipes; VMM retains no host share roots")
 			queues := make([]virtio.VhostQueueFiles, len(assets.VhostQueue))
 			for index, queue := range assets.VhostQueue {
 				queues[index] = virtio.VhostQueueFiles{
@@ -215,6 +227,13 @@ func (rt Runtime) Serve(control, bridge, fdChannel net.Conn, load AssetLoader) e
 	if err != nil {
 		_ = workerproto.WriteMessage(control, BootAck{Error: err.Error(), Confinement: confinement})
 		return err
+	}
+	confinement, err = rt.confine(config, control, bridge, fdChannel, assets, fileLimitNote)
+	if err != nil {
+		return errors.Join(err, runner.Close())
+	}
+	if config.VhostShares {
+		confinement.Notes = append(confinement.Notes, "virtio-fs data plane uses shared guest RAM and doorbell pipes; VMM retains no host share roots")
 	}
 	state := &workerState{
 		runner:  runner,

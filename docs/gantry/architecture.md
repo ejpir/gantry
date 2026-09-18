@@ -371,7 +371,11 @@ start request
 
 The parent `start` command returns only after both guest RPC and `ctl.sock` can
 accept work. Boot inputs are opened before worker confinement, which prevents
-a path from being exchanged between validation and use.
+a path from being exchanged between validation and use. The VMM worker prepares
+those inherited capabilities before pivoting to its private root because host
+LSMs may reject metadata operations on paths disconnected by `pivot_root`.
+Preparation processes no guest input; confinement is applied and verified
+before the boot acknowledgment and before virtual CPUs run.
 
 ## Filesystems and persistence
 

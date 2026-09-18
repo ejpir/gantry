@@ -13,16 +13,19 @@ import (
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, assets Assets) (workerconf.Report, error) {
-	report := workerconf.DisabledReport(runtime.GOOS, config.Confinement)
+func applyVMMFileLimit(config Config) (string, error) {
 	if err := workerconf.SetFileSizeLimit(config.MaxWritableFileSize); err != nil {
-		message := "bound writable disk size: " + err.Error()
-		_ = workerproto.WriteMessage(control, BootAck{Error: message, Confinement: report})
-		return report, fmt.Errorf("%s", message)
+		return "", fmt.Errorf("bound writable disk size: %w", err)
 	}
-	fileLimitNote := ""
-	if config.MaxWritableFileSize != 0 {
-		fileLimitNote = fmt.Sprintf("writable file growth capped process-wide at %d bytes; disk locks remain supervisor-owned", config.MaxWritableFileSize)
+	if config.MaxWritableFileSize == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf("writable file growth capped process-wide at %d bytes; disk locks remain supervisor-owned", config.MaxWritableFileSize), nil
+}
+
+func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, assets Assets, fileLimitNote string) (workerconf.Report, error) {
+	report := workerconf.DisabledReport(runtime.GOOS, config.Confinement)
+	if fileLimitNote != "" {
 		report.Notes = append(report.Notes, fileLimitNote)
 	}
 	if config.Confinement == "" || config.Confinement == "off" {
