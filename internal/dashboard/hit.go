@@ -195,13 +195,10 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 			}
 			return m, m.openCreateWizard()
 		case "help":
-			m.dialog = tuiHelpDialog
-			m.dialogScroll = 0
+			m.tuiDialogState.open(tuiHelpDialog)
 		case "update":
 			if m.tuiOperationState.phase() == tuiOperationIdle && m.updateStatus.Available {
-				m.dialog = tuiUpdateDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+				m.tuiDialogState.openConfirmation(tuiUpdateDialog)
 			}
 		}
 		return m, nil
@@ -236,9 +233,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		case "edit":
 			return m, m.openEditDialog()
 		case "delete":
-			m.dialog = tuiRemoveDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiRemoveDialog)
 		}
 		return m, nil
 	case "shortcut":

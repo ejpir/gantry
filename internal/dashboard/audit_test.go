@@ -78,6 +78,7 @@ func TestAuditSelectionRefreshAndFrozenDetails(t *testing.T) {
 		t.Fatal("open details alias mutable rules")
 	}
 	msg := *m.viewSource
+	msg.owner, _ = m.tuiRefreshState.begin(false)
 	msg.audit = append([]tuiAuditRow{{Sandbox: "Zulu", Line: "new event"}}, msg.audit...)
 	_, _ = m.handleRefresh(msg)
 	if m.selectedAuditKey() != key || m.auditCursor != 1 || m.auditDetail.Line != original {
@@ -208,7 +209,7 @@ func TestAuditSnapshotSanitizesAllDisplayFields(t *testing.T) {
 	bad := "\x1b[2Junsafe\nvalue\x1b]52;c;payload\a"
 	d := &dashboardapi.AuditDecision{Effect: bad, Action: bad, Reason: bad, Organization: bad, Revision: bad, Profile: bad, Rules: []string{bad}}
 	s := auditSnapshotService{data: dashboardapi.Snapshot{Audit: []tuiAuditRow{{Sandbox: bad, Line: bad, Error: bad, Decision: d}}}}
-	msg := refreshSandboxesCmd(s)().(tuiRefreshMsg)
+	msg := refreshSandboxesCmd(s, tuiRefreshOwner{})().(tuiRefreshMsg)
 	if len(msg.audit) != 1 {
 		t.Fatal("refresh omitted audit data")
 	}

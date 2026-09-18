@@ -167,9 +167,7 @@ func (m sandboxTUIModel) renderRegistryDetail(theme tuiTheme, width int) []strin
 const tuiImagePullSubmitFocus = 2
 
 func (m *sandboxTUIModel) openImagePullDialog() tea.Cmd {
-	m.dialog = tuiImagePullDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiImagePullDialog)
 	m.pullRef.Reset()
 	m.pullArch = "auto"
 	m.resizeInputs()
@@ -257,9 +255,7 @@ func (m *sandboxTUIModel) submitImagePull() (tea.Model, tea.Cmd) {
 const tuiRegistryLoginSubmitFocus = 3
 
 func (m *sandboxTUIModel) openRegistryLoginDialog() tea.Cmd {
-	m.dialog = tuiRegistryLoginDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiRegistryLoginDialog)
 	m.loginRegistry.Reset()
 	m.loginUsername.Reset()
 	m.loginPassword.Reset()

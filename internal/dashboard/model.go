@@ -145,6 +145,7 @@ type tuiToast struct {
 }
 
 type tuiRefreshMsg struct {
+	owner      tuiRefreshOwner
 	sandboxes  []tuiSandbox
 	traffic    []tuiTrafficRow
 	rules      []tuiRuleRow
@@ -164,6 +165,7 @@ type tuiTickMsg struct{}
 type tuiPacketPollMsg struct{}
 
 type tuiProcessDoneMsg struct {
+	owner  tuiOperationOwner
 	action string
 	name   string
 	output string
@@ -176,6 +178,7 @@ type tuiProcessStreamEvent struct {
 }
 
 type tuiProcessStreamMsg struct {
+	owner  tuiOperationOwner
 	event  tuiProcessStreamEvent
 	stream <-chan tuiProcessStreamEvent
 }
@@ -256,10 +259,9 @@ type sandboxTUIModel struct {
 	height int
 	dark   bool
 
-	loading        bool
-	refreshing     bool
-	refreshVisible bool
-	lastUpdate     time.Time
+	loading bool
+	tuiRefreshState
+	lastUpdate time.Time
 	tuiOperationState
 
 	spinner   spinner.Model
@@ -271,9 +273,7 @@ type sandboxTUIModel struct {
 	updateChecked bool
 	exitMessage   string
 
-	dialog        tuiDialog
-	dialogScroll  int
-	confirmRemove bool
+	tuiDialogState
 	createDialogModel
 	remoteOnboarding
 	editFocus         int
@@ -330,7 +330,6 @@ type sandboxTUIModel struct {
 	loginRegistry     textinput.Model
 	loginUsername     textinput.Model
 	loginPassword     textinput.Model
-	formError         string
 
 	lastClickIndex int
 	lastClickKind  string
@@ -469,7 +468,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		height:             30,
 		dark:               true,
 		loading:            true,
-		refreshing:         true,
+		tuiRefreshState:    newTUIRefreshState(),
 		spinner:            sp,
 		animating:          true,
 		createDialogModel: createDialogModel{
@@ -524,7 +523,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 
 func (m sandboxTUIModel) Init() tea.Cmd {
 	return tea.Batch(
-		refreshSandboxesCmd(m.service),
+		refreshSandboxesCmd(m.service, m.tuiRefreshState.current()),
 		cachedTUIUpdateCmd(),
 		checkTUIUpdateCmd(),
 		tuiTickCmd(),
@@ -546,9 +545,10 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyInputTheme()
 		return m, nil
 	case tea.FocusMsg:
-		if !m.refreshing && m.tuiOperationState.phase() == tuiOperationIdle {
-			m.refreshing = true
-			return m, refreshSandboxesCmd(m.service)
+		if m.tuiOperationState.phase() == tuiOperationIdle {
+			if owner, ok := m.tuiRefreshState.begin(false); ok {
+				return m, refreshSandboxesCmd(m.service, owner)
+			}
 		}
 		return m, nil
 	case spinner.TickMsg:
@@ -603,9 +603,10 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleRefresh(msg)
 	case tuiTickMsg:
 		cmds := []tea.Cmd{tuiTickCmd()}
-		if !m.refreshing && m.tuiOperationState.phase() == tuiOperationIdle {
-			m.refreshing = true
-			cmds = append(cmds, refreshSandboxesCmd(m.service))
+		if m.tuiOperationState.phase() == tuiOperationIdle {
+			if owner, ok := m.tuiRefreshState.begin(false); ok {
+				cmds = append(cmds, refreshSandboxesCmd(m.service, owner))
+			}
 		}
 		return m, tea.Batch(cmds...)
 	case tuiPacketPollMsg:
@@ -619,10 +620,15 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleProcessDone(msg)
 	case tuiProcessStreamMsg:
 		if msg.event.done != nil {
-			return m.handleProcessDone(*msg.event.done)
+			done := *msg.event.done
+			done.owner = msg.owner
+			if done.action == "" {
+				done.action, done.name = msg.owner.action, msg.owner.name
+			}
+			return m.handleProcessDone(done)
 		}
-		_ = m.tuiOperationState.progress(safeUILine(msg.event.progress))
-		return m, waitTUIProcessStream(msg.stream)
+		_ = m.tuiOperationState.progress(msg.owner, safeUILine(msg.event.progress))
+		return m, waitTUIProcessStream(msg.stream, msg.owner)
 	case tuiToastExpiredMsg:
 		if m.toast != nil && m.toast.gen == msg.gen {
 			m.toast = nil
@@ -655,10 +661,11 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) {
+	if !m.tuiRefreshState.finish(msg.owner) {
+		return m, nil
+	}
 	wasLoading := m.loading
 	m.loading = false
-	m.refreshing = false
-	m.refreshVisible = false
 	m.lastUpdate = msg.at
 	m.lastClickAt = time.Time{}
 	m.lastClickKind = ""
@@ -714,7 +721,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, tea.Cmd) {
-	if !m.tuiOperationState.finish(msg.action, msg.name) {
+	if !m.tuiOperationState.finish(msg.owner) {
 		return m, nil
 	}
 	if msg.action == "update" {
@@ -728,7 +735,7 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 		}
 		return m, tea.Quit
 	}
-	m.refreshing = true
+	refreshOwner := m.tuiRefreshState.restart(false)
 
 	kind, title, body := tuiToastSuccess, actionPastTense(msg.action), msg.name
 	if msg.err != nil {
@@ -747,7 +754,7 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 			body = "Returned from " + msg.name
 		}
 	}
-	return m, tea.Batch(refreshSandboxesCmd(m.service), m.showToast(kind, title, body))
+	return m, tea.Batch(refreshSandboxesCmd(m.service, refreshOwner), m.showToast(kind, title, body))
 }
 
 func lastOutputLine(output string) string {
@@ -827,9 +834,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			return m.openShareAddDialog(false), true
 		case "d", "delete", "x":
 			if m.selectedMount() != nil {
-				m.dialog = tuiShareRemoveDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+				m.tuiDialogState.openConfirmation(tuiShareRemoveDialog)
 			}
 			return nil, true
 		case "r":
@@ -847,9 +852,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 				return nil, true
 			}
 			if removableRule(*row) {
-				m.dialog = tuiRuleRemoveDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+				m.tuiDialogState.openConfirmation(tuiRuleRemoveDialog)
 				return nil, true
 			}
 			return m.showToast(
@@ -864,9 +867,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			return m.openPortPublishDialog(), true
 		case "d", "delete", "x", "u":
 			if m.selectedPort() != nil {
-				m.dialog = tuiPortUnpublishDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+				m.tuiDialogState.openConfirmation(tuiPortUnpublishDialog)
 			}
 			return nil, true
 		}
@@ -876,9 +877,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			return m.openSecretAddDialog(), true
 		case "d", "delete", "x":
 			if m.selectedSecret() != nil {
-				m.dialog = tuiSecretRemoveDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+				m.tuiDialogState.openConfirmation(tuiSecretRemoveDialog)
 			}
 			return nil, true
 		}
@@ -908,9 +907,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			if row.Type != "remote" || row.Error != "" {
 				return m.showToast(tuiToastInfo, "Built-in MCP server", "The filesystem server can be edited but not removed."), true
 			}
-			m.dialog = tuiMCPRemoveDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiMCPRemoveDialog)
 			return nil, true
 		}
 	case tuiImagesPage:
@@ -931,9 +928,7 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 				if !row.HasSecret {
 					return m.showToast(tuiToastInfo, "Nothing stored", "No credential is stored for "+row.Registry+" — anonymous pulls use it as-is."), true
 				}
-				m.dialog = tuiRegistryLogoutDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+				m.tuiDialogState.openConfirmation(tuiRegistryLogoutDialog)
 				return nil, true
 			}
 			return nil, false
@@ -945,17 +940,13 @@ func (m *sandboxTUIModel) updatePageActionKey(key string) (tea.Cmd, bool) {
 			if m.selectedImage() == nil {
 				return nil, true
 			}
-			m.dialog = tuiImageRemoveDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiImageRemoveDialog)
 			return nil, true
 		case "u":
 			if m.prunableImageCount() == 0 {
 				return m.showToast(tuiToastInfo, "Nothing to prune", "Every cached image is referenced by a sandbox."), true
 			}
-			m.dialog = tuiImagePruneDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiImagePruneDialog)
 			return nil, true
 		}
 		return nil, false
@@ -985,9 +976,7 @@ func (m *sandboxTUIModel) updateGlobalKey(key string) (tea.Cmd, bool) {
 		return m.refreshCmd(), true
 	case "U":
 		if m.updateStatus.Available {
-			m.dialog = tuiUpdateDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiUpdateDialog)
 		}
 		return nil, true
 	}
@@ -1027,8 +1016,7 @@ func checkTUIUpdateCmd() tea.Cmd {
 func (m *sandboxTUIModel) updatePageKey(key string) bool {
 	switch key {
 	case "?":
-		m.dialog = tuiHelpDialog
-		m.dialogScroll = 0
+		m.tuiDialogState.open(tuiHelpDialog)
 	case "0":
 		m.setPage(tuiOverviewPage)
 	case "1":
@@ -1064,12 +1052,11 @@ func (m *sandboxTUIModel) updatePageKey(key string) bool {
 }
 
 func (m *sandboxTUIModel) refreshCmd() tea.Cmd {
-	if m.refreshing {
+	owner, ok := m.tuiRefreshState.begin(true)
+	if !ok {
 		return nil
 	}
-	m.refreshing = true
-	m.refreshVisible = true
-	return tea.Batch(refreshSandboxesCmd(m.service), m.ensureAnimation())
+	return tea.Batch(refreshSandboxesCmd(m.service, owner), m.ensureAnimation())
 }
 
 func (m *sandboxTUIModel) updateTableKey(key string) {
@@ -1141,14 +1128,11 @@ func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 		return m.openEditDialog()
 	case "i":
 		if m.selected() != nil {
-			m.dialog = tuiInfoDialog
-			m.dialogScroll = 0
+			m.tuiDialogState.open(tuiInfoDialog)
 		}
 	case "d", "delete", "x":
 		if m.selected() != nil {
-			m.dialog = tuiRemoveDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiRemoveDialog)
 		}
 	}
 	return nil
@@ -1193,16 +1177,13 @@ func (m *sandboxTUIModel) updateSandboxKey(key string) tea.Cmd {
 		return cmd
 	case "i":
 		if m.selected() != nil {
-			m.dialog = tuiInfoDialog
-			m.dialogScroll = 0
+			m.tuiDialogState.open(tuiInfoDialog)
 		}
 	case "e":
 		return m.openEditDialog()
 	case "d", "delete", "x":
 		if m.selected() != nil {
-			m.dialog = tuiRemoveDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiRemoveDialog)
 		}
 	}
 	return nil
@@ -1241,23 +1222,24 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 }
 
 func (m *sandboxTUIModel) beginAction(action, name string, argv []string, interactive bool) (tea.Model, tea.Cmd) {
-	if !m.tuiOperationState.begin(action, name, action == "create" || action == "start") {
+	owner, ok := m.tuiOperationState.begin(action, name, action == "create" || action == "start")
+	if !ok {
 		return m, nil
 	}
-	m.dialog = tuiNoDialog
-	m.dialogScroll = 0
-	return m, tea.Batch(runTUIProcessCmd(m.operations, m.service, action, name, argv, interactive), m.ensureAnimation())
+	m.tuiDialogState.dismiss()
+	return m, tea.Batch(runTUIProcessCmd(m.operations, m.service, owner, argv, interactive), m.ensureAnimation())
 }
 
 // beginServiceAction is the single admission point for in-process dashboard
 // mutations. Validation remains with each form, while this owner prevents a
 // second command from replacing the result routing of the active operation.
 func (m *sandboxTUIModel) beginServiceAction(action, name string, command tea.Cmd) (tea.Model, tea.Cmd) {
-	if !m.tuiOperationState.begin(action, name, false) {
+	owner, ok := m.tuiOperationState.begin(action, name, false)
+	if !ok {
 		return m, nil
 	}
 	m.closeDialog()
-	return m, tea.Batch(command, m.ensureAnimation())
+	return m, tea.Batch(ownTUIOperationCmd(owner, command), m.ensureAnimation())
 }
 
 func saveSandboxConfigCmd(service dashboardapi.Service, request dashboardapi.SandboxConfigRequest, running bool) tea.Cmd {
@@ -1850,12 +1832,12 @@ func clampTableCursor(cursor, count int) int {
 	return clampInt(cursor, 0, count-1)
 }
 
-func refreshSandboxesCmd(service dashboardapi.Service) tea.Cmd {
+func refreshSandboxesCmd(service dashboardapi.Service, owner tuiRefreshOwner) tea.Cmd {
 	return func() tea.Msg {
 		data, err := service.Snapshot()
 		sanitizeSnapshot(&data)
 		return tuiRefreshMsg{
-			sandboxes: data.Sandboxes, traffic: data.Traffic,
+			owner: owner, sandboxes: data.Sandboxes, traffic: data.Traffic,
 			rules: data.Rules, mounts: data.Mounts, ports: data.Ports, secrets: data.Secrets,
 			mcp: data.MCPServers, audit: data.Audit, images: data.Images, registries: data.Registries,
 			err: err, at: time.Now(),

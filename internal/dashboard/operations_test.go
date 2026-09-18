@@ -58,7 +58,8 @@ func TestDashboardCloseCancelsAndJoinsLifecycle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		message := runTUIStartCmd(group, service, "create", lifecycle.StartRequest{Name: "dev"})()
+		owner := tuiOperationOwner{generation: 1, action: "create", name: "dev"}
+		message := runTUIStartCmd(group, service, owner, lifecycle.StartRequest{Name: "dev"})()
 		stream, ok := message.(tuiProcessStreamMsg)
 		if !ok || stream.event.progress != "a structured event with no CLI marker" {
 			t.Errorf("progress=%+v", message)

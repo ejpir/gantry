@@ -144,7 +144,7 @@ func (m *sandboxTUIModel) openFilterDialog() tea.Cmd {
 	m.sandboxFilterInput.Placeholder = "All sandboxes"
 	m.sandboxFilterInput.CharLimit = 64
 	m.sandboxFilterInput.SetValue(m.sandboxFilter)
-	m.dialog, m.dialogScroll = tuiSandboxFilterDialog, 0
+	m.tuiDialogState.open(tuiSandboxFilterDialog)
 	m.applyInputTheme()
 	m.resizeInputs()
 	m.ensureDialogFocusVisible()
@@ -178,7 +178,8 @@ func (m sandboxTUIModel) renderFilterDialog(theme tuiTheme, width int) string {
 }
 
 func (m *sandboxTUIModel) openSortDialog() {
-	m.dialog, m.dialogScroll, m.sortCursor = tuiSortDialog, 0, 0
+	m.tuiDialogState.open(tuiSortDialog)
+	m.sortCursor = 0
 	for i, column := range m.sortColumns() {
 		if column.id == m.sorts[m.sortScope()].column {
 			m.sortCursor = i + 1

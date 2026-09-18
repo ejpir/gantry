@@ -572,9 +572,7 @@ func (m *sandboxTUIModel) openCreateForm(target, organization string) tea.Cmd {
 	if target != "" {
 		m.createEndpoint, _, _ = remote.Lookup(target)
 	}
-	m.dialog = tuiCreateDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiCreateDialog)
 	m.createErrFocus = -1
 	m.createName.Reset()
 	m.createImage.Reset()
@@ -657,9 +655,7 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 	if selected.ConfigError {
 		return m.showToast(tuiToastError, "Cannot edit sandbox", "The saved sandbox configuration is unavailable.")
 	}
-	m.dialog = tuiEditDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiEditDialog)
 	m.editCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, maxInt(1, selected.VCPUs))
 	m.editMemory = newMemorySlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), int(selected.MemMB))
 	m.editIsolation = selected.ProcessIsolation
@@ -933,9 +929,7 @@ func (m *sandboxTUIModel) openShareAddDialog(replace bool) tea.Cmd {
 	if target == nil {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Wait for a starting sandbox to finish, or create one first.")
 	}
-	m.dialog = tuiShareAddDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiShareAddDialog)
 	m.shareReplace = replace
 	m.shareRO = true
 	m.shareTag.Reset()
@@ -1014,9 +1008,7 @@ func (m *sandboxTUIModel) openPortPublishDialog() tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Port publishing requires a running sandbox with the embedded netstack.")
 	}
-	m.dialog = tuiPortPublishDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiPortPublishDialog)
 	m.portUDP = false
 	m.portBind.Reset()
 	m.portGuest.Reset()
@@ -1072,9 +1064,7 @@ func (m *sandboxTUIModel) openNetworkPolicyDialog() tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Live policy updates require a running sandbox with the embedded netstack.")
 	}
-	m.dialog = tuiNetworkPolicyDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiNetworkPolicyDialog)
 	m.syncNetworkPolicyFields()
 	m.resizeInputs()
 	return m.focusNetworkPolicy(0)
@@ -1090,9 +1080,7 @@ func (m *sandboxTUIModel) openRuleAddDialog() tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Rules require a network-enabled sandbox using the embedded netstack.")
 	}
-	m.dialog = tuiRuleAddDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiRuleAddDialog)
 	m.ruleTarget.Reset()
 	m.rulePorts.Reset()
 	m.ruleTarget.Placeholder = "203.0.113.10 or 203.0.113.0/24 (blank = all)"
@@ -1288,9 +1276,7 @@ func (m *sandboxTUIModel) openSecretAddDialog() tea.Cmd {
 	if !m.secretSandbox.Reset(m.sandboxes, preferred) {
 		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before adding an in-memory secret.")
 	}
-	m.dialog = tuiSecretAddDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiSecretAddDialog)
 	m.secretName.Reset()
 	m.secretValue.Reset()
 	m.resizeInputs()
@@ -1520,8 +1506,7 @@ func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
 func (m *sandboxTUIModel) closeDialog() {
 	m.resetOnboarding()
 	m.createRemote, m.createOrganization = "", ""
-	m.dialog = tuiNoDialog
-	m.dialogScroll = 0
+	m.tuiDialogState.dismiss()
 	m.packetDetail = nil
 	m.auditDetail = nil
 	m.confirmRemove = false

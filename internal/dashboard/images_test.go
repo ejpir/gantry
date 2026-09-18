@@ -313,7 +313,7 @@ func TestSandboxTUIImagesSelectionSurvivesRefresh(t *testing.T) {
 	m := imagesTestModel()
 	m.imageCursor = 1
 	m.registryCursor = 1
-	model, _ := m.handleRefresh(tuiRefreshMsg{
+	model, _ := m.handleRefresh(tuiRefreshMsg{owner: m.tuiRefreshState.current(),
 		images: []tuiImageRow{
 			{Ref: "ghcr.io/org/app:latest", Digest: "sha256:new", Arch: "arm64", InUse: true},
 			{Ref: "zzz:latest", Digest: "sha256:zzz", Arch: "arm64"},

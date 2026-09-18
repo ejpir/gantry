@@ -36,10 +36,11 @@ func (m *sandboxTUIModel) updateRemoteActionKey(key string) (tea.Cmd, bool) {
 		case "enter", "o":
 			return m.openCreateForm(row.target, ""), true
 		case "t":
-			if !m.tuiOperationState.begin("remote test", row.target, false) {
+			owner, ok := m.tuiOperationState.begin("remote test", row.target, false)
+			if !ok {
 				return nil, true
 			}
-			return tea.Batch(testRemoteCmd(m.operations, row.target), m.ensureAnimation()), true
+			return tea.Batch(ownTUIOperationCmd(owner, testRemoteCmd(m.operations, row.target)), m.ensureAnimation()), true
 		default:
 			m.onboardingDialog(tuiRemoteRemoveDialog)
 			m.onboardRemove, m.confirmRemove = row.target, false
@@ -139,13 +140,14 @@ func (m *sandboxTUIModel) submitRemoteCreate() (tea.Model, tea.Cmd) {
 		MemoryMiB: uint(m.createMemory.Value), CPUs: m.createCPUs.Value, DiskSizeMiB: uint(m.createDisk.Value),
 		ProcessIsolation: m.createIsolation, SSH: m.createSSH, DevContainers: m.createDevContainers}
 	organization := m.createOrganization
-	if !m.tuiOperationState.begin("remote create", name+"@"+profile.Name, false) {
+	owner, ok := m.tuiOperationState.begin("remote create", name+"@"+profile.Name, false)
+	if !ok {
 		return m, nil
 	}
-	_ = m.tuiOperationState.progress("Checking remote image cache")
+	_ = m.tuiOperationState.progress(owner, "Checking remote image cache")
 	m.closeDialog()
 	m.setPage(tuiRemotesPage)
-	return m, tea.Batch(runRemoteCreateCmd(m.operations, profile, organization, request), m.ensureAnimation())
+	return m, tea.Batch(ownTUIOperationCmd(owner, runRemoteCreateCmd(m.operations, profile, organization, request)), m.ensureAnimation())
 }
 
 func runRemoteCreateCmd(group *dashboardOperations, expected remote.Profile, organization string, request managerapi.CreateSandboxRequest) tea.Cmd {
@@ -172,7 +174,7 @@ func runRemoteCreateCmd(group *dashboardOperations, expected remote.Profile, org
 			case <-group.ctx.Done():
 			}
 		}()
-		return receiveTUIProcessStream(stream)
+		return receiveTUIProcessStream(stream, tuiOperationOwner{})
 	}
 }
 

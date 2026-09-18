@@ -736,7 +736,7 @@ func TestSandboxTUITrafficSelectionSurvivesDNSRefresh(t *testing.T) {
 	}
 	m.trafficCursor = 0
 
-	_, _ = m.handleRefresh(tuiRefreshMsg{
+	_, _ = m.handleRefresh(tuiRefreshMsg{owner: m.tuiRefreshState.current(),
 		at: time.Now(),
 		traffic: []tuiTrafficRow{
 			{Sandbox: "dev", Host: "cdn.example.com", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: true},
@@ -834,10 +834,11 @@ func TestSandboxTUIUpdateBadgeAndConfirmation(t *testing.T) {
 func TestSandboxTUIQuitsAfterSuccessfulUpdate(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
-	if !m.tuiOperationState.begin("update", "v1.3.0", false) {
+	owner, ok := m.tuiOperationState.begin("update", "v1.3.0", false)
+	if !ok {
 		t.Fatal("failed to begin update operation")
 	}
-	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
+	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{owner: owner, action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
 	m = *model.(*sandboxTUIModel)
 	if cmd == nil {
 		t.Fatal("successful update did not quit")
@@ -897,12 +898,16 @@ func TestSandboxTUIKeepsCreateSelectionAcrossStaleRefresh(t *testing.T) {
 	m.busyAction = "create"
 	m.busyName = "dev"
 	m.selectNext = "dev"
-	_, _ = m.handleRefresh(tuiRefreshMsg{at: time.Now()})
+	_, _ = m.handleRefresh(tuiRefreshMsg{owner: m.tuiRefreshState.current(), at: time.Now()})
 	if m.selectNext != "dev" {
 		t.Fatal("in-flight refresh discarded pending create selection")
 	}
 	m.busyAction = ""
-	_, _ = m.handleRefresh(tuiRefreshMsg{
+	owner, ok := m.tuiRefreshState.begin(false)
+	if !ok {
+		t.Fatal("replacement refresh was not admitted")
+	}
+	_, _ = m.handleRefresh(tuiRefreshMsg{owner: owner,
 		at: time.Now(), sandboxes: []tuiSandbox{{Name: "dev", State: tuiStarting}},
 	})
 	if m.cursor != 0 || m.selectNext != "" {

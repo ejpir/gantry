@@ -147,6 +147,48 @@ func TestDashboardOperationOwnership(t *testing.T) {
 	}
 }
 
+// Dashboard modal transitions and refresh publication have dedicated owners.
+// Rendering and input handlers may inspect these fields but cannot bypass the
+// generation and transition checks.
+func TestDashboardDialogAndRefreshOwnership(t *testing.T) {
+	root := filepath.Join("..", "..", "internal", "dashboard")
+	owned := map[string]bool{"dialog": true, "refreshing": true, "refreshVisible": true}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		base := filepath.Base(path)
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			base == "dialog_state.go" || base == "refresh_state.go" {
+			return nil
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			assignment, ok := node.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for _, expression := range assignment.Lhs {
+				ast.Inspect(expression, func(node ast.Node) bool {
+					selector, ok := node.(*ast.SelectorExpr)
+					if ok && owned[selector.Sel.Name] {
+						t.Errorf("%s writes dashboard-owned field %s", path, selector.Sel.Name)
+					}
+					return true
+				})
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Manager operation records are mutated only by operationstate.Store after it
 // validates the private completion owner and typed transition.
 func TestManagerOperationOwnership(t *testing.T) {

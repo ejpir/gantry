@@ -84,7 +84,8 @@ func (m *sandboxTUIModel) resetOnboarding() {
 
 func (m *sandboxTUIModel) onboardingDialog(kind tuiDialog) {
 	m.resetOnboarding()
-	m.dialog, m.dialogScroll, m.formError, m.onboardFocus = kind, 0, "", 0
+	m.tuiDialogState.openForm(kind)
+	m.onboardFocus = 0
 }
 
 func (m *sandboxTUIModel) openCreateWizard() tea.Cmd {

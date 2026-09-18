@@ -21,9 +21,7 @@ func (m *sandboxTUIModel) openMCPRemoteDialog(edit bool) tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Create a sandbox or wait for startup to finish before configuring MCP.")
 	}
-	m.dialog = tuiMCPRemoteDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiMCPRemoteDialog)
 	m.mcpEditing = edit
 	m.mcpName.Reset()
 	m.mcpURL.Reset()
@@ -243,9 +241,7 @@ func (m *sandboxTUIModel) openMCPFilesystemDialog() tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Create a sandbox or wait for startup to finish before configuring MCP.")
 	}
-	m.dialog = tuiMCPFilesystemDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiMCPFilesystemDialog)
 	m.syncMCPFilesystemFields()
 	m.resizeInputs()
 	return m.focusMCPFilesystem(0)

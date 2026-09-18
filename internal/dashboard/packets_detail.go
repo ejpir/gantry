@@ -19,8 +19,7 @@ func (m *sandboxTUIModel) openPacketDetail() bool {
 	detail := m.packets[m.packetCursor]
 	detail.Data = append([]byte(nil), detail.Data...)
 	m.packetDetail = &detail
-	m.dialog = tuiPacketDetailDialog
-	m.dialogScroll = 0
+	m.tuiDialogState.open(tuiPacketDetailDialog)
 	return true
 }
 

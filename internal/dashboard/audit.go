@@ -42,7 +42,7 @@ func (m *sandboxTUIModel) openAuditDetail() {
 		row.Decision = &d
 	}
 	m.auditDetail = &row
-	m.dialog, m.dialogScroll = tuiAuditDetailDialog, 0
+	m.tuiDialogState.open(tuiAuditDetailDialog)
 }
 
 func auditStatus(row tuiAuditRow) string {

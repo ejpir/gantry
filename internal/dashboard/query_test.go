@@ -92,6 +92,7 @@ func TestColumnSortNumericSelectionAndRefresh(t *testing.T) {
 	original := append([]tuiTrafficRow(nil), m.viewSource.traffic...)
 	m.applySandboxFilter("zul")
 	msg := *m.viewSource
+	msg.owner, _ = m.tuiRefreshState.begin(false)
 	msg.traffic = []tuiTrafficRow{original[1], original[0]}
 	msg.traffic[1].TXBytes = 99
 	_, _ = m.handleRefresh(msg)
