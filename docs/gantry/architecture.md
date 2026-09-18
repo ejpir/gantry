@@ -104,10 +104,12 @@ scoped completion capabilities, so a delayed result cannot complete a later
 operation with the same action and target. `dashboard/refreshstate.State` uses
 the same ownership rule: only the newest admitted generation may publish rows.
 Modal open, replacement, and close transitions are centralized in the dialog state
-owner while dialog-specific fields remain with their form owners. Page changes,
-table/card selections, and toast replacement/expiry likewise pass through their
-typed state owners. Refresh rebuilds restore selections by stable row keys and
-then clamp cursor and viewport positions inside the selection owner.
+owner while dialog-specific fields remain with their form owners.
+`dashboard/pagestate.Owner` owns bounded page transitions and explicit cycling
+order, while `dashboard/notificationstate.Owner` owns toast replacement and
+expiry generations. `dashboard/selectionstate.Owner` owns all table and card
+cursor/viewport positions. Refresh rebuilds restore selections by stable row
+keys and then clamp cursor and viewport positions inside that owner.
 
 Dashboard shutdown cancels and joins its launch operations and background
 subprocesses. Preparation checks cancellation between its existing bounded

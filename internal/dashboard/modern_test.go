@@ -295,7 +295,7 @@ func TestTopNavigationAndNewSandboxModal(t *testing.T) {
 
 func TestTopNavigationKeepsEveryViewDiscoverable(t *testing.T) {
 	m := modernDashboardTestModel()
-	m.page = tuiOverviewPage
+	m.setPage(tuiOverviewPage)
 	header := strings.Split(ansi.Strip(m.View().Content), "\n")[tuiTopPadding]
 	for _, label := range []string{"overview", "sandboxes", "traffic", "rules", "ports", "packets", "mounts", "secrets", "mcp", "images"} {
 		if !strings.Contains(header, label) {
@@ -306,12 +306,12 @@ func TestTopNavigationKeepsEveryViewDiscoverable(t *testing.T) {
 
 func TestPageCyclingFollowsTopNavigationOrder(t *testing.T) {
 	m := modernDashboardTestModel()
-	m.page = tuiRulesPage
+	m.setPage(tuiRulesPage)
 	m.cyclePage(1)
 	if m.page != tuiPortsPage {
 		t.Fatalf("page after Rules = %d, want Ports", m.page)
 	}
-	m.page = tuiPacketsPage
+	m.setPage(tuiPacketsPage)
 	m.cyclePage(1)
 	if m.page != tuiMountsPage {
 		t.Fatalf("page after Packets = %d, want Mounts", m.page)

@@ -1,9 +1,13 @@
 package dashboard
 
-// tuiPageState owns dashboard page transitions. The visible page order is
-// explicit rather than relying on enum arithmetic because packet and audit
-// views have independent polling/detail behavior.
-type tuiPageState struct{ page tuiPage }
+import "github.com/ejpir/gantry/internal/dashboard/pagestate"
+
+// tuiPageState adapts the framework-independent page owner to dashboard page
+// identifiers. page is a read-only projection used by rendering code.
+type tuiPageState struct {
+	owner pagestate.Owner
+	page  tuiPage
+}
 
 var tuiPageOrder = [...]tuiPage{
 	tuiOverviewPage,
@@ -20,24 +24,26 @@ var tuiPageOrder = [...]tuiPage{
 	tuiRemotesPage,
 }
 
-func newTUIPageState() tuiPageState { return tuiPageState{page: tuiOverviewPage} }
+func newTUIPageState() tuiPageState {
+	order := make([]pagestate.Page, len(tuiPageOrder))
+	for index, page := range tuiPageOrder {
+		order[index] = pagestate.Page(page)
+	}
+	owner := pagestate.New(pagestate.Page(tuiOverviewPage), pagestate.Page(tuiPageCount), order)
+	return tuiPageState{owner: owner, page: tuiOverviewPage}
+}
 
 func (state *tuiPageState) transition(next tuiPage) bool {
-	if next >= tuiPageCount {
+	if state == nil || !state.owner.Transition(pagestate.Page(next)) {
 		return false
 	}
-	state.page = next
+	state.page = tuiPage(state.owner.Current())
 	return true
 }
 
 func (state *tuiPageState) cycle(delta int) tuiPage {
-	current := 0
-	for index, page := range tuiPageOrder {
-		if page == state.page {
-			current = index
-			break
-		}
+	if state == nil {
+		return tuiOverviewPage
 	}
-	next := (current + delta%len(tuiPageOrder) + len(tuiPageOrder)) % len(tuiPageOrder)
-	return tuiPageOrder[next]
+	return tuiPage(state.owner.Cycle(delta))
 }

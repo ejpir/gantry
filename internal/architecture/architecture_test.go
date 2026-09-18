@@ -43,6 +43,9 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/sandbox/manager/runtimeowner":   noManagerParent,
 		"internal/dashboard/operationstate":       noDashboardParent,
 		"internal/dashboard/refreshstate":         noDashboardParent,
+		"internal/dashboard/pagestate":            noDashboardParent,
+		"internal/dashboard/notificationstate":    noDashboardParent,
+		"internal/dashboard/selectionstate":       noDashboardParent,
 		"internal/sharefs/lifecycle":              noShareFSParent,
 		"internal/sharefs/exportstate":            noShareFSParent,
 		"internal/sharefs/coherencestate":         noShareFSParent,
@@ -222,6 +225,7 @@ func TestDashboardViewStateOwnership(t *testing.T) {
 		base := filepath.Base(path)
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
 			strings.Contains(filepath.ToSlash(path), "/dashboard/refreshstate/") ||
+			strings.Contains(filepath.ToSlash(path), "/dashboard/selectionstate/") ||
 			base == "dialog_state.go" || base == "refresh_state.go" ||
 			base == "page_state.go" || base == "notification_state.go" ||
 			base == "selection_state.go" || base == "sandbox_picker.go" {
