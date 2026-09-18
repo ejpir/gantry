@@ -68,10 +68,12 @@ func (m *sandboxTUIModel) updatePolicyInput(msg tea.Msg) (cmd tea.Cmd) {
 
 func (m *sandboxTUIModel) updateRuleInput(msg tea.Msg) (cmd tea.Cmd) {
 	switch m.ruleFocus {
-	case 2:
+	case ruleTargetFocus:
 		m.ruleTarget, cmd = m.ruleTarget.Update(msg)
-	case 4:
-		m.rulePorts, cmd = m.rulePorts.Update(msg)
+	case rulePortsFocus:
+		if m.ruleProtocol != ruleProtocolDNS {
+			m.rulePorts, cmd = m.rulePorts.Update(msg)
+		}
 	}
 	return cmd
 }

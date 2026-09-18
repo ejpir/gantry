@@ -10,10 +10,10 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 		return m, nil
 	}
 	if layout.submit.contains(x, y) {
-		m.createFocus = 10
+		m.createFocus = createSubmitFocus
 		return m.submitCreate()
 	}
-	focus, ok := 0, false
+	focus, ok := createNameFocus, false
 	for index, rect := range layout.controls {
 		if rect.contains(x, y) {
 			focus, ok = index, true
@@ -24,29 +24,20 @@ func (m *sandboxTUIModel) updateCreateDialogMouse(mouse tea.Mouse, bounds tuiRec
 		return m, nil
 	}
 	switch focus {
-	case 0, 1:
+	case createNameFocus, createImageFocus:
 		return m, m.focusCreate(focus)
-	case 2:
+	case createRuntimeFocus, createKernelFocus, createSSHFocus, createDevContainersFocus, createIsolationFocus:
 		m.createFocus = focus
 		m.adjustCreateChoice(1)
-	case 3:
-		m.createFocus = focus
-		m.cycleCreateKernel(1)
-	case 4, 5:
-		m.createFocus = focus
-		m.adjustCreateChoice(1)
-	case 6:
+	case createCPUFocus:
 		m.setSliderFromMouse(&m.createCPUs, bounds, mouse.X, "CPU")
 		return m, m.focusCreate(focus)
-	case 7:
+	case createMemoryFocus:
 		m.setSliderFromMouse(&m.createMemory, bounds, mouse.X, "MiB")
 		return m, m.focusCreate(focus)
-	case 8:
+	case createDiskFocus:
 		m.setSliderFromMouse(&m.createDisk, bounds, mouse.X, "MiB")
 		return m, m.focusCreate(focus)
-	case 9:
-		m.createFocus = focus
-		m.createIsolation = cycleIsolation(m.createIsolation, 1)
 	}
 	return m, nil
 }

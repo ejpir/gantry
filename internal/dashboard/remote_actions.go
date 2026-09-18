@@ -106,34 +106,34 @@ func (m *sandboxTUIModel) submitRemoteCreate() (tea.Model, tea.Cmd) {
 		return m, m.focusCreate(focus)
 	}
 	if err := remote.ValidateSandboxName(name); err != nil {
-		return fail(err, 0)
+		return fail(err, createNameFocus)
 	}
 	if ref == "" {
-		return fail(fmt.Errorf("an OCI image reference is required for remote creation"), 1)
+		return fail(fmt.Errorf("an OCI image reference is required for remote creation"), createImageFocus)
 	}
 	if _, err := image.ParseRef(ref); err != nil {
-		return fail(err, 1)
+		return fail(err, createImageFocus)
 	}
 	if err := config.ValidateSandboxResources(uint(m.createMemory.Value), m.createCPUs.Value); err != nil {
-		return fail(err, 7)
+		return fail(err, createMemoryFocus)
 	}
 	if err := config.ValidateRWLayerSize(uint(m.createDisk.Value)); err != nil {
-		return fail(err, 8)
+		return fail(err, createDiskFocus)
 	}
 	if err := config.ValidateProcessIsolation(m.createIsolation); err != nil {
-		return fail(err, 9)
+		return fail(err, createIsolationFocus)
 	}
 	// Capture a concrete endpoint now. The command refuses a changed profile,
 	// rather than silently routing the form's name to a newly configured host.
 	profile, found, err := remote.Lookup(m.createRemote)
 	if err != nil {
-		return fail(err, 0)
+		return fail(err, createNameFocus)
 	}
 	if !found {
-		return fail(fmt.Errorf("remote %q is no longer configured", m.createRemote), 0)
+		return fail(fmt.Errorf("remote %q is no longer configured", m.createRemote), createNameFocus)
 	}
 	if m.createEndpoint != profile {
-		return fail(fmt.Errorf("remote profile changed; reopen Create Sandbox and select the remote again"), 0)
+		return fail(fmt.Errorf("remote profile changed; reopen Create Sandbox and select the remote again"), createNameFocus)
 	}
 	rw := true
 	request := managerapi.CreateSandboxRequest{Name: name, Image: ref, Runtime: m.createRuntime, RW: &rw,

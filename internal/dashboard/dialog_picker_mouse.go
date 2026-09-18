@@ -91,41 +91,41 @@ func (m *sandboxTUIModel) updateNetworkPolicyDialogMouse(mouse tea.Mouse, bounds
 
 func (m *sandboxTUIModel) updateRuleAddDialogMouse(mouse tea.Mouse, bounds tuiRect) (tea.Model, tea.Cmd) {
 	if m.dialogButtonHit(mouse, bounds, m.ruleAddButtonLabel()) {
-		m.ruleFocus = 5
+		m.ruleFocus = ruleSubmitFocus
 		return m.submitRuleAdd()
 	}
 	if m.chooseDialogSandbox(mouse, bounds, "Sandbox", &m.ruleSandbox) {
 		return m, nil
 	}
 	targetLabel := "Destination"
-	if m.ruleProtocol == "dns" {
+	if m.ruleProtocol == ruleProtocolDNS {
 		targetLabel = "Domain"
 	}
 	focus, ok := m.dialogFormControlAt(mouse, bounds, []tuiFormControl{
-		{label: "Sandbox", focus: 0}, {label: "Decision", focus: 1}, {label: targetLabel, focus: 2},
-		{label: "Protocol", focus: 3}, {label: "Destination ports", focus: 4},
+		{label: "Sandbox", focus: ruleSandboxFocus}, {label: "Decision", focus: ruleActionFocus}, {label: targetLabel, focus: ruleTargetFocus},
+		{label: "Protocol", focus: ruleProtocolFocus}, {label: "Destination ports", focus: rulePortsFocus},
 	})
 	if !ok {
 		return m, nil
 	}
 	switch focus {
-	case 0:
+	case ruleSandboxFocus:
 		m.ruleSandbox.Toggle()
 		return m, m.focusRule(focus)
-	case 1:
-		if m.ruleProtocol != "dns" {
+	case ruleActionFocus:
+		if m.ruleProtocol != ruleProtocolDNS {
 			m.ruleFocus = focus
 		}
 		m.toggleRuleAction()
-	case 2:
+	case ruleTargetFocus:
 		return m, m.focusRule(focus)
-	case 3:
-		if m.ruleProtocol != "dns" {
+	case ruleProtocolFocus:
+		if m.ruleProtocol != ruleProtocolDNS {
 			m.ruleFocus = focus
 		}
 		m.changeRuleProtocol(1)
-	case 4:
-		if m.ruleProtocol != "dns" {
+	case rulePortsFocus:
+		if m.ruleProtocol != ruleProtocolDNS {
 			return m, m.focusRule(focus)
 		}
 	}

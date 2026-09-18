@@ -80,17 +80,23 @@ func (m *sandboxTUIModel) updateEditDialogKey(msg tea.KeyPressMsg) (tea.Model, t
 func (m *sandboxTUIModel) adjustEditChoice(delta int) bool {
 	switch m.editFocus {
 	case 0:
-		toggleSandboxSSH(&m.editSSH, &m.editDevContainers)
+		m.editFeatureControls().toggleSSH()
 		return true
 	case 1:
-		m.toggleSandboxDevContainers(&m.editSSH, &m.editDevContainers,
-			&m.editCPUs, &m.editMemory, nil, nil)
+		m.toggleDevContainers(m.editFeatureControls())
 		return true
 	case 4:
 		m.editIsolation = cycleIsolation(m.editIsolation, delta)
 		return true
 	default:
 		return false
+	}
+}
+
+func (m *sandboxTUIModel) editFeatureControls() sandboxFeatureControls {
+	return sandboxFeatureControls{
+		ssh: &m.editSSH, devContainers: &m.editDevContainers,
+		cpus: &m.editCPUs, memory: &m.editMemory,
 	}
 }
 
@@ -134,8 +140,10 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	request := sandboxConfigRequest(selected.Name, m.editSSH, m.editDevContainers,
-		m.editMemory, m.editCPUs, m.editIsolation)
+	request := (sandboxConfigForm{
+		name: selected.Name, ssh: m.editSSH, devContainers: m.editDevContainers,
+		memory: m.editMemory, cpus: m.editCPUs, isolation: m.editIsolation,
+	}).request()
 	if err := m.service.ValidateSandboxConfig(request); err != nil {
 		m.formError = err.Error()
 		if dashboardErrorField(err) == "devcontainers" {

@@ -62,10 +62,10 @@ func (m *sandboxTUIModel) ensureCreateDialogFocusVisible(viewport dialogFocusVie
 	layout := m.createLayout(tuiThemeFor(m.dark), maxInt(10, viewport.width-6))
 	target := layout.controls[m.createFocus]
 	switch m.createFocus {
-	case 10:
+	case createSubmitFocus:
 		m.dialogScroll = viewport.maxScroll
 		return
-	case 0:
+	case createNameFocus:
 		m.dialogScroll = 0
 		return
 	}
@@ -122,7 +122,7 @@ func (m sandboxTUIModel) dialogFocusAtStart() bool {
 	case tuiCreateLocationDialog, tuiRemoteProfilesDialog, tuiOrganizationLoginDialog, tuiRemoteAddDialog, tuiOrganizationRemotesDialog:
 		return m.onboardFocus == 0
 	case tuiCreateDialog:
-		return m.createFocus == 0
+		return m.createFocus == createNameFocus
 	case tuiEditDialog:
 		return m.editFocus == 0
 	case tuiShareAddDialog:
@@ -132,7 +132,7 @@ func (m sandboxTUIModel) dialogFocusAtStart() bool {
 	case tuiNetworkPolicyDialog:
 		return m.policyFocus == 0
 	case tuiRuleAddDialog:
-		return m.ruleFocus == 0
+		return m.ruleFocus == ruleSandboxFocus
 	case tuiSecretAddDialog:
 		return m.secretFocus == 0
 	case tuiMCPRemoteDialog:
@@ -157,7 +157,7 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 	}
 	switch m.dialog {
 	case tuiCreateDialog:
-		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "SSH", "Dev Containers", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create sandbox"}), m.createFocus == 10
+		return choose(m.createFocus, []string{"Name", "OCI image", "Runtime", "Kernel", "SSH", "Dev Containers", "CPUs", "Memory", "Persistent disk", "Process isolation", "Create sandbox"}), m.createFocus == createSubmitFocus
 	case tuiEditDialog:
 		return choose(m.editFocus, []string{"SSH", "Dev Containers", "CPUs", "Memory", "Process isolation", "Save"}), m.editFocus == 5
 	case tuiShareAddDialog:
@@ -168,10 +168,10 @@ func (m sandboxTUIModel) dialogFocusTarget() (needle string, fromEnd bool) {
 	case tuiNetworkPolicyDialog:
 		return choose(m.policyFocus, []string{"Sandbox", "Policy file", "Local network override", "Apply"}), m.policyFocus == 3
 	case tuiRuleAddDialog:
-		if m.ruleProtocol == "dns" {
-			return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Domain", "Protocol", "Destination ports", m.ruleAddButtonLabel()}), m.ruleFocus == 5
+		if m.ruleProtocol == ruleProtocolDNS {
+			return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Domain", "Protocol", "Destination ports", m.ruleAddButtonLabel()}), m.ruleFocus == ruleSubmitFocus
 		}
-		return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Destination", "Protocol", "Destination ports", "Add rule"}), m.ruleFocus == 5
+		return choose(m.ruleFocus, []string{"Sandbox", "Decision", "Destination", "Protocol", "Destination ports", "Add rule"}), m.ruleFocus == ruleSubmitFocus
 	case tuiSecretAddDialog:
 		return choose(m.secretFocus, []string{"Sandbox", "Name", "Value", "Add secret"}), m.secretFocus == 3
 	case tuiMCPRemoteDialog:

@@ -140,7 +140,7 @@ func (m sandboxTUIModel) policyCopyValues() []focusedDialogValue {
 
 func (m sandboxTUIModel) ruleCopyValues() []focusedDialogValue {
 	targetLabel := "destination"
-	if m.ruleProtocol == "dns" {
+	if m.ruleProtocol == ruleProtocolDNS {
 		targetLabel = "domain"
 	}
 	return []focusedDialogValue{

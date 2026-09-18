@@ -408,7 +408,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 			createCPUs:      createCPUs,
 			createMemory:    createMemory,
 			createDisk:      createDisk,
-			createRuntime:   "crun",
+			createRuntime:   createRuntimeCrun,
 			createIsolation: "auto",
 		},
 		editDialogState: editDialogState{editCPUs: editCPUs, editMemory: editMemory},
@@ -418,7 +418,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		portDialogState:   portDialogState{portBind: portBind, portGuest: portGuest},
 		policyDialogState: policyDialogState{policyPath: policyPath},
 		ruleDialogState: ruleDialogState{
-			ruleTarget: ruleTarget, rulePorts: rulePorts, ruleAction: "deny", ruleProtocol: "tcp",
+			ruleTarget: ruleTarget, rulePorts: rulePorts, ruleAction: ruleActionDeny, ruleProtocol: ruleProtocolTCP,
 		},
 		secretDialogState: secretDialogState{secretName: secretName, secretValue: secretValue},
 		mcpDialogState: mcpDialogState{
