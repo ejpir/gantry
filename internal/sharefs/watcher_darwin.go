@@ -63,8 +63,9 @@ type darwinShareWatcher struct {
 	emit      func(shareWatchEvent)
 	lifecycle sharelifecycle.Owner
 
-	callbackMu sync.Mutex
-	callbacks  sync.WaitGroup
+	callbackMu      sync.Mutex
+	callbacks       sync.WaitGroup
+	callbacksClosed bool
 }
 
 func loadDarwinFSEvents() (darwinFSEventAPI, error) {
@@ -169,9 +170,10 @@ func (w *darwinShareWatcher) Close() error {
 	api.streamStop(w.stream)
 	api.streamInvalidate(w.stream)
 	darwinWatchers.Delete(w.stream)
-	// Synchronize callback admission before Wait so no callback can retain the
-	// stream or dispatch queue after Close returns.
+	// Close callback admission before Wait so no callback can retain the stream
+	// or dispatch queue after Close returns.
 	w.callbackMu.Lock()
+	w.callbacksClosed = true
 	w.callbackMu.Unlock()
 	w.callbacks.Wait()
 	api.streamRelease(w.stream)
@@ -187,7 +189,7 @@ func darwinFSEventCallback(stream, _ uintptr, count uintptr, eventPaths **byte, 
 	}
 	watcher := value.(*darwinShareWatcher)
 	watcher.callbackMu.Lock()
-	if watcher.lifecycle.Phase() != sharelifecycle.Active {
+	if watcher.callbacksClosed || watcher.lifecycle.Phase() != sharelifecycle.Active {
 		watcher.callbackMu.Unlock()
 		return
 	}

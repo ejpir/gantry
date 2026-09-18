@@ -30,6 +30,21 @@ issues:
 
 linters:
   default: standard
+  settings:
+    staticcheck:
+      checks:
+        - all
+        # Preserve golangci-lint's default staticcheck style exclusions.
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # Dashboard adapters intentionally qualify embedded state owners. The
+        # qualifier documents which owner admits each transition; QF1008 would
+        # erase that ownership boundary for a cosmetic selector reduction.
+        - -QF1008
   exclusions:
     generated: lax # generated files (api/**/*.pb.go) carry the DO NOT EDIT marker
     # No exclusion presets: the std-error-handling preset would hide

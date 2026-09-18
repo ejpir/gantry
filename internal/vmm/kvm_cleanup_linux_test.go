@@ -58,7 +58,7 @@ func TestMachineCloseReleasesKVMBackendResourcesExactlyOnce(t *testing.T) {
 	if err := m.adoptBackend(resources); err != nil {
 		t.Fatal(err)
 	}
-	m.finishRun()
+	_ = m.finishRun()
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}

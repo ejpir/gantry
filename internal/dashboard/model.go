@@ -1698,13 +1698,6 @@ func mcpRowKey(row tuiMCPRow) string { return row.Sandbox + "\x00" + row.Name + 
 // digest so a re-pull of the same tag keeps the selection.
 func imageRowKey(row tuiImageRow) string { return row.Ref + "\x00" + row.Arch }
 
-func clampTableCursor(cursor, count int) int {
-	if count == 0 {
-		return 0
-	}
-	return clampInt(cursor, 0, count-1)
-}
-
 func refreshSandboxesCmd(service dashboardapi.Service, owner tuiRefreshOwner) tea.Cmd {
 	return func() tea.Msg {
 		data, err := service.Snapshot()

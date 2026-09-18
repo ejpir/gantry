@@ -24,6 +24,9 @@ func validateGuestRenameFlags(flags uint32) syscall.Errno {
 	return 0
 }
 
+// borrowedDirectoryCache is implemented only by Unix descriptor caches.
+//
+//nolint:unused // The common Export shape cross-compiles for the Windows backend.
 type borrowedDirectoryCache interface {
 	prefetch(key, parentKey uint64, parentFD int, name string, expectedIno uint64) bool
 	open(key uint64) (int, bool)
@@ -31,6 +34,9 @@ type borrowedDirectoryCache interface {
 	clear()
 }
 
+// ownedDirectoryCache retains close authority inside its Export owner.
+//
+//nolint:unused // The common Export shape cross-compiles for the Windows backend.
 type ownedDirectoryCache interface {
 	borrowedDirectoryCache
 	close()
@@ -53,7 +59,8 @@ type Export struct {
 	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
 	coherence       *exportCoherence
 
-	cacheMu        sync.RWMutex
+	cacheMu sync.RWMutex //nolint:unused // Unix-only descriptor-cache ownership.
+	//nolint:unused // Unix-only descriptor-cache ownership.
 	directoryCache ownedDirectoryCache
 	exportState    exportstate.Owner
 	policyDenied   atomic.Bool

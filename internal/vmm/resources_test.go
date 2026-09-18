@@ -110,10 +110,7 @@ func TestMachineCloseWaitsForBackendInitialization(t *testing.T) {
 	go func() { closed <- m.Close() }()
 
 	deadline := time.Now().Add(time.Second)
-	for {
-		if m.phase() == machineStopping {
-			break
-		}
+	for m.phase() != machineStopping {
 		if time.Now().After(deadline) {
 			t.Fatal("Close did not enter stopping state")
 		}
