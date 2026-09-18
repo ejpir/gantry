@@ -1,3 +1,8 @@
+# Complete Gantry sandbox manifest. Remove optional sections that your sandbox
+# does not need. Validate without creating anything with:
+#
+#   gantry manifest validate examples/sandbox.yaml
+#
 apiVersion: gantry.dev/v1alpha1
 kind: Sandbox
 
@@ -5,30 +10,129 @@ metadata:
   name: dev
 
 spec:
+  # OCI reference, OCI archive/layout, or a local path beginning with ./ or ../.
   image: debian:bookworm-slim
-  runtime: crun
+  runtime: crun # crun | runsc
 
   resources:
     cpus: 2
-    memory: 2GiB
-    disk: 4GiB
+    memory: 4GiB
+    disk: 8GiB
 
   root:
     writable: true
+
+    # Optional caller-owned writable layer. Omit for Gantry's per-sandbox disk.
+    # layer: ./disks/dev.ext4
+
+    # Advanced multi-device EROFS input. Use either layerSetFile or layerSet,
+    # never both. These replace the image filesystem but still need a writable
+    # root layer.
+    # layerSetFile: ./layers/layerset.json
+    # layerSet:
+    #   fsmeta: ./layers/fsmeta.erofs
+    #   layers:
+    #     - ./layers/base.erofs
+    #     - ./layers/application.erofs
+
+  # Advanced boot overrides. Omit to use release-managed guest assets.
+  # boot:
+  #   kernel: ../artifacts/gantry-kernel-x86_64
+  #   rootfs: ../artifacts/nerdbox-rootfs-x86_64.erofs
 
   shares:
     - name: source
       source: ..
       target: /workspace
+      readOnly: false
+    - name: reference
+      source: ./reference
+      target: /reference
+      readOnly: true
+      uid: 1000
+      gid: 1000
 
   network:
     enabled: true
+    allowLocal: false
+    policy: ./net-policy.json
     ports:
       - host: 127.0.0.1:8080
         guest: 80
         protocol: tcp
+      - host: "[::1]:5353"
+        guest: 53
+        protocol: udp
+    proxy:
+      url: http://proxy.example.com:3128
+      noProxy:
+        - localhost
+        - 127.0.0.1
+        - .example.com
+      enforce: true
+
+  # Values never appear in the manifest. Environment-backed names must match
+  # the host variable; file paths are resolved relative to this file.
+  secrets:
+    - name: GITHUB_TOKEN
+      environment: GITHUB_TOKEN
+      bind: github.com
+    - name: MCP_TOKEN
+      file: ./private/mcp-token
+      bind: mcp.example.com
+      ttl: 1m
+
+  # Signed organization policy is snapshotted and verified during apply.
+  organizationPolicy:
+    bundle: ./policy/bundle.tar.gz
+    publicKey: ./policy/public.pem
+    profile: developer
+
+  oauth:
+    bridge: true
+    # Organization policy v1 and OAuth custody are mutually exclusive. Set
+    # custody to true only when organizationPolicy is omitted.
+    custody: false
+    providerFiles:
+      - ./oauth/another-provider.json
+    providers:
+      - name: company
+        grant: authorization_code
+        authorizeURL: https://login.example.com/oauth/authorize
+        tokenURL: https://login.example.com/oauth/token
+        clientID: gantry-public-client
+        redirectURI: http://127.0.0.1:0/callback
+        scope: openid profile offline_access
+        resource: https://mcp.example.com
+        exchangeEncoding: form
+        refreshEncoding: json
+        credentialHosts:
+          - git.example.com
+
+  mcp:
+    enabled: true
+    filesystem:
+      root: /workspace
+      user: nobody
+    remotes:
+      - name: company
+        url: https://mcp.example.com/rpc
+        auth:
+          type: bearer # bearer | header | custody
+          reference: MCP_TOKEN
+          # header: X-API-Key # required when type is header
+        allow:
+          - docs_*
+          - search
+        deny:
+          - admin_*
+        redact:
+          - MCP_TOKEN
 
   ssh:
     enabled: true
 
-  processIsolation: auto
+  devContainers:
+    enabled: true
+
+  processIsolation: required # auto | required | off
