@@ -123,6 +123,8 @@ func TestShareFSStateOwnership(t *testing.T) {
 		"exportState":    "export.go",
 		"coherenceState": "coherence.go",
 		"preparedState":  "export.go",
+		"directoryCache": "dir_cache_unix.go",
+		"cacheMu":        "dir_cache_unix.go",
 	}
 	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {

@@ -29,6 +29,40 @@ func testDirIno(t *testing.T, parentFD int, name string) uint64 {
 	return uint64(stat.Ino)
 }
 
+func TestExportOwnsDirectoryCacheRelease(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = parent.Close() }()
+	export := &Export{}
+	registerShareDirCache(export)
+	cache, ok := shareDirectoryCache(export).(*shareDirCache)
+	if !ok || cache == nil {
+		t.Fatal("export did not adopt its directory cache")
+	}
+	if !cache.prefetch(1, 2, int(parent.Fd()), "child", testDirIno(t, int(parent.Fd()), "child")) {
+		t.Fatal("prefetch failed")
+	}
+	cachedFD := cache.parents[2].fd
+	closeShareDirCache(export)
+	closeShareDirCache(export)
+	if owned := shareDirectoryCache(export); owned != nil {
+		t.Fatalf("released export retained cache %#v", owned)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(cachedFD, &stat); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("cache parent descriptor remained open: %v", err)
+	}
+	if cache.prefetch(3, 4, int(parent.Fd()), "child", testDirIno(t, int(parent.Fd()), "child")) {
+		t.Fatal("released cache admitted a descriptor")
+	}
+}
+
 func TestShareDirCacheUsesOneParentForWideDirectory(t *testing.T) {
 	root := t.TempDir()
 	parent, err := os.Open(root)

@@ -24,6 +24,18 @@ func validateGuestRenameFlags(flags uint32) syscall.Errno {
 	return 0
 }
 
+type borrowedDirectoryCache interface {
+	prefetch(key, parentKey uint64, parentFD int, name string, expectedIno uint64) bool
+	open(key uint64) (int, bool)
+	forget(key uint64)
+	clear()
+}
+
+type ownedDirectoryCache interface {
+	borrowedDirectoryCache
+	close()
+}
+
 // Export is one prepared or published child of a Hub.
 type Export struct {
 	Tag  string
@@ -41,8 +53,10 @@ type Export struct {
 	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
 	coherence       *exportCoherence
 
-	exportState  exportstate.Owner
-	policyDenied atomic.Bool
+	cacheMu        sync.RWMutex
+	directoryCache ownedDirectoryCache
+	exportState    exportstate.Owner
+	policyDenied   atomic.Bool
 	// namespace serializes guest-originated name mutations with the
 	// lstat/open policy check. The host is trusted, but concurrent FUSE
 	// requests must not swap a FIFO or device into place between those steps.
