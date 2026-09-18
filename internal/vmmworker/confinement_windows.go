@@ -9,7 +9,13 @@ import (
 	"github.com/ejpir/gantry/internal/workerproto"
 )
 
-func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, assets Assets) (workerconf.Report, error) {
+func applyVMMFileLimit(Config) (string, error) {
+	// Windows writable disks enforce their configured bounds in the block
+	// device; there is no process-wide RLIMIT_FSIZE equivalent to install.
+	return "", nil
+}
+
+func (rt Runtime) confine(config Config, control, bridge, fdChannel net.Conn, assets Assets, _ string) (workerconf.Report, error) {
 	report := workerconf.DisabledReport(runtime.GOOS, config.Confinement)
 	var roleNotes []string
 	if config.NDisks != 0 {
