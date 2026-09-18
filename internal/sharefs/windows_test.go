@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
@@ -334,15 +335,23 @@ func TestWinExportFSCreateWhileWatcherIsActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		closed := make(chan error, 1)
-		go func() { closed <- watcher.Close() }()
-		select {
-		case err := <-closed:
-			if err != nil {
-				t.Errorf("close active watcher: %v", err)
+		native := watcher.(*windowsShareWatcher)
+		closed := make(chan error, 8)
+		for range 8 {
+			go func() { closed <- watcher.Close() }()
+		}
+		for range 8 {
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Errorf("close active watcher: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Errorf("closing active watcher did not cancel ReadDirectoryChangesW")
 			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("closing active watcher did not cancel ReadDirectoryChangesW")
+		}
+		if got := native.lifecycle.Phase(); got != sharelifecycle.Closed {
+			t.Errorf("watcher phase = %d, want closed", got)
 		}
 	}()
 

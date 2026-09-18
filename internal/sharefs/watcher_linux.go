@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"golang.org/x/sys/unix"
 )
 
@@ -43,7 +44,7 @@ type linuxShareWatcher struct {
 	fd           int
 	wakeFD       int
 	rootFD       int
-	closed       bool
+	lifecycle    sharelifecycle.Owner
 	byPath       map[string]int
 	byWD         map[int]string
 	pendingMoves map[uint32]linuxPendingMove
@@ -80,13 +81,16 @@ func newPlatformShareWatcher(export *Export, emit func(shareWatchEvent)) (shareW
 }
 
 func (w *linuxShareWatcher) WatchDirectory(rel string) error {
+	if w == nil {
+		return syscall.EBADF
+	}
 	rel, ok := cleanCoherenceRel(rel)
 	if !ok {
 		return syscall.EINVAL
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed {
+	if w.lifecycle.Phase() != sharelifecycle.Active {
 		return syscall.EBADF
 	}
 	return w.watchDirectoryLocked(rel)
@@ -156,9 +160,12 @@ func (w *linuxShareWatcher) ForgetDirectory(rel string) {
 }
 
 func (w *linuxShareWatcher) Reset() error {
+	if w == nil {
+		return syscall.EBADF
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.closed {
+	if w.lifecycle.Phase() != sharelifecycle.Active {
 		return syscall.EBADF
 	}
 	for rel, wd := range w.byPath {
@@ -170,32 +177,31 @@ func (w *linuxShareWatcher) Reset() error {
 }
 
 func (w *linuxShareWatcher) Close() error {
-	w.mu.Lock()
-	if w.closed {
-		w.mu.Unlock()
-		<-w.done
+	if w == nil {
 		return nil
 	}
-	w.closed = true
-	fd, wakeFD := w.fd, w.wakeFD
-	w.mu.Unlock()
+	leader, done := w.lifecycle.BeginClose()
+	if !leader {
+		<-done
+		return nil
+	}
 	var wake [8]byte
 	wake[0] = 1
-	_, _ = unix.Write(wakeFD, wake[:])
+	_, _ = unix.Write(w.wakeFD, wake[:])
 	<-w.done
-	return errors.Join(unix.Close(fd), unix.Close(wakeFD))
+	err := errors.Join(unix.Close(w.fd), unix.Close(w.wakeFD))
+	w.lifecycle.FinishClose()
+	return err
 }
 
 func (w *linuxShareWatcher) run() {
 	defer close(w.done)
 	buffer := make([]byte, 64<<10)
 	for {
-		w.mu.Lock()
-		closed, fd := w.closed, w.fd
-		w.mu.Unlock()
-		if closed {
+		if w.lifecycle.Phase() != sharelifecycle.Active {
 			return
 		}
+		fd := w.fd
 		poll := []unix.PollFd{
 			{Fd: int32(fd), Events: unix.POLLIN},
 			{Fd: int32(w.wakeFD), Events: unix.POLLIN},

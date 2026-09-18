@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unsafe"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"golang.org/x/sys/windows"
 )
 
@@ -18,7 +18,7 @@ type windowsShareWatcher struct {
 	event      windows.Handle
 	overlapped windows.Overlapped
 	emit       func(shareWatchEvent)
-	closed     atomic.Bool
+	lifecycle  sharelifecycle.Owner
 	ioMu       sync.Mutex
 	done       chan struct{}
 }
@@ -79,7 +79,12 @@ func (w *windowsShareWatcher) ForgetDirectory(string)      {}
 func (w *windowsShareWatcher) Reset() error                { return nil }
 
 func (w *windowsShareWatcher) Close() error {
-	if w == nil || !w.closed.CompareAndSwap(false, true) {
+	if w == nil {
+		return nil
+	}
+	leader, done := w.lifecycle.BeginClose()
+	if !leader {
+		<-done
 		return nil
 	}
 	// Serialize cancellation with request submission. Otherwise Close could see
@@ -93,7 +98,9 @@ func (w *windowsShareWatcher) Close() error {
 	<-w.done
 	handleErr := windows.CloseHandle(w.handle)
 	eventErr := windows.CloseHandle(w.event)
-	return errors.Join(cancelErr, handleErr, eventErr)
+	err := errors.Join(cancelErr, handleErr, eventErr)
+	w.lifecycle.FinishClose()
+	return err
 }
 
 func (w *windowsShareWatcher) run() {
@@ -109,7 +116,7 @@ func (w *windowsShareWatcher) run() {
 	for {
 		var returned uint32
 		w.ioMu.Lock()
-		if w.closed.Load() {
+		if w.lifecycle.Phase() != sharelifecycle.Active {
 			w.ioMu.Unlock()
 			return
 		}
@@ -122,7 +129,7 @@ func (w *windowsShareWatcher) run() {
 			err = windows.GetOverlappedResult(w.handle, &w.overlapped, &returned, true)
 		}
 		if err != nil {
-			if w.closed.Load() || errors.Is(err, windows.ERROR_OPERATION_ABORTED) || errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			if w.lifecycle.Phase() != sharelifecycle.Active || errors.Is(err, windows.ERROR_OPERATION_ABORTED) || errors.Is(err, windows.ERROR_INVALID_HANDLE) {
 				return
 			}
 			w.emit(shareWatchEvent{loss: fmt.Errorf("ReadDirectoryChangesW: %w", err)})
