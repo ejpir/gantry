@@ -222,7 +222,7 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 	}
 
 	summary := m.tabSummary(theme)
-	if m.refreshVisible {
+	if m.tuiRefreshState.Visible() {
 		summary = m.spinner.View() + lipgloss.NewStyle().Foreground(theme.muted).Render(" syncing")
 	}
 	right := summary
@@ -629,8 +629,8 @@ func (m sandboxTUIModel) renderNewSandboxCard(theme tuiTheme, layout tuiDashboar
 }
 
 func (m sandboxTUIModel) renderSandboxState(theme tuiTheme, sandbox tuiSandbox) string {
-	if m.busyName == sandbox.Name {
-		return m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render(busyLabel(m.busyAction))
+	if m.tuiOperationState.Name() == sandbox.Name {
+		return m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render(busyLabel(m.tuiOperationState.Action()))
 	}
 	switch sandbox.State {
 	case tuiRunning:
@@ -657,8 +657,8 @@ func sandboxCardActions(sandbox tuiSandbox) []tuiCardAction {
 }
 
 func (m sandboxTUIModel) renderCardActions(theme tuiTheme, sandbox tuiSandbox, selected bool, width int) string {
-	if m.busyName == sandbox.Name {
-		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.busyAction))+"…"), width)
+	if m.tuiOperationState.Name() == sandbox.Name {
+		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.tuiOperationState.Action()))+"…"), width)
 	}
 	var rendered []string
 	for _, action := range sandboxCardActions(sandbox) {
@@ -693,11 +693,11 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 
 	var left string
 	budget := maxInt(1, innerWidth-lipgloss.Width(right)-1)
-	if m.tuiOperationState.phase() == tuiOperationRunning {
-		if m.busyProgress != "" {
-			left = truncateANSI(lipgloss.NewStyle().Foreground(theme.text).Render(m.busyProgress), budget)
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
+		if m.tuiOperationState.Progress() != "" {
+			left = truncateANSI(lipgloss.NewStyle().Foreground(theme.text).Render(m.tuiOperationState.Progress()), budget)
 		} else {
-			left = m.spinner.View() + " " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToLower(busyLabel(m.busyAction))+" "+m.busyName+"…")
+			left = m.spinner.View() + " " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToLower(busyLabel(m.tuiOperationState.Action()))+" "+m.tuiOperationState.Name()+"…")
 		}
 	} else {
 		separator := lipgloss.NewStyle().Foreground(theme.border).Render("  •  ")

@@ -2368,7 +2368,7 @@ func (m *sandboxTUIModel) updateMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		}
 		return m, nil
 	}
-	if m.tuiOperationState.phase() == tuiOperationRunning {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		return m, nil
 	}
 	m.lastClickAt = time.Time{}

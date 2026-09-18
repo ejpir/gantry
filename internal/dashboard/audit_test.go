@@ -55,12 +55,12 @@ func TestAuditNavigationAndActions(t *testing.T) {
 		t.Fatal("closing details retained the event")
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'r'})
-	if cmd == nil || !m.refreshing {
+	if cmd == nil || !m.tuiRefreshState.Refreshing() {
 		t.Fatal("refresh did not request a new snapshot")
 	}
 	m.auditEvents = nil
 	_, _ = m.Update(tea.KeyPressMsg{Code: 'd'})
-	if m.dialog != tuiNoDialog || m.busyAction != "" {
+	if m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "" {
 		t.Fatal("empty audit should not open details or mutate a sandbox")
 	}
 }
@@ -78,7 +78,7 @@ func TestAuditSelectionRefreshAndFrozenDetails(t *testing.T) {
 		t.Fatal("open details alias mutable rules")
 	}
 	msg := *m.viewSource
-	msg.owner, _ = m.tuiRefreshState.begin(false)
+	msg.owner, _ = m.tuiRefreshState.Begin(false)
 	msg.audit = append([]tuiAuditRow{{Sandbox: "Zulu", Line: "new event"}}, msg.audit...)
 	_, _ = m.handleRefresh(msg)
 	if m.selectedAuditKey() != key || m.auditCursor != 1 || m.auditDetail.Line != original {

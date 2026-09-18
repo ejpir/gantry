@@ -17,6 +17,8 @@ func TestApplicationBoundaries(t *testing.T) {
 	root := filepath.Join("..", "..")
 	const sandboxRoot = "github.com/ejpir/gantry/internal/sandbox"
 	noSandboxParent := func(path string) bool { return path == sandboxRoot }
+	const dashboardRoot = "github.com/ejpir/gantry/internal/dashboard"
+	noDashboardParent := func(path string) bool { return path == dashboardRoot }
 	const vmmRoot = "github.com/ejpir/gantry/internal/vmm"
 	noVMMParent := func(path string) bool { return path == vmmRoot }
 	const managerRoot = "github.com/ejpir/gantry/internal/sandbox/manager"
@@ -37,6 +39,8 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/vmm/devices":                    noVMMParent,
 		"internal/sandbox/manager/operationstate": noManagerParent,
 		"internal/sandbox/manager/runtimeowner":   noManagerParent,
+		"internal/dashboard/operationstate":       noDashboardParent,
+		"internal/dashboard/refreshstate":         noDashboardParent,
 		"internal/sandbox/lifecycle": func(path string) bool {
 			return path == "flag" || path == "os/exec" || strings.Contains(path, "/internal/dashboard") || strings.Contains(path, "/sandbox/manager")
 		},
@@ -169,6 +173,7 @@ func TestDashboardViewStateOwnership(t *testing.T) {
 		}
 		base := filepath.Base(path)
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
+			strings.Contains(filepath.ToSlash(path), "/dashboard/refreshstate/") ||
 			base == "dialog_state.go" || base == "refresh_state.go" ||
 			base == "page_state.go" || base == "notification_state.go" ||
 			base == "selection_state.go" || base == "sandbox_picker.go" {

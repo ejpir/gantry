@@ -36,7 +36,7 @@ func (m *sandboxTUIModel) updateRemoteActionKey(key string) (tea.Cmd, bool) {
 		case "enter", "o":
 			return m.openCreateForm(row.target, ""), true
 		case "t":
-			owner, ok := m.tuiOperationState.begin("remote test", row.target, false)
+			owner, ok := m.tuiOperationState.Begin("remote test", row.target, false)
 			if !ok {
 				return nil, true
 			}
@@ -140,11 +140,11 @@ func (m *sandboxTUIModel) submitRemoteCreate() (tea.Model, tea.Cmd) {
 		MemoryMiB: uint(m.createMemory.Value), CPUs: m.createCPUs.Value, DiskSizeMiB: uint(m.createDisk.Value),
 		ProcessIsolation: m.createIsolation, SSH: m.createSSH, DevContainers: m.createDevContainers}
 	organization := m.createOrganization
-	owner, ok := m.tuiOperationState.begin("remote create", name+"@"+profile.Name, false)
+	owner, ok := m.tuiOperationState.Begin("remote create", name+"@"+profile.Name, false)
 	if !ok {
 		return m, nil
 	}
-	_ = m.tuiOperationState.progress(owner, "Checking remote image cache")
+	_ = m.tuiOperationState.SetProgress(owner, "Checking remote image cache")
 	m.closeDialog()
 	m.setPage(tuiRemotesPage)
 	return m, tea.Batch(ownTUIOperationCmd(owner, runRemoteCreateCmd(m.operations, profile, organization, request)), m.ensureAnimation())

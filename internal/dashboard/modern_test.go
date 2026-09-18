@@ -15,7 +15,7 @@ import (
 func modernDashboardTestModel() sandboxTUIModel {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
-	m.refreshing = false
+	m.tuiRefreshState = tuiRefreshState{}
 	m.width, m.height = 170, 40
 	m.lastUpdate = time.Now().Add(-5 * time.Second)
 	m.sandboxes = []tuiSandbox{
@@ -178,13 +178,13 @@ func TestWorkloadDoubleClickRunsEnterAction(t *testing.T) {
 	mouse := tea.Mouse{X: workload.rect.x + workload.rect.w/2, Y: workload.rect.y + workload.rect.h/2, Button: tea.MouseLeft}
 	model, cmd := m.updateMouseClick(mouse)
 	m = *model.(*sandboxTUIModel)
-	if cmd != nil || m.busyAction != "" {
-		t.Fatalf("first Workload click = busy %q cmd=%v", m.busyAction, cmd)
+	if cmd != nil || m.tuiOperationState.Action() != "" {
+		t.Fatalf("first Workload click = busy %q cmd=%v", m.tuiOperationState.Action(), cmd)
 	}
 	model, cmd = m.updateMouseClick(mouse)
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.busyAction != "open" || m.busyName != "codex-dev" {
-		t.Fatalf("Workload double-click = busy %q name %q cmd=%v", m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.tuiOperationState.Action() != "open" || m.tuiOperationState.Name() != "codex-dev" {
+		t.Fatalf("Workload double-click = busy %q name %q cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 }
 
@@ -320,8 +320,7 @@ func TestPageCyclingFollowsTopNavigationOrder(t *testing.T) {
 
 func TestBusyDashboardDoesNotPublishCreationShortcut(t *testing.T) {
 	m := modernDashboardTestModel()
-	m.busyAction = "start"
-	m.busyName = "codex-dev"
+	beginTestOperation(&m, "start", "codex-dev", "", false)
 	_ = m.View()
 	for _, target := range m.dashboardHits {
 		if target.kind == "shortcut" && target.action == "n" {

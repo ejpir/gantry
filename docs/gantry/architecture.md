@@ -99,11 +99,11 @@ read-only default and cached-image policy.
 read model. The daemon publishes its immutable boot settings before readiness,
 allowing frontends to distinguish active resources from saved changes that
 require restart. The create dialog owns its form state and emits control
-geometry during rendering. Dashboard foreground operations issue generation-
+geometry during rendering. `dashboard/operationstate.State` issues generation-
 scoped completion capabilities, so a delayed result cannot complete a later
-operation with the same action and target. Snapshot refreshes use the same
-ownership rule: only the newest admitted generation may publish rows. Modal
-open, replacement, and close transitions are centralized in the dialog state
+operation with the same action and target. `dashboard/refreshstate.State` uses
+the same ownership rule: only the newest admitted generation may publish rows.
+Modal open, replacement, and close transitions are centralized in the dialog state
 owner while dialog-specific fields remain with their form owners. Page changes,
 table/card selections, and toast replacement/expiry likewise pass through their
 typed state owners. Refresh rebuilds restore selections by stable row keys and

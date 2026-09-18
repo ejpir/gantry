@@ -18,12 +18,12 @@ func runTUIProcessCmd(group *dashboardOperations, service dashboardapi.Service, 
 	cmd, err := service.Command(group.ctx, argv...)
 	if err != nil {
 		return func() tea.Msg {
-			return tuiProcessDoneMsg{owner: owner, action: owner.action, name: owner.name, err: err}
+			return tuiProcessDoneMsg{owner: owner, action: owner.Action(), name: owner.Name(), err: err}
 		}
 	}
 	if interactive {
 		return tea.ExecProcess(cmd, func(err error) tea.Msg {
-			msg := tuiProcessDoneMsg{owner: owner, action: owner.action, name: owner.name}
+			msg := tuiProcessDoneMsg{owner: owner, action: owner.Action(), name: owner.Name()}
 			if err != nil {
 				msg.output = err.Error()
 				// Preserve the session's exit status as a warning rather than an
@@ -38,7 +38,7 @@ func runTUIProcessCmd(group *dashboardOperations, service dashboardapi.Service, 
 	events := make(chan tuiProcessStreamEvent, 16)
 	return func() tea.Msg {
 		if !group.begin() {
-			return tuiProcessDoneMsg{owner: owner, action: owner.action, name: owner.name, err: context.Canceled}
+			return tuiProcessDoneMsg{owner: owner, action: owner.Action(), name: owner.Name(), err: context.Canceled}
 		}
 		output := &tuiProcessOutput{events: events}
 		cmd.Stdout = output
@@ -47,7 +47,7 @@ func runTUIProcessCmd(group *dashboardOperations, service dashboardapi.Service, 
 			defer group.end()
 			err := cmd.Run()
 			select {
-			case events <- tuiProcessStreamEvent{done: &tuiProcessDoneMsg{action: owner.action, name: owner.name, output: strings.TrimSpace(output.String()), err: err}}:
+			case events <- tuiProcessStreamEvent{done: &tuiProcessDoneMsg{action: owner.Action(), name: owner.Name(), output: strings.TrimSpace(output.String()), err: err}}:
 			case <-group.ctx.Done():
 			}
 			close(events)
@@ -63,7 +63,7 @@ func waitTUIProcessStream(stream <-chan tuiProcessStreamEvent, owner tuiOperatio
 func receiveTUIProcessStream(stream <-chan tuiProcessStreamEvent, owner tuiOperationOwner) tea.Msg {
 	event, ok := <-stream
 	if !ok {
-		done := tuiProcessDoneMsg{action: owner.action, name: owner.name, err: fmt.Errorf("process output stream closed unexpectedly")}
+		done := tuiProcessDoneMsg{action: owner.Action(), name: owner.Name(), err: fmt.Errorf("process output stream closed unexpectedly")}
 		event.done = &done
 	}
 	return tuiProcessStreamMsg{owner: owner, event: event, stream: stream}
@@ -72,14 +72,14 @@ func receiveTUIProcessStream(stream <-chan tuiProcessStreamEvent, owner tuiOpera
 func ownTUIOperationCmd(owner tuiOperationOwner, command tea.Cmd) tea.Cmd {
 	return func() tea.Msg {
 		if command == nil {
-			return tuiProcessDoneMsg{owner: owner, action: owner.action, name: owner.name, err: fmt.Errorf("operation command is nil")}
+			return tuiProcessDoneMsg{owner: owner, action: owner.Action(), name: owner.Name(), err: fmt.Errorf("operation command is nil")}
 		}
 		message := command()
 		switch message := message.(type) {
 		case tuiProcessDoneMsg:
 			message.owner = owner
 			if message.action == "" {
-				message.action, message.name = owner.action, owner.name
+				message.action, message.name = owner.Action(), owner.Name()
 			}
 			return message
 		case tuiProcessStreamMsg:
@@ -185,7 +185,7 @@ func operationProgressLine(line string) (string, bool) {
 }
 
 func (m *sandboxTUIModel) beginStart(action string, request lifecycle.StartRequest) (tea.Model, tea.Cmd) {
-	owner, ok := m.tuiOperationState.begin(action, request.Name, true)
+	owner, ok := m.tuiOperationState.Begin(action, request.Name, true)
 	if !ok {
 		return m, nil
 	}
@@ -196,7 +196,7 @@ func (m *sandboxTUIModel) beginStart(action string, request lifecycle.StartReque
 func runTUIStartCmd(group *dashboardOperations, service lifecycle.Service, owner tuiOperationOwner, request lifecycle.StartRequest) tea.Cmd {
 	return func() tea.Msg {
 		if !group.begin() {
-			return tuiProcessDoneMsg{owner: owner, action: owner.action, name: owner.name, err: context.Canceled}
+			return tuiProcessDoneMsg{owner: owner, action: owner.Action(), name: owner.Name(), err: context.Canceled}
 		}
 		events := make(chan tuiProcessStreamEvent, 16)
 		go func() {
@@ -208,7 +208,7 @@ func runTUIStartCmd(group *dashboardOperations, service lifecycle.Service, owner
 				default:
 				}
 			})
-			done := &tuiProcessDoneMsg{action: owner.action, name: owner.name, err: err}
+			done := &tuiProcessDoneMsg{action: owner.Action(), name: owner.Name(), err: err}
 			if err == nil {
 				done.output = strings.Join(result.Warnings, "\n")
 			}
