@@ -102,7 +102,7 @@ func (m *managerService) handleSSH(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-outputDone:
 	case <-r.Context().Done():
-	case <-m.context.Done():
+	case <-m.runtime.Context().Done():
 	}
 	_ = conn.Close()
 	_ = guest.Close()

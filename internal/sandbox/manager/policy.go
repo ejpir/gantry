@@ -347,7 +347,7 @@ func (m *managerService) applyReceivedOrganizationPolicy(ctx context.Context, up
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-m.context.Done():
+		case <-m.runtime.Context().Done():
 			return context.Canceled
 		case <-time.After(10 * time.Millisecond):
 		}

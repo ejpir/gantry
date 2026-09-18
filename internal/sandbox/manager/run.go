@@ -27,7 +27,7 @@ func (m *managerService) handleRunVM(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(request.TimeoutSeconds)*time.Second)
 	defer cancel()
-	stop := context.AfterFunc(m.context, cancel)
+	stop := context.AfterFunc(m.runtime.Context(), cancel)
 	defer stop()
 	r = r.WithContext(ctx)
 	// Raw runs have no saved sandbox name. A dedicated lock serializes them

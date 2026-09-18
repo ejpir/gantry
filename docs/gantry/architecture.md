@@ -85,7 +85,9 @@ progress/results cannot mutate a record. Wire state strings remain unchanged.
 The process-level `manager/runtimeowner.Owner` advances
 `new → locked → listening → feeds-ready → serving → stopping → stopped|failed`
 and owns the state lock, listeners, HTTP servers, policy receivers, and joined
-background work. Shutdown closes admission, cancels work, drains servers, joins
+background work. The service-level `managerRuntime` exclusively owns request
+and background-task admission, cancellation, and joining; HTTP handlers borrow
+its context. Shutdown closes admission, cancels work, drains servers, joins
 borrowers, and releases receivers, endpoint paths, then the state lock.
 
 Create and resume use the typed `internal/sandbox/lifecycle` application

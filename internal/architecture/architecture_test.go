@@ -119,6 +119,46 @@ func TestApplicationBoundaries(t *testing.T) {
 	}
 }
 
+// Request admission, cancellation, and task joining belong to managerRuntime;
+// managerService coordinates through that owner rather than growing another
+// set of lifecycle fields.
+func TestManagerServiceDelegatesRuntimeOwnership(t *testing.T) {
+	path := filepath.Join("..", "..", "internal", "sandbox", "manager", "manager.go")
+	parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := map[string]bool{
+		"context": true, "cancel": true, "requests": true, "background": true,
+	}
+	foundRuntime := false
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		typeSpec, ok := node.(*ast.TypeSpec)
+		if !ok || typeSpec.Name.Name != "managerService" {
+			return true
+		}
+		structure, ok := typeSpec.Type.(*ast.StructType)
+		if !ok {
+			t.Error("managerService is not a struct")
+			return false
+		}
+		for _, field := range structure.Fields.List {
+			for _, name := range field.Names {
+				if forbidden[name.Name] {
+					t.Errorf("managerService directly owns runtime field %s", name.Name)
+				}
+				if name.Name == "runtime" {
+					foundRuntime = true
+				}
+			}
+		}
+		return false
+	})
+	if !foundRuntime {
+		t.Fatal("managerService does not delegate to managerRuntime")
+	}
+}
+
 // TrafficRecorder is a public facade. Mutable aggregates and publisher
 // lifecycle state belong to their dedicated owners rather than accumulating on
 // the facade again.
