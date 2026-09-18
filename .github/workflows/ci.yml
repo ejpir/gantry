@@ -252,10 +252,10 @@ jobs:
       - name: gofmt
         shell: bash
         run: |
-          # Repository Go paths contain no whitespace; preserve Bash 3.2
-          # compatibility on macOS instead of relying on mapfile.
-          # shellcheck disable=SC2046
-          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v '^third_party/'))
+          # Repository Go paths contain no whitespace. Run bounded batches to
+          # stay below Windows' command-line limit while retaining Bash 3.2
+          # compatibility on macOS.
+          unformatted=$(git ls-files '*.go' | grep -v '^third_party/' | xargs -n 50 gofmt -l)
           if [ -n "$unformatted" ]; then
             echo "run gofmt -w:"
             echo "$unformatted"
