@@ -18,20 +18,16 @@ const oauthWatchReadyTimeout = 10 * time.Second
 // startOAuthListenerWatch starts a trusted task in the guest network namespace
 // and waits for its first procfs snapshot. This happens before daemon readiness,
 // so an immediately launched OAuth CLI cannot beat listener discovery.
-func (d *daemonRuntime) startOAuthListenerWatch() error {
-	if d.broker == nil || d.broker.oauth == nil {
+func (d *daemonSupervisor) startOAuthListenerWatch() error {
+	if d.control.broker == nil || d.control.broker.oauth == nil {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	decoder := newOAuthWatchDecoder(d.broker.oauth, func(format string, a ...any) {
+	decoder := newOAuthWatchDecoder(d.control.broker.oauth, func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "daemon: oauth watcher: "+format+"\n", a...)
 	})
 	exited := make(chan error, 1)
-	d.oauthWatchCancel = cancel
-	d.oauthWatchWG.Add(1)
-	go func() {
-		defer d.oauthWatchWG.Done()
-		status, err := d.broker.runOAuthWatchSession(ctx, decoder)
+	if !d.control.oauth.start(func(ctx context.Context) {
+		status, err := d.control.broker.runOAuthWatchSession(ctx, decoder)
 		decoder.Close()
 		if err == nil && status != 0 {
 			err = fmt.Errorf("guest helper exited %d", status)
@@ -43,7 +39,9 @@ func (d *daemonRuntime) startOAuthListenerWatch() error {
 			fmt.Fprintln(os.Stderr, "daemon: oauth watcher:", err)
 		}
 		exited <- err
-	}()
+	}) {
+		return fmt.Errorf("start OAuth listener watcher: control plane is stopping")
+	}
 
 	timer := time.NewTimer(oauthWatchReadyTimeout)
 	defer timer.Stop()
@@ -52,26 +50,18 @@ func (d *daemonRuntime) startOAuthListenerWatch() error {
 		fmt.Fprintln(os.Stderr, "daemon: oauth watcher ready (guest loopback listener discovery active)")
 		return nil
 	case err := <-exited:
-		cancel()
-		d.oauthWatchWG.Wait()
+		d.control.stopOAuth()
 		if err == nil {
 			err = fmt.Errorf("guest helper stopped before its first snapshot")
 		}
 		return fmt.Errorf("start OAuth listener watcher: %w", err)
 	case <-timer.C:
-		cancel()
-		d.oauthWatchWG.Wait()
+		d.control.stopOAuth()
 		return fmt.Errorf("start OAuth listener watcher: no snapshot within %s", oauthWatchReadyTimeout)
 	}
 }
 
-func (d *daemonRuntime) stopOAuthListenerWatch() {
-	if d.oauthWatchCancel != nil {
-		d.oauthWatchCancel()
-		d.oauthWatchCancel = nil
-	}
-	d.oauthWatchWG.Wait()
-}
+func (d *daemonSupervisor) stopOAuthListenerWatch() { d.control.stopOAuth() }
 
 type oauthWatchDecoder struct {
 	mu          sync.Mutex

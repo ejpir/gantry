@@ -1,37 +1,33 @@
 package sandbox
 
 import (
-	"context"
 	"fmt"
-	"net"
 	"os"
-	"os/signal"
 	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/policy"
-	"github.com/ejpir/gantry/internal/sandbox/boundedlog"
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/control"
-	mcpworkersup "github.com/ejpir/gantry/internal/sandbox/mcpworker"
-	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 	"github.com/ejpir/gantry/internal/secret"
-	"github.com/ejpir/gantry/internal/vmm"
-
-	"github.com/containerd/ttrpc"
 )
 
-// daemonRuntime owns the resources of one daemon process. Fields are ordered
-// by acquisition; close releases them in reverse order. The monolithic
-// machine is deliberately excluded from close: an unexpected daemon exit is a
-// power cut, while gracefulStop explicitly flushes the guest and its devices.
-type daemonRuntime struct {
+// daemonSupervisor is the supervisor for one daemon process. It owns the phase
+// machine and four explicit resource owners. Acquisition proceeds host,
+// guest, control, then background borrowers; close releases them in the exact
+// reverse order.
+type daemonSupervisor struct {
 	name        string
 	readySocket string
 	dir         string
 
 	started    time.Time
 	bootTiming bool
+	lifecycle  daemonLifecycle
+
+	host       hostPlane
+	guest      guestPlane
+	control    controlPlane
+	background backgroundGroup
 
 	cfg         config.RunConfig
 	secretStore *secret.Store
@@ -40,60 +36,19 @@ type daemonRuntime struct {
 	// daemon. policyChanged wakes supervise so expiry follows the active engine.
 	policyUpdateMu sync.Mutex
 	policyChanged  chan struct{}
-	// audit owns the shared sink writer and bounded security-event trail
-	// (policy, secrets, credentials, custody) from early boot onward. The
-	// broker serves audit.tail; audit.log is the stopped-state fallback.
-	audit   *auditRing
-	store   *config.ConfigStore
-	lock    *os.File
-	console *os.File
-	// consoleLog owns the regular console.log file and drains console through
-	// a bounded stream. console is only its write-side capability.
-	consoleLog *boundedlog.Pipe
-	network    *Network
-	shares     *control.ShareManager
-	// networkTransactions spans each live policy/port mutation through its
-	// persistence and rollback phase. Both control managers sharing the network
-	// backend must use this same coordinator.
-	networkTransactions *control.NetworkTransactionCoordinator
-	// Guest-tool delivery uses RPC and shares. The lifecycle gate prevents new
-	// deliveries once teardown starts and lets close cancel/join every owner
-	// before either dependency is released; guestToolsMu serializes retries.
-	guestToolsMu       sync.Mutex
-	guestToolsLifeMu   sync.Mutex
-	guestToolsCtx      context.Context
-	guestToolsCancel   context.CancelFunc
-	guestToolsStopping bool
-	guestToolsWG       sync.WaitGroup
-	// OAuth listener discovery is a daemon-owned guest task. It starts after
-	// verified helper delivery and stops before RPC teardown.
-	oauthWatchCancel context.CancelFunc
-	oauthWatchWG     sync.WaitGroup
-	ports            *control.PortManager
-	runner           vmmworker.Runner
-	machine          *vmm.Machine
-	rpc              *ttrpc.Client
-	control          net.Listener
-	broker           *broker
-	sshMu            sync.Mutex
-	sshListener      net.Listener
-	sshCancel        func()
-	mcpListener      net.Listener
-	mcpWorker        *mcpworkersup.Worker
-
-	guestErr <-chan error
-	signals  chan os.Signal
-	shutdown chan struct{}
+	// Guest-tool delivery borrows control, guest, and host resources. Its
+	// background group is therefore closed before any of those owners.
+	guestToolsMu sync.Mutex
 
 	// postReady, when non-nil, replaces supervise() after publishReady:
 	// hidden spike commands (docs/kubernetes-runtimeclass.md, Phase K0) run
 	// their scenario against the fully booted guest instead of serving
 	// ctl.sock sessions.
-	postReady func(d *daemonRuntime) int
+	postReady func(d *daemonSupervisor) int
 }
 
 func CmdDaemon(name, readySocket string) int {
-	d := &daemonRuntime{
+	d := &daemonSupervisor{
 		name:        name,
 		readySocket: readySocket,
 		started:     time.Now(),
@@ -102,23 +57,48 @@ func CmdDaemon(name, readySocket string) int {
 	return d.run()
 }
 
-func (d *daemonRuntime) run() int {
+func (d *daemonSupervisor) run() (exitCode int) {
 	d.bootLog("daemon started")
-	defer d.close()
+	defer func() {
+		// Every exit, including a partial boot failure, crosses the same teardown
+		// phase. Publish the terminal outcome only after daemonSupervisor.close has
+		// completed its process-level teardown policy.
+		d.lifecycle.beginStop()
+		d.close()
+		if err := d.lifecycle.finish(exitCode != 0); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon: lifecycle:", err)
+			exitCode = 1
+		}
+	}()
 
 	if err := d.load(); err != nil {
+		return daemonFailure(err)
+	}
+	if err := d.lifecycle.advance(daemonLoaded); err != nil {
 		return daemonFailure(err)
 	}
 	if err := d.startHostServices(); err != nil {
 		return daemonFailure(err)
 	}
+	if err := d.lifecycle.advance(daemonHostReady); err != nil {
+		return daemonFailure(err)
+	}
 	if err := d.prepareGuest(); err != nil {
+		return daemonFailure(err)
+	}
+	if err := d.lifecycle.advance(daemonGuestPrepared); err != nil {
 		return daemonFailure(err)
 	}
 	if err := d.connectGuest(); err != nil {
 		return daemonFailure(err)
 	}
+	if err := d.lifecycle.advance(daemonGuestConnected); err != nil {
+		return daemonFailure(err)
+	}
 	if err := d.startControl(); err != nil {
+		return daemonFailure(err)
+	}
+	if err := d.lifecycle.advance(daemonControlReady); err != nil {
 		return daemonFailure(err)
 	}
 	// MCP, bound secrets, and OAuth custody require the workload helper before
@@ -158,54 +138,25 @@ func daemonFailure(err error) int {
 	return 1
 }
 
-func (d *daemonRuntime) bootLog(phase string) {
+func (d *daemonSupervisor) bootLog(phase string) {
 	if !d.bootTiming {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "boot-timing: %-36s %9.3f ms\n", phase, float64(time.Since(d.started))/float64(time.Millisecond))
 }
 
-func (d *daemonRuntime) close() {
-	// Watcher and delivery own RPC sessions. Cancel and join both before
-	// closing their dependencies. These stops are deliberately idempotent.
-	d.stopOAuthListenerWatch()
-	d.stopGuestToolsDelivery()
-	d.stopSSHGateway()
-	if d.mcpListener != nil {
-		_ = d.mcpListener.Close()
+func (d *daemonSupervisor) close() {
+	// Background deliveries were acquired last and borrow all three planes.
+	// Every owner is idempotent because graceful shutdown may have released a
+	// subset of its resources before this process-level unwind.
+	d.background.close()
+	if err := d.control.close(); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: control plane:", err)
 	}
-	if d.mcpWorker != nil {
-		if err := d.mcpWorker.Close(); err != nil {
-			fmt.Fprintln(os.Stderr, "daemon: MCP worker:", err)
-		}
+	if err := d.guest.close(); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: guest plane:", err)
 	}
-	if d.control != nil {
-		_ = d.control.Close()
-	}
-	if d.signals != nil {
-		signal.Stop(d.signals)
-	}
-	if d.rpc != nil {
-		_ = d.rpc.Close()
-	}
-	if d.runner != nil {
-		_ = d.runner.Close()
-	}
-	if d.shares != nil {
-		_ = d.shares.Close()
-	}
-	if d.network != nil {
-		d.network.Close()
-	}
-	if d.console != nil {
-		_ = d.console.Close()
-	}
-	if d.consoleLog != nil {
-		if err := d.consoleLog.Close(); err != nil {
-			fmt.Fprintln(os.Stderr, "daemon: console log broker:", err)
-		}
-	}
-	if d.lock != nil {
-		_ = d.lock.Close()
+	if err := d.host.close(); err != nil {
+		fmt.Fprintln(os.Stderr, "daemon: host plane:", err)
 	}
 }

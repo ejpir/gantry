@@ -40,7 +40,7 @@ func (backend *livePolicyNetworkBackend) SetPolicy(next *netpol.Policy) error {
 	return err
 }
 
-func newLivePolicyDaemon(t *testing.T) (*daemonRuntime, *livePolicyNetworkBackend) {
+func newLivePolicyDaemon(t *testing.T) (*daemonSupervisor, *livePolicyNetworkBackend) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.RunConfig{MemMB: 512, VCPUs: 1, Net: true}
@@ -55,11 +55,11 @@ func newLivePolicyDaemon(t *testing.T) (*daemonRuntime, *livePolicyNetworkBacken
 	backend := &livePolicyNetworkBackend{policy: local}
 	transactions := control.NewNetworkTransactionCoordinator()
 	networkManager := control.NewNetworkPolicyManagerWithCoordinator(store, backend, local, transactions)
-	d := &daemonRuntime{
-		dir: dir, cfg: cfg, store: store, audit: &auditRing{},
+	d := &daemonSupervisor{
+		dir: dir, cfg: cfg,
+		host:       hostPlane{store: store, audit: &auditRing{}, network: &Network{Policy: local, Backend: backend}, networkTx: transactions},
+		control:    controlPlane{broker: &broker{netPolicy: networkManager}, shutdown: make(chan struct{}, 1)},
 		governance: policy.NewController(nil), policyChanged: make(chan struct{}, 1),
-		network: &Network{Policy: local, Backend: backend}, networkTransactions: transactions,
-		broker: &broker{netPolicy: networkManager}, shutdown: make(chan struct{}, 1),
 	}
 	return d, backend
 }
@@ -123,11 +123,11 @@ func TestLiveOrganizationPolicyUpdatesCredentialNetworkGateWithoutGuestNetwork(t
 	}
 	transactions := control.NewNetworkTransactionCoordinator()
 	networkManager := control.NewNetworkPolicyManagerWithCoordinator(store, nil, netpol.DefaultPolicy(), transactions)
-	d := &daemonRuntime{
-		dir: dir, cfg: cfg, store: store, audit: &auditRing{}, network: &Network{},
+	d := &daemonSupervisor{
+		dir: dir, cfg: cfg,
+		host:       hostPlane{store: store, audit: &auditRing{}, network: &Network{}, networkTx: transactions},
+		control:    controlPlane{shutdown: make(chan struct{}, 1), broker: &broker{netPolicy: networkManager, domainAllowed: networkManager.DomainAllowed}},
 		governance: policy.NewController(nil), policyChanged: make(chan struct{}, 1),
-		networkTransactions: transactions, shutdown: make(chan struct{}, 1),
-		broker: &broker{netPolicy: networkManager, domainAllowed: networkManager.DomainAllowed},
 	}
 	candidate := policytest.Signed(t, policy.Profile{
 		Rules:   []policy.Rule{{ID: "credential", Effect: "allow", Action: policy.CredentialUse, Host: "allowed.example"}},
@@ -165,7 +165,7 @@ func TestLiveOrganizationPolicyNetworkFailureLeavesOldGeneration(t *testing.T) {
 		t.Fatal("failed policy generation was persisted")
 	}
 	select {
-	case <-d.shutdown:
+	case <-d.control.shutdown:
 		t.Fatal("confirmed pre-commit failure should not stop the sandbox")
 	default:
 	}
@@ -190,7 +190,7 @@ func TestLiveOrganizationPolicyPersistenceFailureRollsBackNetwork(t *testing.T) 
 		t.Fatal("local network policy was not restored")
 	}
 	select {
-	case <-d.shutdown:
+	case <-d.control.shutdown:
 		t.Fatal("confirmed rollback should not stop the sandbox")
 	default:
 	}
@@ -210,7 +210,7 @@ func TestLiveOrganizationPolicyUnconfirmedRollbackStopsSandbox(t *testing.T) {
 		t.Fatal("policy update unexpectedly succeeded")
 	}
 	select {
-	case <-d.shutdown:
+	case <-d.control.shutdown:
 	default:
 		t.Fatal("unconfirmed rollback did not stop the sandbox")
 	}
@@ -223,7 +223,7 @@ func TestLiveOrganizationPolicyUnconfirmedRollbackStopsSandbox(t *testing.T) {
 func TestLiveOrganizationPolicyDoesNotRereadLocalPolicySource(t *testing.T) {
 	d, _ := newLivePolicyDaemon(t)
 	missing := filepath.Join(t.TempDir(), "removed-policy.json")
-	if err := d.store.Mutate(func(cfg *config.RunConfig) error {
+	if err := d.host.store.Mutate(func(cfg *config.RunConfig) error {
 		cfg.NetPol = missing
 		return nil
 	}); err != nil {

@@ -161,10 +161,11 @@ func operationProgressLine(line string) (string, bool) {
 }
 
 func (m *sandboxTUIModel) beginStart(action string, request lifecycle.StartRequest) (tea.Model, tea.Cmd) {
+	if !m.tuiOperationState.begin(action, request.Name, true) {
+		return m, nil
+	}
 	m.dialog = tuiNoDialog
 	m.dialogScroll = 0
-	m.busyAction, m.busyName, m.busyProgress = action, request.Name, ""
-	m.selectNext = request.Name
 	return m, tea.Batch(runTUIStartCmd(m.operations, m.service, action, request), m.ensureAnimation())
 }
 

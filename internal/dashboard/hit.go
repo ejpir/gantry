@@ -38,7 +38,7 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 		targets = append(targets, tuiHitTarget{kind: "page", page: tab.page, rect: tuiRect{x: tab.x, y: tuiTopPadding, w: tab.w, h: 1}})
 	}
 
-	if m.busyAction != "" {
+	if m.tuiOperationState.phase() == tuiOperationRunning {
 		return targets
 	}
 	switch m.page {
@@ -103,7 +103,7 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 }
 
 func (m sandboxTUIModel) statusBarHitTargets(layout tuiDashboardLayout) []tuiHitTarget {
-	if m.busyAction != "" {
+	if m.tuiOperationState.phase() == tuiOperationRunning {
 		return nil
 	}
 	lines := strings.Split(ansi.Strip(m.renderStatusBar(tuiThemeFor(m.dark), layout.screenWidth)), "\n")
@@ -190,7 +190,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 	case "menu":
 		switch target.action {
 		case "new":
-			if m.busyAction != "" {
+			if m.tuiOperationState.phase() == tuiOperationRunning {
 				return m, nil
 			}
 			return m, m.openCreateWizard()
@@ -198,7 +198,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 			m.dialog = tuiHelpDialog
 			m.dialogScroll = 0
 		case "update":
-			if m.busyAction == "" && m.updateStatus.Available {
+			if m.tuiOperationState.phase() == tuiOperationIdle && m.updateStatus.Available {
 				m.dialog = tuiUpdateDialog
 				m.dialogScroll = 0
 				m.confirmRemove = false

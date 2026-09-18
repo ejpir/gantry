@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -44,10 +45,8 @@ func defaultSSHUser(cfgUser string, uid uint32) string {
 	return "root"
 }
 
-func (d *daemonRuntime) startSSHGateway() error {
-	d.sshMu.Lock()
-	defer d.sshMu.Unlock()
-	if d.sshListener != nil {
+func (d *daemonSupervisor) startSSHGateway() error {
+	if d.control.ssh.running() {
 		return nil
 	}
 	listener, endpoint, err := listenSSH(d.name, d.dir)
@@ -62,39 +61,32 @@ func (d *daemonRuntime) startSSHGateway() error {
 	}
 	gateway, err := sshgw.New(sshgw.Config{
 		Name: d.name, HostKeyPath: sshHostKeyPath(), DefaultUser: defaultUser,
-		Spawner: sshgw.SpawnFunc(d.broker.spawnSSH),
-		Auditf:  d.broker.auditf, PeerAllowed: localsec.PeerSameUser,
+		Spawner: sshgw.SpawnFunc(d.control.broker.spawnSSH),
+		Auditf:  d.control.broker.auditf, PeerAllowed: localsec.PeerSameUser,
 	})
 	if err != nil {
 		_ = listener.Close()
 		removeSSHRuntime(d.name, d.dir)
 		return fmt.Errorf("SSH gateway: %w", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	d.sshListener, d.sshCancel = listener, cancel
-	d.broker.auditf("ssh: gateway enabled on sandbox-local socket")
-	if d.broker.devContainers.Load() {
-		d.broker.auditf("devcontainers: curated IDE container enabled inside sandbox VM")
-	}
-	go func() {
+	d.control.sshCleanup = func() { removeSSHRuntime(d.name, d.dir) }
+	if !d.control.ssh.start(listener, func(ctx context.Context, listener net.Listener) {
 		if err := gateway.Serve(ctx, listener); err != nil {
-			d.broker.auditf("ssh: gateway stopped: %v", err)
+			d.control.broker.auditf("ssh: gateway stopped: %v", err)
 		}
-	}()
+	}) {
+		_ = listener.Close()
+		return nil
+	}
+	d.control.broker.auditf("ssh: gateway enabled on sandbox-local socket")
+	if d.control.broker.devContainers.Load() {
+		d.control.broker.auditf("devcontainers: curated IDE container enabled inside sandbox VM")
+	}
 	return nil
 }
 
-func (d *daemonRuntime) stopSSHGateway() {
-	d.sshMu.Lock()
-	cancel, listener := d.sshCancel, d.sshListener
-	d.sshCancel, d.sshListener = nil, nil
-	d.sshMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if listener != nil {
-		_ = listener.Close()
-	}
+func (d *daemonSupervisor) stopSSHGateway() {
+	d.control.ssh.stop()
 	removeSSHRuntime(d.name, d.dir)
 }
 
@@ -179,7 +171,7 @@ func (br *broker) spawnSSH(ctx context.Context, request sshgw.SpawnRequest) (int
 	applySessionTarget(&options, target)
 	// gantry-guest starts as root and validates/drops to request.User itself.
 	options.ImgCfg = mcpLauncherImageConfig(target.imageConfig)
-	err := client.Session(br.rpc, options, request.Stdin, request.Stdout)
+	err := br.rpc.Session(options, request.Stdin, request.Stdout)
 	if err != nil {
 		return 255, fmt.Errorf("SSH session refused")
 	}

@@ -138,7 +138,7 @@ func TestGuestToolsTargetsSeparateWorkloadAndIDE(t *testing.T) {
 }
 
 func TestStopGuestToolsDeliveryCancelsAndJoinsOwners(t *testing.T) {
-	d := &daemonRuntime{}
+	d := &daemonSupervisor{}
 	ctx, done, ok := d.beginGuestToolsDelivery()
 	if !ok {
 		t.Fatal("first guest-tools delivery was refused")

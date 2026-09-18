@@ -109,6 +109,17 @@ The supervisor is the trusted host control plane for one sandbox. It owns:
 - port and policy mutations, traffic snapshots, and graceful shutdown;
 - the persistent guest ttrpc connection over virtio-vsock.
 
+Runtime ownership is split into four explicit planes. `hostPlane` owns the
+lifetime lock, configuration store, audit sink, network, shares, and ports;
+`guestPlane` owns the VMM runner, guest RPC transport, and guest-exit waiter;
+`controlPlane` owns the control and credential listeners, broker, SSH/MCP
+gateways, signal channels, and OAuth watcher; `backgroundGroup` provides
+cancel-before-join admission for goroutines that borrow those planes. The
+supervisor alone advances the daemon phase machine and closes background,
+control, guest, then host ownership in reverse acquisition order. Borrowed
+capabilities omit `Close`; only their owning plane can release the underlying
+resource.
+
 The supervisor runs with the privileges of the user who launched Gantry. It
 does not run as a system daemon.
 

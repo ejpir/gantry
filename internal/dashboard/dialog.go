@@ -798,11 +798,8 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		}
 		return m, m.focusEdit(3)
 	}
-	m.dialog = tuiNoDialog
-	m.dialogScroll = 0
-	m.busyAction = "edit"
-	m.busyName = selected.Name
-	return m, tea.Batch(saveSandboxConfigCmd(m.service, request, selected.State == tuiRunning), m.ensureAnimation())
+	return m.beginServiceAction("edit", selected.Name,
+		saveSandboxConfigCmd(m.service, request, selected.State == tuiRunning))
 }
 
 func cycleIsolation(current string, delta int) string {
@@ -1261,10 +1258,7 @@ func (m *sandboxTUIModel) submitRuleAdd() (tea.Model, tea.Cmd) {
 			return m, m.focusRule(4)
 		}
 	}
-	m.closeDialog()
-	m.busyAction = "rule add"
-	m.busyName = request.Sandbox
-	return m, tea.Batch(addNetworkRuleCmd(m.service, request), m.ensureAnimation())
+	return m.beginServiceAction("rule add", request.Sandbox, addNetworkRuleCmd(m.service, request))
 }
 
 func (m *sandboxTUIModel) removeSelectedRule() (tea.Model, tea.Cmd) {
@@ -1273,10 +1267,8 @@ func (m *sandboxTUIModel) removeSelectedRule() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	m.closeDialog()
-	m.busyAction = "rule remove"
-	m.busyName = row.Sandbox + "/" + row.Source
-	return m, tea.Batch(removeNetworkRuleCmd(m.service, *row), m.ensureAnimation())
+	return m.beginServiceAction("rule remove", row.Sandbox+"/"+row.Source,
+		removeNetworkRuleCmd(m.service, *row))
 }
 
 func (m *sandboxTUIModel) removeSelectedTrafficRule() (tea.Model, tea.Cmd) {
@@ -1284,9 +1276,8 @@ func (m *sandboxTUIModel) removeSelectedTrafficRule() (tea.Model, tea.Cmd) {
 	if row == nil {
 		return m, nil
 	}
-	m.busyAction = "rule remove"
-	m.busyName = row.Sandbox + "/" + row.Address
-	return m, tea.Batch(removeTrafficRuleCmd(m.service, *row), m.ensureAnimation())
+	return m.beginServiceAction("rule remove", row.Sandbox+"/"+row.Address,
+		removeTrafficRuleCmd(m.service, *row))
 }
 
 func (m *sandboxTUIModel) openSecretAddDialog() tea.Cmd {
@@ -1369,10 +1360,8 @@ func (m *sandboxTUIModel) submitSecretAdd() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.secretValue.Reset()
-	m.closeDialog()
-	m.busyAction = "secret add"
-	m.busyName = request.Sandbox + "/" + request.Name
-	return m, tea.Batch(addSecretCmd(m.service, request), m.ensureAnimation())
+	return m.beginServiceAction("secret add", request.Sandbox+"/"+request.Name,
+		addSecretCmd(m.service, request))
 }
 
 func (m *sandboxTUIModel) removeSelectedSecret() (tea.Model, tea.Cmd) {
@@ -1381,10 +1370,8 @@ func (m *sandboxTUIModel) removeSelectedSecret() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	m.closeDialog()
-	m.busyAction = "secret remove"
-	m.busyName = row.Sandbox + "/" + row.Name
-	return m, tea.Batch(removeSecretCmd(m.service, *row), m.ensureAnimation())
+	return m.beginServiceAction("secret remove", row.Sandbox+"/"+row.Name,
+		removeSecretCmd(m.service, *row))
 }
 
 func (m *sandboxTUIModel) syncNetworkPolicyFields() {
@@ -1417,11 +1404,8 @@ func (m *sandboxTUIModel) submitNetworkPolicy() (tea.Model, tea.Cmd) {
 		m.formError = err.Error()
 		return m, m.focusNetworkPolicy(1)
 	}
-	m.dialog = tuiNoDialog
-	m.dialogScroll = 0
-	m.busyAction = "netpolicy set"
-	m.busyName = name
-	return m, tea.Batch(setSandboxNetworkPolicyCmd(m.service, name, path, m.policyLocal), m.ensureAnimation())
+	return m.beginServiceAction("netpolicy set", name,
+		setSandboxNetworkPolicyCmd(m.service, name, path, m.policyLocal))
 }
 
 // portSpecFromDialog composes [IP:]HOST:GUEST[/udp] from the dialog fields.
@@ -1499,14 +1483,8 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 		}
 	}
 	if !plan.Live {
-		m.dialog = tuiNoDialog
-		m.dialogScroll = 0
-		m.busyAction = "share configure"
-		m.busyName = plan.Sandbox + "/" + plan.Tag
-		return m, tea.Batch(
-			configureSandboxShareCmd(m.service, plan, target.State == tuiRunning),
-			m.ensureAnimation(),
-		)
+		return m.beginServiceAction("share configure", plan.Sandbox+"/"+plan.Tag,
+			configureSandboxShareCmd(m.service, plan, target.State == tuiRunning))
 	}
 	argv := []string{"share", "add"}
 	if plan.Replace {
@@ -1526,10 +1504,8 @@ func (m *sandboxTUIModel) removeSelectedShare() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	m.closeDialog()
-	m.busyAction = "share remove"
-	m.busyName = row.Sandbox + "/" + row.Tag
-	return m, tea.Batch(removeSandboxShareCmd(m.service, *row), m.ensureAnimation())
+	return m.beginServiceAction("share remove", row.Sandbox+"/"+row.Tag,
+		removeSandboxShareCmd(m.service, *row))
 }
 
 func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
@@ -2407,7 +2383,7 @@ func (m *sandboxTUIModel) updateMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		}
 		return m, nil
 	}
-	if m.busyAction != "" {
+	if m.tuiOperationState.phase() == tuiOperationRunning {
 		return m, nil
 	}
 	m.lastClickAt = time.Time{}

@@ -24,7 +24,7 @@ import (
 // startMCPGateway launches the mandatory split MCP worker when -mcp is set.
 // The supervisor accepts the local endpoint and relays opaque bytes; parsing,
 // policy, HTTP/SSE, and local stdio framing live only in _mcp-worker.
-func (d *daemonRuntime) startMCPGateway() error {
+func (d *daemonSupervisor) startMCPGateway() error {
 	if !d.cfg.MCP {
 		return nil
 	}
@@ -33,7 +33,7 @@ func (d *daemonRuntime) startMCPGateway() error {
 		return fmt.Errorf("mcp gateway: %w", err)
 	}
 	mcpWorker, err := mcpworkersup.Start(servers, d.dir, d.cfg.ProcessIsolation, func(event mcpgw.Event) {
-		d.broker.auditf("%s", event.String())
+		d.control.broker.auditf("%s", event.String())
 	})
 	if err != nil {
 		return fmt.Errorf("mcp gateway: %w", err)
@@ -43,37 +43,23 @@ func (d *daemonRuntime) startMCPGateway() error {
 		_ = mcpWorker.Close()
 		return fmt.Errorf("mcp gateway listener: %w", err)
 	}
-	d.mcpWorker, d.mcpListener = mcpWorker, ln
+	if !d.control.mcp.start(ln, mcpWorker,
+		func() { d.control.broker.auditf("mcp: guest session relay failed") },
+		func() {
+			if err := d.writeIsolationState(); err != nil {
+				fmt.Printf("daemon: isolation state after MCP worker exit: %v\n", err)
+			}
+			d.control.broker.auditf("mcp: worker exited; MCP disabled for this sandbox")
+		}) {
+		_ = ln.Close()
+		_ = mcpWorker.Close()
+		return fmt.Errorf("mcp gateway owner is not available")
+	}
 	if err := d.writeIsolationState(); err != nil {
 		fmt.Printf("daemon: isolation state after MCP worker start: %v\n", err)
 	}
-	d.broker.auditf("mcp: gateway enabled in split worker (fs root %s, local servers run as %s, %d remotes)",
+	d.control.broker.auditf("mcp: gateway enabled in split worker (fs root %s, local servers run as %s, %d remotes)",
 		d.cfg.MCPFSRoot, d.cfg.MCPFSUser, len(d.cfg.MCPRemotes))
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				if err := mcpWorker.Serve(context.Background(), conn); err != nil {
-					select {
-					case <-mcpWorker.Done():
-					default:
-						d.broker.auditf("mcp: guest session relay failed")
-					}
-				}
-			}()
-		}
-	}()
-	go func() {
-		<-mcpWorker.Done()
-		_ = ln.Close()
-		if err := d.writeIsolationState(); err != nil {
-			fmt.Printf("daemon: isolation state after MCP worker exit: %v\n", err)
-		}
-		d.broker.auditf("mcp: worker exited; MCP disabled for this sandbox")
-	}()
 	return nil
 }
 
@@ -129,7 +115,7 @@ func (br *broker) spawnGuestStdio(ctx context.Context, args []string) (io.WriteC
 		}
 		applySessionTarget(&options, br.sessionTarget(false))
 		options.ImgCfg = rootImageCfg
-		_ = client.Session(br.rpc, options, stdinR, stdoutW)
+		_ = br.rpc.Session(options, stdinR, stdoutW)
 	}()
 
 	kill := func() {

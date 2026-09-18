@@ -83,14 +83,14 @@ func CmdRootfsSpike(argv []string) int {
 		return 1
 	}
 	defer prep.Cleanup()
-	return launch.run(func(d *daemonRuntime) int { return d.runRootfsSpike(prep) })
+	return launch.run(func(d *daemonSupervisor) int { return d.runRootfsSpike(prep) })
 }
 
 // runRootfsSpike is the _rootfs-spike scenario hook. It publishes the
 // prepared snapshot as two hub exports (writable and host-enforced
 // read-only), drives the guest scenario, and then verifies host-visible
 // effects before the normal VM shutdown.
-func (d *daemonRuntime) runRootfsSpike(prep *rootfsSnapshotPrep) int {
+func (d *daemonSupervisor) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	image := d.cfg.ImageRef
 	if image == "" {
 		image = d.cfg.Image
@@ -101,7 +101,7 @@ func (d *daemonRuntime) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "rootfs-spike: host snapshot %s (image %s, guest runtime %s)\n", prep.snapshot, image, runtimeName)
 
-	hub := d.shares.Hub()
+	hub := d.host.shareBorrow().Hub()
 	if hub == nil {
 		fmt.Fprintln(os.Stderr, "gantry _rootfs-spike: the virtio-fs share hub is unavailable on this platform")
 		return 1
@@ -128,9 +128,9 @@ func (d *daemonRuntime) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	}
 	defer release()
 
-	_, spikeErr := client.RootfsSpike(d.rpc, client.RootfsSpikeOptions{
-		StreamSock:   d.broker.streamSock,
-		StreamDial:   d.broker.streamDial,
+	_, spikeErr := d.guest.rootfsSpike(client.RootfsSpikeOptions{
+		StreamSock:   d.control.broker.streamSock,
+		StreamDial:   d.control.broker.streamDial,
 		Report:       os.Stdout,
 		ExportTag:    rootfsSpikeExportRW,
 		ROTag:        rootfsSpikeExportRO,

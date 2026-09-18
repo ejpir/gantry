@@ -49,7 +49,10 @@ func TestConfigureDevContainersRequiresRestartAndKeepsLiveTarget(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 	enabled := true
 	br := &broker{}
-	daemon := &daemonRuntime{name: "dev", store: store, broker: br, sshListener: listener}
+	daemon := &daemonSupervisor{
+		name: "dev", host: hostPlane{store: store},
+		control: controlPlane{broker: br, ssh: sshGatewayOwner{phase: sshGatewayRunning, listener: listener}},
+	}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{DevContainers: &enabled})
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +90,7 @@ func TestConfigureDevContainersPreflightFailureDoesNotPersist(t *testing.T) {
 	ensureDevContainersImageAsset = func(string, func(string, ...any)) (string, error) { return "", wantErr }
 
 	enabled := true
-	daemon := &daemonRuntime{name: "dev", store: store, broker: &broker{}}
+	daemon := &daemonSupervisor{name: "dev", host: hostPlane{store: store}, control: controlPlane{broker: &broker{}}}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{DevContainers: &enabled})
 	if restart || !errors.Is(err, wantErr) {
 		t.Fatalf("configure result = restart %t, err %v; want preflight failure", restart, err)
@@ -125,14 +128,15 @@ func TestConfigureAppliesLiveStateAfterCommittedDurabilityError(t *testing.T) {
 		t.Fatal(err)
 	}
 	disabled := false
-	daemon := &daemonRuntime{
-		dir: dir, store: store, broker: &broker{}, sshListener: listener,
+	daemon := &daemonSupervisor{
+		dir: dir, host: hostPlane{store: store},
+		control: controlPlane{broker: &broker{}, ssh: sshGatewayOwner{phase: sshGatewayRunning, listener: listener}},
 	}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{SSH: &disabled})
 	if restart || !atomicfile.Committed(err) || !errors.Is(err, wantErr) {
 		t.Fatalf("configure result = restart %t, err %v; want committed durability error", restart, err)
 	}
-	if daemon.sshListener != nil {
+	if daemon.control.ssh.running() {
 		t.Fatal("committed SSH disable returned before stopping the live gateway")
 	}
 	if got := store.Snapshot(); got.SSH {
@@ -166,11 +170,14 @@ func TestConfigureReconcilesServiceOnSettingsNoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	disabled := false
-	daemon := &daemonRuntime{dir: dir, store: store, broker: &broker{}, sshListener: listener}
+	daemon := &daemonSupervisor{
+		dir: dir, host: hostPlane{store: store},
+		control: controlPlane{broker: &broker{}, ssh: sshGatewayOwner{phase: sshGatewayRunning, listener: listener}},
+	}
 	if restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{SSH: &disabled}); err != nil || restart {
 		t.Fatalf("configure result = restart %t, err %v", restart, err)
 	}
-	if daemon.sshListener != nil {
+	if daemon.control.ssh.running() {
 		t.Fatal("no-op desired settings did not stop the divergent SSH service")
 	}
 	if got := store.Snapshot(); got.SSH || got.SettingsRevision != 0 {
@@ -193,9 +200,8 @@ func TestConfigureRollsBackRevisionWhenServiceReconciliationFails(t *testing.T) 
 		t.Fatal(err)
 	}
 	enabled := true
-	daemon := &daemonRuntime{
-		dir: dir, store: store, broker: &broker{}, guestToolsStopping: true,
-	}
+	daemon := &daemonSupervisor{dir: dir, host: hostPlane{store: store}, control: controlPlane{broker: &broker{}}}
+	daemon.background.close()
 	// A combined SSH/resource update must remain atomic when the helper
 	// cannot be verified: neither SSH nor the new desired allocation survives.
 	memory := uint(768)
@@ -238,7 +244,10 @@ func TestConfigurePersistsRuntimeNormalizationOnOtherwiseNoopUpdate(t *testing.T
 	}
 	defer func() { _ = listener.Close() }()
 	enabled := true
-	daemon := &daemonRuntime{store: store, broker: &broker{}, sshListener: listener}
+	daemon := &daemonSupervisor{
+		host:    hostPlane{store: store},
+		control: controlPlane{broker: &broker{}, ssh: sshGatewayOwner{phase: sshGatewayRunning, listener: listener}},
+	}
 	restart, err := daemon.configureSandbox(controlproto.ConfigureRequest{
 		SSH: &enabled, DevContainers: &enabled,
 	})

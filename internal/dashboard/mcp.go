@@ -229,10 +229,8 @@ func (m *sandboxTUIModel) submitMCPRemote() (tea.Model, tea.Cmd) {
 	}
 	target := m.sandboxNamed(request.Sandbox)
 	running := target != nil && target.State == tuiRunning
-	m.closeDialog()
-	m.busyAction = "mcp configure"
-	m.busyName = request.Sandbox + "/" + request.Name
-	return m, tea.Batch(configureMCPRemoteCmd(m.service, request, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp configure", request.Sandbox+"/"+request.Name,
+		configureMCPRemoteCmd(m.service, request, running))
 }
 
 func (m *sandboxTUIModel) openMCPFilesystemDialog() tea.Cmd {
@@ -333,10 +331,8 @@ func (m *sandboxTUIModel) submitMCPFilesystem() (tea.Model, tea.Cmd) {
 	}
 	target := m.sandboxNamed(request.Sandbox)
 	running := target != nil && target.State == tuiRunning
-	m.closeDialog()
-	m.busyAction = "mcp filesystem"
-	m.busyName = request.Sandbox + "/fs"
-	return m, tea.Batch(configureMCPFilesystemCmd(m.service, request, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp filesystem", request.Sandbox+"/fs",
+		configureMCPFilesystemCmd(m.service, request, running))
 }
 
 func (m *sandboxTUIModel) removeSelectedMCPRemote() (tea.Model, tea.Cmd) {
@@ -348,10 +344,8 @@ func (m *sandboxTUIModel) removeSelectedMCPRemote() (tea.Model, tea.Cmd) {
 	target := m.sandboxNamed(row.Sandbox)
 	running := target != nil && target.State == tuiRunning
 	copyRow := *row
-	m.closeDialog()
-	m.busyAction = "mcp remove"
-	m.busyName = row.Sandbox + "/" + row.Name
-	return m, tea.Batch(removeMCPRemoteCmd(m.service, copyRow, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp remove", row.Sandbox+"/"+row.Name,
+		removeMCPRemoteCmd(m.service, copyRow, running))
 }
 
 func (m sandboxTUIModel) renderMCPRemoteDialog(theme tuiTheme, width int) string {

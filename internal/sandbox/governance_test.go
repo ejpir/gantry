@@ -23,7 +23,7 @@ func TestOrganizationCredentialAndMCPDialGates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &daemonRuntime{governance: policy.NewController(engine), broker: &broker{domainAllowed: func(string) bool { return true }}}
+	d := &daemonSupervisor{governance: policy.NewController(engine), control: controlPlane{broker: &broker{domainAllowed: func(string) bool { return true }}}}
 	resolved := 0
 	broker := credhelper.New(func(string) (string, secret.Value, credhelper.Resolution) {
 		resolved++
@@ -54,7 +54,7 @@ func TestOrganizationCredentialAndMCPDialGates(t *testing.T) {
 
 func TestMCPAuthorizationClosureFollowsLiveController(t *testing.T) {
 	controller := policy.NewController(nil)
-	d := &daemonRuntime{governance: controller, broker: &broker{}, cfg: config.RunConfig{}}
+	d := &daemonSupervisor{governance: controller, control: controlPlane{broker: &broker{}}, cfg: config.RunConfig{}}
 	servers, err := d.resolveMCPServers()
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestOrganizationLaunchPinsBundleAndRejectsUnsupportedCustody(t *testing.T) 
 		t.Fatalf("source mutation changed snapshot: %v", err)
 	}
 	enabled := true
-	d := daemonRuntime{cfg: config.RunConfig{OrgPolicy: r.cfg.OrgPolicy, OAuthCustody: &enabled}}
+	d := daemonSupervisor{cfg: config.RunConfig{OrgPolicy: r.cfg.OrgPolicy, OAuthCustody: &enabled}}
 	if err := d.loadOrganizationPolicy(); err == nil {
 		t.Fatal("ungoverned OAuth custody path accepted")
 	}

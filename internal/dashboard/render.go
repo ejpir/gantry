@@ -693,7 +693,7 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 
 	var left string
 	budget := maxInt(1, innerWidth-lipgloss.Width(right)-1)
-	if m.busyAction != "" {
+	if m.tuiOperationState.phase() == tuiOperationRunning {
 		if m.busyProgress != "" {
 			left = truncateANSI(lipgloss.NewStyle().Foreground(theme.text).Render(m.busyProgress), budget)
 		} else {

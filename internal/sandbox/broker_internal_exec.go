@@ -134,7 +134,7 @@ func (br *broker) internalExecWithImageConfigContext(ctx context.Context, stdin 
 	// Trusted internal callers may deliberately override only the process
 	// identity; the selected workload/IDE root remains fixed above.
 	options.ImgCfg = imageConfig
-	err := client.Session(br.rpc, options, stdin, &capture)
+	err := br.rpc.Session(options, stdin, &capture)
 	_ = timer.Stop()
 	stdout, overflow := capture.snapshot()
 	return internalExecOutcome(stdout, status, err, overflow, expired.Load(), timeout, maxResponse, op)

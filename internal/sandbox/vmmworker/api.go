@@ -4,6 +4,7 @@ import (
 	"net"
 
 	"github.com/ejpir/gantry/internal/netpol"
+	"github.com/ejpir/gantry/internal/sharefs"
 )
 
 // Runner is the split-VMM execution handle: the guest runs in a _vmm-worker
@@ -24,20 +25,36 @@ type Runner interface {
 	DialStream(guestPort uint32) (net.Conn, error)
 }
 
-// NetAttachment is the network capability handed to a split VMM worker: the
-// supervisor end of the guest's data channel, plus the policy and recorder
-// this worker is responsible for enforcing.
-//
-// Split reports that networking runs in its own worker, which means egress
-// enforcement is that worker's job and the VMM worker must not also attach a
-// policy to the device. The supervisor keeps Policy either way, for display
-// and rollback.
-type NetAttachment struct {
-	Conn    net.Conn
-	Split   bool
-	Policy  *netpol.Policy
-	Traffic *netpol.TrafficRecorder
+// ShareProvider is the borrowed share capability needed while constructing a
+// split VMM. Its owner remains responsible for shutdown.
+type ShareProvider interface {
+	Hub() sharefs.BorrowedHub
 }
+
+// NetAttachment is the borrowed network capability handed to a split VMM
+// worker. It exposes topology and policy observations, never the owning
+// connection's Close method.
+type NetAttachment interface {
+	Available() bool
+	IsSplit() bool
+	NetworkPolicy() *netpol.Policy
+	TrafficRecorder() *netpol.TrafficRecorder
+}
+
+type netAttachment struct {
+	available bool
+	split     bool
+	policy    *netpol.Policy
+	traffic   *netpol.TrafficRecorder
+}
+
+func BorrowNetworkAttachment(conn net.Conn, split bool, policy *netpol.Policy, traffic *netpol.TrafficRecorder) NetAttachment {
+	return netAttachment{available: conn != nil, split: split, policy: policy, traffic: traffic}
+}
+func (n netAttachment) Available() bool                          { return n.available }
+func (n netAttachment) IsSplit() bool                            { return n.split }
+func (n netAttachment) NetworkPolicy() *netpol.Policy            { return n.policy }
+func (n netAttachment) TrafficRecorder() *netpol.TrafficRecorder { return n.traffic }
 
 // vmmWorkerSpawnHook, when set, rewrites the re-exec argv/env (tests only:
 // os.Executable() is the test binary under `go test`).

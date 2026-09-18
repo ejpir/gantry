@@ -834,7 +834,9 @@ func TestSandboxTUIUpdateBadgeAndConfirmation(t *testing.T) {
 func TestSandboxTUIQuitsAfterSuccessfulUpdate(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
-	m.busyAction = "update"
+	if !m.tuiOperationState.begin("update", "v1.3.0", false) {
+		t.Fatal("failed to begin update operation")
+	}
 	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
 	m = *model.(*sandboxTUIModel)
 	if cmd == nil {

@@ -11,7 +11,6 @@ import (
 	"os"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/vmm"
 )
 
@@ -24,6 +23,6 @@ func CrossProcNetConn() (sup, dev net.Conn, err error) {
 	return nil, nil, ErrUnavailable
 }
 
-func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManager *control.ShareManager, dir string, console *os.File) (Runner, error) {
+func TryStart(cfg config.RunConfig, opts vmm.Opts, nw NetAttachment, shareManager ShareProvider, dir string, console *os.File) (Runner, error) {
 	return nil, ErrUnavailable
 }

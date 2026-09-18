@@ -260,10 +260,7 @@ type sandboxTUIModel struct {
 	refreshing     bool
 	refreshVisible bool
 	lastUpdate     time.Time
-	busyAction     string
-	busyName       string
-	busyProgress   string
-	selectNext     string
+	tuiOperationState
 
 	spinner   spinner.Model
 	animating bool
@@ -549,7 +546,7 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyInputTheme()
 		return m, nil
 	case tea.FocusMsg:
-		if !m.refreshing && m.busyAction == "" {
+		if !m.refreshing && m.tuiOperationState.phase() == tuiOperationIdle {
 			m.refreshing = true
 			return m, refreshSandboxesCmd(m.service)
 		}
@@ -606,7 +603,7 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleRefresh(msg)
 	case tuiTickMsg:
 		cmds := []tea.Cmd{tuiTickCmd()}
-		if !m.refreshing && m.busyAction == "" {
+		if !m.refreshing && m.tuiOperationState.phase() == tuiOperationIdle {
 			m.refreshing = true
 			cmds = append(cmds, refreshSandboxesCmd(m.service))
 		}
@@ -624,7 +621,7 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.event.done != nil {
 			return m.handleProcessDone(*msg.event.done)
 		}
-		m.busyProgress = safeUILine(msg.event.progress)
+		_ = m.tuiOperationState.progress(safeUILine(msg.event.progress))
 		return m, waitTUIProcessStream(msg.stream)
 	case tuiToastExpiredMsg:
 		if m.toast != nil && m.toast.gen == msg.gen {
@@ -703,7 +700,7 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	// requested selection until the sandbox appears; handleProcessDone clears
 	// it explicitly if creation fails.
 	if found {
-		m.selectNext = ""
+		m.tuiOperationState.clearSelection()
 	}
 	if !found && selectedNewCard {
 		m.cursor = len(m.sandboxes)
@@ -717,9 +714,9 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 }
 
 func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, tea.Cmd) {
-	m.busyAction = ""
-	m.busyName = ""
-	m.busyProgress = ""
+	if !m.tuiOperationState.finish(msg.action, msg.name) {
+		return m, nil
+	}
 	if msg.action == "update" {
 		if msg.err != nil {
 			return m, m.showToast(tuiToastError, "Update failed", compactCommandError(msg.output, msg.err))
@@ -738,7 +735,7 @@ func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, t
 		kind = tuiToastError
 		title = actionTitle(msg.action) + " failed"
 		body = compactCommandError(msg.output, msg.err)
-		m.selectNext = ""
+		m.tuiOperationState.clearSelection()
 	} else if (msg.action == "edit" || msg.action == "share configure" || msg.action == "netpolicy set" || msg.action == "registry login" || msg.action == "image prune" || strings.HasPrefix(msg.action, "mcp ")) && msg.output != "" {
 		body = strings.TrimSpace(msg.output)
 	} else if msg.action == "open" {
@@ -768,7 +765,7 @@ func (m *sandboxTUIModel) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateDialogKey(msg)
 	}
 	key := msg.String()
-	if m.busyAction != "" {
+	if m.tuiOperationState.phase() == tuiOperationRunning {
 		return m, m.updateBusyKey(key)
 	}
 	if cmd, handled := m.updatePageActionKey(key); handled {
@@ -1244,15 +1241,23 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 }
 
 func (m *sandboxTUIModel) beginAction(action, name string, argv []string, interactive bool) (tea.Model, tea.Cmd) {
+	if !m.tuiOperationState.begin(action, name, action == "create" || action == "start") {
+		return m, nil
+	}
 	m.dialog = tuiNoDialog
 	m.dialogScroll = 0
-	m.busyAction = action
-	m.busyName = name
-	m.busyProgress = ""
-	if action == "create" || action == "start" {
-		m.selectNext = name
-	}
 	return m, tea.Batch(runTUIProcessCmd(m.operations, m.service, action, name, argv, interactive), m.ensureAnimation())
+}
+
+// beginServiceAction is the single admission point for in-process dashboard
+// mutations. Validation remains with each form, while this owner prevents a
+// second command from replacing the result routing of the active operation.
+func (m *sandboxTUIModel) beginServiceAction(action, name string, command tea.Cmd) (tea.Model, tea.Cmd) {
+	if !m.tuiOperationState.begin(action, name, false) {
+		return m, nil
+	}
+	m.closeDialog()
+	return m, tea.Batch(command, m.ensureAnimation())
 }
 
 func saveSandboxConfigCmd(service dashboardapi.Service, request dashboardapi.SandboxConfigRequest, running bool) tea.Cmd {
@@ -1414,7 +1419,7 @@ func removeSandboxShareCmd(service dashboardapi.Service, row tuiMountRow) tea.Cm
 }
 
 func (m *sandboxTUIModel) needsAnimation() bool {
-	if m.loading || m.refreshVisible || m.busyAction != "" {
+	if m.loading || m.refreshVisible || m.tuiOperationState.phase() == tuiOperationRunning {
 		return true
 	}
 	for _, sandbox := range m.sandboxes {

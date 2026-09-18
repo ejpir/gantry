@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -17,12 +18,11 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 	"github.com/ejpir/gantry/internal/shares"
 	"github.com/ejpir/gantry/internal/vmm"
-	"github.com/ejpir/gantry/internal/workerconf"
 
 	"github.com/containerd/ttrpc"
 )
 
-func (d *daemonRuntime) load() error {
+func (d *daemonSupervisor) load() error {
 	// The secrets handshake arrives on stdin before anything else. Refuse a
 	// malformed or oversized launcher handshake rather than silently starting
 	// a sandbox without the secrets the caller expected to inject.
@@ -30,7 +30,7 @@ func (d *daemonRuntime) load() error {
 	if err != nil {
 		return fmt.Errorf("secrets handshake: %w", err)
 	}
-	d.audit = &auditRing{}
+	d.host.audit = &auditRing{}
 
 	d.dir = layout.Dir(d.name)
 	// Revalidate the local control boundary before reading configuration. On
@@ -46,7 +46,7 @@ func (d *daemonRuntime) load() error {
 	if err != nil {
 		return fmt.Errorf("another daemon holds the sandbox lock: %w", err)
 	}
-	d.lock = lock
+	d.host.lock = lock
 	// Publish the pid only with the lifetime lock held: layout.PID treats a
 	// live pid as proof of life solely while vmm.lock is held, so a pid
 	// recycled after an early daemon death is never mistaken for a daemon.
@@ -57,8 +57,8 @@ func (d *daemonRuntime) load() error {
 	if err != nil {
 		return fmt.Errorf("config store: %w", err)
 	}
-	d.store = store
-	d.cfg = d.store.Snapshot()
+	d.host.store = store
+	d.cfg = d.host.config().Snapshot()
 	if err := d.loadOrganizationPolicy(); err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func (d *daemonRuntime) load() error {
 		return fmt.Errorf("secrets handshake isolation: %w", err)
 	}
 	d.secretStore = newSecretStore(secrets, sources, func(f string, a ...any) {
-		d.audit.logf(d.dir, f, a...)
+		d.host.audit.logf(d.dir, f, a...)
 	})
 	if d.cfg.ImageDigest != "" && !gutil.FileExists(d.cfg.Image) {
 		return fmt.Errorf("image %s not in cache; run `gantry image pull %s`", d.cfg.ImageDigest, d.cfg.ImageRef)
@@ -90,50 +90,50 @@ func (d *daemonRuntime) load() error {
 	return nil
 }
 
-func (d *daemonRuntime) startHostServices() error {
+func (d *daemonSupervisor) startHostServices() error {
 	consoleLog, err := boundedlog.NewPipe(filepath.Join(d.dir, "console.log"))
 	if err != nil {
 		return fmt.Errorf("console log broker: %w", err)
 	}
-	d.consoleLog = consoleLog
-	d.console = consoleLog.Writer()
+	d.host.consoleLog = consoleLog
+	d.host.console = consoleLog.Writer()
 	network, err := startNetworkWithGovernance(d.cfg, d.dir, d.governance.Snapshot())
 	if err != nil {
 		return err
 	}
-	d.network = network
+	d.host.network = network
 	d.bootLog("network up")
 	d.logNetworkState()
 
-	shareManager, warnings, err := control.NewShareManagerWithController(d.dir, d.store, d.governance)
+	shareManager, warnings, err := control.NewShareManagerWithController(d.dir, d.host.store, d.governance)
 	if err != nil {
 		return fmt.Errorf("shares: %w", err)
 	}
-	d.shares = shareManager
+	d.host.shares = shareManager
 	for _, warning := range warnings {
 		fmt.Fprintln(os.Stderr, "daemon: shares:", warning)
 	}
-	if d.networkTransactions == nil {
-		d.networkTransactions = control.NewNetworkTransactionCoordinator()
+	if d.host.networkTx == nil {
+		d.host.networkTx = control.NewNetworkTransactionCoordinator()
 	}
-	d.ports = control.NewPortManagerWithCoordinator(d.store, d.network.Backend, d.networkTransactions)
+	d.host.ports = control.NewPortManagerWithCoordinator(d.host.store, d.host.network.Backend, d.host.networkTx)
 	return nil
 }
 
-func (d *daemonRuntime) logNetworkState() {
-	if d.network.Policy != nil {
-		fmt.Fprintln(os.Stderr, "daemon: network policy:", d.network.Policy.Describe())
+func (d *daemonSupervisor) logNetworkState() {
+	if d.host.network.Policy != nil {
+		fmt.Fprintln(os.Stderr, "daemon: network policy:", d.host.network.Policy.Describe())
 	}
-	for _, degraded := range d.network.Degraded {
+	for _, degraded := range d.host.network.Degraded {
 		fmt.Fprintln(os.Stderr, "daemon: process isolation degraded:", degraded)
 	}
-	if d.network.Split {
+	if d.host.network.Split {
 		d.bootLog("network worker: split process (data/control channels up)")
 	}
 }
 
-func (d *daemonRuntime) prepareGuest() error {
-	opts, err := vmmOpts(d.cfg, d.network, d.dir, true)
+func (d *daemonSupervisor) prepareGuest() error {
+	opts, err := d.host.vmmOptions(d.cfg, d.dir, true)
 	if err != nil {
 		return err
 	}
@@ -150,36 +150,25 @@ func (d *daemonRuntime) prepareGuest() error {
 	if err := d.writeIsolationState(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: isolation state:", err)
 	}
-	if err := d.shares.Publish(); err != nil {
+	if err := d.host.shareBorrow().Publish(); err != nil {
 		return fmt.Errorf("share manifest: %w", err)
 	}
 	return nil
 }
 
-func (d *daemonRuntime) writeIsolationState() error {
-	var confinement *workerconf.Report
-	if reporter, ok := d.runner.(interface{ ConfinementReport() workerconf.Report }); ok {
-		report := reporter.ConfinementReport()
-		confinement = &report
-	}
-	var mcpConfinement *workerconf.Report
-	if d.mcpWorker != nil {
-		select {
-		case <-d.mcpWorker.Done():
-		default:
-			mcpConfinement = d.mcpWorker.ConfinementReport()
-		}
-	}
-	return writeIsolationState(d.dir, d.cfg, d.network, d.runner != nil, confinement, mcpConfinement)
+func (d *daemonSupervisor) writeIsolationState() error {
+	confinement, _ := d.guest.confinementReport()
+	mcpConfinement, _ := d.control.mcp.confinementReport()
+	return writeIsolationState(d.dir, d.cfg, d.host.network, d.guest.runnerBorrow() != nil, confinement, mcpConfinement)
 }
 
-func (d *daemonRuntime) prepareVM(opts vmm.Opts) error {
+func (d *daemonSupervisor) prepareVM(opts vmm.Opts) error {
 	// Split VMM (Phase 2): the guest runs in a _vmm-worker process; the
 	// supervisor keeps ctl.sock, sessions, policy, and all host sockets.
-	runner, splitErr := vmmworker.TryStart(d.cfg, opts, d.network.vmmAttachment(), d.shares, d.dir, d.console)
+	runner, splitErr := vmmworker.TryStart(d.cfg, opts, d.host.networkBorrow().vmmAttachment(), d.host.shareBorrow(), d.dir, d.host.console)
 	switch {
 	case splitErr == nil:
-		d.runner = runner
+		d.guest.setRunner(runner)
 		if err := d.installPolicyFanout(); err != nil {
 			return err
 		}
@@ -191,35 +180,35 @@ func (d *daemonRuntime) prepareVM(opts vmm.Opts) error {
 		fmt.Fprintf(os.Stderr, "daemon: split VMM failed (%v), falling back to monolithic\n", splitErr)
 	}
 
-	if hub := d.shares.Hub(); hub != nil {
+	if hub := d.host.shareBorrow().Hub(); hub != nil {
 		opts.Filesystems = []vmm.Filesystem{{
 			Tag:         shares.HubTag,
 			Handler:     hub,
 			Description: "share hub (hot-add enabled)",
 		}}
 	}
-	opts.Console = d.console
+	opts.Console = d.host.console
 	machine, err := vmm.Prepare(opts)
 	if err != nil {
 		return err
 	}
-	d.machine = machine
+	d.guest.setMachine(machine)
 	return nil
 }
 
-func (d *daemonRuntime) installPolicyFanout() error {
-	if d.network == nil || d.network.Split || d.network.Backend == nil {
+func (d *daemonSupervisor) installPolicyFanout() error {
+	if d.host.network == nil || d.host.network.Split || d.host.network.Backend == nil {
 		return nil
 	}
-	pusher, ok := d.runner.(control.VMMPolicyPusher)
-	if !ok {
+	pusher := d.guest.policyPusherBorrow()
+	if pusher == nil {
 		return nil
 	}
-	fanout, err := control.NewVMMPolicyBackend(d.network.Backend, pusher, d.network.Policy)
+	fanout, err := control.NewVMMPolicyBackend(d.host.network.Backend, pusher, d.host.network.Policy, d.guest.closeDevices)
 	if err != nil {
 		return fmt.Errorf("initialize VMM policy fan-out: %w", err)
 	}
-	d.network.Backend = fanout
+	d.host.network.Backend = fanout
 	return nil
 }
 
@@ -228,7 +217,7 @@ type guestRPCResult struct {
 	err    error
 }
 
-func (d *daemonRuntime) connectGuest() error {
+func (d *daemonSupervisor) connectGuest() error {
 	// Create the RPC listener before booting: vminitd makes one dial-back
 	// attempt, and a fast CI VM can otherwise beat net.Listen below.
 	rpcSock := filepath.Join(d.dir, "1025.sock")
@@ -237,28 +226,25 @@ func (d *daemonRuntime) connectGuest() error {
 		return err
 	}
 
-	guestErr := make(chan error, 1)
-	d.guestErr = guestErr
-	if d.runner != nil {
-		go func() { guestErr <- d.runner.Wait() }()
-	} else {
-		go func() { guestErr <- vmm.Run(d.machine) }()
-	}
+	guestErr := d.guest.start()
 	d.bootLog("vCPUs running; guest booting")
 
 	// Hold the single dial-back connection for the VM's lifetime, while also
 	// watching guestErr so a failed boot cannot strand CmdStart until timeout.
 	rpcCh := make(chan guestRPCResult, 1)
-	go func() {
+	if !d.guest.workers.start(func(context.Context) {
 		rpc, err := client.AcceptRPCListener(listener, rpcSock)
 		rpcCh <- guestRPCResult{client: rpc, err: err}
-	}()
+	}) {
+		_ = listener.Close()
+		return fmt.Errorf("guest plane is stopping")
+	}
 	select {
 	case result := <-rpcCh:
 		if result.err != nil {
 			return result.err
 		}
-		d.rpc = result.client
+		d.guest.setRPC(result.client)
 		return nil
 	case err := <-guestErr:
 		_ = listener.Close()
@@ -266,8 +252,11 @@ func (d *daemonRuntime) connectGuest() error {
 	}
 }
 
-func (d *daemonRuntime) publishReady() error {
-	if d.control == nil || d.broker == nil {
+func (d *daemonSupervisor) publishReady() error {
+	if phase := d.lifecycle.Phase(); phase != daemonControlReady {
+		return fmt.Errorf("refusing to publish readiness from daemon phase %s", phase)
+	}
+	if d.control.listener == nil || d.control.broker == nil {
 		return fmt.Errorf("refusing to publish readiness before the control broker is listening")
 	}
 	if err := inspection.PublishActive(d.dir, d.cfg); err != nil {
@@ -281,7 +270,12 @@ func (d *daemonRuntime) publishReady() error {
 	if err := os.Remove(filepath.Join(d.dir, config.MCPRestartMarker)); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, "daemon: clear MCP restart marker:", err)
 	}
-	_ = os.WriteFile(filepath.Join(d.dir, "ready"), []byte("1\n"), 0o600)
+	if err := os.WriteFile(filepath.Join(d.dir, "ready"), []byte("1\n"), 0o600); err != nil {
+		return fmt.Errorf("publish daemon readiness: %w", err)
+	}
+	if err := d.lifecycle.advance(daemonReady); err != nil {
+		return err
+	}
 	if err := notifyDaemonReady(d.readySocket); err != nil {
 		// The parent may have exited or fallen back to ready-file polling;
 		// readiness notification is never a reason to stop a healthy VM.
@@ -292,17 +286,10 @@ func (d *daemonRuntime) publishReady() error {
 	// Publish both durable and event-driven readiness before asking Linux to
 	// online the configured tail; the request may immediately consume a guest
 	// CPU for memory-block initialization, but must never delay the launcher.
-	runner, machine := d.runner, d.machine
-	go func() {
-		if runner != nil {
-			if err := runner.RequestHotMemory(); err != nil {
-				fmt.Fprintln(os.Stderr, "daemon: request post-readiness guest memory:", err)
-			}
-		} else if machine != nil {
-			if err := machine.RequestHotMemory(); err != nil {
-				fmt.Fprintln(os.Stderr, "daemon: request post-readiness guest memory:", err)
-			}
+	d.background.start(func(context.Context) {
+		if err := d.guest.requestHotMemory(); err != nil {
+			fmt.Fprintln(os.Stderr, "daemon: request post-readiness guest memory:", err)
 		}
-	}()
+	})
 	return nil
 }

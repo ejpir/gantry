@@ -34,7 +34,7 @@ func (r *runResolver) resolveOrganizationPolicy() error {
 	return nil
 }
 
-func (d *daemonRuntime) loadOrganizationPolicy() error {
+func (d *daemonSupervisor) loadOrganizationPolicy() error {
 	if d.cfg.OrgPolicy != nil && d.cfg.OAuthCustodyEnabled() {
 		return fmt.Errorf("organization policy v1 does not support OAuth custody")
 	}
@@ -47,14 +47,14 @@ func (d *daemonRuntime) loadOrganizationPolicy() error {
 	return nil
 }
 
-func (d *daemonRuntime) newOrganizationPolicyEngine(snapshot *policy.Config) (*policy.Engine, error) {
+func (d *daemonSupervisor) newOrganizationPolicyEngine(snapshot *policy.Config) (*policy.Engine, error) {
 	// The daemon-wide writer is available before the control broker and is
 	// shared with it later, so early mount decisions persist and concurrent
 	// policy/broker events cannot race audit.log rotation.
 	engine, err := policy.New(snapshot, func(decision policy.Decision) {
-		if d.audit != nil {
+		if d.host.audit != nil {
 			raw, _ := json.Marshal(decision)
-			d.audit.logf(d.dir, "policy: %s", raw)
+			d.host.audit.logf(d.dir, "policy: %s", raw)
 		}
 	})
 	if err != nil {
@@ -63,8 +63,8 @@ func (d *daemonRuntime) newOrganizationPolicyEngine(snapshot *policy.Config) (*p
 	return engine, nil
 }
 
-func (d *daemonRuntime) credentialAllowed(host string) bool {
-	if d.broker.domainAllowed != nil && !d.broker.domainAllowed(host) {
+func (d *daemonSupervisor) credentialAllowed(host string) bool {
+	if d.control.broker.domainAllowed != nil && !d.control.broker.domainAllowed(host) {
 		return false
 	}
 	return d.governance.Authorize(context.Background(), policy.CredentialUse, policy.Resource{Host: host}) == nil
@@ -73,7 +73,7 @@ func (d *daemonRuntime) credentialAllowed(host string) bool {
 // authorizeMCPDial runs on the exact IP selected by the supervisor's pinned
 // transport. A host-side MCP upstream must not bypass the organization egress
 // guard merely because its socket is outside the guest netstack.
-func (d *daemonRuntime) authorizeMCPDial(ctx context.Context, host string, ip net.IP, port string) error {
+func (d *daemonSupervisor) authorizeMCPDial(ctx context.Context, host string, ip net.IP, port string) error {
 	if err := d.governance.Authorize(ctx, policy.NetworkResolve, policy.Resource{Host: host}); err != nil {
 		return err
 	}

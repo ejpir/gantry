@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,8 +25,6 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
-
-	"github.com/containerd/ttrpc"
 )
 
 // broker accepts ctl connections. Protocol: one JSON request line, then
@@ -39,15 +38,15 @@ import (
 type broker struct {
 	cfg        config.RunConfig
 	dir        string
-	rpc        *ttrpc.Client
+	rpc        guestRPCBorrow
 	streamSock string
 	// streamDial replaces the streamSock unix dial in the split-VMM
 	// topology (streams cross the worker bridge).
 	streamDial     func() (net.Conn, error)
 	sessionSetupMu sync.Mutex
-	store          *config.ConfigStore
-	shares         *control.ShareManager
-	ports          *control.PortManager
+	store          configStoreBorrow
+	shares         shareManagerBorrow
+	ports          portManagerBorrow
 	netPolicy      *control.NetworkPolicyManager
 	capture        packetCaptureBackend
 	// secretStore resolves values at use time (source TTL, fail-closed);
@@ -91,6 +90,19 @@ type broker struct {
 }
 
 func (br *broker) serve(ln net.Listener) {
+	workers := new(backgroundGroup)
+	ctx, release, ok := workers.acquire()
+	if !ok {
+		return
+	}
+	br.serveOwned(ctx, ln, workers)
+	release()
+	workers.close()
+}
+
+// serveOwned admits every accepted connection to the control-plane group.
+// Closing that group cancels active sockets and joins their handlers.
+func (br *broker) serveOwned(ctx context.Context, ln net.Listener, workers *backgroundGroup) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -113,10 +125,26 @@ func (br *broker) serve(ln net.Listener) {
 			_ = c.Close()
 			continue
 		}
-		go func(c net.Conn) {
+		if !workers.start(func(ctx context.Context) {
 			defer br.limits.releaseConnection()
+			finished := make(chan struct{})
+			watcherDone := make(chan struct{})
+			go func() {
+				defer close(watcherDone)
+				select {
+				case <-ctx.Done():
+					_ = c.Close()
+				case <-finished:
+				}
+			}()
 			br.handle(c)
-		}(c)
+			close(finished)
+			<-watcherDone
+		}) {
+			br.limits.releaseConnection()
+			_ = c.Close()
+			return
+		}
 	}
 }
 
