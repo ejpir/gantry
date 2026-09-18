@@ -19,6 +19,8 @@ func TestApplicationBoundaries(t *testing.T) {
 	noSandboxParent := func(path string) bool { return path == sandboxRoot }
 	const dashboardRoot = "github.com/ejpir/gantry/internal/dashboard"
 	noDashboardParent := func(path string) bool { return path == dashboardRoot }
+	const sharefsRoot = "github.com/ejpir/gantry/internal/sharefs"
+	noShareFSParent := func(path string) bool { return path == sharefsRoot }
 	const vmmRoot = "github.com/ejpir/gantry/internal/vmm"
 	noVMMParent := func(path string) bool { return path == vmmRoot }
 	const managerRoot = "github.com/ejpir/gantry/internal/sandbox/manager"
@@ -41,6 +43,7 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/sandbox/manager/runtimeowner":   noManagerParent,
 		"internal/dashboard/operationstate":       noDashboardParent,
 		"internal/dashboard/refreshstate":         noDashboardParent,
+		"internal/sharefs/lifecycle":              noShareFSParent,
 		"internal/sandbox/lifecycle": func(path string) bool {
 			return path == "flag" || path == "os/exec" || strings.Contains(path, "/internal/dashboard") || strings.Contains(path, "/sandbox/manager")
 		},

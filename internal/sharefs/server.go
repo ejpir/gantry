@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/ejpir/gantry/internal/fusewire"
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/ejpir/gantry/internal/shares"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -19,12 +20,13 @@ import (
 // Server exposes one host directory through the raw FUSE protocol. It owns
 // the pinned root capability and is independent of both virtio and IPC.
 type Server struct {
-	root    string
-	export  *Export
-	handler fusewire.Handler
-	guard   *requestGuard
-	request sync.RWMutex
-	closed  bool
+	root       string
+	export     *Export
+	handler    fusewire.Handler
+	guard      *requestGuard
+	request    sync.RWMutex
+	lifecycle  sharelifecycle.Owner
+	finalizers deferredFinalizers
 }
 
 // NewServer opens and pins root, then builds a host-enforced FUSE server.
@@ -87,7 +89,7 @@ func (s *Server) Identity() Identity {
 func (s *Server) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	s.request.RLock()
 	defer s.request.RUnlock()
-	if s.closed {
+	if s.lifecycle.Phase() != sharelifecycle.Active {
 		return 0, fuse.EIO
 	}
 	return s.guard.handle(s.handler, in, out)
@@ -97,22 +99,29 @@ func (s *Server) Close() error {
 	if s == nil {
 		return nil
 	}
-	s.request.Lock()
-	defer s.request.Unlock()
-	if s.closed {
+	leader, done := s.lifecycle.BeginClose()
+	if !leader {
+		<-done
 		return nil
 	}
-	s.closed = true
-	s.export.finishNow()
+
+	s.request.Lock()
+	s.finalizers.stopAdmission()
+	if s.export != nil {
+		s.export.finishNow()
+	}
+	s.request.Unlock()
+	s.finalizers.wait()
+	s.lifecycle.FinishClose()
 	return nil
 }
 
 func (s *Server) scheduleFinish(finish func()) {
-	go func() {
+	s.finalizers.schedule(func() {
 		s.request.Lock()
 		defer s.request.Unlock()
 		finish()
-	}()
+	})
 }
 
 type readOnlyHandler struct{ next fusewire.Handler }

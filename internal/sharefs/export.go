@@ -106,14 +106,36 @@ func (e *Export) PolicyDenied() bool {
 	return e != nil && e.policyDenied.Load()
 }
 
-func (e *Export) advanceState(next ExportState) {
+func validExportTransition(current, next ExportState) bool {
+	switch current {
+	case ExportActive:
+		return next == ExportDraining || next == ExportRevoked
+	case ExportDraining:
+		return next == ExportRevoked
+	case ExportRevoked:
+		return next == ExportGone
+	default:
+		return false
+	}
+}
+
+// advanceState performs a validated monotonic transition. Repeated or stale
+// transitions are harmless, which lets forced removal, OnForget, and owner
+// shutdown race without regressing or skipping release phases.
+func (e *Export) advanceState(next ExportState) bool {
 	if e == nil {
-		return
+		return false
 	}
 	for {
-		current := e.state.Load()
-		if current >= int32(next) || e.state.CompareAndSwap(current, int32(next)) {
-			return
+		current := ExportState(e.state.Load())
+		if current == next {
+			return true
+		}
+		if !validExportTransition(current, next) {
+			return false
+		}
+		if e.state.CompareAndSwap(int32(current), int32(next)) {
+			return true
 		}
 	}
 }
@@ -163,7 +185,7 @@ func (e *Export) finishNow() {
 		return
 	}
 	e.finishOne.Do(func() {
-		e.advanceState(ExportGone)
+		e.advanceState(ExportRevoked)
 		if e.coherence != nil {
 			e.coherence.close()
 		}
@@ -173,6 +195,7 @@ func (e *Export) finishNow() {
 		if e.onFinish != nil {
 			e.onFinish(e)
 		}
+		e.advanceState(ExportGone)
 	})
 }
 

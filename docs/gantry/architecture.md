@@ -453,6 +453,15 @@ share hub. Guest requests name an admitted tag and a path relative to that
 root; they do not carry arbitrary host paths. The backend applies read-only
 policy before mutating host files and rejects traversal outside the root.
 
+`sharefs/lifecycle.Owner` serializes hub and standalone-server shutdown as
+`active → stopping → closed`. Shutdown stops admission, drains serving
+requests, detaches notification borrowers, closes each export watcher, and
+then releases its pinned root. OnForget releases that require a request-gate
+upgrade run as owned workers; shutdown stops worker admission and joins every
+admitted worker before publishing `closed`. Export state advances through
+`active → draining → revoked → gone`, with `gone` published only after watcher
+and root release complete.
+
 The guest mounts the multiplexed virtio-fs hub once, then bind-mounts admitted
 tags into the workload container. Live add and remove mutate the hub manifest
 rather than attaching another VM device. Persistent changes are serialized to
