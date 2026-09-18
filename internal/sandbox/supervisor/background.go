@@ -1,4 +1,4 @@
-package sandbox
+package supervisor
 
 import (
 	"context"
@@ -13,11 +13,10 @@ const (
 	backgroundClosed
 )
 
-// backgroundGroup is a one-shot owner for cancellable goroutines. Admission
+// BackgroundGroup is a one-shot owner for cancellable goroutines. Admission
 // and shutdown share one lock, so Wait can never race a zero-to-one WaitGroup
-// transition. close cancels every borrower and does not return until all of
-// them have released the context.
-type backgroundGroup struct {
+// transition. Close cancels every borrower and joins it before returning.
+type BackgroundGroup struct {
 	mu     sync.Mutex
 	phase  backgroundPhase
 	ctx    context.Context
@@ -26,9 +25,9 @@ type backgroundGroup struct {
 	closed chan struct{}
 }
 
-// acquire borrows the group context and returns its release function. The
+// Acquire borrows the group context and returns its release function. The
 // caller must release exactly once when admitted.
-func (g *backgroundGroup) acquire() (context.Context, func(), bool) {
+func (g *BackgroundGroup) Acquire() (context.Context, func(), bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.phase != backgroundOpen {
@@ -42,11 +41,12 @@ func (g *backgroundGroup) acquire() (context.Context, func(), bool) {
 	return g.ctx, g.wg.Done, true
 }
 
-func (g *backgroundGroup) start(run func(context.Context)) bool {
+// Start admits and launches one cancellable task.
+func (g *BackgroundGroup) Start(run func(context.Context)) bool {
 	if run == nil {
 		return false
 	}
-	ctx, done, ok := g.acquire()
+	ctx, done, ok := g.Acquire()
 	if !ok {
 		return false
 	}
@@ -57,7 +57,9 @@ func (g *backgroundGroup) start(run func(context.Context)) bool {
 	return true
 }
 
-func (g *backgroundGroup) close() {
+// Close prevents new tasks, cancels current tasks, and joins them. It is safe
+// for repeated and concurrent callers.
+func (g *BackgroundGroup) Close() {
 	g.mu.Lock()
 	switch g.phase {
 	case backgroundClosed:

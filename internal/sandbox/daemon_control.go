@@ -16,18 +16,21 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
+	"github.com/ejpir/gantry/internal/sandbox/guestplane"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
 )
 
 func (d *daemonSupervisor) startControl() error {
-	if d.host.networkTx == nil {
-		d.host.networkTx = control.NewNetworkTransactionCoordinator()
+	if d.host.Transactions() == nil {
+		d.host.SetTransactions(control.NewNetworkTransactionCoordinator())
 	}
-	d.control.signals = make(chan os.Signal, 1)
-	d.control.shutdown = make(chan struct{}, 1)
-	signal.Notify(d.control.signals, syscall.SIGINT, syscall.SIGTERM)
+	signals := make(chan os.Signal, 1)
+	shutdown := make(chan struct{}, 1)
+	d.control.SetSignals(signals)
+	d.control.SetShutdown(shutdown)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 
 	path := filepath.Join(d.dir, "ctl.sock")
 	listener, err := net.Listen("unix", path)
@@ -42,59 +45,60 @@ func (d *daemonSupervisor) startControl() error {
 		_ = os.Remove(path)
 		return fmt.Errorf("secure control endpoint: %w", err)
 	}
-	d.control.listener = listener
+	d.control.SetListener(listener)
 
 	var streamDial func() (net.Conn, error)
-	if runner := d.guest.runnerBorrow(); runner != nil {
+	if runner := d.guest.Runner(); runner != nil {
 		// Sessions cross the worker bridge: no host listen-1026.sock exists
 		// in the split topology.
 		streamDial = func() (net.Conn, error) { return runner.DialStream(1026) }
 	}
-	liveNetworkPolicy := d.host.network.Policy
+	liveNetworkPolicy := d.host.Network().Policy()
 	if liveNetworkPolicy == nil {
 		// Networking-disabled sandboxes still need a stable effective policy for
 		// the host credential egress gate when organization policy changes live.
 		liveNetworkPolicy = netpol.DefaultPolicy()
 	}
-	d.control.broker = &broker{
+	br := &broker{
 		cfg:            d.cfg,
 		dir:            d.dir,
-		rpc:            d.guest.rpcBorrow(),
+		rpc:            d.guest.RPC(),
 		streamSock:     filepath.Join(d.dir, "listen-1026.sock"),
 		streamDial:     streamDial,
 		secretStore:    d.secretStore,
-		store:          d.host.config(),
-		shares:         d.host.shareBorrow(),
-		ports:          d.host.portBorrow(),
-		netPolicy:      control.NewNetworkPolicyManagerWithCoordinator(d.host.store, d.host.network.Backend, liveNetworkPolicy, d.host.networkTx),
-		capture:        packetCaptureBackendFor(d.host.networkBorrow(), d.guest.packetCaptureBorrow()),
+		store:          d.host.Config(),
+		shares:         d.host.Shares(),
+		ports:          d.host.Ports(),
+		netPolicy:      control.NewNetworkPolicyManagerWithCoordinator(d.host.Config(), d.host.Network().Backend(), liveNetworkPolicy, d.host.Transactions()),
+		capture:        packetCaptureBackendFor(d.host.Network(), d.guest.PacketCapture()),
 		guestToolsDone: make(chan struct{}),
 		ideToolsDone:   make(chan struct{}),
 		sessions:       map[string]chan struct{}{},
 		sessionCtl:     map[string]net.Conn{},
-		shutdown:       d.control.shutdown,
-		audit:          d.host.audit,
+		shutdown:       shutdown,
+		audit:          d.host.Audit(),
 	}
-	d.control.broker.devContainers.Store(d.cfg.DevContainers)
-	d.control.broker.configure = d.configureSandbox
-	d.control.broker.policyApply = d.applyOrganizationPolicy
-	d.secretStore.SetLogger(d.control.broker.auditf)
+	d.control.SetBroker(br)
+	br.devContainers.Store(d.cfg.DevContainers)
+	br.configure = d.configureSandbox
+	br.policyApply = d.applyOrganizationPolicy
+	d.secretStore.SetLogger(br.auditf)
 	// The OAuth bridge replays callbacks through the generic internal exec,
 	// with its own response limit and op attribution bound here.
-	d.control.broker.oauth = oauthbridge.New(func(stdin io.Reader, args []string, timeout time.Duration) ([]byte, int, error) {
-		return d.control.broker.internalExec(stdin, args, timeout,
+	br.oauth = oauthbridge.New(func(stdin io.Reader, args []string, timeout time.Duration) ([]byte, int, error) {
+		return br.internalExec(stdin, args, timeout,
 			oauthbridge.MaxReplayResponseSize, "oauth callback replay")
-	}, d.control.broker.cfg.OAuthBridgeEnabled())
+	}, br.cfg.OAuthBridgeEnabled())
 	// Credential broker: guest helpers reach it over vsock (the VMM dials
 	// <dir>/1027.sock when a guest connects to the broker port). The egress
 	// gate follows the live policy object.
-	d.control.broker.domainAllowed = d.control.broker.netPolicy.DomainAllowed
+	br.domainAllowed = br.netPolicy.DomainAllowed
 	credLn, err := net.Listen("unix", filepath.Join(d.dir, credhelper.SockName))
 	if err != nil {
 		return fmt.Errorf("credential broker listener: %w", err)
 	}
 	// credhelper decision lines self-prefix "credhelper: ".
-	d.control.broker.cred = credhelper.New(d.control.broker.resolveCredential, d.credentialAllowed, d.control.broker.auditf)
+	br.cred = credhelper.New(br.resolveCredential, d.credentialAllowed, br.auditf)
 	// OAuth custody (opt-in): the daemon completes guest-initiated logins
 	// host-side, holds refresh tokens (0600 disk sync under the sandbox
 	// dir for restart durability), and pushes fresh access tokens into
@@ -103,19 +107,19 @@ func (d *daemonSupervisor) startControl() error {
 		_ = credLn.Close()
 		return err
 	}
-	d.control.broker.cfg.OAuthProviders = d.cfg.OAuthProviders
+	br.cfg.OAuthProviders = d.cfg.OAuthProviders
 	if d.cfg.OAuthCustodyEnabled() {
-		if d.control.broker.oauth == nil {
+		if br.oauth == nil {
 			_ = credLn.Close()
 			return fmt.Errorf("oauth custody requires an active OAuth callback bridge")
 		}
 		registry := oauthtokens.New()
 		registry.AttachFile(d.dir)
-		registry.SetLogger(func(f string, a ...any) { d.control.broker.auditf("oauth tokens: "+f, a...) })
-		d.control.broker.custodyRegistry = registry
-		cm := newCustodyManager(d.control.broker, registry)
-		d.control.broker.cred.SetOAuthHandler(cm.handleOAuthOp)
-		d.control.broker.oauth.SetCustodyConsumer(cm.consumeCallback)
+		registry.SetLogger(func(f string, a ...any) { br.auditf("oauth tokens: "+f, a...) })
+		br.custodyRegistry = registry
+		cm := newCustodyManager(br, registry)
+		br.cred.SetOAuthHandler(cm.handleOAuthOp)
+		br.oauth.SetCustodyConsumer(cm.consumeCallback)
 		cm.restoreRestart()
 		fmt.Printf("daemon: oauth custody enabled (refresh tokens held host-side)\n")
 	}
@@ -131,19 +135,19 @@ func (d *daemonSupervisor) startControl() error {
 			return err
 		}
 	}
-	d.control.credListener = credLn
-	if !d.control.servers.start(func(ctx context.Context) { _ = d.control.broker.cred.ServeContext(ctx, credLn) }) {
+	d.control.SetCredentialListener(credLn)
+	if !d.control.StartServer(func(ctx context.Context) { _ = br.cred.ServeContext(ctx, credLn) }) {
 		return fmt.Errorf("credential broker background owner is closed")
 	}
-	if !d.control.servers.start(func(ctx context.Context) { d.control.broker.serveOwned(ctx, listener, &d.control.servers) }) {
+	if !d.control.StartServer(func(ctx context.Context) { br.serveOwned(ctx, listener, d.control.StartServer) }) {
 		return fmt.Errorf("control broker background owner is closed")
 	}
 	return nil
 }
 
 func (d *daemonSupervisor) supervise() int {
-	workerDead := closedWhenNetworkWorkerExits(d.host.networkBorrow())
-	vmmDead := closedWhenVMMWorkerExits(d.guest.runnerBorrow())
+	workerDead := closedWhenNetworkWorkerExits(d.host.Network())
+	vmmDead := closedWhenVMMWorkerExits(d.guest.Runner())
 	var expiryTimer *time.Timer
 	defer func() {
 		if expiryTimer != nil {
@@ -194,11 +198,11 @@ func (d *daemonSupervisor) supervise() int {
 			return d.gracefulStop("organization policy expired")
 		case <-d.policyChanged:
 			continue
-		case sig := <-d.control.signals:
+		case sig := <-d.control.Signals():
 			return d.gracefulStop("signal " + sig.String())
-		case <-d.control.shutdown:
+		case <-d.control.Shutdown():
 			return d.gracefulStop("control request")
-		case err := <-d.guest.exited():
+		case err := <-d.guest.Exited():
 			fmt.Fprintln(os.Stderr, "daemon: VM exited:", err)
 			return 1
 		case <-workerDead:
@@ -208,14 +212,14 @@ func (d *daemonSupervisor) supervise() int {
 			// publish its authoritative process state so we do not report the
 			// dependent network EOF as the root cause.
 			if waitForClosed(vmmDead, 100*time.Millisecond) {
-				fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.guest.runnerBorrow().Err())
-				fmt.Fprintln(os.Stderr, "daemon: network worker also died:", d.host.network.Worker.Err())
+				fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.guest.Runner().Err())
+				fmt.Fprintln(os.Stderr, "daemon: network worker also died:", d.host.Network().WorkerError())
 			} else {
-				fmt.Fprintln(os.Stderr, "daemon: network worker died:", d.host.network.Worker.Err())
+				fmt.Fprintln(os.Stderr, "daemon: network worker died:", d.host.Network().WorkerError())
 			}
 			return 1
 		case <-vmmDead:
-			fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.guest.runnerBorrow().Err())
+			fmt.Fprintln(os.Stderr, "daemon: vmm worker died:", d.guest.Runner().Err())
 			return 1
 		}
 	}
@@ -239,14 +243,14 @@ func closedWhenNetworkWorkerExits(network networkBorrow) <-chan struct{} {
 	if network == nil {
 		return nil
 	}
-	worker := network.workerBorrow()
+	worker := network.WorkerBorrow()
 	if worker == nil {
 		return nil
 	}
 	return worker.Done()
 }
 
-func closedWhenVMMWorkerExits(runner guestRunnerBorrow) <-chan struct{} {
+func closedWhenVMMWorkerExits(runner guestplane.Runner) <-chan struct{} {
 	if runner == nil {
 		return nil
 	}
@@ -257,9 +261,9 @@ func (d *daemonSupervisor) gracefulStop(reason string) int {
 	// Record shutdown before closing admission and beginning potentially slow
 	// guest and device flushes. Deferred teardown observes the same idempotent
 	// stopping phase.
-	d.lifecycle.beginStop()
+	d.lifecycle.BeginStop()
 	fmt.Println("daemon:", reason, "— shutting down")
-	d.control.closeAdmission() // no new broker sessions
+	d.control.CloseAdmission() // no new broker sessions
 	// The OAuth watcher and guest-tool delivery own internal RPC sessions and
 	// temporary shares. Stop them before syncing or closing VM devices; deferred
 	// close repeats this safely before releasing their dependencies.
@@ -269,7 +273,7 @@ func (d *daemonSupervisor) gracefulStop(reason string) int {
 	// Process exit is a power cut for the guest. Flush while the RPC
 	// connection is still held: guest filesystem first (bounded because it
 	// may be wedged), then host-side devices.
-	if err := d.guest.sync(5 * time.Second); err != nil {
+	if err := d.guest.Sync(5 * time.Second); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: guest filesystem sync:", err)
 	}
 	shutdownErr := d.closeShutdownDevices()
@@ -288,9 +292,9 @@ func (d *daemonSupervisor) gracefulStop(reason string) int {
 // stopped first so its expected peer EOF is quiet. Monolithic networking is
 // owned by the VM and remains live until device teardown.
 func (d *daemonSupervisor) closeShutdownDevices() error {
-	return errors.Join(d.host.closeShutdownNetwork(), d.closeVMDevices())
+	return errors.Join(d.host.CloseShutdownNetwork(), d.closeVMDevices())
 }
 
 func (d *daemonSupervisor) closeVMDevices() error {
-	return d.guest.closeDevices()
+	return d.guest.CloseDevices()
 }

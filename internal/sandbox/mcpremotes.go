@@ -62,7 +62,7 @@ func mcpFilesystemArgv(cfg config.RunConfig) []string {
 }
 
 func (d *daemonSupervisor) resolveMCPServers() ([]mcpworkersup.Server, error) {
-	br := d.control.broker
+	br := d.control.Broker()
 	fsArgv := mcpFilesystemArgv(d.cfg)
 	servers := []mcpworkersup.Server{{
 		Config: mcpworkerapi.ServerConfig{

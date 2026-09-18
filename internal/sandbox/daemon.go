@@ -8,6 +8,9 @@ import (
 
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/controlplane"
+	"github.com/ejpir/gantry/internal/sandbox/guestplane"
+	sandboxsupervisor "github.com/ejpir/gantry/internal/sandbox/supervisor"
 	"github.com/ejpir/gantry/internal/secret"
 )
 
@@ -22,12 +25,12 @@ type daemonSupervisor struct {
 
 	started    time.Time
 	bootTiming bool
-	lifecycle  daemonLifecycle
+	lifecycle  sandboxsupervisor.Lifecycle
 
 	host       hostPlane
-	guest      guestPlane
-	control    controlPlane
-	background backgroundGroup
+	guest      guestplane.Plane
+	control    controlplane.Plane[*broker]
+	background sandboxsupervisor.BackgroundGroup
 
 	cfg         config.RunConfig
 	secretStore *secret.Store
@@ -63,9 +66,9 @@ func (d *daemonSupervisor) run() (exitCode int) {
 		// Every exit, including a partial boot failure, crosses the same teardown
 		// phase. Publish the terminal outcome only after daemonSupervisor.close has
 		// completed its process-level teardown policy.
-		d.lifecycle.beginStop()
+		d.lifecycle.BeginStop()
 		d.close()
-		if err := d.lifecycle.finish(exitCode != 0); err != nil {
+		if err := d.lifecycle.Finish(exitCode != 0); err != nil {
 			fmt.Fprintln(os.Stderr, "daemon: lifecycle:", err)
 			exitCode = 1
 		}
@@ -74,31 +77,31 @@ func (d *daemonSupervisor) run() (exitCode int) {
 	if err := d.load(); err != nil {
 		return daemonFailure(err)
 	}
-	if err := d.lifecycle.advance(daemonLoaded); err != nil {
+	if err := d.lifecycle.Advance(sandboxsupervisor.Loaded); err != nil {
 		return daemonFailure(err)
 	}
 	if err := d.startHostServices(); err != nil {
 		return daemonFailure(err)
 	}
-	if err := d.lifecycle.advance(daemonHostReady); err != nil {
+	if err := d.lifecycle.Advance(sandboxsupervisor.HostReady); err != nil {
 		return daemonFailure(err)
 	}
 	if err := d.prepareGuest(); err != nil {
 		return daemonFailure(err)
 	}
-	if err := d.lifecycle.advance(daemonGuestPrepared); err != nil {
+	if err := d.lifecycle.Advance(sandboxsupervisor.GuestPrepared); err != nil {
 		return daemonFailure(err)
 	}
 	if err := d.connectGuest(); err != nil {
 		return daemonFailure(err)
 	}
-	if err := d.lifecycle.advance(daemonGuestConnected); err != nil {
+	if err := d.lifecycle.Advance(sandboxsupervisor.GuestConnected); err != nil {
 		return daemonFailure(err)
 	}
 	if err := d.startControl(); err != nil {
 		return daemonFailure(err)
 	}
-	if err := d.lifecycle.advance(daemonControlReady); err != nil {
+	if err := d.lifecycle.Advance(sandboxsupervisor.ControlReady); err != nil {
 		return daemonFailure(err)
 	}
 	// MCP, bound secrets, and OAuth custody require the workload helper before
@@ -149,14 +152,14 @@ func (d *daemonSupervisor) close() {
 	// Background deliveries were acquired last and borrow all three planes.
 	// Every owner is idempotent because graceful shutdown may have released a
 	// subset of its resources before this process-level unwind.
-	d.background.close()
-	if err := d.control.close(); err != nil {
+	d.background.Close()
+	if err := d.control.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: control plane:", err)
 	}
-	if err := d.guest.close(); err != nil {
+	if err := d.guest.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: guest plane:", err)
 	}
-	if err := d.host.close(); err != nil {
+	if err := d.host.Close(); err != nil {
 		fmt.Fprintln(os.Stderr, "daemon: host plane:", err)
 	}
 }

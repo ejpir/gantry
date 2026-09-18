@@ -41,16 +41,13 @@ func TestCloseShutdownDevicesCollectsFinalNetworkTrafficBeforeVMMClose(t *testin
 		}
 		return nil
 	}
-	runtime := &daemonSupervisor{
-		guest: guestPlane{runner: runner},
-		host: hostPlane{network: &Network{
-			Split:   true,
-			Worker:  childConn,
-			Traffic: recorder,
-			close:   childConn.Close,
-		}},
+	network := &Network{
+		Split: true, Worker: childConn, Traffic: recorder, close: childConn.Close,
 	}
-	t.Cleanup(runtime.host.network.Close)
+	runtime := &daemonSupervisor{}
+	runtime.host.SetNetwork(networkView{network: network}, network.CloseBackend, network.Close)
+	runtime.guest.SetRunner(runner)
+	t.Cleanup(func() { _ = runtime.host.Close() })
 
 	if err := runtime.closeShutdownDevices(); err != nil {
 		t.Fatal(err)

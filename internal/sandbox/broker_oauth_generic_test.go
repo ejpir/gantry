@@ -119,7 +119,8 @@ func TestGenericCustodyLoginRefreshMCPAndRestart(t *testing.T) {
 	}
 
 	cm.br.cfg.MCPRemotes = []string{"name=company,url=https://mcp.example/mcp,auth=custody:company-mcp"}
-	d := daemonSupervisor{cfg: cm.br.cfg, control: controlPlane{broker: cm.br}}
+	d := daemonSupervisor{cfg: cm.br.cfg}
+	d.control.SetBroker(cm.br)
 	servers, err := d.resolveMCPServers()
 	if err != nil {
 		t.Fatal(err)
@@ -174,7 +175,7 @@ func TestGenericCustodyLoginRefreshMCPAndRestart(t *testing.T) {
 	restarted.pushAuthFile = cm.pushAuthFile
 	t.Cleanup(func() { stopCustodyLoops(restarted) })
 	restarted.restoreRestart()
-	d.control.broker = restarted.br
+	d.control.SetBroker(restarted.br)
 	servers, err = d.resolveMCPServers()
 	if err != nil {
 		t.Fatal(err)

@@ -101,7 +101,7 @@ func (d *daemonSupervisor) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "rootfs-spike: host snapshot %s (image %s, guest runtime %s)\n", prep.snapshot, image, runtimeName)
 
-	hub := d.host.shareBorrow().Hub()
+	hub := d.host.Shares().Hub()
 	if hub == nil {
 		fmt.Fprintln(os.Stderr, "gantry _rootfs-spike: the virtio-fs share hub is unavailable on this platform")
 		return 1
@@ -128,9 +128,9 @@ func (d *daemonSupervisor) runRootfsSpike(prep *rootfsSnapshotPrep) int {
 	}
 	defer release()
 
-	_, spikeErr := d.guest.rootfsSpike(client.RootfsSpikeOptions{
-		StreamSock:   d.control.broker.streamSock,
-		StreamDial:   d.control.broker.streamDial,
+	_, spikeErr := d.guest.RootfsSpike(client.RootfsSpikeOptions{
+		StreamSock:   d.control.Broker().streamSock,
+		StreamDial:   d.control.Broker().streamDial,
 		Report:       os.Stdout,
 		ExportTag:    rootfsSpikeExportRW,
 		ROTag:        rootfsSpikeExportRO,

@@ -27,11 +27,12 @@ func newPolicyAuditDaemon(t *testing.T) *daemonSupervisor {
 		t.Fatal(err)
 	}
 	d := &daemonSupervisor{
-		name: name, dir: dir, host: hostPlane{audit: &auditRing{}},
+		name: name, dir: dir,
 		cfg: config.RunConfig{OrgPolicy: policytest.Signed(t, policy.Profile{
 			Rules: []policy.Rule{{ID: "credential", Effect: "allow", Action: policy.CredentialUse, Host: "github.com"}},
 		})},
 	}
+	d.host.SetAudit(&auditRing{})
 	if err := d.loadOrganizationPolicy(); err != nil {
 		t.Fatal(err)
 	}
@@ -44,15 +45,15 @@ func TestOrganizationAuditPersistsBeforeBrokerAndAfterRestart(t *testing.T) {
 	// must leave policy provenance in the stopped command's audit.log too.
 	const resourceCanary = "PRIVATE-RESOURCE-NOT-FOR-AUDIT"
 	denied := d.governance.Evaluate(context.Background(), policy.MountRead, policy.Resource{Path: filepath.Join(d.dir, resourceCanary)})
-	if denied.Effect != "deny" || d.control.broker != nil {
+	if denied.Effect != "deny" || d.control.Broker() != nil {
 		t.Fatal("test did not exercise a denied pre-broker decision")
 	}
 	assertStoppedPolicyAudit(t, d, denied)
 
 	// All subsequent producers borrow the same sink writer, not a new file
 	// writer/rotation lock. Decisions of both effects must survive shutdown.
-	d.control.broker = &broker{dir: d.dir, audit: d.host.audit}
-	d.control.broker.auditf("mcp: session open")
+	d.control.SetBroker(&broker{dir: d.dir, audit: d.host.Audit()})
+	d.control.Broker().auditf("mcp: session open")
 	allowed := d.governance.Evaluate(context.Background(), policy.CredentialUse, policy.Resource{Host: "github.com"})
 	if allowed.Effect != "allow" {
 		t.Fatalf("approved credential: %+v", allowed)
@@ -67,7 +68,8 @@ func TestOrganizationAuditPersistsBeforeBrokerAndAfterRestart(t *testing.T) {
 	}
 
 	// A fresh daemon ring must append to, not overwrite, the persisted trail.
-	restarted := &daemonSupervisor{name: d.name, dir: d.dir, cfg: d.cfg, host: hostPlane{audit: &auditRing{}}}
+	restarted := &daemonSupervisor{name: d.name, dir: d.dir, cfg: d.cfg}
+	restarted.host.SetAudit(&auditRing{})
 	if err := restarted.loadOrganizationPolicy(); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +109,7 @@ func assertStoppedPolicyAudit(t *testing.T, d *daemonSupervisor, want ...policy.
 
 func TestOrganizationAndBrokerAuditShareRotationAndOrdering(t *testing.T) {
 	d := newPolicyAuditDaemon(t)
-	br := &broker{dir: d.dir, audit: d.host.audit}
+	br := &broker{dir: d.dir, audit: d.host.Audit()}
 	path := filepath.Join(d.dir, "audit.log")
 	seed := strings.Repeat("old-event\n", auditLogCap/len("old-event\n")+1)
 	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
@@ -133,7 +135,7 @@ func TestOrganizationAndBrokerAuditShareRotationAndOrdering(t *testing.T) {
 	}
 	close(start)
 	wg.Wait()
-	live := d.host.audit.tail()
+	live := d.host.Audit().tail()
 	if len(live) != 2*producers {
 		t.Fatalf("live count=%d", len(live))
 	}
@@ -165,7 +167,7 @@ func TestOrganizationAuditDiskFailureKeepsLiveDecision(t *testing.T) {
 	if decision.Effect != "allow" {
 		t.Fatalf("audit disk failure changed authorization: %+v", decision)
 	}
-	lines := d.host.audit.tail()
+	lines := d.host.Audit().tail()
 	if len(lines) != 1 || !strings.Contains(lines[0], `"effect":"allow"`) {
 		t.Fatalf("live audit lost decision after disk failure: %v", lines)
 	}

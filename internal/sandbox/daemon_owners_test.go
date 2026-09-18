@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/control"
+	"github.com/ejpir/gantry/internal/sandbox/guestplane"
 	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
 	"github.com/ejpir/gantry/internal/sharefs"
 )
@@ -56,18 +56,18 @@ func TestDaemonSupervisorClosesOwnersInReverseAcquisitionOrder(t *testing.T) {
 		close(runnerDone)
 		return nil
 	}}
-	d := &daemonSupervisor{
-		host:  hostPlane{network: &Network{close: func() error { record("host"); return nil }}},
-		guest: guestPlane{runner: runner},
-	}
-	d.control.listener = newOrderedListener(record)
-	if !d.background.start(func(ctx context.Context) {
+	network := &Network{close: func() error { record("host"); return nil }}
+	d := &daemonSupervisor{}
+	d.host.SetNetwork(networkView{network: network}, nil, network.Close)
+	d.guest.SetRunner(runner)
+	d.control.SetListener(newOrderedListener(record))
+	if !d.background.Start(func(ctx context.Context) {
 		<-ctx.Done()
 		record("background")
 	}) {
 		t.Fatal("background task was rejected")
 	}
-	d.guest.start()
+	d.guest.Start()
 
 	d.close()
 	d.close()
@@ -96,8 +96,9 @@ func TestBorrowedCapabilitiesDoNotExposeClose(t *testing.T) {
 		reflect.TypeOf((*networkWorkerBorrow)(nil)).Elem(),
 		reflect.TypeOf((*shareManagerBorrow)(nil)).Elem(),
 		reflect.TypeOf((*portManagerBorrow)(nil)).Elem(),
-		reflect.TypeOf((*guestRunnerBorrow)(nil)).Elem(),
-		reflect.TypeOf((*guestRPCBorrow)(nil)).Elem(),
+		reflect.TypeOf((*guestplane.Runner)(nil)).Elem(),
+		reflect.TypeOf((*guestplane.RPC)(nil)).Elem(),
+		reflect.TypeOf((*guestplane.PacketCapture)(nil)).Elem(),
 		reflect.TypeOf((*control.VMMPolicyPusher)(nil)).Elem(),
 		reflect.TypeOf((*vmmworker.ShareProvider)(nil)).Elem(),
 		reflect.TypeOf((*vmmworker.NetAttachment)(nil)).Elem(),
@@ -109,13 +110,7 @@ func TestBorrowedCapabilitiesDoNotExposeClose(t *testing.T) {
 		}
 	}
 
-	runner := &closeFailureRunner{done: make(chan struct{})}
-	guest := guestPlane{runner: runner}
 	borrowed := []any{
-		guest.runnerBorrow(),
-		guestRPCClient{},
-		guestPolicyPusherView{pusher: policyPusherStub{}},
-		guestPacketCaptureView{},
 		networkView{},
 		shareManagerView{},
 	}
@@ -125,7 +120,3 @@ func TestBorrowedCapabilitiesDoNotExposeClose(t *testing.T) {
 		}
 	}
 }
-
-type policyPusherStub struct{}
-
-func (policyPusherStub) SetPolicy(*netpol.Policy) error { return nil }

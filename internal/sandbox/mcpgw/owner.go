@@ -1,24 +1,27 @@
-package sandbox
+package mcpgw
 
 import (
 	"context"
 	"net"
 	"sync"
 
+	"github.com/ejpir/gantry/internal/sandbox/supervisor"
 	"github.com/ejpir/gantry/internal/workerconf"
 )
 
-type mcpGatewayPhase uint8
+type ownerPhase uint8
 
 const (
-	mcpGatewayIdle mcpGatewayPhase = iota
-	mcpGatewayRunning
-	mcpGatewayStopping
-	mcpGatewayExited
-	mcpGatewayClosed
+	ownerIdle ownerPhase = iota
+	ownerRunning
+	ownerStopping
+	ownerExited
+	ownerClosed
 )
 
-type mcpGatewayWorker interface {
+// Worker is the owned MCP worker capability. Close remains on the ownership
+// interface and is never exposed by Owner's borrowed methods.
+type Worker interface {
 	Serve(context.Context, net.Conn) error
 	Done() <-chan struct{}
 	ConfinementReport() *workerconf.Report
@@ -26,54 +29,52 @@ type mcpGatewayWorker interface {
 	Close() error
 }
 
-// mcpGatewayOwner owns the MCP listener, confined worker, accept loop, worker
-// watcher, and every accepted relay goroutine. backgroundGroup serializes task
-// admission against shutdown and joins all callbacks which borrow daemon
-// services before close returns.
-type mcpGatewayOwner struct {
+// Owner owns the MCP listener, confined worker, accept loop, worker watcher,
+// and every accepted relay goroutine.
+type Owner struct {
 	mu       sync.Mutex
-	phase    mcpGatewayPhase
+	phase    ownerPhase
 	listener net.Listener
-	worker   mcpGatewayWorker
-	workers  *backgroundGroup
+	worker   Worker
+	workers  *supervisor.BackgroundGroup
 	closed   chan struct{}
 }
 
-func (o *mcpGatewayOwner) start(listener net.Listener, worker mcpGatewayWorker, sessionError, workerExit func()) bool {
+func (o *Owner) Start(listener net.Listener, worker Worker, sessionError, workerExit func()) bool {
 	if listener == nil || worker == nil {
 		return false
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.phase != mcpGatewayIdle {
+	if o.phase != ownerIdle {
 		return false
 	}
-	workers := new(backgroundGroup)
-	o.phase = mcpGatewayRunning
+	workers := new(supervisor.BackgroundGroup)
+	o.phase = ownerRunning
 	o.listener = listener
 	o.worker = worker
 	o.workers = workers
 	o.closed = make(chan struct{})
-	workers.start(func(ctx context.Context) { o.accept(ctx, listener, worker, sessionError) })
-	workers.start(func(ctx context.Context) { o.watch(ctx, worker, listener, workerExit) })
+	workers.Start(func(ctx context.Context) { o.accept(ctx, listener, worker, sessionError) })
+	workers.Start(func(ctx context.Context) { o.watch(ctx, worker, listener, workerExit) })
 	return true
 }
 
-func (o *mcpGatewayOwner) accept(ctx context.Context, listener net.Listener, worker mcpGatewayWorker, sessionError func()) {
+func (o *Owner) accept(ctx context.Context, listener net.Listener, worker Worker, sessionError func()) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
 		o.mu.Lock()
-		running := o.phase == mcpGatewayRunning
+		running := o.phase == ownerRunning
 		workers := o.workers
 		o.mu.Unlock()
 		if !running || workers == nil {
 			_ = conn.Close()
 			return
 		}
-		if !workers.start(func(ctx context.Context) {
+		if !workers.Start(func(ctx context.Context) {
 			defer func() { _ = conn.Close() }()
 			if err := worker.Serve(ctx, conn); err != nil {
 				select {
@@ -91,7 +92,7 @@ func (o *mcpGatewayOwner) accept(ctx context.Context, listener net.Listener, wor
 	}
 }
 
-func (o *mcpGatewayOwner) watch(ctx context.Context, worker mcpGatewayWorker, listener net.Listener, workerExit func()) {
+func (o *Owner) watch(ctx context.Context, worker Worker, listener net.Listener, workerExit func()) {
 	select {
 	case <-worker.Done():
 	case <-ctx.Done():
@@ -99,8 +100,8 @@ func (o *mcpGatewayOwner) watch(ctx context.Context, worker mcpGatewayWorker, li
 	}
 	_ = listener.Close()
 	o.mu.Lock()
-	if o.phase == mcpGatewayRunning {
-		o.phase = mcpGatewayExited
+	if o.phase == ownerRunning {
+		o.phase = ownerExited
 	}
 	o.mu.Unlock()
 	if workerExit != nil {
@@ -108,18 +109,18 @@ func (o *mcpGatewayOwner) watch(ctx context.Context, worker mcpGatewayWorker, li
 	}
 }
 
-func (o *mcpGatewayOwner) closeSessions() {
+func (o *Owner) CloseSessions() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.phase == mcpGatewayRunning && o.worker != nil {
+	if o.phase == ownerRunning && o.worker != nil {
 		o.worker.CloseSessions()
 	}
 }
 
-func (o *mcpGatewayOwner) confinementReport() (*workerconf.Report, bool) {
+func (o *Owner) ConfinementReport() (*workerconf.Report, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.phase != mcpGatewayRunning || o.worker == nil {
+	if o.phase != ownerRunning || o.worker == nil {
 		return nil, false
 	}
 	select {
@@ -130,21 +131,21 @@ func (o *mcpGatewayOwner) confinementReport() (*workerconf.Report, bool) {
 	}
 }
 
-func (o *mcpGatewayOwner) close() error {
+func (o *Owner) Close() error {
 	o.mu.Lock()
 	switch o.phase {
-	case mcpGatewayIdle, mcpGatewayClosed:
+	case ownerIdle, ownerClosed:
 		o.mu.Unlock()
 		return nil
-	case mcpGatewayStopping:
+	case ownerStopping:
 		closed := o.closed
 		o.mu.Unlock()
 		if closed != nil {
 			<-closed
 		}
 		return nil
-	case mcpGatewayRunning, mcpGatewayExited:
-		o.phase = mcpGatewayStopping
+	case ownerRunning, ownerExited:
+		o.phase = ownerStopping
 	}
 	listener, worker, workers := o.listener, o.worker, o.workers
 	o.mu.Unlock()
@@ -157,14 +158,14 @@ func (o *mcpGatewayOwner) close() error {
 		err = worker.Close()
 	}
 	if workers != nil {
-		workers.close()
+		workers.Close()
 	}
 
 	o.mu.Lock()
 	o.listener = nil
 	o.worker = nil
 	o.workers = nil
-	o.phase = mcpGatewayClosed
+	o.phase = ownerClosed
 	if o.closed != nil {
 		close(o.closed)
 		o.closed = nil

@@ -29,7 +29,7 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 			{Property: workerconf.PropFSWrite, State: workerconf.StateUnenforced, Detail: "probe"},
 		},
 	}
-	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, nw, true, conf, nil); err != nil {
+	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, networkView{network: nw}, true, conf, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
@@ -60,7 +60,7 @@ func TestWriteIsolationStateConfinement(t *testing.T) {
 		t.Fatalf("unenforced property not reported degraded: %v", st.Degraded)
 	}
 	// Monolithic boot: no report, honest unavailable everywhere.
-	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, nw, false, nil, nil); err != nil {
+	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, networkView{network: nw}, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, _ = os.ReadFile(filepath.Join(dir, "isolation.json"))
@@ -97,7 +97,7 @@ func TestWriteIsolationStateSeparatesWorkerRoles(t *testing.T) {
 	networkReport := enforced(true)
 	vmmReport := enforced(false)
 	network := &Network{Split: true, Confinement: networkReport}
-	if err := writeIsolationState(dir, config.RunConfig{Net: true, ProcessIsolation: "required"}, network, true, vmmReport, nil); err != nil {
+	if err := writeIsolationState(dir, config.RunConfig{Net: true, ProcessIsolation: "required"}, networkView{network: network}, true, vmmReport, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
@@ -135,7 +135,7 @@ func TestWriteIsolationStateIncludesMCPWorker(t *testing.T) {
 			{Property: workerconf.PropTaskLimit, State: workerconf.StateEnforced},
 		}}
 	cfg := config.RunConfig{MCP: true, ProcessIsolation: "required"}
-	if err := writeIsolationState(dir, cfg, &Network{}, true, mcp, mcp); err != nil {
+	if err := writeIsolationState(dir, cfg, networkView{network: &Network{}}, true, mcp, mcp); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
@@ -170,7 +170,7 @@ func TestWriteIsolationStateClassifiesLandlockAsFilesystemBoundary(t *testing.T)
 			{Property: workerconf.PropProcEnum, State: workerconf.StateEnforced},
 			{Property: workerconf.PropTaskLimit, State: workerconf.StateEnforced},
 		}}
-	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, &Network{}, true, conf, nil); err != nil {
+	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, networkView{network: &Network{}}, true, conf, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "isolation.json"))
@@ -199,7 +199,7 @@ func TestWriteIsolationStateDarwinAggregatesSignalBoundary(t *testing.T) {
 			{Property: workerconf.PropProcSignal, State: workerconf.StateUnenforced},
 		},
 	}
-	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, &Network{}, true, conf, nil); err != nil {
+	if err := writeIsolationState(dir, config.RunConfig{ProcessIsolation: "auto"}, networkView{network: &Network{}}, true, conf, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "isolation.json"))

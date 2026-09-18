@@ -16,7 +16,7 @@ import (
 // then explicitly reconciles host services to it. VM allocation and Dev
 // Containers topology remain restart-only; the SSH endpoint converges live.
 func (d *daemonSupervisor) configureSandbox(request controlproto.ConfigureRequest) (bool, error) {
-	tx, err := d.host.config().BeginConfiguration(request.SandboxUpdate())
+	tx, err := d.host.Config().BeginConfiguration(request.SandboxUpdate())
 	if err != nil {
 		return false, err
 	}
@@ -29,7 +29,7 @@ func (d *daemonSupervisor) configureSandbox(request controlproto.ConfigureReques
 			return false, fmt.Errorf("enable Dev Containers: %w", err)
 		}
 		for _, warning := range warnings {
-			d.control.broker.auditf("devcontainers: %s", warning)
+			d.control.Broker().auditf("devcontainers: %s", warning)
 		}
 		if err := tx.Amend(config.SandboxUpdate{
 			DevContainersProfile: devcontainersprofile.ProfileUpdate(prepared),
@@ -64,13 +64,13 @@ func (d *daemonSupervisor) configureSandbox(request controlproto.ConfigureReques
 		// Whether rollback committed, conflicted, or failed before replacement,
 		// the store snapshot is the authoritative desired state. Reconcile it so
 		// a concurrent newer revision is never left behind in live services.
-		if restoreErr := d.reconcileSandboxServices(d.host.config().Snapshot()); restoreErr != nil {
+		if restoreErr := d.reconcileSandboxServices(d.host.Config().Snapshot()); restoreErr != nil {
 			result = errors.Join(result, fmt.Errorf("reconcile authoritative sandbox services: %w", restoreErr))
 		}
 		return false, result
 	}
 	if before.DevContainers != after.DevContainers {
-		d.control.broker.auditf("devcontainers: IDE container enabled=%t after restart", after.DevContainers)
+		d.control.Broker().auditf("devcontainers: IDE container enabled=%t after restart", after.DevContainers)
 	}
 	return restartRequired, persistErr
 }
@@ -80,7 +80,7 @@ func (d *daemonSupervisor) configureSandbox(request controlproto.ConfigureReques
 // inferring it from the previous configuration, making retries and no-op
 // configure requests repair partial service failures.
 func (d *daemonSupervisor) reconcileSandboxServices(desired config.RunConfig) error {
-	sshRunning := d.control.ssh.running()
+	sshRunning := d.control.SSHRunning()
 	if desired.SSH == sshRunning {
 		return nil
 	}

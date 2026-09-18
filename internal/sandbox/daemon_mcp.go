@@ -33,7 +33,7 @@ func (d *daemonSupervisor) startMCPGateway() error {
 		return fmt.Errorf("mcp gateway: %w", err)
 	}
 	mcpWorker, err := mcpworkersup.Start(servers, d.dir, d.cfg.ProcessIsolation, func(event mcpgw.Event) {
-		d.control.broker.auditf("%s", event.String())
+		d.control.Broker().auditf("%s", event.String())
 	})
 	if err != nil {
 		return fmt.Errorf("mcp gateway: %w", err)
@@ -43,13 +43,13 @@ func (d *daemonSupervisor) startMCPGateway() error {
 		_ = mcpWorker.Close()
 		return fmt.Errorf("mcp gateway listener: %w", err)
 	}
-	if !d.control.mcp.start(ln, mcpWorker,
-		func() { d.control.broker.auditf("mcp: guest session relay failed") },
+	if !d.control.StartMCP(ln, mcpWorker,
+		func() { d.control.Broker().auditf("mcp: guest session relay failed") },
 		func() {
 			if err := d.writeIsolationState(); err != nil {
 				fmt.Printf("daemon: isolation state after MCP worker exit: %v\n", err)
 			}
-			d.control.broker.auditf("mcp: worker exited; MCP disabled for this sandbox")
+			d.control.Broker().auditf("mcp: worker exited; MCP disabled for this sandbox")
 		}) {
 		_ = ln.Close()
 		_ = mcpWorker.Close()
@@ -58,7 +58,7 @@ func (d *daemonSupervisor) startMCPGateway() error {
 	if err := d.writeIsolationState(); err != nil {
 		fmt.Printf("daemon: isolation state after MCP worker start: %v\n", err)
 	}
-	d.control.broker.auditf("mcp: gateway enabled in split worker (fs root %s, local servers run as %s, %d remotes)",
+	d.control.Broker().auditf("mcp: gateway enabled in split worker (fs root %s, local servers run as %s, %d remotes)",
 		d.cfg.MCPFSRoot, d.cfg.MCPFSUser, len(d.cfg.MCPRemotes))
 	return nil
 }

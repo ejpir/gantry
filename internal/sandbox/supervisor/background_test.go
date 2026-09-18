@@ -1,4 +1,4 @@
-package sandbox
+package supervisor
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 )
 
 func TestBackgroundGroupCancelsJoinsAndClosesAdmission(t *testing.T) {
-	var group backgroundGroup
+	var group BackgroundGroup
 	started := make(chan struct{})
 	exited := make(chan struct{})
-	if !group.start(func(ctx context.Context) {
+	if !group.Start(func(ctx context.Context) {
 		close(started)
 		<-ctx.Done()
 		close(exited)
@@ -19,22 +19,21 @@ func TestBackgroundGroupCancelsJoinsAndClosesAdmission(t *testing.T) {
 		t.Fatal("initial background task was rejected")
 	}
 	<-started
-	group.close()
+	group.Close()
 	select {
 	case <-exited:
 	default:
-		t.Fatal("close returned before the task exited")
+		t.Fatal("Close returned before the task exited")
 	}
-	if group.start(func(context.Context) {}) {
-		t.Fatal("task admitted after close")
+	if group.Start(func(context.Context) {}) {
+		t.Fatal("task admitted after Close")
 	}
-	// Repeated and concurrent closes must observe the same joined terminal state.
 	var callers sync.WaitGroup
 	for range 8 {
 		callers.Add(1)
 		go func() {
 			defer callers.Done()
-			group.close()
+			group.Close()
 		}()
 	}
 	done := make(chan struct{})
@@ -42,6 +41,6 @@ func TestBackgroundGroupCancelsJoinsAndClosesAdmission(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("concurrent close did not return")
+		t.Fatal("concurrent Close did not return")
 	}
 }

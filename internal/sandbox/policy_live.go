@@ -19,7 +19,7 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 	d.policyUpdateMu.Lock()
 	defer d.policyUpdateMu.Unlock()
 
-	cfg := d.host.config().Snapshot()
+	cfg := d.host.Config().Snapshot()
 	if sameLiveOrganizationPolicy(cfg.OrgPolicy, snapshot) {
 		return nil
 	}
@@ -39,8 +39,8 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 	// The controller barrier covers host-side credentials and MCP. The share
 	// barrier drains FUSE operations and covers existing handles separately.
 	d.governance.SetBlocked(true)
-	d.control.mcp.closeSessions()
-	if shares := d.host.shareBorrow(); shares != nil {
+	d.control.CloseMCPSessions()
+	if shares := d.host.Shares(); shares != nil {
 		shares.SetPolicyBlocked(true)
 	}
 	releaseBarriers := true
@@ -48,27 +48,27 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 		if !releaseBarriers {
 			return
 		}
-		if shares := d.host.shareBorrow(); shares != nil {
+		if shares := d.host.Shares(); shares != nil {
 			shares.SetPolicyBlocked(false)
 		}
 		d.governance.SetBlocked(false)
 	}()
 
-	if d.host.networkTx == nil {
-		d.host.networkTx = control.NewNetworkTransactionCoordinator()
+	if d.host.Transactions() == nil {
+		d.host.SetTransactions(control.NewNetworkTransactionCoordinator())
 	}
-	return d.host.networkTx.Run(func() error {
+	return d.host.Transactions().Run(func() error {
 		// Read both the persisted settings and effective network policy inside
 		// the network transaction. A concurrent local net-policy or port update
 		// therefore lands wholly before or after this organization generation.
-		cfg = d.host.config().Snapshot()
-		if d.control.broker == nil || d.control.broker.netPolicy == nil {
+		cfg = d.host.Config().Snapshot()
+		if d.control.Broker() == nil || d.control.Broker().netPolicy == nil {
 			return fmt.Errorf("live organization policy requires the daemon network policy controller")
 		}
-		if cfg.Net && (d.host.network == nil || d.host.network.Backend == nil) {
+		if cfg.Net && (d.host.Network() == nil || d.host.Network().Backend() == nil) {
 			return fmt.Errorf("live organization policy requires a running embedded netstack")
 		}
-		oldNetwork, err := d.control.broker.netPolicy.CurrentPolicy()
+		oldNetwork, err := d.control.Broker().netPolicy.CurrentPolicy()
 		if err != nil {
 			return fmt.Errorf("snapshot current network policy: %w", err)
 		}
@@ -85,12 +85,12 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 		}
 		rollback := func(cause error, restoreShares bool) error {
 			var rollbackErr error
-			if shares := d.host.shareBorrow(); restoreShares && shares != nil {
+			if shares := d.host.Shares(); restoreShares && shares != nil {
 				if err := shares.ReconcileOrganizationPolicy(oldEngine); err != nil {
 					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore previous share policy: %w", err))
 				}
 			}
-			if err := d.control.broker.netPolicy.ReplaceEffectivePolicy(oldNetwork); err != nil {
+			if err := d.control.Broker().netPolicy.ReplaceEffectivePolicy(oldNetwork); err != nil {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore previous live network policy: %w", err))
 			}
 			if rollbackErr != nil {
@@ -100,17 +100,17 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 			}
 			return cause
 		}
-		barrier, err := d.control.broker.netPolicy.FailClosedPolicy()
+		barrier, err := d.control.Broker().netPolicy.FailClosedPolicy()
 		if err != nil {
 			return fmt.Errorf("prepare fail-closed network barrier: %w", err)
 		}
-		if err := d.control.broker.netPolicy.ReplaceEffectivePolicy(barrier); err != nil {
+		if err := d.control.Broker().netPolicy.ReplaceEffectivePolicy(barrier); err != nil {
 			return fmt.Errorf("enter fail-closed network barrier: %w", err)
 		}
-		if err := d.control.broker.netPolicy.ReplaceEffectivePolicy(nextNetwork); err != nil {
+		if err := d.control.Broker().netPolicy.ReplaceEffectivePolicy(nextNetwork); err != nil {
 			return rollback(fmt.Errorf("apply live organization network policy: %w", err), false)
 		}
-		if shares := d.host.shareBorrow(); shares != nil {
+		if shares := d.host.Shares(); shares != nil {
 			if err := shares.ReconcileOrganizationPolicy(engine); err != nil {
 				// Manifest rollback is internal to ShareManager. Stop anyway if
 				// its own fail-closed path left the hub unavailable.
@@ -124,7 +124,7 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 			}
 		}
 
-		persistErr := d.host.config().SetOrganizationPolicy(snapshot)
+		persistErr := d.host.Config().SetOrganizationPolicy(snapshot)
 		if persistErr != nil && !atomicfile.Committed(persistErr) {
 			return rollback(persistErr, true)
 		}
@@ -134,19 +134,19 @@ func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) erro
 		case d.policyChanged <- struct{}{}:
 		default:
 		}
-		if persistErr != nil && d.host.audit != nil {
-			d.host.audit.logf(d.dir, "policy: snapshot applied but configuration durability is uncertain: %v", persistErr)
+		if persistErr != nil && d.host.Audit() != nil {
+			d.host.Audit().logf(d.dir, "policy: snapshot applied but configuration durability is uncertain: %v", persistErr)
 		}
 		return nil
 	})
 }
 
 func (d *daemonSupervisor) stopAfterPolicyReconciliationFailure() {
-	if d.control.shutdown == nil {
+	if d.control.Shutdown() == nil {
 		return
 	}
 	select {
-	case d.control.shutdown <- struct{}{}:
+	case d.control.Shutdown() <- struct{}{}:
 	default:
 	}
 }

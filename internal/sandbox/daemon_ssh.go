@@ -46,7 +46,7 @@ func defaultSSHUser(cfgUser string, uid uint32) string {
 }
 
 func (d *daemonSupervisor) startSSHGateway() error {
-	if d.control.ssh.running() {
+	if d.control.SSHRunning() {
 		return nil
 	}
 	listener, endpoint, err := listenSSH(d.name, d.dir)
@@ -61,32 +61,32 @@ func (d *daemonSupervisor) startSSHGateway() error {
 	}
 	gateway, err := sshgw.New(sshgw.Config{
 		Name: d.name, HostKeyPath: sshHostKeyPath(), DefaultUser: defaultUser,
-		Spawner: sshgw.SpawnFunc(d.control.broker.spawnSSH),
-		Auditf:  d.control.broker.auditf, PeerAllowed: localsec.PeerSameUser,
+		Spawner: sshgw.SpawnFunc(d.control.Broker().spawnSSH),
+		Auditf:  d.control.Broker().auditf, PeerAllowed: localsec.PeerSameUser,
 	})
 	if err != nil {
 		_ = listener.Close()
 		removeSSHRuntime(d.name, d.dir)
 		return fmt.Errorf("SSH gateway: %w", err)
 	}
-	d.control.sshCleanup = func() { removeSSHRuntime(d.name, d.dir) }
-	if !d.control.ssh.start(listener, func(ctx context.Context, listener net.Listener) {
+	d.control.SetSSHCleanup(func() { removeSSHRuntime(d.name, d.dir) })
+	if !d.control.StartSSH(listener, func(ctx context.Context, listener net.Listener) {
 		if err := gateway.Serve(ctx, listener); err != nil {
-			d.control.broker.auditf("ssh: gateway stopped: %v", err)
+			d.control.Broker().auditf("ssh: gateway stopped: %v", err)
 		}
 	}) {
 		_ = listener.Close()
 		return nil
 	}
-	d.control.broker.auditf("ssh: gateway enabled on sandbox-local socket")
-	if d.control.broker.devContainers.Load() {
-		d.control.broker.auditf("devcontainers: curated IDE container enabled inside sandbox VM")
+	d.control.Broker().auditf("ssh: gateway enabled on sandbox-local socket")
+	if d.control.Broker().devContainers.Load() {
+		d.control.Broker().auditf("devcontainers: curated IDE container enabled inside sandbox VM")
 	}
 	return nil
 }
 
 func (d *daemonSupervisor) stopSSHGateway() {
-	d.control.ssh.stop()
+	d.control.StopSSH()
 	removeSSHRuntime(d.name, d.dir)
 }
 

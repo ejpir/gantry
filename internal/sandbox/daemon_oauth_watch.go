@@ -19,15 +19,15 @@ const oauthWatchReadyTimeout = 10 * time.Second
 // and waits for its first procfs snapshot. This happens before daemon readiness,
 // so an immediately launched OAuth CLI cannot beat listener discovery.
 func (d *daemonSupervisor) startOAuthListenerWatch() error {
-	if d.control.broker == nil || d.control.broker.oauth == nil {
+	if d.control.Broker() == nil || d.control.Broker().oauth == nil {
 		return nil
 	}
-	decoder := newOAuthWatchDecoder(d.control.broker.oauth, func(format string, a ...any) {
+	decoder := newOAuthWatchDecoder(d.control.Broker().oauth, func(format string, a ...any) {
 		fmt.Fprintf(os.Stderr, "daemon: oauth watcher: "+format+"\n", a...)
 	})
 	exited := make(chan error, 1)
-	if !d.control.oauth.start(func(ctx context.Context) {
-		status, err := d.control.broker.runOAuthWatchSession(ctx, decoder)
+	if !d.control.StartOAuth(func(ctx context.Context) {
+		status, err := d.control.Broker().runOAuthWatchSession(ctx, decoder)
 		decoder.Close()
 		if err == nil && status != 0 {
 			err = fmt.Errorf("guest helper exited %d", status)
@@ -50,18 +50,18 @@ func (d *daemonSupervisor) startOAuthListenerWatch() error {
 		fmt.Fprintln(os.Stderr, "daemon: oauth watcher ready (guest loopback listener discovery active)")
 		return nil
 	case err := <-exited:
-		d.control.stopOAuth()
+		d.control.StopOAuth()
 		if err == nil {
 			err = fmt.Errorf("guest helper stopped before its first snapshot")
 		}
 		return fmt.Errorf("start OAuth listener watcher: %w", err)
 	case <-timer.C:
-		d.control.stopOAuth()
+		d.control.StopOAuth()
 		return fmt.Errorf("start OAuth listener watcher: no snapshot within %s", oauthWatchReadyTimeout)
 	}
 }
 
-func (d *daemonSupervisor) stopOAuthListenerWatch() { d.control.stopOAuth() }
+func (d *daemonSupervisor) stopOAuthListenerWatch() { d.control.StopOAuth() }
 
 type oauthWatchDecoder struct {
 	mu          sync.Mutex

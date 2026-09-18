@@ -52,9 +52,9 @@ func (d *daemonSupervisor) newOrganizationPolicyEngine(snapshot *policy.Config) 
 	// shared with it later, so early mount decisions persist and concurrent
 	// policy/broker events cannot race audit.log rotation.
 	engine, err := policy.New(snapshot, func(decision policy.Decision) {
-		if d.host.audit != nil {
+		if d.host.Audit() != nil {
 			raw, _ := json.Marshal(decision)
-			d.host.audit.logf(d.dir, "policy: %s", raw)
+			d.host.Audit().logf(d.dir, "policy: %s", raw)
 		}
 	})
 	if err != nil {
@@ -64,7 +64,7 @@ func (d *daemonSupervisor) newOrganizationPolicyEngine(snapshot *policy.Config) 
 }
 
 func (d *daemonSupervisor) credentialAllowed(host string) bool {
-	if d.control.broker.domainAllowed != nil && !d.control.broker.domainAllowed(host) {
+	if d.control.Broker().domainAllowed != nil && !d.control.Broker().domainAllowed(host) {
 		return false
 	}
 	return d.governance.Authorize(context.Background(), policy.CredentialUse, policy.Resource{Host: host}) == nil

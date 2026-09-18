@@ -40,9 +40,9 @@ func CmdMCSpike(argv []string) int {
 // (guest RPC, stream bridge, control socket all live) at this point, and the
 // spike uses the same guest connection and stream wiring as broker sessions.
 func (d *daemonSupervisor) runMCSpike() int {
-	err := d.guest.multiContainerSpike(client.SpikeOptions{
-		StreamSock: d.control.broker.streamSock,
-		StreamDial: d.control.broker.streamDial,
+	err := d.guest.MultiContainerSpike(client.SpikeOptions{
+		StreamSock: d.control.Broker().streamSock,
+		StreamDial: d.control.Broker().streamDial,
 		ImgCfg:     d.cfg.ImageCfg,
 		LayerSet:   d.cfg.LayerSet,
 		Report:     os.Stdout,
