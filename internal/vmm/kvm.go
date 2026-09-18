@@ -110,11 +110,11 @@ type kvmFile struct {
 func (m *Machine) takeKVM() (*os.File, error) {
 	m.resourceMu.Lock()
 	defer m.resourceMu.Unlock()
-	if m.lifecycle == machineStopping || m.lifecycle == machineClosed {
+	if m.lifecycle.phase == machineStopping || m.lifecycle.phase == machineClosed {
 		return nil, errMachineClosed
 	}
-	if m.lifecycle != machineRunning {
-		return nil, errors.New("vmm: KVM descriptor requested outside Run")
+	if m.lifecycle.phase != machineStarting {
+		return nil, errors.New("vmm: KVM descriptor requested outside startup")
 	}
 	fd := m.kvmFD
 	m.kvmFD = nil

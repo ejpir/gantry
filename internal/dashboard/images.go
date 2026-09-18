@@ -167,9 +167,7 @@ func (m sandboxTUIModel) renderRegistryDetail(theme tuiTheme, width int) []strin
 const tuiImagePullSubmitFocus = 2
 
 func (m *sandboxTUIModel) openImagePullDialog() tea.Cmd {
-	m.dialog = tuiImagePullDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiImagePullDialog)
 	m.pullRef.Reset()
 	m.pullArch = "auto"
 	m.resizeInputs()
@@ -257,9 +255,7 @@ func (m *sandboxTUIModel) submitImagePull() (tea.Model, tea.Cmd) {
 const tuiRegistryLoginSubmitFocus = 3
 
 func (m *sandboxTUIModel) openRegistryLoginDialog() tea.Cmd {
-	m.dialog = tuiRegistryLoginDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiRegistryLoginDialog)
 	m.loginRegistry.Reset()
 	m.loginUsername.Reset()
 	m.loginPassword.Reset()
@@ -342,10 +338,8 @@ func (m *sandboxTUIModel) submitRegistryLogin() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.loginPassword.Reset()
-	m.closeDialog()
-	m.busyAction = "registry login"
-	m.busyName = request.Registry
-	return m, tea.Batch(storeRegistryLoginCmd(m.service, request), m.ensureAnimation())
+	return m.beginServiceAction("registry login", request.Registry,
+		storeRegistryLoginCmd(m.service, request))
 }
 
 // ---------------- removals ----------------
@@ -357,17 +351,11 @@ func (m *sandboxTUIModel) removeSelectedImage() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	copyRow := *row
-	m.closeDialog()
-	m.busyAction = "image remove"
-	m.busyName = copyRow.Ref
-	return m, tea.Batch(removeImageCmd(m.service, copyRow), m.ensureAnimation())
+	return m.beginServiceAction("image remove", copyRow.Ref, removeImageCmd(m.service, copyRow))
 }
 
 func (m *sandboxTUIModel) pruneImages() (tea.Model, tea.Cmd) {
-	m.closeDialog()
-	m.busyAction = "image prune"
-	m.busyName = ""
-	return m, tea.Batch(pruneImagesCmd(m.service), m.ensureAnimation())
+	return m.beginServiceAction("image prune", "", pruneImagesCmd(m.service))
 }
 
 func (m *sandboxTUIModel) logoutSelectedRegistry() (tea.Model, tea.Cmd) {
@@ -377,10 +365,8 @@ func (m *sandboxTUIModel) logoutSelectedRegistry() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	copyRow := *row
-	m.closeDialog()
-	m.busyAction = "registry logout"
-	m.busyName = copyRow.Registry
-	return m, tea.Batch(removeRegistryLoginCmd(m.service, copyRow), m.ensureAnimation())
+	return m.beginServiceAction("registry logout", copyRow.Registry,
+		removeRegistryLoginCmd(m.service, copyRow))
 }
 
 // ---------------- mouse ----------------

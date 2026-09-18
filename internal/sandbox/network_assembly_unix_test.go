@@ -7,6 +7,7 @@ package sandbox
 // itself is tested in the networker package.
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,14 +53,22 @@ func TestStartNetworkSplitModes(t *testing.T) {
 			if n.Backend == nil {
 				t.Fatal("no backend")
 			}
-			if err := n.Backend.Publish("tcp", "127.0.0.1:18083", "192.168.127.2:8083"); err != nil {
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := listener.Addr().String()
+			if err := listener.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := n.Backend.Publish("tcp", local, "192.168.127.2:8083"); err != nil {
 				t.Fatal(err)
 			}
 			fw, err := n.Backend.Forwards()
 			if err != nil || len(fw) != 1 {
 				t.Fatalf("forwards: %+v err=%v", fw, err)
 			}
-			if err := n.Backend.Unpublish("tcp", "127.0.0.1:18083"); err != nil {
+			if err := n.Backend.Unpublish("tcp", local); err != nil {
 				t.Fatal(err)
 			}
 			// split: the worker owns enforcement + per-boot counters;

@@ -5,6 +5,20 @@ This page lists the public command surface. Run `gantry --help` and
 
 ## Sandbox lifecycle
 
+### `gantry apply` and `gantry manifest`
+
+```text
+gantry manifest validate FILE
+gantry manifest export NAME
+gantry apply -f FILE [--check] [--force]
+```
+
+Manifests are strict, versioned YAML sandbox definitions. `apply` creates and
+starts a missing sandbox, resumes an unchanged stopped sandbox, and cleanly
+restarts a changed running sandbox. `--check` reports the action without
+changing state. `export` emits a redacted, re-applicable manifest and never
+includes secret values. See [Sandbox manifests](manifests.md).
+
 ### `gantry start`
 
 ```text

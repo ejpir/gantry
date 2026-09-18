@@ -243,7 +243,7 @@ func TestVMMPolicyBackendFailureLeavesPreviousPolicy(t *testing.T) {
 	t.Run("worker push fails", func(t *testing.T) {
 		local := &policyBackendStub{policy: mustPolicySnapshot(old)}
 		worker := &policyPusherStub{policy: mustPolicySnapshot(old), failNext: errors.New("worker unavailable")}
-		fanout, err := NewVMMPolicyBackend(local, worker, old)
+		fanout, err := NewVMMPolicyBackend(local, worker, old, worker.Close)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -264,7 +264,7 @@ func TestVMMPolicyBackendFailureLeavesPreviousPolicy(t *testing.T) {
 	t.Run("local mirror fails", func(t *testing.T) {
 		local := &policyBackendStub{policy: mustPolicySnapshot(old), failNext: errors.New("local failure")}
 		worker := &policyPusherStub{policy: mustPolicySnapshot(old)}
-		fanout, err := NewVMMPolicyBackend(local, worker, old)
+		fanout, err := NewVMMPolicyBackend(local, worker, old, worker.Close)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -287,7 +287,7 @@ func TestVMMPolicyBackendFailureLeavesPreviousPolicy(t *testing.T) {
 		worker := &policyPusherStub{
 			policy: mustPolicySnapshot(old), failAt: 2, failAtErr: errors.New("rollback response lost"),
 		}
-		fanout, err := NewVMMPolicyBackend(local, worker, old)
+		fanout, err := NewVMMPolicyBackend(local, worker, old, worker.Close)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,7 +302,7 @@ func TestVMMPolicyBackendFailureLeavesPreviousPolicy(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		local := &policyBackendStub{policy: mustPolicySnapshot(old)}
 		worker := &policyPusherStub{policy: mustPolicySnapshot(old)}
-		fanout, err := NewVMMPolicyBackend(local, worker, old)
+		fanout, err := NewVMMPolicyBackend(local, worker, old, worker.Close)
 		if err != nil {
 			t.Fatal(err)
 		}

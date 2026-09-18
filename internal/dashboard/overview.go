@@ -136,7 +136,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 		{"e", "Edit configuration"},
 		{"i", "Full sandbox details"},
 	}
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		actions = nil
 	}
 	bodyHeight := rect.h - 2
@@ -158,7 +158,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 		})
 		lines = append(lines, text)
 	}
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		// Replace the action heading rather than advertising disabled controls.
 		lines[len(lines)-1] = muted.Render("Action in progress…")
 	}

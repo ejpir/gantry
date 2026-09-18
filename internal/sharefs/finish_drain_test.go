@@ -16,10 +16,10 @@ func wrapExportReleaseForTest(t *testing.T, export *Export) <-chan struct{} {
 	original := export.release
 	var once sync.Once
 	export.release = func() {
-		once.Do(func() { close(released) })
 		if original != nil {
 			original()
 		}
+		once.Do(func() { close(released) })
 	}
 	return released
 }
@@ -39,6 +39,17 @@ func awaitRelease(t *testing.T, released <-chan struct{}) {
 	case <-released:
 	case <-time.After(finishDrainTestTimeout):
 		t.Fatal("export resources were not released after requests drained")
+	}
+}
+
+func awaitExportGone(t *testing.T, export *Export) {
+	t.Helper()
+	deadline := time.Now().Add(finishDrainTestTimeout)
+	for export.State() != ExportGone && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if state := export.State(); state != ExportGone {
+		t.Fatalf("export state after release = %s, want gone", state)
 	}
 }
 
@@ -87,9 +98,7 @@ func TestHubExportFinishDrainsActiveRequest(t *testing.T) {
 		t.Fatal("simulated request did not release its read lock")
 	}
 	awaitRelease(t, released)
-	if state := export.State(); state != ExportGone {
-		t.Fatalf("export state after release = %s, want gone", state)
-	}
+	awaitExportGone(t, export)
 }
 
 func TestServerExportFinishDrainsActiveRequest(t *testing.T) {
@@ -128,9 +137,7 @@ func TestServerExportFinishDrainsActiveRequest(t *testing.T) {
 		t.Fatal("simulated request did not release its read lock")
 	}
 	awaitRelease(t, released)
-	if state := server.export.State(); state != ExportGone {
-		t.Fatalf("export state after release = %s, want gone", state)
-	}
+	awaitExportGone(t, server.export)
 }
 
 func TestHubCloseCompletesQueuedExportFinish(t *testing.T) {

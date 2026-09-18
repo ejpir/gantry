@@ -22,8 +22,9 @@ func errnoToStatus(errno syscall.Errno) fuse.Status {
 }
 
 type fileEntry struct {
-	file  FileHandle
-	inode *Inode
+	file      FileHandle
+	inode     *Inode
+	directory bool
 
 	// index into Inode.openFiles
 	nodeIndex int
@@ -238,7 +239,7 @@ func (b *rawBridge) addNewChild(parent *Inode, name string, child *Inode, file F
 	// Any node that might be there is overwritten - it is obsolete now
 	b.stableAttrs[id] = child
 	if file != nil {
-		fe = b.registerFile(child, file, fileFlags)
+		fe = b.registerFile(child, file, fileFlags, false)
 	}
 
 	parent.setEntry(name, child)
@@ -354,6 +355,57 @@ func (b *rawBridge) GantryResourceUsage() (nodes, handles int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.kernelNodeIds), len(b.files) - 1 - len(b.freeFiles)
+}
+
+// GantryCloseResources detaches and releases every retained file and directory
+// handle. GANTRY PATCH: ProtocolServer has no mount lifecycle, so Gantry's
+// in-process share owner invokes this after draining request admission and
+// before releasing export roots.
+func (b *rawBridge) GantryCloseResources() int {
+	type detachedFile struct {
+		entry *fileEntry
+		fh    uint32
+	}
+	b.mu.Lock()
+	detached := make([]detachedFile, 0, len(b.files)-1-len(b.freeFiles))
+	for fh := uint32(1); int(fh) < len(b.files); fh++ {
+		entry := b.files[fh]
+		if entry == nil || entry.inode == nil {
+			continue
+		}
+		node := entry.inode
+		if entry.nodeIndex >= 0 && entry.nodeIndex < len(node.openFiles) && node.openFiles[entry.nodeIndex] == fh {
+			last := len(node.openFiles) - 1
+			if last != entry.nodeIndex {
+				node.openFiles[entry.nodeIndex] = node.openFiles[last]
+				b.files[node.openFiles[entry.nodeIndex]].nodeIndex = entry.nodeIndex
+			}
+			node.openFiles = node.openFiles[:last]
+		}
+		b.files[fh] = nil
+		entry.nodeIndex = -1
+		detached = append(detached, detachedFile{entry: entry, fh: fh})
+	}
+	b.mu.Unlock()
+
+	for _, file := range detached {
+		file.entry.wg.Wait()
+		if file.entry.directory {
+			releaseDirHandle(context.Background(), file.entry.file)
+		} else if releaser, ok := file.entry.inode.ops.(NodeReleaser); ok {
+			releaser.Release(context.Background(), file.entry.file)
+		} else if releaser, ok := file.entry.file.(FileReleaser); ok {
+			_ = releaser.Release(context.Background())
+		}
+	}
+
+	b.mu.Lock()
+	for _, file := range detached {
+		b.releaseBackingIDRef(file.entry.inode)
+		b.freeFiles = append(b.freeFiles, file.fh)
+	}
+	b.mu.Unlock()
+	return len(detached)
 }
 
 // GantryPruneCandidates returns bounded guest-visible inode IDs that the
@@ -986,7 +1038,7 @@ func (b *rawBridge) Open(cancel <-chan struct{}, input *fuse.OpenIn, out *fuse.O
 	if f != nil {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		fe := b.registerFile(n, f, input.Flags)
+		fe := b.registerFile(n, f, input.Flags, false)
 		out.Fh = uint64(fe.fh)
 
 		b.addBackingID(n, f, out)
@@ -1056,8 +1108,8 @@ func (b *rawBridge) releaseBackingIDRef(n *Inode) {
 
 // registerFile hands out a file handle. Must have bridge.mu. Flags are the open flags
 // (eg. syscall.O_EXCL).
-func (b *rawBridge) registerFile(n *Inode, f FileHandle, flags uint32) *fileEntry {
-	fe := &fileEntry{inode: n}
+func (b *rawBridge) registerFile(n *Inode, f FileHandle, flags uint32, directory bool) *fileEntry {
+	fe := &fileEntry{inode: n, directory: directory}
 	if len(b.freeFiles) > 0 {
 		last := len(b.freeFiles) - 1
 		fe.fh = b.freeFiles[last]
@@ -1327,7 +1379,7 @@ func (b *rawBridge) OpenDir(cancel <-chan struct{}, input *fuse.OpenIn, out *fus
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	fe := b.registerFile(n, fh, 0)
+	fe := b.registerFile(n, fh, 0, true)
 	out.Fh = uint64(fe.fh)
 	out.OpenFlags = fuseFlags
 	return fuse.OK

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/virtio"
 
@@ -71,6 +72,20 @@ type closeCountingConn struct {
 
 type closeCountingFilesystem struct {
 	closes atomic.Int32
+}
+
+type orderedFilesystem struct {
+	name  string
+	order *[]string
+}
+
+func (*orderedFilesystem) HandleRequest([][]byte, [][]byte) (int, fuse.Status) {
+	return 0, fuse.ENOSYS
+}
+
+func (f *orderedFilesystem) Close() error {
+	*f.order = append(*f.order, f.name)
+	return nil
 }
 
 func (*closeCountingFilesystem) HandleRequest([][]byte, [][]byte) (int, fuse.Status) {
@@ -267,6 +282,78 @@ func TestMachineCloseReleasesSuccessfulPrepareInputsOnce(t *testing.T) {
 	}
 }
 
+func TestMachineCloseReleasesDevicesInReverseAttachmentOrder(t *testing.T) {
+	var order []string
+	first := &orderedFilesystem{name: "first", order: &order}
+	second := &orderedFilesystem{name: "second", order: &order}
+	m, err := Prepare(Opts{
+		MemSize: MinMemoryBytes,
+		VCPUs:   1,
+		Kernel:  openCleanupTestARMKernel(t),
+		Filesystems: []Filesystem{
+			{Tag: "first", Handler: first, Owner: first},
+			{Tag: "second", Handler: second, Owner: second},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, ","); got != "second,first" {
+		t.Fatalf("device close order = %q, want %q", got, "second,first")
+	}
+}
+
+func TestMachineCloseJoinsBackendBeforeReleasingDevices(t *testing.T) {
+	var order []string
+	filesystem := &orderedFilesystem{name: "devices", order: &order}
+	m, err := Prepare(Opts{
+		MemSize: MinMemoryBytes,
+		VCPUs:   1,
+		Kernel:  openCleanupTestARMKernel(t),
+		Filesystems: []Filesystem{{
+			Tag: "shared", Handler: filesystem, Owner: filesystem,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.beginRun(); err != nil {
+		t.Fatal(err)
+	}
+	backendClosed := make(chan struct{})
+	if err := m.adoptBackend(closeFunc(func() error {
+		order = append(order, "backend")
+		close(backendClosed)
+		return nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- m.Close() }()
+	select {
+	case <-backendClosed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not stop the backend")
+	}
+	if err := m.finishRun(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not finish after Run joined")
+	}
+	if got := strings.Join(order, ","); got != "backend,devices" {
+		t.Fatalf("close order = %q, want %q", got, "backend,devices")
+	}
+}
+
 func TestPrepareRejectsReusedFilesystemOwnerAndClosesItOnce(t *testing.T) {
 	filesystem := &closeCountingFilesystem{}
 	_, err := Prepare(Opts{
@@ -302,8 +389,8 @@ func TestPrepareRejectsReusedDescriptorObject(t *testing.T) {
 
 func TestAddVirtioFailureClosesRejectedDevice(t *testing.T) {
 	m := &Machine{
-		arch: "amd64",
-		mem:  virtio.NewRAM(make([]byte, 4096), 0),
+		machineResources: machineResources{mem: virtio.NewRAM(make([]byte, 4096), 0)},
+		arch:             "amd64",
 	}
 	defer func() { _ = m.Close() }()
 	for range x86MMIOIRQs {
@@ -329,8 +416,8 @@ func TestAttachVsockRejectsListenerFailureBeforeBoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	machine := &Machine{
-		arch: "arm64",
-		mem:  virtio.NewRAM(make([]byte, 1<<20), 0),
+		machineResources: machineResources{mem: virtio.NewRAM(make([]byte, 1<<20), 0)},
+		arch:             "arm64",
 	}
 	defer func() { _ = machine.Close() }()
 

@@ -12,6 +12,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -117,9 +118,18 @@ func (g *Gateway) auditf(format string, args ...any) {
 
 // Serve accepts local socket connections until ctx is canceled or ln closes.
 func (g *Gateway) Serve(ctx context.Context, ln net.Listener) error {
+	serveCtx, stop := context.WithCancel(ctx)
+	listenerStopped := make(chan struct{})
 	go func() {
-		<-ctx.Done()
+		defer close(listenerStopped)
+		<-serveCtx.Done()
 		_ = ln.Close()
+	}()
+	var connections sync.WaitGroup
+	defer func() {
+		stop()
+		<-listenerStopped
+		connections.Wait()
 	}()
 	for {
 		conn, err := ln.Accept()
@@ -134,7 +144,11 @@ func (g *Gateway) Serve(ctx context.Context, ln net.Listener) error {
 			_ = conn.Close()
 			continue
 		}
-		go g.serveConn(ctx, conn)
+		connections.Add(1)
+		go func() {
+			defer connections.Done()
+			g.serveConn(serveCtx, conn)
+		}()
 	}
 }
 
@@ -164,7 +178,12 @@ func (g *Gateway) serveConn(parent context.Context, raw net.Conn) {
 
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	go g.rejectGlobalRequests(requests, user)
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		g.rejectGlobalRequests(requests, user)
+	}()
 	var active atomic.Int32
 	for newChannel := range channels {
 		if active.Add(1) > MaxChannels {
@@ -173,11 +192,18 @@ func (g *Gateway) serveConn(parent context.Context, raw net.Conn) {
 			_ = newChannel.Reject(ssh.ResourceShortage, genericChannelRefusal)
 			continue
 		}
+		workers.Add(1)
 		go func(ch ssh.NewChannel) {
+			defer workers.Done()
 			defer active.Add(-1)
 			g.handleChannel(ctx, user, ch)
 		}(newChannel)
 	}
+	// Closing the transport makes every request/channel stream observable as
+	// closed. Join their handlers before Serve can return to its listener owner.
+	cancel()
+	_ = conn.Close()
+	workers.Wait()
 }
 
 func (g *Gateway) rejectGlobalRequests(requests <-chan *ssh.Request, user string) {

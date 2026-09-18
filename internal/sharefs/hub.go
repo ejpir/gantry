@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/fusewire"
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/ejpir/gantry/internal/shares"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -35,12 +36,14 @@ import (
 // Hub is a synthetic FUSE root containing dynamically managed exports. It
 // owns host filesystem capabilities but no virtio device or IPC transport.
 type Hub struct {
-	root     *shareHubRoot
-	protocol *fuse.ProtocolServer
-	handler  fusewire.Handler
-	guard    *requestGuard
-	debugFS  bool
-	request  sync.RWMutex // drains guest operations before root capabilities close
+	root       *shareHubRoot
+	protocol   *fuse.ProtocolServer
+	handler    fusewire.Handler
+	guard      *requestGuard
+	debugFS    bool
+	request    sync.RWMutex // drains guest operations before root capabilities close
+	lifecycle  sharelifecycle.Owner
+	finalizers deferredFinalizers
 
 	notificationsReady atomic.Bool
 
@@ -52,7 +55,6 @@ type Hub struct {
 	mu            sync.RWMutex
 	exports       map[string]*Export
 	all           map[*Export]struct{}
-	closed        bool
 	policyBlocked bool      // request lock; fail-closed live-policy barrier
 	deadline      time.Time // request lock; hard expiry of an optional host policy
 	nextSalt      atomic.Uint64
@@ -115,6 +117,17 @@ func (h *Hub) Prepare(tag, path string, ro bool) (*Prepared, string, error) {
 
 // PrepareMapped is Prepare with optional guest-visible UID/GID mapping.
 func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepared, string, error) {
+	if h == nil {
+		return nil, "", fmt.Errorf("share hub is closed")
+	}
+	// Preparation acquires host capabilities. Join the serving read side so
+	// Close cannot return while an admitted preparation is still acquiring
+	// resources that it will transfer to Prepared.
+	h.request.RLock()
+	defer h.request.RUnlock()
+	if h.lifecycle.Phase() != sharelifecycle.Active {
+		return nil, "", fmt.Errorf("share hub is closed")
+	}
 	if err := shares.ValidateShareTag(tag); err != nil {
 		return nil, "", err
 	}
@@ -125,7 +138,6 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 		return nil, "", fmt.Errorf("share uid=/gid= ownership mapping is not supported on this platform")
 	}
 	exp := &Export{Tag: tag, RO: ro, UID: uid, GID: gid, hub: h, watchRootFD: -1}
-	exp.state.Store(int32(ExportActive))
 	node, identity, release, err := newExportNode(exp, path, h.nextSalt.Add(1)<<32)
 	if err != nil {
 		return nil, "", err
@@ -144,17 +156,22 @@ func (h *Hub) PrepareMapped(tag, path string, ro bool, uid, gid *uint32) (*Prepa
 
 // Publish atomically exposes a prepared export as /<tag> in the hub root.
 func (h *Hub) Publish(p *Prepared) (*Export, error) {
-	if p == nil || p.export == nil {
+	exp, lease, ok := p.acquire()
+	if !ok || exp == nil {
 		return nil, fmt.Errorf("nil prepared share")
+	}
+	consumed := false
+	defer func() { p.complete(lease, consumed) }()
+	if exp.hub != h {
+		return nil, fmt.Errorf("prepared share belongs to another hub")
 	}
 	// Publication may reuse a path whose gracefully removed export has just
 	// reached OnForget. Drain old readers before a new independently locked
 	// namespace can become reachable.
 	h.request.Lock()
 	defer h.request.Unlock()
-	exp := p.export
 	h.mu.Lock()
-	if h.closed {
+	if h.lifecycle.Phase() != sharelifecycle.Active {
 		h.mu.Unlock()
 		return nil, fmt.Errorf("share hub is closed")
 	}
@@ -175,7 +192,7 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 	exp.finishDrain = h.scheduleFinish
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
-	p.export = nil
+	consumed = true
 	h.mu.Unlock()
 	h.bumpRootVer()
 	_ = h.root.NotifyEntry(exp.Tag)
@@ -188,8 +205,14 @@ func (h *Hub) Publish(p *Prepared) (*Export, error) {
 // earlier failure, the working export is still live. The revoked export's
 // nodes and handles fail ESTALE from here on.
 func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
-	if p == nil || p.export == nil {
+	candidate, lease, ok := p.acquire()
+	if !ok || candidate == nil {
 		return nil, nil, fmt.Errorf("nil prepared share")
+	}
+	consumed := false
+	defer func() { p.complete(lease, consumed) }()
+	if candidate.hub != h {
+		return nil, nil, fmt.Errorf("prepared share belongs to another hub")
 	}
 	// A replacement must not publish a second export over the same host tree
 	// while an old request is between its policy check and host operation.
@@ -198,9 +221,9 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 	// lifecycle state change together.
 	h.request.Lock()
 	defer h.request.Unlock()
-	exp = p.export
+	exp = candidate
 	h.mu.Lock()
-	if h.closed {
+	if h.lifecycle.Phase() != sharelifecycle.Active {
 		h.mu.Unlock()
 		return nil, nil, fmt.Errorf("share hub is closed")
 	}
@@ -227,7 +250,7 @@ func (h *Hub) Swap(p *Prepared) (old, exp *Export, err error) {
 	exp.finishDrain = h.scheduleFinish
 	h.exports[exp.Tag] = exp
 	h.all[exp] = struct{}{}
-	p.export = nil
+	consumed = true
 	h.mu.Unlock()
 	if oldChild != nil {
 		oldChild.ForgetPersistent()
@@ -282,6 +305,9 @@ func (h *Hub) Remove(tag string, force bool) (*Export, error) {
 	// may not revoke and release a root while a request still uses it.
 	h.request.Lock()
 	defer h.request.Unlock()
+	if h.lifecycle.Phase() != sharelifecycle.Active {
+		return nil, fmt.Errorf("share hub is closed")
+	}
 	h.mu.Lock()
 	exp := h.exports[tag]
 	if exp == nil {
@@ -333,41 +359,54 @@ func (h *Hub) syncExports() syscall.Errno {
 	return 0
 }
 
-// Close revokes every export and releases pinned roots at VM shutdown.
+// Close revokes every export and releases pinned roots at VM shutdown. The
+// lifecycle owner makes concurrent calls join one shutdown. Borrowers stop at
+// the request gate before watchers and pinned roots are released.
 func (h *Hub) Close() error {
-	h.request.Lock()
-	defer h.request.Unlock()
-	h.mu.Lock()
-	if h.closed {
-		h.mu.Unlock()
+	if h == nil {
 		return nil
 	}
-	h.closed = true
+	leader, done := h.lifecycle.BeginClose()
+	if !leader {
+		<-done
+		return nil
+	}
+
+	h.request.Lock()
+	h.finalizers.stopAdmission()
 	h.notificationsReady.Store(false)
 	if h.protocol != nil {
 		h.protocol.GantrySetNotificationSink(nil)
+		h.protocol.GantryCloseResources()
 	}
+	h.mu.RLock()
 	exports := make([]*Export, 0, len(h.all))
 	for exp := range h.all {
 		exports = append(exports, exp)
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	for _, exp := range exports {
 		exp.advanceState(ExportRevoked)
 		exp.finishNow()
 	}
+	h.request.Unlock()
+
+	// Queued OnForget workers may have been waiting for the writer gate. They
+	// observe already-finished exports, exit, and are joined before Closed.
+	h.finalizers.wait()
+	h.lifecycle.FinishClose()
 	return nil
 }
 
 // scheduleFinish is called from OnForget while HandleRequest holds the read
-// side of request. A separate goroutine can safely wait for the writer side;
-// writer preference then prevents later requests from overtaking release.
+// side of request. A joined worker waits for the writer side; writer preference
+// then prevents later requests from overtaking release.
 func (h *Hub) scheduleFinish(finish func()) {
-	go func() {
+	h.finalizers.schedule(func() {
 		h.request.Lock()
 		defer h.request.Unlock()
 		finish()
-	}()
+	})
 }
 
 // SetNotificationSink is called by a transport only after the guest has
@@ -376,6 +415,11 @@ func (h *Hub) scheduleFinish(finish func()) {
 // is also healthy.
 func (h *Hub) SetNotificationSink(sink fusewire.NotificationSink) {
 	if h == nil || h.protocol == nil {
+		return
+	}
+	h.request.RLock()
+	defer h.request.RUnlock()
+	if h.lifecycle.Phase() != sharelifecycle.Active {
 		return
 	}
 	if sink == nil {
@@ -394,6 +438,9 @@ func (h *Hub) SetNotificationSink(sink fusewire.NotificationSink) {
 func (h *Hub) SetDeadline(deadline time.Time) {
 	h.request.Lock()
 	defer h.request.Unlock()
+	if h.lifecycle.Phase() != sharelifecycle.Active {
+		return
+	}
 	h.deadline = deadline
 }
 
@@ -405,6 +452,9 @@ func (h *Hub) SetPolicyBlocked(blocked bool) {
 	}
 	h.request.Lock()
 	defer h.request.Unlock()
+	if h.lifecycle.Phase() != sharelifecycle.Active {
+		return
+	}
 	h.policyBlocked = blocked
 }
 
@@ -417,6 +467,9 @@ func (h *Hub) SetPolicyAccess(deadline time.Time, denied map[string]bool) {
 	}
 	h.request.Lock()
 	defer h.request.Unlock()
+	if h.lifecycle.Phase() != sharelifecycle.Active {
+		return
+	}
 	h.deadline = deadline
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -430,7 +483,7 @@ func (h *Hub) SetPolicyAccess(deadline time.Time, denied map[string]bool) {
 func (h *Hub) HandleRequest(in, out [][]byte) (int, fuse.Status) {
 	h.request.RLock()
 	defer h.request.RUnlock()
-	if h.closed {
+	if h.lifecycle.Phase() != sharelifecycle.Active {
 		return 0, fuse.EIO
 	}
 	if h.policyBlocked {

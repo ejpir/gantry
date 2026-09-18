@@ -16,7 +16,7 @@ import (
 
 func TestBrokerShareControl(t *testing.T) {
 	manager, _ := newTestShareManager(t)
-	br := &broker{sessions: map[string]chan struct{}{}, shares: manager}
+	br := &broker{sessions: map[string]chan struct{}{}, shares: shareManagerView{manager: manager}}
 	dir := t.TempDir()
 	resp := brokerPipe(t, br, `{"op":"share.add","id":"s1","share":{"spec":"code=`+dir+`,ro","persistent":false}}`+"\n")
 	if !strings.Contains(resp, `"ok":true`) || !strings.Contains(resp, `"tag":"code"`) {

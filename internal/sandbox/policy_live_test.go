@@ -40,7 +40,7 @@ func (backend *livePolicyNetworkBackend) SetPolicy(next *netpol.Policy) error {
 	return err
 }
 
-func newLivePolicyDaemon(t *testing.T) (*daemonRuntime, *livePolicyNetworkBackend) {
+func newLivePolicyDaemon(t *testing.T) (*daemonSupervisor, *livePolicyNetworkBackend) {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.RunConfig{MemMB: 512, VCPUs: 1, Net: true}
@@ -55,12 +55,17 @@ func newLivePolicyDaemon(t *testing.T) (*daemonRuntime, *livePolicyNetworkBacken
 	backend := &livePolicyNetworkBackend{policy: local}
 	transactions := control.NewNetworkTransactionCoordinator()
 	networkManager := control.NewNetworkPolicyManagerWithCoordinator(store, backend, local, transactions)
-	d := &daemonRuntime{
-		dir: dir, cfg: cfg, store: store, audit: &auditRing{},
+	d := &daemonSupervisor{
+		dir: dir, cfg: cfg,
 		governance: policy.NewController(nil), policyChanged: make(chan struct{}, 1),
-		network: &Network{Policy: local, Backend: backend}, networkTransactions: transactions,
-		broker: &broker{netPolicy: networkManager}, shutdown: make(chan struct{}, 1),
 	}
+	d.host.SetConfig(store)
+	d.host.SetAudit(&auditRing{})
+	network := &Network{Policy: local, Backend: backend}
+	d.host.SetNetwork(networkView{network: network}, network.CloseBackend, network.Close)
+	d.host.SetTransactions(transactions)
+	d.control.SetBroker(&broker{netPolicy: networkManager})
+	d.control.SetShutdown(make(chan struct{}, 1))
 	return d, backend
 }
 
@@ -123,12 +128,17 @@ func TestLiveOrganizationPolicyUpdatesCredentialNetworkGateWithoutGuestNetwork(t
 	}
 	transactions := control.NewNetworkTransactionCoordinator()
 	networkManager := control.NewNetworkPolicyManagerWithCoordinator(store, nil, netpol.DefaultPolicy(), transactions)
-	d := &daemonRuntime{
-		dir: dir, cfg: cfg, store: store, audit: &auditRing{}, network: &Network{},
+	d := &daemonSupervisor{
+		dir: dir, cfg: cfg,
 		governance: policy.NewController(nil), policyChanged: make(chan struct{}, 1),
-		networkTransactions: transactions, shutdown: make(chan struct{}, 1),
-		broker: &broker{netPolicy: networkManager, domainAllowed: networkManager.DomainAllowed},
 	}
+	d.host.SetConfig(store)
+	d.host.SetAudit(&auditRing{})
+	network := &Network{}
+	d.host.SetNetwork(networkView{network: network}, network.CloseBackend, network.Close)
+	d.host.SetTransactions(transactions)
+	d.control.SetBroker(&broker{netPolicy: networkManager, domainAllowed: networkManager.DomainAllowed})
+	d.control.SetShutdown(make(chan struct{}, 1))
 	candidate := policytest.Signed(t, policy.Profile{
 		Rules:   []policy.Rule{{ID: "credential", Effect: "allow", Action: policy.CredentialUse, Host: "allowed.example"}},
 		Network: policy.Network{DNS: []string{"allowed.example"}},
@@ -165,7 +175,7 @@ func TestLiveOrganizationPolicyNetworkFailureLeavesOldGeneration(t *testing.T) {
 		t.Fatal("failed policy generation was persisted")
 	}
 	select {
-	case <-d.shutdown:
+	case <-d.control.Shutdown():
 		t.Fatal("confirmed pre-commit failure should not stop the sandbox")
 	default:
 	}
@@ -190,7 +200,7 @@ func TestLiveOrganizationPolicyPersistenceFailureRollsBackNetwork(t *testing.T) 
 		t.Fatal("local network policy was not restored")
 	}
 	select {
-	case <-d.shutdown:
+	case <-d.control.Shutdown():
 		t.Fatal("confirmed rollback should not stop the sandbox")
 	default:
 	}
@@ -210,7 +220,7 @@ func TestLiveOrganizationPolicyUnconfirmedRollbackStopsSandbox(t *testing.T) {
 		t.Fatal("policy update unexpectedly succeeded")
 	}
 	select {
-	case <-d.shutdown:
+	case <-d.control.Shutdown():
 	default:
 		t.Fatal("unconfirmed rollback did not stop the sandbox")
 	}
@@ -223,7 +233,7 @@ func TestLiveOrganizationPolicyUnconfirmedRollbackStopsSandbox(t *testing.T) {
 func TestLiveOrganizationPolicyDoesNotRereadLocalPolicySource(t *testing.T) {
 	d, _ := newLivePolicyDaemon(t)
 	missing := filepath.Join(t.TempDir(), "removed-policy.json")
-	if err := d.store.Mutate(func(cfg *config.RunConfig) error {
+	if err := d.host.Config().Mutate(func(cfg *config.RunConfig) error {
 		cfg.NetPol = missing
 		return nil
 	}); err != nil {

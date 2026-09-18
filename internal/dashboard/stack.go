@@ -90,7 +90,7 @@ func renderStackStage(theme tuiTheme, width int, icon, title, subtitle string, r
 }
 
 func (m sandboxTUIModel) stackActions(theme tuiTheme, selected tuiSandbox, width, y int) (string, []tuiHitTarget) {
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		return lipgloss.NewStyle().Foreground(theme.muted).Render("Action in progress…"), nil
 	}
 	actions := [][2]string{}
@@ -148,7 +148,7 @@ func (m sandboxTUIModel) renderSandboxStack(theme tuiTheme, width, height int) (
 	}
 	// Keep targets within the actual visible component even on tiny viewports.
 	var visible []tuiHitTarget
-	if m.busyAction == "" {
+	if m.tuiOperationState.Phase() == tuiOperationIdle {
 		for _, hit := range hits {
 			if rect, ok := intersectRect(hit.rect, tuiRect{w: width, h: height}); ok {
 				hit.rect = rect

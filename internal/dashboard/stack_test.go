@@ -208,7 +208,7 @@ func TestStackActionsFollowSelectionAndBusyState(t *testing.T) {
 		t.Fatal("header action was applied to the wrong sandbox")
 	}
 	m.closeDialog()
-	m.busyAction, m.busyName = "start", "testnick"
+	beginTestOperation(&m, "start", "testnick", "", false)
 	_ = m.View()
 	for _, hit := range m.dashboardHits {
 		if hit.kind == "shortcut" || hit.kind == "workload" || hit.kind == "create" {

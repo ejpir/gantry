@@ -27,6 +27,12 @@ as a fallback.
 Sandbox names may contain letters, digits, `.`, `_`, and `-`, up to 64
 characters. `.` and `..` are invalid.
 
+For repeatable environments, define the same settings in a strict YAML
+manifest and reconcile them with `gantry apply -f gantry.yaml`. See
+[Sandbox manifests](manifests.md). The saved `sandbox.json` under Gantry's
+state directory is a resolved internal snapshot, not the public configuration
+format.
+
 ## Configure resources
 
 Set resources when creating a sandbox:

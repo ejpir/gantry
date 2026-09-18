@@ -17,7 +17,6 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vmm"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
@@ -40,8 +39,8 @@ func CrossProcNetConn() (sup, dev net.Conn, err error) { return worker.Socketpai
 // as a descriptor; gvproxy's unixgram endpoint cannot), and shares must
 // be hub-served. The real hub stays in the trusted supervisor; the worker
 // receives only a request relay, never host share roots.
-func vmmSplitPossible(mode string, nw *NetAttachment, shareManager *control.ShareManager) bool {
-	if mode == "off" || nw == nil || nw.Conn == nil {
+func vmmSplitPossible(mode string, nw NetAttachment, shareManager ShareProvider) bool {
+	if mode == "off" || nw == nil || !nw.Available() {
 		return false
 	}
 	if shareManager == nil || shareManager.Hub() == nil {
@@ -57,7 +56,7 @@ func vmmSplitPossible(mode string, nw *NetAttachment, shareManager *control.Shar
 // supervisor in both topologies; the worker gets only bounded FUSE request
 // and response bytes over its dedicated share channel. Consequently a
 // compromised worker has no host directory descriptor/handle to bypass.
-func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManager *control.ShareManager, dir string, console *os.File) (Runner, error) {
+func TryStart(cfg config.RunConfig, opts vmm.Opts, nw NetAttachment, shareManager ShareProvider, dir string, console *os.File) (Runner, error) {
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, ErrUnavailable
 	}
@@ -109,8 +108,8 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 	// every configured deny (including the default local-network wall)
 	// silently vanishes. In split-net topology the network worker owns
 	// enforcement; its supervisor mirror must not be applied a second time.
-	if !nw.Split && nw.Policy != nil {
-		raw, err := netpol.Marshal(nw.Policy)
+	if !nw.IsSplit() && nw.NetworkPolicy() != nil {
+		raw, err := netpol.Marshal(nw.NetworkPolicy())
 		if err != nil {
 			return nil, fmt.Errorf("marshal network policy for worker: %w", err)
 		}
@@ -148,10 +147,10 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		}
 		return nil, err
 	}
-	if bootCfg.Policy != nil && nw.Traffic != nil {
+	if bootCfg.Policy != nil && nw.TrafficRecorder() != nil {
 		// Attach the host recorder before starting any other lifecycle
 		// goroutine: an immediately-failing share relay can initiate Close.
-		vw.startTrafficSync(nw.Traffic)
+		vw.startTrafficSync(nw.TrafficRecorder())
 	}
 	if bootCfg.VhostShares {
 		err = vw.startShareVhost(shareManager.Hub())

@@ -7,30 +7,21 @@ import (
 
 	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
-	"github.com/ejpir/gantry/internal/sandbox/vmmworker"
+	"github.com/ejpir/gantry/internal/sandbox/guestplane"
 )
 
 type packetCaptureBackend interface {
 	Capture(packetcapture.Request) (packetcapture.Snapshot, error)
 }
 
-func packetCaptureBackendFor(network *Network, runner vmmworker.Runner) packetCaptureBackend {
+func packetCaptureBackendFor(network networkBorrow, runnerCapture guestplane.PacketCapture) packetCaptureBackend {
 	if network == nil {
 		return nil
-	}
-	if network.Worker != nil {
-		return network.Worker
 	}
 	// When the VMM is split but the netstack is local/external, virtio-net and
 	// its TrafficRecorder live in the VMM worker. In monolithic mode the
 	// supervisor-owned recorder is the packet boundary.
-	if backend, ok := runner.(packetCaptureBackend); ok {
-		return backend
-	}
-	if network.Traffic != nil {
-		return network.Traffic
-	}
-	return nil
+	return network.CaptureBackend(runnerCapture)
 }
 
 func (br *broker) captureControl(conn net.Conn, request controlproto.Request) {

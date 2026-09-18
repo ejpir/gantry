@@ -31,6 +31,10 @@ func winOpenAccess(flags uint32) uint32 {
 }
 
 func (b *winExportFS) lookup(parentRel, name string) (winFileInfo, syscall.Errno) {
+	if !b.beginRequest() {
+		return winFileInfo{}, linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	parent, _, errno := b.resolveDir(parentRel)
 	if errno != 0 {
 		return winFileInfo{}, errno
@@ -59,6 +63,10 @@ func (b *winExportFS) lookup(parentRel, name string) (winFileInfo, syscall.Errno
 }
 
 func (b *winExportFS) open(rel string, flags uint32) (*winOpenFile, winFileInfo, syscall.Errno) {
+	if !b.beginRequest() {
+		return nil, winFileInfo{}, linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	if flags&linuxOAccmode == 3 || flags&linuxOTmpfile != 0 {
 		return nil, winFileInfo{}, linuxErrno(fuse.EINVAL)
 	}
@@ -89,10 +97,18 @@ func (b *winExportFS) open(rel string, flags uint32) (*winOpenFile, winFileInfo,
 			return nil, info, errno
 		}
 	}
-	return b.trackOpen(wf), info, 0
+	tracked, ok := b.trackOpen(wf)
+	if !ok {
+		return nil, info, linuxErrno(fuse.ESTALE)
+	}
+	return tracked, info, 0
 }
 
 func (b *winExportFS) create(parentRel, name string, flags, mode uint32) (*winOpenFile, winFileInfo, syscall.Errno) {
+	if !b.beginRequest() {
+		return nil, winFileInfo{}, linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	if flags&linuxOAccmode == 3 || flags&linuxODirectory != 0 || flags&linuxOTmpfile != 0 {
 		return nil, winFileInfo{}, linuxErrno(fuse.EINVAL)
 	}
@@ -143,10 +159,18 @@ func (b *winExportFS) create(parentRel, name string, flags, mode uint32) (*winOp
 		_ = b.setReadOnly(h, true)
 	}
 	wf := &winOpenFile{file: f, appendMode: flags&linuxOAppend != 0, writable: true}
-	return b.trackOpen(wf), info, 0
+	tracked, ok := b.trackOpen(wf)
+	if !ok {
+		return nil, info, linuxErrno(fuse.ESTALE)
+	}
+	return tracked, info, 0
 }
 
 func (b *winExportFS) mkdir(parentRel, name string) (winFileInfo, syscall.Errno) {
+	if !b.beginRequest() {
+		return winFileInfo{}, linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	parent, _, errno := b.resolveDir(parentRel)
 	if errno != 0 {
 		return winFileInfo{}, errno
@@ -166,6 +190,10 @@ func (b *winExportFS) mkdir(parentRel, name string) (winFileInfo, syscall.Errno)
 type winDispositionInfo struct{ deleteFile byte }
 
 func (b *winExportFS) delete(parentRel, name string, wantDir bool) syscall.Errno {
+	if !b.beginRequest() {
+		return linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	parent, _, errno := b.resolveDir(parentRel)
 	if errno != 0 {
 		return errno
@@ -208,6 +236,10 @@ type winRenameInfo struct {
 }
 
 func (b *winExportFS) rename(oldParentRel, oldName, newParentRel, newName string, flags uint32) syscall.Errno {
+	if !b.beginRequest() {
+		return linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	if flags&^1 != 0 { // Linux RENAME_NOREPLACE is the only phase-1 flag.
 		return linuxErrno(fuse.ENOSYS)
 	}
@@ -293,6 +325,10 @@ func (b *winExportFS) setReadOnly(h windows.Handle, ro bool) syscall.Errno {
 }
 
 func (b *winExportFS) setattr(rel string, file *winOpenFile, in *fuse.SetAttrIn) (fuse.Attr, syscall.Errno) {
+	if !b.beginRequest() {
+		return fuse.Attr{}, linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	var h windows.Handle
 	var closeHandle bool
 	if file != nil {

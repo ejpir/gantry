@@ -302,12 +302,12 @@ func TestSandboxTUIShareDialogActions(t *testing.T) {
 	model, _ := m.submitShare()
 	m = *model.(*sandboxTUIModel)
 	wantAction := "share add"
-	if m.busyAction != wantAction || m.busyName != "dev/code" {
-		t.Fatalf("busy action = %q %q, want %q", m.busyAction, m.busyName, wantAction)
+	if m.tuiOperationState.Action() != wantAction || m.tuiOperationState.Name() != "dev/code" {
+		t.Fatalf("busy action = %q %q, want %q", m.tuiOperationState.Action(), m.tuiOperationState.Name(), wantAction)
 	}
 
 	m.dialog = tuiNoDialog
-	m.busyAction = ""
+	resetTestOperation(&m)
 	m.mounts = []tuiMountRow{{Sandbox: "dev", Tag: "code", Host: "/tmp/code", Guest: "/host/code", ReadOnly: true}}
 	m.mountCursor = 0
 	model, _ = m.updateKey(tea.KeyPressMsg{Code: 'r'})
@@ -360,8 +360,8 @@ func TestSandboxTUIShareDialogAllowsStoppedSandbox(t *testing.T) {
 	m.sharePath.SetValue(t.TempDir())
 	model, cmd := m.submitShare()
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.busyAction != "share configure" || m.busyName != "stopped/code" {
-		t.Fatalf("stopped share action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.tuiOperationState.Action() != "share configure" || m.tuiOperationState.Name() != "stopped/code" {
+		t.Fatalf("stopped share action = %q %q cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 	done, ok := cmd().(tuiProcessDoneMsg)
 	if !ok || done.err != nil || !strings.Contains(done.output, "applies on next start") {
@@ -397,8 +397,8 @@ func TestSandboxTUIShareDialogAppliesRunningShareLive(t *testing.T) {
 	}
 	model, cmd := m.submitShare()
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.busyAction != "share add" || m.busyName != "dev/code" {
-		t.Fatalf("share action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.tuiOperationState.Action() != "share add" || m.tuiOperationState.Name() != "dev/code" {
+		t.Fatalf("share action = %q %q cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 }
 
@@ -426,8 +426,8 @@ func TestSandboxTUIRemovesShareFromStoppedSandbox(t *testing.T) {
 
 	model, cmd := m.removeSelectedShare()
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "share remove" || m.busyName != "stopped/code" {
-		t.Fatalf("stopped removal action = dialog %v busy %q %q cmd=%v", m.dialog, m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "share remove" || m.tuiOperationState.Name() != "stopped/code" {
+		t.Fatalf("stopped removal action = dialog %v busy %q %q cmd=%v", m.dialog, m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 	done, ok := cmd().(tuiProcessDoneMsg)
 	if !ok || done.err != nil {
@@ -468,11 +468,11 @@ func TestSandboxTUIFormsSelectSandboxAndCustomMount(t *testing.T) {
 	}
 	model, cmd := m.submitShare()
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.busyAction != "share configure" || m.busyName != "other/workspace" {
-		t.Fatalf("custom mount action = %q %q cmd=%v", m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.tuiOperationState.Action() != "share configure" || m.tuiOperationState.Name() != "other/workspace" {
+		t.Fatalf("custom mount action = %q %q cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 
-	m.busyAction = ""
+	resetTestOperation(&m)
 	m.dialog = tuiNoDialog
 	m.openPortPublishDialog()
 	_, _ = m.updatePortDialogKey(tea.KeyPressMsg{Code: tea.KeyRight})
@@ -482,8 +482,8 @@ func TestSandboxTUIFormsSelectSandboxAndCustomMount(t *testing.T) {
 	m.portGuest.SetValue("80")
 	model, _ = m.submitPort()
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "port publish" || !strings.HasPrefix(m.busyName, "other/") {
-		t.Fatalf("port action = %q %q", m.busyAction, m.busyName)
+	if m.tuiOperationState.Action() != "port publish" || !strings.HasPrefix(m.tuiOperationState.Name(), "other/") {
+		t.Fatalf("port action = %q %q", m.tuiOperationState.Action(), m.tuiOperationState.Name())
 	}
 }
 
@@ -554,8 +554,8 @@ func TestSandboxTUINetworkPolicyDialog(t *testing.T) {
 	}
 	model, cmd := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "netpolicy set" || m.busyName != "other" {
-		t.Fatalf("policy action = dialog %d busy %q/%q cmd=%v", m.dialog, m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "netpolicy set" || m.tuiOperationState.Name() != "other" {
+		t.Fatalf("policy action = dialog %d busy %q/%q cmd=%v", m.dialog, m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 }
 
@@ -577,8 +577,8 @@ func TestSandboxTUIShareOwner(t *testing.T) {
 	m.shareOwner.SetValue("bad")
 	model, _ := m.submitShare()
 	m = *model.(*sandboxTUIModel)
-	if m.formError == "" || m.busyAction != "" || m.shareFocus != 4 {
-		t.Fatalf("invalid owner: error=%q busy=%q focus=%d", m.formError, m.busyAction, m.shareFocus)
+	if m.formError == "" || m.tuiOperationState.Action() != "" || m.shareFocus != 4 {
+		t.Fatalf("invalid owner: error=%q busy=%q focus=%d", m.formError, m.tuiOperationState.Action(), m.shareFocus)
 	}
 }
 
@@ -608,7 +608,7 @@ func TestSandboxTUIRendersShareHubMountsAndDialog(t *testing.T) {
 func TestSandboxTUIRenderFillsTerminal(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
-	m.refreshing = false
+	m.tuiRefreshState = tuiRefreshState{}
 	m.width = 100
 	m.height = 30
 	m.sandboxes = []tuiSandbox{{
@@ -637,7 +637,7 @@ func TestSandboxTUIRenderSizes(t *testing.T) {
 	for _, size := range [][2]int{{40, 12}, {60, 20}, {80, 24}, {100, 30}, {140, 40}} {
 		m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 		m.loading = false
-		m.refreshing = false
+		m.tuiRefreshState = tuiRefreshState{}
 		m.width, m.height = size[0], size[1]
 		m.resizeInputs()
 		m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped, Image: "alpine:latest"}}
@@ -736,7 +736,7 @@ func TestSandboxTUITrafficSelectionSurvivesDNSRefresh(t *testing.T) {
 	}
 	m.trafficCursor = 0
 
-	_, _ = m.handleRefresh(tuiRefreshMsg{
+	_, _ = m.handleRefresh(tuiRefreshMsg{owner: m.tuiRefreshState.Current(),
 		at: time.Now(),
 		traffic: []tuiTrafficRow{
 			{Sandbox: "dev", Host: "cdn.example.com", Address: "192.168.127.1", Protocol: "dns", Port: 53, Allowed: true},
@@ -773,11 +773,11 @@ func TestSandboxTUIBlockedDNSAddsQueriedDomain(t *testing.T) {
 	}
 	model, cmd := m.updateMouseClick(tea.Mouse{X: button.x + button.w/2, Y: button.y, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "rule add" {
-		t.Fatalf("Allow domain click = dialog %d action %q cmd=%v", m.dialog, m.busyAction, cmd)
+	if cmd == nil || m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "rule add" {
+		t.Fatalf("Allow domain click = dialog %d action %q cmd=%v", m.dialog, m.tuiOperationState.Action(), cmd)
 	}
 
-	m.busyAction = ""
+	resetTestOperation(&m)
 	m.traffic[0].Allowed = true
 	model, cmd = m.updateKey(tea.KeyPressMsg{Code: 'a'})
 	m = *model.(*sandboxTUIModel)
@@ -826,16 +826,19 @@ func TestSandboxTUIUpdateBadgeAndConfirmation(t *testing.T) {
 	}
 	model, cmd = m.updateMouseClick(tea.Mouse{X: update.x + update.w/2, Y: update.y, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.dialog != tuiNoDialog || m.busyAction != "update" || m.busyName != "v1.3.0" {
-		t.Fatalf("update click = dialog %d action=%q name=%q cmd=%v", m.dialog, m.busyAction, m.busyName, cmd)
+	if cmd == nil || m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "update" || m.tuiOperationState.Name() != "v1.3.0" {
+		t.Fatalf("update click = dialog %d action=%q name=%q cmd=%v", m.dialog, m.tuiOperationState.Action(), m.tuiOperationState.Name(), cmd)
 	}
 }
 
 func TestSandboxTUIQuitsAfterSuccessfulUpdate(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.updateStatus = selfupdate.Status{Current: "v1.2.3", Latest: "v1.3.0", Available: true}
-	m.busyAction = "update"
-	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
+	owner, ok := m.tuiOperationState.Begin("update", "v1.3.0", false)
+	if !ok {
+		t.Fatal("failed to begin update operation")
+	}
+	model, cmd := m.handleProcessDone(tuiProcessDoneMsg{owner: owner, action: "update", name: "v1.3.0", output: "updated Gantry v1.2.3 → v1.3.0"})
 	m = *model.(*sandboxTUIModel)
 	if cmd == nil {
 		t.Fatal("successful update did not quit")
@@ -892,19 +895,21 @@ func TestSandboxTUIKeepsCreateSelectionAcrossStaleRefresh(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
 	m.cursor = 0 // trailing New Sandbox card in an empty dashboard
-	m.busyAction = "create"
-	m.busyName = "dev"
-	m.selectNext = "dev"
-	_, _ = m.handleRefresh(tuiRefreshMsg{at: time.Now()})
-	if m.selectNext != "dev" {
+	operationOwner := beginTestOperation(&m, "create", "dev", "", true)
+	_, _ = m.handleRefresh(tuiRefreshMsg{owner: m.tuiRefreshState.Current(), at: time.Now()})
+	if m.tuiOperationState.Selection() != "dev" {
 		t.Fatal("in-flight refresh discarded pending create selection")
 	}
-	m.busyAction = ""
-	_, _ = m.handleRefresh(tuiRefreshMsg{
+	m.tuiOperationState.Finish(operationOwner)
+	owner, ok := m.tuiRefreshState.Begin(false)
+	if !ok {
+		t.Fatal("replacement refresh was not admitted")
+	}
+	_, _ = m.handleRefresh(tuiRefreshMsg{owner: owner,
 		at: time.Now(), sandboxes: []tuiSandbox{{Name: "dev", State: tuiStarting}},
 	})
-	if m.cursor != 0 || m.selectNext != "" {
-		t.Fatalf("created sandbox selection = cursor %d pending %q", m.cursor, m.selectNext)
+	if m.cursor != 0 || m.tuiOperationState.Selection() != "" {
+		t.Fatalf("created sandbox selection = cursor %d pending %q", m.cursor, m.tuiOperationState.Selection())
 	}
 }
 
@@ -925,9 +930,7 @@ func TestSandboxTUIStreamsDownloadProgress(t *testing.T) {
 
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
-	m.busyAction = "create"
-	m.busyName = "dev"
-	m.busyProgress = event.progress
+	beginTestOperation(&m, "create", "dev", event.progress, false)
 	plain := ansi.Strip(m.View().Content)
 	if !strings.Contains(plain, "50%") || !strings.Contains(plain, "gantry-kernel-x86_64") {
 		t.Fatalf("dashboard does not render download progress:\n%s", plain)
@@ -977,8 +980,8 @@ func TestSandboxTUITrafficRulesSupportEveryProtocolPosture(t *testing.T) {
 	m.closeDialog()
 	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'r'})
 	m = *model.(*sandboxTUIModel)
-	if cmd == nil || m.busyAction != "rule remove" {
-		t.Fatalf("traffic rule removal = busy %q cmd=%v", m.busyAction, cmd)
+	if cmd == nil || m.tuiOperationState.Action() != "rule remove" {
+		t.Fatalf("traffic rule removal = busy %q cmd=%v", m.tuiOperationState.Action(), cmd)
 	}
 }
 
@@ -1061,7 +1064,7 @@ func TestSandboxTUICompactHelpKeepsAllSections(t *testing.T) {
 func TestSandboxTUIDialogsAreLayered(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
-	m.refreshing = false
+	m.tuiRefreshState = tuiRefreshState{}
 	m.sandboxes = []tuiSandbox{{Name: "dev", State: tuiStopped}}
 	m.dialog = tuiRemoveDialog
 	plain := ansi.Strip(m.View().Content)
@@ -1078,8 +1081,8 @@ func TestSandboxTUICreateValidation(t *testing.T) {
 	m.openCreateDialog()
 	m.createName.SetValue("has space")
 	_, _ = m.submitCreate()
-	if m.formError == "" || m.busyAction != "" {
-		t.Fatalf("invalid create submission: error=%q busy=%q", m.formError, m.busyAction)
+	if m.formError == "" || m.tuiOperationState.Action() != "" {
+		t.Fatalf("invalid create submission: error=%q busy=%q", m.formError, m.tuiOperationState.Action())
 	}
 	plain := ansi.Strip(m.renderCreateDialog(tuiThemeFor(true), 58))
 	nameAt := strings.Index(plain, "\nName\n")
@@ -1248,8 +1251,8 @@ func TestSandboxTUIEditSaveButtonHitbox(t *testing.T) {
 	}
 	model, _ := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
 	m = *model.(*sandboxTUIModel)
-	if m.dialog != tuiNoDialog || m.busyAction != "edit" || m.busyName != "dev" {
-		t.Fatalf("Save click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+	if m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "edit" || m.tuiOperationState.Name() != "dev" {
+		t.Fatalf("Save click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.tuiOperationState.Action(), m.tuiOperationState.Name(), buttonX, buttonY)
 	}
 }
 
@@ -1278,8 +1281,8 @@ func TestSandboxTUICreateButtonHitbox(t *testing.T) {
 			}
 			model, _ := m.updateMouseClick(tea.Mouse{X: buttonX, Y: buttonY, Button: tea.MouseLeft})
 			m = *model.(*sandboxTUIModel)
-			if m.dialog != tuiNoDialog || m.busyAction != "create" || m.busyName != "click-create" {
-				t.Fatalf("Create click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.busyAction, m.busyName, buttonX, buttonY)
+			if m.dialog != tuiNoDialog || m.tuiOperationState.Action() != "create" || m.tuiOperationState.Name() != "click-create" {
+				t.Fatalf("Create click missed: dialog=%d busy=%q name=%q at %d,%d", m.dialog, m.tuiOperationState.Action(), m.tuiOperationState.Name(), buttonX, buttonY)
 			}
 		})
 	}
@@ -1356,17 +1359,17 @@ func TestSandboxTUIMountAndPortButtonHitboxes(t *testing.T) {
 	_, _, shareButton := m.shareDialogCopy()
 	wantAction := "share add"
 	m = *clickLabel(t, &m, shareButton)
-	if m.busyAction != wantAction || m.busyName != "dev/code" {
-		t.Fatalf("%s click missed: busy=%q name=%q", shareButton, m.busyAction, m.busyName)
+	if m.tuiOperationState.Action() != wantAction || m.tuiOperationState.Name() != "dev/code" {
+		t.Fatalf("%s click missed: busy=%q name=%q", shareButton, m.tuiOperationState.Action(), m.tuiOperationState.Name())
 	}
 
-	m.busyAction = ""
+	resetTestOperation(&m)
 	m.dialog = tuiNoDialog
 	m.openPortPublishDialog()
 	m.portGuest.SetValue("80")
 	m = *clickLabel(t, &m, "Publish")
-	if m.busyAction != "port publish" || !strings.HasPrefix(m.busyName, "dev/") {
-		t.Fatalf("Publish click missed: busy=%q name=%q", m.busyAction, m.busyName)
+	if m.tuiOperationState.Action() != "port publish" || !strings.HasPrefix(m.tuiOperationState.Name(), "dev/") {
+		t.Fatalf("Publish click missed: busy=%q name=%q", m.tuiOperationState.Action(), m.tuiOperationState.Name())
 	}
 }
 

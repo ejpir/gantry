@@ -232,7 +232,7 @@ func TestRemoteCreationNeverCallsLocalService(t *testing.T) {
 	m.createImage.SetValue("alpine")
 	m.createSSH = true
 	_, cmd := m.submitCreate()
-	if m.busyAction != "remote create" || m.page != tuiRemotesPage || m.selectNext != "" {
+	if m.tuiOperationState.Action() != "remote create" || m.page != tuiRemotesPage || m.tuiOperationState.Selection() != "" {
 		t.Fatal("remote create selected a local row")
 	}
 	runCreateTestCommand(t, m, cmd)
@@ -301,7 +301,7 @@ func TestRemoteCreateRefusesProfileChangeAndExpiredOrganization(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.submitCreate()
-	if m.busyAction != "" || !strings.Contains(m.formError, "changed") || m.createRemote == "" {
+	if m.tuiOperationState.Action() != "" || !strings.Contains(m.formError, "changed") || m.createRemote == "" {
 		t.Fatal("changed profile fell through to local")
 	}
 	if err := createOnRemote(t.Context(), changed, "expired-org", managerapi.CreateSandboxRequest{Name: "dev", Image: "alpine"}, func(string) {}); err == nil {

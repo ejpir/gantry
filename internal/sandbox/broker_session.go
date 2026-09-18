@@ -153,7 +153,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 		ExitStatus:     &status,
 	}
 	applySessionTarget(&options, br.sessionTarget(false))
-	err := client.Session(br.rpc, options, stdin, c)
+	err := br.rpc.Session(options, stdin, c)
 	if err != nil {
 		_, _ = fmt.Fprintf(c, "\n[gantry] session error: %v\n", err)
 		// The broker is the only process that still has the sandbox logs

@@ -13,6 +13,15 @@ type x86Devices struct {
 	pic    *devices.PIC8259
 }
 
+func (x *x86Devices) close() error {
+	var err error
+	if x.pit != nil {
+		err = x.pit.Close()
+	}
+	*x = x86Devices{}
+	return err
+}
+
 // mmioX86 claims nothing: KVM services the I/O APIC window in-kernel.
 func (x x86Devices) mmioX86(isWrite bool, phys uint64, data []byte) (uint32, bool) {
 	return 0, false

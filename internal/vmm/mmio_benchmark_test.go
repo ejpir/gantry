@@ -8,8 +8,8 @@ import (
 
 func BenchmarkHandleVirtioMMIO(b *testing.B) {
 	machine := &Machine{
-		arch: "amd64",
-		mem:  virtio.NewRAM(make([]byte, 4096), 0),
+		machineResources: machineResources{mem: virtio.NewRAM(make([]byte, 4096), 0)},
+		arch:             "amd64",
 	}
 	for range len(x86MMIOIRQs) {
 		if _, err := machine.addVirtio(virtio.NewRNG(), "rng"); err != nil {

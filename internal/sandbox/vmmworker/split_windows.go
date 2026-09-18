@@ -10,7 +10,6 @@ import (
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/sandbox/config"
-	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/worker"
 	"github.com/ejpir/gantry/internal/vmm"
 	vmmworkerapi "github.com/ejpir/gantry/internal/vmmworker"
@@ -23,15 +22,15 @@ var ErrUnavailable = fmt.Errorf("split VMM unavailable on this platform/topology
 
 func CrossProcNetConn() (sup, dev net.Conn, err error) { return worker.SocketpairConns() }
 
-func vmmSplitPossible(mode string, _ *NetAttachment, _ *control.ShareManager) bool {
+func vmmSplitPossible(mode string, _ NetAttachment, _ ShareProvider) bool {
 	return mode != "off"
 }
 
-func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManager *control.ShareManager, dir string, console *os.File) (Runner, error) {
+func TryStart(cfg config.RunConfig, opts vmm.Opts, nw NetAttachment, shareManager ShareProvider, dir string, console *os.File) (Runner, error) {
 	if !vmmSplitPossible(cfg.ProcessIsolation, nw, shareManager) {
 		return nil, ErrUnavailable
 	}
-	hasNetwork := nw != nil && nw.Conn != nil
+	hasNetwork := nw != nil && nw.Available()
 	if hasNetwork != (opts.NetConn != nil) {
 		return nil, fmt.Errorf("split VMM network attachment mismatch")
 	}
@@ -72,8 +71,8 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		bootCfg.WHPXBroker = true
 		bootCfg.WHPXToken = token
 	}
-	if hasNetwork && !nw.Split && nw.Policy != nil {
-		raw, err := netpol.Marshal(nw.Policy)
+	if hasNetwork && !nw.IsSplit() && nw.NetworkPolicy() != nil {
+		raw, err := netpol.Marshal(nw.NetworkPolicy())
 		if err != nil {
 			return nil, fmt.Errorf("marshal network policy for worker: %w", err)
 		}
@@ -102,8 +101,8 @@ func TryStart(cfg config.RunConfig, opts vmm.Opts, nw *NetAttachment, shareManag
 		}
 		return nil, err
 	}
-	if bootCfg.Policy != nil && nw.Traffic != nil {
-		vw.startTrafficSync(nw.Traffic)
+	if bootCfg.Policy != nil && nw.TrafficRecorder() != nil {
+		vw.startTrafficSync(nw.TrafficRecorder())
 	}
 	if hasShares {
 		if err := vw.startShareBroker(shareManager.Hub()); err != nil {

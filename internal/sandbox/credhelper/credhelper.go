@@ -19,11 +19,13 @@ package credhelper
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
@@ -140,20 +142,67 @@ func New(resolve Resolver, allowed func(host string) bool, logf func(string, ...
 // Serve accepts connections until the listener fails (sandbox teardown
 // closes it). Per-connection errors are logged and swallowed.
 func (b *Broker) Serve(ln net.Listener) error {
+	return b.ServeContext(context.Background(), ln)
+}
+
+// ServeContext additionally closes and joins every accepted connection when
+// ctx is canceled. Only the accept goroutine adds workers, so its final Wait
+// cannot race a zero-to-one WaitGroup transition.
+func (b *Broker) ServeContext(ctx context.Context, ln net.Listener) error {
+	var workers sync.WaitGroup
+	var mu sync.Mutex
+	connections := map[net.Conn]struct{}{}
+	watchDone := make(chan struct{})
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-ctx.Done():
+			_ = ln.Close()
+			mu.Lock()
+			for connection := range connections {
+				_ = connection.Close()
+			}
+			mu.Unlock()
+		case <-serveDone:
+		}
+	}()
+	defer func() {
+		close(serveDone)
+		<-watchDone
+		workers.Wait()
+	}()
+
 	for {
-		c, err := ln.Accept()
+		connection, err := ln.Accept()
 		if err != nil {
 			return err
 		}
 		select {
 		case b.slots <- struct{}{}:
+			mu.Lock()
+			if ctx.Err() != nil {
+				mu.Unlock()
+				<-b.slots
+				_ = connection.Close()
+				return ctx.Err()
+			}
+			connections[connection] = struct{}{}
+			workers.Add(1)
+			mu.Unlock()
 			go func() {
+				defer workers.Done()
 				defer func() { <-b.slots }()
-				b.exchange(c)
+				defer func() {
+					mu.Lock()
+					delete(connections, connection)
+					mu.Unlock()
+				}()
+				b.exchange(connection)
 			}()
 		default:
 			b.logf("credhelper: connection dropped (concurrency limit)")
-			_ = c.Close()
+			_ = connection.Close()
 		}
 	}
 }

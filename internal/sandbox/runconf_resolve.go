@@ -100,6 +100,10 @@ func resolveRunOptions(ctx context.Context, options config.RunOptions, progress 
 }
 
 func (r *runResolver) initialize() error {
+	if r.options.Manifest != nil {
+		provenance := *r.options.Manifest
+		r.cfg.Manifest = &provenance
+	}
 	if r.options.DevContainers {
 		if !r.explicit.Memory {
 			r.options.MemMB = min(config.DefaultDevContainersMemoryMiB, uint(config.MaxSandboxMemMB))
@@ -201,6 +205,9 @@ func (r *runResolver) resolveImage() error {
 			r.cfg.Image = imagePath
 		}
 	}
+	if r.options.LayerSet != "" && r.options.LayerSetConfig != nil {
+		return fmt.Errorf("layerset file and inline layerset are mutually exclusive")
+	}
 	if r.options.LayerSet != "" {
 		layers, err := client.LoadLayerSet(r.options.LayerSet)
 		if err != nil {
@@ -210,6 +217,14 @@ func (r *runResolver) resolveImage() error {
 			return err
 		}
 		r.cfg.LayerSet = layers
+	}
+	if r.options.LayerSetConfig != nil {
+		layers := *r.options.LayerSetConfig
+		layers.Layers = append([]string(nil), layers.Layers...)
+		if err := layers.Validate(); err != nil {
+			return err
+		}
+		r.cfg.LayerSet = &layers
 	}
 	if r.cfg.LayerSet != nil {
 		return nil
@@ -440,9 +455,10 @@ func (r *runResolver) resolveSessionOptions() error {
 	if custody && !enabled {
 		return fmt.Errorf("-oauth-custody requires -oauth-bridge=true")
 	}
-	if len(r.options.OAuthProviderFiles) > oauthprovider.MaxProviders {
-		return fmt.Errorf("too many -oauth-provider values (max %d)", oauthprovider.MaxProviders)
+	if len(r.options.OAuthProviderFiles)+len(r.options.OAuthProviders) > oauthprovider.MaxProviders {
+		return fmt.Errorf("too many OAuth providers (max %d)", oauthprovider.MaxProviders)
 	}
+	r.cfg.OAuthProviders = oauthprovider.Clone(r.options.OAuthProviders)
 	for _, file := range r.options.OAuthProviderFiles {
 		provider, err := config.ReadOAuthProvider(file)
 		if err != nil {

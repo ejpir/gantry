@@ -7,17 +7,9 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/ejpir/gantry/internal/sharefs/exportstate"
+	"github.com/ejpir/gantry/internal/sharefs/preparedstate"
 	"github.com/hanwen/go-fuse/v2/fs"
-)
-
-// ExportState is the lifecycle of one logical share beneath the hub.
-type ExportState int32
-
-const (
-	ExportActive ExportState = iota
-	ExportDraining
-	ExportRevoked
-	ExportGone
 )
 
 // FUSE carries Linux renameat2 flags on every host. NOREPLACE and EXCHANGE
@@ -32,17 +24,22 @@ func validateGuestRenameFlags(flags uint32) syscall.Errno {
 	return 0
 }
 
-func (s ExportState) String() string {
-	switch s {
-	case ExportActive:
-		return "active"
-	case ExportDraining:
-		return "draining"
-	case ExportRevoked:
-		return "revoked"
-	default:
-		return "gone"
-	}
+// borrowedDirectoryCache is implemented only by Unix descriptor caches.
+//
+//nolint:unused // The common Export shape cross-compiles for the Windows backend.
+type borrowedDirectoryCache interface {
+	prefetch(key, parentKey uint64, parentFD int, name string, expectedIno uint64) bool
+	open(key uint64) (int, bool)
+	forget(key uint64)
+	clear()
+}
+
+// ownedDirectoryCache retains close authority inside its Export owner.
+//
+//nolint:unused // The common Export shape cross-compiles for the Windows backend.
+type ownedDirectoryCache interface {
+	borrowedDirectoryCache
+	close()
 }
 
 // Export is one prepared or published child of a Hub.
@@ -62,8 +59,11 @@ type Export struct {
 	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
 	coherence       *exportCoherence
 
-	state        atomic.Int32
-	policyDenied atomic.Bool
+	cacheMu sync.RWMutex //nolint:unused // Unix-only descriptor-cache ownership.
+	//nolint:unused // Unix-only descriptor-cache ownership.
+	directoryCache ownedDirectoryCache
+	exportState    exportstate.Owner
+	policyDenied   atomic.Bool
 	// namespace serializes guest-originated name mutations with the
 	// lstat/open policy check. The host is trusted, but concurrent FUSE
 	// requests must not swap a FIFO or device into place between those steps.
@@ -89,7 +89,7 @@ func (e *Export) State() ExportState {
 	if e == nil {
 		return ExportGone
 	}
-	return ExportState(e.state.Load())
+	return e.exportState.Phase()
 }
 
 // Identity returns the kernel-object identity pinned by this export.
@@ -106,16 +106,11 @@ func (e *Export) PolicyDenied() bool {
 	return e != nil && e.policyDenied.Load()
 }
 
-func (e *Export) advanceState(next ExportState) {
-	if e == nil {
-		return
-	}
-	for {
-		current := e.state.Load()
-		if current >= int32(next) || e.state.CompareAndSwap(current, int32(next)) {
-			return
-		}
-	}
+// advanceState performs a validated monotonic transition. Repeated or stale
+// transitions are harmless, which lets forced removal, OnForget, and owner
+// shutdown race without regressing or skipping release phases.
+func (e *Export) advanceState(next ExportState) bool {
+	return e != nil && e.exportState.Transition(next)
 }
 
 func (e *Export) usable() bool {
@@ -163,7 +158,7 @@ func (e *Export) finishNow() {
 		return
 	}
 	e.finishOne.Do(func() {
-		e.advanceState(ExportGone)
+		e.advanceState(ExportRevoked)
 		if e.coherence != nil {
 			e.coherence.close()
 		}
@@ -173,6 +168,7 @@ func (e *Export) finishNow() {
 		if e.onFinish != nil {
 			e.onFinish(e)
 		}
+		e.advanceState(ExportGone)
 	})
 }
 
@@ -181,22 +177,60 @@ func (e *Export) finishNow() {
 // persist sandbox.json before making an infallible map swap. Publish and Swap
 // consume it on success; Close releases it on failure.
 type Prepared struct {
-	export *Export
+	preparedState preparedstate.Owner
+	export        *Export
 }
 
-// Close releases a prepared export that was never published.
-func (p *Prepared) Close() {
-	if p != nil && p.export != nil {
-		export := p.export
+func (p *Prepared) acquire() (*Export, preparedstate.Lease, bool) {
+	if p == nil {
+		return nil, preparedstate.Lease{}, false
+	}
+	lease, ok := p.preparedState.Acquire()
+	if !ok {
+		return nil, preparedstate.Lease{}, false
+	}
+	return p.export, lease, true
+}
+
+func (p *Prepared) complete(lease preparedstate.Lease, consumed bool) {
+	if p == nil {
+		return
+	}
+	if consumed {
 		p.export = nil
+	}
+	p.preparedState.Complete(lease, consumed)
+}
+
+// Close releases a prepared export that was never published. If publication
+// is in flight, Close joins that attempt before deciding which owner must
+// release the pinned root.
+func (p *Prepared) Close() {
+	if p == nil {
+		return
+	}
+	leader, done := p.preparedState.BeginClose()
+	if !leader {
+		<-done
+		return
+	}
+	defer p.preparedState.FinishClose()
+	export := p.export
+	p.export = nil
+	if export != nil {
 		export.finishNow()
 	}
 }
 
 // Identity returns the candidate's pinned root identity.
 func (p *Prepared) Identity() Identity {
-	if p == nil || p.export == nil {
+	export, lease, ok := p.acquire()
+	if !ok {
 		return Identity{}
 	}
-	return p.export.identity
+	defer p.complete(lease, false)
+	if export == nil {
+		return Identity{}
+	}
+	return export.identity
 }

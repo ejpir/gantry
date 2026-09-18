@@ -8,9 +8,9 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 
+	"github.com/ejpir/gantry/internal/sharefs/coherencestate"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -51,9 +51,8 @@ type coherencePath struct {
 type exportCoherence struct {
 	export *Export
 
-	healthy atomic.Bool
-	closed  atomic.Bool
-	eventMu sync.Mutex
+	coherenceState coherencestate.Owner
+	eventMu        sync.Mutex
 
 	mu         sync.RWMutex
 	root       *fs.Inode
@@ -74,17 +73,18 @@ func newExportCoherence(export *Export) *exportCoherence {
 	watcher, err := newPlatformShareWatcher(export, c.handleWatchEvent)
 	if err != nil {
 		c.watchErr = err
+		c.coherenceState.Degrade()
 		fmt.Fprintf(os.Stderr, "sharefs: cache watcher for %q unavailable; using %s metadata TTL: %v\n",
 			export.Tag, descendantMetadataTTL, err)
 		return c // the 100 ms fallback remains active
 	}
 	c.watcher = watcher
-	c.healthy.Store(true)
+	c.coherenceState.Activate()
 	return c
 }
 
 func (c *exportCoherence) Healthy() bool {
-	return c != nil && c.healthy.Load() && !c.closed.Load()
+	return c != nil && c.coherenceState.Healthy()
 }
 
 func (c *exportCoherence) attachRoot(root *fs.Inode) {
@@ -294,12 +294,12 @@ func (c *exportCoherence) renamePath(oldParent *fs.Inode, oldName string, newPar
 }
 
 func (c *exportCoherence) handleWatchEvent(event shareWatchEvent) {
-	if c == nil || c.closed.Load() || !c.healthy.Load() {
+	if c == nil || !c.coherenceState.Healthy() {
 		return
 	}
 	c.eventMu.Lock()
 	defer c.eventMu.Unlock()
-	if c.closed.Load() || !c.healthy.Load() {
+	if !c.coherenceState.Healthy() {
 		return
 	}
 	if event.loss != nil {
@@ -475,13 +475,13 @@ func (c *exportCoherence) revoke() {
 	}
 	c.eventMu.Lock()
 	defer c.eventMu.Unlock()
-	if c.healthy.CompareAndSwap(true, false) {
+	if c.coherenceState.Degrade() {
 		c.flushAllLocked()
 	}
 }
 
 func (c *exportCoherence) loseLocked(err error) {
-	if !c.healthy.CompareAndSwap(true, false) {
+	if !c.coherenceState.Degrade() {
 		return
 	}
 	c.flushAllLocked()
@@ -491,10 +491,14 @@ func (c *exportCoherence) loseLocked(err error) {
 }
 
 func (c *exportCoherence) close() {
-	if c == nil || !c.closed.CompareAndSwap(false, true) {
+	if c == nil {
 		return
 	}
-	c.healthy.Store(false)
+	leader, done := c.coherenceState.BeginClose()
+	if !leader {
+		<-done
+		return
+	}
 	if c.watcher != nil {
 		_ = c.watcher.Close()
 	}
@@ -504,4 +508,5 @@ func (c *exportCoherence) close() {
 	c.root = nil
 	c.pathBytes = 0
 	c.mu.Unlock()
+	c.coherenceState.FinishClose()
 }

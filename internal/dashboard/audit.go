@@ -19,16 +19,17 @@ func (m sandboxTUIModel) selectedAuditKey() string {
 }
 
 func (m *sandboxTUIModel) restoreAuditSelection(key string) {
+	index := m.auditCursor
 	if key != "" {
-		m.auditCursor = 0
+		index = 0
 		for i, row := range m.auditEvents {
 			if auditRowKey(row) == key {
-				m.auditCursor = i
+				index = i
 				break
 			}
 		}
 	}
-	m.auditCursor = clampTableCursor(m.auditCursor, len(m.auditEvents))
+	m.tuiSelectionState.setTableCursor(tuiAuditSelection, index, len(m.auditEvents))
 }
 
 func (m *sandboxTUIModel) openAuditDetail() {
@@ -42,7 +43,7 @@ func (m *sandboxTUIModel) openAuditDetail() {
 		row.Decision = &d
 	}
 	m.auditDetail = &row
-	m.dialog, m.dialogScroll = tuiAuditDetailDialog, 0
+	m.tuiDialogState.open(tuiAuditDetailDialog)
 }
 
 func auditStatus(row tuiAuditRow) string {

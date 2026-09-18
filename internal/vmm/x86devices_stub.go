@@ -7,6 +7,8 @@ package vmm
 // per-platform x86devices_{linux_amd64,windows}.go.
 type x86Devices struct{}
 
+func (*x86Devices) close() error { return nil }
+
 // mmioX86 never claims an address: arm64 platforms have no x86 legacy
 // MMIO (I/O APIC) window.
 func (x x86Devices) mmioX86(isWrite bool, phys uint64, data []byte) (uint32, bool) {

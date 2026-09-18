@@ -14,8 +14,63 @@ import (
 	"time"
 	"unicode/utf16"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
+
+func TestWinBackendCloseReleasesTrackedHandles(t *testing.T) {
+	backend, err := newWinExportFS(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _, errno := backend.create("", "open.txt", linuxOCreat|2, 0o644)
+	if errno != 0 {
+		t.Fatalf("create errno %d", fuse.ToStatus(errno))
+	}
+	export := &Export{}
+	dir, errno := backend.readdir("", export)
+	if errno != 0 {
+		t.Fatalf("readdir errno %d", fuse.ToStatus(errno))
+	}
+	if len(backend.openFiles) != 1 || len(backend.openDirs) != 1 {
+		t.Fatalf("tracked handles: files=%d dirs=%d", len(backend.openFiles), len(backend.openDirs))
+	}
+
+	backend.requests.RLock()
+	const closers = 8
+	results := make(chan error, closers)
+	for range closers {
+		go func() { results <- backend.Close() }()
+	}
+	select {
+	case err := <-results:
+		backend.requests.RUnlock()
+		t.Fatalf("Close returned before an admitted request drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	backend.requests.RUnlock()
+	for range closers {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := backend.lifecycle.Phase(); got != sharelifecycle.Closed {
+		t.Fatalf("backend phase = %d, want closed", got)
+	}
+	if backend.root != 0 || len(backend.openFiles) != 0 || len(backend.openDirs) != 0 {
+		t.Fatalf("closed backend retained resources: root=%v files=%d dirs=%d",
+			backend.root, len(backend.openFiles), len(backend.openDirs))
+	}
+	if _, err := file.read(make([]byte, 1), 0); err == nil {
+		t.Fatal("tracked file remained usable after backend Close")
+	}
+	if !dir.closed || dir.dir != 0 || dir.buffer != nil {
+		t.Fatalf("tracked directory remained live: closed=%v handle=%v buffer=%p", dir.closed, dir.dir, dir.buffer)
+	}
+	if _, _, errno := backend.open("open.txt", 0); errno == 0 {
+		t.Fatal("closed backend admitted a new file handle")
+	}
+}
 
 func TestWindowsSyncfsFlushesTrackedWritableHandles(t *testing.T) {
 	root := t.TempDir()
@@ -299,7 +354,6 @@ func TestWinExportFSNativePassthrough(t *testing.T) {
 	if errno != 0 {
 		t.Fatalf("readdir errno %d", fuse.ToStatus(errno))
 	}
-	stream.export.state.Store(int32(ExportActive))
 	defer stream.Close()
 	seen := map[string]bool{}
 	for stream.HasNext() {
@@ -334,15 +388,23 @@ func TestWinExportFSCreateWhileWatcherIsActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() {
-		closed := make(chan error, 1)
-		go func() { closed <- watcher.Close() }()
-		select {
-		case err := <-closed:
-			if err != nil {
-				t.Errorf("close active watcher: %v", err)
+		native := watcher.(*windowsShareWatcher)
+		closed := make(chan error, 8)
+		for range 8 {
+			go func() { closed <- watcher.Close() }()
+		}
+		for range 8 {
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Errorf("close active watcher: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Errorf("closing active watcher did not cancel ReadDirectoryChangesW")
 			}
-		case <-time.After(5 * time.Second):
-			t.Errorf("closing active watcher did not cancel ReadDirectoryChangesW")
+		}
+		if got := native.lifecycle.Phase(); got != sharelifecycle.Closed {
+			t.Errorf("watcher phase = %d, want closed", got)
 		}
 	}()
 
@@ -374,7 +436,6 @@ func TestWinDirStreamReplaysForwardCookie(t *testing.T) {
 	}
 	defer func() { _ = backend.Close() }()
 	export := &Export{}
-	export.state.Store(int32(ExportActive))
 
 	first, errno := backend.readdir("", export)
 	if errno != 0 {

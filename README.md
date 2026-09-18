@@ -61,6 +61,17 @@ Create and reuse a named sandbox:
 ./gantry delete dev
 ```
 
+Or define and reconcile it with strict, versioned YAML:
+
+```sh
+gantry manifest validate gantry.yaml
+gantry apply --check -f gantry.yaml
+gantry apply -f gantry.yaml
+```
+
+See [Sandbox manifests](docs/gantry/manifests.md) for the schema and redacted
+export workflow.
+
 Open the terminal dashboard:
 
 ```sh

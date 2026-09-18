@@ -180,16 +180,10 @@ func loadInitrd(f *os.File, ram []byte) (start, end uint64, err error) {
 // native backend lifecycle. Platform backends own their hypervisor resources
 // and vCPU threads; Machine.Close joins them before releasing devices or RAM.
 type Machine struct {
-	ram              []byte
-	ramShared        bool
-	whpxBroker       net.Conn // Windows split-WHPX transport; nil uses in-process WHPX
-	whpxToken        string
-	whpxMailbox      *os.File
-	whpxRequestEvent *os.File
-	whpxReplyEvents  []*os.File
-	mem              *virtio.RAM
-	entry            uint64
-	arch             string // "arm64" | "amd64"
+	machineResources
+	whpxToken string
+	entry     uint64
+	arch      string // "arm64" | "amd64"
 	// x86BootMemSize is the ordinary e820/low mapping. With the Windows
 	// virtio-mem path, the rest of ram is mapped above 4 GiB and hot-added by
 	// Linux instead of delaying early boot page initialization.
@@ -197,25 +191,12 @@ type Machine struct {
 	x86LowRAMSize  uint64
 	x86HotMemSize  uint64
 	fdt            []byte
-	uart           *devices.PL011 // arm64 console (MMIO)
-	// x86 clusters the legacy PC devices (16550 console, CMOS RTC, PIT,
-	// PIC, I/O APIC): they exist only on the x86 boot paths (KVM on
-	// linux/amd64, WHPX on Windows) and the whole cluster is build-gated
-	// so arm64 builds carry no dead emulation code (x86devices.go).
-	x86            x86Devices
-	virtios        []*virtio.Core
-	rootBlkCore    *virtio.Core    // boot rootfs (/dev/vda), for first-request timing
-	vsockCore      *virtio.Core    // transport slot, for first-packet timing
-	vsock          *virtio.Vsock   // nil when no vsock device attached
-	hotMem         *virtio.Mem     // nil unless the x86 virtio-mem path is active
-	hotMemDeferred bool            // tail publication is owned by the daemon-ready edge
 	interrupts     interruptRouter // published by the backend; disabled before native teardown
 	// irqTargets is immutable once Prepare returns. Each virtio slot targets
 	// slot%vcpus; the guest init applies the same policy to Linux IRQ affinity.
 	// Native backends can therefore wake the vCPU that will service an IRQ
 	// instead of creating an SMP-wide wakeup herd.
 	irqTargets map[int]int
-	kvmFD      *os.File // pre-opened /dev/kvm from Opts.KVM (linux; nil = open by path)
 	stdinDone  chan struct{}
 	// consoleStdin wires host stdin into the guest UART (interactive `run`;
 	// off for `exec`, where the terminal belongs to the container session).
@@ -226,9 +207,8 @@ type Machine struct {
 	stdoutBuf    []byte
 	bootTiming   *bootTimeline
 	resourceMu   sync.Mutex
-	backend      io.Closer
+	backendOwner machineBackendOwner
 	lifecycle    machineLifecycle
-	runDone      chan struct{}
 	closeOnce    sync.Once
 	closeErr     error
 }
@@ -241,15 +221,18 @@ type Machine struct {
 func (m *Machine) Close() error {
 	m.closeOnce.Do(func() {
 		m.resourceMu.Lock()
-		waitForRun := m.lifecycle.beginStop()
-		backend := m.backend
-		m.backend = nil
-		kvmFD := m.kvmFD
-		m.kvmFD = nil
-		runDone := m.runDone
+		runDone := m.lifecycle.beginStop()
+		backend := m.backendOwner.take()
+		var startupCancelErr error
+		if backend == nil && runDone != nil {
+			startupCancelErr = m.cancelBackendStartup()
+		}
 		m.resourceMu.Unlock()
 
 		var errs []error
+		if startupCancelErr != nil {
+			errs = append(errs, startupCancelErr)
+		}
 		// Stop new callbacks and wait for any in-flight IRQ delivery before the
 		// backend closes native handles. Device workers are joined below.
 		m.interrupts.disable()
@@ -258,42 +241,18 @@ func (m *Machine) Close() error {
 				errs = append(errs, fmt.Errorf("close hypervisor backend: %w", err))
 			}
 		}
-		if waitForRun && runDone != nil {
+		if runDone != nil {
 			<-runDone
 		}
-		for _, file := range append([]*os.File{m.whpxMailbox, m.whpxRequestEvent}, m.whpxReplyEvents...) {
-			if file != nil {
-				if err := file.Close(); err != nil {
-					errs = append(errs, fmt.Errorf("close WHPX mailbox capability: %w", err))
-				}
-			}
-		}
-		m.whpxMailbox = nil
-		m.whpxRequestEvent = nil
-		m.whpxReplyEvents = nil
-		for _, vc := range m.virtios {
-			if err := vc.Close(); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		m.virtios = nil
-		if kvmFD != nil {
-			if err := kvmFD.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close KVM descriptor: %w", err))
-			}
-		}
-		if err := m.releaseRAM(); err != nil {
+		if err := m.closePrepared(); err != nil {
 			errs = append(errs, err)
 		}
 		m.fdt = nil
 		m.stdoutFlush()
 		m.resourceMu.Lock()
-		m.rootBlkCore = nil
-		m.vsockCore = nil
-		m.vsock = nil
-		m.hotMem = nil
-		m.hotMemDeferred = false
-		m.lifecycle = machineClosed
+		if err := m.lifecycle.finishClose(); err != nil {
+			errs = append(errs, err)
+		}
 		m.resourceMu.Unlock()
 		m.closeErr = errors.Join(errs...)
 	})
@@ -449,9 +408,9 @@ type Opts struct {
 	// and opens everything once (killing path-swap races between staging
 	// and boot), and a confined VMM worker can boot without any path
 	// resolution rights at all. Prepare consumes every descriptor, NetConn,
-	// and non-nil Filesystem Owner on entry, even when preparation fails.
-	// Kernel/Initrd are loaded and closed; disks, KVM, NetConn, and owned
-	// filesystems remain owned by the Machine until Close.
+	// WHPXBroker, and non-nil Filesystem Owner on entry, even when preparation
+	// fails. Kernel/Initrd are loaded and closed; disks, KVM, network transports,
+	// and owned filesystems remain owned by the Machine until Close.
 	Kernel *os.File
 	Initrd *os.File // optional when Disks are set
 	Rootfs *os.File // virtio-blk image /dev/vda (e.g. nerdbox EROFS), optional
@@ -528,10 +487,9 @@ func (m *Machine) InjectVsockConn(guestPort uint32, nc net.Conn) error {
 		return fmt.Errorf("nil vsock connection")
 	}
 	m.resourceMu.Lock()
+	defer m.resourceMu.Unlock()
 	vsock := m.vsock
-	running := m.lifecycle == machineRunning
-	m.resourceMu.Unlock()
-	if !running || vsock == nil {
+	if m.lifecycle.phase != machineRunning || vsock == nil {
 		_ = nc.Close()
 		return fmt.Errorf("vsock device is not running")
 	}
@@ -552,14 +510,14 @@ func (m *Machine) RequestHotMemory() error {
 	if m.hotMem == nil || !m.hotMemDeferred {
 		return nil
 	}
-	if m.lifecycle != machineRunning || m.backend == nil {
+	if m.lifecycle.phase != machineRunning || !m.backendOwner.present() {
 		return fmt.Errorf("request hot memory: machine is not running")
 	}
 	// Windows deliberately leaves the tail uncommitted and unmapped during
 	// boot. Publish it to Linux only after the native backend makes every GPA
 	// accessible; other backends use demand-paged mappings established at run.
-	if mapper, ok := m.backend.(interface{ mapHotMemory() error }); ok {
-		if err := mapper.mapHotMemory(); err != nil {
+	if mapper, ok := m.backendOwner.hotMemoryMapper(); ok {
+		if err := mapper.MapHotMemory(); err != nil {
 			return err
 		}
 	}
@@ -600,13 +558,17 @@ func Prepare(o Opts) (result *Machine, resultErr error) {
 		// Direct `gantry run` and one-shot exec have no daemon clock to pass.
 		bootTimingStart = time.Now()
 	}
-	m = &Machine{stdinDone: make(chan struct{}), consoleStdin: o.Interactive,
-		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096), kvmFD: inputs.takeFile(o.KVM),
-		whpxBroker: o.WHPXBroker, whpxToken: o.WHPXToken,
-		whpxMailbox: inputs.takeFile(o.WHPXMailbox), whpxRequestEvent: inputs.takeFile(o.WHPXRequestEvent),
-		whpxReplyEvents: make([]*os.File, len(o.WHPXReplyEvents)),
-		bootTiming:      newBootTimeline(bootTimingStart, nil), vcpus: o.VCPUs,
-		irqTargets: make(map[int]int)}
+	m = &Machine{
+		machineResources: machineResources{
+			kvmFD: inputs.takeFile(o.KVM), whpxBroker: inputs.takeWHPXBroker(),
+			whpxMailbox: inputs.takeFile(o.WHPXMailbox), whpxRequestEvent: inputs.takeFile(o.WHPXRequestEvent),
+			whpxReplyEvents: make([]*os.File, len(o.WHPXReplyEvents)),
+		},
+		stdinDone: make(chan struct{}), consoleStdin: o.Interactive,
+		consoleW: o.Console, stdoutBuf: make([]byte, 0, 4096), whpxToken: o.WHPXToken,
+		bootTiming: newBootTimeline(bootTimingStart, nil), vcpus: o.VCPUs,
+		irqTargets: make(map[int]int),
+	}
 	for index, event := range o.WHPXReplyEvents {
 		m.whpxReplyEvents[index] = inputs.takeFile(event)
 	}
@@ -775,7 +737,9 @@ func Run(m *Machine) (resultErr error) {
 		return err
 	}
 	defer func() {
-		m.finishRun()
+		if lifecycleErr := m.finishRun(); lifecycleErr != nil {
+			resultErr = errors.Join(resultErr, lifecycleErr)
+		}
 		if closeErr := m.Close(); closeErr != nil {
 			resultErr = errors.Join(resultErr, closeErr)
 		}

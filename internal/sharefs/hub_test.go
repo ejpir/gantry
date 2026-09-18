@@ -1246,7 +1246,6 @@ func TestShareHubSwapRevokesReplacedExport(t *testing.T) {
 
 func TestExportStateCannotRegressAfterFinish(t *testing.T) {
 	export := &Export{}
-	export.state.Store(int32(ExportActive))
 	export.finish()
 
 	// Hub.Close can race an inode's OnForget. A late revoke must not move a
@@ -1587,11 +1586,45 @@ func assertCloseDrainsRequest(
 	}
 }
 
+func TestShareHubCloseReleasesRetainedProtocolHandles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "open.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishHubShare(t, hub, "code", root, false)
+	fuseInitHub(t, hub)
+	tagNode, errno := hubLookup(t, hub, 2, 1, "code")
+	if errno != 0 {
+		t.Fatalf("tag lookup errno %d", errno)
+	}
+	fileNode, errno := hubLookup(t, hub, 3, tagNode, "open.txt")
+	if errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+	openIn := make([]byte, 8)
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpen, 4, fileNode, len(openIn)), openIn}, 16, 16); errno != 0 {
+		t.Fatalf("open errno %d", errno)
+	}
+	if _, handles := hub.protocol.GantryResourceUsage(); handles != 1 {
+		t.Fatalf("retained handles before Close = %d, want 1", handles)
+	}
+	if err := hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, handles := hub.protocol.GantryResourceUsage(); handles != 0 {
+		t.Fatalf("retained handles after Close = %d, want 0", handles)
+	}
+}
+
 func TestShareHubCloseDrainsRequestsBeforeRelease(t *testing.T) {
 	handler := newBlockingFuseHandler()
 	released := make(chan struct{})
 	export := &Export{release: func() { close(released) }}
-	export.state.Store(int32(ExportActive))
 	hub := &Hub{
 		handler: handler,
 		exports: map[string]*Export{"code": export},
@@ -1609,7 +1642,6 @@ func TestShareServerCloseDrainsRequestsBeforeRelease(t *testing.T) {
 	handler := newBlockingFuseHandler()
 	released := make(chan struct{})
 	export := &Export{release: func() { close(released) }}
-	export.state.Store(int32(ExportActive))
 	server := &Server{handler: handler, export: export}
 
 	assertCloseDrainsRequest(t, &server.request, handler,

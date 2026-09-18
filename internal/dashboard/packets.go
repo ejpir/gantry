@@ -118,7 +118,7 @@ func (m *sandboxTUIModel) handlePacketCapture(message tuiPacketCaptureMsg) (tea.
 	m.restorePacketSelection(key)
 	m.dashboardHits = nil
 	if wasFollowing && len(m.packets) > 0 {
-		m.packetCursor = len(m.packets) - 1
+		m.tuiSelectionState.setTableCursor(tuiPacketSelection, len(m.packets)-1, len(m.packets))
 	}
 	m.ensureTableCursorVisible()
 	if m.page == tuiPacketsPage && !m.packetPaused {
@@ -158,7 +158,7 @@ func (m *sandboxTUIModel) clearPacketsCmd() tea.Cmd {
 		}
 	}
 	m.packets, m.packetSource = nil, nil
-	m.packetCursor, m.packetScroll = 0, 0
+	m.tuiSelectionState.resetTable(tuiPacketSelection)
 	m.packetAfter = make(map[string]uint64)
 	m.packetEvicted = 0
 	m.packetError = ""

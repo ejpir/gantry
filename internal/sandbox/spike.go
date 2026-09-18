@@ -33,16 +33,16 @@ func CmdMCSpike(argv []string) int {
 	if launch == nil {
 		return code
 	}
-	return launch.run((*daemonRuntime).runMCSpike)
+	return launch.run((*daemonSupervisor).runMCSpike)
 }
 
 // runMCSpike is the _mc-spike scenario hook: the daemon is fully booted
 // (guest RPC, stream bridge, control socket all live) at this point, and the
 // spike uses the same guest connection and stream wiring as broker sessions.
-func (d *daemonRuntime) runMCSpike() int {
-	err := client.MultiContainerSpike(d.rpc, client.SpikeOptions{
-		StreamSock: d.broker.streamSock,
-		StreamDial: d.broker.streamDial,
+func (d *daemonSupervisor) runMCSpike() int {
+	err := d.guest.MultiContainerSpike(client.SpikeOptions{
+		StreamSock: d.control.Broker().streamSock,
+		StreamDial: d.control.Broker().streamDial,
 		ImgCfg:     d.cfg.ImageCfg,
 		LayerSet:   d.cfg.LayerSet,
 		Report:     os.Stdout,
@@ -63,8 +63,8 @@ type spikeLaunch struct {
 }
 
 // run boots the foreground daemon with postReady replaced by hook.
-func (l *spikeLaunch) run(hook func(*daemonRuntime) int) int {
-	d := &daemonRuntime{
+func (l *spikeLaunch) run(hook func(*daemonSupervisor) int) int {
+	d := &daemonSupervisor{
 		name:       l.name,
 		started:    time.Now(),
 		bootTiming: os.Getenv("GANTRY_BOOT_TIMING") != "",

@@ -21,9 +21,7 @@ func (m *sandboxTUIModel) openMCPRemoteDialog(edit bool) tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Create a sandbox or wait for startup to finish before configuring MCP.")
 	}
-	m.dialog = tuiMCPRemoteDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiMCPRemoteDialog)
 	m.mcpEditing = edit
 	m.mcpName.Reset()
 	m.mcpURL.Reset()
@@ -229,10 +227,8 @@ func (m *sandboxTUIModel) submitMCPRemote() (tea.Model, tea.Cmd) {
 	}
 	target := m.sandboxNamed(request.Sandbox)
 	running := target != nil && target.State == tuiRunning
-	m.closeDialog()
-	m.busyAction = "mcp configure"
-	m.busyName = request.Sandbox + "/" + request.Name
-	return m, tea.Batch(configureMCPRemoteCmd(m.service, request, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp configure", request.Sandbox+"/"+request.Name,
+		configureMCPRemoteCmd(m.service, request, running))
 }
 
 func (m *sandboxTUIModel) openMCPFilesystemDialog() tea.Cmd {
@@ -245,9 +241,7 @@ func (m *sandboxTUIModel) openMCPFilesystemDialog() tea.Cmd {
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Create a sandbox or wait for startup to finish before configuring MCP.")
 	}
-	m.dialog = tuiMCPFilesystemDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiMCPFilesystemDialog)
 	m.syncMCPFilesystemFields()
 	m.resizeInputs()
 	return m.focusMCPFilesystem(0)
@@ -333,10 +327,8 @@ func (m *sandboxTUIModel) submitMCPFilesystem() (tea.Model, tea.Cmd) {
 	}
 	target := m.sandboxNamed(request.Sandbox)
 	running := target != nil && target.State == tuiRunning
-	m.closeDialog()
-	m.busyAction = "mcp filesystem"
-	m.busyName = request.Sandbox + "/fs"
-	return m, tea.Batch(configureMCPFilesystemCmd(m.service, request, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp filesystem", request.Sandbox+"/fs",
+		configureMCPFilesystemCmd(m.service, request, running))
 }
 
 func (m *sandboxTUIModel) removeSelectedMCPRemote() (tea.Model, tea.Cmd) {
@@ -348,10 +340,8 @@ func (m *sandboxTUIModel) removeSelectedMCPRemote() (tea.Model, tea.Cmd) {
 	target := m.sandboxNamed(row.Sandbox)
 	running := target != nil && target.State == tuiRunning
 	copyRow := *row
-	m.closeDialog()
-	m.busyAction = "mcp remove"
-	m.busyName = row.Sandbox + "/" + row.Name
-	return m, tea.Batch(removeMCPRemoteCmd(m.service, copyRow, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp remove", row.Sandbox+"/"+row.Name,
+		removeMCPRemoteCmd(m.service, copyRow, running))
 }
 
 func (m sandboxTUIModel) renderMCPRemoteDialog(theme tuiTheme, width int) string {
