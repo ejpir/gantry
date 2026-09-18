@@ -41,6 +41,7 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/vmm/devices":                    noVMMParent,
 		"internal/sandbox/manager/operationstate": noManagerParent,
 		"internal/sandbox/manager/runtimeowner":   noManagerParent,
+		"internal/sandbox/manifest":               noSandboxParent,
 		"internal/dashboard/operationstate":       noDashboardParent,
 		"internal/dashboard/refreshstate":         noDashboardParent,
 		"internal/dashboard/pagestate":            noDashboardParent,

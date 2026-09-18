@@ -34,9 +34,18 @@ import (
 // immutable MCP worker. A successful daemon restart removes it.
 const MCPRestartMarker = "mcp-restart-required"
 
+// ManifestProvenance identifies the normalized public manifest most recently
+// applied to a sandbox. It is not user configuration: imperative mutations
+// clear it so declarative apply can detect drift.
+type ManifestProvenance struct {
+	APIVersion string `json:"api_version"`
+	Digest     string `json:"digest"`
+}
+
 // RunConfig is the fully-resolved description of one gantry VM run.
 // sandbox.json is this struct.
 type RunConfig struct {
+	Manifest *ManifestProvenance `json:"manifest,omitempty"`
 	// SettingsRevision is a monotonic generation for the mutable service and
 	// VM settings managed by configuration transactions. Unrelated shares,
 	// ports, secrets, and policy mutations deliberately do not advance it.

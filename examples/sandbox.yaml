@@ -1,0 +1,34 @@
+apiVersion: gantry.dev/v1alpha1
+kind: Sandbox
+
+metadata:
+  name: dev
+
+spec:
+  image: debian:bookworm-slim
+  runtime: crun
+
+  resources:
+    cpus: 2
+    memory: 2GiB
+    disk: 4GiB
+
+  root:
+    writable: true
+
+  shares:
+    - name: source
+      source: ..
+      target: /workspace
+
+  network:
+    enabled: true
+    ports:
+      - host: 127.0.0.1:8080
+        guest: 80
+        protocol: tcp
+
+  ssh:
+    enabled: true
+
+  processIsolation: auto

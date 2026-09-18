@@ -117,6 +117,23 @@ stages; a launch cancelled before readiness reaps its uncommitted daemon.
 After readiness the persistent sandbox owns its daemon independently of the
 caller. Subprocess diagnostics retain a bounded tail.
 
+### Declarative sandbox manifests
+
+`internal/sandbox/manifest` owns the strict `gantry.dev/v1alpha1` public YAML
+schema. It rejects unknown/duplicate fields, aliases, merge keys, custom tags,
+and multiple documents. Host paths are normalized relative to the manifest,
+then the compiler produces `config.RunOptions`; it never decodes YAML into the
+resolved `RunConfig` persistence model or bypasses the shared resolver.
+
+The normalized manifest digest is recorded as provenance in `sandbox.json`.
+The configuration store clears that provenance whenever an imperative
+persistent mutation changes behavior, allowing `gantry apply` to detect drift.
+Changed running sandboxes pass through orderly supervisor shutdown before the
+new configuration is resolved and started. Existing state directories are not
+replaced, and failed launches restore the preceding configuration before a
+recovery start. Export is a redacted projection: secret values never exist in
+the persisted input and pinned public policy material may be emitted inline.
+
 ### Sandbox supervisor
 
 The supervisor is the trusted host control plane for one sandbox. It owns:
