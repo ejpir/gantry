@@ -41,7 +41,9 @@ func TestExportOwnsDirectoryCacheRelease(t *testing.T) {
 	defer func() { _ = parent.Close() }()
 	export := &Export{}
 	registerShareDirCache(export)
-	cache, ok := shareDirectoryCache(export).(*shareDirCache)
+	export.cacheMu.RLock()
+	cache, ok := export.directoryCache.(*shareDirCache)
+	export.cacheMu.RUnlock()
 	if !ok || cache == nil {
 		t.Fatal("export did not adopt its directory cache")
 	}
@@ -51,7 +53,10 @@ func TestExportOwnsDirectoryCacheRelease(t *testing.T) {
 	cachedFD := cache.parents[2].fd
 	closeShareDirCache(export)
 	closeShareDirCache(export)
-	if owned := shareDirectoryCache(export); owned != nil {
+	export.cacheMu.RLock()
+	owned := export.directoryCache
+	export.cacheMu.RUnlock()
+	if owned != nil {
 		t.Fatalf("released export retained cache %#v", owned)
 	}
 	var stat unix.Stat_t
@@ -61,6 +66,10 @@ func TestExportOwnsDirectoryCacheRelease(t *testing.T) {
 	if cache.prefetch(3, 4, int(parent.Fd()), "child", testDirIno(t, int(parent.Fd()), "child")) {
 		t.Fatal("released cache admitted a descriptor")
 	}
+	if shareDirectoryCache(export).prefetch(5, 6, int(parent.Fd()), "child", 1) {
+		t.Fatal("borrowed cache admitted work after owner release")
+	}
+	shareDirectoryCache(nil).clear() // nil borrowers remain safe during teardown callbacks
 }
 
 func TestShareDirCacheUsesOneParentForWideDirectory(t *testing.T) {

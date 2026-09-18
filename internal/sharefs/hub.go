@@ -377,6 +377,7 @@ func (h *Hub) Close() error {
 	h.notificationsReady.Store(false)
 	if h.protocol != nil {
 		h.protocol.GantrySetNotificationSink(nil)
+		h.protocol.GantryCloseResources()
 	}
 	h.mu.RLock()
 	exports := make([]*Export, 0, len(h.all))

@@ -455,8 +455,9 @@ policy before mutating host files and rejects traversal outside the root.
 
 `sharefs/lifecycle.Owner` serializes hub and standalone-server shutdown as
 `active → stopping → closed`. Shutdown stops admission, drains serving
-requests, detaches notification borrowers, closes each export watcher, and
-then releases its pinned root. OnForget releases that require a request-gate
+requests, detaches notification borrowers, releases every file and directory
+handle retained by the FUSE bridge, closes each export watcher, and then
+releases its pinned root. OnForget releases that require a request-gate
 upgrade run as owned workers; shutdown stops worker admission and joins every
 admitted worker before publishing `closed`. Linux, Windows, and macOS watcher
 shutdown uses the same joined lifecycle, so duplicate closes cannot return

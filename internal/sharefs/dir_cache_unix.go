@@ -103,19 +103,42 @@ func closeShareDirCache(export *Export) {
 }
 
 func invalidateShareDirCache(export *Export) {
-	if cache := shareDirectoryCache(export); cache != nil {
-		cache.clear()
+	shareDirectoryCache(export).clear()
+}
+
+type borrowedShareDirCache struct{ cache borrowedDirectoryCache }
+
+func (cache borrowedShareDirCache) prefetch(key, parentKey uint64, parentFD int, name string, expectedIno uint64) bool {
+	return cache.cache != nil && cache.cache.prefetch(key, parentKey, parentFD, name, expectedIno)
+}
+
+func (cache borrowedShareDirCache) open(key uint64) (int, bool) {
+	if cache.cache == nil {
+		return -1, false
+	}
+	return cache.cache.open(key)
+}
+
+func (cache borrowedShareDirCache) forget(key uint64) {
+	if cache.cache != nil {
+		cache.cache.forget(key)
+	}
+}
+
+func (cache borrowedShareDirCache) clear() {
+	if cache.cache != nil {
+		cache.cache.clear()
 	}
 }
 
 func shareDirectoryCache(export *Export) borrowedDirectoryCache {
 	if export == nil {
-		return nil
+		return borrowedShareDirCache{}
 	}
 	export.cacheMu.RLock()
 	cache := export.directoryCache
 	export.cacheMu.RUnlock()
-	return cache
+	return borrowedShareDirCache{cache: cache}
 }
 
 // prefetch records how to open a child directory relative to the directory

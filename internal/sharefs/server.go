@@ -23,6 +23,7 @@ type Server struct {
 	root       string
 	export     *Export
 	handler    fusewire.Handler
+	protocol   *fuse.ProtocolServer
 	guard      *requestGuard
 	request    sync.RWMutex
 	lifecycle  sharelifecycle.Owner
@@ -71,6 +72,7 @@ func NewServer(tag, root string, readOnly bool) (*Server, error) {
 		handler = readOnlyHandler{next: protocol}
 	}
 	server.handler = handler
+	server.protocol = protocol
 	server.guard.setReporter(protocol)
 	return server, nil
 }
@@ -106,6 +108,9 @@ func (s *Server) Close() error {
 
 	s.request.Lock()
 	s.finalizers.stopAdmission()
+	if s.protocol != nil {
+		s.protocol.GantryCloseResources()
+	}
 	if s.export != nil {
 		s.export.finishNow()
 	}
