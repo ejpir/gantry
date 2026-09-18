@@ -201,10 +201,10 @@ type sandboxTUIModel struct {
 	service    dashboardapi.Service
 	limits     dashboardapi.ResourceLimits
 
+	tuiPageState
 	remotes      map[string]remoteSection
 	remoteCursor int
 	remoteScroll int
-	page         tuiPage
 	sandboxes    []tuiSandbox
 	cursor       int // len(sandboxes) is the trailing "New Sandbox" card
 	scrollRow    int
@@ -266,8 +266,7 @@ type sandboxTUIModel struct {
 
 	spinner   spinner.Model
 	animating bool
-	toast     *tuiToast
-	toastGen  uint64
+	tuiNotificationState
 
 	updateStatus  selfupdate.Status
 	updateChecked bool
@@ -462,7 +461,7 @@ func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
 		sandboxFilterInput: textinput.New(),
 		operations:         newDashboardOperations(),
 		service:            service,
-		page:               tuiOverviewPage,
+		tuiPageState:       newTUIPageState(),
 		limits:             limits,
 		width:              100,
 		height:             30,
@@ -630,9 +629,7 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		_ = m.tuiOperationState.progress(msg.owner, safeUILine(msg.event.progress))
 		return m, waitTUIProcessStream(msg.stream, msg.owner)
 	case tuiToastExpiredMsg:
-		if m.toast != nil && m.toast.gen == msg.gen {
-			m.toast = nil
-		}
+		m.tuiNotificationState.expire(msg.gen)
 		return m, nil
 	case tuiUpdateStatusMsg:
 		if msg.err == nil && (msg.live || !m.updateChecked) {
@@ -1421,12 +1418,8 @@ func (m *sandboxTUIModel) ensureAnimation() tea.Cmd {
 }
 
 func (m *sandboxTUIModel) showToast(kind tuiToastKind, title, body string) tea.Cmd {
-	m.toastGen++
-	gen := m.toastGen
-	m.toast = &tuiToast{
-		kind: kind, title: safeUILine(title), body: strings.TrimSpace(safeUIBlock(body)), gen: gen,
-	}
-	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return tuiToastExpiredMsg{gen: gen} })
+	generation := m.tuiNotificationState.publish(kind, safeUILine(title), strings.TrimSpace(safeUIBlock(body)))
+	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return tuiToastExpiredMsg{gen: generation} })
 }
 
 func (m *sandboxTUIModel) selected() *tuiSandbox {
@@ -1624,10 +1617,9 @@ func (m *sandboxTUIModel) ensureCursorVisible() {
 }
 
 func (m *sandboxTUIModel) setPage(page tuiPage) {
-	if page >= tuiPageCount {
+	if !m.tuiPageState.transition(page) {
 		return
 	}
-	m.page = page
 	if m.viewSource != nil {
 		m.rebuildView(false)
 	}
@@ -1636,16 +1628,7 @@ func (m *sandboxTUIModel) setPage(page tuiPage) {
 }
 
 func (m *sandboxTUIModel) cyclePage(delta int) {
-	pages := []tuiPage{tuiOverviewPage, tuiSandboxesPage, tuiTrafficPage, tuiRulesPage, tuiPortsPage, tuiPacketsPage, tuiMountsPage, tuiSecretsPage, tuiMCPPage, tuiAuditPage, tuiImagesPage, tuiRemotesPage}
-	current := 0
-	for index, page := range pages {
-		if page == m.page {
-			current = index
-			break
-		}
-	}
-	next := (current + delta%len(pages) + len(pages)) % len(pages)
-	m.setPage(pages[next])
+	m.setPage(m.tuiPageState.cycle(delta))
 }
 
 func (m *sandboxTUIModel) tableState() (cursor, scroll *int, count int) {

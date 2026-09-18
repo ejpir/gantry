@@ -150,16 +150,20 @@ func TestDashboardOperationOwnership(t *testing.T) {
 // Dashboard modal transitions and refresh publication have dedicated owners.
 // Rendering and input handlers may inspect these fields but cannot bypass the
 // generation and transition checks.
-func TestDashboardDialogAndRefreshOwnership(t *testing.T) {
+func TestDashboardViewStateOwnership(t *testing.T) {
 	root := filepath.Join("..", "..", "internal", "dashboard")
-	owned := map[string]bool{"dialog": true, "refreshing": true, "refreshVisible": true}
+	owned := map[string]bool{
+		"dialog": true, "refreshing": true, "refreshVisible": true,
+		"page": true, "toast": true, "toastGen": true,
+	}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		base := filepath.Base(path)
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") ||
-			base == "dialog_state.go" || base == "refresh_state.go" {
+			base == "dialog_state.go" || base == "refresh_state.go" ||
+			base == "page_state.go" || base == "notification_state.go" {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)

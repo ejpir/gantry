@@ -104,7 +104,8 @@ scoped completion capabilities, so a delayed result cannot complete a later
 operation with the same action and target. Snapshot refreshes use the same
 ownership rule: only the newest admitted generation may publish rows. Modal
 open, replacement, and close transitions are centralized in the dialog state
-owner while dialog-specific fields remain with their form owners.
+owner while dialog-specific fields remain with their form owners. Page changes
+and toast replacement/expiry likewise pass through their typed state owners.
 
 Dashboard shutdown cancels and joins its launch operations and background
 subprocesses. Preparation checks cancellation between its existing bounded

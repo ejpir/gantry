@@ -1985,7 +1985,7 @@ func (m *sandboxTUIModel) updateMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd)
 		return m, nil
 	}
 	if m.dialog == tuiNoDialog && m.toast != nil && m.toastBounds(tuiThemeFor(m.dark)).contains(mouse.X, mouse.Y) {
-		m.toast = nil
+		m.tuiNotificationState.dismiss()
 		return m, nil
 	}
 	if m.dialog != tuiNoDialog {
