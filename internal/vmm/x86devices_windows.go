@@ -17,6 +17,15 @@ type x86Devices struct {
 	pic    *devices.PIC8259
 }
 
+func (x *x86Devices) close() error {
+	var err error
+	if x.pit != nil {
+		err = x.pit.Close()
+	}
+	*x = x86Devices{}
+	return err
+}
+
 // mmioX86 services the I/O APIC MMIO window and reports whether the
 // access was claimed, so the generic MMIO dispatcher can fall through to
 // reads-as-zero/writes-ignored for unassigned space.

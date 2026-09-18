@@ -7,7 +7,8 @@
 //     the UART and (on x86) the legacy PC device cluster, MMIO and port-I/O
 //     dispatch (handleMMIO/handleIO), the interrupt router, console
 //     plumbing, and the boot timeline. Prepare builds it; Close tears it
-//     down, joining the backend before releasing devices and RAM.
+//     down, joining the backend before machineResources releases devices,
+//     RAM, and host capabilities in reverse acquisition order.
 //   - The backend is the per-platform vCPU execution engine — KVM
 //     (linux/amd64, linux/arm64), Hypervisor.framework (darwin), or WHPX
 //     (windows). Build constraints select exactly one backend per platform;
@@ -28,6 +29,11 @@
 // Where coupling can be narrowed cheaply it is: backend instrumentation
 // flows through the small bootTracer interface rather than the concrete
 // boot timeline.
+//
+// Machine is single-use and follows the validated phase sequence prepared ->
+// starting -> running -> exited -> stopping -> closed. Shutdown may enter
+// stopping from any non-terminal phase; startup and vCPU execution are joined
+// before prepared resources are released.
 //
 // Public surface: Opts and Prepare construct a Machine, Run boots it on the
 // platform backend, Close releases it. InjectVsockConn and RequestHotMemory

@@ -26,12 +26,14 @@ type pitChannel struct {
 }
 
 type PIT8254 struct {
-	mu     sync.Mutex
-	ch     [3]pitChannel
-	raise  func(level bool) // IRQ 0 line
-	cancel func()
-	nmi61  byte // port 0x61 shadow
-	now    func() time.Time
+	mu      sync.Mutex
+	ch      [3]pitChannel
+	raise   func(level bool) // IRQ 0 line
+	cancel  func()
+	nmi61   byte // port 0x61 shadow
+	now     func() time.Time
+	closed  bool
+	workers sync.WaitGroup
 }
 
 func NewPIT(raise func(level bool)) *PIT8254 {
@@ -109,6 +111,9 @@ func (p *PIT8254) IORead(port uint16) byte {
 func (p *PIT8254) IOWrite(port uint16, val byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return
+	}
 	if port == 0x43 { // mode/command
 		idx := (val >> 6) & 3
 		if idx == 3 || (val>>4)&3 == 0 {
@@ -173,7 +178,9 @@ func (p *PIT8254) armTimerLocked() {
 	stop := make(chan struct{})
 	p.cancel = func() { close(stop) }
 	raise := p.raise
+	p.workers.Add(1)
 	go func() {
+		defer p.workers.Done()
 		if oneShot {
 			t := time.NewTimer(period)
 			defer t.Stop()
@@ -197,4 +204,20 @@ func (p *PIT8254) armTimerLocked() {
 			}
 		}
 	}()
+}
+
+// Close stops and joins every timer generation before its interrupt callback
+// owner can be released. It is safe to call repeatedly.
+func (p *PIT8254) Close() error {
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+		if p.cancel != nil {
+			p.cancel()
+			p.cancel = nil
+		}
+	}
+	p.mu.Unlock()
+	p.workers.Wait()
+	return nil
 }

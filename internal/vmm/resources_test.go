@@ -111,10 +111,7 @@ func TestMachineCloseWaitsForBackendInitialization(t *testing.T) {
 
 	deadline := time.Now().Add(time.Second)
 	for {
-		m.resourceMu.Lock()
-		state := m.lifecycle
-		m.resourceMu.Unlock()
-		if state == machineStopping {
+		if m.phase() == machineStopping {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -131,7 +128,9 @@ func TestMachineCloseWaitsForBackendInitialization(t *testing.T) {
 		t.Fatalf("backend adoption during Close = %v, want errMachineClosed", err)
 	}
 
-	m.finishRun()
+	if err := m.finishRun(); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-closed:
 		if err != nil {
@@ -150,7 +149,9 @@ func TestMachineRunLifecycleIsSingleUse(t *testing.T) {
 	if err := m.beginRun(); !errors.Is(err, errMachineAlreadyRun) {
 		t.Fatalf("second beginRun = %v, want errMachineAlreadyRun", err)
 	}
-	m.finishRun()
+	if err := m.finishRun(); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.beginRun(); !errors.Is(err, errMachineAlreadyRun) {
 		t.Fatalf("beginRun after exit = %v, want errMachineAlreadyRun", err)
 	}

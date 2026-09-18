@@ -186,6 +186,22 @@ map one anonymous RAM section and exchange validated exits through fixed
 shared-memory mailboxes/events; low-volume control uses authenticated pipes.
 The broker receives no disks, share roots, guest console, or network handles.
 
+Inside `internal/vmm`, `Machine` alone advances the single-use lifecycle
+`prepared → starting → running → exited → stopping → closed`. Backend adoption
+is the `starting → running` ownership transfer. Shutdown can enter `stopping`
+from any live phase, disables interrupt publication, stops and joins the native
+backend, and only then asks `machineResources` to release virtio devices,
+legacy-device workers, guest RAM, and inherited host capabilities in reverse
+acquisition order. Runtime borrowers such as hot-memory mapping and the WHPX
+transport do not expose `Close`; the owning machine supplies narrow revocation
+callbacks where failure handling needs them. The worker process itself remains
+owned by `guestplane.Plane`; `vmm.Machine` owns only in-process hypervisor and
+guest resources. Disk and network descriptors transfer into their virtio core,
+native vCPU goroutines remain with the backend lifecycle, and the x86 PIT now
+cancels and joins its timer worker before the legacy-device cluster is released.
+Console writers, packet policies, traffic observers, and filesystem handlers
+without an explicit `Owner` remain borrowed.
+
 The supervisor passes pre-opened files and authenticated channels, so a
 confined worker does not need general host-path access. Workload and IDE
 writable layers are independent ordered descriptors with separate virtio-blk

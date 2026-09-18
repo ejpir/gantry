@@ -17,6 +17,8 @@ func TestApplicationBoundaries(t *testing.T) {
 	root := filepath.Join("..", "..")
 	const sandboxRoot = "github.com/ejpir/gantry/internal/sandbox"
 	noSandboxParent := func(path string) bool { return path == sandboxRoot }
+	const vmmRoot = "github.com/ejpir/gantry/internal/vmm"
+	noVMMParent := func(path string) bool { return path == vmmRoot }
 	rules := map[string]func(string) bool{
 		"internal/dashboard": func(path string) bool {
 			const sandbox = "github.com/ejpir/gantry/internal/sandbox"
@@ -29,6 +31,8 @@ func TestApplicationBoundaries(t *testing.T) {
 		"internal/sandbox/controlplane": noSandboxParent,
 		"internal/sandbox/sshgw":        noSandboxParent,
 		"internal/sandbox/mcpgw":        noSandboxParent,
+		"internal/vmm/boot":             noVMMParent,
+		"internal/vmm/devices":          noVMMParent,
 		"internal/sandbox/lifecycle": func(path string) bool {
 			return path == "flag" || path == "os/exec" || strings.Contains(path, "/internal/dashboard") || strings.Contains(path, "/sandbox/manager")
 		},

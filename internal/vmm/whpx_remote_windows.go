@@ -6,10 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ejpir/gantry/internal/vmm/boot"
 	"github.com/ejpir/gantry/internal/vmm/devices"
@@ -17,9 +17,10 @@ import (
 )
 
 type whpxRemoteBackend struct {
-	m         *Machine
-	conn      net.Conn
-	mailboxes *whpxMailboxView
+	m              *Machine
+	conn           whpxBrokerBorrow
+	abortTransport func()
+	mailboxes      *whpxMailboxView
 
 	writeMu   sync.Mutex
 	commandID atomic.Uint64
@@ -27,6 +28,7 @@ type whpxRemoteBackend struct {
 	pending   map[uint64]chan error
 
 	closeOnce   sync.Once
+	closing     atomic.Bool
 	doneOnce    sync.Once
 	done        chan struct{}
 	mailboxDone chan struct{}
@@ -45,8 +47,12 @@ func runBrokeredWHPX(m *Machine) error {
 	if err != nil {
 		return err
 	}
+	transport, abortTransport, err := m.borrowWHPXBroker()
+	if err != nil {
+		return err
+	}
 	backend := &whpxRemoteBackend{
-		m: m, conn: m.whpxBroker, mailboxes: mailboxes,
+		m: m, conn: transport, abortTransport: abortTransport, mailboxes: mailboxes,
 		pending: make(map[uint64]chan error), done: make(chan struct{}), mailboxDone: make(chan struct{}),
 	}
 	defer func() { _ = mailboxes.close() }()
@@ -110,6 +116,10 @@ func (backend *whpxRemoteBackend) readLoop() error {
 	for {
 		var message whpxBrokerEnvelope
 		if err := workerproto.ReadMessage(backend.conn, &message); err != nil {
+			if backend.closing.Load() {
+				backend.finish(nil)
+				return backend.result()
+			}
 			backend.finish(fmt.Errorf("WHPX broker channel: %w", err))
 			return backend.result()
 		}
@@ -337,9 +347,18 @@ func (backend *whpxRemoteBackend) mapHotMemory() error {
 
 func (backend *whpxRemoteBackend) Close() error {
 	backend.closeOnce.Do(func() {
-		_ = backend.write(whpxBrokerEnvelope{Type: "close"})
+		backend.closing.Store(true)
+		// Bound graceful protocol shutdown even if another writer is stalled.
+		_ = backend.conn.SetDeadline(time.Now().Add(250 * time.Millisecond))
+		if err := backend.write(whpxBrokerEnvelope{Type: "close"}); err != nil {
+			backend.setError(fmt.Errorf("close WHPX broker: %w", err))
+		}
+		backend.finish(nil)
+		if backend.abortTransport != nil {
+			backend.abortTransport()
+		}
 	})
-	return nil
+	return backend.result()
 }
 
 func (backend *whpxRemoteBackend) write(message whpxBrokerEnvelope) error {
@@ -350,7 +369,9 @@ func (backend *whpxRemoteBackend) write(message whpxBrokerEnvelope) error {
 
 func (backend *whpxRemoteBackend) fail(err error) {
 	backend.setError(err)
-	_ = backend.conn.Close()
+	if backend.abortTransport != nil {
+		backend.abortTransport()
+	}
 }
 
 func (backend *whpxRemoteBackend) setError(err error) {

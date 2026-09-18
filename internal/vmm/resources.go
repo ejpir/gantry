@@ -8,7 +8,6 @@ import (
 	"os"
 	"reflect"
 	"runtime"
-	"sync"
 )
 
 const (
@@ -65,89 +64,19 @@ func ValidateResources(memBytes uint64, vcpus int) error {
 
 func maxInt() int { return int(^uint(0) >> 1) }
 
-type machineLifecycle uint8
-
-const (
-	machinePrepared machineLifecycle = iota
-	machineRunning
-	machineStopping
-	machineExited
-	machineClosed
-)
-
-// interruptRouter serializes callback publication and native-backend teardown.
-// Device goroutines may raise interrupts as soon as Prepare attaches them, so
-// a plain function field would race backend startup and could run through a
-// closed or reused native descriptor during Close.
-type interruptRouter struct {
-	mu       sync.RWMutex
-	line     func(int, bool)
-	disabled bool
-}
-
-func (r *interruptRouter) set(line func(int, bool)) {
-	r.mu.Lock()
-	if !r.disabled {
-		r.line = line
-	}
-	r.mu.Unlock()
-}
-
-func (r *interruptRouter) raise(irq int, level bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.line != nil {
-		r.line(irq, level)
-	}
-}
-
-// disable is sticky and waits for callbacks that already loaded the current
-// route. A backend racing Close cannot publish a route afterward; once this
-// returns, native resources can be released without a late IRQ ioctl.
-func (r *interruptRouter) disable() {
-	r.mu.Lock()
-	r.disabled = true
-	r.line = nil
-	r.mu.Unlock()
-}
-
-// beginStop returns whether a Run invocation must be joined. resourceMu
-// serializes every transition; stopping and exited are distinct so Close can
-// tell an initializing/running backend from one that has fully unwound.
-func (s *machineLifecycle) beginStop() bool {
-	wait := *s == machineRunning || *s == machineStopping
-	if *s != machineClosed {
-		*s = machineStopping
-	}
-	return wait
-}
-
-// releaseRAM runs only after backend and device workers are joined, so no
-// goroutine can retain a live access to the mapping.
-func (m *Machine) releaseRAM() error {
-	if len(m.ram) == 0 {
-		return nil
-	}
-	if err := freeGuestRAM(m.ram, m.ramShared); err != nil {
-		return fmt.Errorf("release guest RAM: %w", err)
-	}
-	m.ram = nil
-	m.ramShared = false
-	m.mem = nil
-	return nil
-}
-
 // prepareInputs owns every descriptor-bearing Opts field from the instant
 // Prepare is called. A successful constructor or Machine adoption removes a
 // capability from this set. Anything left is closed by Prepare's deferred
 // cleanup, including inputs it never reached after an early failure.
 //
 // Filesystem handlers with nil owners, Console, policies, and callbacks are
-// borrowed; descriptors and non-nil Filesystem owners are consumed.
+// borrowed; descriptors, network transports, and non-nil Filesystem owners
+// are consumed.
 type prepareInputs struct {
 	files            map[*os.File]string
 	filesystemOwners []ownedFilesystem
 	netConn          net.Conn
+	whpxBroker       net.Conn
 }
 
 type ownedFilesystem struct {
@@ -160,6 +89,7 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 		files:            make(map[*os.File]string, 4+len(o.DisksRO)+len(o.Disks)),
 		filesystemOwners: make([]ownedFilesystem, len(o.Filesystems)),
 		netConn:          o.NetConn,
+		whpxBroker:       o.WHPXBroker,
 	}
 	var errs []error
 	claim := func(f *os.File, label string, required bool) {
@@ -191,6 +121,13 @@ func collectPrepareInputs(o Opts) (*prepareInputs, error) {
 	}
 	for i, f := range o.Disks {
 		claim(f, fmt.Sprintf("writable disk %d", i), true)
+	}
+	if o.NetConn != nil && o.WHPXBroker != nil {
+		netValue, brokerValue := reflect.ValueOf(o.NetConn), reflect.ValueOf(o.WHPXBroker)
+		if netValue.Type() == brokerValue.Type() && netValue.Type().Comparable() && netValue.Interface() == brokerValue.Interface() {
+			errs = append(errs, errors.New("vmm: network and WHPX broker reuse the same connection"))
+			in.whpxBroker = nil // netConn retains the one close obligation
+		}
 	}
 	seenOwners := make(map[io.Closer]int, len(o.Filesystems))
 	for i, filesystem := range o.Filesystems {
@@ -249,6 +186,12 @@ func (in *prepareInputs) takeNetConn() net.Conn {
 	return conn
 }
 
+func (in *prepareInputs) takeWHPXBroker() net.Conn {
+	conn := in.whpxBroker
+	in.whpxBroker = nil
+	return conn
+}
+
 func (in *prepareInputs) takeFilesystem(index int) {
 	in.filesystemOwners[index].closer = nil
 }
@@ -277,57 +220,14 @@ func (in *prepareInputs) Close() error {
 		}
 		in.netConn = nil
 	}
+	if in.whpxBroker != nil {
+		if err := in.whpxBroker.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close WHPX broker transport: %w", err))
+		}
+		in.whpxBroker = nil
+	}
 	return errors.Join(errs...)
 }
 
 var errMachineClosed = errors.New("vmm: machine is closed")
 var errMachineAlreadyRun = errors.New("vmm: machine has already been run")
-
-func (m *Machine) beginRun() error {
-	m.resourceMu.Lock()
-	defer m.resourceMu.Unlock()
-	if m.lifecycle != machinePrepared {
-		if m.lifecycle == machineStopping || m.lifecycle == machineClosed {
-			return errMachineClosed
-		}
-		return errMachineAlreadyRun
-	}
-	m.lifecycle = machineRunning
-	m.runDone = make(chan struct{})
-	return nil
-}
-
-func (m *Machine) finishRun() {
-	m.resourceMu.Lock()
-	defer m.resourceMu.Unlock()
-	switch m.lifecycle {
-	case machineRunning:
-		m.lifecycle = machineExited
-	case machineStopping:
-		// Close owns the final transition after it observes runDone.
-	default:
-		return
-	}
-	close(m.runDone)
-}
-
-// adoptBackend transfers a fully constructed backend resource owner to the
-// Machine. The caller retains ownership when this method returns an error.
-func (m *Machine) adoptBackend(backend io.Closer) error {
-	if backend == nil {
-		return errors.New("vmm: nil hypervisor backend")
-	}
-	m.resourceMu.Lock()
-	defer m.resourceMu.Unlock()
-	if m.lifecycle == machineStopping || m.lifecycle == machineClosed {
-		return errMachineClosed
-	}
-	if m.lifecycle != machineRunning {
-		return errors.New("vmm: hypervisor backend adopted outside Run")
-	}
-	if m.backend != nil {
-		return errors.New("vmm: hypervisor backend already attached")
-	}
-	m.backend = backend
-	return nil
-}
