@@ -471,7 +471,10 @@ return ownership, and successful publication or close consumes it exactly once.
 On Unix, each export directly owns its directory-capability cache rather than
 registering it globally. Borrowers can prefetch, open, forget, or invalidate
 entries but cannot close the cache; export release closes cached parent
-descriptors before releasing the pinned root.
+descriptors before releasing the pinned root. The Windows export backend also
+tracks every native file handle and directory stream. Its joined shutdown stops
+handle admission, closes streams and files, and only then releases the root
+handle.
 
 The guest mounts the multiplexed virtio-fs hub once, then bind-mounts admitted
 tags into the workload container. Live add and remove mutate the hub manifest

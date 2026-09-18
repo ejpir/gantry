@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"golang.org/x/sys/windows"
 )
@@ -39,9 +40,12 @@ type winExportFS struct {
 	volume   uint32
 	salt     uint64
 
+	requests  sync.RWMutex
 	mu        sync.RWMutex
 	renameMu  sync.Mutex
+	lifecycle sharelifecycle.Owner
 	openFiles map[*winOpenFile]struct{}
+	openDirs  map[*winShareDirStream]struct{}
 }
 
 const (
@@ -91,21 +95,61 @@ func newWinExportFS(rootPath string, salt uint64) (*winExportFS, error) {
 	return &winExportFS{
 		root: root, identity: identity, volume: info.id.volume, salt: salt,
 		openFiles: make(map[*winOpenFile]struct{}),
+		openDirs:  make(map[*winShareDirStream]struct{}),
 	}, nil
 }
+
+func (b *winExportFS) beginRequest() bool {
+	if b == nil {
+		return false
+	}
+	b.requests.RLock()
+	if b.lifecycle.Phase() != sharelifecycle.Active {
+		b.requests.RUnlock()
+		return false
+	}
+	return true
+}
+
+func (b *winExportFS) endRequest() { b.requests.RUnlock() }
 
 func (b *winExportFS) Close() error {
 	if b == nil {
 		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.root == 0 {
+	leader, done := b.lifecycle.BeginClose()
+	if !leader {
+		<-done
 		return nil
 	}
-	err := windows.CloseHandle(b.root)
-	b.root = 0
-	return err
+
+	b.requests.Lock()
+	b.mu.Lock()
+	dirs := make([]*winShareDirStream, 0, len(b.openDirs))
+	for dir := range b.openDirs {
+		dirs = append(dirs, dir)
+	}
+	files := make([]*winOpenFile, 0, len(b.openFiles))
+	for file := range b.openFiles {
+		files = append(files, file)
+	}
+	root := b.root
+	b.root = 0 // stop all path admission before releasing child handles
+	b.mu.Unlock()
+
+	var closeErr error
+	for _, dir := range dirs {
+		dir.Close()
+	}
+	for _, file := range files {
+		closeErr = errors.Join(closeErr, file.close())
+	}
+	if root != 0 {
+		closeErr = errors.Join(closeErr, windows.CloseHandle(root))
+	}
+	b.requests.Unlock()
+	b.lifecycle.FinishClose()
+	return closeErr
 }
 
 // cleanWinSharePath performs syntactic validation only. Security-relevant

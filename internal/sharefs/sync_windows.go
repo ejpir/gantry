@@ -6,13 +6,20 @@ import (
 	"errors"
 	"os"
 	"syscall"
+
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 )
 
-func (backend *winExportFS) trackOpen(file *winOpenFile) *winOpenFile {
+func (backend *winExportFS) trackOpen(file *winOpenFile) (*winOpenFile, bool) {
 	if backend == nil || file == nil {
-		return file
+		return nil, false
 	}
 	backend.mu.Lock()
+	if backend.lifecycle.Phase() != sharelifecycle.Active || backend.root == 0 {
+		backend.mu.Unlock()
+		_ = file.close()
+		return nil, false
+	}
 	if backend.openFiles == nil {
 		backend.openFiles = make(map[*winOpenFile]struct{})
 	}
@@ -23,15 +30,16 @@ func (backend *winExportFS) trackOpen(file *winOpenFile) *winOpenFile {
 		backend.mu.Unlock()
 	}
 	backend.mu.Unlock()
-	return file
+	return file, true
 }
 
 func (backend *winExportFS) syncOpenFiles() syscall.Errno {
-	if backend == nil {
+	if backend == nil || !backend.beginRequest() {
 		return syscall.ESTALE
 	}
+	defer backend.endRequest()
 	backend.mu.RLock()
-	if backend.root == 0 {
+	if backend.lifecycle.Phase() != sharelifecycle.Active || backend.root == 0 {
 		backend.mu.RUnlock()
 		return syscall.ESTALE
 	}

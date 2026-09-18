@@ -18,6 +18,60 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+func TestWinBackendCloseReleasesTrackedHandles(t *testing.T) {
+	backend, err := newWinExportFS(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, _, errno := backend.create("", "open.txt", linuxOCreat|2, 0o644)
+	if errno != 0 {
+		t.Fatalf("create errno %d", fuse.ToStatus(errno))
+	}
+	export := &Export{}
+	dir, errno := backend.readdir("", export)
+	if errno != 0 {
+		t.Fatalf("readdir errno %d", fuse.ToStatus(errno))
+	}
+	if len(backend.openFiles) != 1 || len(backend.openDirs) != 1 {
+		t.Fatalf("tracked handles: files=%d dirs=%d", len(backend.openFiles), len(backend.openDirs))
+	}
+
+	backend.requests.RLock()
+	const closers = 8
+	results := make(chan error, closers)
+	for range closers {
+		go func() { results <- backend.Close() }()
+	}
+	select {
+	case err := <-results:
+		backend.requests.RUnlock()
+		t.Fatalf("Close returned before an admitted request drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	backend.requests.RUnlock()
+	for range closers {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := backend.lifecycle.Phase(); got != sharelifecycle.Closed {
+		t.Fatalf("backend phase = %d, want closed", got)
+	}
+	if backend.root != 0 || len(backend.openFiles) != 0 || len(backend.openDirs) != 0 {
+		t.Fatalf("closed backend retained resources: root=%v files=%d dirs=%d",
+			backend.root, len(backend.openFiles), len(backend.openDirs))
+	}
+	if _, err := file.read(make([]byte, 1), 0); err == nil {
+		t.Fatal("tracked file remained usable after backend Close")
+	}
+	if !dir.closed || dir.dir != 0 || dir.buffer != nil {
+		t.Fatalf("tracked directory remained live: closed=%v handle=%v buffer=%p", dir.closed, dir.dir, dir.buffer)
+	}
+	if _, _, errno := backend.open("open.txt", 0); errno == 0 {
+		t.Fatal("closed backend admitted a new file handle")
+	}
+}
+
 func TestWindowsSyncfsFlushesTrackedWritableHandles(t *testing.T) {
 	root := t.TempDir()
 	backend, err := newWinExportFS(root, 1)
