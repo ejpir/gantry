@@ -77,7 +77,9 @@ type imageDialogState struct {
 	pullFocus     int
 	pullRef       textinput.Model
 	pullArch      string
+	pullRemote    string
 	loginFocus    int
+	loginRemote   string
 	loginRegistry textinput.Model
 	loginUsername textinput.Model
 	loginPassword textinput.Model
@@ -135,4 +137,6 @@ func (state *imageDialogState) releaseFocus() {
 	state.loginUsername.Blur()
 	state.loginPassword.Blur()
 	state.loginPassword.Reset()
+	state.pullRemote = ""
+	state.loginRemote = ""
 }

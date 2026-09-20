@@ -8,7 +8,7 @@ import (
 )
 
 func auditRowKey(row tuiAuditRow) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", row.Sandbox, row.Line, row.Error, row.Occurrence)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d", row.Remote, row.Sandbox, row.Line, row.Error, row.Occurrence)
 }
 
 func (m sandboxTUIModel) selectedAuditKey() string {
@@ -84,7 +84,7 @@ func auditMessage(row tuiAuditRow) string {
 func auditSortValue(row tuiAuditRow, column string) tuiSortValue {
 	switch column {
 	case "sandbox":
-		return sortText(row.Sandbox)
+		return sortText(sourceDisplayName(row.Sandbox, row.Remote))
 	case "result":
 		return sortText(auditStatus(row))
 	case "action":
@@ -128,14 +128,14 @@ func (m sandboxTUIModel) renderAuditRow(theme tuiTheme, row tuiAuditRow, width i
 	message := auditMessage(row)
 	switch {
 	case width >= 86:
-		return tableCell(status, 8) + " " + tableCell(row.Sandbox, 14) + " " + tableCell(auditAction(row), 22) + " " + tableCell(message, width-47)
+		return tableCell(status, 8) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 14) + " " + tableCell(auditAction(row), 22) + " " + tableCell(message, width-47)
 	case width >= 56:
 		if row.Decision != nil {
 			message = row.Decision.Action + " · " + message
 		}
-		return tableCell(status, 6) + " " + tableCell(row.Sandbox, 12) + " " + tableCell(message, width-20)
+		return tableCell(status, 6) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 12) + " " + tableCell(message, width-20)
 	default:
-		return truncateANSI(status+" "+row.Sandbox+" · "+auditAction(row)+" · "+message, width)
+		return truncateANSI(status+" "+sourceDisplayName(row.Sandbox, row.Remote)+" · "+auditAction(row)+" · "+message, width)
 	}
 }
 
@@ -148,7 +148,7 @@ func (m sandboxTUIModel) renderAuditDetail(theme tuiTheme, width int) []string {
 	muted := lipgloss.NewStyle().Foreground(theme.muted)
 	lines := []string{
 		m.renderTableSeparator(theme, width),
-		renderAuditStatus(theme, row) + "  " + text.Bold(true).Render(row.Sandbox+" · "+auditAction(row)),
+		renderAuditStatus(theme, row) + "  " + text.Bold(true).Render(sourceDisplayName(row.Sandbox, row.Remote)+" · "+auditAction(row)),
 		text.Render(auditMessage(row)),
 	}
 	if row.Decision != nil {
@@ -172,7 +172,7 @@ func (m sandboxTUIModel) renderAuditDetailDialog(theme tuiTheme, width int) stri
 		lines = append(lines, lipgloss.NewStyle().Foreground(theme.secondary).Render(
 			lipgloss.Wrap(label+": "+defaultText(safeUILine(value), "—"), width, "")))
 	}
-	field("Sandbox", row.Sandbox)
+	field("Sandbox", sourceDisplayName(row.Sandbox, row.Remote))
 	field("Result", auditStatus(*row))
 	if row.Decision != nil {
 		d := row.Decision

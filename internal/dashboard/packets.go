@@ -21,6 +21,7 @@ const (
 )
 
 type tuiPacketRow struct {
+	Remote    string
 	Sandbox   string
 	Sequence  uint64
 	Timestamp time.Time
@@ -47,10 +48,10 @@ func (m *sandboxTUIModel) refreshPacketsCmd() tea.Cmd {
 	if m.packetLoading || m.packetPaused {
 		return nil
 	}
-	targets := make([]string, 0, len(m.allSandboxes()))
+	targets := make([]tuiSandbox, 0, len(m.allSandboxes()))
 	for _, sandbox := range m.allSandboxes() {
 		if sandbox.State == tuiRunning && sandbox.Net {
-			targets = append(targets, sandbox.Name)
+			targets = append(targets, sandbox)
 		}
 	}
 	after := make(map[string]uint64, len(m.packetAfter))
@@ -61,26 +62,28 @@ func (m *sandboxTUIModel) refreshPacketsCmd() tea.Cmd {
 	return func() tea.Msg {
 		message := tuiPacketCaptureMsg{after: after}
 		var failures []string
-		for _, name := range targets {
-			cursor := message.after[name]
-			snapshot, err := m.service.CapturePackets(name, packetcapture.Request{
+		for _, target := range targets {
+			key := sandboxRowKey(target)
+			cursor := message.after[key]
+			service := m.serviceForRemote(target.Remote)
+			snapshot, err := service.CapturePackets(target.Name, packetcapture.Request{
 				Start: true, After: cursor, MaxPackets: 128, MaxBytes: 128 << 10,
 			})
 			// A restarted sandbox has a fresh recorder and sequence space. Retry
 			// from its beginning instead of permanently waiting on the old cursor.
 			if err == nil && snapshot.Latest < cursor {
-				snapshot, err = m.service.CapturePackets(name, packetcapture.Request{
+				snapshot, err = service.CapturePackets(target.Name, packetcapture.Request{
 					Start: true, MaxPackets: 128, MaxBytes: 128 << 10,
 				})
 			}
 			if err != nil {
-				failures = append(failures, name+": "+err.Error())
+				failures = append(failures, remoteOperationLabel(target.Name, target.Remote)+": "+err.Error())
 				continue
 			}
-			message.after[name] = snapshot.Next
+			message.after[key] = snapshot.Next
 			message.evicted += snapshot.Evicted
 			for _, packet := range snapshot.Packets {
-				message.rows = append(message.rows, decodePacketRow(name, packet))
+				message.rows = append(message.rows, decodePacketRow(target.Name, target.Remote, packet))
 			}
 		}
 		message.err = strings.Join(failures, "; ")
@@ -103,10 +106,12 @@ func (m *sandboxTUIModel) handlePacketCapture(message tuiPacketCaptureMsg) (tea.
 	m.packetSource = append(m.packetSource, message.rows...)
 	sort.SliceStable(m.packetSource, func(left, right int) bool {
 		if m.packetSource[left].Timestamp.Equal(m.packetSource[right].Timestamp) {
-			if m.packetSource[left].Sandbox == m.packetSource[right].Sandbox {
+			leftKey := m.packetSource[left].Remote + "\x00" + m.packetSource[left].Sandbox
+			rightKey := m.packetSource[right].Remote + "\x00" + m.packetSource[right].Sandbox
+			if leftKey == rightKey {
 				return m.packetSource[left].Sequence < m.packetSource[right].Sequence
 			}
-			return m.packetSource[left].Sandbox < m.packetSource[right].Sandbox
+			return leftKey < rightKey
 		}
 		return m.packetSource[left].Timestamp.Before(m.packetSource[right].Timestamp)
 	})
@@ -151,10 +156,10 @@ func (m *sandboxTUIModel) clearPacketsCmd() tea.Cmd {
 	if m.packetLoading {
 		return nil
 	}
-	targets := make([]string, 0, len(m.allSandboxes()))
+	targets := make([]tuiSandbox, 0, len(m.allSandboxes()))
 	for _, sandbox := range m.allSandboxes() {
 		if sandbox.State == tuiRunning && sandbox.Net {
-			targets = append(targets, sandbox.Name)
+			targets = append(targets, sandbox)
 		}
 	}
 	m.packets, m.packetSource = nil, nil
@@ -166,9 +171,9 @@ func (m *sandboxTUIModel) clearPacketsCmd() tea.Cmd {
 	return func() tea.Msg {
 		message := tuiPacketCaptureMsg{after: make(map[string]uint64)}
 		var failures []string
-		for _, name := range targets {
-			if _, err := m.service.CapturePackets(name, packetcapture.Request{Start: true, Clear: true}); err != nil {
-				failures = append(failures, name+": "+err.Error())
+		for _, target := range targets {
+			if _, err := m.serviceForRemote(target.Remote).CapturePackets(target.Name, packetcapture.Request{Start: true, Clear: true}); err != nil {
+				failures = append(failures, remoteOperationLabel(target.Name, target.Remote)+": "+err.Error())
 			}
 		}
 		message.err = strings.Join(failures, "; ")
@@ -194,7 +199,7 @@ func (m sandboxTUIModel) renderPacketsView(theme tuiTheme, layout tuiDashboardLa
 
 func (m sandboxTUIModel) hasPacketCaptureTarget() bool {
 	for _, sandbox := range m.sandboxes {
-		if sandbox.Remote == "" && sandbox.State == tuiRunning && sandbox.Net {
+		if sandbox.State == tuiRunning && sandbox.Net {
 			return true
 		}
 	}
@@ -226,16 +231,16 @@ func (m sandboxTUIModel) renderPacketRow(theme tuiTheme, row tuiPacketRow, width
 	}
 	if width >= 100 {
 		endpoint := maxInt(14, (width-50)/2)
-		return tableCell(row.Timestamp.Local().Format("15:04:05.000"), 12) + " " + tableCell(row.Sandbox, 13) + " " + tableCell(direction, 4) + " " +
+		return tableCell(row.Timestamp.Local().Format("15:04:05.000"), 12) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 13) + " " + tableCell(direction, 4) + " " +
 			tableCell(row.Source, endpoint) + " " + tableCell(row.Target, endpoint) + " " + tableCell(row.Protocol, 7) + " " +
 			tableCell(fmt.Sprint(row.Length), 6) + " " + row.Info
 	}
 	if width >= 62 {
 		endpoint := maxInt(12, (width-31)/2)
-		return tableCell(row.Timestamp.Local().Format("15:04:05"), 9) + " " + tableCell(row.Sandbox, 11) + " " + tableCell(direction, 2) + " " +
+		return tableCell(row.Timestamp.Local().Format("15:04:05"), 9) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 11) + " " + tableCell(direction, 2) + " " +
 			tableCell(row.Source, endpoint) + " " + tableCell(row.Target, endpoint) + " " + tableCell(row.Protocol, 6)
 	}
-	return tableCell(direction, 2) + " " + tableCell(row.Sandbox, 11) + " " + tableCell(row.Protocol+" "+row.Source+" → "+row.Target, maxInt(1, width-16))
+	return tableCell(direction, 2) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 11) + " " + tableCell(row.Protocol+" "+row.Source+" → "+row.Target, maxInt(1, width-16))
 }
 
 func (m sandboxTUIModel) renderPacketDetail(theme tuiTheme, width int) []string {
@@ -252,7 +257,7 @@ func (m sandboxTUIModel) renderPacketDetail(theme tuiTheme, width int) []string 
 	payload := fmt.Sprintf("% x", row.Data[:min(len(row.Data), 32)])
 	return []string{
 		m.renderTableSeparator(theme, width),
-		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("%s packet #%d", row.Sandbox, row.Sequence)) + "  " + decisionStyle.Render(decision),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("%s packet #%d", sourceDisplayName(row.Sandbox, row.Remote), row.Sequence)) + "  " + decisionStyle.Render(decision),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("flow     ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Source+" → "+row.Target),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("layers   ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(defaultText(row.Layers, "decode unavailable")),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("capture  ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("%d/%d bytes at %s", row.Captured, row.Length, row.Timestamp.Local().Format(time.RFC3339Nano))),
@@ -260,9 +265,9 @@ func (m sandboxTUIModel) renderPacketDetail(theme tuiTheme, width int) []string 
 	}
 }
 
-func decodePacketRow(sandbox string, record packetcapture.Packet) tuiPacketRow {
+func decodePacketRow(sandbox, remote string, record packetcapture.Packet) tuiPacketRow {
 	row := tuiPacketRow{
-		Sandbox: sandbox, Sequence: record.Sequence, Timestamp: record.Timestamp,
+		Remote: remote, Sandbox: sandbox, Sequence: record.Sequence, Timestamp: record.Timestamp,
 		Direction: record.Direction, Allowed: record.Allowed, Length: record.Length,
 		Captured: len(record.Data), Source: "—", Target: "—", Protocol: "ETH",
 		Data: append([]byte(nil), record.Data...),

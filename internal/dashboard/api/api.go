@@ -84,6 +84,7 @@ func (sandbox Sandbox) DisplayMemoryMiB() uint {
 }
 
 type Traffic struct {
+	Remote    string
 	Sandbox   string
 	Host      string
 	Address   string
@@ -99,6 +100,7 @@ type Traffic struct {
 }
 
 type Rule struct {
+	Remote  string
 	Sandbox string
 	Action  string
 	Target  string
@@ -118,6 +120,7 @@ type RuleRequest struct {
 }
 
 type Mount struct {
+	Remote   string
 	Sandbox  string
 	Tag      string
 	Host     string
@@ -131,6 +134,7 @@ type Mount struct {
 }
 
 type Port struct {
+	Remote  string
 	Sandbox string
 	Bind    string
 	Guest   int
@@ -140,6 +144,7 @@ type Port struct {
 }
 
 type Secret struct {
+	Remote  string
 	Sandbox string
 	Name    string
 	State   string
@@ -154,6 +159,7 @@ type SecretRequest struct {
 // Image is one cached OCI image in the local image store. Entrypoint, Cmd,
 // and EnvCount describe the image config captured at build time.
 type Image struct {
+	Remote     string
 	Ref        string
 	Digest     string
 	Arch       string
@@ -171,6 +177,7 @@ type Image struct {
 // secret value itself never crosses the dashboard boundary: HasSecret only
 // reports that one exists.
 type RegistryAuth struct {
+	Remote    string
 	Registry  string
 	Username  string
 	Source    string
@@ -188,6 +195,7 @@ type RegistryLoginRequest struct {
 // MCPServer contains configuration references only. AuthRef and Redact are
 // secret/custody names; credential values never cross the dashboard boundary.
 type MCPServer struct {
+	Remote     string
 	Sandbox    string
 	Name       string
 	Type       string // local or remote
@@ -227,6 +235,7 @@ type MCPFilesystemRequest struct {
 // Entries have no timestamps or durable IDs. Occurrence distinguishes identical
 // lines within one sandbox's tail, counted from newest to oldest.
 type AuditEvent struct {
+	Remote     string
 	Sandbox    string
 	Line       string
 	Occurrence int
@@ -256,6 +265,52 @@ type Snapshot struct {
 	Audit      []AuditEvent
 	Images     []Image
 	Registries []RegistryAuth
+}
+
+// HostSnapshot is the full non-secret dashboard read model plus the host's
+// form limits. Remote managers return this over the authenticated manager API;
+// secret and registry credential values are never part of a snapshot.
+type HostSnapshot struct {
+	Snapshot       Snapshot       `json:"snapshot"`
+	ResourceLimits ResourceLimits `json:"resourceLimits"`
+	KernelChoices  []string       `json:"kernelChoices,omitempty"`
+}
+
+// ActionRequest is the closed union accepted by the manager's dashboard
+// action endpoint. Action selects exactly one payload below. Secret-bearing
+// requests are write-only and are never returned by the manager.
+type ActionRequest struct {
+	Action        string                `json:"action"`
+	Value         string                `json:"value,omitempty"`
+	SandboxConfig *SandboxConfigRequest `json:"sandboxConfig,omitempty"`
+	RuleRequest   *RuleRequest          `json:"ruleRequest,omitempty"`
+	Rule          *Rule                 `json:"rule,omitempty"`
+	Traffic       *Traffic              `json:"traffic,omitempty"`
+	Secret        *SecretRequest        `json:"secret,omitempty"`
+	SecretRow     *Secret               `json:"secretRow,omitempty"`
+	MCPRemote     *MCPRemoteRequest     `json:"mcpRemote,omitempty"`
+	MCPFilesystem *MCPFilesystemRequest `json:"mcpFilesystem,omitempty"`
+	MCPServer     *MCPServer            `json:"mcpServer,omitempty"`
+	Registry      *RegistryLoginRequest `json:"registry,omitempty"`
+	Share         *ShareRequest         `json:"share,omitempty"`
+	SharePlan     *SharePlan            `json:"sharePlan,omitempty"`
+	Mount         *Mount                `json:"mount,omitempty"`
+	PortRequest   *PortRequest          `json:"portRequest,omitempty"`
+	Port          *PortMutationRequest  `json:"port,omitempty"`
+}
+
+type PortMutationRequest struct {
+	Sandbox string `json:"sandbox"`
+	Spec    string `json:"spec"`
+}
+
+type ActionResult struct {
+	RestartRequired bool          `json:"restartRequired,omitempty"`
+	Policy          *PolicyResult `json:"policy,omitempty"`
+	SharePlan       *SharePlan    `json:"sharePlan,omitempty"`
+	PortSpec        string        `json:"portSpec,omitempty"`
+	Warning         string        `json:"warning,omitempty"`
+	Count           int           `json:"count,omitempty"`
 }
 
 type ResourceLimits struct {
@@ -366,5 +421,7 @@ type Service interface {
 	ConfigureShare(SharePlan) error
 	RemoveShare(Mount) error
 	PlanPort(PortRequest) (string, error)
+	PublishPort(name, spec string) error
+	UnpublishPort(name, spec string) error
 	CapturePackets(name string, request packetcapture.Request) (packetcapture.Snapshot, error)
 }

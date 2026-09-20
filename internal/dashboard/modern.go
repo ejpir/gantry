@@ -249,42 +249,28 @@ func (m sandboxTUIModel) renderOperationalSandboxPanel(theme tuiTheme, width, he
 func (m sandboxTUIModel) operationalPanelContent(theme tuiTheme, sandbox tuiSandbox) tuiOperationalPanelContent {
 	muted := lipgloss.NewStyle().Foreground(theme.muted)
 	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text)
-	if sandbox.Remote != "" {
-		return tuiOperationalPanelContent{
-			name:        value.Render(sandboxDisplayName(sandbox)),
-			metadata:    muted.Render(shortImageRef(sandbox.Image) + " / remote manager"),
-			resources:   muted.Render(fmt.Sprintf("%d vCPU · %s", maxInt(1, sandbox.DisplayCPUs()), formatMiBHuman(sandbox.DisplayMemoryMiB()))),
-			traffic:     muted.Render("remote"),
-			trafficNote: muted.Render("telemetry not mirrored"),
-			denied:      muted.Render("—"),
-			deniedNote:  muted.Render("see remote audit"),
-			access:      value.Render("manager"),
-			accessNote:  muted.Render(sandbox.Remote),
-			recent:      muted.Render("Source: remote · " + sandbox.Remote),
-		}
-	}
 	blockedColor := theme.muted
 	if sandbox.DroppedPackets > 0 {
 		blockedColor = theme.error
 	}
 	last := "no blocks recorded"
-	if at := m.lastDeniedAt(sandbox.Name); !at.IsZero() {
+	if at := m.lastDeniedAtSource(sandbox.Name, sandbox.Remote); !at.IsZero() {
 		last = "last " + formatOverviewDenyClock(at)
 	} else if sandbox.DroppedPackets > 0 {
 		last = "time unavailable"
 	}
 	access, accessNote := m.overviewAccess(theme, sandbox)
 	return tuiOperationalPanelContent{
-		name:        value.Render(sandbox.Name),
+		name:        value.Render(sandboxDisplayName(sandbox)),
 		metadata:    muted.Render(shortImageRef(sandbox.Image) + " / " + defaultText(sandbox.Runtime, "runtime unknown")),
 		resources:   muted.Render(fmt.Sprintf("%d vCPU · %s", maxInt(1, sandbox.DisplayCPUs()), formatMiBHuman(sandbox.DisplayMemoryMiB()))),
 		traffic:     value.Render("↑" + formatBytes(sandbox.TXBytes) + "  ↓" + formatBytes(sandbox.RXBytes)),
-		trafficNote: lipgloss.NewStyle().Foreground(theme.success).Render(m.sandboxTrafficSparkline(sandbox.Name, 12)) + muted.Render("  recent"),
+		trafficNote: lipgloss.NewStyle().Foreground(theme.success).Render(m.sandboxTrafficSparkline(sandboxTelemetryKey(sandbox), 12)) + muted.Render("  recent"),
 		denied:      value.Foreground(blockedColor).Render(formatDashboardCount(sandbox.DroppedPackets)),
 		deniedNote:  muted.Render(last),
 		access:      access,
 		accessNote:  accessNote,
-		recent:      muted.Render("Recent blocks: ") + m.recentDeniedHosts(theme, sandbox.Name, 3),
+		recent:      muted.Render("Recent blocks: ") + m.recentDeniedHostsAt(theme, sandbox.Name, sandbox.Remote, 3),
 	}
 }
 
@@ -307,15 +293,16 @@ func (m *sandboxTUIModel) sampleSandboxTraffic(sandboxes []tuiSandbox) {
 	}
 	present := make(map[string]struct{}, len(sandboxes))
 	for _, sandbox := range sandboxes {
-		present[sandbox.Name] = struct{}{}
+		key := sandboxTelemetryKey(sandbox)
+		present[key] = struct{}{}
 		total := sandbox.TXBytes
 		if ^uint64(0)-total < sandbox.RXBytes {
 			total = ^uint64(0)
 		} else {
 			total += sandbox.RXBytes
 		}
-		previous, sampled := m.trafficTotals[sandbox.Name]
-		m.trafficTotals[sandbox.Name] = total
+		previous, sampled := m.trafficTotals[key]
+		m.trafficTotals[key] = total
 		delta := uint64(0)
 		if sampled {
 			if total >= previous {
@@ -324,11 +311,11 @@ func (m *sandboxTUIModel) sampleSandboxTraffic(sandboxes []tuiSandbox) {
 				delta = total
 			}
 		}
-		history := append(m.trafficHistory[sandbox.Name], delta)
+		history := append(m.trafficHistory[key], delta)
 		if len(history) > 15 {
 			history = append([]uint64(nil), history[len(history)-15:]...)
 		}
-		m.trafficHistory[sandbox.Name] = history
+		m.trafficHistory[key] = history
 	}
 	for name := range m.trafficTotals {
 		if _, ok := present[name]; !ok {
@@ -336,6 +323,13 @@ func (m *sandboxTUIModel) sampleSandboxTraffic(sandboxes []tuiSandbox) {
 			delete(m.trafficHistory, name)
 		}
 	}
+}
+
+func sandboxTelemetryKey(sandbox tuiSandbox) string {
+	if sandbox.Remote == "" {
+		return sandbox.Name
+	}
+	return sandboxRowKey(sandbox)
 }
 
 func (m sandboxTUIModel) sandboxTrafficSparkline(sandbox string, width int) string {
@@ -370,7 +364,7 @@ func (m sandboxTUIModel) sandboxTrafficSparkline(sandbox string, width int) stri
 func (m sandboxTUIModel) overviewAccess(theme tuiTheme, sandbox tuiSandbox) (string, string) {
 	mounts, writable, errors := 0, 0, 0
 	for _, mount := range m.mounts {
-		if mount.Sandbox != sandbox.Name {
+		if mount.Sandbox != sandbox.Name || mount.Remote != sandbox.Remote {
 			continue
 		}
 		mounts++
@@ -403,9 +397,13 @@ func (m sandboxTUIModel) overviewAccess(theme tuiTheme, sandbox tuiSandbox) (str
 }
 
 func (m sandboxTUIModel) lastDeniedAt(sandbox string) time.Time {
+	return m.lastDeniedAtSource(sandbox, "")
+}
+
+func (m sandboxTUIModel) lastDeniedAtSource(sandbox, remote string) time.Time {
 	var latest time.Time
 	for _, row := range m.traffic {
-		if row.Sandbox == sandbox && !row.Allowed && row.LastSeen.After(latest) {
+		if row.Sandbox == sandbox && row.Remote == remote && !row.Allowed && row.LastSeen.After(latest) {
 			latest = row.LastSeen
 		}
 	}
@@ -478,7 +476,7 @@ func (m sandboxTUIModel) renderSandboxMasterList(theme tuiTheme, geometry tuiMas
 		resources := fmt.Sprintf("  %d vCPU · %s", maxInt(1, sandbox.DisplayCPUs()), formatMiBHuman(sandbox.DisplayMemoryMiB()))
 		features := "  " + sandboxFeatureSummary(sandbox)
 		if sandbox.Remote != "" {
-			features = "  remote manager · " + sandbox.Remote
+			features += " · remote " + sandbox.Remote
 		}
 		appendEntry([]string{first, image, lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(resources, inner)), lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(features, inner))}, index == m.cursor)
 	}

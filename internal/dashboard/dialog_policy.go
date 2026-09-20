@@ -28,13 +28,13 @@ func (m *sandboxTUIModel) updateNetworkPolicyDialogKey(msg tea.KeyPressMsg) (tea
 }
 
 func (m *sandboxTUIModel) openNetworkPolicyDialog() tea.Cmd {
-	preferred := ""
+	preferred, preferredRemote := "", ""
 	if row := m.selectedRule(); row != nil {
-		preferred = row.Sandbox
+		preferred, preferredRemote = row.Sandbox, row.Remote
 	} else if sandbox := m.selected(); sandbox != nil {
-		preferred = sandbox.Name
+		preferred, preferredRemote = sandbox.Name, sandbox.Remote
 	}
-	if !m.policySandbox.ResetWhere(m.sandboxes, preferred, func(sandbox tuiSandbox) bool {
+	if !m.policySandbox.ResetWhereSource(m.sandboxes, preferred, preferredRemote, func(sandbox tuiSandbox) bool {
 		return sandbox.State == tuiRunning && sandbox.Net && sandbox.GVProxy == ""
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Live policy updates require a running sandbox with the embedded netstack.")
@@ -48,8 +48,13 @@ func (m *sandboxTUIModel) openNetworkPolicyDialog() tea.Cmd {
 func (m *sandboxTUIModel) syncNetworkPolicyFields() {
 	m.policyPath.Reset()
 	m.policyLocal = false
-	if sandbox := m.sandboxNamed(m.policySandbox.Value()); sandbox != nil {
-		m.policyPath.SetValue(sandbox.NetPolicy)
+	if sandbox := m.sandboxAtSource(m.policySandbox.Value(), m.policySandbox.Remote()); sandbox != nil {
+		// A remote policy path belongs to the manager host. Leave the client
+		// path blank so choosing a file uploads its JSON rather than confusing
+		// the two filesystems.
+		if sandbox.Remote == "" {
+			m.policyPath.SetValue(sandbox.NetPolicy)
+		}
 		m.policyLocal = sandbox.AllowLocal
 	}
 }
@@ -71,10 +76,12 @@ func (m *sandboxTUIModel) submitNetworkPolicy() (tea.Model, tea.Cmd) {
 		return m, m.focusNetworkPolicy(0)
 	}
 	path := strings.TrimSpace(m.policyPath.Value())
-	if err := m.service.ValidateNetworkPolicy(path, m.policyLocal); err != nil {
+	remote := m.policySandbox.Remote()
+	service := m.serviceForRemote(remote)
+	if err := service.ValidateNetworkPolicy(path, m.policyLocal); err != nil {
 		m.formError = err.Error()
 		return m, m.focusNetworkPolicy(1)
 	}
-	return m.beginServiceAction("netpolicy set", name,
-		setSandboxNetworkPolicyCmd(m.service, name, path, m.policyLocal))
+	return m.beginServiceAction("netpolicy set", remoteOperationLabel(name, remote),
+		setSandboxNetworkPolicyCmd(service, name, path, m.policyLocal))
 }

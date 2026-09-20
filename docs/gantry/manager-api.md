@@ -121,6 +121,10 @@ are:
 - `/v1/sandboxes/{name}/policy` for live organization policy and controlled
   restart rollout;
 - `/v1/sandboxes/{name}/audit` for a bounded audit tail;
+- `/v1/dashboard` for the complete non-secret dashboard snapshot and host
+  limits;
+- `/v1/dashboard/actions` for the dashboard's validated configuration actions;
+- `/v1/dashboard/packets/{name}` for bounded in-memory packet capture;
 - `/v1/run` for a bounded low-level VM run; and
 - `/v1/operations/{id}` for operation state.
 
@@ -137,10 +141,10 @@ organization-wide feed policy is active. See
 [Architecture](architecture.md#remote-manager-transport) for execution and SSH
 tunnel boundaries.
 
-## Pass secrets by name
+## Secret handling
 
-The API never accepts secret values. Start the manager with values in its own
-environment and send only names:
+Sandbox creation never accepts secret values. Start the manager with values in
+its own environment and send only names:
 
 ```console
 $ export GITHUB_TOKEN=...
@@ -152,6 +156,13 @@ $ gantry serve
 ```
 
 The normal [secret lifecycle](shares-secrets.md#secret-lifecycle) applies.
+
+The authenticated dashboard action endpoint additionally supports the same
+live, memory-only secret operation as the local TUI. That write-only value is
+sent only over the verified manager transport, is never returned in a snapshot
+or response, and is not persisted. Registry credentials use the same
+write-only rule and remain manager-host credentials; they never enter a
+sandbox.
 
 ## Watch events
 

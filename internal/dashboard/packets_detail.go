@@ -38,7 +38,7 @@ func (m sandboxTUIModel) renderPacketDetailDialog(theme tuiTheme, width int) str
 		return label + lipgloss.NewStyle().Foreground(theme.secondary).Render(safeUILine(value))
 	}
 	lines := []string{
-		m.dialogHeader(theme, fmt.Sprintf("Packet #%d · %s", row.Sequence, row.Sandbox), width),
+		m.dialogHeader(theme, fmt.Sprintf("Packet #%d · %s", row.Sequence, sourceDisplayName(row.Sandbox, row.Remote)), width),
 		"",
 		section("CAPTURE"),
 		field("Time", row.Timestamp.Local().Format("2006-01-02 15:04:05.000000000 -0700")),

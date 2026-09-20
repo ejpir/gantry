@@ -45,21 +45,25 @@ func (m sandboxTUIModel) renderImagesHeader(theme tuiTheme, width int) string {
 
 func (m sandboxTUIModel) renderImageRow(theme tuiTheme, row tuiImageRow, width int) string {
 	inUse := lipgloss.NewStyle().Foreground(theme.success).Render("●")
+	ref := row.Ref
+	if row.Remote != "" {
+		ref += "  [remote:" + row.Remote + "]"
+	}
 	if !row.InUse {
 		inUse = lipgloss.NewStyle().Foreground(theme.muted).Render("○")
 	}
 	switch {
 	case width >= 96:
 		refWidth := maxInt(16, width-56)
-		return tableCell(inUse, 2) + " " + tableCell(row.Ref, refWidth) + " " + tableCell(shortImageDigest(row.Digest), 21) + " " +
+		return tableCell(inUse, 2) + " " + tableCell(ref, refWidth) + " " + tableCell(shortImageDigest(row.Digest), 21) + " " +
 			tableCell(defaultText(row.Arch, "?"), 7) + " " + tableCell(formatBytes(uint64(maxInt(0, int(row.Size)))), 9) + " " +
 			tableCell(formatImageCreated(row.Created), 12)
 	case width >= 56:
 		refWidth := maxInt(12, width-24)
-		return tableCell(inUse, 2) + " " + tableCell(row.Ref, refWidth) + " " + tableCell(defaultText(row.Arch, "?"), 7) + " " +
+		return tableCell(inUse, 2) + " " + tableCell(ref, refWidth) + " " + tableCell(defaultText(row.Arch, "?"), 7) + " " +
 			tableCell(formatBytes(uint64(maxInt(0, int(row.Size)))), 9)
 	default:
-		return tableCell(inUse, 2) + " " + tableCell(row.Ref, maxInt(1, width-3))
+		return tableCell(inUse, 2) + " " + tableCell(ref, maxInt(1, width-3))
 	}
 }
 
@@ -68,7 +72,7 @@ func (m sandboxTUIModel) renderImageDetail(theme tuiTheme, width int) []string {
 		return nil
 	}
 	row := m.images[m.imageCursor]
-	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Ref) + "  " +
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Ref, row.Remote)) + "  " +
 		lipgloss.NewStyle().Foreground(theme.muted).Render(defaultText(row.Arch, "?")+"  •  "+
 			formatBytes(uint64(maxInt(0, int(row.Size))))+"  •  built "+defaultText(formatImageCreated(row.Created), "unknown"))
 	command := strings.TrimSpace(strings.Join(append(append([]string{}, row.Entrypoint...), row.Cmd...), " "))
@@ -120,6 +124,7 @@ func (m sandboxTUIModel) renderRegistriesHeader(theme tuiTheme, width int) strin
 }
 
 func (m sandboxTUIModel) renderRegistryRow(theme tuiTheme, row tuiRegistryRow, width int) string {
+	registry := sourceDisplayName(row.Registry, row.Remote)
 	username := row.Username
 	if username == "" {
 		username = "(anonymous)"
@@ -134,9 +139,9 @@ func (m sandboxTUIModel) renderRegistryRow(theme tuiTheme, row tuiRegistryRow, w
 		if !row.HasSecret {
 			source = defaultText(row.Source, "anonymous")
 		}
-		return tableCell(row.Registry, 20) + " " + tableCell(username, 14) + " " + tableCell(source, sourceWidth) + " " + tableCell(secretState, 7)
+		return tableCell(registry, 20) + " " + tableCell(username, 14) + " " + tableCell(source, sourceWidth) + " " + tableCell(secretState, 7)
 	}
-	return tableCell(row.Registry, maxInt(12, width-10)) + " " + tableCell(secretState, 8)
+	return tableCell(registry, maxInt(12, width-10)) + " " + tableCell(secretState, 8)
 }
 
 func (m sandboxTUIModel) renderRegistryDetail(theme tuiTheme, width int) []string {
@@ -144,7 +149,7 @@ func (m sandboxTUIModel) renderRegistryDetail(theme tuiTheme, width int) []strin
 		return nil
 	}
 	row := m.registries[m.registryCursor]
-	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Registry)
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Registry, row.Remote))
 	source := "anonymous pulls"
 	if row.HasSecret {
 		source = "credential from " + defaultText(row.Source, "unknown source")
@@ -168,6 +173,10 @@ const tuiImagePullSubmitFocus = 2
 
 func (m *sandboxTUIModel) openImagePullDialog() tea.Cmd {
 	m.tuiDialogState.openForm(tuiImagePullDialog)
+	m.pullRemote = ""
+	if row := m.selectedImage(); row != nil {
+		m.pullRemote = row.Remote
+	}
 	m.pullRef.Reset()
 	m.pullArch = "auto"
 	m.resizeInputs()
@@ -247,7 +256,7 @@ func (m *sandboxTUIModel) submitImagePull() (tea.Model, tea.Cmd) {
 		m.formError = "an image reference is required"
 		return m, m.focusImagePull(0)
 	}
-	return m.beginAction("image pull", ref, m.imagePullArgv(ref), false)
+	return m.beginCommandAction("image pull", remoteOperationLabel(ref, m.pullRemote), m.serviceForRemote(m.pullRemote), m.imagePullArgv(ref), false)
 }
 
 // ---------------- registry login dialog ----------------
@@ -256,10 +265,12 @@ const tuiRegistryLoginSubmitFocus = 3
 
 func (m *sandboxTUIModel) openRegistryLoginDialog() tea.Cmd {
 	m.tuiDialogState.openForm(tuiRegistryLoginDialog)
+	m.loginRemote = ""
 	m.loginRegistry.Reset()
 	m.loginUsername.Reset()
 	m.loginPassword.Reset()
 	if row := m.selectedRegistry(); row != nil {
+		m.loginRemote = row.Remote
 		m.loginRegistry.SetValue(row.Registry)
 		if row.HasSecret {
 			m.loginUsername.SetValue(row.Username)
@@ -326,7 +337,8 @@ func (m *sandboxTUIModel) submitRegistryLogin() (tea.Model, tea.Cmd) {
 		Username: strings.TrimSpace(m.loginUsername.Value()),
 		Secret:   secret.Value(m.loginPassword.Value()),
 	}
-	if err := m.service.ValidateRegistryLogin(request); err != nil {
+	service := m.serviceForRemote(m.loginRemote)
+	if err := service.ValidateRegistryLogin(request); err != nil {
 		m.formError = err.Error()
 		switch dashboardErrorField(err) {
 		case "registry":
@@ -338,8 +350,8 @@ func (m *sandboxTUIModel) submitRegistryLogin() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.loginPassword.Reset()
-	return m.beginServiceAction("registry login", request.Registry,
-		storeRegistryLoginCmd(m.service, request))
+	return m.beginServiceAction("registry login", remoteOperationLabel(request.Registry, m.loginRemote),
+		storeRegistryLoginCmd(service, request))
 }
 
 // ---------------- removals ----------------
@@ -351,11 +363,15 @@ func (m *sandboxTUIModel) removeSelectedImage() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	copyRow := *row
-	return m.beginServiceAction("image remove", copyRow.Ref, removeImageCmd(m.service, copyRow))
+	return m.beginServiceAction("image remove", remoteOperationLabel(copyRow.Ref, copyRow.Remote), removeImageCmd(m.serviceForRemote(copyRow.Remote), copyRow))
 }
 
 func (m *sandboxTUIModel) pruneImages() (tea.Model, tea.Cmd) {
-	return m.beginServiceAction("image prune", "", pruneImagesCmd(m.service))
+	remote := ""
+	if row := m.selectedImage(); row != nil {
+		remote = row.Remote
+	}
+	return m.beginServiceAction("image prune", remoteOperationLabel("images", remote), pruneImagesCmd(m.serviceForRemote(remote)))
 }
 
 func (m *sandboxTUIModel) logoutSelectedRegistry() (tea.Model, tea.Cmd) {
@@ -365,8 +381,8 @@ func (m *sandboxTUIModel) logoutSelectedRegistry() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	copyRow := *row
-	return m.beginServiceAction("registry logout", copyRow.Registry,
-		removeRegistryLoginCmd(m.service, copyRow))
+	return m.beginServiceAction("registry logout", remoteOperationLabel(copyRow.Registry, copyRow.Remote),
+		removeRegistryLoginCmd(m.serviceForRemote(copyRow.Remote), copyRow))
 }
 
 // ---------------- mouse ----------------
@@ -433,8 +449,11 @@ func (m sandboxTUIModel) renderImagePullDialog(theme tuiTheme, width int) string
 
 func (m sandboxTUIModel) renderRegistryLoginDialog(theme tuiTheme, width int) string {
 	header := m.dialogHeader(theme, "Registry Login", width)
-	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(
-		"Store a credential for registry pulls. A docker-credential-* helper is used when configured.")
+	descriptionText := "Store a credential for registry pulls. A docker-credential-* helper is used when configured."
+	if m.loginRemote != "" {
+		descriptionText = "Store a write-only credential on remote manager " + m.loginRemote + "."
+	}
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(descriptionText)
 	registryLabel := formLabel(theme, "Registry", m.loginFocus == 0)
 	registryField := renderInputField(theme, m.loginRegistry.View(), width, m.loginFocus == 0)
 	usernameLabel := formLabel(theme, "Username", m.loginFocus == 1)
@@ -462,7 +481,7 @@ func (m sandboxTUIModel) renderImageRemoveDialog(theme tuiTheme, width int) stri
 	if row == nil {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No image selected.")
 	}
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Ref)
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Ref, row.Remote))
 	detail := lipgloss.NewStyle().Foreground(theme.secondary).Render(defaultText(row.Arch, "?") + "  •  " +
 		formatBytes(uint64(maxInt(0, int(row.Size)))) + "  •  " + shortImageDigest(row.Digest))
 	warning := lipgloss.NewStyle().Foreground(theme.warning).Render("Sandboxes referencing this digest fall back to a re-pull.")
@@ -480,9 +499,13 @@ func (m sandboxTUIModel) renderImageRemoveDialog(theme tuiTheme, width int) stri
 func (m sandboxTUIModel) renderImagePruneDialog(theme tuiTheme, width int) string {
 	header := m.dialogHeader(theme, "Prune Images", width)
 	count := m.prunableImageCount()
+	remote := ""
+	if row := m.selectedImage(); row != nil {
+		remote = row.Remote
+	}
 	var bytesTotal int64
 	for _, row := range m.images {
-		if !row.InUse {
+		if row.Remote == remote && !row.InUse {
 			bytesTotal += row.Size
 		}
 	}
@@ -507,7 +530,7 @@ func (m sandboxTUIModel) renderRegistryLogoutDialog(theme tuiTheme, width int) s
 	if row == nil {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No registry selected.")
 	}
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Registry)
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Registry, row.Remote))
 	detail := lipgloss.NewStyle().Foreground(theme.secondary).Render(defaultText(row.Username, "") + "  •  " + defaultText(row.Source, ""))
 	warning := lipgloss.NewStyle().Foreground(theme.warning).Render("Future pulls from this registry authenticate anonymously.")
 	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Erase the stored credential?")

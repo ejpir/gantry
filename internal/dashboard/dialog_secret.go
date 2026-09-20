@@ -9,11 +9,11 @@ import (
 )
 
 func (m *sandboxTUIModel) openSecretAddDialog() tea.Cmd {
-	preferred := ""
+	preferred, preferredRemote := "", ""
 	if row := m.selectedSecret(); row != nil {
-		preferred = row.Sandbox
+		preferred, preferredRemote = row.Sandbox, row.Remote
 	}
-	if !m.secretSandbox.Reset(m.sandboxes, preferred) {
+	if !m.secretSandbox.ResetWhereSource(m.sandboxes, preferred, preferredRemote, func(sandbox tuiSandbox) bool { return sandbox.State == tuiRunning }) {
 		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before adding an in-memory secret.")
 	}
 	m.tuiDialogState.openForm(tuiSecretAddDialog)
@@ -74,7 +74,9 @@ func (m *sandboxTUIModel) submitSecretAdd() (tea.Model, tea.Cmd) {
 	request := dashboardapi.SecretRequest{
 		Sandbox: m.secretSandbox.Value(), Name: strings.TrimSpace(m.secretName.Value()), Value: secret.Value(m.secretValue.Value()),
 	}
-	if err := m.service.ValidateSecret(request); err != nil {
+	remote := m.secretSandbox.Remote()
+	service := m.serviceForRemote(remote)
+	if err := service.ValidateSecret(request); err != nil {
 		m.formError = err.Error()
 		switch dashboardErrorField(err) {
 		case "sandbox":
@@ -86,8 +88,8 @@ func (m *sandboxTUIModel) submitSecretAdd() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.secretValue.Reset()
-	return m.beginServiceAction("secret add", request.Sandbox+"/"+request.Name,
-		addSecretCmd(m.service, request))
+	return m.beginServiceAction("secret add", remoteOperationLabel(request.Sandbox+"/"+request.Name, remote),
+		addSecretCmd(service, request))
 }
 
 func (m *sandboxTUIModel) removeSelectedSecret() (tea.Model, tea.Cmd) {
@@ -96,6 +98,6 @@ func (m *sandboxTUIModel) removeSelectedSecret() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	return m.beginServiceAction("secret remove", row.Sandbox+"/"+row.Name,
-		removeSecretCmd(m.service, *row))
+	return m.beginServiceAction("secret remove", remoteOperationLabel(row.Sandbox+"/"+row.Name, row.Remote),
+		removeSecretCmd(m.serviceForRemote(row.Remote), *row))
 }

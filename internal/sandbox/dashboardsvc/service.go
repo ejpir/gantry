@@ -647,6 +647,16 @@ func (dashboardService) PlanPort(req dashboardapi.PortRequest) (string, error) {
 	return spec, nil
 }
 
+func (dashboardService) PublishPort(name, spec string) error {
+	_, err := controlcmd.PortRPC(name, "port.publish", controlproto.PortRequest{Spec: spec, Persistent: true})
+	return err
+}
+
+func (dashboardService) UnpublishPort(name, spec string) error {
+	_, err := controlcmd.PortRPC(name, "port.unpublish", controlproto.PortRequest{Spec: spec, Persistent: true})
+	return err
+}
+
 func parseDashboardPort(value, what string) (int, error) {
 	if value == "" {
 		return 0, fmt.Errorf("%s is required", what)

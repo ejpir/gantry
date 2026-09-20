@@ -15,7 +15,10 @@ printed fingerprint, the bearer-authentication matrix (missing/wrong tokens
 are indistinguishable 403s on every path), plaintext-HTTP refusal, live
 token-file rotation, and — once a sandbox is running — the mutation audit
 trail (remote address and token fingerprint logged, never the token value).
-The full lifecycle and SSE checks then use authenticated TLS. It also starts a
+The same battery validates the full remote-dashboard snapshot, source-routed
+configuration action, and bounded packet-capture endpoint in empty-host and
+real-VM states. The full lifecycle and SSE checks then use authenticated TLS.
+It also starts a
 separate local mTLS policy service, creates two running sandboxes, publishes a
 newly signed organization generation, waits for the aggregate acknowledgement,
 and verifies both sandboxes change without replacing either process. It also

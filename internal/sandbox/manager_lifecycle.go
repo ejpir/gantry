@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/image"
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/controlcmd"
+	"github.com/ejpir/gantry/internal/sandbox/dashboardsvc"
 	"github.com/ejpir/gantry/internal/sandbox/manager"
 )
 
@@ -23,6 +25,10 @@ import (
 // HTTP statuses are derived from, so the adapter translates the daemon's own
 // sentinels into it rather than leaking them across the boundary.
 type managerLifecycle struct{ sandboxLifecycle }
+
+func (lifecycle managerLifecycle) DashboardService() dashboardapi.Service {
+	return dashboardsvc.NewDashboardService(lifecycle)
+}
 
 func (managerLifecycle) Stop(name string) error {
 	err := stopSandbox(name)

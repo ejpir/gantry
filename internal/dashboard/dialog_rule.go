@@ -31,11 +31,11 @@ const (
 var ruleTransportProtocols = []string{ruleProtocolAny, ruleProtocolTCP, ruleProtocolUDP, ruleProtocolICMP}
 
 func (m *sandboxTUIModel) openRuleAddDialog() tea.Cmd {
-	preferred := ""
+	preferred, preferredRemote := "", ""
 	if row := m.selectedTraffic(); row != nil {
-		preferred = row.Sandbox
+		preferred, preferredRemote = row.Sandbox, row.Remote
 	}
-	if !m.ruleSandbox.ResetWhere(m.sandboxes, preferred, ruleEligibleSandbox) {
+	if !m.ruleSandbox.ResetWhereSource(m.sandboxes, preferred, preferredRemote, ruleEligibleSandbox) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Rules require a network-enabled sandbox using the embedded netstack.")
 	}
 	m.tuiDialogState.openForm(tuiRuleAddDialog)
@@ -216,11 +216,13 @@ func (m *sandboxTUIModel) submitRuleAdd() (tea.Model, tea.Cmd) {
 		m.formError = "no eligible sandbox"
 		return m, m.focusRule(ruleSandboxFocus)
 	}
-	if err := m.service.ValidateNetworkRule(request); err != nil {
+	remote := m.ruleSandbox.Remote()
+	service := m.serviceForRemote(remote)
+	if err := service.ValidateNetworkRule(request); err != nil {
 		m.formError = err.Error()
 		return m, m.focusRule(ruleErrorFocus(err))
 	}
-	return m.beginServiceAction("rule add", request.Sandbox, addNetworkRuleCmd(m.service, request))
+	return m.beginServiceAction("rule add", remoteOperationLabel(request.Sandbox, remote), addNetworkRuleCmd(service, request))
 }
 
 func ruleErrorFocus(err error) int {
@@ -242,8 +244,8 @@ func (m *sandboxTUIModel) removeSelectedRule() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	return m.beginServiceAction("rule remove", row.Sandbox+"/"+row.Source,
-		removeNetworkRuleCmd(m.service, *row))
+	return m.beginServiceAction("rule remove", remoteOperationLabel(row.Sandbox+"/"+row.Source, row.Remote),
+		removeNetworkRuleCmd(m.serviceForRemote(row.Remote), *row))
 }
 
 func (m *sandboxTUIModel) removeSelectedTrafficRule() (tea.Model, tea.Cmd) {
@@ -251,6 +253,6 @@ func (m *sandboxTUIModel) removeSelectedTrafficRule() (tea.Model, tea.Cmd) {
 	if row == nil {
 		return m, nil
 	}
-	return m.beginServiceAction("rule remove", row.Sandbox+"/"+row.Address,
-		removeTrafficRuleCmd(m.service, *row))
+	return m.beginServiceAction("rule remove", remoteOperationLabel(row.Sandbox+"/"+row.Address, row.Remote),
+		removeTrafficRuleCmd(m.serviceForRemote(row.Remote), *row))
 }

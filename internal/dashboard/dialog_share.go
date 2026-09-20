@@ -9,17 +9,18 @@ import (
 )
 
 func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
-	targetName := m.shareSandbox.Value()
-	target := m.sandboxNamed(targetName)
+	targetName, targetRemote := m.shareSandbox.Value(), m.shareSandbox.Remote()
+	target := m.sandboxAtSource(targetName, targetRemote)
 	if target == nil || target.State == tuiStarting {
 		m.formError = "no eligible sandbox available"
 		return m, m.focusShare(0)
 	}
 	currentGuest := ""
-	if row := m.selectedMount(); row != nil {
+	if row := m.selectedMount(); row != nil && row.Remote == targetRemote && row.Sandbox == targetName {
 		currentGuest = row.Guest
 	}
-	plan, err := m.service.PlanShare(dashboardapi.ShareRequest{
+	service := m.serviceForRemote(targetRemote)
+	plan, err := service.PlanShare(dashboardapi.ShareRequest{
 		Sandbox: targetName, Tag: strings.TrimSpace(m.shareTag.Value()),
 		Path: strings.TrimSpace(m.sharePath.Value()), Mountpoint: strings.TrimSpace(m.shareMount.Value()),
 		Owner: m.shareOwner.Value(), ReadOnly: m.shareRO, Replace: m.shareReplace,
@@ -40,9 +41,9 @@ func (m *sandboxTUIModel) submitShare() (tea.Model, tea.Cmd) {
 			return m, m.focusShare(0)
 		}
 	}
-	if !plan.Live {
-		return m.beginServiceAction("share configure", plan.Sandbox+"/"+plan.Tag,
-			configureSandboxShareCmd(m.service, plan, target.State == tuiRunning))
+	if !plan.Live || targetRemote != "" {
+		return m.beginServiceAction("share configure", remoteOperationLabel(plan.Sandbox+"/"+plan.Tag, targetRemote),
+			configureSandboxShareCmd(service, plan, target.State == tuiRunning))
 	}
 	argv := []string{"share", "add"}
 	if plan.Replace {
@@ -62,8 +63,8 @@ func (m *sandboxTUIModel) removeSelectedShare() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	return m.beginServiceAction("share remove", row.Sandbox+"/"+row.Tag,
-		removeSandboxShareCmd(m.service, *row))
+	return m.beginServiceAction("share remove", remoteOperationLabel(row.Sandbox+"/"+row.Tag, row.Remote),
+		removeSandboxShareCmd(m.serviceForRemote(row.Remote), *row))
 }
 
 func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
@@ -113,13 +114,13 @@ func (m *sandboxTUIModel) openShareAddDialog(replace bool) tea.Cmd {
 	m.sharePath.Reset()
 	m.shareMount.Reset()
 	m.shareOwner.Reset()
-	preferred := target.Name
+	preferred, preferredRemote := target.Name, target.Remote
 	if replace {
 		if row := m.selectedMount(); row != nil && row.Error == "" {
-			preferred = row.Sandbox
+			preferred, preferredRemote = row.Sandbox, row.Remote
 			m.shareTag.SetValue(row.Tag)
 			m.sharePath.SetValue(row.Host)
-			if row.Guest != "" && row.Guest != m.service.DefaultShareMount(row.Tag) {
+			if row.Guest != "" && row.Guest != m.serviceForRemote(row.Remote).DefaultShareMount(row.Tag) {
 				m.shareMount.SetValue(row.Guest)
 			}
 			m.shareRO = row.ReadOnly
@@ -128,7 +129,7 @@ func (m *sandboxTUIModel) openShareAddDialog(replace bool) tea.Cmd {
 			}
 		}
 	}
-	m.shareSandbox.ResetWhere(m.sandboxes, preferred, func(sandbox tuiSandbox) bool {
+	m.shareSandbox.ResetWhereSource(m.sandboxes, preferred, preferredRemote, func(sandbox tuiSandbox) bool {
 		return sandbox.State == tuiRunning || sandbox.State == tuiStopped
 	})
 	m.resizeInputs()

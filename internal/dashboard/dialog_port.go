@@ -14,7 +14,7 @@ import (
 // digits-only, so it can never smuggle an address (e.g. "[::]:80") into the
 // bind position, and a bind address must parse as an IP.
 func (m *sandboxTUIModel) portSpecFromDialog() (string, error) {
-	return m.service.PlanPort(dashboardapi.PortRequest{
+	return m.serviceForRemote(m.portSandbox.Remote()).PlanPort(dashboardapi.PortRequest{
 		Bind: m.portBind.Value(), Guest: m.portGuest.Value(), UDP: m.portUDP,
 	})
 }
@@ -33,6 +33,10 @@ func (m *sandboxTUIModel) submitPort() (tea.Model, tea.Cmd) {
 		}
 		return m, m.focusPort(1)
 	}
+	if remote := m.portSandbox.Remote(); remote != "" {
+		return m.beginServiceAction("port publish", remoteOperationLabel(targetName+"/"+spec, remote),
+			publishPortCmd(m.serviceForRemote(remote), targetName, spec))
+	}
 	return m.beginAction("port publish", targetName+"/"+spec, []string{"ports", "publish", targetName, spec}, false)
 }
 
@@ -45,6 +49,10 @@ func (m *sandboxTUIModel) unpublishSelectedPort() (tea.Model, tea.Cmd) {
 	spec := row.Bind + ":" + fmt.Sprintf("%d", row.Guest)
 	if row.Proto != "tcp" {
 		spec += "/" + row.Proto
+	}
+	if row.Remote != "" {
+		return m.beginServiceAction("port unpublish", remoteOperationLabel(row.Sandbox+"/"+row.Bind, row.Remote),
+			unpublishPortCmd(m.serviceForRemote(row.Remote), row.Sandbox, spec))
 	}
 	return m.beginAction("port unpublish", row.Sandbox+"/"+row.Bind, []string{"ports", "unpublish", row.Sandbox, spec}, false)
 }
@@ -73,7 +81,7 @@ func (m *sandboxTUIModel) openPortPublishDialog() tea.Cmd {
 	if target == nil {
 		return m.showToast(tuiToastInfo, "No running sandbox", "Start a sandbox before publishing a port.")
 	}
-	if !m.portSandbox.ResetWhere(m.sandboxes, target.Name, func(sandbox tuiSandbox) bool {
+	if !m.portSandbox.ResetWhereSource(m.sandboxes, target.Name, target.Remote, func(sandbox tuiSandbox) bool {
 		return sandbox.State == tuiRunning && sandbox.Net && sandbox.GVProxy == ""
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Port publishing requires a running sandbox with the embedded netstack.")

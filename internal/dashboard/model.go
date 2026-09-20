@@ -267,9 +267,10 @@ type sandboxTUIModel struct {
 
 	// dashboardHits is emitted by the last render pass. Mouse events consume
 	// this map instead of independently reconstructing component positions.
-	dashboardHits  []tuiHitTarget
-	trafficHistory map[string][]uint64
-	trafficTotals  map[string]uint64
+	dashboardHits     []tuiHitTarget
+	pendingRemoteOpen *tuiSandbox
+	trafficHistory    map[string][]uint64
+	trafficTotals     map[string]uint64
 }
 
 func newSandboxTUIModel(service dashboardapi.Service) sandboxTUIModel {
@@ -500,6 +501,7 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// next local refresh. Unavailable sources contribute no stale rows.
 		if m.viewSource != nil {
 			m.rebuildView(false)
+			m.sampleSandboxTraffic(m.sandboxes)
 		}
 		m.ensureTableCursorVisible()
 		return m, nil
@@ -603,10 +605,10 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey := m.selectedTableKeys()
 	packetKey := m.selectedPacketKey()
 	auditKey := m.selectedAuditKey()
-	m.sampleSandboxTraffic(msg.sandboxes)
 	m.rememberViewSource()
 	m.viewSource = &msg
 	m.rebuildRows()
+	m.sampleSandboxTraffic(m.sandboxes)
 	m.restorePacketSelection(packetKey)
 	m.restoreAuditSelection(auditKey)
 	m.dashboardHits = nil
@@ -647,6 +649,15 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 func (m *sandboxTUIModel) handleProcessDone(msg tuiProcessDoneMsg) (tea.Model, tea.Cmd) {
 	if !m.tuiOperationState.Finish(msg.owner) {
 		return m, nil
+	}
+	if msg.action == "enable remote SSH" {
+		target := m.pendingRemoteOpen
+		m.pendingRemoteOpen = nil
+		if msg.err == nil && target != nil {
+			refreshOwner := m.tuiRefreshState.Restart(false)
+			_, open := m.beginRemoteAction("open", *target, []string{"ssh", target.Name, "-remote", target.Remote}, true)
+			return m, tea.Batch(refreshSandboxesCmd(m.service, refreshOwner), open)
+		}
 	}
 	if msg.action == "update" {
 		if msg.err != nil {
@@ -1031,13 +1042,10 @@ func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 		m.setPage(tuiSandboxesPage)
 	case "t":
 		selected := m.selected()
-		if selected != nil && selected.Remote != "" {
-			return m.showToast(tuiToastInfo, "Remote telemetry", "Open Remotes (B) or use gantry audit -remote "+selected.Remote+".")
-		}
 		m.setPage(tuiTrafficPage)
 		if selected != nil {
 			for index, row := range m.traffic {
-				if row.Sandbox == selected.Name {
+				if row.Sandbox == selected.Name && row.Remote == selected.Remote {
 					m.tuiSelectionState.setTableCursor(tuiTrafficSelection, index, len(m.traffic))
 					m.ensureTableCursorVisible()
 					break
@@ -1122,8 +1130,13 @@ func (m *sandboxTUIModel) primaryAction() (tea.Model, tea.Cmd) {
 	}
 	if selected.Remote != "" {
 		if selected.State == tuiRunning {
-			m.tuiDialogState.open(tuiInfoDialog)
-			return m, nil
+			if !selected.SSH {
+				copy := *selected
+				m.pendingRemoteOpen = &copy
+				return m.beginServiceAction("enable remote SSH", sandboxOperationName(*selected),
+					enableRemoteSSHCmd(m.serviceForRemote(selected.Remote), *selected))
+			}
+			return m.beginRemoteAction("open", *selected, []string{"ssh", selected.Name, "-remote", selected.Remote}, true)
 		}
 		if selected.State == tuiStarting {
 			return m, m.showToast(tuiToastInfo, "Sandbox is starting", sandboxOperationName(*selected))
@@ -1165,12 +1178,16 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 }
 
 func (m *sandboxTUIModel) beginAction(action, name string, argv []string, interactive bool) (tea.Model, tea.Cmd) {
+	return m.beginCommandAction(action, name, m.service, argv, interactive)
+}
+
+func (m *sandboxTUIModel) beginCommandAction(action, name string, service dashboardapi.Service, argv []string, interactive bool) (tea.Model, tea.Cmd) {
 	owner, ok := m.tuiOperationState.Begin(action, name, action == "create" || action == "start")
 	if !ok {
 		return m, nil
 	}
 	m.tuiDialogState.dismiss()
-	return m, tea.Batch(runTUIProcessCmd(m.operations, m.service, owner, argv, interactive), m.ensureAnimation())
+	return m, tea.Batch(runTUIProcessCmd(m.operations, service, owner, argv, interactive), m.ensureAnimation())
 }
 
 // beginRemoteAction always carries an explicit profile selector and never
@@ -1214,6 +1231,17 @@ func saveSandboxConfigCmd(service dashboardapi.Service, request dashboardapi.San
 			body += " · applies on next start"
 		}
 		return tuiProcessDoneMsg{action: "edit", name: request.Name, output: body, err: err}
+	}
+}
+
+func enableRemoteSSHCmd(service dashboardapi.Service, sandbox tuiSandbox) tea.Cmd {
+	return func() tea.Msg {
+		request := dashboardapi.SandboxConfigRequest{
+			Name: sandbox.Name, MemMB: sandbox.MemMB, VCPUs: sandbox.VCPUs,
+			ProcessIsolation: sandbox.ProcessIsolation, SSH: true, DevContainers: sandbox.DevContainers,
+		}
+		_, err := service.ConfigureSandbox(request)
+		return tuiProcessDoneMsg{action: "enable remote SSH", name: sandboxOperationName(sandbox), err: err}
 	}
 }
 
@@ -1355,6 +1383,20 @@ func removeSandboxShareCmd(service dashboardapi.Service, row tuiMountRow) tea.Cm
 	}
 }
 
+func publishPortCmd(service dashboardapi.Service, name, spec string) tea.Cmd {
+	return func() tea.Msg {
+		err := service.PublishPort(name, spec)
+		return tuiProcessDoneMsg{action: "port publish", name: name + "/" + spec, err: err}
+	}
+}
+
+func unpublishPortCmd(service dashboardapi.Service, name, spec string) tea.Cmd {
+	return func() tea.Msg {
+		err := service.UnpublishPort(name, spec)
+		return tuiProcessDoneMsg{action: "port unpublish", name: name + "/" + spec, err: err}
+	}
+}
+
 func (m *sandboxTUIModel) needsAnimation() bool {
 	if m.loading || m.tuiRefreshState.Visible() || m.tuiOperationState.Phase() == tuiOperationRunning {
 		return true
@@ -1388,10 +1430,14 @@ func sandboxDisplayName(sandbox tuiSandbox) string {
 }
 
 func sandboxOperationName(sandbox tuiSandbox) string {
-	if sandbox.Remote == "" {
-		return sandbox.Name
+	return remoteOperationLabel(sandbox.Name, sandbox.Remote)
+}
+
+func sourceDisplayName(name, remote string) string {
+	if remote == "" {
+		return name
 	}
-	return sandbox.Name + "@" + sandbox.Remote
+	return name + " [remote:" + remote + "]"
 }
 
 func (m *sandboxTUIModel) selected() *tuiSandbox {
@@ -1467,9 +1513,13 @@ func (m *sandboxTUIModel) switchImageSection() {
 }
 
 func (m *sandboxTUIModel) prunableImageCount() int {
+	remote := ""
+	if row := m.selectedImage(); row != nil {
+		remote = row.Remote
+	}
 	count := 0
 	for _, row := range m.images {
-		if !row.InUse {
+		if row.Remote == remote && !row.InUse {
 			count++
 		}
 	}
@@ -1477,8 +1527,12 @@ func (m *sandboxTUIModel) prunableImageCount() int {
 }
 
 func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
+	return m.sandboxAtSource(name, "")
+}
+
+func (m *sandboxTUIModel) sandboxAtSource(name, remote string) *tuiSandbox {
 	for i := range m.sandboxes {
-		if m.sandboxes[i].Remote == "" && m.sandboxes[i].Name == name {
+		if m.sandboxes[i].Remote == remote && m.sandboxes[i].Name == name {
 			return &m.sandboxes[i]
 		}
 	}
@@ -1486,14 +1540,14 @@ func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
 }
 
 func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
-	if selected := m.selected(); selected != nil && selected.Remote == "" && selected.State != tuiStarting {
+	if selected := m.selected(); selected != nil && selected.State != tuiStarting {
 		return selected
 	}
 	if running := m.runningTargetSandbox(); running != nil {
 		return running
 	}
 	for i := range m.sandboxes {
-		if m.sandboxes[i].Remote == "" && m.sandboxes[i].State == tuiStopped {
+		if m.sandboxes[i].State == tuiStopped {
 			return &m.sandboxes[i]
 		}
 	}
@@ -1501,11 +1555,11 @@ func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
 }
 
 func (m *sandboxTUIModel) runningTargetSandbox() *tuiSandbox {
-	if selected := m.selected(); selected != nil && selected.Remote == "" && selected.State == tuiRunning {
+	if selected := m.selected(); selected != nil && selected.State == tuiRunning {
 		return selected
 	}
 	for i := range m.sandboxes {
-		if m.sandboxes[i].Remote == "" && m.sandboxes[i].State == tuiRunning {
+		if m.sandboxes[i].State == tuiRunning {
 			return &m.sandboxes[i]
 		}
 	}
@@ -1660,7 +1714,7 @@ func (m sandboxTUIModel) selectedTableKeys() (traffic, rule, mount, port, secret
 		image = imageRowKey(m.images[m.imageCursor])
 	}
 	if m.registryCursor >= 0 && m.registryCursor < len(m.registries) {
-		registry = m.registries[m.registryCursor].Registry
+		registry = registryRowKey(m.registries[m.registryCursor])
 	}
 	return
 }
@@ -1709,7 +1763,7 @@ func (m *sandboxTUIModel) restoreTableSelections(traffic, rule, mount, port, sec
 		}
 	}
 	for i := range m.registries {
-		if registry != "" && m.registries[i].Registry == registry {
+		if registry != "" && registryRowKey(m.registries[i]) == registry {
 			m.tuiSelectionState.setTableCursor(tuiRegistrySelection, i, len(m.registries))
 			break
 		}
@@ -1728,7 +1782,7 @@ func trafficRowKey(row tuiTrafficRow) string {
 	// DNS traffic is keyed by queried host in the recorder, but every query is
 	// sent to the same gateway address and port. Include Host so a refresh does
 	// not collapse several DNS rows onto the first (most recently sorted) one.
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%t", row.Sandbox, row.Host, row.Address, row.Protocol, row.Port, row.Allowed)
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t", row.Remote, row.Sandbox, row.Host, row.Address, row.Protocol, row.Port, row.Allowed)
 }
 
 func removableRule(row tuiRuleRow) bool {
@@ -1736,24 +1790,29 @@ func removableRule(row tuiRuleRow) bool {
 }
 
 func ruleRowKey(row tuiRuleRow) string {
-	return strings.Join([]string{row.Sandbox, row.Action, row.Target, row.Proto, row.Ports, row.Source}, "\x00")
+	return strings.Join([]string{row.Remote, row.Sandbox, row.Action, row.Target, row.Proto, row.Ports, row.Source}, "\x00")
 }
 
 func mountRowKey(row tuiMountRow) string {
-	return strings.Join([]string{row.Sandbox, row.Tag, row.Host, row.Guest}, "\x00")
+	return strings.Join([]string{row.Remote, row.Sandbox, row.Tag, row.Host, row.Guest}, "\x00")
 }
 
 func portRowKey(row tuiPortRow) string {
-	return strings.Join([]string{row.Sandbox, row.Bind, row.Proto}, "\x00")
+	return strings.Join([]string{row.Remote, row.Sandbox, row.Bind, row.Proto}, "\x00")
 }
 
-func secretRowKey(row tuiSecretRow) string { return row.Sandbox + "\x00" + row.Name }
+func secretRowKey(row tuiSecretRow) string {
+	return row.Remote + "\x00" + row.Sandbox + "\x00" + row.Name
+}
 
-func mcpRowKey(row tuiMCPRow) string { return row.Sandbox + "\x00" + row.Name + "\x00" + row.Type }
+func mcpRowKey(row tuiMCPRow) string {
+	return row.Remote + "\x00" + row.Sandbox + "\x00" + row.Name + "\x00" + row.Type
+}
 
 // imageRowKey keys on ref+arch (the store's index granularity) rather than
 // digest so a re-pull of the same tag keeps the selection.
-func imageRowKey(row tuiImageRow) string { return row.Ref + "\x00" + row.Arch }
+func imageRowKey(row tuiImageRow) string       { return row.Remote + "\x00" + row.Ref + "\x00" + row.Arch }
+func registryRowKey(row tuiRegistryRow) string { return row.Remote + "\x00" + row.Registry }
 
 func refreshSandboxesCmd(service dashboardapi.Service, owner tuiRefreshOwner) tea.Cmd {
 	return func() tea.Msg {

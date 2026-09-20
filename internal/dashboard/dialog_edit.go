@@ -11,15 +11,16 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 	if selected == nil {
 		return nil
 	}
-	if selected.Remote != "" {
-		return m.showToast(tuiToastInfo, "Remote sandbox", "Configure "+sandboxOperationName(*selected)+" with gantry configure -remote "+selected.Remote+".")
-	}
 	if selected.ConfigError {
 		return m.showToast(tuiToastError, "Cannot edit sandbox", "The saved sandbox configuration is unavailable.")
 	}
 	m.tuiDialogState.openForm(tuiEditDialog)
-	m.editCPUs = newResourceSlider(1, m.limits.MaxVCPUs, 1, maxInt(1, selected.VCPUs))
-	m.editMemory = newMemorySlider(int(m.limits.MinMemoryMB), int(m.limits.MaxMemoryMB), int(selected.MemMB))
+	limits := m.limits
+	if selected.Remote != "" {
+		limits = m.serviceForRemote(selected.Remote).ResourceLimits()
+	}
+	m.editCPUs = newResourceSlider(1, limits.MaxVCPUs, 1, maxInt(1, selected.VCPUs))
+	m.editMemory = newMemorySlider(int(limits.MinMemoryMB), int(limits.MaxMemoryMB), int(selected.MemMB))
 	m.editIsolation = selected.ProcessIsolation
 	if m.editIsolation == "" {
 		m.editIsolation = "auto"
@@ -147,7 +148,8 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		name: selected.Name, ssh: m.editSSH, devContainers: m.editDevContainers,
 		memory: m.editMemory, cpus: m.editCPUs, isolation: m.editIsolation,
 	}).request()
-	if err := m.service.ValidateSandboxConfig(request); err != nil {
+	service := m.serviceForRemote(selected.Remote)
+	if err := service.ValidateSandboxConfig(request); err != nil {
 		m.formError = err.Error()
 		if dashboardErrorField(err) == "devcontainers" {
 			return m, m.focusEdit(1)
@@ -160,8 +162,8 @@ func (m *sandboxTUIModel) submitEdit() (tea.Model, tea.Cmd) {
 		}
 		return m, m.focusEdit(3)
 	}
-	return m.beginServiceAction("edit", selected.Name,
-		saveSandboxConfigCmd(m.service, request, selected.State == tuiRunning))
+	return m.beginServiceAction("edit", sandboxOperationName(*selected),
+		saveSandboxConfigCmd(service, request, selected.State == tuiRunning))
 }
 
 func cycleIsolation(current string, delta int) string {

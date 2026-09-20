@@ -1234,7 +1234,7 @@ forwarding, passwords, and public-key client authentication are unsupported.</p>
 <a href="#security/local-control-surfaces">Security</a>.</p>
 </div><footer class="doc-footer"><p>Help make these docs better. <a href="https://github.com/ejpir/gantry/edit/main/docs/gantry/ssh-access.md" target="_blank" rel="noopener noreferrer">Edit this page on GitHub ↗</a></p><nav class="pager" aria-label="Adjacent guides"><a class="pager-link" href="#coding-agents"><span>Previous</span><strong>Coding agents <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a><a class="pager-link" href="#remote-access"><span>Next</span><strong>Remote access <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a></nav></footer></article>
 <article class="doc-page" id="remote-access" data-label="Remote access" data-group="Integrations" data-title="Remote sandbox access">
-<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Integrations</span><span aria-hidden="true">/</span><span>Remote access</span></div><p class="eyebrow">Integrations</p><h1 id="remote-access/remote-sandbox-access" tabindex="-1">Remote sandbox access</h1><div class="page-meta"><span>4 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/remote-access.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
+<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Integrations</span><span aria-hidden="true">/</span><span>Remote access</span></div><p class="eyebrow">Integrations</p><h1 id="remote-access/remote-sandbox-access" tabindex="-1">Remote sandbox access</h1><div class="page-meta"><span>5 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/remote-access.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
 <div class="prose"><p>Gantry can manage another host through the <a href="#manager-api">manager API</a>.
 Remote transport is HTTPS with a manager bearer token. Organization login is
 optional.</p>
@@ -1339,8 +1339,23 @@ masked, write-only, and cleared after submission or cancellation.</p>
 organization discovery. Profile and login changes appear without restarting
 the dashboard. <strong>Overview</strong> and <strong>Sandboxes</strong> include authenticated remote
 sandboxes alongside local ones; every remote row carries its profile tag so
-same-named sandboxes remain distinct. The <strong>Remotes</strong> view retains the grouped
-per-manager inventory and connection status.</p>
+same-named sandboxes remain distinct. The Traffic, Rules, Mounts, Ports,
+Secrets, MCP, Packets, Audit, Images, and Registries views merge the manager's
+source-tagged rows in the same way. Forms and destructive actions retain that
+source identity and are executed by the owning manager, never by a same-named
+local sandbox.</p>
+<p>Enter on a running remote row opens a terminal through the authenticated SSH
+upgrade. The dashboard enables that sandbox's SSH gateway live first when
+needed; newly created remote sandboxes enable terminal access by default.
+Remote host paths in share forms refer to the manager host, while a network
+policy file is read on the client and uploaded as policy data. Secret and
+registry values are write-only over the verified manager transport and never
+appear in inventory responses. The <strong>Remotes</strong> view retains grouped connection
+status and onboarding controls.</p>
+<p>Full dashboard parity requires the same build on the client and manager. A new
+client preserves lifecycle-only rows from an older manager, but telemetry and
+configuration views become available only after upgrading and restarting
+<code>gantry serve</code>.</p>
 <p>A failed login, expired catalog, changed profile, missing token, or unreachable
 manager never creates locally. Cancel and choose <strong>Local</strong> explicitly.</p>
 <h2 id="remote-access/organization-discovery" tabindex="-1">Organization discovery</h2>
@@ -1664,7 +1679,7 @@ credential flow, <a href="#security/credentials">Security</a> for cautions, and
 <a href="#mcp-worker-confinement">MCP confinement</a> for worker boundaries.</p>
 </div><footer class="doc-footer"><p>Help make these docs better. <a href="https://github.com/ejpir/gantry/edit/main/docs/gantry/mcp-gateway.md" target="_blank" rel="noopener noreferrer">Edit this page on GitHub ↗</a></p><nav class="pager" aria-label="Adjacent guides"><a class="pager-link" href="#oauth"><span>Previous</span><strong>OAuth <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a><a class="pager-link" href="#manager-api"><span>Next</span><strong>Manager API <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></strong></a></nav></footer></article>
 <article class="doc-page" id="manager-api" data-label="Manager API" data-group="Integrations" data-title="Manager API">
-<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Integrations</span><span aria-hidden="true">/</span><span>Manager API</span></div><p class="eyebrow">Integrations</p><h1 id="manager-api/manager-api" tabindex="-1">Manager API</h1><div class="page-meta"><span>3 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/manager-api.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
+<header class="doc-header"><div class="breadcrumbs"><span><svg class="icon" aria-hidden="true"><use href="#i-book"/></svg> Integrations</span><span aria-hidden="true">/</span><span>Manager API</span></div><p class="eyebrow">Integrations</p><h1 id="manager-api/manager-api" tabindex="-1">Manager API</h1><div class="page-meta"><span>4 min read</span><span aria-hidden="true">/</span><span>Markdown, made readable.</span><a href="https://github.com/ejpir/gantry/blob/main/docs/gantry/manager-api.md" target="_blank" rel="noopener noreferrer">Read source <svg class="icon" aria-hidden="true"><use href="#i-external"/></svg></a></div></header>
 <div class="prose"><p>The manager exposes sandbox lifecycle and bounded command execution over
 HTTP/1.1. Use it when an agent or development tool needs structured results.
 The installed server exposes the exact <a href="https://github.com/ejpir/gantry/blob/main/api/managerapi/openapi.yaml" target="_blank" rel="noopener noreferrer">OpenAPI contract</a>.</p>
@@ -1756,6 +1771,10 @@ are:</p>
 <li><code>/v1/sandboxes/{name}/policy</code> for live organization policy and controlled
 restart rollout;</li>
 <li><code>/v1/sandboxes/{name}/audit</code> for a bounded audit tail;</li>
+<li><code>/v1/dashboard</code> for the complete non-secret dashboard snapshot and host
+limits;</li>
+<li><code>/v1/dashboard/actions</code> for the dashboard's validated configuration actions;</li>
+<li><code>/v1/dashboard/packets/{name}</code> for bounded in-memory packet capture;</li>
 <li><code>/v1/run</code> for a bounded low-level VM run; and</li>
 <li><code>/v1/operations/{id}</code> for operation state.</li>
 </ul>
@@ -1770,15 +1789,21 @@ timeouts. It is not named-sandbox creation and is disabled while an
 organization-wide feed policy is active. See
 <a href="#architecture/remote-manager-transport">Architecture</a> for execution and SSH
 tunnel boundaries.</p>
-<h2 id="manager-api/pass-secrets-by-name" tabindex="-1">Pass secrets by name</h2>
-<p>The API never accepts secret values. Start the manager with values in its own
-environment and send only names:</p>
+<h2 id="manager-api/secret-handling" tabindex="-1">Secret handling</h2>
+<p>Sandbox creation never accepts secret values. Start the manager with values in
+its own environment and send only names:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> console</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="console example"><code><span class="gp">$ </span><span class="nb">export</span><span class="w"> </span><span class="nv">GITHUB_TOKEN</span><span class="o">=</span>...
 <span class="gp">$ </span>gantry<span class="w"> </span>serve
 </code></pre></div>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> json</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="json example"><code><span class="p">{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"agent"</span><span class="p">,</span><span class="w"> </span><span class="nt">"image"</span><span class="p">:</span><span class="w"> </span><span class="s2">"alpine:latest"</span><span class="p">,</span><span class="w"> </span><span class="nt">"secretNames"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"GITHUB_TOKEN"</span><span class="p">]}</span>
 </code></pre></div>
 <p>The normal <a href="#shares-secrets/secret-lifecycle">secret lifecycle</a> applies.</p>
+<p>The authenticated dashboard action endpoint additionally supports the same
+live, memory-only secret operation as the local TUI. That write-only value is
+sent only over the verified manager transport, is never returned in a snapshot
+or response, and is not persisted. Registry credentials use the same
+write-only rule and remain manager-host credentials; they never enter a
+sandbox.</p>
 <h2 id="manager-api/watch-events" tabindex="-1">Watch events</h2>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> console</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="console example"><code><span class="gp">$ </span>curl<span class="w"> </span>-N<span class="w"> </span>--unix-socket<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.gantry/manager.sock"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>http://gantry.local/v1/events
@@ -2148,10 +2173,11 @@ re-execute the same binary with inherited, authenticated channels.</p>
 <li><code>exec &lt;name&gt;</code> connects to that supervisor's local session broker.</li>
 <li>one-shot <code>exec</code> creates a randomly named transient sandbox, runs one
 session, and deletes it.</li>
-<li><code>tui</code> uses the same local lifecycle and control surfaces as the CLI. Its
-Overview and Sandboxes inventory combines local rows with authenticated
-source-scoped remote rows; each remote row retains its profile identity so
-actions cannot target a same-named local sandbox.</li>
+<li><code>tui</code> uses the same lifecycle and control surfaces locally and through the
+authenticated manager dashboard API. Every sandbox, traffic, policy, mount,
+port, secret-name, MCP, packet, audit, image, and registry row retains its
+source profile, so reads and mutations cannot target a same-named sandbox on
+another host. Interactive remote entry uses the manager's SSH upgrade.</li>
 <li><code>serve</code> provides the HTTP/JSON manager API on a Unix socket by default, or
 on explicitly configured TLS listeners with bearer authentication. It
 delegates lifecycle work to the same implementation.</li>
@@ -3589,11 +3615,15 @@ Failures never fall back to a local operation. Remote SSH upgrades an
 authenticated manager request into a tunnel to the selected sandbox and pins
 the learned host key per profile.</p>
 <p>The dashboard keeps local and remote inventories source-scoped while showing
-both in <strong>Overview</strong> and <strong>Sandboxes</strong> with explicit remote profile tags. Its
-create flow offers explicit <strong>Local</strong>, <strong>Remote</strong>, and <strong>Organization</strong> paths,
-while the <strong>Remotes</strong> view can add, test, and remove profiles or refresh
-organization discovery. Credentials are masked, write-only, and cleared when
-onboarding finishes or is cancelled.</p>
+both in <strong>Overview</strong> and <strong>Sandboxes</strong> with explicit remote profile tags. The
+same source identity now covers traffic, rules, mounts, ports, live secrets,
+MCP, packet capture, audit, images, registries, editing, and destructive
+actions. Enter opens a remote terminal through the authenticated SSH upgrade,
+enabling the gateway live first when necessary. Its create flow offers
+explicit <strong>Local</strong>, <strong>Remote</strong>, and <strong>Organization</strong> paths, while the
+<strong>Remotes</strong> view can add, test, and remove profiles or refresh organization
+discovery. Credentials are masked, write-only, and cleared when onboarding
+finishes or is cancelled.</p>
 <h3 id="releases-v0.0.23/provider-scoped-oauth-custody" tabindex="-1">Provider-scoped OAuth custody</h3>
 <p>Host-side OAuth custody now supports configured public OAuth clients in
 addition to built-in providers. Authorization-code and device-code grants can

@@ -125,7 +125,7 @@ run_macos_validation() {
 	MAC_KERNEL=${GANTRY_TEST_KERNEL:-$MAC_ARTIFACTS/gantry-kernel-arm64}
 	MAC_ROOTFS=${GANTRY_TEST_ROOTFS:-$MAC_ARTIFACTS/nerdbox-rootfs-arm64.erofs}
 	MAC_WORKLOAD=${GANTRY_TEST_WORKLOAD_IMAGE:-builtin}
-	echo "===== macOS HVF: manager API lifecycle battery ====="
+	echo "===== macOS HVF: manager API, remote dashboard parity, and lifecycle battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" sh scripts/test-manager-api-e2e.sh \
 		-gantry "$MAC_GANTRY" \
 		-artifacts "$MAC_ARTIFACTS" \
@@ -329,7 +329,7 @@ run_linux_validation() {
 	fi
 	[ -x "$LINUX_OAUTH_IDP" ] || { echo "missing OAuth fixture: $LINUX_OAUTH_IDP" >&2; exit 1; }
 
-	echo "===== Linux KVM: manager API, SSH, and organization policy-feed battery ====="
+	echo "===== Linux KVM: manager API, remote dashboard parity, SSH, and organization policy-feed battery ====="
 	rm -rf -- "$LINUX_WORK/manager"
 	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" scripts/test-manager-api-e2e.sh \
 		-gantry "$LINUX_GANTRY" -artifacts "$LINUX_ARTIFACTS" \
@@ -675,7 +675,7 @@ PY
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
 	-c "$WINDOWS_POLICY_COMMAND" 1200
 
-echo "===== Linux amd64 KVM: live manager API and policy-feed battery ====="
+echo "===== Linux amd64 KVM: live manager API, remote dashboard parity, and policy-feed battery ====="
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-amd64 /opt/gantry/manager-api-e2e 600
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
@@ -689,7 +689,7 @@ rm -rf /opt/gantry/manager-e2e-run
   -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
 ' 1800
 
-echo "===== Linux arm64 KVM: live manager API and policy-feed battery ====="
+echo "===== Linux arm64 KVM: live manager API, remote dashboard parity, and policy-feed battery ====="
 GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-arm64 /opt/gantry/manager-api-e2e 600
 GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
@@ -703,7 +703,7 @@ rm -rf /opt/gantry/manager-e2e-run
   -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
 ' 1800
 
-echo "===== Windows WHPX: live manager API and policy-feed battery ====="
+echo "===== Windows WHPX: live manager API, remote dashboard parity, and policy-feed battery ====="
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
 	--s3-download "$BUCKET" e2e/manager-api-windows-amd64.exe C:/gantry/manager-api-e2e.exe 600
 WINDOWS_MANAGER_COMMAND=$(python3 - \

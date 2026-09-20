@@ -114,7 +114,7 @@ func (m *sandboxTUIModel) submitRemoteCreate() (tea.Model, tea.Cmd) {
 	if _, err := image.ParseRef(ref); err != nil {
 		return fail(err, createImageFocus)
 	}
-	if err := config.ValidateSandboxResources(uint(m.createMemory.Value), m.createCPUs.Value); err != nil {
+	if err := config.ValidateSandboxResourceBounds(uint(m.createMemory.Value), m.createCPUs.Value); err != nil {
 		return fail(err, createMemoryFocus)
 	}
 	if err := config.ValidateRWLayerSize(uint(m.createDisk.Value)); err != nil {

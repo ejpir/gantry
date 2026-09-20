@@ -11,8 +11,13 @@ const sandboxPickerMaxVisible = 5
 // sandboxPicker is shared by forms whose action belongs to one sandbox.
 // Each form supplies its own eligibility rule so saved configuration may
 // target a stopped sandbox while live-only actions remain running-only.
+type sandboxPickerOption struct {
+	name   string
+	remote string
+}
+
 type sandboxPicker struct {
-	options []string
+	options []sandboxPickerOption
 	cursor  int
 	open    bool
 }
@@ -24,17 +29,19 @@ func (p *sandboxPicker) Reset(sandboxes []tuiSandbox, preferred string) bool {
 }
 
 func (p *sandboxPicker) ResetWhere(sandboxes []tuiSandbox, preferred string, eligible func(tuiSandbox) bool) bool {
+	return p.ResetWhereSource(sandboxes, preferred, "", eligible)
+}
+
+func (p *sandboxPicker) ResetWhereSource(sandboxes []tuiSandbox, preferred, preferredRemote string, eligible func(tuiSandbox) bool) bool {
 	p.options = p.options[:0]
 	for _, sandbox := range sandboxes {
-		// Sandbox-scoped forms use the local dashboard service. Remote rows are
-		// visible in the unified inventory but must never become local targets.
-		if sandbox.Remote == "" && eligible(sandbox) {
-			p.options = append(p.options, sandbox.Name)
+		if eligible(sandbox) {
+			p.options = append(p.options, sandboxPickerOption{name: sandbox.Name, remote: sandbox.Remote})
 		}
 	}
 	p.cursor = 0
-	for i, name := range p.options {
-		if name == preferred {
+	for i, option := range p.options {
+		if option.name == preferred && option.remote == preferredRemote {
 			p.cursor = i
 			break
 		}
@@ -47,7 +54,14 @@ func (p sandboxPicker) Value() string {
 	if p.cursor < 0 || p.cursor >= len(p.options) {
 		return ""
 	}
-	return p.options[p.cursor]
+	return p.options[p.cursor].name
+}
+
+func (p sandboxPicker) Remote() string {
+	if p.cursor < 0 || p.cursor >= len(p.options) {
+		return ""
+	}
+	return p.options[p.cursor].remote
 }
 
 func (p *sandboxPicker) Move(delta int) {
@@ -120,6 +134,9 @@ func (p *sandboxPicker) chooseVisible(index int) bool {
 
 func (p sandboxPicker) View(theme tuiTheme, width int, focused bool) string {
 	value := p.Value()
+	if remote := p.Remote(); value != "" && remote != "" {
+		value += "  [remote:" + remote + "]"
+	}
 	if value == "" {
 		value = "no eligible sandbox"
 	}
@@ -144,7 +161,12 @@ func (p sandboxPicker) View(theme tuiTheme, width int, focused bool) string {
 			marker = "› "
 			style = style.Bold(true).Foreground(theme.accent)
 		}
-		lines = append(lines, style.Render(truncateText(marker+p.options[option], maxInt(1, width-4))))
+		selected := p.options[option]
+		label := selected.name
+		if selected.remote != "" {
+			label += "  [remote:" + selected.remote + "]"
+		}
+		lines = append(lines, style.Render(truncateText(marker+label, maxInt(1, width-4))))
 	}
 	menu := lipgloss.NewStyle().
 		Foreground(theme.secondary).

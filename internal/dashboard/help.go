@@ -51,7 +51,7 @@ func (m sandboxTUIModel) helpViewActions() tuiHelpSection {
 		}
 		section.rows = [][2]string{{"enter", enter}, {"s", "Start / stop"}, {"e", "Edit configuration"}, {"i", "Full details"}, {"d", "Remove sandbox"}}
 		if selected := m.selected(); selected != nil && selected.Remote != "" {
-			section.rows = [][2]string{{"enter", "Details or start remote sandbox"}, {"s", "Start / stop on tagged remote"}, {"i", "Remote inventory details"}, {"d", "Remove from tagged remote"}, {"B", "Open grouped remote inventory"}}
+			section.rows = [][2]string{{"enter", "Open remote shell or start"}, {"s", "Start / stop on tagged remote"}, {"e", "Edit on tagged remote"}, {"i", "Full remote details"}, {"t", "View remote traffic"}, {"d", "Remove from tagged remote"}, {"B", "Open grouped remote inventory"}}
 		} else if m.page == tuiOverviewPage {
 			section.rows = append(section.rows, [2]string{"t", "View selected sandbox traffic"})
 		}

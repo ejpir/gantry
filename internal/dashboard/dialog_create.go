@@ -38,14 +38,22 @@ func (m *sandboxTUIModel) resetCreateForm(target string) {
 	}
 	m.createKernel = 0
 	m.createIsolation = "auto"
-	m.createSSH = false
+	// Remote rows open through the authenticated SSH upgrade, so make terminal
+	// access available by default. Users can still disable it explicitly.
+	m.createSSH = target != ""
 	m.createDevContainers = false
 }
 
 func (m sandboxTUIModel) createResourceMaximums(target string) (int, int) {
 	if target != "" {
-		// A remote may be larger than this client. Use protocol/runtime
-		// ceilings, not the desktop's RAM; the manager validates capacity.
+		if section, ok := m.remotes[target]; ok && section.Dashboard != nil {
+			limits := section.Dashboard.ResourceLimits
+			if limits.MaxVCPUs > 0 && limits.MaxMemoryMB > 0 {
+				return limits.MaxVCPUs, int(limits.MaxMemoryMB)
+			}
+		}
+		// An older remote may be larger than this client. Use transport-safe
+		// ceilings, not the desktop's capacity; the manager validates its host.
 		return config.MaxSandboxVCPUs(), int(config.MaxSandboxMemMB)
 	}
 	return m.limits.MaxVCPUs, int(m.limits.MaxMemoryMB)

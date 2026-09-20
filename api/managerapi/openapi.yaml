@@ -316,6 +316,58 @@ paths:
               schema: { $ref: "#/components/schemas/AuditTail" }
         "404":
           $ref: "#/components/responses/Error"
+  /v1/dashboard:
+    get:
+      operationId: dashboardSnapshot
+      description: Full non-secret dashboard inventory and host form limits for source-scoped remote TUI parity.
+      responses:
+        "200":
+          description: Dashboard snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardSnapshot" }
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/dashboard/actions:
+    post:
+      operationId: dashboardAction
+      description: Validated dashboard configuration mutation. The action discriminator selects one typed payload; secret values are write-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DashboardActionRequest" }
+      responses:
+        "200":
+          description: Action result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardActionResult" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/dashboard/packets/{name}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: captureDashboardPackets
+      description: Read or clear the named sandbox's bounded in-memory packet recorder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PacketCaptureRequest" }
+      responses:
+        "200":
+          description: Bounded packet snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PacketCaptureSnapshot" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
   /v1/ssh/hostkey:
     get:
       operationId: getSSHHostKey
@@ -444,6 +496,72 @@ components:
       properties:
         ok: { type: boolean }
         version: { type: string }
+    DashboardSnapshot:
+      type: object
+      required: [snapshot, resourceLimits]
+      properties:
+        snapshot:
+          type: object
+          description: Complete non-secret dashboard rows. The client assigns the authenticated remote profile as source identity.
+        resourceLimits:
+          type: object
+          description: Manager-host CPU, memory, and disk form bounds.
+        kernelChoices:
+          type: array
+          items: { type: string }
+    DashboardActionRequest:
+      type: object
+      additionalProperties: false
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [validate-sandbox-config, configure-sandbox, validate-rule, add-rule, remove-rule, remove-traffic-rule, validate-secret, add-secret, remove-secret, validate-mcp-remote, configure-mcp-remote, validate-mcp-filesystem, configure-mcp-filesystem, remove-mcp-remote, remove-image, prune-images, validate-registry, store-registry, remove-registry, plan-share, configure-share, remove-share, plan-port, publish-port, unpublish-port]
+        value: { type: string }
+        sandboxConfig: { type: object }
+        ruleRequest: { type: object }
+        rule: { type: object }
+        traffic: { type: object }
+        secret: { type: object, description: Write-only live secret request; values are never returned or persisted. }
+        secretRow: { type: object }
+        mcpRemote: { type: object }
+        mcpFilesystem: { type: object }
+        mcpServer: { type: object }
+        registry: { type: object, description: Write-only manager-host registry login. }
+        share: { type: object }
+        sharePlan: { type: object }
+        mount: { type: object }
+        portRequest: { type: object }
+        port: { type: object }
+    DashboardActionResult:
+      type: object
+      properties:
+        restartRequired: { type: boolean }
+        policy: { type: object }
+        sharePlan: { type: object }
+        portSpec: { type: string }
+        warning: { type: string }
+        count: { type: integer }
+    PacketCaptureRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        start: { type: boolean }
+        clear: { type: boolean }
+        stop: { type: boolean }
+        after: { type: integer }
+        max_packets: { type: integer }
+        max_bytes: { type: integer }
+    PacketCaptureSnapshot:
+      type: object
+      required: [active]
+      properties:
+        active: { type: boolean }
+        packets: { type: array, items: { type: object } }
+        next: { type: integer }
+        latest: { type: integer }
+        oldest: { type: integer }
+        evicted: { type: integer }
     Error:
       type: object
       required: [error]
