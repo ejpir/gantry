@@ -1,0 +1,37 @@
+[
+  {
+    "name": "dev",
+    "state": "running",
+    "desired": {"memoryMiB": 4096, "cpus": 4, "processIsolation": "auto", "devContainers": true},
+    "active": {"memoryMiB": 2048, "cpus": 2, "processIsolation": "auto", "devContainers": true},
+    "restartRequired": true,
+    "imageRef": "debian:bookworm-slim",
+    "imageDigest": "sha256:98f471fd796a4f33dc4c85aa52d7b2a97ef08a2ba2f7af6afbe56779564dd029",
+    "writable": true
+  },
+  {
+    "name": "agent",
+    "state": "running",
+    "desired": {"memoryMiB": 1024, "cpus": 2, "processIsolation": "required", "devContainers": false},
+    "active": {"memoryMiB": 1024, "cpus": 2, "processIsolation": "required", "devContainers": false},
+    "restartRequired": false,
+    "imageRef": "alpine:latest",
+    "writable": true
+  },
+  {
+    "name": "build",
+    "state": "stopped",
+    "desired": {"memoryMiB": 4096, "cpus": 4, "processIsolation": "auto", "devContainers": false},
+    "restartRequired": false,
+    "imageRef": "golang:1.26",
+    "writable": true
+  },
+  {
+    "name": "scratch",
+    "state": "starting",
+    "desired": {"memoryMiB": 512, "cpus": 1, "processIsolation": "auto", "devContainers": false},
+    "restartRequired": false,
+    "imageRef": "ubuntu:24.04",
+    "writable": false
+  }
+]

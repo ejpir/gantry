@@ -80,6 +80,15 @@ Open the terminal dashboard:
 ./gantry tui
 ```
 
+An experimental, read-only native desktop client is also available from source:
+
+```sh
+cargo run --locked --manifest-path desktop/Cargo.toml -- --demo
+```
+
+See [Gantry Desktop](desktop/README.md) for prerequisites and connecting it to a
+local manager. The desktop build is optional and separate from the Go CLI.
+
 ## Remote sandboxes and organization policy
 
 A standalone remote manager needs HTTPS and its own bearer token; organization
