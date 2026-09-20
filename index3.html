@@ -116,18 +116,25 @@
     h3 { font-size: 18px; line-height: 1.4; font-weight: 550; letter-spacing: -.02em; }
     .capabilities p { color: var(--muted); font-size: 14px; margin-top: 12px; }
     .capabilities .text-link { color: var(--accent); margin-top: 18px; }
-    .architecture-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: center; }
+    .architecture-grid { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 64px; align-items: start; }
     .architecture-copy p { color: var(--muted); font-size: 14px; margin-top: 17px; max-width: 440px; }
     .architecture-copy .text-link { margin-top: 20px; color: var(--accent); }
-    .stack { font: 12px/1.6 var(--mono); text-align: center; }
-    .vm { border: 1px solid var(--border); border-radius: 5px; background: var(--soft); padding: 17px; }
-    .vm-label { color: var(--muted); text-align: left; font-size: 11px; margin-bottom: 12px; }
-    .vm-layers { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .vm-layers span { background: var(--bg); border: 1px solid var(--border); border-radius: 3px; padding: 13px 8px; }
-    .vm-layers span:last-child { color: var(--accent); }
-    .stack-connector { width: 1px; height: 17px; background: var(--border); margin-inline: auto; }
-    .host { border: 1px solid var(--border); border-radius: 5px; padding: 12px; }
-    .host small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+    .architecture-copy .isolation-required { padding-top: 17px; border-top: 1px solid var(--border); font-size: 13px; }
+    .isolation-required code { color: var(--accent); overflow-wrap: anywhere; }
+    .worker-diagram { min-width: 0; }
+    .worker-diagram figcaption { margin-bottom: 12px; color: var(--muted); font: 12px/1.6 var(--mono); }
+    .supervisor-node { padding: 15px; border: 1px solid var(--border); border-radius: 5px; background: var(--soft); text-align: center; }
+    .supervisor-node strong { display: block; font: 550 13px/1.6 var(--mono); }
+    .supervisor-node span { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+    /* Each worker connects to the supervisor, not to the next worker. */
+    .worker-branches { --worker-gap: 12px; position: relative; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--worker-gap); margin: 32px 0 0; }
+    .worker-branches::before { content: ""; position: absolute; top: -32px; left: 50%; height: 16px; border-left: 1px solid var(--border); }
+    .worker-branches::after { content: ""; position: absolute; top: -16px; left: calc((100% - 2 * var(--worker-gap)) / 6); right: calc((100% - 2 * var(--worker-gap)) / 6); border-top: 1px solid var(--border); }
+    .worker-node { position: relative; padding: 14px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); text-align: center; }
+    .worker-node::before { content: ""; position: absolute; top: -17px; left: 50%; height: 16px; border-left: 1px solid var(--border); }
+    .worker-node dt { color: var(--accent); font: 550 12px/1.6 var(--mono); }
+    .worker-node dd { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.75; }
+    .worker-note { margin-top: 16px; color: var(--muted); font-size: 12px; line-height: 1.7; }
     .security-note { border-left: 2px solid var(--border); padding-left: 15px; margin-top: 30px; font-size: 13px; color: var(--muted); }
     .security-note strong { color: var(--text); font-weight: 550; }
     .security-note a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
@@ -179,7 +186,7 @@
       .section { padding-block: 38px; }
       .architecture-grid, .install-layout { grid-template-columns: 1fr; gap: 27px; }
       .architecture-copy p, .install-copy p, .requirements { max-width: 550px; }
-      .stack { max-width: 550px; }
+      .worker-diagram { max-width: 550px; }
       .requirements { margin-top: 18px; padding-top: 17px; }
     }
     @media (max-width: 420px) {
@@ -193,7 +200,14 @@
       .demo-label { display: block; font-size: 12px; }
       .demo-label code { display: block; margin-top: 2px; font-size: 11px; }
       .workflow-code, .install-body { padding: 17px; }
-      .vm-layers { grid-template-columns: 1fr; }
+      .worker-branches { grid-template-columns: 1fr; margin: 0 0 0 16px; padding: 16px 0 0 20px; }
+      .worker-branches::before, .worker-branches::after { display: none; }
+      .worker-node { display: grid; grid-template-columns: 78px minmax(0, 1fr); align-items: center; gap: 12px; padding: 12px; text-align: left; }
+      .worker-node dd { margin: 0; }
+      .worker-node::before { top: 50%; left: -21px; width: 20px; height: 0; border-left: 0; border-top: 1px solid var(--border); }
+      .worker-node::after { content: ""; position: absolute; left: -21px; top: -13px; bottom: -1px; width: 1px; background: var(--border); }
+      .worker-node:first-child::after { top: -17px; }
+      .worker-node:last-child::after { bottom: 50%; }
     }
     @media (prefers-reduced-motion: reduce) {
       html { scroll-behavior: auto; }
@@ -262,11 +276,25 @@
         <article><h3>Connect your tools</h3><p>Use SSH and VS Code Dev Containers, give agents tools through the MCP gateway, or automate sandboxes with the HTTP/JSON API.</p><a class="text-link" href="docs/gantry/index.html#coding-agents">Coding agents and editors <span aria-hidden="true">→</span></a></article>
       </div>
     </section>
-    <section class="section" aria-labelledby="architecture-title">
+    <section class="section" id="architecture" aria-labelledby="architecture-title">
       <div class="container">
         <div class="architecture-grid">
-          <div class="architecture-copy"><h2 id="architecture-title">A direct path to the hypervisor.</h2><p>Gantry is a Go VMM and CLI that talks to your host’s native virtualization backend. No Docker, containerd, QEMU, or libkrun required.</p><p>Each sandbox has its own Linux kernel. Optional gVisor runs inside the VM, not in place of it.</p><a class="text-link" href="docs/gantry/index.html#architecture">Read the architecture <span aria-hidden="true">→</span></a></div>
-          <div class="stack" role="figure" aria-label="Each microVM contains an OCI workload and a private Linux kernel. Gantry connects the VM to the host's KVM, Hypervisor.framework, or WHPX backend."><div class="vm"><p class="vm-label">Each microVM</p><div class="vm-layers"><span>OCI workload</span><span>Private Linux kernel</span></div></div><div class="stack-connector" aria-hidden="true"></div><div class="host">Gantry VMM<small>KVM · Hypervisor.framework · WHPX</small></div></div>
+          <div class="architecture-copy">
+            <h2 id="architecture-title">One binary.<br>Role-separated workers.</h2>
+            <p>A trusted supervisor manages lifecycle, credentials, and delegated access. In split mode, guest-facing work runs in role-specific processes with narrowly scoped capabilities and platform-specific confinement.</p>
+            <p class="isolation-required">Use <code>-process-isolation=required</code> to refuse startup unless the required isolation properties are verified.</p>
+            <a class="text-link" href="docs/gantry/index.html#architecture">Read the architecture <span aria-hidden="true">→</span></a>
+          </div>
+          <figure class="worker-diagram" aria-label="Split host processes: a trusted supervisor delegates access to separate VMM, network, and optional MCP workers." aria-describedby="worker-platform-note">
+            <figcaption>Per-sandbox host processes</figcaption>
+            <div class="supervisor-node"><strong>Trusted supervisor</strong><span>Lifecycle · credentials · capability grants</span></div>
+            <dl class="worker-branches">
+              <div class="worker-node"><dt>VMM worker</dt><dd>Guest memory<br>Virtualization<br>Device emulation</dd></div>
+              <div class="worker-node"><dt>Network worker</dt><dd>DNS &amp; egress policy<br>Port forwarding<br>Traffic inspection</dd></div>
+              <div class="worker-node"><dt>MCP worker</dt><dd>Protocol parsing<br>Tool routing<br>Tool policy</dd></div>
+            </dl>
+            <p class="worker-note" id="worker-platform-note">VMM/network splitting depends on platform and mode; <code>auto</code> may fall back. MCP uses a separate process whenever enabled.</p>
+          </figure>
         </div>
         <p class="security-note"><strong>Experimental software.</strong> Gantry is not yet a hardened boundary for hostile public multi-tenancy. <a href="docs/gantry/index.html#security">Security model and limitations →</a></p>
       </div>
