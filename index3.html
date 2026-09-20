@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101210">
-  <meta name="description" content="Run OCI images in Linux microVMs. Gantry gives each sandbox its own kernel, persistent storage, and explicit filesystem and network access. One binary. No Docker required.">
+  <meta name="description" content="Run OCI images locally or remotely in Linux microVMs, with a private kernel per sandbox, explicit access controls, and signed organization policies.">
   <meta property="og:title" content="Gantry — Your containers. Their own kernel.">
-  <meta property="og:description" content="An open-source microVM runtime. One binary, a private kernel per sandbox, and no Docker required.">
+  <meta property="og:description" content="Open-source microVMs for local and remote workspaces, with role-separated workers and signed organization policies.">
   <meta property="og:type" content="website">
   <title>Gantry — Your containers. Their own kernel.</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%23c2f36b'/%3E%3Cpath d='M10 29V11h20v18M17 29V18h6v11' fill='none' stroke='%23101210' stroke-width='4'/%3E%3C/svg%3E">
@@ -112,10 +112,13 @@
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
     .section { border-top: 1px solid var(--border); padding-block: 54px; }
     .capabilities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; }
+    .capabilities article { display: flex; flex-direction: column; align-items: start; }
     h2 { font-size: 30px; line-height: 1.2; font-weight: 550; letter-spacing: -.035em; }
     h3 { font-size: 18px; line-height: 1.4; font-weight: 550; letter-spacing: -.02em; }
     .capabilities p { color: var(--muted); font-size: 14px; margin-top: 12px; }
-    .capabilities .text-link { color: var(--accent); margin-top: 18px; }
+    .capabilities .text-link { color: var(--accent); margin-top: auto; padding-top: 18px; }
+    .capability-note { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+    .capability-note a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
     .architecture-grid { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 64px; align-items: start; }
     .architecture-copy p { color: var(--muted); font-size: 14px; margin-top: 17px; max-width: 440px; }
     .architecture-copy .text-link { margin-top: 20px; color: var(--accent); }
@@ -182,7 +185,7 @@
       .demo { margin-top: 28px; }
       .capabilities { grid-template-columns: 1fr; gap: 28px; }
       .capabilities article { max-width: 550px; }
-      .capabilities .text-link { margin-top: 10px; }
+      .capabilities .text-link { padding-top: 10px; }
       .section { padding-block: 38px; }
       .architecture-grid, .install-layout { grid-template-columns: 1fr; gap: 27px; }
       .architecture-copy p, .install-copy p, .requirements { max-width: 550px; }
@@ -239,7 +242,7 @@
         <div>
           <p class="eyebrow">Open-source microVM runtime</p>
           <h1 id="hero-title"><span>Your containers.</span><span>Their <em>own kernel.</em></span></h1>
-          <p class="hero-description">Run OCI images in Linux microVMs. One binary, a private kernel per sandbox, and no Docker required.</p>
+          <p class="hero-description">Run OCI images in Linux microVMs, locally or remotely. One binary, a private kernel per sandbox, and no Docker required.</p>
           <div class="hero-actions"><a class="button button-primary" href="#install">Install Gantry <svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a><a class="text-link" href="docs/gantry/index.html">Read the docs <span aria-hidden="true">→</span></a></div>
           <p class="hero-note">Linux · Apple silicon macOS · Windows (experimental)</p>
         </div>
@@ -269,11 +272,26 @@
         <p class="sr-only" id="demo-description">The dashboard shows two running Alpine sandboxes: a workspace with SSH and a writable project share, and an agent with a read-only share and a default-deny network policy. The recording visits the overview, VM details, configuration, allowed and blocked traffic, network rules, mounted directories, and the agent’s read-only filesystem MCP gateway, then returns to the overview. No configuration changes are saved.</p>
       </figure>
     </section>
-    <section class="section" aria-label="Capabilities">
-      <div class="container capabilities">
-        <article><h3>Keep your workspace</h3><p>Named sandboxes keep their writable disks between sessions. Share a project directory when you need host files; leave the rest on the host.</p><a class="text-link" href="docs/gantry/index.html#usage">Sandbox lifecycle <span aria-hidden="true">→</span></a></article>
-        <article><h3>Control access</h3><p>Choose read-only shares, define egress policies, and publish individual ports. Inspect allowed and blocked traffic in the dashboard.</p><a class="text-link" href="docs/gantry/index.html#networking">Networking and policies <span aria-hidden="true">→</span></a></article>
-        <article><h3>Connect your tools</h3><p>Use SSH and VS Code Dev Containers, give agents tools through the MCP gateway, or automate sandboxes with the HTTP/JSON API.</p><a class="text-link" href="docs/gantry/index.html#coding-agents">Coding agents and editors <span aria-hidden="true">→</span></a></article>
+    <section class="section" id="capabilities" aria-label="Capabilities">
+      <div class="container">
+        <div class="capabilities">
+          <article>
+            <h3>Local and remote workspaces</h3>
+            <p>Named sandboxes keep their writable disks between sessions, on your machine or a remote host. Manage remotes over authenticated HTTPS; use SSH for interactive shells and editors.</p>
+            <a class="text-link" href="docs/gantry/index.html#remote-access">Remote sandbox setup <span aria-hidden="true">→</span></a>
+          </article>
+          <article>
+            <h3>Organization governance</h3>
+            <p>Signed policy bundles constrain networking, shares, MCP tools, and brokered credentials. An mTLS feed updates running sandboxes; new sandboxes on that manager inherit the active policy.</p>
+            <a class="text-link" href="docs/gantry/index.html#organization-policy">Organization policy <span aria-hidden="true">→</span></a>
+          </article>
+          <article>
+            <h3>Tools with explicit access</h3>
+            <p>Choose read-only shares, egress rules, and published ports. Connect VS Code Dev Containers and MCP tools, inspect traffic in the dashboard, or automate through the HTTP/JSON API.</p>
+            <a class="text-link" href="docs/gantry/index.html#coding-agents">Coding agents and editors <span aria-hidden="true">→</span></a>
+          </article>
+        </div>
+        <p class="capability-note"><a href="docs/gantry/index.html#organization-login">Organization login</a> is optional and can discover managers; remote access still needs a separate manager token. Policy-feed enforcement is manager-scoped, not host-wide enrollment.</p>
       </div>
     </section>
     <section class="section" id="architecture" aria-labelledby="architecture-title">
