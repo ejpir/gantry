@@ -22,7 +22,7 @@ const { values } = parseArgs({ options: {
 if (values.help) {
   console.log(`Usage: node scripts/record-tui-demo.mjs [options]
   --assets DIR    Staged kernel, rootfs and default Alpine image (default: artifacts/)
-  --output PATH   Output prefix for .gif and .png (default: assets/gantry-tui-v3)
+  --output PATH   Output prefix for .webm, .mp4, .gif and .png (default: assets/gantry-tui-v3)
   --chrome PATH   Chrome/Chromium executable (or CHROME_BIN)
   --font PATH     DejaVu Sans Mono TTF
   --keep          Retain temporary frames and isolated state for debugging
@@ -30,7 +30,9 @@ if (values.help) {
 Requires Linux/KVM, Go, Node/npm, Python 3, ffmpeg, Chrome and a monospace font.
 Installs pinned capture-only npm dependencies into a temporary directory.
 Builds current sources, creates two disposable VMs, makes sample HTTP requests,
-records 24 seconds, and stops the VMs. Does not use your Gantry state or tokens.`);
+records 24 seconds at native 2× resolution / 10 fps, and stops the VMs.
+Exports lossless RGB VP9, H.264, a 256-color GIF, and a PNG poster.
+Does not use your Gantry state or tokens.`);
   process.exit(0);
 }
 if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) {
@@ -39,6 +41,8 @@ if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) {
 const arch = process.arch === 'x64' ? 'x86_64' : 'arm64';
 const assets = path.resolve(values.assets);
 const output = path.resolve(values.output);
+const fps = 10;
+const deviceScaleFactor = 2;
 const sources = [
   `gantry-kernel-${arch}`,
   `nerdbox-rootfs-${arch}.erofs`,
@@ -154,7 +158,8 @@ window.ready=(async()=>{await document.fonts.load('14px CaptureMono');window.ter
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   browser = await chromium.launch({ executablePath: path.resolve(values.chrome), headless: true });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
+  // Render fonts at the output pixel density; do not enlarge a 1× bitmap.
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor });
   await page.exposeFunction('terminalInput', data => { if (terminal?.stdin.writable) terminal.stdin.write(data); });
   await page.goto(`http://127.0.0.1:${server.address().port}/terminal.html`);
   await page.evaluate(() => window.ready);
@@ -184,28 +189,36 @@ window.ready=(async()=>{await document.fonts.load('14px CaptureMono');window.ter
   await waitFor('TRAFFIC TOTALS');
   const view = page.locator('#terminal');
   let frame = 0;
-  // 120 frames / 5 fps = 24 seconds. Discard short view-loading transitions.
-  for (const [key, expected, count] of [
-    ['', 'TRAFFIC TOTALS', 18], ['1', 'microVM boundary', 18], ['e', 'Edit Sandbox', 15],
-    ['\x1b2', 'HOST / DESTINATION', 18], ['3', 'public internet', 15],
-    ['4', 'HOST PATH', 13], ['7', 'built-in read-only filesystem', 13], ['0', 'TRAFFIC TOTALS', 10],
+  // 24 seconds at the capture frame rate. Discard short view-loading transitions.
+  for (const [key, expected, seconds] of [
+    ['', 'TRAFFIC TOTALS', 3.6], ['1', 'microVM boundary', 3.6], ['e', 'Edit Sandbox', 3],
+    ['\x1b2', 'HOST / DESTINATION', 3.6], ['3', 'public internet', 3],
+    ['4', 'HOST PATH', 2.6], ['7', 'built-in read-only filesystem', 2.6], ['0', 'TRAFFIC TOTALS', 2],
   ]) {
     // Escape must be delivered alone so it cannot be interpreted as Alt+2.
     if (key.startsWith('\x1b')) { terminal.stdin.write('\x1b'); await wait(300); }
     if (key) terminal.stdin.write(key.replace('\x1b', ''));
     await waitFor(expected);
     await wait(200);
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < Math.round(seconds * fps); i++) {
       const start = Date.now();
       await pump();
-      await view.screenshot({ path: path.join(frames, `${String(frame++).padStart(4, '0')}.png`) });
-      await wait(Math.max(0, 200 - (Date.now() - start)));
+      await view.screenshot({ path: path.join(frames, `${String(frame++).padStart(4, '0')}.png`), scale: 'device' });
+      await wait(Math.max(0, 1000 / fps - (Date.now() - start)));
     }
   }
-  await run('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-y', '-framerate', '5', '-i', path.join(frames, '%04d.png'),
-    '-filter_complex', '[0:v]split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle', '-loop', '0', `${output}.gif`]);
-  await copyFile(path.join(frames, '0112.png'), `${output}.png`);
-  console.log(`Recorded ${frame / 5}s: ${output}.gif and ${output}.png`);
+  const input = ['-hide_banner', '-loglevel', 'warning', '-y', '-framerate', String(fps), '-i', path.join(frames, '%04d.png')];
+  // RGB VP9 preserves the source pixels: no palette reduction or chroma subsampling.
+  await run('ffmpeg', [...input, '-c:v', 'libvpx-vp9', '-lossless', '1', '-pix_fmt', 'gbrp',
+    '-colorspace', 'rgb', '-color_range', 'pc', '-row-mt', '1', '-threads', '4', '-cpu-used', '4', '-an', `${output}.webm`]);
+  // Broadly compatible fallback for browsers without RGB VP9 support.
+  await run('ffmpeg', [...input, '-c:v', 'libx264', '-preset', 'slow', '-crf', '14', '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart', '-an', `${output}.mp4`]);
+  // Preserve static text colors too; avoid dithering speckle around glyph edges.
+  await run('ffmpeg', [...input, '-filter_complex',
+    '[0:v]split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=none:diff_mode=rectangle', '-loop', '0', `${output}.gif`]);
+  await copyFile(path.join(frames, `${String(frame - 8).padStart(4, '0')}.png`), `${output}.png`);
+  console.log(`Recorded ${frame / fps}s at ${deviceScaleFactor}×: ${output}.{webm,mp4,gif,png}`);
 } finally {
   if (terminal) {
     terminal.stdin.end('q');

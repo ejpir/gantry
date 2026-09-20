@@ -104,9 +104,12 @@
     .demo-label code { color: var(--muted); font-size: 12px; font-weight: 400; }
     .demo-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 4px 9px; background: transparent; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; white-space: nowrap; }
     .demo-toggle:hover { color: var(--accent); border-color: var(--muted); }
-    .demo img { display: block; width: 100%; height: auto; }
+    .demo video { display: block; width: 100%; height: auto; color-scheme: dark; }
+    .demo video:fullscreen { width: 100%; height: 100%; object-fit: contain; }
     .demo figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: 12px; color: var(--muted); font-size: 12px; }
     .demo figcaption a { text-decoration: underline; text-underline-offset: 3px; }
+    .demo-downloads { display: inline-flex; gap: 18px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
     .section { border-top: 1px solid var(--border); padding-block: 54px; }
     .capabilities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; }
     h2 { font-size: 30px; line-height: 1.2; font-weight: 550; letter-spacing: -.035em; }
@@ -205,7 +208,7 @@
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z"/></symbol>
       <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
-      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></symbol>
+      <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
     </defs>
   </svg>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -241,10 +244,15 @@
       </div>
       <figure class="demo" aria-labelledby="demo-title">
         <div class="demo-frame">
-          <div class="demo-toolbar"><div class="demo-label"><span id="demo-title">The terminal dashboard</span><code>gantry tui</code></div><button class="demo-toggle" id="demo-toggle" type="button" aria-pressed="false" aria-controls="tui-demo" hidden><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>Play 24s demo</span></button></div>
-          <img id="tui-demo" src="assets/gantry-tui-v3.png" width="1137" height="672" alt="Gantry terminal dashboard showing two local sandboxes, their resource allocations, traffic totals, blocked packets, and access settings." fetchpriority="high" decoding="async">
+          <div class="demo-toolbar"><div class="demo-label"><span id="demo-title">The terminal dashboard</span><code>gantry tui</code></div><button class="demo-toggle" id="demo-toggle" type="button" aria-pressed="false" aria-controls="tui-demo" hidden><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>Play 24s HD demo</span></button></div>
+          <video id="tui-demo" width="2274" height="1344" poster="assets/gantry-tui-v3.png" preload="none" controls playsinline muted aria-label="Gantry terminal dashboard — 24-second silent demo" aria-describedby="demo-description">
+            <source src="assets/gantry-tui-v3.webm" type="video/webm">
+            <source src="assets/gantry-tui-v3.mp4" type="video/mp4">
+            <a href="assets/gantry-tui-v3.gif">View the dashboard recording as a GIF.</a>
+          </video>
         </div>
-        <figcaption><span>Recorded on Linux / KVM with two disposable sandboxes.</span><a href="assets/gantry-tui-v3.gif">Open recording <span aria-hidden="true">↗</span></a></figcaption>
+        <figcaption><span>Recorded on Linux / KVM with two disposable sandboxes.</span><span class="demo-downloads"><a href="assets/gantry-tui-v3.mp4">HD video <span aria-hidden="true">↗</span></a><a href="assets/gantry-tui-v3.gif">GIF <span aria-hidden="true">↗</span></a></span></figcaption>
+        <p class="sr-only" id="demo-description">The dashboard shows two running Alpine sandboxes: a workspace with SSH and a writable project share, and an agent with a read-only share and a default-deny network policy. The recording visits the overview, VM details, configuration, allowed and blocked traffic, network rules, mounted directories, and the agent’s read-only filesystem MCP gateway, then returns to the overview. No configuration changes are saved.</p>
       </figure>
     </section>
     <section class="section" aria-label="Capabilities">
@@ -318,32 +326,36 @@ chmod +x gantry</code></pre>
         toastTimer = setTimeout(() => { document.getElementById('toast').textContent = ''; }, 4000);
       }
 
-      // The GIF is only fetched on request. Stopping restores the still preview.
+      // Keep the lossless HD video idle until requested. Native controls also
+      // provide seeking and fullscreen playback, including without JavaScript.
       const demoButton = document.getElementById('demo-toggle');
       const demo = document.getElementById('tui-demo');
-      const poster = 'assets/gantry-tui-v3.png';
-      const recording = 'assets/gantry-tui-v3.gif';
-      function stopDemo() {
-        demo.src = poster;
-        demoButton.setAttribute('aria-pressed', 'false');
-        demoButton.querySelector('span').textContent = 'Play 24s demo';
-        demoButton.querySelector('use').setAttribute('href', '#i-play');
+      function updateDemoButton() {
+        const playing = !demo.paused && !demo.ended;
+        demoButton.setAttribute('aria-pressed', String(playing));
+        demoButton.querySelector('span').textContent = playing ? 'Pause demo'
+          : demo.ended ? 'Replay demo' : demo.currentTime > 0 ? 'Resume demo' : 'Play 24s HD demo';
+        demoButton.querySelector('use').setAttribute('href', playing ? '#i-pause' : '#i-play');
       }
       demoButton.hidden = false;
-      demoButton.addEventListener('click', () => {
-        if (demoButton.getAttribute('aria-pressed') === 'true') return stopDemo();
-        demo.src = recording;
-        demoButton.setAttribute('aria-pressed', 'true');
-        demoButton.querySelector('span').textContent = 'Stop demo';
-        demoButton.querySelector('use').setAttribute('href', '#i-stop');
+      ['play', 'pause', 'ended', 'emptied'].forEach(event => demo.addEventListener(event, updateDemoButton));
+      demoButton.addEventListener('click', async () => {
+        if (!demo.paused) return demo.pause();
+        try {
+          if (demo.ended) demo.currentTime = 0;
+          await demo.play();
+        } catch (error) {
+          if (error.name !== 'AbortError') notify('Video unavailable. Try the HD video or GIF link below.');
+          updateDemoButton();
+        }
       });
       demo.addEventListener('error', () => {
-        if (demoButton.getAttribute('aria-pressed') !== 'true') return;
-        stopDemo();
-        notify('Recording unavailable. Use the recording link to try again.');
+        demo.pause();
+        updateDemoButton();
+        notify('Video unavailable. Try the HD video or GIF link below.');
       });
       document.addEventListener('visibilitychange', () => {
-        if (document.hidden && demoButton.getAttribute('aria-pressed') === 'true') stopDemo();
+        if (document.hidden) demo.pause();
       });
 
       const releaseBase = 'https://github.com/ejpir/gantry/releases/latest/download/';

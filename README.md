@@ -11,7 +11,9 @@ Windows.
 > Gantry is experimental. Linux and Apple silicon macOS are supported. Windows
 > support is experimental.
 
-[![Gantry terminal dashboard demo](assets/gantry-tui.gif)](assets/gantry-tui.gif)
+[![Gantry terminal dashboard demo](assets/gantry-tui-v3.gif)](assets/gantry-tui-v3.gif)
+
+[Watch the HD video](assets/gantry-tui-v3.mp4) · 24-second demo recorded on Linux/KVM.
 
 ## Install
 
