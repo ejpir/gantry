@@ -72,8 +72,10 @@ The ordinary command paths are:
 - `exec <name>` connects to that supervisor's local session broker.
 - one-shot `exec` creates a randomly named transient sandbox, runs one
   session, and deletes it.
-- `tui` uses the same local lifecycle and control surfaces as the CLI, with
-  separate source-scoped clients for remote rows.
+- `tui` uses the same local lifecycle and control surfaces as the CLI. Its
+  Overview and Sandboxes inventory combines local rows with authenticated
+  source-scoped remote rows; each remote row retains its profile identity so
+  actions cannot target a same-named local sandbox.
 - `serve` provides the HTTP/JSON manager API on a Unix socket by default, or
   on explicitly configured TLS listeners with bearer authentication. It
   delegates lifecycle work to the same implementation.

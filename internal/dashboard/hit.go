@@ -127,7 +127,7 @@ func (m sandboxTUIModel) statusBarHitTargets(layout tuiDashboardLayout) []tuiHit
 
 func clickableContextKey(key string) bool {
 	switch key {
-	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc", "/", "S":
+	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc", "/", "S", "B":
 		return true
 	default:
 		return false

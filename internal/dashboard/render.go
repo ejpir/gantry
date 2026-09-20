@@ -349,10 +349,12 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	switch m.page {
 	case tuiOverviewPage:
-		running, configuredVCPUs := 0, 0
+		running, configuredVCPUs, remoteCount := 0, 0, 0
 		unknownConfig := false
 		for _, sandbox := range m.sandboxes {
-			if sandbox.ConfigError {
+			if sandbox.Remote != "" {
+				remoteCount++
+			} else if sandbox.ConfigError {
 				unknownConfig = true
 			} else {
 				configuredVCPUs += maxInt(1, sandbox.VCPUs)
@@ -366,7 +368,11 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 			configured += "+?"
 		}
 		hostVCPUs := maxInt(1, m.limits.MaxVCPUs)
-		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running · %s vCPU configured · %d host", running, configured, hostVCPUs))
+		summary := fmt.Sprintf(" %d running · %s vCPU configured · %d host", running, configured, hostVCPUs)
+		if remoteCount > 0 {
+			summary += fmt.Sprintf(" · %d remote", remoteCount)
+		}
+		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
 	case tuiTrafficPage:
 		var tx, rx, blocked uint64
 		for _, sandbox := range m.sandboxes {
@@ -470,8 +476,11 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
 	default:
-		running, starting := 0, 0
+		running, starting, remoteCount := 0, 0, 0
 		for _, sandbox := range m.sandboxes {
+			if sandbox.Remote != "" {
+				remoteCount++
+			}
 			switch sandbox.State {
 			case tuiRunning:
 				running++
@@ -484,6 +493,9 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 		if starting > 0 {
 			right += "  " + lipgloss.NewStyle().Foreground(theme.warning).Render("◐") +
 				lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d starting", starting))
+		}
+		if remoteCount > 0 {
+			right += lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("  ·  %d remote", remoteCount))
 		}
 		return right
 	}
@@ -553,19 +565,23 @@ func (m sandboxTUIModel) renderSandboxCard(theme tuiTheme, layout tuiDashboardLa
 	if selected {
 		nameStyle = nameStyle.Foreground(theme.accent)
 	}
-	header := joinSides(nameStyle.Render(truncateText(sandbox.Name, maxInt(4, innerWidth-lipgloss.Width(state)-1))), state, innerWidth)
+	header := joinSides(nameStyle.Render(truncateText(sandboxDisplayName(sandbox), maxInt(4, innerWidth-lipgloss.Width(state)-1))), state, innerWidth)
 	separator := lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", innerWidth))
 
 	image := labeledValue(theme, "image", sandbox.Image, innerWidth)
 	runtimeName := sandbox.Runtime
-	if runtimeName == "" {
+	if sandbox.Remote != "" {
+		runtimeName = "remote"
+	} else if runtimeName == "" {
 		runtimeName = "unknown"
 	}
 	compute := fmt.Sprintf("%s · %dc · %dMB", runtimeName, maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())
 	computeLine := labeledValue(theme, "compute", compute, innerWidth)
 	storageLine := labeledValue(theme, "storage", sandboxStorageSummary(sandbox, false), innerWidth)
 	network := "offline"
-	if sandbox.Net {
+	if sandbox.Remote != "" {
+		network = "managed by " + sandbox.Remote
+	} else if sandbox.Net {
 		network = "connected"
 		if sandbox.TXBytes > 0 || sandbox.RXBytes > 0 {
 			network = "↑" + formatBytes(sandbox.TXBytes) + " ↓" + formatBytes(sandbox.RXBytes)
@@ -629,7 +645,7 @@ func (m sandboxTUIModel) renderNewSandboxCard(theme tuiTheme, layout tuiDashboar
 }
 
 func (m sandboxTUIModel) renderSandboxState(theme tuiTheme, sandbox tuiSandbox) string {
-	if m.tuiOperationState.Name() == sandbox.Name {
+	if m.tuiOperationState.Name() == sandboxOperationName(sandbox) {
 		return m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render(busyLabel(m.tuiOperationState.Action()))
 	}
 	switch sandbox.State {
@@ -650,6 +666,12 @@ type tuiCardAction struct {
 }
 
 func sandboxCardActions(sandbox tuiSandbox) []tuiCardAction {
+	if sandbox.Remote != "" {
+		if sandbox.State == tuiRunning {
+			return []tuiCardAction{{"↵", "info", "primary"}, {"s", "top", "toggle"}, {"d", "elete", "delete"}}
+		}
+		return []tuiCardAction{{"↵", "start", "primary"}, {"d", "elete", "delete"}}
+	}
 	if sandbox.State == tuiRunning {
 		return []tuiCardAction{{"↵", "open", "primary"}, {"s", "top", "toggle"}, {"e", "dit", "edit"}, {"d", "elete", "delete"}}
 	}
@@ -657,7 +679,7 @@ func sandboxCardActions(sandbox tuiSandbox) []tuiCardAction {
 }
 
 func (m sandboxTUIModel) renderCardActions(theme tuiTheme, sandbox tuiSandbox, selected bool, width int) string {
-	if m.tuiOperationState.Name() == sandbox.Name {
+	if m.tuiOperationState.Name() == sandboxOperationName(sandbox) {
 		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.tuiOperationState.Action()))+"…"), width)
 	}
 	var rendered []string
@@ -745,6 +767,9 @@ func (m sandboxTUIModel) pageContextHints() [][2]string {
 		if len(m.sandboxes) == 0 {
 			return [][2]string{{"enter", "create"}, {"n", "new"}, {"r", "refresh"}, {"?", "help"}}
 		}
+		if selected := m.selected(); selected != nil && selected.Remote != "" {
+			return [][2]string{{"enter", "sandbox view"}, {"i", "details"}, {"B", "remotes"}, {"n", "new"}, {"?", "help"}}
+		}
 		return [][2]string{{"enter", "open"}, {"t", "traffic"}, {"n", "new"}, {"?", "help"}}
 	case tuiTrafficPage:
 		return [][2]string{{"↑/↓", "inspect"}, {"a", "allow/block"}, {"r", "remove rule"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
@@ -772,6 +797,12 @@ func (m sandboxTUIModel) pageContextHints() [][2]string {
 		return [][2]string{{"enter", "create"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	}
 	selected := m.selected()
+	if selected != nil && selected.Remote != "" {
+		if selected.State == tuiRunning {
+			return [][2]string{{"enter", "details"}, {"s", "stop"}, {"i", "details"}, {"d", "remove"}, {"B", "remotes"}, {"?", "help"}}
+		}
+		return [][2]string{{"enter", "start"}, {"s", "start"}, {"i", "details"}, {"d", "remove"}, {"B", "remotes"}, {"?", "help"}}
+	}
 	if selected != nil && selected.State == tuiRunning {
 		return [][2]string{{"enter", "open"}, {"s", "stop"}, {"e", "edit"}, {"i", "details"}, {"d", "remove"}, {"?", "help"}}
 	}
@@ -1064,22 +1095,34 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No sandbox selected.")
 	}
 	state := m.renderSandboxState(theme, *sandbox)
-	rows := [][2]string{
-		{"State", state},
-		{"Image", sandbox.Image},
-		{"Runtime", sandbox.Runtime},
-		{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
-		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())},
-		{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
-		{"SSH", map[bool]string{true: "enabled", false: "disabled"}[sandbox.SSH]},
-		{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
-		{"Storage", sandboxStorageSummary(*sandbox, true)},
-		{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
+	rows := [][2]string{{"State", state}}
+	if sandbox.Remote != "" {
+		rows = append(rows,
+			[2]string{"Source", "remote · " + sandbox.Remote},
+			[2]string{"Image", sandbox.Image},
+			[2]string{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())},
+			[2]string{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
+			[2]string{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
+			[2]string{"Storage", sandboxStorageSummary(*sandbox, true)},
+		)
+	} else {
+		rows = append(rows,
+			[2]string{"Source", "local"},
+			[2]string{"Image", sandbox.Image},
+			[2]string{"Runtime", sandbox.Runtime},
+			[2]string{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
+			[2]string{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())},
+			[2]string{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
+			[2]string{"SSH", map[bool]string{true: "enabled", false: "disabled"}[sandbox.SSH]},
+			[2]string{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
+			[2]string{"Storage", sandboxStorageSummary(*sandbox, true)},
+			[2]string{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
+		)
 	}
 	if sandbox.RestartRequired {
 		rows = append(rows, [2]string{"Next boot", fmt.Sprintf("%d CPU · %d MiB RAM (restart required)", sandbox.VCPUs, sandbox.MemMB)})
 	}
-	if sandbox.Net {
+	if sandbox.Remote == "" && sandbox.Net {
 		rows = append(rows,
 			[2]string{"Local access", map[bool]string{true: "allowed", false: "blocked"}[sandbox.AllowLocal]},
 			[2]string{"Policy", pathBaseOr(sandbox.NetPolicy, "built-in default")},
@@ -1098,13 +1141,15 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 			}
 		}
 	}
-	rows = append(rows,
-		[2]string{"Traffic", "↑ " + formatBytes(sandbox.TXBytes) + "  ↓ " + formatBytes(sandbox.RXBytes)},
-		[2]string{"Blocked", fmt.Sprintf("%d packets", sandbox.DroppedPackets)},
-		[2]string{"Shares", fmt.Sprintf("%d", sandbox.Shares)},
-		[2]string{"Published", fmt.Sprintf("%d ports", sandbox.Ports)},
-		[2]string{"Secrets", sandbox.Secrets},
-	)
+	if sandbox.Remote == "" {
+		rows = append(rows,
+			[2]string{"Traffic", "↑ " + formatBytes(sandbox.TXBytes) + "  ↓ " + formatBytes(sandbox.RXBytes)},
+			[2]string{"Blocked", fmt.Sprintf("%d packets", sandbox.DroppedPackets)},
+			[2]string{"Shares", fmt.Sprintf("%d", sandbox.Shares)},
+			[2]string{"Published", fmt.Sprintf("%d ports", sandbox.Ports)},
+			[2]string{"Secrets", sandbox.Secrets},
+		)
+	}
 	if sandbox.PID > 0 {
 		rows = append(rows, [2]string{"VMM PID", fmt.Sprint(sandbox.PID)})
 	}
@@ -1124,10 +1169,12 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		}
 		paths = append(paths, lipgloss.NewStyle().Foreground(theme.muted).Render(label)+"\n"+lipgloss.Wrap(path, width, ""))
 	}
-	appendPath("Kernel asset", sandbox.Kernel)
-	appendPath("Disk image", sandbox.RWLayer)
-	appendPath("Policy file", sandbox.NetPolicy)
-	appendPath("Config", sandbox.ConfigPath)
+	if sandbox.Remote == "" {
+		appendPath("Kernel asset", sandbox.Kernel)
+		appendPath("Disk image", sandbox.RWLayer)
+		appendPath("Policy file", sandbox.NetPolicy)
+		appendPath("Config", sandbox.ConfigPath)
+	}
 	footer := lipgloss.NewStyle().Foreground(theme.muted).Render("c copy all  •  i / esc close")
 	return header + "\n\n" + strings.Join(lines, "\n") + "\n\n" + strings.Join(paths, "\n\n") + "\n\n" + footer
 }
@@ -1175,7 +1222,7 @@ func (m sandboxTUIModel) renderRemoveDialog(theme tuiTheme, width int) string {
 	header := m.dialogHeader(theme, "Remove Sandbox", width)
 	name := ""
 	if selected := m.selected(); selected != nil {
-		name = selected.Name
+		name = sandboxDisplayName(*selected)
 	}
 	label := lipgloss.NewStyle().Foreground(theme.secondary).Render("Sandbox: ")
 	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(name)

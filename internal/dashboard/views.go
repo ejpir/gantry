@@ -75,7 +75,7 @@ func (m sandboxTUIModel) renderTrafficView(theme tuiTheme, layout tuiDashboardLa
 func (m sandboxTUIModel) sandboxesMissingTrafficCapture() []string {
 	var names []string
 	for _, sandbox := range m.sandboxes {
-		if sandbox.State == tuiRunning && sandbox.Net && !sandbox.TrafficAvailable {
+		if sandbox.Remote == "" && sandbox.State == tuiRunning && sandbox.Net && !sandbox.TrafficAvailable {
 			names = append(names, sandbox.Name)
 		}
 	}

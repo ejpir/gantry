@@ -72,6 +72,9 @@ func (m *sandboxTUIModel) removeSelected() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
+	if selected.Remote != "" {
+		return m.beginRemoteAction("delete", *selected, []string{"delete", selected.Name, "-remote", selected.Remote}, false)
+	}
 	return m.beginAction("delete", selected.Name, []string{"delete", selected.Name}, false)
 }
 

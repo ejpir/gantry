@@ -13,19 +13,33 @@ import (
 // Source snapshots are never sorted or filtered in place. Actions and details
 // consume the same projected rows as the screen; clearing a filter restores
 // hidden rows without waiting for a refresh. Image/registry data is host-wide.
+func localSandboxRows(rows []tuiSandbox) []tuiSandbox {
+	local := make([]tuiSandbox, 0, len(rows))
+	for _, row := range rows {
+		if row.Remote == "" {
+			local = append(local, row)
+		}
+	}
+	return local
+}
+
+func sandboxRowKey(row tuiSandbox) string { return row.Remote + "\x00" + row.Name }
+
 func (m *sandboxTUIModel) rememberViewSource() {
 	if m.viewSource != nil {
 		return
 	}
-	m.viewSource = &tuiRefreshMsg{sandboxes: m.sandboxes, traffic: m.traffic, rules: m.rules, mounts: m.mounts, ports: m.ports, secrets: m.secrets, mcp: m.mcpServers, audit: m.auditEvents, images: m.images, registries: m.registries}
+	m.viewSource = &tuiRefreshMsg{sandboxes: localSandboxRows(m.sandboxes), traffic: m.traffic, rules: m.rules, mounts: m.mounts, ports: m.ports, secrets: m.secrets, mcp: m.mcpServers, audit: m.auditEvents, images: m.images, registries: m.registries}
 	m.packetSource = slices.Clone(m.packets)
 }
 
+// allSandboxes intentionally returns local source rows. Packet capture and
+// local mutation forms must never consume the unified remote presentation.
 func (m sandboxTUIModel) allSandboxes() []tuiSandbox {
 	if m.viewSource != nil {
 		return m.viewSource.sandboxes
 	}
-	return m.sandboxes
+	return localSandboxRows(m.sandboxes)
 }
 
 func filteredRows[T any](source []T, query string, sandbox func(T) string) []T {
@@ -45,7 +59,8 @@ func (m *sandboxTUIModel) rebuildRows() {
 	}
 	s := m.viewSource
 	q := m.sandboxFilter
-	m.sandboxes = filteredRows(s.sandboxes, q, func(r tuiSandbox) string { return r.Name })
+	sandboxSource := append(slices.Clone(s.sandboxes), m.remoteSandboxRows()...)
+	m.sandboxes = filteredRows(sandboxSource, q, func(r tuiSandbox) string { return r.Name + " " + r.Remote })
 	m.traffic = filteredRows(s.traffic, q, func(r tuiTrafficRow) string { return r.Sandbox })
 	m.rules = filteredRows(s.rules, q, func(r tuiRuleRow) string { return r.Sandbox })
 	m.mounts = filteredRows(s.mounts, q, func(r tuiMountRow) string { return r.Sandbox })
@@ -96,9 +111,9 @@ func (m *sandboxTUIModel) restorePacketSelection(key string) {
 }
 
 func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
-	name := ""
+	selectedKey := ""
 	if selected := m.selected(); selected != nil {
-		name = selected.Name
+		selectedKey = sandboxRowKey(*selected)
 	}
 	newCard := m.page == tuiSandboxesPage && m.onNewCard()
 	t, r, mount, port, secret, mcp, image, registry := m.selectedTableKeys()
@@ -119,7 +134,7 @@ func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
 		cardIndex = len(m.sandboxes)
 	} else {
 		for i, row := range m.sandboxes {
-			if row.Name == name {
+			if sandboxRowKey(row) == selectedKey {
 				cardIndex = i
 				break
 			}

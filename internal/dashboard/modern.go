@@ -249,6 +249,20 @@ func (m sandboxTUIModel) renderOperationalSandboxPanel(theme tuiTheme, width, he
 func (m sandboxTUIModel) operationalPanelContent(theme tuiTheme, sandbox tuiSandbox) tuiOperationalPanelContent {
 	muted := lipgloss.NewStyle().Foreground(theme.muted)
 	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text)
+	if sandbox.Remote != "" {
+		return tuiOperationalPanelContent{
+			name:        value.Render(sandboxDisplayName(sandbox)),
+			metadata:    muted.Render(shortImageRef(sandbox.Image) + " / remote manager"),
+			resources:   muted.Render(fmt.Sprintf("%d vCPU · %s", maxInt(1, sandbox.DisplayCPUs()), formatMiBHuman(sandbox.DisplayMemoryMiB()))),
+			traffic:     muted.Render("remote"),
+			trafficNote: muted.Render("telemetry not mirrored"),
+			denied:      muted.Render("—"),
+			deniedNote:  muted.Render("see remote audit"),
+			access:      value.Render("manager"),
+			accessNote:  muted.Render(sandbox.Remote),
+			recent:      muted.Render("Source: remote · " + sandbox.Remote),
+		}
+	}
 	blockedColor := theme.muted
 	if sandbox.DroppedPackets > 0 {
 		blockedColor = theme.error
@@ -453,7 +467,7 @@ func (m sandboxTUIModel) renderSandboxMasterList(theme tuiTheme, geometry tuiMas
 		if index == m.cursor {
 			nameStyle = nameStyle.Foreground(theme.accent)
 		}
-		name := nameStyle.Render(truncateText(sandbox.Name, maxInt(4, inner-4)))
+		name := nameStyle.Render(truncateText(sandboxDisplayName(sandbox), maxInt(4, inner-4)))
 		first := state + " " + name
 		if index == m.cursor {
 			first = lipgloss.NewStyle().Foreground(theme.accent).Render("▌") + truncateANSI(first, inner-1)
@@ -463,6 +477,9 @@ func (m sandboxTUIModel) renderSandboxMasterList(theme tuiTheme, geometry tuiMas
 		image := "  " + lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText(shortImageRef(sandbox.Image), maxInt(4, inner-2)))
 		resources := fmt.Sprintf("  %d vCPU · %s", maxInt(1, sandbox.DisplayCPUs()), formatMiBHuman(sandbox.DisplayMemoryMiB()))
 		features := "  " + sandboxFeatureSummary(sandbox)
+		if sandbox.Remote != "" {
+			features = "  remote manager · " + sandbox.Remote
+		}
 		appendEntry([]string{first, image, lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(resources, inner)), lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(features, inner))}, index == m.cursor)
 	}
 	content := strings.Join(lines, "\n")

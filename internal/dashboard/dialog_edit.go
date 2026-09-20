@@ -11,6 +11,9 @@ func (m *sandboxTUIModel) openEditDialog() tea.Cmd {
 	if selected == nil {
 		return nil
 	}
+	if selected.Remote != "" {
+		return m.showToast(tuiToastInfo, "Remote sandbox", "Configure "+sandboxOperationName(*selected)+" with gantry configure -remote "+selected.Remote+".")
+	}
 	if selected.ConfigError {
 		return m.showToast(tuiToastError, "Cannot edit sandbox", "The saved sandbox configuration is unavailable.")
 	}

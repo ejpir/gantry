@@ -315,11 +315,12 @@ func TestRemoteCreateRefusesProfileChangeAndExpiredOrganization(t *testing.T) {
 func TestRemoteInventoryRejectsStaleWatchMessages(t *testing.T) {
 	m, _ := onboardingModel(t)
 	m.sandboxes = []tuiSandbox{{Name: "same", State: tuiRunning}}
+	m.rememberViewSource()
 	old := remoteSectionMsg{snapshot: remote.WatchSnapshot{Remote: "team", Sandboxes: []managerapi.Sandbox{{Name: "same"}}}, generation: 1}
 	m.Update(old)
 	m.Update(remoteSectionMsg{snapshot: remote.WatchSnapshot{Remote: "team"}, generation: 2, removed: true})
 	m.Update(old)
-	if len(m.remotes) != 0 || len(m.sandboxes) != 1 {
+	if len(m.remotes) != 0 || len(m.sandboxes) != 1 || m.sandboxes[0].Remote != "" {
 		t.Fatal("removed source was resurrected or local inventory changed")
 	}
 }

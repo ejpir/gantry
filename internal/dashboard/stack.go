@@ -98,13 +98,20 @@ func (m sandboxTUIModel) stackActions(theme tuiTheme, selected tuiSandbox, width
 		label := "Start"
 		if selected.State == tuiRunning {
 			label = "Open"
+			if selected.Remote != "" {
+				label = "Details"
+			}
 		}
 		actions = append(actions, [2]string{"enter", label})
 		if selected.State == tuiRunning {
 			actions = append(actions, [2]string{"s", "Stop"})
 		}
 	}
-	actions = append(actions, [2]string{"e", "Edit"}, [2]string{"i", "Details"})
+	if selected.Remote != "" {
+		actions = append(actions, [2]string{"B", "Remote"})
+	} else {
+		actions = append(actions, [2]string{"e", "Edit"}, [2]string{"i", "Details"})
+	}
 	var parts []string
 	var hits []tuiHitTarget
 	x := 0
@@ -167,8 +174,11 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 	accent := lipgloss.NewStyle().Foreground(theme.accent).Bold(true)
 	state := m.renderSandboxState(theme, selected)
 	nameWidth := maxInt(1, width-lipgloss.Width(state)-2)
-	lines := []string{lipgloss.NewStyle().Foreground(theme.text).Bold(true).Render(truncateText(selected.Name, nameWidth)) + "  " + state}
+	lines := []string{lipgloss.NewStyle().Foreground(theme.text).Bold(true).Render(truncateText(sandboxDisplayName(selected), nameWidth)) + "  " + state}
 	summary := fmt.Sprintf("microVM · %d vCPU · %s RAM · %s", selected.DisplayCPUs(), formatMiBHuman(selected.DisplayMemoryMiB()), defaultText(selected.Runtime, "runtime unavailable"))
+	if selected.Remote != "" {
+		summary = fmt.Sprintf("remote · %s · %d vCPU · %s RAM", selected.Remote, selected.DisplayCPUs(), formatMiBHuman(selected.DisplayMemoryMiB()))
+	}
 	if selected.ConfigError {
 		summary = "! Configuration unavailable · i opens details"
 	}
@@ -181,12 +191,16 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 
 	image := stackImageLabel(selected.Image)
 	runtimeLabel := defaultText(selected.Runtime, "unknown") + " runtime"
-	if selected.Runtime == "runsc" {
+	if selected.Remote != "" {
+		runtimeLabel = "runtime managed by " + selected.Remote
+	} else if selected.Runtime == "runsc" {
 		runtimeLabel = "gVisor / runsc runtime"
 	}
 	storage := modernStorageSummary(selected)
 	ssh := "SSH disabled"
-	if selected.SSH {
+	if selected.Remote != "" {
+		ssh = "access managed remotely"
+	} else if selected.SSH {
 		ssh = featureState(selected.State, "SSH")
 	}
 	ideImage := stackImageLabel(defaultText(selected.DevContainersImage, "IDE image unavailable"))
@@ -256,12 +270,14 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 
 	connector := muted.Render(strings.Repeat(" ", width/2) + "╎")
 	roles := "VMM"
-	if selected.Net {
+	if selected.Remote != "" {
+		roles += " · details managed by " + selected.Remote
+	} else if selected.Net {
 		roles += " · networking"
 	} else {
 		roles += " · network disabled"
 	}
-	if selected.Shares > 0 {
+	if selected.Remote == "" && selected.Shares > 0 {
 		roles += " · shared filesystem"
 	}
 	if selected.ConfigError {
@@ -275,11 +291,21 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 	lines = append(lines, strings.Split(renderStackStage(theme, width, tuiLogo, supervisorTitle, roles, icons), "\n")...)
 	lines = append(lines, connector)
 	backend, host := stackHostBackend(runtime.GOOS)
-	backendTitle := backend
-	if !icons {
-		backendTitle = "▣ " + backend + " · " + host + " host"
+	if selected.Remote != "" {
+		backend, host = "Remote manager", selected.Remote
 	}
-	lines = append(lines, strings.Split(renderStackStage(theme, width, tuiStackChip, backendTitle, host+" · "+runtime.GOARCH+" · host virtualization", icons), "\n")...)
+	backendTitle := backend
+	backendSubtitle := host + " · " + runtime.GOARCH + " · host virtualization"
+	if selected.Remote != "" {
+		backendSubtitle = "Authenticated inventory from " + selected.Remote
+	}
+	if !icons {
+		backendTitle = "▣ " + backend + " · " + host
+		if selected.Remote == "" {
+			backendTitle += " host"
+		}
+	}
+	lines = append(lines, strings.Split(renderStackStage(theme, width, tuiStackChip, backendTitle, backendSubtitle, icons), "\n")...)
 	if icons {
 		lines = append(lines, "")
 	}
@@ -290,6 +316,14 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 func (m sandboxTUIModel) stackFacts(theme tuiTheme, selected tuiSandbox, width int, rich bool) []string {
 	muted := lipgloss.NewStyle().Foreground(theme.muted)
 	secondary := lipgloss.NewStyle().Foreground(theme.secondary)
+	if selected.Remote != "" {
+		facts := [][2]string{{"Source", "remote · " + selected.Remote}, {"Inventory", "manager API"}, {"Lifecycle", "explicit remote target"}}
+		var lines []string
+		for _, fact := range facts {
+			lines = append(lines, muted.Width(10).Render(fact[0])+secondary.Render(truncateText(fact[1], maxInt(1, width-10))))
+		}
+		return lines
+	}
 	network := "Disabled"
 	if selected.Net {
 		network = "↓ " + formatNetworkBytes(selected.RXBytes) + "  ↑ " + formatNetworkBytes(selected.TXBytes)

@@ -22,6 +22,9 @@ const (
 )
 
 type Sandbox struct {
+	// Remote is empty for a sandbox on the dashboard host. A non-empty value
+	// names the remote-manager profile that owns the row.
+	Remote               string
 	ActiveAvailable      bool
 	ActiveMemMB          uint
 	ActiveVCPUs          int

@@ -8,6 +8,7 @@ import dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	for i := range snapshot.Sandboxes {
 		row := &snapshot.Sandboxes[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Name = safeUILine(row.Name)
 		row.State = dashboardapi.SandboxState(safeUILine(string(row.State)))
 		row.Image = safeUILine(row.Image)

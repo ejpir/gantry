@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/orgauth"
 	"github.com/ejpir/gantry/internal/remote"
 )
@@ -130,6 +131,58 @@ func watchRemoteProfile(ctx context.Context, profile remote.Profile, generation 
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+// remoteSandboxRows projects authenticated manager inventory into the same
+// presentation model used by local Overview and Sandboxes rows. The Remote
+// source is part of row identity, so equal sandbox names on different hosts
+// remain distinct and can never be mistaken for a local action target.
+func (m sandboxTUIModel) remoteSandboxRows() []tuiSandbox {
+	names := make([]string, 0, len(m.remotes))
+	for name := range m.remotes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var rows []tuiSandbox
+	for _, name := range names {
+		section := m.remotes[name]
+		if section.Error != "" {
+			continue
+		}
+		for _, sandbox := range section.Sandboxes {
+			image := sandbox.Image
+			if image == "" {
+				image = sandbox.ImageRef
+			}
+			if image == "" {
+				image = sandbox.ImageDigest
+			}
+			memory, cpus := sandbox.Desired.MemoryMiB, sandbox.Desired.CPUs
+			if memory == 0 {
+				memory = sandbox.MemoryMiB
+			}
+			if cpus == 0 {
+				cpus = sandbox.CPUs
+			}
+			row := tuiSandbox{
+				Remote: safeUILine(name), Name: safeUILine(sandbox.Name),
+				State: dashboardapi.SandboxState(safeUILine(sandbox.State)), PID: sandbox.PID,
+				Image: safeUILine(image), RW: sandbox.Writable,
+				MemMB: memory, VCPUs: cpus, RestartRequired: sandbox.RestartRequired,
+				ProcessIsolation: safeUILine(sandbox.Desired.ProcessIsolation),
+				DevContainers:    sandbox.Desired.DevContainers,
+				Proxy:            safeUILine(sandbox.Proxy), NoProxy: safeUILine(sandbox.NoProxy),
+				ProxyEnforce: sandbox.ProxyEnforce,
+			}
+			if sandbox.Active != nil {
+				row.ActiveAvailable = true
+				row.ActiveMemMB = sandbox.Active.MemoryMiB
+				row.ActiveVCPUs = sandbox.Active.CPUs
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 type remoteRow struct {

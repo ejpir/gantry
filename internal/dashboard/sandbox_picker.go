@@ -26,7 +26,9 @@ func (p *sandboxPicker) Reset(sandboxes []tuiSandbox, preferred string) bool {
 func (p *sandboxPicker) ResetWhere(sandboxes []tuiSandbox, preferred string, eligible func(tuiSandbox) bool) bool {
 	p.options = p.options[:0]
 	for _, sandbox := range sandboxes {
-		if eligible(sandbox) {
+		// Sandbox-scoped forms use the local dashboard service. Remote rows are
+		// visible in the unified inventory but must never become local targets.
+		if sandbox.Remote == "" && eligible(sandbox) {
 			p.options = append(p.options, sandbox.Name)
 		}
 	}

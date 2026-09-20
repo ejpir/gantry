@@ -194,7 +194,7 @@ func (m sandboxTUIModel) renderPacketsView(theme tuiTheme, layout tuiDashboardLa
 
 func (m sandboxTUIModel) hasPacketCaptureTarget() bool {
 	for _, sandbox := range m.sandboxes {
-		if sandbox.State == tuiRunning && sandbox.Net {
+		if sandbox.Remote == "" && sandbox.State == tuiRunning && sandbox.Net {
 			return true
 		}
 	}

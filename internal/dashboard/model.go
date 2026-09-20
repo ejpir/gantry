@@ -495,6 +495,12 @@ func (m *sandboxTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.remotes[name] = remoteSection(msg.snapshot)
 		}
+		// Local discovery owns viewSource. Once it exists, project every live
+		// remote inventory into Overview and Sandboxes without waiting for the
+		// next local refresh. Unavailable sources contribute no stale rows.
+		if m.viewSource != nil {
+			m.rebuildView(false)
+		}
 		m.ensureTableCursorVisible()
 		return m, nil
 	case remoteConfigMsg:
@@ -589,10 +595,10 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 		return m, m.showToast(tuiToastError, "Refresh failed", msg.err.Error())
 	}
 
-	selectedName := ""
+	selectedKey := ""
 	selectedNewCard := !wasLoading && m.onNewCard()
 	if selected := m.selected(); selected != nil {
-		selectedName = selected.Name
+		selectedKey = sandboxRowKey(*selected)
 	}
 	trafficKey, ruleKey, mountKey, portKey, secretKey, mcpKey, imageKey, registryKey := m.selectedTableKeys()
 	packetKey := m.selectedPacketKey()
@@ -606,17 +612,19 @@ func (m *sandboxTUIModel) handleRefresh(msg tuiRefreshMsg) (tea.Model, tea.Cmd) 
 	m.dashboardHits = nil
 
 	target := m.tuiOperationState.Selection()
-	if target == "" {
-		target = selectedName
-	}
 	found := false
-	if target != "" {
-		for i := range m.sandboxes {
-			if m.sandboxes[i].Name == target {
-				m.tuiSelectionState.setCardCursor(i, m.entryCount())
-				found = true
-				break
-			}
+	for i := range m.sandboxes {
+		row := m.sandboxes[i]
+		matches := target == "" && sandboxRowKey(row) == selectedKey
+		// Operation selections are local sandbox names. Requiring an empty
+		// source prevents a same-named remote row from stealing selection.
+		if target != "" {
+			matches = row.Remote == "" && row.Name == target
+		}
+		if matches {
+			m.tuiSelectionState.setCardCursor(i, m.entryCount())
+			found = true
+			break
 		}
 	}
 	// A refresh that was already in flight can race a create process. Keep the
@@ -1023,6 +1031,9 @@ func (m *sandboxTUIModel) updateOverviewKey(key string) tea.Cmd {
 		m.setPage(tuiSandboxesPage)
 	case "t":
 		selected := m.selected()
+		if selected != nil && selected.Remote != "" {
+			return m.showToast(tuiToastInfo, "Remote telemetry", "Open Remotes (B) or use gantry audit -remote "+selected.Remote+".")
+		}
 		m.setPage(tuiTrafficPage)
 		if selected != nil {
 			for index, row := range m.traffic {
@@ -1109,6 +1120,16 @@ func (m *sandboxTUIModel) primaryAction() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
+	if selected.Remote != "" {
+		if selected.State == tuiRunning {
+			m.tuiDialogState.open(tuiInfoDialog)
+			return m, nil
+		}
+		if selected.State == tuiStarting {
+			return m, m.showToast(tuiToastInfo, "Sandbox is starting", sandboxOperationName(*selected))
+		}
+		return m.beginRemoteAction("start", *selected, []string{"resume", selected.Name, "-remote", selected.Remote}, false)
+	}
 	if selected.State == tuiRunning {
 		return m.beginAction("open", selected.Name, []string{"exec", selected.Name}, true)
 	}
@@ -1123,6 +1144,16 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 	if selected == nil {
 		return m, nil
 	}
+	if selected.Remote != "" {
+		switch selected.State {
+		case tuiRunning:
+			return m.beginRemoteAction("stop", *selected, []string{"stop", selected.Name, "-remote", selected.Remote}, false)
+		case tuiStarting:
+			return m, m.showToast(tuiToastInfo, "Sandbox is starting", sandboxOperationName(*selected))
+		default:
+			return m.beginRemoteAction("start", *selected, []string{"resume", selected.Name, "-remote", selected.Remote}, false)
+		}
+	}
 	switch selected.State {
 	case tuiRunning:
 		return m.beginAction("stop", selected.Name, []string{"stop", selected.Name}, false)
@@ -1135,6 +1166,18 @@ func (m *sandboxTUIModel) toggleSelected() (tea.Model, tea.Cmd) {
 
 func (m *sandboxTUIModel) beginAction(action, name string, argv []string, interactive bool) (tea.Model, tea.Cmd) {
 	owner, ok := m.tuiOperationState.Begin(action, name, action == "create" || action == "start")
+	if !ok {
+		return m, nil
+	}
+	m.tuiDialogState.dismiss()
+	return m, tea.Batch(runTUIProcessCmd(m.operations, m.service, owner, argv, interactive), m.ensureAnimation())
+}
+
+// beginRemoteAction always carries an explicit profile selector and never
+// creates a local selection handoff. This keeps same-named local and remote
+// sandboxes isolated even when GANTRY_REMOTE is set in the environment.
+func (m *sandboxTUIModel) beginRemoteAction(action string, sandbox tuiSandbox, argv []string, interactive bool) (tea.Model, tea.Cmd) {
+	owner, ok := m.tuiOperationState.Begin(action, sandboxOperationName(sandbox), false)
 	if !ok {
 		return m, nil
 	}
@@ -1337,6 +1380,20 @@ func (m *sandboxTUIModel) showToast(kind tuiToastKind, title, body string) tea.C
 	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return tuiToastExpiredMsg{gen: generation} })
 }
 
+func sandboxDisplayName(sandbox tuiSandbox) string {
+	if sandbox.Remote == "" {
+		return sandbox.Name
+	}
+	return sandbox.Name + "  [remote:" + sandbox.Remote + "]"
+}
+
+func sandboxOperationName(sandbox tuiSandbox) string {
+	if sandbox.Remote == "" {
+		return sandbox.Name
+	}
+	return sandbox.Name + "@" + sandbox.Remote
+}
+
 func (m *sandboxTUIModel) selected() *tuiSandbox {
 	if m.cursor < 0 || m.cursor >= len(m.sandboxes) {
 		return nil
@@ -1421,7 +1478,7 @@ func (m *sandboxTUIModel) prunableImageCount() int {
 
 func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
 	for i := range m.sandboxes {
-		if m.sandboxes[i].Name == name {
+		if m.sandboxes[i].Remote == "" && m.sandboxes[i].Name == name {
 			return &m.sandboxes[i]
 		}
 	}
@@ -1429,14 +1486,14 @@ func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
 }
 
 func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
-	if selected := m.selected(); selected != nil && selected.State != tuiStarting {
+	if selected := m.selected(); selected != nil && selected.Remote == "" && selected.State != tuiStarting {
 		return selected
 	}
 	if running := m.runningTargetSandbox(); running != nil {
 		return running
 	}
 	for i := range m.sandboxes {
-		if m.sandboxes[i].State == tuiStopped {
+		if m.sandboxes[i].Remote == "" && m.sandboxes[i].State == tuiStopped {
 			return &m.sandboxes[i]
 		}
 	}
@@ -1444,11 +1501,11 @@ func (m *sandboxTUIModel) shareTargetSandbox() *tuiSandbox {
 }
 
 func (m *sandboxTUIModel) runningTargetSandbox() *tuiSandbox {
-	if selected := m.selected(); selected != nil && selected.State == tuiRunning {
+	if selected := m.selected(); selected != nil && selected.Remote == "" && selected.State == tuiRunning {
 		return selected
 	}
 	for i := range m.sandboxes {
-		if m.sandboxes[i].State == tuiRunning {
+		if m.sandboxes[i].Remote == "" && m.sandboxes[i].State == tuiRunning {
 			return &m.sandboxes[i]
 		}
 	}

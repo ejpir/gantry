@@ -64,6 +64,27 @@ gantry remote rm home-lab
 
 This does not delete remote sandboxes or revoke the server token.
 
+### Connect through an SSH jump host
+
+When the client can reach the manager only through an SSH host, use a local
+forward. The repository includes a bootstrap script that securely copies the
+CA, server certificate, and token through the jump host, pins the certificate,
+and keeps an SSH control-master tunnel running:
+
+```sh
+JUMP=root@gateway.example \
+MANAGER=gantry@192.168.1.160 \
+GANTRY_BIN=./gantry \
+./scripts/connect-remote-manager.sh
+```
+
+Set `MANAGER_HOST` separately when the SSH destination name is not the address
+the jump host uses for the TLS listener. Stop the tunnel with:
+
+```sh
+JUMP=root@gateway.example ./scripts/connect-remote-manager.sh --stop
+```
+
 ## CLI operations
 
 Select a profile with `-remote NAME` or `GANTRY_REMOTE`. An explicit flag wins;
@@ -121,7 +142,10 @@ masked, write-only, and cleared after submission or cancellation.
 
 Open **Remotes (B)** to add, test, or remove profiles and to refresh
 organization discovery. Profile and login changes appear without restarting
-the dashboard. Local and remote inventories stay separate.
+the dashboard. **Overview** and **Sandboxes** include authenticated remote
+sandboxes alongside local ones; every remote row carries its profile tag so
+same-named sandboxes remain distinct. The **Remotes** view retains the grouped
+per-manager inventory and connection status.
 
 A failed login, expired catalog, changed profile, missing token, or unreachable
 manager never creates locally. Cancel and choose **Local** explicitly.
