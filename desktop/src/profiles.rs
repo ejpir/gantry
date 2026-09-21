@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::security;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteProfile {
     pub name: String,
@@ -35,6 +35,7 @@ impl std::fmt::Debug for BearerToken {
 
 #[derive(Deserialize)]
 struct Store {
+    #[serde(deserialize_with = "crate::wire::null_vec")]
     remotes: Vec<RemoteProfile>,
 }
 
@@ -137,6 +138,27 @@ impl RemoteProfile {
         );
         Ok(certificates)
     }
+}
+
+/// Read the client-local catalog without loading any bearer values.
+pub fn list(base: &Path) -> Result<Vec<RemoteProfile>> {
+    match std::fs::symlink_metadata(base.join("remotes.json")) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+        Ok(_) => {}
+    }
+    security::private_directory(base)?;
+    let tokens = base.join("remotes");
+    security::private_directory(&tokens)?;
+    let _lock = crate::profile_lock::acquire(&tokens)?;
+    let bytes = security::read_file(&base.join("remotes.json"), 1024 * 1024, false)?;
+    let store: Store = serde_json::from_slice(&bytes).context("Invalid remote profile store")?;
+    let mut names = std::collections::HashSet::new();
+    for profile in &store.remotes {
+        profile.validate()?;
+        ensure!(names.insert(&profile.name), "Duplicate remote profile name");
+    }
+    Ok(store.remotes)
 }
 
 pub fn load(base: &Path, name: &str) -> Result<(RemoteProfile, BearerToken)> {

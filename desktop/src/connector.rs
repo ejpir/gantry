@@ -6,7 +6,46 @@ use crate::{
     options::{Options, Source},
     profiles,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail, ensure};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub source: Source,
+    pub profile: Option<profiles::RemoteProfile>,
+}
+impl Target {
+    pub fn label(&self) -> String {
+        match &self.profile {
+            Some(profile) => format!("{} · {}", profile.name, profile.url),
+            None => self.source.description(),
+        }
+    }
+}
+pub struct WorkspaceSnapshot {
+    pub inventory: Snapshot,
+    pub dashboard: Option<crate::dashboard_wire::HostSnapshot>,
+    pub target: Target,
+}
+fn resolve(source: &Source) -> Result<(ManagerClient, Target)> {
+    let (client, profile) = match source {
+        Source::Local(socket) => (ManagerClient::local(socket)?, None),
+        Source::Remote { name, config_dir } => {
+            let (profile, token) = profiles::load(config_dir, name)?;
+            (
+                ManagerClient::remote(&profile, token.expose())?,
+                Some(profile),
+            )
+        }
+        Source::Demo => bail!("Demo mode cannot send requests"),
+    };
+    Ok((
+        client,
+        Target {
+            source: source.clone(),
+            profile,
+        },
+    ))
+}
 
 pub struct Connector {
     source: Source,
@@ -31,43 +70,107 @@ impl Connector {
     /// does not create an endless respawn loop. An explicit Refresh permits a
     /// new attempt; custom sockets and remotes never invoke a local launcher.
     pub fn snapshot(&mut self, retry_start: bool) -> Result<Snapshot> {
+        if self.source == Source::Demo {
+            return Ok(Snapshot {
+                version: "demo".into(),
+                sandboxes: crate::inventory::demo_sandboxes(),
+                capabilities: vec!["dashboard-control-v1".into()],
+            });
+        }
+        self.read(retry_start, |client, _| client.snapshot())
+    }
+
+    pub fn workspace(&mut self, retry_start: bool) -> Result<WorkspaceSnapshot> {
+        if self.source == Source::Demo {
+            return Ok(WorkspaceSnapshot {
+                inventory: self.snapshot(false)?,
+                dashboard: Some(crate::workspace::demo()),
+                target: Target {
+                    source: Source::Demo,
+                    profile: None,
+                },
+            });
+        }
+        self.read(retry_start, |client, target| {
+            let inventory = client.snapshot()?;
+            let dashboard = match client.dashboard() {
+                Ok(snapshot) => Some(snapshot),
+                Err(error)
+                    if error
+                        .downcast_ref::<api::ManagerError>()
+                        .is_some_and(|e| matches!(e.status, 404 | 501)) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            Ok(WorkspaceSnapshot {
+                inventory,
+                dashboard,
+                target,
+            })
+        })
+    }
+
+    /// Mutations never bootstrap or retry. A replaced URL/CA/pin invalidates an
+    /// open form even if its profile alias is unchanged. Token rotation at the
+    /// same authenticated origin is safe and takes effect on the next action.
+    pub fn execute(
+        &self,
+        target: &Target,
+        command: &crate::commands::Command,
+    ) -> Result<crate::commands::Outcome> {
+        self.execute_with_progress(target, command, |_| {})
+    }
+
+    pub fn execute_with_progress(
+        &self,
+        target: &Target,
+        command: &crate::commands::Command,
+        progress: impl Fn(&str),
+    ) -> Result<crate::commands::Outcome> {
+        let (client, current) = resolve(&self.source)?;
+        ensure!(
+            &current == target,
+            "The selected connection changed. Refresh and reopen the form; no write was sent."
+        );
+        client.execute_with_progress(command, progress)
+    }
+
+    fn read<T>(
+        &mut self,
+        retry_start: bool,
+        read: impl Fn(ManagerClient, Target) -> Result<T>,
+    ) -> Result<T> {
         if retry_start {
             self.start_attempted = false;
             self.start_error = None;
         }
-        match &self.source {
-            Source::Local(socket) => {
-                match api::snapshot(socket) {
-                    Ok(snapshot) => {
-                        self.start_error = None;
-                        return Ok(snapshot);
-                    }
-                    Err(error) if self.auto_start && api::is_absent(&error) => {}
-                    Err(error) => return Err(error),
-                }
-                if self.start_attempted {
-                    bail!("{}", self.start_error.as_deref().unwrap_or("The local manager is unavailable. Press Refresh to retry startup, or run gantry serve explicitly."));
-                }
-                self.start_attempted = true;
-                let program = launcher::executable(self.gantry.as_deref());
-                if let Err(error) = launcher::ensure_local(socket, &program) {
-                    self.start_error = Some(error.to_string());
-                    return Err(error);
-                }
-                api::snapshot(socket)
-                    .context("The local manager did not become usable after startup")
+        match resolve(&self.source).and_then(|(client, target)| read(client, target)) {
+            Ok(value) => {
+                self.start_error = None;
+                return Ok(value);
             }
-            Source::Remote { name, config_dir } => {
-                // Reload on each refresh: profile removal, CA changes and token
-                // rotation must take effect without restarting the desktop.
-                let (profile, token) = profiles::load(config_dir, name)?;
-                ManagerClient::remote(&profile, token.expose())?.snapshot()
-            }
-            Source::Demo => Ok(Snapshot {
-                version: "demo".into(),
-                sandboxes: crate::inventory::demo_sandboxes(),
-            }),
+            Err(error)
+                if matches!(self.source, Source::Local(_))
+                    && self.auto_start
+                    && api::is_absent(&error) => {}
+            Err(error) => return Err(error),
         }
+        if self.start_attempted {
+            bail!("{}",self.start_error.as_deref().unwrap_or("The local manager is unavailable. Press Refresh to retry startup, or run gantry serve explicitly."));
+        }
+        self.start_attempted = true;
+        let Source::Local(socket) = &self.source else {
+            unreachable!()
+        };
+        let program = launcher::executable(self.gantry.as_deref());
+        if let Err(error) = launcher::ensure_local(socket, &program) {
+            self.start_error = Some(error.to_string());
+            return Err(error);
+        }
+        let (client, target) = resolve(&self.source)?;
+        read(client, target)
     }
 }
 

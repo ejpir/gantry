@@ -13,12 +13,15 @@ use crate::inventory::Sandbox;
 pub struct Snapshot {
     pub version: String,
     pub sandboxes: Vec<Sandbox>,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct Health {
     ok: bool,
     version: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -36,6 +39,7 @@ fn null_sandboxes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Sand
 pub struct ManagerClient {
     http: reqwest::blocking::Client,
     base: String,
+    bearer: crate::wire::SecretInput,
 }
 
 impl ManagerClient {
@@ -47,6 +51,7 @@ impl ManagerClient {
         Ok(Self {
             http: builder().unix_socket(socket).build()?,
             base: "http://gantry.local".into(),
+            bearer: Default::default(),
         })
     }
 
@@ -74,6 +79,122 @@ impl ManagerClient {
                 .default_headers(headers)
                 .build()?,
             base: profile.url.trim_end_matches('/').to_owned(),
+            bearer: crate::wire::SecretInput::new(token.to_owned()),
+        })
+    }
+
+    pub(crate) fn require_control(&self) -> Result<()> {
+        let health: Health = get_json(self, "/v1/health")?;
+        anyhow::ensure!(
+            health.ok
+                && health.version == "v1"
+                && health
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "dashboard-control-v1"),
+            "This manager does not advertise safe dashboard control. Upgrade and restart it; no write was sent."
+        );
+        Ok(())
+    }
+
+    pub fn dashboard(&self) -> Result<crate::dashboard_wire::HostSnapshot> {
+        self.request::<_, ()>(
+            "GET",
+            "/v1/dashboard",
+            None,
+            std::time::Duration::from_secs(15),
+            &[],
+        )
+    }
+
+    pub fn safe_message(&self, message: &str, secrets: &[&str]) -> String {
+        let mut text = message.to_owned();
+        for secret in std::iter::once(self.bearer.expose())
+            .chain(secrets.iter().copied())
+            .filter(|s| !s.is_empty())
+        {
+            text = text.replace(secret, "[redacted]");
+        }
+        text.chars()
+            .filter(|c| !c.is_control())
+            .take(1024)
+            .collect()
+    }
+
+    pub(crate) fn request<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &self,
+        method: &str,
+        route: &str,
+        body: Option<&B>,
+        timeout: std::time::Duration,
+        secrets: &[&str],
+    ) -> Result<T> {
+        use std::io::Read;
+        let mut request = self
+            .http
+            .request(
+                reqwest::Method::from_bytes(method.as_bytes())?,
+                format!("{}{route}", self.base),
+            )
+            .timeout(timeout)
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some(body) = body {
+            let bytes = serde_json::to_vec(body)?;
+            anyhow::ensure!(
+                bytes.len() <= 1024 * 1024,
+                "Request exceeds the 1 MiB limit"
+            );
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(bytes);
+        }
+        let response = request.send().map_err(|_| {
+            anyhow::anyhow!(if method == "GET" {
+                "Cannot read the selected manager"
+            } else {
+                "Write outcome unknown. Refresh before retrying; the request was not replayed."
+            })
+        })?;
+        let status = response.status();
+        let mut bytes = Vec::new();
+        response
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Response incomplete. Refresh before retrying a write; it may have completed."
+                )
+            })?;
+        anyhow::ensure!(
+            bytes.len() <= 4 * 1024 * 1024,
+            "Manager response exceeds the 4 MiB limit"
+        );
+        if !matches!(status.as_u16(), 200..=202) {
+            // Secret-bearing errors are intentionally opaque, including encoded
+            // reflections that a substring redactor could not recognize.
+            let detail = if !secrets.is_empty() {
+                "Secret-bearing request rejected. Check the input and sandbox state.".into()
+            } else {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|body| {
+                        body.get("error")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default()
+            };
+            return Err(ManagerError {
+                status: status.as_u16(),
+                message: format!(
+                    "Manager returned HTTP {status}. {}",
+                    self.safe_message(&detail, secrets)
+                ),
+            }
+            .into());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| {
+            anyhow::anyhow!("Invalid manager response; refresh before retrying a write")
         })
     }
 
@@ -88,15 +209,29 @@ impl ManagerClient {
         Ok(Snapshot {
             version: health.version,
             sandboxes: list.sandboxes,
+            capabilities: health.capabilities,
         })
     }
 }
+
+#[derive(Debug)]
+pub struct ManagerError {
+    pub status: u16,
+    pub message: String,
+}
+impl std::fmt::Display for ManagerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for ManagerError {}
 
 fn builder() -> reqwest::blocking::ClientBuilder {
     use std::time::Duration;
     reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .http1_only()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(5))

@@ -112,7 +112,7 @@ fn ensure_local_with_timeout(_: &Path, _: &Path, _: Duration) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<()> {
+pub(crate) fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<()> {
     // SAFETY: this is a live, owned child pipe; fcntl changes only its status
     // flags. No pointers are passed and its existing flags are preserved.
     let result = unsafe {
@@ -130,7 +130,7 @@ fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn collect_output(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> Result<bool> {
+pub(crate) fn collect_output(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> Result<bool> {
     loop {
         let mut buffer = [0; 1024];
         match pipe.read(&mut buffer) {

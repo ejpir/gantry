@@ -47,9 +47,23 @@ func (m *managerService) handleDashboardAction(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var request dashboardapi.ActionRequest
-	if _, err := decodeManagerJSON(r, &request); err != nil {
+	body, err := decodeManagerJSON(r, &request)
+	if err != nil {
 		writeManagerError(w, http.StatusBadRequest, err, "")
 		return
+	}
+	if err := request.ValidateJSON(body); err != nil {
+		writeManagerError(w, http.StatusBadRequest, err, "")
+		return
+	}
+	name := dashboardActionSandbox(request)
+	switch dashboardapi.ActionPayload(request.Action) {
+	case "", "value", "registry", "portRequest":
+	default:
+		if err := layout.ValidateName(name); err != nil {
+			writeManagerError(w, http.StatusBadRequest, err, "")
+			return
+		}
 	}
 	if !tryAcquireSlot(m.execSlots) {
 		writeManagerError(w, http.StatusServiceUnavailable, errors.New("too many concurrent dashboard actions"), "")
@@ -58,7 +72,7 @@ func (m *managerService) handleDashboardAction(w http.ResponseWriter, r *http.Re
 	defer releaseSlot(m.execSlots)
 	m.organizationPolicyMu.RLock()
 	defer m.organizationPolicyMu.RUnlock()
-	if name := dashboardActionSandbox(request); layout.ValidName(name) {
+	if layout.ValidName(name) {
 		lock := m.sandboxLock(name)
 		lock.Lock()
 		defer lock.Unlock()

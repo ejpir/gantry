@@ -1,6 +1,8 @@
 use gantry_desktop::{
+    forms::Kind,
     inventory::{BootSettings, Filter, memory_label},
     options::{Appearance, Source},
+    workspace::Page,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
@@ -17,7 +19,7 @@ use gpui_kit::{
 };
 
 use crate::{
-    app::{Connection, Desktop, FocusInventory, FocusSearch, Refresh},
+    app::{CloseForm, Connection, Desktop, FocusInventory, FocusSearch, Refresh},
     sandbox_table::status,
 };
 
@@ -25,6 +27,7 @@ impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("gantry-desktop")
+            .relative()
             .key_context("GantryDesktop")
             .track_focus(&self.focus)
             .flex()
@@ -36,6 +39,11 @@ impl Render for Desktop {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(cx)))
+            .on_action(cx.listener(|this, _: &CloseForm, window, cx| {
+                if this.form.is_some() {
+                    this.close_form(window, cx);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
@@ -45,13 +53,21 @@ impl Render for Desktop {
                 }),
             )
             .child(self.header(cx))
+            .children(self.notice.as_ref().map(|notice| {
+                div()
+                    .px_4()
+                    .py_2()
+                    .text_size(px(12.))
+                    .bg(cx.theme().accent)
+                    .child(notice.clone())
+            }))
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.sidebar(cx))
-                    .child(
+                    .child(if self.page == Page::Sandboxes {
                         div().flex_1().min_w_0().h_full().child(
                             h_resizable("sandbox-workspace")
                                 .child(
@@ -75,11 +91,14 @@ impl Render for Desktop {
                                                 .child(self.inspector(cx)),
                                         ),
                                 ),
-                        ),
-                    ),
+                        )
+                    } else {
+                        div().flex_1().min_w_0().h_full().child(self.workbench(cx))
+                    }),
             )
             .child(self.footer(cx))
             .children(Root::render_notification_layer(window, cx))
+            .child(self.form_layer(cx))
     }
 }
 
@@ -137,7 +156,7 @@ impl Desktop {
                             .xsmall()
                             .text_color(cx.theme().muted_foreground),
                     )
-                    .child("Sandboxes"),
+                    .child(self.page.label()),
             )
             .child(div().flex_1())
             .child(
@@ -192,76 +211,58 @@ impl Desktop {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let known = matches!(self.connection, Connection::Connected(_) | Connection::Demo);
         let running = self
             .inventory
             .rows()
             .iter()
-            .filter(|row| row.state == "running")
+            .filter(|s| s.state == "running")
             .count();
-        let stopped = self
-            .inventory
-            .rows()
-            .iter()
-            .filter(|row| row.state == "stopped")
-            .count();
-        let known = matches!(self.connection, Connection::Connected(_) | Connection::Demo);
         div()
             .flex()
             .flex_col()
             .w(px(184.))
+            .min_h_0()
             .flex_shrink_0()
             .p_3()
             .gap_2()
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(eyebrow("WORKSPACE", cx).px_2().pt_3().pb_2())
+            .child(eyebrow("WORKSPACE", cx).px_2().pt_3())
             .child(
-                Button::new("sandboxes-nav")
-                    .ghost()
-                    .selected(true)
-                    .icon(IconName::Box)
-                    .label("Sandboxes")
-                    .w_full()
-                    .justify_start()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_filter(Filter::All, cx);
-                        this.focus_inventory(window, cx);
-                    })),
-            )
-            .child(
-                eyebrow(
-                    match self.options.source {
-                        Source::Demo => "DEMO INVENTORY",
-                        Source::Local(_) => "THIS MACHINE",
-                        Source::Remote { .. } => "REMOTE HOST",
-                    },
-                    cx,
-                )
-                .px_2()
-                .pt_6()
-                .pb_2(),
+                div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(Page::ALL.into_iter().map(|page| {
+                            Button::new(("page-nav", page.index()))
+                                .ghost()
+                                .small()
+                                .selected(self.page == page)
+                                .label(page.label())
+                                .w_full()
+                                .justify_start()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.switch_page(page, window, cx)
+                                }))
+                        })),
+                ),
             )
             .child(sidebar_count("Running", known.then_some(running), cx))
-            .child(sidebar_count("Stopped", known.then_some(stopped), cx))
-            .child(div().flex_1())
             .child(
                 div()
-                    .flex()
-                    .flex_col()
                     .p_2()
-                    .gap_2()
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(Icon::new(IconName::ShieldCheck).small())
-                    .child(
-                        div()
-                            .text_color(cx.theme().foreground)
-                            .child("Read-only preview"),
-                    )
-                    .child(
-                        "Your sandboxes stay in Gantry’s hands. This window only inspects them.",
-                    ),
+                    .child(if self.options.source == Source::Demo {
+                        "Demo · writes disabled"
+                    } else if self.control_available {
+                        "Manager-owned lifecycle. Closing this window leaves sandboxes running."
+                    } else {
+                        "Read-only until the manager advertises safe control. Upgrade and restart its process."
+                    }),
             )
     }
 
@@ -317,6 +318,18 @@ impl Desktop {
                             .tooltip("Refresh inventory and retry the selected connection")
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
+            )
+            .child(
+                div().flex().items_center().gap_2().child(
+                    Button::new("sandbox-create")
+                        .primary()
+                        .small()
+                        .label("Create sandbox")
+                        .disabled(!self.can_write())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_form(Kind::Create, window, cx)
+                        })),
+                ),
             )
             .child(
                 Input::new(&self.search)
@@ -401,7 +414,7 @@ impl Desktop {
             _ if self.inventory.rows().is_empty() => empty_state(
                 IconName::Box,
                 "A little room to build",
-                "No sandboxes on this manager yet. Create one with the CLI or open gantry tui; it will appear here automatically.",
+                "No sandboxes on this manager yet. Use Create to launch one from a cached image, or pull an image first on the Images screen.",
                 cx,
             ),
             _ if visible == 0 => empty_state(
@@ -554,7 +567,49 @@ impl Desktop {
                             .truncate()
                             .child(row.name.clone()),
                     )
-                    .child(status(row, cx)),
+                    .child(status(row, cx))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("sandbox-edit")
+                                    .small()
+                                    .label("Edit settings")
+                                    .disabled(!self.can_write())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.edit_selected_sandbox(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("sandbox-start")
+                                    .small()
+                                    .label("Start")
+                                    .disabled(!self.can_write() || row.state != "stopped")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.sandbox_action("start", window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("sandbox-stop")
+                                    .small()
+                                    .label("Stop")
+                                    .disabled(!self.can_write() || row.state != "running")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.sandbox_action("stop", window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("sandbox-delete")
+                                    .small()
+                                    .label("Delete…")
+                                    .disabled(!self.can_write() || row.state != "stopped")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.sandbox_action("delete", window, cx)
+                                    })),
+                            ),
+                    ),
             )
             .child(details)
     }
@@ -571,7 +626,11 @@ impl Desktop {
             ),
             Connection::Demo => (cx.theme().warning, "Demo · sample data only".to_owned()),
         };
-        let source = self.options.source.description();
+        let source = self
+            .target
+            .as_ref()
+            .map(|target| target.label())
+            .unwrap_or_else(|| self.options.source.description());
         div()
             .flex()
             .items_center()

@@ -1,8 +1,13 @@
 mod app;
+mod dashboard_table;
 mod sandbox_table;
 mod theme;
+mod ui_forms;
 mod views;
+mod workbench;
 
+#[cfg(all(test, feature = "ui-tests"))]
+mod dashboard_ui_tests;
 #[cfg(all(test, feature = "ui-tests"))]
 mod ui_tests;
 
@@ -13,7 +18,7 @@ use gpui_kit::{
     WindowOptions, px, size,
 };
 
-use app::{Desktop, FocusInventory, FocusSearch, Quit, Refresh};
+use app::{CloseForm, Desktop, FocusInventory, FocusSearch, Quit, Refresh};
 
 fn main() -> anyhow::Result<()> {
     let Some(options) = Options::parse(std::env::args_os().skip(1), SocketDefaults::from_env())?
@@ -83,5 +88,6 @@ fn bind_keys(cx: &mut App) {
             Some("GantryDesktop"),
         ),
         KeyBinding::new("/", FocusSearch, Some("DataTable")),
+        KeyBinding::new("escape", CloseForm, Some("GantryDesktop")),
     ]);
 }

@@ -11,11 +11,11 @@ use gpui_kit::{AppContext, Entity, TestAppContext, WindowHandle, px, size};
 
 use crate::{app::Desktop, bind_keys};
 
-fn desktop(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Desktop>) {
+pub(crate) fn desktop(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Desktop>) {
     desktop_at(cx, 1280., 800.)
 }
 
-fn desktop_at(
+pub(crate) fn desktop_at(
     cx: &mut TestAppContext,
     width: f32,
     height: f32,

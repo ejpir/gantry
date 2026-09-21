@@ -1,16 +1,27 @@
 # Gantry Desktop — native preview
 
 A native Rust / [GPUI Kit](https://github.com/longbridge/gpui-kit) frontend for
-Gantry. The inspector is **read-only** and uses the same HTTP/JSON manager API
-over a local Unix socket or remote HTTPS. Local mode starts its manager on
-demand; closing the window does not stop the manager or any sandbox.
+Gantry. Native dashboard screens and explicit read/write controls use the same
+HTTP/JSON manager API over a local Unix socket or remote HTTPS. Local mode starts
+its manager on demand; closing the window does not stop the manager or any sandbox.
 
-![Gantry Desktop in dark mode, showing explicitly labeled demo data](assets/preview-dark.png)
+This is a **working preview**, not yet complete TUI parity: it selects one host
+at a time. Interactive terminals, organization-login/catalog flows, SSE updates,
+and persistent preferences remain follow-up work. Demo mode never permits writes.
+
+![Earlier inventory preview in dark mode, showing explicitly labeled demo data](assets/preview-dark.png)
 
 ## Run locally — no separate serve command
 
 Install a current stable Rust toolchain and an up-to-date Gantry CLI supporting
 `gantry serve --ensure`. Commands below run from the repository root.
+
+**Upgrading:** rebuild both the desktop and Go CLI, and restart any already-running
+manager. Writes require the manager's `dashboard-control-v1` health capability,
+checked again immediately before each action. Older managers remain read-only;
+the desktop will never replace a running manager automatically. For managed
+servers, preserve the original listener and policy-feed configuration when
+restarting. Do not kill all Gantry processes: sandbox daemons are separate.
 
 ```sh
 cargo run --locked --manifest-path desktop/Cargo.toml
@@ -104,7 +115,18 @@ without a display.
 ## Included
 
 - Gantry branding, semantic light/dark themes, and bundled icons.
-- Virtualized sandbox table with resizable columns, status filters, and search.
+- Overview, Sandboxes, Traffic, Rules, Ports, Packets, Mounts, Secrets, MCP,
+  Audit, Images, and Remotes screens, with retained per-page search and selection.
+- Virtualized tables, resource inspection, and source-bound action dialogs.
+- Sandbox create, saved-settings edit, start, stop, and confirmed deletion.
+- Network rules/policy, port publishing, mounts, live secrets, MCP configuration,
+  image pulls/pruning, registry login, and opt-in bounded packet capture.
+- Client-local remote-profile add/remove through the Go CLI, and explicit host
+  switching. Profile credentials use stdin, never process arguments.
+- Pending actions, operation progress, and sanitized errors. No automatic replay
+  after a write timeout; refresh the selected manager before retrying.
+- Masked, non-copyable secret inputs; forms are dropped after submission/cancel.
+  Replaced remote URLs, CAs, or pins invalidate an open action.
 - Resizable, scrollable inspector separating active allocation from saved
   next-boot settings, including restart-required notices.
 - Loading, empty, no-match, and unavailable states; automatic reconnection.
@@ -114,7 +136,7 @@ without a display.
 | Ctrl/⌘ F, or `/` in the table | Focus search |
 | Enter while searching | Focus the inventory |
 | ↑ / ↓ in the table | Select a sandbox and update its inspector |
-| Escape in search | Clear the query |
+| Escape in search / a form | Clear the query / cancel the form |
 | Ctrl/⌘ 1 | Focus the inventory |
 | Ctrl/⌘ R | Refresh / retry the selected connection |
 | Ctrl/⌘ Q | Quit the desktop only |
@@ -137,19 +159,25 @@ or app bundles yet. The first Rust build downloads and compiles GPUI dependencie
 
 ## Architecture and tests
 
-`src/api.rs` is one typed client for `GET /v1/health` and `GET /v1/sandboxes` over
-both transports, using the [manager contract](../api/managerapi/openapi.yaml).
-`connector.rs` selects transport and owns startup policy; `launcher.rs` invokes
-only `gantry serve --ensure`. Go owns daemon lifecycle, locks, policy, and the
-existing sandbox sockets. Rust owns presentation, connection state, and TLS
-client verification—not VM policy or lifecycle decisions.
+`src/api.rs` is one typed manager client over both transports. `commands.rs`
+implements typed write intents and operation polling; `connector.rs` owns
+startup and verifies that action targets have not changed. `launcher.rs` invokes
+`gantry serve --ensure`; `local_profiles.rs` uses only the CLI's client-local
+profile workflow. Business operations never use shell commands or sandbox files.
+
+`dashboard_wire.rs` and the dashboard sections of the
+[OpenAPI contract](../api/managerapi/openapi.yaml) are generated from the same
+Go DTOs used by the TUI. Go retains lifecycle, policy, and validation ownership.
+The manager rejects ambiguous action payloads before selecting a sandbox lock,
+and rechecks ordinal rule selections before removing them.
 
 All file, HTTP, and launcher work stays off the GPUI foreground thread. HTTP
 requests, file/response sizes, launcher output, and readiness waits are bounded.
 Inventory polls every three seconds with one refresh in flight; failures
 clear stale rows. Selection by name, search, and filters survive successful
-refreshes. SSE invalidation, lifecycle controls, image management, terminals,
-and persistent preferences remain follow-up work.
+refreshes. Profiles and tokens are reloaded before actions; no remote failure
+can trigger a local write or startup. Packet payloads are memory-only and explicit
+capture-stop clears the manager's retained recorder data.
 
 ```sh
 cargo fmt --manifest-path desktop/Cargo.toml -- --check
@@ -162,8 +190,11 @@ cargo test --locked --manifest-path desktop/Cargo.toml --features ui-tests
 cargo clippy --locked --manifest-path desktop/Cargo.toml \
   --all-targets --all-features -- -D warnings
 
-# Go launcher/manager ownership and concurrency tests.
-go test -race ./internal/sandbox/manager
+# Canonical DTO/schema drift check (omit -check to regenerate).
+go run ./internal/dashboard/api/generate -check
+
+# Go launcher, control-plane, and concurrency tests.
+go test -race ./internal/sandbox/manager ./internal/sandbox/dashboardsvc
 ```
 
 Tests use disposable sockets, TLS certificates, profiles, and manager state—not

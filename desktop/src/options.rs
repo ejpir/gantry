@@ -5,14 +5,14 @@ use std::{
 
 use anyhow::{Result, bail};
 
-pub const HELP: &str = "Gantry Desktop — read-only local and remote sandbox inspector
+pub const HELP: &str = "Gantry Desktop — native local and remote dashboard
 
 Usage: gantry-desktop [--socket PATH | --remote NAME | --demo] [options]
 
   --socket PATH   Connect to an existing private manager socket (no autostart)
   --remote NAME   Use an existing gantry remote profile over verified HTTPS
   --no-start      Disable automatic startup of the default local manager
-  --gantry PATH   Gantry executable for automatic startup (otherwise sibling/PATH)
+  --gantry PATH   Gantry executable for startup and local profile writes (otherwise sibling/PATH)
   --demo          Show sample data; no connections or subprocesses
   --theme MODE    Initial appearance: system, dark, or light (default: system)
   -h, --help      Show this help
@@ -21,7 +21,7 @@ Local mode starts the default Unix-only manager on demand. --socket and
 GANTRY_MANAGER_SOCKET are connect-only; remote errors never fall back to local.
 GANTRY_HOME selects the same state tree as the CLI. Remote profiles are created
 with gantry remote add; tokens are never passed on the desktop command line.
-The desktop never starts, stops, or modifies sandboxes. Managers and VMs remain
+Sandbox writes require explicit UI actions. Managers and VMs remain
 independent of the GUI's lifetime. Local startup requires Linux or macOS.
 ";
 
@@ -112,7 +112,7 @@ impl SocketDefaults {
         Ok(self.base()?.join("manager.sock"))
     }
 
-    fn base(&self) -> Result<PathBuf> {
+    pub fn base(&self) -> Result<PathBuf> {
         if let Some(path) = &self.gantry_home {
             // Match filepath.Dir(filepath.Clean(GANTRY_HOME)) in the manager.
             // This is a lexical cleanup, not filesystem/symlink canonicalization.
@@ -223,8 +223,8 @@ impl Options {
             && socket.is_none()
             && defaults.manager_socket.is_none()
             && !no_start;
-        if gantry.is_some() && !auto_start {
-            bail!("--gantry is only used for automatic default-local startup");
+        if gantry.is_some() && demo {
+            bail!("--gantry is not used in demo mode");
         }
         if no_start && (demo || remote.is_some()) {
             bail!("--no-start only applies to local connections");
@@ -367,9 +367,7 @@ mod tests {
         for args in [
             &["--remote", "team", "--socket", "/tmp/socket"][..],
             &["--remote", "team", "--demo"],
-            &["--remote", "team", "--gantry", "gantry"],
-            &["--socket", "/tmp/socket", "--gantry", "gantry"],
-            &["--no-start", "--gantry", "gantry"],
+            &["--demo", "--gantry", "gantry"],
             &["--demo", "--no-start"],
             &["--remote", "--demo"],
         ] {

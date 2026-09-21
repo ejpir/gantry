@@ -98,7 +98,11 @@ func (m *managerService) handler() http.Handler {
 }
 
 func (m *managerService) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeManagerJSON(w, http.StatusOK, managerapi.Health{OK: true, Version: managerAPIVersion})
+	health := managerapi.Health{OK: true, Version: managerAPIVersion}
+	if provider, ok := m.lifecycle.(dashboardServiceProvider); ok && provider.DashboardService() != nil {
+		health.Capabilities = []string{"dashboard-control-v1"}
+	}
+	writeManagerJSON(w, http.StatusOK, health)
 }
 
 func (m *managerService) handleOpenAPI(w http.ResponseWriter, _ *http.Request) {

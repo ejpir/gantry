@@ -201,7 +201,7 @@ func (dashboardService) RemoveNetworkRule(row dashboardapi.Rule) error {
 			return fmt.Errorf("invalid policy rule source %q", row.Source)
 		}
 		return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
-			return netpol.WithoutRule(policy, number-1)
+			return removeSelectedRule(policy, row, number-1)
 		})
 	case row.Source == "domain":
 		return mutateDashboardNetworkPolicy(row.Sandbox, func(policy *netpol.Policy) (*netpol.Policy, error) {
@@ -210,6 +210,18 @@ func (dashboardService) RemoveNetworkRule(row dashboardapi.Rule) error {
 	default:
 		return fmt.Errorf("effective %s rows cannot be removed; edit the network policy instead", row.Source)
 	}
+}
+
+// A visible ordinal is not a stable rule identity. Recheck its complete
+// summary under the mutation path so a stale UI cannot delete a different rule
+// after another client has inserted, removed, or reordered rules.
+func removeSelectedRule(policy *netpol.Policy, row dashboardapi.Rule, index int) (*netpol.Policy, error) {
+	for _, current := range policy.RuleSummaries() {
+		if current.Source == row.Source && current.Action == row.Action && current.Target == row.Target && current.Protocol == row.Proto && current.Ports == row.Ports {
+			return netpol.WithoutRule(policy, index)
+		}
+	}
+	return nil, fmt.Errorf("network rule changed; refresh and select it again before removing")
 }
 
 func (dashboardService) RemoveTrafficRule(row dashboardapi.Traffic) error {

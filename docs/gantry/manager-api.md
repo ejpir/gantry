@@ -143,6 +143,28 @@ $ curl --unix-socket "$HOME/.gantry/manager.sock" \
 A guest nonzero exit is an HTTP `200` response with `exitCode`, `output`, and
 `truncated`. Invalid requests and infrastructure failures use HTTP errors.
 
+## Native dashboard control
+
+`GET /v1/health` advertises `dashboard-control-v1` when this manager exposes
+safe dashboard control. The desktop requires this capability before enabling
+writes and rechecks it before submitting an action. Rebuild **and restart** an
+older manager to enable the controls; updating the executable does not update
+an already-running process. Read-only connections remain supported.
+
+Dashboard snapshots and action schemas are generated from
+`internal/dashboard/api` with `go run ./internal/dashboard/api/generate`.
+Use `-check` to verify generated Rust DTOs and OpenAPI definitions are current.
+`POST /v1/dashboard/actions` accepts exactly the payload selected by `action`,
+rejects cross-manager row metadata, and validates sandbox names before choosing
+a lock. Removing an ordinal network rule rechecks its selected summary, rather
+than deleting whichever rule happens to occupy an old index.
+
+Desktop action dialogs capture their verified source. A changed remote URL, CA,
+or leaf pin invalidates the action; credentials are reloaded at the same source.
+Writes are never automatically replayed after a transport failure. Lifecycle
+and image operation status is polled using the returned operation ID. Secret
+inputs remain write-only, and secret-bearing error bodies are not shown.
+
 ## Other routes
 
 The OpenAPI contract defines all request and response shapes. Main route groups
