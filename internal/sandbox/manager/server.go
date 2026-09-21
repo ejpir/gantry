@@ -25,6 +25,8 @@ func serveManager(socketPath string, lifecycle Lifecycle) error {
 type serveOptions struct {
 	plan        servePlan
 	policyFeeds []*policyfeed.Config
+	// localAutostart must not bypass a previously configured policy feed.
+	localAutostart bool
 	// audit receives authentication, mutation, and policy-feed records;
 	// nil defaults to stderr.
 	audit *log.Logger
@@ -60,6 +62,11 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	stateDir, err := prepareManagerState(options.plan, owner)
 	if err != nil {
 		return err
+	}
+	if options.localAutostart {
+		if err := allowAutomaticManager(stateDir); err != nil {
+			return err
+		}
 	}
 	if err := addManagerListeners(service, owner, options.plan, security, audit); err != nil {
 		return err

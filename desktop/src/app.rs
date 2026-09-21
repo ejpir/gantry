@@ -1,7 +1,10 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use gantry_desktop::{
-    api,
+    connector::Connector,
     inventory::{Filter, Inventory, demo_sandboxes},
     options::{Appearance, Options, Source},
 };
@@ -31,6 +34,7 @@ pub(crate) struct Desktop {
     pub refreshing: bool,
     pub last_updated: Option<Instant>,
     pub focus: FocusHandle,
+    connector: Arc<Mutex<Connector>>,
     _subscriptions: Vec<Subscription>,
     // Retained tasks are cancelled with the window. Blocking requests also have
     // a deadline; neither polling nor a response can retain the view forever.
@@ -83,8 +87,10 @@ impl Desktop {
                 }
             }),
         ];
+        let connector = Arc::new(Mutex::new(Connector::new(&options)));
         let mut this = Self {
             options,
+            connector,
             inventory: Inventory::default(),
             table,
             search,
@@ -102,11 +108,11 @@ impl Desktop {
             this.connection = Connection::Demo;
             this.sync_table(cx);
         } else {
-            this.refresh(cx);
+            this.fetch(false, cx);
             this._poll_task = Some(cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
-                    if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                    if this.update(cx, |this, cx| this.fetch(false, cx)).is_err() {
                         break;
                     }
                 }
@@ -117,15 +123,21 @@ impl Desktop {
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Source::Local(socket) = &self.options.source else {
-            return;
-        };
-        if self.refreshing {
+        self.fetch(true, cx);
+    }
+
+    fn fetch(&mut self, retry_start: bool, cx: &mut Context<Self>) {
+        if self.options.source == Source::Demo || self.refreshing {
             return;
         }
         self.refreshing = true;
-        let socket = socket.clone();
-        let request = cx.background_spawn(async move { api::snapshot(&socket) });
+        let connector = self.connector.clone();
+        let request = cx.background_spawn(async move {
+            connector
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Manager connector failed"))?
+                .snapshot(retry_start)
+        });
         self._request_task = Some(cx.spawn(async move |this, cx| {
             let result = request.await;
             let _ = this.update(cx, |this, cx| {

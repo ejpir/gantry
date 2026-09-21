@@ -154,15 +154,17 @@ impl Desktop {
                             .mr_3()
                             .text_size(px(12.))
                             .child(
-                                Icon::new(IconName::Monitor)
-                                    .small()
-                                    .text_color(cx.theme().muted_foreground),
+                                Icon::new(
+                                    if matches!(self.options.source, Source::Remote { .. }) {
+                                        IconName::Server
+                                    } else {
+                                        IconName::Monitor
+                                    },
+                                )
+                                .small()
+                                .text_color(cx.theme().muted_foreground),
                             )
-                            .child(if self.options.source == Source::Demo {
-                                "Demo workspace"
-                            } else {
-                                "Local machine"
-                            }),
+                            .child(self.options.source.label()),
                     )
                     .child(
                         Button::new("appearance")
@@ -229,10 +231,10 @@ impl Desktop {
             )
             .child(
                 eyebrow(
-                    if self.options.source == Source::Demo {
-                        "DEMO INVENTORY"
-                    } else {
-                        "THIS MACHINE"
+                    match self.options.source {
+                        Source::Demo => "DEMO INVENTORY",
+                        Source::Local(_) => "THIS MACHINE",
+                        Source::Remote { .. } => "REMOTE HOST",
                     },
                     cx,
                 )
@@ -312,7 +314,7 @@ impl Desktop {
                                 "Refresh"
                             })
                             .disabled(self.refreshing || self.options.source == Source::Demo)
-                            .tooltip("Refresh the local manager inventory")
+                            .tooltip("Refresh inventory and retry the selected connection")
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     ),
             )
@@ -363,14 +365,54 @@ impl Desktop {
                     ),
             );
         }
+        let connection_help = match &self.options.source {
+            Source::Local(_) if self.options.auto_start => {
+                "Refresh retries local startup. Existing endpoints and saved organization governance are never replaced."
+            }
+            Source::Local(_) => {
+                "This socket is connect-only. Start its manager explicitly, or use the default local connection for automatic startup."
+            }
+            Source::Remote { .. } => {
+                "Check this profile with gantry remote test. Verify its credentials and TLS trust. Remote failures never fall back to local execution."
+            }
+            Source::Demo => "Demo mode does not connect to a manager.",
+        };
         let content = match &self.connection {
-            Connection::Connecting => empty_state(IconName::RefreshCw, "Connecting to Gantry", "Looking for your local manager…", cx),
-            Connection::Offline(message) => empty_state(IconName::CircleAlert, "Manager unavailable", message, cx)
-                .child(div().max_w(px(420.)).mt_2().text_size(px(12.)).text_color(cx.theme().muted_foreground)
-                    .child("Start gantry serve in a terminal. For a custom socket, use the same -socket path on the manager. This window retries automatically.")),
-            _ if self.inventory.rows().is_empty() => empty_state(IconName::Box, "A little room to build", "No sandboxes on this manager yet. Create one with the CLI or open gantry tui; it will appear here automatically.", cx),
-            _ if visible == 0 => empty_state(IconName::Search, "No matching sandboxes", "Try another name or image, or change the status filter.", cx),
-            _ => div().size_full().child(DataTable::new(&self.table).bordered(false)),
+            Connection::Connecting => empty_state(
+                IconName::RefreshCw,
+                "Connecting to Gantry",
+                if self.options.auto_start {
+                    "Connecting to the private local API; starting its manager if needed…"
+                } else {
+                    "Connecting to the selected manager…"
+                },
+                cx,
+            ),
+            Connection::Offline(message) => {
+                empty_state(IconName::CircleAlert, "Manager unavailable", message, cx).child(
+                    div()
+                        .max_w(px(420.))
+                        .mt_2()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(connection_help),
+                )
+            }
+            _ if self.inventory.rows().is_empty() => empty_state(
+                IconName::Box,
+                "A little room to build",
+                "No sandboxes on this manager yet. Create one with the CLI or open gantry tui; it will appear here automatically.",
+                cx,
+            ),
+            _ if visible == 0 => empty_state(
+                IconName::Search,
+                "No matching sandboxes",
+                "Try another name or image, or change the status filter.",
+                cx,
+            ),
+            _ => div()
+                .size_full()
+                .child(DataTable::new(&self.table).bordered(false)),
         };
         view.child(
             div()
@@ -529,10 +571,7 @@ impl Desktop {
             ),
             Connection::Demo => (cx.theme().warning, "Demo · sample data only".to_owned()),
         };
-        let source = match &self.options.source {
-            Source::Local(path) => path.display().to_string(),
-            Source::Demo => "No manager connection".into(),
-        };
+        let source = self.options.source.description();
         div()
             .flex()
             .items_center()

@@ -1,5 +1,6 @@
-//! The only manager operations in this preview are GET /v1/health and
-//! GET /v1/sandboxes. No CLI subprocesses, state-file reads, or TCP fallback.
+//! One manager wire client over a private Unix socket or verified HTTPS.
+//! Endpoint selection never changes request/response semantics. Startup and
+//! credential-file handling live outside the protocol client.
 
 use std::path::Path;
 
@@ -32,52 +33,104 @@ fn null_sandboxes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Sand
     Ok(Option::<Vec<Sandbox>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// Blocking and bounded; callers must run this off the GPUI foreground thread.
-#[cfg(unix)]
-pub fn snapshot(socket: &Path) -> Result<Snapshot> {
-    use anyhow::{Context, ensure};
-    use std::time::Duration;
+pub struct ManagerClient {
+    http: reqwest::blocking::Client,
+    base: String,
+}
 
-    let client = reqwest::blocking::Client::builder()
-        .unix_socket(socket)
+impl ManagerClient {
+    /// Construct on a background thread: the blocking HTTP runtime and TLS
+    /// certificate store must never be initialized during GPUI rendering.
+    #[cfg(unix)]
+    pub fn local(socket: &Path) -> Result<Self> {
+        crate::security::local_socket(socket)?;
+        Ok(Self {
+            http: builder().unix_socket(socket).build()?,
+            base: "http://gantry.local".into(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub fn local(_: &Path) -> Result<Self> {
+        anyhow::bail!("Local socket connections currently require Linux or macOS")
+    }
+
+    pub fn remote(profile: &crate::profiles::RemoteProfile, token: &str) -> Result<Self> {
+        use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+        anyhow::ensure!(
+            (16..=256).contains(&token.len())
+                && token.bytes().all(|ch| (0x21..=0x7e).contains(&ch)),
+            "Invalid remote bearer token"
+        );
+        let tls = crate::tls::configuration(profile)?;
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))?;
+        authorization.set_sensitive(true);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, authorization);
+        Ok(Self {
+            http: builder()
+                .https_only(true)
+                .use_preconfigured_tls(tls)
+                .default_headers(headers)
+                .build()?,
+            base: profile.url.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        let health: Health = get_json(self, "/v1/health")?;
+        anyhow::ensure!(health.ok, "The manager reports that it is not ready");
+        anyhow::ensure!(
+            health.version == "v1",
+            "Unsupported manager API version; the endpoint was not replaced"
+        );
+        let list: SandboxList = get_json(self, "/v1/sandboxes")?;
+        Ok(Snapshot {
+            version: health.version,
+            sandboxes: list.sandboxes,
+        })
+    }
+}
+
+fn builder() -> reqwest::blocking::ClientBuilder {
+    use std::time::Duration;
+    reqwest::blocking::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .http1_only()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(5))
-        .build()
-        .context("Could not initialize the local manager client")?;
+}
 
-    let health: Health = get_json(&client, "/v1/health")?;
-    ensure!(health.ok, "The manager reports that it is not ready");
-    let list: SandboxList = get_json(&client, "/v1/sandboxes")?;
-    Ok(Snapshot {
-        version: health.version,
-        sandboxes: list.sandboxes,
+/// Existing callers can select a socket without invoking any launcher.
+pub fn snapshot(socket: &Path) -> Result<Snapshot> {
+    ManagerClient::local(socket)?.snapshot()
+}
+
+pub fn is_absent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
     })
 }
 
-#[cfg(not(unix))]
-pub fn snapshot(_: &Path) -> Result<Snapshot> {
-    anyhow::bail!(
-        "Local socket connections currently require Linux or macOS. Use --demo to preview the UI on this platform."
-    )
-}
-
-#[cfg(unix)]
-fn get_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::blocking::Client,
-    route: &str,
-) -> Result<T> {
+fn get_json<T: serde::de::DeserializeOwned>(client: &ManagerClient, route: &str) -> Result<T> {
     use anyhow::{Context, bail, ensure};
     use std::io::Read;
 
     const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
     let response = client
-        .get(format!("http://gantry.local{route}"))
+        .http
+        .get(format!("{}{route}", client.base))
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
-        .context("Cannot reach the selected manager socket")?;
+        .context(
+            "Cannot reach the selected manager; check its availability and TLS trust settings",
+        )?;
     let status = response.status();
     let mut bytes = Vec::new();
     response
@@ -92,7 +145,10 @@ fn get_json<T: serde::de::DeserializeOwned>(
         // Do not surface arbitrary response bodies (or redirects) in the UI.
         bail!("Manager returned HTTP {status} for {route}");
     }
-    serde_json::from_slice(&bytes).with_context(|| format!("Invalid manager response for {route}"))
+    // A hostile server can reflect its bearer into an invalid JSON value.
+    // Do not retain serde's value-bearing diagnostic in the error chain.
+    serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("Invalid manager response for {route}"))
 }
 
 #[cfg(test)]
@@ -118,7 +174,10 @@ mod tests {
         use std::{
             fs,
             io::{Read, Write},
-            os::unix::{fs::DirBuilderExt, net::UnixListener},
+            os::unix::{
+                fs::{DirBuilderExt, PermissionsExt},
+                net::UnixListener,
+            },
             path::PathBuf,
             sync::atomic::{AtomicUsize, Ordering},
             thread::{self, JoinHandle},
@@ -142,6 +201,7 @@ mod tests {
                 fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
                 let path = dir.join("manager.sock");
                 let listener = UnixListener::bind(&path).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
                 listener.set_nonblocking(true).unwrap();
                 let task = thread::spawn(move || {
                     for (route, reply) in replies {
@@ -207,10 +267,7 @@ mod tests {
         }
 
         fn health() -> (&'static str, String) {
-            (
-                "/v1/health",
-                response(r#"{"ok":true,"version":"test-manager"}"#),
-            )
+            ("/v1/health", response(r#"{"ok":true,"version":"v1"}"#))
         }
 
         #[test]
@@ -221,7 +278,7 @@ mod tests {
             );
             let manager = MockManager::new(vec![health(), ("/v1/sandboxes", response(&body))]);
             let result = snapshot(&manager.path).unwrap();
-            assert_eq!(result.version, "test-manager");
+            assert_eq!(result.version, "v1");
             assert_eq!(result.sandboxes.len(), 4);
             assert_eq!(result.sandboxes[0].desired.memory_mib, 4096);
             manager.finish();

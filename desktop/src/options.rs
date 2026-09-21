@@ -5,26 +5,49 @@ use std::{
 
 use anyhow::{Result, bail};
 
-pub const HELP: &str = "Gantry Desktop — read-only local sandbox inspector
+pub const HELP: &str = "Gantry Desktop — read-only local and remote sandbox inspector
 
-Usage: gantry-desktop [--socket PATH | --demo] [--theme system|dark|light]
+Usage: gantry-desktop [--socket PATH | --remote NAME | --demo] [options]
 
-  --socket PATH   Connect to this private Gantry manager socket
-  --demo          Show clearly labeled sample data; no manager connection
-  --theme MODE    Initial appearance (default: system)
+  --socket PATH   Connect to an existing private manager socket (no autostart)
+  --remote NAME   Use an existing gantry remote profile over verified HTTPS
+  --no-start      Disable automatic startup of the default local manager
+  --gantry PATH   Gantry executable for automatic startup (otherwise sibling/PATH)
+  --demo          Show sample data; no connections or subprocesses
+  --theme MODE    Initial appearance: system, dark, or light (default: system)
   -h, --help      Show this help
 
-The default socket is ~/.gantry/manager.sock. GANTRY_MANAGER_SOCKET and
-GANTRY_HOME are resolved like gantry serve. Start the manager separately;
-this application never starts, stops, or modifies sandboxes.
-
-Local socket connections require Linux or macOS in this first preview.
+Local mode starts the default Unix-only manager on demand. --socket and
+GANTRY_MANAGER_SOCKET are connect-only; remote errors never fall back to local.
+GANTRY_HOME selects the same state tree as the CLI. Remote profiles are created
+with gantry remote add; tokens are never passed on the desktop command line.
+The desktop never starts, stops, or modifies sandboxes. Managers and VMs remain
+independent of the GUI's lifetime. Local startup requires Linux or macOS.
 ";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
     Local(PathBuf),
+    Remote { name: String, config_dir: PathBuf },
     Demo,
+}
+
+impl Source {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local(_) => "Local machine".into(),
+            Self::Remote { name, .. } => format!("Remote · {name}"),
+            Self::Demo => "Demo workspace".into(),
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            Self::Local(path) => path.display().to_string(),
+            Self::Remote { name, .. } => format!("Verified HTTPS · profile {name}"),
+            Self::Demo => "No manager connection".into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,10 +76,12 @@ impl Appearance {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub source: Source,
     pub appearance: Appearance,
+    pub auto_start: bool,
+    pub gantry: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -80,24 +105,28 @@ impl SocketDefaults {
         }
     }
 
-    fn resolve(self) -> Result<PathBuf> {
-        if let Some(path) = self.manager_socket {
-            return Ok(path);
+    fn resolve(&self) -> Result<PathBuf> {
+        if let Some(path) = &self.manager_socket {
+            return Ok(path.clone());
         }
-        if let Some(path) = self.gantry_home {
+        Ok(self.base()?.join("manager.sock"))
+    }
+
+    fn base(&self) -> Result<PathBuf> {
+        if let Some(path) = &self.gantry_home {
             // Match filepath.Dir(filepath.Clean(GANTRY_HOME)) in the manager.
             // This is a lexical cleanup, not filesystem/symlink canonicalization.
-            let path = clean_path(&path);
-            return Ok(path.parent().unwrap_or(&path).join("manager.sock"));
+            let path = clean_path(path);
+            return Ok(path.parent().unwrap_or(&path).to_owned());
         }
-        if let Some(path) = self.home {
-            return Ok(path.join(".gantry/manager.sock"));
+        if let Some(path) = &self.home {
+            return Ok(path.join(".gantry"));
         }
         bail!("Cannot locate the manager socket without a home directory; pass --socket PATH")
     }
 }
 
-fn clean_path(path: &Path) -> PathBuf {
+pub(crate) fn clean_path(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     for component in path.components() {
         match component {
@@ -126,12 +155,40 @@ impl Options {
     ) -> Result<Option<Self>> {
         let mut args = args.into_iter();
         let mut socket = None;
+        let mut remote = None;
+        let mut gantry = None;
+        let mut no_start = false;
         let mut demo = false;
         let mut appearance = Appearance::System;
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("-h" | "--help") => return Ok(None),
                 Some("--demo") => demo = true,
+                Some("--no-start") => no_start = true,
+                Some("--remote") => {
+                    if remote.is_some() {
+                        bail!("--remote can only be specified once");
+                    }
+                    let name = args
+                        .next()
+                        .and_then(|value| value.into_string().ok())
+                        .filter(|name| !name.starts_with("--"))
+                        .ok_or_else(|| anyhow::anyhow!("--remote requires a profile name"))?;
+                    crate::profiles::validate_name(&name)?;
+                    remote = Some(name);
+                }
+                Some("--gantry") => {
+                    if gantry.is_some() {
+                        bail!("--gantry can only be specified once");
+                    }
+                    let path = args
+                        .next()
+                        .filter(|value| {
+                            !value.is_empty() && !value.to_string_lossy().starts_with("--")
+                        })
+                        .ok_or_else(|| anyhow::anyhow!("--gantry requires an executable path"))?;
+                    gantry = Some(PathBuf::from(path));
+                }
                 Some("--socket") => {
                     if socket.is_some() {
                         bail!("--socket can only be specified once");
@@ -158,18 +215,39 @@ impl Options {
                 ),
             }
         }
-        if demo && socket.is_some() {
-            bail!("--demo and --socket cannot be combined");
+        if usize::from(demo) + usize::from(socket.is_some()) + usize::from(remote.is_some()) > 1 {
+            bail!("--demo, --socket, and --remote are mutually exclusive");
+        }
+        let auto_start = !demo
+            && remote.is_none()
+            && socket.is_none()
+            && defaults.manager_socket.is_none()
+            && !no_start;
+        if gantry.is_some() && !auto_start {
+            bail!("--gantry is only used for automatic default-local startup");
+        }
+        if no_start && (demo || remote.is_some()) {
+            bail!("--no-start only applies to local connections");
         }
         let source = if demo {
             Source::Demo
+        } else if let Some(name) = remote {
+            Source::Remote {
+                name,
+                config_dir: defaults.base()?,
+            }
         } else {
             Source::Local(match socket {
                 Some(path) => path,
                 None => defaults.resolve()?,
             })
         };
-        Ok(Some(Self { source, appearance }))
+        Ok(Some(Self {
+            source,
+            appearance,
+            auto_start,
+            gantry,
+        }))
     }
 }
 
@@ -238,6 +316,64 @@ mod tests {
                 parse(&[], defaults).unwrap().unwrap().source,
                 Source::Local(expected.into())
             );
+        }
+    }
+
+    #[test]
+    fn startup_is_default_local_only_and_can_be_disabled() {
+        let defaults = || SocketDefaults {
+            home: Some("/home/test".into()),
+            ..Default::default()
+        };
+        assert!(parse(&[], defaults()).unwrap().unwrap().auto_start);
+        assert!(
+            !parse(&["--no-start"], defaults())
+                .unwrap()
+                .unwrap()
+                .auto_start
+        );
+        assert!(
+            !parse(&["--socket", "/tmp/explicit.sock"], defaults())
+                .unwrap()
+                .unwrap()
+                .auto_start
+        );
+        let options = parse(&["--gantry", "/opt/gantry"], defaults())
+            .unwrap()
+            .unwrap();
+        assert_eq!(options.gantry, Some("/opt/gantry".into()));
+        let custom = SocketDefaults {
+            manager_socket: Some("/explicit.sock".into()),
+            ..defaults()
+        };
+        assert!(!parse(&[], custom).unwrap().unwrap().auto_start);
+        let options = parse(&["--remote", "team"], defaults()).unwrap().unwrap();
+        assert!(!options.auto_start);
+        assert_eq!(
+            options.source,
+            Source::Remote {
+                name: "team".into(),
+                config_dir: "/home/test/.gantry".into()
+            }
+        );
+    }
+
+    #[test]
+    fn target_selectors_never_silently_override_each_other() {
+        let defaults = || SocketDefaults {
+            home: Some("/home/test".into()),
+            ..Default::default()
+        };
+        for args in [
+            &["--remote", "team", "--socket", "/tmp/socket"][..],
+            &["--remote", "team", "--demo"],
+            &["--remote", "team", "--gantry", "gantry"],
+            &["--socket", "/tmp/socket", "--gantry", "gantry"],
+            &["--no-start", "--gantry", "gantry"],
+            &["--demo", "--no-start"],
+            &["--remote", "--demo"],
+        ] {
+            assert!(parse(args, defaults()).is_err(), "{args:?}");
         }
     }
 

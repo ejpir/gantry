@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -51,6 +52,8 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 	var feedPaths policyFeedFlags
 	flags.Var(&feedPaths, "policy-feed", "organization-wide mTLS policy-feed configuration")
 	mintToken := flags.Bool("mint-token", false, "print a fresh bearer token and exit")
+	ensure := flags.Bool("ensure", false, "ensure the default local manager is running; print JSON readiness and exit")
+	localBackground := flags.Bool("local-background", false, "internal Unix-only background manager role")
 	if err := flags.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -61,6 +64,25 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 		fmt.Fprintln(os.Stderr, "usage: gantry serve [-listen unix://PATH | tls://ADDR:PORT] [--self-signed | --tls-cert C --tls-key K] [--token-file PATH] [--policy-feed CONFIG]")
 		fmt.Fprintln(os.Stderr, "       gantry serve --mint-token")
 		return 2
+	}
+	if *ensure || *localBackground {
+		if *ensure && *localBackground || len(listens) != 0 || *selfSigned || *tlsCert != "" || *tlsKey != "" || *tokenFile != "" || *mintToken || len(feedPaths) != 0 || *localBackground && (*socket != "" || os.Getenv("GANTRY_MANAGER_SOCKET") != "") {
+			fmt.Fprintln(os.Stderr, "gantry serve: automatic startup cannot be combined with listener, TLS, token, or policy-feed options")
+			return 2
+		}
+		if *ensure {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			result, err := ensureDefaultManager(ctx, *socket)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "gantry serve --ensure:", err)
+				return 1
+			}
+			if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+				return 1
+			}
+			return 0
+		}
 	}
 	if *mintToken {
 		token, err := MintToken()
@@ -91,7 +113,7 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := serveWithOptions(ctx, serveOptions{plan: plan, policyFeeds: feeds}, lifecycle); err != nil {
+	if err := serveWithOptions(ctx, serveOptions{plan: plan, policyFeeds: feeds, localAutostart: *localBackground}, lifecycle); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry serve:", err)
 		return 1
 	}

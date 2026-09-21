@@ -23,6 +23,39 @@ $ curl --unix-socket "$HOME/.gantry/manager.sock" \
 The socket is private and same-user authenticated. Do not expose it through a
 network proxy or share it with untrusted users.
 
+## Start the local manager on demand
+
+On Linux and macOS, a desktop or other same-user client can ask Gantry to start
+or reuse the default local manager:
+
+```console
+$ gantry serve --ensure
+{"socket":"/home/user/.gantry/manager.sock","version":"v1","started":true,"pid":12345}
+```
+
+The response is JSON; `pid` is present only when this invocation starts a
+process. The command checks readiness before returning and is bounded to eight
+seconds. Concurrent launchers share a startup lock, and the ordinary
+manager-state lock remains the single-instance authority. The detached child
+serves the **same `/v1` HTTP API** over the private Unix socket, never a TCP
+listener. Its output goes to the private `manager.log` beside the socket.
+Closing the requesting application does not stop this manager or its sandboxes.
+
+Only a missing or refused default endpoint permits startup. Incompatible or
+unhealthy servers, permission errors, symlinks, and non-socket paths are not
+replaced. A `-socket` argument to `--ensure` can confirm the default path but
+cannot retarget startup. `GANTRY_MANAGER_SOCKET` overrides are connect-only.
+TLS, token, listener, and policy-feed flags cannot accompany `--ensure`.
+
+An existing manager holding the state lock is never displaced, including a
+TLS-only manager. Saved organization policy-feed state also blocks automatic
+startup: restart that manager explicitly with its correct `-policy-feed`
+configuration. The desktop uses this command only for its default local
+connection; remote failures never cause local startup.
+
+The sandbox-specific `ctl.sock` remains an internal broker protocol. Clients
+should use the manager API, not substitute that socket for `manager.sock`.
+
 ## Serve over TLS
 
 Remote listeners require TLS and a bearer token:

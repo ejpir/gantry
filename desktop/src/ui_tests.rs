@@ -31,6 +31,8 @@ fn desktop_at(
                 Options {
                     source: Source::Demo,
                     appearance: Appearance::Dark,
+                    auto_start: false,
+                    gantry: None,
                 },
                 window,
                 cx,
