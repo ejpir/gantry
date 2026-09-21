@@ -3,6 +3,7 @@
 use crate::{
     commands::{Command, CreateSandbox, name_path},
     dashboard_wire::*,
+    options::Source,
     wire::SecretInput,
     workspace::Record,
 };
@@ -34,6 +35,41 @@ pub enum FieldKind {
     Password,
     Bool,
     Choice(Vec<String>),
+    Resource(ResourceRange),
+    Path(PathKind),
+}
+
+/// UI bounds only: exact text remains authoritative until Go validates the write.
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceRange {
+    pub min: u64,
+    pub max: u64,
+    pub step: u64,
+    pub unit: &'static str,
+}
+impl ResourceRange {
+    pub fn slider_value(self, value: f32) -> u64 {
+        (value.round() as u64).clamp(self.min, self.max.max(self.min))
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathKind {
+    DesktopFile,
+    ManagerFile,
+    ManagerDirectory,
+    GuestDirectory,
+}
+impl PathKind {
+    pub fn can_browse(self, source: &Source) -> bool {
+        match self {
+            Self::DesktopFile => !matches!(source, Source::Demo),
+            Self::ManagerFile | Self::ManagerDirectory => matches!(source, Source::Local(_)),
+            Self::GuestDirectory => false,
+        }
+    }
+    pub fn directories(self) -> bool {
+        matches!(self, Self::ManagerDirectory | Self::GuestDirectory)
+    }
 }
 #[derive(Clone)]
 pub struct Field {
@@ -87,11 +123,47 @@ fn password(key: &'static str, label: &str) -> Field {
     }
 }
 
+fn resource(key: &'static str, label: &str, value: impl ToString, range: ResourceRange) -> Field {
+    Field {
+        kind: FieldKind::Resource(range),
+        ..field(key, label, value)
+    }
+}
+fn path(key: &'static str, label: &str, value: impl ToString, kind: PathKind) -> Field {
+    Field {
+        kind: FieldKind::Path(kind),
+        ..field(key, label, value)
+    }
+}
+
 impl Spec {
     pub fn new(kind: Kind, host: &HostSnapshot, sandbox: &str) -> Self {
         let mut fields = vec![];
         let mut help="Changes are validated and applied by the selected manager. They do not change which host is selected.".to_string();
         let sb = || field("sandbox", "Sandbox", sandbox);
+        let limits = &host.resource_limits;
+        // Unknown limits get a convenience range, not an invented manager limit.
+        // Numeric entry still permits other values; build() and Go validate them.
+        let memory = ResourceRange {
+            min: limits.min_memory_mb.max(1),
+            max: if limits.max_memory_mb > 0 {
+                limits.max_memory_mb
+            } else {
+                65536.max(limits.min_memory_mb)
+            },
+            step: 128,
+            unit: "MiB",
+        };
+        let cpus = ResourceRange {
+            min: 1,
+            max: if limits.max_vcpus > 0 {
+                limits.max_vcpus as u64
+            } else {
+                64
+            },
+            step: 1,
+            unit: "vCPUs",
+        };
         let title = match &kind {
             Kind::Create => {
                 help="Create on this manager. Images must already be cached; use Images → Pull first. Writable disk and network changes are explicit.".into();
@@ -106,10 +178,20 @@ impl Spec {
                             .map(|i| i.r#ref.as_str())
                             .unwrap_or(""),
                     ),
-                    field("kernel", "Manager kernel (blank uses default)", ""),
+                    path(
+                        "kernel",
+                        "Manager kernel (blank uses default)",
+                        "",
+                        PathKind::ManagerFile,
+                    ),
                     field("runtime", "Runtime (blank uses default)", ""),
-                    field("memory", "Memory MiB", 512),
-                    field("cpus", "vCPUs", 1),
+                    resource(
+                        "memory",
+                        "Memory",
+                        512_u64.clamp(memory.min, memory.max.max(memory.min)),
+                        memory,
+                    ),
+                    resource("cpus", "CPU", 1, cpus),
                     field(
                         "disk",
                         "Writable disk MiB (0 uses default)",
@@ -130,8 +212,8 @@ impl Spec {
             }
             Kind::Configure(r) => {
                 fields = vec![
-                    field("memory", "Saved memory MiB", r.mem_mb),
-                    field("cpus", "Saved vCPUs", r.vcpus),
+                    resource("memory", "Saved memory", r.mem_mb, memory),
+                    resource("cpus", "Saved CPU", r.vcpus, cpus),
                     choice(
                         "isolation",
                         "Process isolation",
@@ -202,17 +284,23 @@ impl Spec {
                 fields = vec![
                     field("sandbox", "Sandbox", r.sandbox),
                     field("tag", "Tag", r.tag),
-                    field("path", "Path on the manager host", r.path),
-                    field(
+                    path(
+                        "path",
+                        "Folder on the manager host",
+                        r.path,
+                        PathKind::ManagerDirectory,
+                    ),
+                    path(
                         "mountpoint",
                         "Guest mountpoint (blank uses default)",
                         r.mountpoint,
+                        PathKind::GuestDirectory,
                     ),
                     field("owner", "Guest owner (optional UID:GID)", r.owner),
                     toggle("read_only", "Read-only mount", r.read_only),
                     toggle("replace", "Replace existing tag", r.replace),
                 ];
-                help="Paths are on the selected manager, not the desktop. Go plans and validates the mount before applying it. Runtime support determines live versus next-boot behavior.".into();
+                help="The shared folder is on the selected manager. Browse is available for local managers only; guest mountpoints are always typed. Go plans and validates the mount before applying it.".into();
                 "Configure mount"
             }
             Kind::Secret => {
@@ -276,7 +364,12 @@ impl Spec {
             Kind::Filesystem => {
                 fields = vec![
                     sb(),
-                    field("root", "Filesystem root on manager", ""),
+                    path(
+                        "root",
+                        "Filesystem root inside the sandbox",
+                        "",
+                        PathKind::GuestDirectory,
+                    ),
                     field("user", "Guest user (optional)", ""),
                 ];
                 "Configure MCP filesystem"
@@ -321,7 +414,12 @@ impl Spec {
                 fields = vec![
                     field("name", "Local profile name", ""),
                     field("url", "HTTPS manager origin", "https://"),
-                    field("ca", "Public CA PEM path on this desktop (optional)", ""),
+                    path(
+                        "ca",
+                        "Public CA PEM on this desktop (optional)",
+                        "",
+                        PathKind::DesktopFile,
+                    ),
                     field("pin", "Optional sha256: leaf fingerprint", ""),
                     password("value", "Manager bearer token"),
                 ];
@@ -351,6 +449,18 @@ impl Spec {
             "Form input exceeds 512 KiB"
         );
         let get = |k: &str| values.get(k).map(|s| s.as_str()).unwrap_or("");
+        // Paths can contain spaces, but must not be silently retargeted by
+        // downstream path parsers that trim their input.
+        for field in &self.fields {
+            if matches!(field.kind, FieldKind::Path(_)) {
+                let value = get(field.key);
+                ensure!(
+                    value == value.trim(),
+                    "{} cannot begin or end with whitespace",
+                    field.label
+                );
+            }
+        }
         let required = |k: &str| -> Result<String> {
             let v = get(k).trim();
             ensure!(!v.is_empty(), "{k} is required");

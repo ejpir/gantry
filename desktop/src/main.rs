@@ -2,6 +2,7 @@ mod activity;
 mod app;
 mod chrome;
 mod dashboard_table;
+mod form_controls;
 mod row_actions;
 mod sandbox_table;
 mod theme;
@@ -13,6 +14,8 @@ mod workbench;
 mod activity_tests;
 #[cfg(all(test, feature = "ui-tests"))]
 mod dashboard_ui_tests;
+#[cfg(all(test, feature = "ui-tests"))]
+mod form_controls_tests;
 #[cfg(all(test, feature = "ui-tests"))]
 mod ui_tests;
 #[cfg(all(test, feature = "ui-tests"))]

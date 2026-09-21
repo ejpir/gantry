@@ -28,13 +28,13 @@ impl FormInput {
             Self::Multiline(s) => s.read(cx).value(),
         }
     }
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
+    pub(crate) fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self {
             Self::Single(s) => s.focus_handle(cx),
             Self::Multiline(s) => s.focus_handle(cx),
         }
     }
-    fn set_value(
+    pub(crate) fn set_value(
         &self,
         value: impl Into<gpui_kit::SharedString>,
         window: &mut Window,
@@ -54,6 +54,9 @@ pub struct NativeForm {
     pub target: Option<Target>,
     pub scope: String,
     pub error: Option<String>,
+    pub sliders: crate::form_controls::ResourceSliders,
+    pub picking_path: Option<usize>,
+    _subscriptions: Vec<gpui_kit::Subscription>,
 }
 impl Desktop {
     pub fn open_form(&mut self, kind: Kind, window: &mut Window, cx: &mut Context<Self>) {
@@ -103,6 +106,7 @@ impl Desktop {
                 }
             })
             .collect::<Vec<_>>();
+        let (sliders, subscriptions) = self.resource_sliders(&spec, &inputs, window, cx);
         let focus = cx.focus_handle();
         if let Some(input) = inputs.first() {
             input.focus_handle(cx).focus(window, cx);
@@ -120,6 +124,9 @@ impl Desktop {
             target: self.target.clone(),
             scope,
             error: None,
+            sliders,
+            picking_path: None,
+            _subscriptions: subscriptions,
         });
         self.notice = None;
         cx.notify();
@@ -133,6 +140,9 @@ impl Desktop {
         let Some(form) = &self.form else {
             return;
         };
+        if form.picking_path.is_some() {
+            return;
+        }
         let allowed = if form.spec.local() {
             self.can_edit_profiles()
         } else {
@@ -359,11 +369,12 @@ impl Desktop {
         let Some(form) = &self.form else {
             return div().id("no-form").into_any_element();
         };
-        let enabled = if form.spec.local() {
-            self.can_edit_profiles()
-        } else {
-            self.can_write() && form.target == self.target
-        };
+        let enabled = form.picking_path.is_none()
+            && if form.spec.local() {
+                self.can_edit_profiles()
+            } else {
+                self.can_write() && form.target == self.target
+            };
         div()
             .id("action-form")
             .test_support()
@@ -419,6 +430,12 @@ impl Desktop {
                         |(index, (field, input))| {
                             let label = div().text_size(px(12.)).child(field.label.clone());
                             let controls = match &field.kind {
+                                FieldKind::Resource(range) => {
+                                    self.resource_control(index, *range, enabled, cx)
+                                }
+                                FieldKind::Path(kind) => {
+                                    self.path_control(index, *kind, enabled, cx)
+                                }
                                 FieldKind::Bool => {
                                     let checked = input.value(cx).as_ref() == "true";
                                     div().child(
@@ -427,6 +444,7 @@ impl Desktop {
                                             .accessibility_label(field.label.clone())
                                             .label(if checked { "On" } else { "Off" })
                                             .checked(checked)
+                                            .disabled(!enabled)
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 if let Some(form) = &this.form {
                                                     form.inputs[index].set_value(
@@ -449,6 +467,7 @@ impl Desktop {
                                             )))
                                             .small()
                                             .label(value.clone())
+                                            .disabled(!enabled)
                                             .selected(selected)
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 if let Some(form) = &this.form {
@@ -464,14 +483,16 @@ impl Desktop {
                                     )
                                 }
                                 _ => match input {
-                                    FormInput::Single(input) => {
-                                        div().child(Input::new(input).id(("form-input", index)))
-                                    }
+                                    FormInput::Single(input) => div().child(
+                                        Input::new(input)
+                                            .id(("form-input", index))
+                                            .disabled(!enabled),
+                                    ),
                                     FormInput::Multiline(input) => div().child(
                                         div()
                                             .id(("form-input", index))
                                             .test_support()
-                                            .child(Textarea::new(input)),
+                                            .child(Textarea::new(input).disabled(!enabled)),
                                     ),
                                 },
                             };

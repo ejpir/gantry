@@ -24,6 +24,16 @@ Light and system appearance use the same layout.
   Menus recheck the connection and sandbox state before opening a write form.
 - **Edit…** / **⌘ I** opens saved settings in the inspector. Save and Cancel
   retain the original sandbox and verified source, even across refreshes.
+- Create and Settings have CPU/memory sliders with exact numeric entry beside
+  them (1 vCPU / 128 MiB steps). Slider bounds use the selected manager's limits;
+  unknown limits use a convenience range, with Go still validating every write.
+  Existing values are never silently clamped when opening an editor.
+- **Browse…** opens the native file/folder chooser for a local manager's kernel
+  and shared folders, and for client-local CA certificates. Remote-manager paths
+  and guest paths remain text fields: a local picker cannot browse those filesystems.
+  Selection only updates the draft; Save/Confirm is still explicit. Cancel keeps
+  the previous path, and late results cannot modify a replacement form or host.
+  If the platform chooser is unavailable, paths can still be entered directly.
 - The CPU/Memory table columns describe running allocation only. Stopped VMs
   show dashes; their saved allocation is in **Next Boot**.
 - Activity contains actual submissions, progress, and outcomes from this window,
