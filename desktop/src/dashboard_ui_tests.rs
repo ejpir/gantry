@@ -13,7 +13,25 @@ fn every_dashboard_page_renders_at_the_minimum_window_size(cx: &mut TestAppConte
     let (handle, desktop) = desktop_at(cx, 1040., 640.);
     for page in Page::ALL {
         cx.update_window(handle.into(), |_, window, cx| {
-            window.click(("page-nav", page.index()), cx);
+            window.render_frame(cx);
+            if page == Page::Overview {
+                desktop.update(cx, |this, cx| this.switch_page(page, window, cx));
+            } else {
+                let bounds = window.find(("page-nav", page.index())).bounds();
+                let sidebar = window.find("sidebar-region").bounds();
+                if page != Page::Remotes
+                    && (bounds.bottom() > sidebar.bottom() || bounds.top() < sidebar.top())
+                {
+                    let dy = sidebar.top() + px(30.) - bounds.top();
+                    window.scroll(
+                        "sidebar-region",
+                        gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), dy)),
+                        cx,
+                    );
+                    window.render_frame(cx);
+                }
+                window.click(("page-nav", page.index()), cx);
+            }
             window.render_frame(cx);
             assert_eq!(desktop.read(cx).page, page);
             if page != Page::Sandboxes {
@@ -193,6 +211,7 @@ fn confirmation_does_not_submit_when_connection_identity_changes(cx: &mut TestAp
             this.connection = Connection::Connected("v1".into());
             this.set_filter(Filter::Stopped, cx);
         });
+        window.click(("inspector-tab", 1usize), cx);
         window.click("sandbox-delete", cx);
         assert!(
             desktop

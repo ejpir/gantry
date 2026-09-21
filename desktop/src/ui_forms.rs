@@ -1,6 +1,6 @@
 use crate::app::Desktop;
 use gantry_desktop::{
-    commands::{Command, Outcome},
+    commands::Outcome,
     connector::Target,
     forms::{self, FieldKind, Intent, Kind, Spec, Values},
     launcher, local_profiles, workspace,
@@ -10,10 +10,11 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{Input, InputState, Textarea, TextareaState},
     scroll::ScrollableElement,
+    switch::Switch,
 };
 use gpui_kit::{
-    App, AppContext, Context, Div, Entity, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Styled, TestSupportExt, Window, div, px,
+    App, AppContext, Context, Div, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ParentElement, Styled, TestSupportExt, Window, div, prelude::FluentBuilder, px,
 };
 
 pub enum FormInput {
@@ -72,6 +73,8 @@ impl Desktop {
         } {
             return;
         }
+        self.context_menu = None;
+        self.context_subscription = None;
         let scope = if spec.local() {
             format!(
                 "Client-local profiles · {}",
@@ -105,6 +108,10 @@ impl Desktop {
             input.focus_handle(cx).focus(window, cx);
         } else {
             focus.focus(window, cx);
+        }
+        if matches!(&spec.kind, Kind::Configure(_)) {
+            self.inspector_open = true;
+            self.inspector_settings = true;
         }
         self.form = Some(NativeForm {
             spec,
@@ -169,10 +176,21 @@ impl Desktop {
         } else if !self.can_edit_profiles() {
             return;
         }
+        // Profile management belongs to this client, never the selected manager.
+        let target = if matches!(&intent, Intent::Manager(_)) {
+            target
+        } else {
+            None
+        };
+        let title = match &intent {
+            Intent::Manager(command) => format!("{} · {}", command.label(), command.subject()),
+            _ => "Update client-local profiles".into(),
+        };
         self.writing = true;
         self.refreshing = false;
         self.generation += 1;
         let generation = self.generation;
+        self.begin_activity(generation, target.clone(), title);
         let scope = target
             .as_ref()
             .map(Target::label)
@@ -197,6 +215,11 @@ impl Desktop {
                             return false;
                         }
                         if let Some(message) = message {
+                            this.record_activity(
+                                generation,
+                                crate::activity::Phase::Working,
+                                &message,
+                            );
                             this.notice = Some(format!("{progress_scope} · {message}"));
                             cx.notify();
                         }
@@ -240,8 +263,16 @@ impl Desktop {
                     return;
                 }
                 this.writing = false;
+                // Require a fresh snapshot before another write, including after
+                // ambiguous failures. Never expose stale action eligibility.
+                this.control_available = false;
                 match result {
                     Ok(outcome) => {
+                        this.record_activity(
+                            generation,
+                            crate::activity::Phase::Complete,
+                            &outcome.message,
+                        );
                         this.notice =
                             Some(format!("{scope} · {}", workspace::text(&outcome.message)));
                         if let Some((sandbox, packets)) = outcome.packets {
@@ -250,6 +281,11 @@ impl Desktop {
                         }
                     }
                     Err(error) => {
+                        this.record_activity(
+                            generation,
+                            crate::activity::Phase::Failed,
+                            &error.to_string(),
+                        );
                         this.notice =
                             Some(format!("{scope} · {}", workspace::text(&error.to_string())))
                     }
@@ -262,23 +298,13 @@ impl Desktop {
         cx.notify();
     }
     pub fn edit_selected_sandbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected) = self.inventory.selected()
-            && let Some(row) = self
-                .host
-                .snapshot
-                .sandboxes
-                .iter()
-                .find(|s| s.name == selected.name)
-        {
-            self.open_form(
-                Kind::Configure(gantry_desktop::dashboard_wire::SandboxConfigRequest {
-                    name: row.name.clone(),
-                    mem_mb: row.mem_mb,
-                    vcpus: row.vcpus,
-                    process_isolation: row.process_isolation.clone(),
-                    ssh: row.ssh,
-                    dev_containers: row.dev_containers,
-                }),
+        if let Some(row) = self.inventory.selected() {
+            let name = row.name.clone();
+            let target = self.target.clone();
+            self.row_action(
+                &name,
+                target.as_ref(),
+                crate::row_actions::RowAction::Edit,
                 window,
                 cx,
             );
@@ -298,23 +324,25 @@ impl Desktop {
     pub fn sandbox_action(&mut self, action: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(row) = self.inventory.selected() {
             let name = row.name.clone();
-            let command = match action {
-                "start" => Command::Start(name),
-                "stop" => Command::Stop(name),
-                _ => Command::Delete(name),
+            let action = match action {
+                "start" => crate::row_actions::RowAction::Start,
+                "stop" => crate::row_actions::RowAction::Stop,
+                "delete" => crate::row_actions::RowAction::Delete,
+                _ => return,
             };
-            self.open_form(Kind::Confirm(command), window, cx);
+            let target = self.target.clone();
+            self.row_action(&name, target.as_ref(), action, window, cx);
         }
     }
+    pub fn inline_form(&self) -> bool {
+        self.form
+            .as_ref()
+            .is_some_and(|f| matches!(f.spec.kind, Kind::Configure(_)))
+    }
     pub fn form_layer(&self, cx: &mut Context<Self>) -> gpui_kit::Stateful<Div> {
-        let Some(form) = &self.form else {
-            return div().id("no-form");
-        };
-        let enabled = if form.spec.local() {
-            self.can_edit_profiles()
-        } else {
-            self.can_write() && form.target == self.target
-        };
+        if self.form.is_none() || self.inline_form() {
+            return div().id("no-modal");
+        }
         div()
             .id("form-overlay")
             .absolute()
@@ -324,141 +352,154 @@ impl Desktop {
             .items_center()
             .justify_center()
             .p_4()
-            .bg(gpui_kit::black().opacity(0.65))
-            .child(
-                div()
-                    .id("action-form")
-                    .test_support()
-                    .focus_trap("action-form", &form.focus)
-                    .flex()
-                    .flex_col()
-                    .w(px(620.))
-                    .h(px(580.))
+            .bg(gpui_kit::black().opacity(0.35))
+            .child(self.form_content(false, cx))
+    }
+    pub fn form_content(&self, inline: bool, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(form) = &self.form else {
+            return div().id("no-form").into_any_element();
+        };
+        let enabled = if form.spec.local() {
+            self.can_edit_profiles()
+        } else {
+            self.can_write() && form.target == self.target
+        };
+        div()
+            .id("action-form")
+            .test_support()
+            .focus_trap("action-form", &form.focus)
+            .flex()
+            .flex_col()
+            .size_full()
+            .when(!inline, |d| {
+                d.w(px(560.))
+                    .h(px(if form.spec.fields.is_empty() {
+                        280.
+                    } else {
+                        580.
+                    }))
                     .max_h_full()
-                    .gap_4()
-                    .p_6()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().background)
+                    .rounded(px(8.))
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(div().text_size(px(22.)).child(form.spec.title.clone()))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().primary)
-                            .child(workspace::text(&form.scope)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(form.spec.help.clone()),
-                    )
-                    .children(form.error.as_ref().map(|error| {
-                        div()
-                            .text_color(cx.theme().danger)
-                            .child(workspace::text(error))
-                    }))
-                    .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                        div().flex().flex_col().gap_3().children(
-                            form.spec.fields.iter().zip(&form.inputs).enumerate().map(
-                                |(index, (field, input))| {
-                                    let label = div().text_size(px(12.)).child(field.label.clone());
-                                    let controls = match &field.kind {
-                                        FieldKind::Bool => {
-                                            let checked = input.value(cx).as_ref() == "true";
-                                            div().child(
-                                                Button::new(("form-toggle", index))
-                                                    .small()
-                                                    .label(if checked {
-                                                        "Enabled"
-                                                    } else {
-                                                        "Disabled"
-                                                    })
-                                                    .selected(checked)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            if let Some(form) = &this.form {
-                                                                form.inputs[index].set_value(
-                                                                    if checked {
-                                                                        "false"
-                                                                    } else {
-                                                                        "true"
-                                                                    },
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                                cx.notify();
-                                                            }
-                                                        },
-                                                    )),
-                                            )
-                                        }
-                                        FieldKind::Choice(choices) => {
-                                            div().flex().flex_wrap().gap_1().children(
-                                                choices.iter().enumerate().map(
-                                                    |(choice_index, value)| {
-                                                        let selected =
-                                                            input.value(cx).as_ref() == value;
-                                                        let value = value.clone();
-                                                        Button::new(gpui_kit::SharedString::from(
-                                                            format!(
-                                                                "form-choice-{index}-{choice_index}"
-                                                            ),
-                                                        ))
-                                                        .small()
-                                                        .label(value.clone())
-                                                        .selected(selected)
-                                                        .on_click(cx.listener(
-                                                            move |this, _, window, cx| {
-                                                                if let Some(form) = &this.form {
-                                                                    form.inputs[index].set_value(
-                                                                        value.clone(),
-                                                                        window,
-                                                                        cx,
-                                                                    );
-                                                                    cx.notify();
-                                                                }
-                                                            },
-                                                        ))
-                                                    },
-                                                ),
-                                            )
-                                        }
-                                        _ => match input {
-                                            FormInput::Single(input) => div()
-                                                .child(Input::new(input).id(("form-input", index))),
-                                            FormInput::Multiline(input) => div().child(
-                                                div()
-                                                    .id(("form-input", index))
-                                                    .test_support()
-                                                    .child(Textarea::new(input)),
-                                            ),
-                                        },
-                                    };
-                                    div().flex().flex_col().gap_1().child(label).child(controls)
+                    .shadow_lg()
+            })
+            .gap_3()
+            .p_5()
+            .bg(cx.theme().secondary)
+            .child(
+                div()
+                    .text_size(px(17.))
+                    .child(if let Kind::Configure(r) = &form.spec.kind {
+                        format!("Settings · {}", r.name)
+                    } else {
+                        form.spec.title.clone()
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().primary)
+                    .child(workspace::text(&form.scope)),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(form.spec.help.clone()),
+            )
+            .children(form.error.as_ref().map(|error| {
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(workspace::text(error))
+            }))
+            .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                div().flex().flex_col().gap_3().children(
+                    form.spec.fields.iter().zip(&form.inputs).enumerate().map(
+                        |(index, (field, input))| {
+                            let label = div().text_size(px(12.)).child(field.label.clone());
+                            let controls = match &field.kind {
+                                FieldKind::Bool => {
+                                    let checked = input.value(cx).as_ref() == "true";
+                                    div().child(
+                                        Switch::new(("form-toggle", index))
+                                            .small()
+                                            .accessibility_label(field.label.clone())
+                                            .label(if checked { "On" } else { "Off" })
+                                            .checked(checked)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if let Some(form) = &this.form {
+                                                    form.inputs[index].set_value(
+                                                        if checked { "false" } else { "true" },
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    )
+                                }
+                                FieldKind::Choice(choices) => {
+                                    div().flex().flex_wrap().gap_1().children(
+                                        choices.iter().enumerate().map(|(choice_index, value)| {
+                                            let selected = input.value(cx).as_ref() == value;
+                                            let value = value.clone();
+                                            Button::new(gpui_kit::SharedString::from(format!(
+                                                "form-choice-{index}-{choice_index}"
+                                            )))
+                                            .small()
+                                            .label(value.clone())
+                                            .selected(selected)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if let Some(form) = &this.form {
+                                                    form.inputs[index].set_value(
+                                                        value.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                }
+                                            }))
+                                        }),
+                                    )
+                                }
+                                _ => match input {
+                                    FormInput::Single(input) => {
+                                        div().child(Input::new(input).id(("form-input", index)))
+                                    }
+                                    FormInput::Multiline(input) => div().child(
+                                        div()
+                                            .id(("form-input", index))
+                                            .test_support()
+                                            .child(Textarea::new(input)),
+                                    ),
                                 },
-                            ),
-                        ),
-                    ))
+                            };
+                            div().flex().flex_col().gap_1().child(label).child(controls)
+                        },
+                    ),
+                ),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
                     .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(Button::new("form-cancel").label("Cancel").on_click(
-                                cx.listener(|this, _, window, cx| this.close_form(window, cx)),
-                            ))
-                            .child(
-                                Button::new("form-submit")
-                                    .primary()
-                                    .label("Confirm")
-                                    .disabled(!enabled)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.submit_form(window, cx)
-                                    })),
+                        Button::new("form-cancel").label("Cancel").on_click(
+                            cx.listener(|this, _, window, cx| this.close_form(window, cx)),
+                        ),
+                    )
+                    .child(
+                        Button::new("form-submit")
+                            .primary()
+                            .label(if inline { "Save Changes" } else { "Confirm" })
+                            .disabled(!enabled)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.submit_form(window, cx)),
                             ),
                     ),
             )
+            .into_any_element()
     }
 }

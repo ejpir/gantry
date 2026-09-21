@@ -3,7 +3,9 @@ use gpui_kit::component::{
     ActiveTheme,
     table::{Column, TableDelegate, TableState},
 };
-use gpui_kit::{App, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use gpui_kit::{
+    App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div, px,
+};
 
 pub struct DashboardTable {
     pub rows: Vec<Row>,
@@ -35,6 +37,36 @@ impl TableDelegate for DashboardTable {
     }
     fn column(&self, index: usize, _: &App) -> Column {
         self.columns[index].clone()
+    }
+    fn render_header(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div().id("header").h(px(28.)).overflow_hidden()
+    }
+    fn render_th(
+        &mut self,
+        column: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .text_size(px(11.))
+            .child(self.column(column, cx).name.clone())
+    }
+    fn render_tr(
+        &mut self,
+        row: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div().id(("row", row)).bg(if row % 2 == 1 {
+            cx.theme().table_even
+        } else {
+            cx.theme().table
+        })
     }
     fn render_td(
         &mut self,

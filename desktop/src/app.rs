@@ -22,7 +22,28 @@ use std::{
 
 gpui_kit::actions!(
     gantry_desktop,
-    [Quit, Refresh, FocusSearch, FocusInventory, CloseForm]
+    [
+        Quit,
+        Refresh,
+        FocusSearch,
+        FocusInventory,
+        CloseForm,
+        NewSandbox,
+        EditSandbox,
+        StartSandbox,
+        StopSandbox,
+        DeleteSandbox,
+        ToggleInspector,
+        ToggleActivity,
+        CycleAppearance,
+        ShowConnections,
+        ShowOverview,
+        ShowImages,
+        ShowManual,
+        MinimizeWindow,
+        ZoomWindow,
+        FullScreen
+    ]
 );
 pub(crate) enum Connection {
     Connecting,
@@ -67,13 +88,22 @@ pub(crate) struct Desktop {
     _request_task: Option<Task<()>>,
     pub action_task: Option<Task<()>>,
     pub progress_task: Option<Task<()>>,
+    pub activity: Vec<crate::activity::Entry>,
+    pub activity_open: bool,
+    pub inspector_open: bool,
+    pub inspector_width: gpui_kit::Pixels,
+    pub inspector_settings: bool,
+    pub images_registries: bool,
+    pub context_menu: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
+    pub context_position: gpui_kit::Point<gpui_kit::Pixels>,
+    pub context_subscription: Option<Subscription>,
 }
 impl Desktop {
     pub fn new(options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
         theme::apply(options.appearance, window, cx);
         let search = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search this screen…")
+                .placeholder("Search sandboxes")
                 .clean_on_escape()
         });
         let table = cx.new(|cx| {
@@ -214,6 +244,15 @@ impl Desktop {
             _request_task: None,
             action_task: None,
             progress_task: None,
+            activity: Vec::new(),
+            activity_open: true,
+            inspector_open: true,
+            inspector_width: gpui_kit::px(theme::INSPECTOR_WIDTH),
+            inspector_settings: false,
+            images_registries: false,
+            context_menu: None,
+            context_position: Default::default(),
+            context_subscription: None,
         };
         if this.options.source == Source::Demo {
             this.inventory.replace(demo_sandboxes());
@@ -322,7 +361,7 @@ impl Desktop {
         }));
         cx.notify();
     }
-    fn sync_table(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_table(&mut self, cx: &mut Context<Self>) {
         let rows = self
             .inventory
             .visible()
@@ -331,7 +370,9 @@ impl Desktop {
             .collect::<Vec<_>>();
         let selected = self.inventory.selected().map(|r| r.name.as_str());
         let index = rows.iter().position(|r| Some(r.name.as_str()) == selected);
+        let target = self.target.clone();
         self.table.update(cx, |table, cx| {
+            table.delegate_mut().target = target;
             let old = table
                 .selected_row()
                 .and_then(|i| table.delegate().rows.get(i))
@@ -353,12 +394,15 @@ impl Desktop {
             if page == Page::Sandboxes {
                 continue;
             }
+            let registries = self.images_registries;
             let state = &mut self.pages[page.index()];
             let query = state.query.to_lowercase();
             let rows = workspace::rows(page, &self.host, &self.profiles, &self.packets)
                 .into_iter()
                 .filter(|r| {
-                    query.is_empty() || r.cells.iter().any(|s| s.to_lowercase().contains(&query))
+                    (page != Page::Images || matches!(&r.record, Record::Registry(_)) == registries)
+                        && (query.is_empty()
+                            || r.cells.iter().any(|s| s.to_lowercase().contains(&query)))
                 })
                 .collect::<Vec<_>>();
             if (!state.selection_initialized || state.selected.is_some())
@@ -399,14 +443,27 @@ impl Desktop {
         if self.form.is_some() {
             return;
         }
+        self.context_menu = None;
+        self.context_subscription = None;
         self.page = page;
+        self.inspector_settings = false;
         let query = if page == Page::Sandboxes {
             self.inventory.query.clone()
         } else {
             self.pages[page.index()].query.clone()
         };
-        self.search
-            .update(cx, |s, cx| s.set_value(query, window, cx));
+        self.search.update(cx, |s, cx| {
+            s.set_placeholder(
+                if page == Page::Sandboxes {
+                    "Search sandboxes"
+                } else {
+                    "Search this screen…"
+                },
+                window,
+                cx,
+            );
+            s.set_value(query, window, cx);
+        });
         self.focus_inventory(window, cx);
         cx.notify();
     }
@@ -414,6 +471,8 @@ impl Desktop {
         if self.writing || self.form.is_some() || self.options.source == Source::Demo {
             return;
         }
+        self.context_menu = None;
+        self.context_subscription = None;
         self.generation += 1;
         self._request_task = None;
         self.refreshing = false;

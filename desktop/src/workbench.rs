@@ -7,8 +7,7 @@ use gantry_desktop::{
     workspace::{Page, Record},
 };
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Sizable, button::Button, input::Input, scroll::ScrollableElement,
-    table::DataTable,
+    ActiveTheme, Disableable, Sizable, button::Button, scroll::ScrollableElement, table::DataTable,
 };
 use gpui_kit::{Context, Div, InteractiveElement, ParentElement, Styled, TestSupportExt, div, px};
 
@@ -37,7 +36,15 @@ impl Desktop {
         let page = self.page;
         let state = &self.pages[page.index()];
         let selected = self.selected_record(cx);
-        let mut toolbar = div().flex().flex_wrap().gap_2();
+        let mut toolbar = div()
+            .flex()
+            .items_center()
+            .flex_wrap()
+            .gap_2()
+            .px_4()
+            .py_2()
+            .min_h(px(43.))
+            .bg(cx.theme().secondary);
         match page {
             Page::Overview => {
                 toolbar = toolbar.child(self.form_button(
@@ -312,41 +319,28 @@ impl Desktop {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .p_6()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_size(px(24.)).child(page.label()))
-                    .child(
-                        Button::new("page-refresh")
-                            .small()
-                            .label("Refresh")
-                            .disabled(
-                                self.refreshing
-                                    || self.writing
-                                    || self.options.source == Source::Demo,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(page.help()),
-            )
             .child(toolbar)
             .child(
-                Input::new(&self.search)
-                    .id("dashboard-search")
-                    .cleanable(true),
+                div()
+                    .px_4()
+                    .py_2()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(page.help()),
             );
+        if let Some(notice) = &self.notice {
+            body = body.child(
+                div()
+                    .px_4()
+                    .py_2()
+                    .text_size(px(12.))
+                    .bg(cx.theme().accent)
+                    .child(notice.clone()),
+            );
+        }
         if page == Page::Overview {
             body = body.child(
-                div().flex().flex_wrap().gap_3().children(
+                div().flex().flex_wrap().px_4().py_2().gap_4().children(
                     [
                         ("Sandboxes", self.host.snapshot.sandboxes.len()),
                         (
@@ -364,12 +358,7 @@ impl Desktop {
                     ]
                     .into_iter()
                     .map(|(label, count)| {
-                        div()
-                            .px_4()
-                            .py_2()
-                            .rounded(cx.theme().radius)
-                            .bg(cx.theme().accent)
-                            .child(format!("{label} · {count}"))
+                        div().text_size(px(12.)).child(format!("{label} · {count}"))
                     }),
                 ),
             );
@@ -406,14 +395,21 @@ impl Desktop {
         body = body.child(
             div()
                 .id(("page-table", page.index()))
+                .capture_any_mouse_down(|event, _, cx| {
+                    if event.button == gpui_kit::MouseButton::Right {
+                        cx.stop_propagation();
+                    }
+                })
                 .test_support()
                 .flex_1()
                 .min_h_0()
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded(cx.theme().radius)
                 .overflow_hidden()
-                .child(DataTable::new(&state.table).bordered(false)),
+                .child(
+                    DataTable::new(&state.table)
+                        .bordered(false)
+                        .stripe(false)
+                        .with_size(px(34.)),
+                ),
         );
         if let Some(record) = selected {
             body = body.child(
@@ -424,7 +420,9 @@ impl Desktop {
                     .flex_shrink_0()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .pt_2()
+                    .px_4()
+                    .py_3()
+                    .bg(cx.theme().secondary)
                     .overflow_y_scrollbar()
                     .child(div().flex().flex_col().gap_1().children(
                         record.details().into_iter().map(|(key, value)| {

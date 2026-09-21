@@ -1,14 +1,13 @@
+use crate::{app::*, sandbox_table::status, theme};
 use gantry_desktop::{
     forms::Kind,
     inventory::{BootSettings, Filter, memory_label},
-    options::{Appearance, Source},
     workspace::Page,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Root, Selectable, Sizable, WindowExt,
+    ActiveTheme, Disableable, Icon, Root, Selectable, Sizable,
     button::{Button, ButtonVariants},
-    input::Input,
     resizable::{h_resizable, resizable_panel},
     scroll::ScrollableElement,
     table::DataTable,
@@ -16,11 +15,6 @@ use gpui_kit::component::{
 use gpui_kit::{
     App, ClipboardItem, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
     Render, Styled, TestSupportExt, Window, div, prelude::FluentBuilder, px,
-};
-
-use crate::{
-    app::{CloseForm, Connection, Desktop, FocusInventory, FocusSearch, Refresh},
-    sandbox_table::status,
 };
 
 impl Render for Desktop {
@@ -35,7 +29,7 @@ impl Render for Desktop {
             .size_full()
             .overflow_hidden()
             .font_family(cx.theme().font_family.clone())
-            .text_size(px(14.))
+            .text_size(px(13.))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(cx)))
@@ -47,20 +41,62 @@ impl Render for Desktop {
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &FocusInventory, window, cx| {
-                    this.focus_inventory(window, cx)
-                }),
-            )
-            .child(self.header(cx))
-            .children(self.notice.as_ref().map(|notice| {
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_size(px(12.))
-                    .bg(cx.theme().accent)
-                    .child(notice.clone())
+            .on_action(cx.listener(|this, _: &FocusInventory, window, cx| {
+                this.switch_page(Page::Sandboxes, window, cx);
+                this.focus_inventory(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &NewSandbox, window, cx| {
+                this.open_form(Kind::Create, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &EditSandbox, window, cx| {
+                if this.page == Page::Sandboxes {
+                    this.edit_selected_sandbox(window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &StartSandbox, window, cx| {
+                if this.page == Page::Sandboxes {
+                    this.sandbox_action("start", window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &StopSandbox, window, cx| {
+                if this.page == Page::Sandboxes {
+                    this.sandbox_action("stop", window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSandbox, window, cx| {
+                if this.page == Page::Sandboxes {
+                    this.sandbox_action("delete", window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+                if this.form.is_none() {
+                    this.inspector_open = !this.inspector_open;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleActivity, _, cx| {
+                this.activity_open = !this.activity_open;
+                cx.notify();
+            }))
+            .on_action(
+                cx.listener(|this, _: &CycleAppearance, window, cx| this.cycle_theme(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowConnections, window, cx| {
+                this.switch_page(Page::Remotes, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowOverview, window, cx| {
+                this.switch_page(Page::Overview, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowImages, window, cx| {
+                this.switch_page(Page::Images, window, cx)
+            }))
+            .on_action(|_: &ShowManual, _, cx| {
+                cx.open_url("https://github.com/ejpir/gantry/tree/main/docs/gantry")
+            })
+            .on_action(|_: &MinimizeWindow, window, _| window.minimize_window())
+            .on_action(|_: &ZoomWindow, window, _| window.zoom_window())
+            .on_action(|_: &FullScreen, window, _| window.toggle_fullscreen())
+            .child(self.toolbar(window, cx))
             .child(
                 div()
                     .flex()
@@ -68,353 +104,150 @@ impl Render for Desktop {
                     .min_h_0()
                     .child(self.sidebar(cx))
                     .child(if self.page == Page::Sandboxes {
-                        div().flex_1().min_w_0().h_full().child(
-                            h_resizable("sandbox-workspace")
-                                .child(
-                                    resizable_panel().size_range(px(420.)..px(2400.)).child(
-                                        div()
-                                            .id("inventory-pane")
-                                            .test_support()
-                                            .size_full()
-                                            .child(self.inventory_view(cx)),
+                        let inventory = div()
+                            .id("inventory-pane")
+                            .test_support()
+                            .size_full()
+                            .flex()
+                            .flex_col()
+                            .min_h_0()
+                            .child(self.inventory_view(cx))
+                            .child(self.activity_view(cx));
+                        if self.inspector_open {
+                            div().flex_1().min_w_0().h_full().child(
+                                h_resizable("sandbox-workspace")
+                                    .on_resize(cx.listener(
+                                        |this,
+                                         state: &gpui_kit::Entity<
+                                            gpui_kit::component::resizable::ResizableState,
+                                        >,
+                                         _,
+                                         cx| {
+                                            if let Some(width) = state.read(cx).sizes().last() {
+                                                this.inspector_width = *width;
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .child(
+                                        resizable_panel()
+                                            .size_range(px(420.)..px(2400.))
+                                            .child(inventory),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .size(self.inspector_width)
+                                            .size_range(px(280.)..px(520.))
+                                            .child(
+                                                div()
+                                                    .id("inspector-pane")
+                                                    .test_support()
+                                                    .size_full()
+                                                    .child(self.inspector(cx)),
+                                            ),
                                     ),
-                                )
-                                .child(
-                                    resizable_panel()
-                                        .size(px(330.))
-                                        .size_range(px(280.)..px(520.))
-                                        .child(
-                                            div()
-                                                .id("inspector-pane")
-                                                .test_support()
-                                                .size_full()
-                                                .child(self.inspector(cx)),
-                                        ),
-                                ),
-                        )
+                            )
+                        } else {
+                            div().flex_1().min_w_0().h_full().child(inventory)
+                        }
                     } else {
                         div().flex_1().min_w_0().h_full().child(self.workbench(cx))
                     }),
             )
             .child(self.footer(cx))
             .children(Root::render_notification_layer(window, cx))
+            .children(self.row_menu_layer())
             .child(self.form_layer(cx))
     }
 }
-
 impl Desktop {
-    fn header(&self, cx: &mut Context<Self>) -> Div {
-        let theme_icon = match self.options.appearance {
-            Appearance::System => IconName::Monitor,
-            Appearance::Dark => IconName::Moon,
-            Appearance::Light => IconName::Sun,
+    fn inventory_view(&self, cx: &mut Context<Self>) -> Div {
+        let visible = self.inventory.visible().len();
+        let count = match self.connection {
+            Connection::Connecting => "Loading…".into(),
+            Connection::Offline(_) => "Unavailable".into(),
+            _ => format!("{visible} sandboxes"),
         };
-        div()
-            .flex()
-            .items_center()
-            .h(px(64.))
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .w(px(184.))
-                    .px_5()
-                    .flex_shrink_0()
-                    .child(
-                        Icon::default()
-                            .data(include_bytes!("../assets/logo.svg"))
-                            .size(px(28.))
-                            .text_color(cx.theme().primary),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .text_size(px(24.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("gantry")
-                            .child(div().text_color(cx.theme().primary).child(".")),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_6()
-                    .text_size(px(13.))
-                    .child(
-                        div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Workspace"),
-                    )
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(self.page.label()),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pr_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .mr_3()
-                            .text_size(px(12.))
-                            .child(
-                                Icon::new(
-                                    if matches!(self.options.source, Source::Remote { .. }) {
-                                        IconName::Server
-                                    } else {
-                                        IconName::Monitor
-                                    },
-                                )
-                                .small()
-                                .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(self.options.source.label()),
-                    )
-                    .child(
-                        Button::new("appearance")
-                            .ghost()
-                            .small()
-                            .icon(theme_icon)
-                            .label(self.options.appearance.label())
-                            .tooltip("Cycle appearance: system, dark, light")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.cycle_theme(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("manual")
-                            .ghost()
-                            .small()
-                            .icon(IconName::ExternalLink)
-                            .accessibility_label("Open Gantry manual")
-                            .tooltip("Open Gantry manual")
-                            .on_click(|_, _, cx| {
-                                cx.open_url("https://github.com/ejpir/gantry/tree/main/docs/gantry")
-                            }),
-                    ),
-            )
-    }
-
-    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
-        let known = matches!(self.connection, Connection::Connected(_) | Connection::Demo);
         let running = self
             .inventory
             .rows()
             .iter()
             .filter(|s| s.state == "running")
             .count();
-        div()
+        let stopped = self
+            .inventory
+            .rows()
+            .iter()
+            .filter(|s| s.state == "stopped")
+            .count();
+        let filters = div()
             .flex()
-            .flex_col()
-            .w(px(184.))
-            .min_h_0()
-            .flex_shrink_0()
-            .p_3()
-            .gap_2()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
+            .gap_0()
+            .rounded(px(5.))
+            .p(px(2.))
+            .bg(cx.theme().background)
+            .border_1()
             .border_color(cx.theme().border)
-            .child(eyebrow("WORKSPACE", cx).px_2().pt_3())
-            .child(
-                div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .children(Page::ALL.into_iter().map(|page| {
-                            Button::new(("page-nav", page.index()))
-                                .ghost()
-                                .small()
-                                .selected(self.page == page)
-                                .label(page.label())
-                                .w_full()
-                                .justify_start()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.switch_page(page, window, cx)
-                                }))
-                        })),
-                ),
-            )
-            .child(sidebar_count("Running", known.then_some(running), cx))
-            .child(
-                div()
-                    .p_2()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if self.options.source == Source::Demo {
-                        "Demo · writes disabled"
-                    } else if self.control_available {
-                        "Manager-owned lifecycle. Closing this window leaves sandboxes running."
-                    } else {
-                        "Read-only until the manager advertises safe control. Upgrade and restart its process."
-                    }),
-            )
-    }
-
-    fn inventory_view(&self, cx: &mut Context<Self>) -> Div {
-        let visible = self.inventory.visible().len();
-        let count = match self.connection {
-            Connection::Connecting => "Loading…".into(),
-            Connection::Offline(_) => "Unavailable".into(),
-            _ => format!("{visible} of {}", self.inventory.rows().len()),
-        };
-        let mut view = div()
+            .children(
+                [
+                    (Filter::All, self.inventory.rows().len()),
+                    (Filter::Running, running),
+                    (Filter::Stopped, stopped),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (filter, n))| {
+                    Button::new(("filter", index))
+                        .ghost()
+                        .xsmall()
+                        .h(px(21.))
+                        .px_3()
+                        .label(format!("{}  {n}", filter.label()))
+                        .selected(self.inventory.filter == filter)
+                        .when(self.inventory.filter == filter, |b| {
+                            b.bg(theme::selected_control(cx))
+                        })
+                        .disabled(self.form.is_some())
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)))
+                }),
+            );
+        let controls = div()
             .flex()
-            .flex_col()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .p_6()
-            .gap_4()
+            .items_center()
+            .h(px(43.))
+            .flex_shrink_0()
+            .px(px(20.))
+            .bg(cx.theme().secondary)
+            .child(filters)
+            .child(div().flex_1())
             .child(
                 div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(24.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Sandboxes"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Your containers. Their own kernel."),
-                            ),
-                    )
-                    .child(
-                        Button::new("refresh")
-                            .small()
-                            .icon(IconName::RefreshCw)
-                            .label(if self.refreshing {
-                                "Refreshing…"
-                            } else {
-                                "Refresh"
-                            })
-                            .disabled(self.refreshing || self.options.source == Source::Demo)
-                            .tooltip("Refresh inventory and retry the selected connection")
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                    ),
-            )
-            .child(
-                div().flex().items_center().gap_2().child(
-                    Button::new("sandbox-create")
-                        .primary()
-                        .small()
-                        .label("Create sandbox")
-                        .disabled(!self.can_write())
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_form(Kind::Create, window, cx)
-                        })),
-                ),
-            )
-            .child(
-                Input::new(&self.search)
-                    .id("sandbox-search")
-                    .prefix(Icon::new(IconName::Search).small())
-                    .cleanable(true),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .children(
-                        [Filter::All, Filter::Running, Filter::Stopped]
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, filter)| {
-                                Button::new(("filter", index))
-                                    .ghost()
-                                    .small()
-                                    .label(filter.label())
-                                    .selected(self.inventory.filter == filter)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_filter(filter, cx)
-                                    }))
-                            }),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(count),
-                    ),
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(count),
             );
-        if self.options.source == Source::Demo {
-            view = view.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .rounded(cx.theme().radius)
-                    .bg(cx.theme().accent)
-                    .text_size(px(12.))
-                    .child(
-                        "Demo data · No manager is connected. Nothing here changes your machine.",
-                    ),
-            );
-        }
-        let connection_help = match &self.options.source {
-            Source::Local(_) if self.options.auto_start => {
-                "Refresh retries local startup. Existing endpoints and saved organization governance are never replaced."
-            }
-            Source::Local(_) => {
-                "This socket is connect-only. Start its manager explicitly, or use the default local connection for automatic startup."
-            }
-            Source::Remote { .. } => {
-                "Check this profile with gantry remote test. Verify its credentials and TLS trust. Remote failures never fall back to local execution."
-            }
-            Source::Demo => "Demo mode does not connect to a manager.",
-        };
         let content = match &self.connection {
             Connection::Connecting => empty_state(
                 IconName::RefreshCw,
                 "Connecting to Gantry",
-                if self.options.auto_start {
-                    "Connecting to the private local API; starting its manager if needed…"
-                } else {
-                    "Connecting to the selected manager…"
-                },
+                "Connecting to the selected manager…",
                 cx,
             ),
             Connection::Offline(message) => {
                 empty_state(IconName::CircleAlert, "Manager unavailable", message, cx).child(
-                    div()
-                        .max_w(px(420.))
-                        .mt_2()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(connection_help),
+                    div().mt_2().child(
+                        Button::new("retry-connection")
+                            .small()
+                            .label("Retry connection")
+                            .disabled(self.refreshing)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    ),
                 )
             }
             _ if self.inventory.rows().is_empty() => empty_state(
                 IconName::Box,
-                "A little room to build",
-                "No sandboxes on this manager yet. Use Create to launch one from a cached image, or pull an image first on the Images screen.",
+                "No sandboxes",
+                "Use New to create a sandbox, or pull an image from Local Images.",
                 cx,
             ),
             _ if visible == 0 => empty_state(
@@ -425,267 +258,304 @@ impl Desktop {
             ),
             _ => div()
                 .size_full()
-                .child(DataTable::new(&self.table).bordered(false)),
+                .capture_any_mouse_down(
+                    cx.listener(|this, event, window, cx| this.open_row_menu(event, window, cx)),
+                )
+                .child(
+                    DataTable::new(&self.table)
+                        .bordered(false)
+                        .stripe(false)
+                        .with_size(px(34.)),
+                ),
         };
-        view.child(
-            div()
-                .flex_1()
-                .min_h_0()
-                .overflow_hidden()
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded(cx.theme().radius)
-                .child(content),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .child("↑ ↓  Inspect rows     /  Search     Enter  Return to list"),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(controls)
+            .child(div().flex_1().min_h_0().overflow_hidden().child(content))
     }
-
     fn inspector(&self, cx: &mut Context<Self>) -> Div {
         let panel = div()
             .flex()
             .flex_col()
             .size_full()
             .min_h_0()
-            .bg(cx.theme().sidebar)
+            .bg(cx.theme().secondary)
             .border_l_1()
             .border_color(cx.theme().border);
+        if self.inline_form() {
+            return panel.child(self.form_content(true, cx));
+        }
         let Some(row) = self.inventory.selected() else {
             return panel.child(empty_state(
-                IconName::PanelLeft,
-                "Sandbox inspector",
-                "Select a sandbox to see its image, allocation, and saved configuration.",
+                IconName::PanelRight,
+                "Inspector",
+                "Select a sandbox to inspect its running and saved configuration.",
                 cx,
             ));
         };
         let image = row.image_label().to_owned();
-        let mut details = div()
-            .id("inspector-scroll")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .p_5()
-            .gap_6()
-            .child(allocation(
-                row.resource_label(),
-                row.displayed_resources(),
-                cx,
-            ))
+        let mut details = div().flex().flex_col().gap(px(13.));
+        if !self.inspector_settings {
+            details = details
+                .child(allocation(
+                    "RUNNING NOW",
+                    if row.state == "running" {
+                        row.active.as_ref()
+                    } else {
+                        None
+                    },
+                    if row.state == "running" {
+                        "Not reported by the manager"
+                    } else {
+                        "Not running"
+                    },
+                    cx,
+                ))
+                .child(separator(cx));
+        }
+        details = details
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(eyebrow("NEXT BOOT", cx))
+                    .child(
+                        Button::new("sandbox-edit")
+                            .ghost()
+                            .xsmall()
+                            .label("Edit…")
+                            .text_color(cx.theme().primary)
+                            .disabled(!self.can_write())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.edit_selected_sandbox(window, cx)
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
+                    .gap_3()
+                    .child(property("CPU", &format!("{} vCPU", row.desired.cpus), cx))
+                    .child(property(
+                        "Memory",
+                        &memory_label(row.desired.memory_mib),
+                        cx,
+                    )),
+            )
+            .when(row.restart_required, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().warning)
+                                .child(Icon::new(IconName::TriangleAlert).size(px(15.)))
+                                .child("Restart required"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Running allocation is unchanged."),
+                        ),
+                )
+            })
+            .child(separator(cx))
+            .child(eyebrow("IMAGE", cx))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
                     .gap_2()
-                    .child(eyebrow("IMAGE", cx))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_size(px(12.))
-                            .truncate()
                             .child(image.clone()),
                     )
                     .child(
                         Button::new("copy-image")
                             .ghost()
-                            .small()
+                            .xsmall()
                             .icon(IconName::Copy)
-                            .label("Copy reference")
-                            .on_click(move |_, window, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(image.clone()));
-                                window.push_notification("Image reference copied", cx);
+                            .accessibility_label("Copy image reference")
+                            .tooltip("Copy image reference")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(image.clone()))
                             }),
                     ),
             )
+            .child(separator(cx))
+            .child(eyebrow("SAVED CONFIGURATION", cx))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(eyebrow("CONFIGURATION", cx))
                     .child(property(
                         "Writable layer",
-                        if row.writable { "Enabled" } else { "Read only" },
+                        if row.writable { "On" } else { "Off" },
                         cx,
                     ))
                     .child(property(
-                        "Isolation mode",
-                        row.displayed_resources()
-                            .map(|settings| settings.process_isolation.as_str())
+                        "Process isolation",
+                        match row.desired.process_isolation.as_str() {
+                            "auto" => "Auto",
+                            "required" => "Required",
+                            "off" => "Off",
+                            value => value,
+                        },
+                        cx,
+                    ))
+                    .child(property(
+                        "SSH",
+                        self.host
+                            .snapshot
+                            .sandboxes
+                            .iter()
+                            .find(|s| s.name == row.name)
+                            .map(|s| if s.ssh { "Enabled" } else { "Off" })
                             .unwrap_or("Not reported"),
                         cx,
                     ))
                     .child(property(
                         "Dev Containers",
-                        row.displayed_resources()
-                            .map(|settings| {
-                                if settings.dev_containers {
-                                    "Enabled"
-                                } else {
-                                    "Disabled"
-                                }
-                            })
-                            .unwrap_or("Not reported"),
+                        if row.desired.dev_containers {
+                            "On"
+                        } else {
+                            "Off"
+                        },
                         cx,
-                    ))
-                    .when(row.pid != 0, |this| {
-                        this.child(property("Host PID", &row.pid.to_string(), cx))
-                    }),
-            );
-        if row.restart_required {
-            details = details.child(div().flex().flex_col().gap_3().p_3().rounded(cx.theme().radius)
-                .border_1().border_color(cx.theme().warning.opacity(0.4))
-                .child(div().flex().items_center().gap_2().text_color(cx.theme().warning).text_size(px(12.))
-                    .child(Icon::new(IconName::CircleAlert).small()).child("Restart required"))
-                .child(allocation("Saved for next boot", Some(&row.desired), cx))
-                .when(row.active.as_ref().map(|active| active.process_isolation.as_str()) != Some(row.desired.process_isolation.as_str()), |this|
-                    this.child(property("Isolation mode", &row.desired.process_isolation, cx)))
-                .when(row.active.as_ref().map(|active| active.dev_containers) != Some(row.desired.dev_containers), |this|
-                    this.child(property("Dev Containers", if row.desired.dev_containers { "Enabled" } else { "Disabled" }, cx)))
-                .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
-                    .child("Saved settings differ from the running VM. Gantry will use them on its next start.")));
-        }
-        panel
+                    )),
+            )
+            .when(self.inspector_settings, |d| {
+                d.child(
+                    Button::new("sandbox-delete")
+                        .small()
+                        .label("Delete sandbox…")
+                        .text_color(cx.theme().danger)
+                        .disabled(!self.can_write() || row.state != "stopped")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.sandbox_action("delete", window, cx)
+                        })),
+                )
+            });
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .px(px(20.))
+            .pt(px(20.))
+            .pb(px(14.))
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .p_5()
+                    .items_center()
                     .gap_3()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(eyebrow("SANDBOX INSPECTOR", cx))
+                    .child(
+                        Icon::new(IconName::Box)
+                            .size(px(24.))
+                            .text_color(cx.theme().muted_foreground),
+                    )
                     .child(
                         div()
-                            .text_size(px(22.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .min_w_0()
                             .truncate()
+                            .text_size(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(row.name.clone()),
-                    )
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .child(status(row, cx))
                     .child(
                         div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Button::new("sandbox-edit")
-                                    .small()
-                                    .label("Edit settings")
-                                    .disabled(!self.can_write())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.edit_selected_sandbox(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("sandbox-start")
-                                    .small()
-                                    .label("Start")
-                                    .disabled(!self.can_write() || row.state != "stopped")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.sandbox_action("start", window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("sandbox-stop")
-                                    .small()
-                                    .label("Stop")
-                                    .disabled(!self.can_write() || row.state != "running")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.sandbox_action("stop", window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("sandbox-delete")
-                                    .small()
-                                    .label("Delete…")
-                                    .disabled(!self.can_write() || row.state != "stopped")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.sandbox_action("delete", window, cx)
-                                    })),
-                            ),
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.source_name()),
                     ),
             )
-            .child(details)
-    }
-
-    fn footer(&self, cx: &App) -> Div {
-        let (color, label) = match &self.connection {
-            Connection::Connecting => (cx.theme().warning, "Connecting to manager".to_owned()),
-            Connection::Connected(version) => {
-                (cx.theme().success, format!("Connected · {version}"))
-            }
-            Connection::Offline(_) => (
-                cx.theme().danger,
-                "Manager unavailable · retrying".to_owned(),
-            ),
-            Connection::Demo => (cx.theme().warning, "Demo · sample data only".to_owned()),
-        };
-        let source = self
-            .target
-            .as_ref()
-            .map(|target| target.label())
-            .unwrap_or_else(|| self.options.source.description());
-        div()
-            .flex()
-            .items_center()
-            .h(px(34.))
-            .flex_shrink_0()
-            .px_4()
-            .gap_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar)
-            .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
-            .child(div().size(px(6.)).rounded_full().bg(color))
-            .child(label)
             .child(
                 div()
+                    .flex()
+                    .p(px(2.))
+                    .bg(cx.theme().background)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(5.))
+                    .children(
+                        [(false, "Overview"), (true, "Settings")]
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, (settings, label))| {
+                                Button::new(("inspector-tab", index))
+                                    .ghost()
+                                    .small()
+                                    .h(px(22.))
+                                    .flex_1()
+                                    .label(label)
+                                    .selected(self.inspector_settings == settings)
+                                    .when(self.inspector_settings == settings, |b| {
+                                        b.bg(theme::selected_control(cx))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.inspector_settings = settings;
+                                        cx.notify();
+                                    }))
+                            }),
+                    ),
+            );
+        panel
+            .child(header)
+            .child(
+                div()
+                    .id("inspector-scroll")
                     .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .child(source),
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(div().px(px(20.)).py(px(8.)).child(details)),
             )
-            .when(self.last_updated.is_some(), |this| {
-                this.child("Syncs every 3s")
-            })
-            .child("Desktop preview 0.1")
+            .child(
+                div()
+                    .px(px(20.))
+                    .py(px(16.))
+                    .text_size(px(10.))
+                    .text_color(cx.theme().muted_foreground)
+                    .truncate()
+                    .child(format!("Inspecting {} on {}", row.name, self.source_name())),
+            )
     }
 }
-
-fn eyebrow(label: &str, cx: &App) -> Div {
+pub fn eyebrow(label: &str, cx: &App) -> Div {
     div()
         .text_size(px(10.))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(cx.theme().muted_foreground)
         .child(label.to_owned())
 }
-
-fn sidebar_count(label: &str, count: Option<usize>, cx: &App) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .px_2()
-        .py_1()
-        .text_size(px(12.))
-        .text_color(cx.theme().muted_foreground)
-        .child(label.to_owned())
-        .child(
-            count
-                .map(|count| count.to_string())
-                .unwrap_or_else(|| "—".into()),
-        )
+fn separator(cx: &App) -> Div {
+    div().h(px(1.)).w_full().bg(cx.theme().border)
 }
-
-fn empty_state(icon: IconName, title: &str, description: &str, cx: &App) -> Div {
+pub fn empty_state(icon: IconName, title: &str, description: &str, cx: &App) -> Div {
     div()
         .flex()
         .flex_col()
@@ -697,7 +567,7 @@ fn empty_state(icon: IconName, title: &str, description: &str, cx: &App) -> Div 
         .text_center()
         .child(
             Icon::new(icon)
-                .size(px(32.))
+                .size(px(28.))
                 .text_color(cx.theme().muted_foreground),
         )
         .child(
@@ -709,12 +579,11 @@ fn empty_state(icon: IconName, title: &str, description: &str, cx: &App) -> Div 
         .child(
             div()
                 .max_w(px(420.))
-                .text_size(px(13.))
+                .text_size(px(12.))
                 .text_color(cx.theme().muted_foreground)
                 .child(description.to_owned()),
         )
 }
-
 fn property(label: &str, value: &str, cx: &App) -> Div {
     div()
         .flex()
@@ -737,68 +606,32 @@ fn property(label: &str, value: &str, cx: &App) -> Div {
                 .child(value.to_owned()),
         )
 }
-
-fn allocation(label: &str, settings: Option<&BootSettings>, cx: &App) -> Div {
-    let cpu = settings
-        .map(|settings| settings.cpus.to_string())
-        .unwrap_or_else(|| "—".into());
-    let memory = settings
-        .map(|settings| memory_label(settings.memory_mib))
-        .unwrap_or_else(|| "—".into());
+fn allocation(label: &str, settings: Option<&BootSettings>, unknown: &str, cx: &App) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap_3()
+        .gap(px(10.))
         .child(eyebrow(label, cx))
-        .child(
-            div()
-                .flex()
-                .gap_6()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(22.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(cpu),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("vCPU"),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(22.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(memory),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Memory"),
-                        ),
-                ),
-        )
-        .when(settings.is_none(), |this| {
-            this.child(
+        .child(property(
+            "CPU",
+            &settings
+                .map(|s| format!("{} vCPU", s.cpus))
+                .unwrap_or_else(|| "—".into()),
+            cx,
+        ))
+        .child(property(
+            "Memory",
+            &settings
+                .map(|s| memory_label(s.memory_mib))
+                .unwrap_or_else(|| "—".into()),
+            cx,
+        ))
+        .when(settings.is_none(), |d| {
+            d.child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("The manager has not reported the active allocation."),
+                    .child(unknown.to_owned()),
             )
         })
 }

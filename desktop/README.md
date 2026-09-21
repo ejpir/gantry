@@ -9,7 +9,34 @@ This is a **working preview**, not yet complete TUI parity: it selects one host
 at a time. Interactive terminals, organization-login/catalog flows, SSE updates,
 and persistent preferences remain follow-up work. Demo mode never permits writes.
 
-![Earlier inventory preview in dark mode, showing explicitly labeled demo data](assets/preview-dark.png)
+![Native desktop workspace in dark mode, showing explicitly labeled demo data](assets/workspace-dark.png)
+
+## Workspace design
+
+The [approved design study](design/desktop-workspace.png) is the styling reference:
+neutral graphite surfaces, blue row selection, restrained Gantry branding, a
+52px unified toolbar, a 208px source sidebar, and a resizable 328px inspector.
+Light and system appearance use the same layout.
+
+- Connections select the whole workspace. Unselected profile dots mean **not
+  checked**, not online or offline. Profile management stays client-local.
+- Right-click a sandbox (or use **…**) for actions on that exact row/source.
+  Menus recheck the connection and sandbox state before opening a write form.
+- **Edit…** / **⌘ I** opens saved settings in the inspector. Save and Cancel
+  retain the original sandbox and verified source, even across refreshes.
+- The CPU/Memory table columns describe running allocation only. Stopped VMs
+  show dashes; their saved allocation is in **Next Boot**.
+- Activity contains actual submissions, progress, and outcomes from this window,
+  bounded to 100 entries, with UTC timestamps. It is not persisted and is not a
+  replacement for the manager-wide Audit screen. Request bodies and secret input
+  values are not recorded. Writes stay disabled until a post-operation refresh completes.
+- The **Gantry** titlebar menu exposes Overview, connection management, pane
+  toggles, appearance, and help. macOS also gets native application menus and
+  real window controls; other platforms use their own window decorations.
+
+The screenshot is a real Linux/Wayland render, not the SVG mockup. macOS native
+window/menu behavior still needs on-device review; macOS controls are not drawn
+as imitations on Linux.
 
 ## Run locally — no separate serve command
 
@@ -35,8 +62,12 @@ protocol. All inventory and inspection still go through `/v1`.
 For a source checkout, build the Go binary and select it explicitly:
 
 ```sh
-go build -o artifacts/gantry ./cmd/gantry
+./scripts/build.sh
+# Linux:
 cargo run --locked --manifest-path desktop/Cargo.toml -- --gantry ./artifacts/gantry
+# macOS (the build script also applies Hypervisor entitlements):
+cargo run --locked --manifest-path desktop/Cargo.toml -- \
+  --gantry ./artifacts/gantry-darwin-arm64
 ```
 
 Without `--gantry`, the launcher looks beside the desktop executable, then on
@@ -137,7 +168,11 @@ without a display.
 | Enter while searching | Focus the inventory |
 | ↑ / ↓ in the table | Select a sandbox and update its inspector |
 | Escape in search / a form | Clear the query / cancel the form |
-| Ctrl/⌘ 1 | Focus the inventory |
+| Ctrl/⌘ 1 | Open Sandboxes and focus the inventory |
+| Ctrl/⌘ N | New sandbox |
+| Ctrl/⌘ I | Edit the selected sandbox's saved settings |
+| Ctrl/⌘ Shift I | Toggle the inspector |
+| Ctrl/⌘ J | Toggle activity |
 | Ctrl/⌘ R | Refresh / retry the selected connection |
 | Ctrl/⌘ Q | Quit the desktop only |
 

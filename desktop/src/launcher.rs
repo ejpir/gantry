@@ -44,20 +44,38 @@ pub fn ensure_local(socket: &Path, program: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn ensure_local_with_timeout(socket: &Path, program: &Path, timeout: Duration) -> Result<()> {
-    let mut child = Command::new(program)
+    let deadline = Instant::now() + timeout;
+    let mut command = Command::new(program);
+    command
         .args(["serve", "--ensure", "--socket"])
         .arg(socket)
         .env("GANTRY_REMOTE", "")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Cannot launch {}. Install an up-to-date Gantry CLI or pass --gantry PATH",
-                program.display()
-            )
-        })?;
+        .stderr(Stdio::piped());
+    // A concurrent fork can briefly inherit a writer's executable fd, even
+    // with CLOEXEC. Retry only ETXTBSY before Gantry has executed, never a
+    // running helper or an HTTP mutation. Stay within the readiness deadline.
+    let mut busy_retries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && busy_retries < 5
+                    && Instant::now() < deadline =>
+            {
+                busy_retries += 1;
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => break result,
+        }
+    }
+    .with_context(|| {
+        format!(
+            "Cannot launch {}. Install an up-to-date Gantry CLI or pass --gantry PATH",
+            program.display()
+        )
+    })?;
     let result = (|| {
         let mut out = child.stdout.take().context("Missing launcher stdout")?;
         let mut err = child.stderr.take().context("Missing launcher stderr")?;
@@ -65,7 +83,6 @@ fn ensure_local_with_timeout(socket: &Path, program: &Path, timeout: Duration) -
         nonblocking(&err)?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let deadline = Instant::now() + timeout;
         let status = loop {
             let out_closed = collect_output(&mut out, &mut stdout)?;
             let err_closed = collect_output(&mut err, &mut stderr)?;
