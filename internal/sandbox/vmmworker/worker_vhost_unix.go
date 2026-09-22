@@ -18,7 +18,7 @@ import (
 // startShareVhost switches the existing authenticated share channel to
 // setup-only vhost-user control. The backend then maps guest RAM and handles
 // virtqueues directly; request and response payloads never traverse w.share.
-func (w *vmmWorker) startShareVhost(hub *sharefs.Hub) error {
+func (w *vmmWorker) startShareVhost(hub sharefs.BorrowedHub) error {
 	if w == nil || w.share == nil {
 		return fmt.Errorf("vhost share control unavailable")
 	}
@@ -60,6 +60,9 @@ func (w *vmmWorker) startShareVhost(hub *sharefs.Hub) error {
 			}
 			return n
 		}, debug, func(sink func([]byte) fuse.Status) {
+			if stats != nil {
+				fmt.Fprintf(os.Stderr, "vhost-share-notify: sink %s\n", map[bool]string{true: "detached", false: "attached"}[sink == nil])
+			}
 			if sink == nil {
 				hub.SetNotificationSink(nil)
 				return

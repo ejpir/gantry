@@ -9,8 +9,8 @@
 #
 # Needs: mkfs.erofs, fsck.erofs, wget, tar with zstd support, sha512sum,
 # and go. Downloads and verifies the matching gVisor release archive, then
-# installs its runsc binary and builds the crunshim /dev fixer
-# (guest/crunshim) for the target arch.
+# installs runsc and its normal-execution sidecars and builds the crunshim
+# /dev fixer (guest/crunshim) for the target arch.
 set -e
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
@@ -45,6 +45,13 @@ BASE=https://storage.googleapis.com/gvisor/releases/release/latest/$RUNSC_ARCH
 	tar --zstd -xf gvisor.tar.zstd -C gvisor
 )
 [ -f "$WORK/gvisor/runsc" ] || { echo "gVisor release archive does not contain runsc" >&2; exit 1; }
+NORMAL_SIDECARS="gvisor_sentry gvisor-sentry-prewarmer runsc-fd-parking"
+for sidecar in $NORMAL_SIDECARS; do
+	[ -f "$WORK/gvisor/gvisor-bin/$sidecar" ] || {
+		echo "gVisor release archive does not contain gvisor-bin/$sidecar" >&2
+		exit 1
+	}
+done
 chmod +x "$WORK/gvisor/runsc"
 
 echo "== building crunshim ($GO_ARCH)"
@@ -54,6 +61,10 @@ echo "== building crunshim ($GO_ARCH)"
 echo "== installing: /sbin/crun = crunshim -> /sbin/crun.runsc (crun -> crun.runc)"
 mv "$WORK/rootfs/sbin/crun" "$WORK/rootfs/sbin/crun.runc"
 cp "$WORK/gvisor/runsc" "$WORK/rootfs/sbin/crun.runsc"
+mkdir -p "$WORK/rootfs/sbin/gvisor-bin"
+for sidecar in $NORMAL_SIDECARS; do
+	cp "$WORK/gvisor/gvisor-bin/$sidecar" "$WORK/rootfs/sbin/gvisor-bin/$sidecar"
+done
 cp "$WORK/crunshim" "$WORK/rootfs/sbin/crun"
 
 LABEL=$(basename "$OUT" .erofs | tr -cd 'a-zA-Z0-9._-' | cut -c1-15)

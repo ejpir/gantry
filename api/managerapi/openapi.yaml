@@ -316,6 +316,58 @@ paths:
               schema: { $ref: "#/components/schemas/AuditTail" }
         "404":
           $ref: "#/components/responses/Error"
+  /v1/dashboard:
+    get:
+      operationId: dashboardSnapshot
+      description: Full non-secret dashboard inventory and host form limits for source-scoped remote TUI parity.
+      responses:
+        "200":
+          description: Dashboard snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardSnapshot" }
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/dashboard/actions:
+    post:
+      operationId: dashboardAction
+      description: Validated dashboard configuration mutation. The action discriminator selects one typed payload; secret values are write-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DashboardActionRequest" }
+      responses:
+        "200":
+          description: Action result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DashboardActionResult" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
+  /v1/dashboard/packets/{name}:
+    parameters:
+      - $ref: "#/components/parameters/SandboxName"
+    post:
+      operationId: captureDashboardPackets
+      description: Read or clear the named sandbox's bounded in-memory packet recorder.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PacketCaptureRequest" }
+      responses:
+        "200":
+          description: Bounded packet snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PacketCaptureSnapshot" }
+        "400":
+          $ref: "#/components/responses/Error"
+        "501":
+          $ref: "#/components/responses/Error"
   /v1/ssh/hostkey:
     get:
       operationId: getSSHHostKey
@@ -444,6 +496,20 @@ components:
       properties:
         ok: { type: boolean }
         version: { type: string }
+        capabilities:
+          type: array
+          description: Additive features; dashboard-control-v1 includes strict action payloads and stale ordinal-rule checks.
+          items: { type: string }
+    DashboardSnapshot:
+      $ref: "#/components/schemas/WireHostSnapshot"
+    DashboardActionRequest:
+      $ref: "#/components/schemas/WireActionRequest"
+    DashboardActionResult:
+      $ref: "#/components/schemas/WireActionResult"
+    PacketCaptureRequest:
+      $ref: "#/components/schemas/WirePacketRequest"
+    PacketCaptureSnapshot:
+      $ref: "#/components/schemas/WirePacketSnapshot"
     Error:
       type: object
       required: [error]
@@ -710,3 +776,35 @@ components:
         sandbox: { type: string }
         state: { type: string }
         time: { type: string, format: date-time }
+    # BEGIN GENERATED DASHBOARD SCHEMAS
+    WireActionRequest: {"oneOf":[{"additionalProperties":false,"properties":{"action":{"enum":["add-rule"],"type":"string"},"ruleRequest":{"$ref":"#/components/schemas/WireRuleRequest"}},"required":["action","ruleRequest"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["add-secret"],"type":"string"},"secret":{"$ref":"#/components/schemas/WireSecretRequest"}},"required":["action","secret"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["configure-mcp-filesystem"],"type":"string"},"mcpFilesystem":{"$ref":"#/components/schemas/WireMCPFilesystemRequest"}},"required":["action","mcpFilesystem"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["configure-mcp-remote"],"type":"string"},"mcpRemote":{"$ref":"#/components/schemas/WireMCPRemoteRequest"}},"required":["action","mcpRemote"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["configure-sandbox"],"type":"string"},"sandboxConfig":{"$ref":"#/components/schemas/WireSandboxConfigRequest"}},"required":["action","sandboxConfig"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["configure-share"],"type":"string"},"sharePlan":{"$ref":"#/components/schemas/WireSharePlan"}},"required":["action","sharePlan"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["plan-port"],"type":"string"},"portRequest":{"$ref":"#/components/schemas/WirePortRequest"}},"required":["action","portRequest"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["plan-share"],"type":"string"},"share":{"$ref":"#/components/schemas/WireShareRequest"}},"required":["action","share"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["prune-images"],"type":"string"}},"required":["action"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["publish-port"],"type":"string"},"port":{"$ref":"#/components/schemas/WirePortMutationRequest"}},"required":["action","port"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-image"],"type":"string"},"value":{"type":"string"}},"required":["action","value"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-mcp-remote"],"type":"string"},"mcpServer":{"$ref":"#/components/schemas/WireMCPServer"}},"required":["action","mcpServer"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-registry"],"type":"string"},"value":{"type":"string"}},"required":["action","value"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-rule"],"type":"string"},"rule":{"$ref":"#/components/schemas/WireRule"}},"required":["action","rule"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-secret"],"type":"string"},"secretRow":{"$ref":"#/components/schemas/WireSecret"}},"required":["action","secretRow"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-share"],"type":"string"},"mount":{"$ref":"#/components/schemas/WireMount"}},"required":["action","mount"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["remove-traffic-rule"],"type":"string"},"traffic":{"$ref":"#/components/schemas/WireTraffic"}},"required":["action","traffic"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["store-registry"],"type":"string"},"registry":{"$ref":"#/components/schemas/WireRegistryLoginRequest"}},"required":["action","registry"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["unpublish-port"],"type":"string"},"port":{"$ref":"#/components/schemas/WirePortMutationRequest"}},"required":["action","port"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["validate-mcp-filesystem"],"type":"string"},"mcpFilesystem":{"$ref":"#/components/schemas/WireMCPFilesystemRequest"}},"required":["action","mcpFilesystem"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["validate-mcp-remote"],"type":"string"},"mcpRemote":{"$ref":"#/components/schemas/WireMCPRemoteRequest"}},"required":["action","mcpRemote"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["validate-registry"],"type":"string"},"registry":{"$ref":"#/components/schemas/WireRegistryLoginRequest"}},"required":["action","registry"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["validate-rule"],"type":"string"},"ruleRequest":{"$ref":"#/components/schemas/WireRuleRequest"}},"required":["action","ruleRequest"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["validate-sandbox-config"],"type":"string"},"sandboxConfig":{"$ref":"#/components/schemas/WireSandboxConfigRequest"}},"required":["action","sandboxConfig"],"type":"object"},{"additionalProperties":false,"properties":{"action":{"enum":["validate-secret"],"type":"string"},"secret":{"$ref":"#/components/schemas/WireSecretRequest"}},"required":["action","secret"],"type":"object"}]}
+    WireActionResult: {"properties":{"count":{"type":"integer"},"policy":{"$ref":"#/components/schemas/WirePolicyResult"},"portSpec":{"type":"string"},"restartRequired":{"type":"boolean"},"sharePlan":{"$ref":"#/components/schemas/WireSharePlan"},"warning":{"type":"string"}},"type":"object"}
+    WireAuditDecision: {"properties":{"action":{"type":"string"},"effect":{"type":"string"},"organization":{"type":"string"},"profile":{"type":"string"},"reason":{"type":"string"},"revision":{"type":"string"},"rules":{"items":{"type":"string"},"nullable":true,"type":"array"}},"required":["effect","action","reason","rules","organization","revision","profile"],"type":"object"}
+    WireAuditEvent: {"properties":{"Decision":{"$ref":"#/components/schemas/WireAuditDecision"},"Error":{"type":"string"},"Line":{"type":"string"},"Occurrence":{"type":"integer"},"Remote":{"type":"string"},"Sandbox":{"type":"string"}},"required":["Remote","Sandbox","Line","Occurrence","Decision","Error"],"type":"object"}
+    WireDashboardData: {"properties":{"Audit":{"items":{"$ref":"#/components/schemas/WireAuditEvent"},"nullable":true,"type":"array"},"Images":{"items":{"$ref":"#/components/schemas/WireImage"},"nullable":true,"type":"array"},"MCPServers":{"items":{"$ref":"#/components/schemas/WireMCPServer"},"nullable":true,"type":"array"},"Mounts":{"items":{"$ref":"#/components/schemas/WireMount"},"nullable":true,"type":"array"},"Ports":{"items":{"$ref":"#/components/schemas/WirePort"},"nullable":true,"type":"array"},"Registries":{"items":{"$ref":"#/components/schemas/WireRegistryAuth"},"nullable":true,"type":"array"},"Rules":{"items":{"$ref":"#/components/schemas/WireRule"},"nullable":true,"type":"array"},"Sandboxes":{"items":{"$ref":"#/components/schemas/WireSandbox"},"nullable":true,"type":"array"},"Secrets":{"items":{"$ref":"#/components/schemas/WireSecret"},"nullable":true,"type":"array"},"Traffic":{"items":{"$ref":"#/components/schemas/WireTraffic"},"nullable":true,"type":"array"}},"required":["Sandboxes","Traffic","Rules","Mounts","Ports","Secrets","MCPServers","Audit","Images","Registries"],"type":"object"}
+    WireHostSnapshot: {"properties":{"kernelChoices":{"items":{"type":"string"},"nullable":true,"type":"array"},"resourceLimits":{"$ref":"#/components/schemas/WireResourceLimits"},"snapshot":{"$ref":"#/components/schemas/WireDashboardData"}},"required":["snapshot","resourceLimits"],"type":"object"}
+    WireImage: {"properties":{"Arch":{"type":"string"},"Cmd":{"items":{"type":"string"},"nullable":true,"type":"array"},"Created":{"type":"string"},"Digest":{"type":"string"},"Entrypoint":{"items":{"type":"string"},"nullable":true,"type":"array"},"EnvCount":{"type":"integer"},"InUse":{"type":"boolean"},"Ref":{"type":"string"},"Remote":{"type":"string"},"Size":{"type":"integer"},"User":{"type":"string"},"WorkingDir":{"type":"string"}},"required":["Remote","Ref","Digest","Arch","Created","Size","InUse","User","WorkingDir","Entrypoint","Cmd","EnvCount"],"type":"object"}
+    WireMCPFilesystemRequest: {"properties":{"Root":{"type":"string"},"Sandbox":{"type":"string"},"User":{"type":"string"}},"required":["Sandbox","Root","User"],"type":"object"}
+    WireMCPRemoteRequest: {"properties":{"Allow":{"items":{"type":"string"},"nullable":true,"type":"array"},"AuthHeader":{"type":"string"},"AuthKind":{"type":"string"},"AuthRef":{"type":"string"},"Deny":{"items":{"type":"string"},"nullable":true,"type":"array"},"Name":{"type":"string"},"Redact":{"items":{"type":"string"},"nullable":true,"type":"array"},"Replace":{"type":"boolean"},"Sandbox":{"type":"string"},"URL":{"type":"string"}},"required":["Sandbox","Name","URL","AuthKind","AuthHeader","AuthRef","Allow","Deny","Redact","Replace"],"type":"object"}
+    WireMCPServer: {"properties":{"Allow":{"items":{"type":"string"},"nullable":true,"type":"array"},"AuthHeader":{"type":"string"},"AuthKind":{"type":"string"},"AuthRef":{"type":"string"},"Deny":{"items":{"type":"string"},"nullable":true,"type":"array"},"Error":{"type":"string"},"Name":{"type":"string"},"Redact":{"items":{"type":"string"},"nullable":true,"type":"array"},"Remote":{"type":"string"},"Root":{"type":"string"},"Sandbox":{"type":"string"},"State":{"type":"string"},"Type":{"type":"string"},"URL":{"type":"string"},"User":{"type":"string"}},"required":["Remote","Sandbox","Name","Type","URL","AuthKind","AuthHeader","AuthRef","Allow","Deny","Redact","Root","User","State","Error"],"type":"object"}
+    WireMount: {"properties":{"Error":{"type":"string"},"GID":{"minimum":0,"type":"integer"},"Guest":{"type":"string"},"Host":{"type":"string"},"ReadOnly":{"type":"boolean"},"Remote":{"type":"string"},"Sandbox":{"type":"string"},"State":{"type":"string"},"Tag":{"type":"string"},"UID":{"minimum":0,"type":"integer"},"VM":{"type":"string"}},"required":["Remote","Sandbox","Tag","Host","VM","Guest","ReadOnly","UID","GID","State","Error"],"type":"object"}
+    WirePacket: {"properties":{"allowed":{"type":"boolean"},"data":{"format":"byte","type":"string"},"direction":{"type":"string"},"length":{"type":"integer"},"sequence":{"minimum":0,"type":"integer"},"timestamp":{"format":"date-time","type":"string"}},"required":["sequence","timestamp","direction","allowed","length","data"],"type":"object"}
+    WirePacketRequest: {"properties":{"after":{"minimum":0,"type":"integer"},"clear":{"type":"boolean"},"max_bytes":{"type":"integer"},"max_packets":{"type":"integer"},"start":{"type":"boolean"},"stop":{"type":"boolean"}},"type":"object"}
+    WirePacketSnapshot: {"properties":{"active":{"type":"boolean"},"evicted":{"minimum":0,"type":"integer"},"latest":{"minimum":0,"type":"integer"},"next":{"minimum":0,"type":"integer"},"oldest":{"minimum":0,"type":"integer"},"packets":{"items":{"$ref":"#/components/schemas/WirePacket"},"nullable":true,"type":"array"}},"required":["active"],"type":"object"}
+    WirePolicyResult: {"properties":{"Description":{"type":"string"},"Path":{"type":"string"}},"required":["Path","Description"],"type":"object"}
+    WirePort: {"properties":{"Bind":{"type":"string"},"Error":{"type":"string"},"Guest":{"type":"integer"},"Proto":{"type":"string"},"Remote":{"type":"string"},"Sandbox":{"type":"string"},"State":{"type":"string"}},"required":["Remote","Sandbox","Bind","Guest","Proto","State","Error"],"type":"object"}
+    WirePortMutationRequest: {"properties":{"sandbox":{"type":"string"},"spec":{"type":"string"}},"required":["sandbox","spec"],"type":"object"}
+    WirePortRequest: {"properties":{"Bind":{"type":"string"},"Guest":{"type":"string"},"UDP":{"type":"boolean"}},"required":["Bind","Guest","UDP"],"type":"object"}
+    WireRegistryAuth: {"properties":{"HasSecret":{"type":"boolean"},"Registry":{"type":"string"},"Remote":{"type":"string"},"Source":{"type":"string"},"Username":{"type":"string"}},"required":["Remote","Registry","Username","Source","HasSecret"],"type":"object"}
+    WireRegistryLoginRequest: {"properties":{"Registry":{"type":"string"},"Secret":{"type":"string","writeOnly":true},"Username":{"type":"string"}},"required":["Registry","Username","Secret"],"type":"object"}
+    WireResourceLimits: {"properties":{"DefaultDevContainersDiskMiB":{"minimum":0,"type":"integer"},"DefaultDevContainersMemoryMiB":{"minimum":0,"type":"integer"},"DefaultDevContainersVCPUs":{"type":"integer"},"DefaultDiskSizeMiB":{"minimum":0,"type":"integer"},"MaxDiskSizeMiB":{"minimum":0,"type":"integer"},"MaxMemoryMB":{"minimum":0,"type":"integer"},"MaxVCPUs":{"type":"integer"},"MinDiskSizeMiB":{"minimum":0,"type":"integer"},"MinMemoryMB":{"minimum":0,"type":"integer"}},"required":["MinMemoryMB","MaxMemoryMB","MinDiskSizeMiB","MaxDiskSizeMiB","DefaultDiskSizeMiB","MaxVCPUs","DefaultDevContainersMemoryMiB","DefaultDevContainersDiskMiB","DefaultDevContainersVCPUs"],"type":"object"}
+    WireRule: {"properties":{"Action":{"type":"string"},"Error":{"type":"boolean"},"Policy":{"type":"string"},"Ports":{"type":"string"},"Proto":{"type":"string"},"Remote":{"type":"string"},"Sandbox":{"type":"string"},"Source":{"type":"string"},"Target":{"type":"string"}},"required":["Remote","Sandbox","Action","Target","Proto","Ports","Source","Policy","Error"],"type":"object"}
+    WireRuleRequest: {"properties":{"Action":{"type":"string"},"Ports":{"type":"string"},"Proto":{"type":"string"},"Sandbox":{"type":"string"},"Target":{"type":"string"}},"required":["Sandbox","Action","Target","Proto","Ports"],"type":"object"}
+    WireSandbox: {"properties":{"ActiveAvailable":{"type":"boolean"},"ActiveMemMB":{"minimum":0,"type":"integer"},"ActiveVCPUs":{"type":"integer"},"AllowLocal":{"type":"boolean"},"ConfigError":{"type":"boolean"},"ConfigPath":{"type":"string"},"DevContainers":{"type":"boolean"},"DevContainersDiskMiB":{"minimum":0,"type":"integer"},"DevContainersImage":{"type":"string"},"DevContainersRWLayer":{"type":"string"},"Dir":{"type":"string"},"DiskSizeMiB":{"minimum":0,"type":"integer"},"DroppedPackets":{"minimum":0,"type":"integer"},"GVProxy":{"type":"string"},"Image":{"type":"string"},"Kernel":{"type":"string"},"MemMB":{"minimum":0,"type":"integer"},"Name":{"type":"string"},"Net":{"type":"boolean"},"NetPolicy":{"type":"string"},"NoProxy":{"type":"string"},"PID":{"type":"integer"},"Ports":{"type":"integer"},"ProcessIsolation":{"type":"string"},"Proxy":{"type":"string"},"ProxyEnforce":{"type":"boolean"},"RW":{"type":"boolean"},"RWLayer":{"type":"string"},"RXBytes":{"minimum":0,"type":"integer"},"Remote":{"type":"string"},"RestartRequired":{"type":"boolean"},"Runtime":{"type":"string"},"SSH":{"type":"boolean"},"SecretCount":{"type":"integer"},"Secrets":{"type":"string"},"Shares":{"type":"integer"},"State":{"type":"string"},"TXBytes":{"minimum":0,"type":"integer"},"TrafficAvailable":{"type":"boolean"},"Updated":{"format":"date-time","type":"string"},"VCPUs":{"type":"integer"}},"required":["Remote","ActiveAvailable","ActiveMemMB","ActiveVCPUs","RestartRequired","Name","State","PID","Image","Runtime","Kernel","Secrets","SecretCount","RW","RWLayer","DiskSizeMiB","Net","GVProxy","NetPolicy","AllowLocal","Proxy","NoProxy","ProxyEnforce","Shares","Ports","MemMB","VCPUs","ProcessIsolation","SSH","DevContainers","DevContainersImage","DevContainersRWLayer","DevContainersDiskMiB","Dir","ConfigPath","Updated","ConfigError","TXBytes","RXBytes","DroppedPackets","TrafficAvailable"],"type":"object"}
+    WireSandboxConfigRequest: {"properties":{"DevContainers":{"type":"boolean"},"MemMB":{"minimum":0,"type":"integer"},"Name":{"type":"string"},"ProcessIsolation":{"type":"string"},"SSH":{"type":"boolean"},"VCPUs":{"type":"integer"}},"required":["Name","MemMB","VCPUs","ProcessIsolation","SSH","DevContainers"],"type":"object"}
+    WireSecret: {"properties":{"Name":{"type":"string"},"Remote":{"type":"string"},"Sandbox":{"type":"string"},"State":{"type":"string"}},"required":["Remote","Sandbox","Name","State"],"type":"object"}
+    WireSecretRequest: {"properties":{"Name":{"type":"string"},"Sandbox":{"type":"string"},"Value":{"type":"string","writeOnly":true}},"required":["Sandbox","Name","Value"],"type":"object"}
+    WireSharePlan: {"properties":{"Live":{"type":"boolean"},"Mountpoint":{"type":"string"},"Replace":{"type":"boolean"},"Sandbox":{"type":"string"},"Spec":{"type":"string"},"Tag":{"type":"string"}},"required":["Sandbox","Tag","Spec","Mountpoint","Replace","Live"],"type":"object"}
+    WireShareRequest: {"properties":{"CurrentGuest":{"type":"string"},"Mountpoint":{"type":"string"},"Owner":{"type":"string"},"Path":{"type":"string"},"ReadOnly":{"type":"boolean"},"Replace":{"type":"boolean"},"Running":{"type":"boolean"},"Sandbox":{"type":"string"},"Tag":{"type":"string"}},"required":["Sandbox","Tag","Path","Mountpoint","Owner","ReadOnly","Replace","Running","CurrentGuest"],"type":"object"}
+    WireTraffic: {"properties":{"Address":{"type":"string"},"Allowed":{"type":"boolean"},"FirstSeen":{"format":"date-time","type":"string"},"Host":{"type":"string"},"LastSeen":{"format":"date-time","type":"string"},"Port":{"type":"integer"},"Protocol":{"type":"string"},"RXBytes":{"minimum":0,"type":"integer"},"RXPackets":{"minimum":0,"type":"integer"},"Remote":{"type":"string"},"Sandbox":{"type":"string"},"TXBytes":{"minimum":0,"type":"integer"},"TXPackets":{"minimum":0,"type":"integer"}},"required":["Remote","Sandbox","Host","Address","Protocol","Port","Allowed","TXBytes","RXBytes","TXPackets","RXPackets","FirstSeen","LastSeen"],"type":"object"}
+    # END GENERATED DASHBOARD SCHEMAS

@@ -31,6 +31,18 @@ func (n *shareHubRoot) active(tag string) *Export {
 
 var _ fs.NodeLookuper = (*shareHubRoot)(nil)
 
+// cacheTTL gates namespace caching on the reverse notification channel: once
+// the guest accepts unsolicited invalidations, Publish/Swap/Remove actively
+// drop the affected dentry (Hub.NotifyEntry), so export entries no longer
+// need a zero TTL to make namespace changes visible. Without the channel the
+// historical zero TTL keeps hot-add immediate.
+func (n *shareHubRoot) cacheTTL() time.Duration {
+	if n.hub != nil && n.hub.notificationsReady.Load() {
+		return watchedMetadataTTL
+	}
+	return 0
+}
+
 func (n *shareHubRoot) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	if n.active(name) == nil {
 		out.SetEntryTimeout(0)
@@ -46,8 +58,9 @@ func (n *shareHubRoot) Lookup(ctx context.Context, name string, out *fuse.EntryO
 	} else {
 		out.Mode = fuse.S_IFDIR | 0o755
 	}
-	out.SetEntryTimeout(0)
-	out.SetAttrTimeout(0)
+	ttl := n.cacheTTL()
+	out.SetEntryTimeout(ttl)
+	out.SetAttrTimeout(ttl)
 	return child, 0
 }
 
@@ -74,7 +87,7 @@ func (n *shareHubRoot) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 	out.Mtime = uint64(ver / int64(time.Second))
 	out.Mtimensec = uint32(ver % int64(time.Second))
 	out.Ctime, out.Ctimensec = out.Mtime, out.Mtimensec
-	out.SetTimeout(0)
+	out.SetTimeout(n.cacheTTL())
 	return 0
 }
 

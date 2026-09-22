@@ -12,7 +12,7 @@ import (
 // GANTRY_* knobs travel in bootstrap config; these diagnostic-only switches
 // must be present before the worker constructs the VMM.
 func vmmWorkerEnv() []string {
-	out := make([]string, 0, 5)
+	out := make([]string, 0, 8)
 	if os.Getenv("GANTRY_DEBUG_RTC") != "" {
 		out = append(out, "GANTRY_DEBUG_RTC=1")
 	}
@@ -24,6 +24,15 @@ func vmmWorkerEnv() []string {
 	}
 	if os.Getenv("GANTRY_VHOST_STATS") == "1" {
 		out = append(out, "GANTRY_VHOST_STATS=1")
+	}
+	if os.Getenv("GANTRY_HVF_STATS") == "1" {
+		out = append(out, "GANTRY_HVF_STATS=1")
+	}
+	if os.Getenv("GANTRY_HVF_IRQ_COALESCE") == "1" {
+		out = append(out, "GANTRY_HVF_IRQ_COALESCE=1")
+	}
+	if os.Getenv("GANTRY_HVF_NO_LIVENESS_KICK") == "1" {
+		out = append(out, "GANTRY_HVF_NO_LIVENESS_KICK=1")
 	}
 	if setting := config.VirtioMemWorkerSetting(); setting != "" {
 		out = append(out, "GANTRY_VIRTIO_MEM="+setting)

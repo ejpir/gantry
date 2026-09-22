@@ -40,7 +40,7 @@ type mcpBoundaryState struct {
 
 // writeIsolationState persists the effective runtime topology and the VMM
 // worker's verified confinement report for CLI and dashboard consumers.
-func writeIsolationState(dir string, cfg config.RunConfig, network *Network, splitVMM bool,
+func writeIsolationState(dir string, cfg config.RunConfig, network networkBorrow, splitVMM bool,
 	confinement, mcpConfinement *workerconf.Report) error {
 	state := isolationState{
 		Version:            3,
@@ -50,9 +50,9 @@ func writeIsolationState(dir string, cfg config.RunConfig, network *Network, spl
 		FilesystemBoundary: workerconf.StateUnavailable,
 		ProcessBoundary:    workerconf.StateUnavailable,
 	}
-	degraded := append([]string(nil), network.Degraded...)
-	if network.Split {
-		state.NetworkConfinement = network.Confinement
+	degraded := append([]string(nil), network.Degraded()...)
+	if network.Split() {
+		state.NetworkConfinement = network.Confinement()
 	}
 	if splitVMM {
 		state.VMMConfinement = confinement
@@ -85,7 +85,7 @@ func writeIsolationState(dir string, cfg config.RunConfig, network *Network, spl
 		degraded = append(degraded, "process isolation disabled by configuration")
 	} else {
 		var splitRoles []string
-		if network.Split {
+		if network.Split() {
 			splitRoles = append(splitRoles, "split-net")
 		}
 		if splitVMM {
@@ -97,8 +97,8 @@ func writeIsolationState(dir string, cfg config.RunConfig, network *Network, spl
 		if len(splitRoles) != 0 {
 			state.Topology = strings.Join(splitRoles, "+")
 		}
-		if network.Split {
-			degraded = appendConfinementDegradations(degraded, "network", network.Confinement)
+		if network.Split() {
+			degraded = appendConfinementDegradations(degraded, "network", network.Confinement())
 		}
 		if splitVMM {
 			degraded = appendConfinementDegradations(degraded, "vmm", confinement)
@@ -106,7 +106,7 @@ func writeIsolationState(dir string, cfg config.RunConfig, network *Network, spl
 		if cfg.MCP {
 			degraded = appendConfinementDegradations(degraded, "mcp", mcpConfinement)
 		}
-		if !network.Split && cfg.Net && cfg.GVProxy == "" {
+		if !network.Split() && cfg.Net && cfg.GVProxy == "" {
 			degraded = append(degraded, "network worker not established")
 		}
 		if !splitVMM && config.NormalizeProcessIsolation(cfg.ProcessIsolation) != "off" {

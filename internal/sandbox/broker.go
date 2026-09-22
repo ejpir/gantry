@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,13 +20,13 @@ import (
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
+	"github.com/ejpir/gantry/internal/sandbox/guestplane"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 	"github.com/ejpir/gantry/internal/sandbox/oauthbridge"
 	"github.com/ejpir/gantry/internal/sandbox/oauthtokens"
+	sandboxsupervisor "github.com/ejpir/gantry/internal/sandbox/supervisor"
 	"github.com/ejpir/gantry/internal/secret"
 	"github.com/ejpir/gantry/internal/shares"
-
-	"github.com/containerd/ttrpc"
 )
 
 // broker accepts ctl connections. Protocol: one JSON request line, then
@@ -39,15 +40,15 @@ import (
 type broker struct {
 	cfg        config.RunConfig
 	dir        string
-	rpc        *ttrpc.Client
+	rpc        guestplane.RPC
 	streamSock string
 	// streamDial replaces the streamSock unix dial in the split-VMM
 	// topology (streams cross the worker bridge).
 	streamDial     func() (net.Conn, error)
 	sessionSetupMu sync.Mutex
-	store          *config.ConfigStore
-	shares         *control.ShareManager
-	ports          *control.PortManager
+	store          configStoreBorrow
+	shares         shareManagerBorrow
+	ports          portManagerBorrow
 	netPolicy      *control.NetworkPolicyManager
 	capture        packetCaptureBackend
 	// secretStore resolves values at use time (source TTL, fail-closed);
@@ -91,6 +92,19 @@ type broker struct {
 }
 
 func (br *broker) serve(ln net.Listener) {
+	workers := new(sandboxsupervisor.BackgroundGroup)
+	ctx, release, ok := workers.Acquire()
+	if !ok {
+		return
+	}
+	br.serveOwned(ctx, ln, workers.Start)
+	release()
+	workers.Close()
+}
+
+// serveOwned admits every accepted connection to the control-plane group.
+// Closing that group cancels active sockets and joins their handlers.
+func (br *broker) serveOwned(ctx context.Context, ln net.Listener, start func(func(context.Context)) bool) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -113,10 +127,26 @@ func (br *broker) serve(ln net.Listener) {
 			_ = c.Close()
 			continue
 		}
-		go func(c net.Conn) {
+		if !start(func(ctx context.Context) {
 			defer br.limits.releaseConnection()
+			finished := make(chan struct{})
+			watcherDone := make(chan struct{})
+			go func() {
+				defer close(watcherDone)
+				select {
+				case <-ctx.Done():
+					_ = c.Close()
+				case <-finished:
+				}
+			}()
 			br.handle(c)
-		}(c)
+			close(finished)
+			<-watcherDone
+		}) {
+			br.limits.releaseConnection()
+			_ = c.Close()
+			return
+		}
 	}
 }
 

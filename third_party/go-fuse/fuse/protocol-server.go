@@ -201,6 +201,15 @@ func (ps *ProtocolServer) GantryResourceUsage() (nodes, handles int) {
 	return 0, 0
 }
 
+// GantryCloseResources releases file and directory handles retained by the raw
+// filesystem after its serving owner has drained request admission.
+func (ps *ProtocolServer) GantryCloseResources() int {
+	if closer, ok := ps.fileSystem.(interface{ GantryCloseResources() int }); ok {
+		return closer.GantryCloseResources()
+	}
+	return 0
+}
+
 // GantryPruneResources asks the guest kernel to release up to limit cached
 // inode references. GANTRY PATCH: ordinary kernel FUSE mounts reclaim these
 // under memory pressure; Gantry also requests reclamation proactively so a

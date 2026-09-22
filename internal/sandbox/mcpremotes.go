@@ -61,7 +61,8 @@ func mcpFilesystemArgv(cfg config.RunConfig) []string {
 	}
 }
 
-func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
+func (d *daemonSupervisor) resolveMCPServers() ([]mcpworkersup.Server, error) {
+	br := d.control.Broker()
 	fsArgv := mcpFilesystemArgv(d.cfg)
 	servers := []mcpworkersup.Server{{
 		Config: mcpworkerapi.ServerConfig{
@@ -69,7 +70,7 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 			Tools: mcpgw.ToolPolicy{Allow: []string{"read_file", "list_directory"}},
 		},
 		Spawn: func(ctx context.Context) (io.WriteCloser, io.ReadCloser, func(), error) {
-			return d.broker.spawnGuestStdio(ctx, fsArgv)
+			return br.spawnGuestStdio(ctx, fsArgv)
 		},
 	}}
 	for _, raw := range d.cfg.MCPRemotes {
@@ -80,17 +81,17 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 		// Validate every named secret now so a bad configuration still refuses
 		// startup. Values are discarded and resolved afresh per worker session.
 		if spec.AuthKind == "bearer" || spec.AuthKind == "header" {
-			if _, err := d.broker.secretStore.Resolve(spec.AuthRef); err != nil {
+			if _, err := br.secretStore.Resolve(spec.AuthRef); err != nil {
 				return nil, fmt.Errorf("-mcp-remote %s: secret %s: %w", spec.Name, spec.AuthRef, err)
 			}
 		}
 		for _, name := range spec.RedactNames {
-			if _, err := d.broker.secretStore.Resolve(name); err != nil {
+			if _, err := br.secretStore.Resolve(name); err != nil {
 				return nil, fmt.Errorf("-mcp-remote %s: redact secret %s: %w", spec.Name, name, err)
 			}
 		}
 		if spec.AuthKind == "custody" {
-			if d.broker.custodyRegistry == nil {
+			if br.custodyRegistry == nil {
 				return nil, fmt.Errorf("-mcp-remote %s: auth=custody: needs -oauth-custody", spec.Name)
 			}
 			if _, ok := oauthprovider.Lookup(d.cfg.OAuthProviders, spec.AuthRef); !ok {
@@ -109,7 +110,7 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 				response := mcpworkerapi.CredentialResponse{}
 				switch serverSpec.AuthKind {
 				case "bearer", "header":
-					value, err := d.broker.secretStore.Resolve(serverSpec.AuthRef)
+					value, err := br.secretStore.Resolve(serverSpec.AuthRef)
 					if err != nil {
 						return response, err
 					}
@@ -119,14 +120,14 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 					}
 					response.Headers = map[string]string{header: raw}
 				case "custody":
-					token, ok := d.broker.custodyRegistry.AccessToken(serverSpec.AuthRef)
+					token, ok := br.custodyRegistry.AccessToken(serverSpec.AuthRef)
 					if !ok {
 						return response, fmt.Errorf("custody access token unavailable")
 					}
 					response.Headers = map[string]string{"Authorization": "Bearer " + token}
 				}
 				for _, name := range serverSpec.RedactNames {
-					value, err := d.broker.secretStore.Resolve(name)
+					value, err := br.secretStore.Resolve(name)
 					if err != nil {
 						return mcpworkerapi.CredentialResponse{}, err
 					}
@@ -142,7 +143,7 @@ func (d *daemonRuntime) resolveMCPServers() ([]mcpworkersup.Server, error) {
 		case "custody":
 			authDesc = "custody:" + spec.AuthRef
 		}
-		d.broker.auditf("mcp: remote %s configured (%s, auth %s)", spec.Name, mcpgw.AuditRemoteOrigin(spec.URL), authDesc)
+		br.auditf("mcp: remote %s configured (%s, auth %s)", spec.Name, mcpgw.AuditRemoteOrigin(spec.URL), authDesc)
 		servers = append(servers, server)
 	}
 	for i := range servers {

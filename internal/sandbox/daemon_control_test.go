@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	sandboxsupervisor "github.com/ejpir/gantry/internal/sandbox/supervisor"
 )
 
 type closeFailureRunner struct {
@@ -36,7 +37,8 @@ func (*closeFailureRunner) DialStream(uint32) (net.Conn, error) { return nil, er
 func TestCloseVMDevicesPreservesSplitWorkerFailure(t *testing.T) {
 	want := errors.New("disk flush failed")
 	runner := &closeFailureRunner{done: make(chan struct{}), err: want}
-	runtime := &daemonRuntime{runner: runner}
+	runtime := &daemonSupervisor{}
+	runtime.guest.SetRunner(runner)
 
 	if err := runtime.closeVMDevices(); !errors.Is(err, want) {
 		t.Fatalf("closeVMDevices() = %v, want %v", err, want)
@@ -44,14 +46,19 @@ func TestCloseVMDevicesPreservesSplitWorkerFailure(t *testing.T) {
 	if runner.calls != 1 {
 		t.Fatalf("runner Close called %d times", runner.calls)
 	}
-	if runtime.runner != nil {
-		t.Fatal("closed runner retained for deferred teardown")
+	if err := runtime.closeVMDevices(); !errors.Is(err, want) || runner.calls != 1 {
+		t.Fatalf("repeated close = %v, calls %d; want cached error and one close", err, runner.calls)
 	}
 }
 
 func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
 	dir := t.TempDir()
-	runtime := &daemonRuntime{dir: dir}
+	runtime := &daemonSupervisor{dir: dir}
+	for _, phase := range []sandboxsupervisor.Phase{sandboxsupervisor.Loaded, sandboxsupervisor.HostReady, sandboxsupervisor.GuestPrepared, sandboxsupervisor.GuestConnected, sandboxsupervisor.ControlReady} {
+		if err := runtime.lifecycle.Advance(phase); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := runtime.publishReady(); err == nil {
 		t.Fatal("publishReady succeeded without a control listener")
 	}
@@ -64,13 +71,14 @@ func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = listener.Close() }()
-	runtime.control = listener
-	runtime.broker = &broker{}
+	runtime.control.SetListener(listener)
+	runtime.control.SetBroker(&broker{})
 	if err := os.WriteFile(filepath.Join(dir, config.MCPRestartMarker), []byte("restart required\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runner := &closeFailureRunner{done: make(chan struct{})}
-	runtime.runner = runner
+	runtime.guest.SetRunner(runner)
+	defer runtime.background.Close()
 	if err := runtime.publishReady(); err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +91,9 @@ func TestPublishReadyRequiresListeningControlBroker(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ready")); err != nil {
 		t.Fatalf("ready marker after control startup: %v", err)
+	}
+	if got := runtime.lifecycle.Phase(); got != sandboxsupervisor.Ready {
+		t.Fatalf("daemon phase after readiness = %s, want %s", got, sandboxsupervisor.Ready)
 	}
 	if _, err := os.Stat(filepath.Join(dir, config.MCPRestartMarker)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("MCP restart marker after ready: %v", err)

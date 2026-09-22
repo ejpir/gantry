@@ -16,6 +16,18 @@ func TestMemorySliderKeepsHostBounds(t *testing.T) {
 	}
 }
 
+func TestResourceSliderBoundaryUsesOwnedLimits(t *testing.T) {
+	slider := newResourceSlider(2, 12, 2, 6)
+	slider.SetBoundary(true)
+	if slider.Value != slider.Max {
+		t.Fatalf("maximum boundary = %d, want %d", slider.Value, slider.Max)
+	}
+	slider.SetBoundary(false)
+	if slider.Value != slider.Min {
+		t.Fatalf("minimum boundary = %d, want %d", slider.Value, slider.Min)
+	}
+}
+
 func TestMemorySliderMouseReachesHostMaximum(t *testing.T) {
 	slider := newMemorySlider(65, 16384, 512)
 	slider.SetFraction(39, 40)

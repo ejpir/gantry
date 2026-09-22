@@ -72,11 +72,26 @@ The ordinary command paths are:
 - `exec <name>` connects to that supervisor's local session broker.
 - one-shot `exec` creates a randomly named transient sandbox, runs one
   session, and deletes it.
-- `tui` uses the same local lifecycle and control surfaces as the CLI, with
-  separate source-scoped clients for remote rows.
+- `tui` uses the same lifecycle and control surfaces locally and through the
+  authenticated manager dashboard API. Every sandbox, traffic, policy, mount,
+  port, secret-name, MCP, packet, audit, image, and registry row retains its
+  source profile, so reads and mutations cannot target a same-named sandbox on
+  another host. Interactive remote entry uses the manager's SSH upgrade.
 - `serve` provides the HTTP/JSON manager API on a Unix socket by default, or
   on explicitly configured TLS listeners with bearer authentication. It
   delegates lifecycle work to the same implementation.
+
+Manager operation state has one owner. `manager/operationstate.Store` advances the typed
+`running → succeeded|failed` machine, owns idempotency routing and event
+publication, and issues private completion capabilities so stale or duplicate
+progress/results cannot mutate a record. Wire state strings remain unchanged.
+The process-level `manager/runtimeowner.Owner` advances
+`new → locked → listening → feeds-ready → serving → stopping → stopped|failed`
+and owns the state lock, listeners, HTTP servers, policy receivers, and joined
+background work. The service-level `managerRuntime` exclusively owns request
+and background-task admission, cancellation, and joining; HTTP handlers borrow
+its context. Shutdown closes admission, cancels work, drains servers, joins
+borrowers, and releases receivers, endpoint paths, then the state lock.
 
 Create and resume use the typed `internal/sandbox/lifecycle` application
 contract. CLI flags, HTTP JSON, and dashboard form inputs are converted into
@@ -89,13 +104,41 @@ read-only default and cached-image policy.
 read model. The daemon publishes its immutable boot settings before readiness,
 allowing frontends to distinguish active resources from saved changes that
 require restart. The create dialog owns its form state and emits control
-geometry during rendering.
+geometry during rendering. `dashboard/operationstate.State` issues generation-
+scoped completion capabilities, so a delayed result cannot complete a later
+operation with the same action and target. `dashboard/refreshstate.State` uses
+the same ownership rule: only the newest admitted generation may publish rows.
+Modal open, replacement, and close transitions are centralized in the dialog state
+owner while dialog-specific fields remain with their form owners. Closing a
+modal delegates focus release and sensitive-value clearing to each form owner.
+`dashboard/pagestate.Owner` owns bounded page transitions and explicit cycling
+order, while `dashboard/notificationstate.Owner` owns toast replacement and
+expiry generations. `dashboard/selectionstate.Owner` owns all table and card
+cursor/viewport positions. Refresh rebuilds restore selections by stable row
+keys and then clamp cursor and viewport positions inside that owner.
 
 Dashboard shutdown cancels and joins its launch operations and background
 subprocesses. Preparation checks cancellation between its existing bounded
 stages; a launch cancelled before readiness reaps its uncommitted daemon.
 After readiness the persistent sandbox owns its daemon independently of the
 caller. Subprocess diagnostics retain a bounded tail.
+
+### Declarative sandbox manifests
+
+`internal/sandbox/manifest` owns the strict `gantry.dev/v1alpha1` public YAML
+schema. It rejects unknown/duplicate fields, aliases, merge keys, custom tags,
+and multiple documents. Host paths are normalized relative to the manifest,
+then the compiler produces `config.RunOptions`; it never decodes YAML into the
+resolved `RunConfig` persistence model or bypasses the shared resolver.
+
+The normalized manifest digest is recorded as provenance in `sandbox.json`.
+The configuration store clears that provenance whenever an imperative
+persistent mutation changes behavior, allowing `gantry apply` to detect drift.
+Changed running sandboxes pass through orderly supervisor shutdown before the
+new configuration is resolved and started. Existing state directories are not
+replaced, and failed launches restore the preceding configuration before a
+recovery start. Export is a redacted projection: secret values never exist in
+the persisted input and pinned public policy material may be emitted inline.
 
 ### Sandbox supervisor
 
@@ -108,6 +151,18 @@ The supervisor is the trusted host control plane for one sandbox. It owns:
 - host share roots and share admission policy;
 - port and policy mutations, traffic snapshots, and graceful shutdown;
 - the persistent guest ttrpc connection over virtio-vsock.
+
+Runtime ownership is split into four explicit planes. `hostplane.Plane` owns the
+lifetime lock, configuration store, audit sink, network, shares, and ports;
+`guestplane.Plane` owns the VMM runner, guest RPC transport, and guest-exit
+waiter; `controlplane.Plane` owns the control and credential listeners, broker,
+SSH/MCP gateways, signal channels, and OAuth watcher;
+`supervisor.BackgroundGroup` provides cancel-before-join admission for
+goroutines that borrow those planes. The
+supervisor alone advances the daemon phase machine and closes background,
+control, guest, then host ownership in reverse acquisition order. Borrowed
+capabilities omit `Close`; only their owning plane can release the underlying
+resource.
 
 The supervisor runs with the privileges of the user who launched Gantry. It
 does not run as a system daemon.
@@ -174,6 +229,22 @@ map one anonymous RAM section and exchange validated exits through fixed
 shared-memory mailboxes/events; low-volume control uses authenticated pipes.
 The broker receives no disks, share roots, guest console, or network handles.
 
+Inside `internal/vmm`, `Machine` alone advances the single-use lifecycle
+`prepared → starting → running → exited → stopping → closed`. Backend adoption
+is the `starting → running` ownership transfer. Shutdown can enter `stopping`
+from any live phase, disables interrupt publication, stops and joins the native
+backend, and only then asks `machineResources` to release virtio devices,
+legacy-device workers, guest RAM, and inherited host capabilities in reverse
+acquisition order. Runtime borrowers such as hot-memory mapping and the WHPX
+transport do not expose `Close`; the owning machine supplies narrow revocation
+callbacks where failure handling needs them. The worker process itself remains
+owned by `guestplane.Plane`; `vmm.Machine` owns only in-process hypervisor and
+guest resources. Disk and network descriptors transfer into their virtio core,
+native vCPU goroutines remain with the backend lifecycle, and the x86 PIT now
+cancels and joins its timer worker before the legacy-device cluster is released.
+Console writers, packet policies, traffic observers, and filesystem handlers
+without an explicit `Owner` remain borrowed.
+
 The supervisor passes pre-opened files and authenticated channels, so a
 confined worker does not need general host-path access. Workload and IDE
 writable layers are independent ordered descriptors with separate virtio-blk
@@ -201,6 +272,10 @@ The network worker runs the userspace IPv4 stack, DNS gateway, egress policy,
 host-to-guest forwarding, and traffic accounting. Frames leaving the VM cross
 the policy point before they reach a host socket. DNS replies cross it on the
 way back so the policy can maintain bounded, TTL-limited domain allowances.
+Traffic aggregation, DNS attribution, snapshot persistence, and periodic
+publication have separate owners. Per-worker epoch capabilities merge only
+monotonic, bounded deltas, and the publisher joins its final flush before
+reporting shutdown complete.
 
 The network worker necessarily retains restricted stream and datagram socket
 creation authority. It does not receive secrets, writable disks, guest RAM,
@@ -306,7 +381,11 @@ start request
 
 The parent `start` command returns only after both guest RPC and `ctl.sock` can
 accept work. Boot inputs are opened before worker confinement, which prevents
-a path from being exchanged between validation and use.
+a path from being exchanged between validation and use. The VMM worker prepares
+those inherited capabilities before pivoting to its private root because host
+LSMs may reject metadata operations on paths disconnected by `pivot_root`.
+Preparation processes no guest input; confinement is applied and verified
+before the boot acknowledgment and before virtual CPUs run.
 
 ## Filesystems and persistence
 
@@ -406,6 +485,30 @@ The supervisor opens and validates each host root before admitting it to the
 share hub. Guest requests name an admitted tag and a path relative to that
 root; they do not carry arbitrary host paths. The backend applies read-only
 policy before mutating host files and rejects traversal outside the root.
+
+`sharefs/lifecycle.Owner` serializes hub and standalone-server shutdown as
+`active → stopping → closed`. Shutdown stops admission, drains serving
+requests, detaches notification borrowers, releases every file and directory
+handle retained by the FUSE bridge, closes each export watcher, and then
+releases its pinned root. OnForget releases that require a request-gate
+upgrade run as owned workers; shutdown stops worker admission and joins every
+admitted worker before publishing `closed`. Linux, Windows, and macOS watcher
+shutdown uses the same joined lifecycle, so duplicate closes cannot return
+before descriptors, handles, dispatch callbacks, and queues are released.
+`sharefs/exportstate.Owner` advances each export through
+`active → draining → revoked → gone`, with `gone` published only after watcher
+and root release complete. `sharefs/coherencestate.Owner` separately owns cache
+health and joins watcher/cache closure, preventing stale host notifications from
+mutating a closing export. `sharefs/preparedstate.Owner` makes each pinned,
+unpublished root single-use: publication attempts serialize, failed attempts
+return ownership, and successful publication or close consumes it exactly once.
+On Unix, each export directly owns its directory-capability cache rather than
+registering it globally. Borrowers can prefetch, open, forget, or invalidate
+entries but cannot close the cache; export release closes cached parent
+descriptors before releasing the pinned root. The Windows export backend also
+tracks every native file handle and directory stream. Its joined shutdown stops
+handle admission, closes streams and files, and only then releases the root
+handle.
 
 The guest mounts the multiplexed virtio-fs hub once, then bind-mounts admitted
 tags into the workload container. Live add and remove mutate the hub manifest

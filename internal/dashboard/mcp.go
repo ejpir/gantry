@@ -12,18 +12,16 @@ import (
 const mcpRemoteSubmitFocus = 9
 
 func (m *sandboxTUIModel) openMCPRemoteDialog(edit bool) tea.Cmd {
-	preferred := ""
+	preferred, preferredRemote := "", ""
 	if row := m.selectedMCPServer(); row != nil {
-		preferred = row.Sandbox
+		preferred, preferredRemote = row.Sandbox, row.Remote
 	}
-	if !m.mcpSandbox.ResetWhere(m.sandboxes, preferred, func(sandbox tuiSandbox) bool {
+	if !m.mcpSandbox.ResetWhereSource(m.sandboxes, preferred, preferredRemote, func(sandbox tuiSandbox) bool {
 		return sandbox.State != tuiStarting
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Create a sandbox or wait for startup to finish before configuring MCP.")
 	}
-	m.dialog = tuiMCPRemoteDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiMCPRemoteDialog)
 	m.mcpEditing = edit
 	m.mcpName.Reset()
 	m.mcpURL.Reset()
@@ -216,7 +214,9 @@ func (m *sandboxTUIModel) mcpRemoteRequest() dashboardapi.MCPRemoteRequest {
 
 func (m *sandboxTUIModel) submitMCPRemote() (tea.Model, tea.Cmd) {
 	request := m.mcpRemoteRequest()
-	if err := m.service.ValidateMCPRemote(request); err != nil {
+	remote := m.mcpSandbox.Remote()
+	service := m.serviceForRemote(remote)
+	if err := service.ValidateMCPRemote(request); err != nil {
 		m.formError = err.Error()
 		focus := map[string]int{
 			"sandbox": 0, "name": 1, "url": 2, "auth": 3, "auth_ref": 4,
@@ -227,27 +227,23 @@ func (m *sandboxTUIModel) submitMCPRemote() (tea.Model, tea.Cmd) {
 		}
 		return m, m.focusMCPRemote(focus)
 	}
-	target := m.sandboxNamed(request.Sandbox)
+	target := m.sandboxAtSource(request.Sandbox, remote)
 	running := target != nil && target.State == tuiRunning
-	m.closeDialog()
-	m.busyAction = "mcp configure"
-	m.busyName = request.Sandbox + "/" + request.Name
-	return m, tea.Batch(configureMCPRemoteCmd(m.service, request, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp configure", remoteOperationLabel(request.Sandbox+"/"+request.Name, remote),
+		configureMCPRemoteCmd(service, request, running))
 }
 
 func (m *sandboxTUIModel) openMCPFilesystemDialog() tea.Cmd {
-	preferred := ""
+	preferred, preferredRemote := "", ""
 	if row := m.selectedMCPServer(); row != nil {
-		preferred = row.Sandbox
+		preferred, preferredRemote = row.Sandbox, row.Remote
 	}
-	if !m.mcpSandbox.ResetWhere(m.sandboxes, preferred, func(sandbox tuiSandbox) bool {
+	if !m.mcpSandbox.ResetWhereSource(m.sandboxes, preferred, preferredRemote, func(sandbox tuiSandbox) bool {
 		return sandbox.State != tuiStarting
 	}) {
 		return m.showToast(tuiToastInfo, "No eligible sandbox", "Create a sandbox or wait for startup to finish before configuring MCP.")
 	}
-	m.dialog = tuiMCPFilesystemDialog
-	m.dialogScroll = 0
-	m.formError = ""
+	m.tuiDialogState.openForm(tuiMCPFilesystemDialog)
 	m.syncMCPFilesystemFields()
 	m.resizeInputs()
 	return m.focusMCPFilesystem(0)
@@ -257,7 +253,7 @@ func (m *sandboxTUIModel) syncMCPFilesystemFields() {
 	m.mcpFSRoot.SetValue("/")
 	m.mcpFSUser.SetValue("nobody")
 	for _, row := range m.mcpServers {
-		if row.Sandbox == m.mcpSandbox.Value() && row.Type == "local" && row.Error == "" {
+		if row.Sandbox == m.mcpSandbox.Value() && row.Remote == m.mcpSandbox.Remote() && row.Type == "local" && row.Error == "" {
 			m.mcpFSRoot.SetValue(row.Root)
 			m.mcpFSUser.SetValue(row.User)
 			return
@@ -321,7 +317,9 @@ func (m *sandboxTUIModel) submitMCPFilesystem() (tea.Model, tea.Cmd) {
 	request := dashboardapi.MCPFilesystemRequest{
 		Sandbox: m.mcpSandbox.Value(), Root: strings.TrimSpace(m.mcpFSRoot.Value()), User: strings.TrimSpace(m.mcpFSUser.Value()),
 	}
-	if err := m.service.ValidateMCPFilesystem(request); err != nil {
+	remote := m.mcpSandbox.Remote()
+	service := m.serviceForRemote(remote)
+	if err := service.ValidateMCPFilesystem(request); err != nil {
 		m.formError = err.Error()
 		if dashboardErrorField(err) == "sandbox" {
 			return m, m.focusMCPFilesystem(0)
@@ -331,12 +329,10 @@ func (m *sandboxTUIModel) submitMCPFilesystem() (tea.Model, tea.Cmd) {
 		}
 		return m, m.focusMCPFilesystem(1)
 	}
-	target := m.sandboxNamed(request.Sandbox)
+	target := m.sandboxAtSource(request.Sandbox, remote)
 	running := target != nil && target.State == tuiRunning
-	m.closeDialog()
-	m.busyAction = "mcp filesystem"
-	m.busyName = request.Sandbox + "/fs"
-	return m, tea.Batch(configureMCPFilesystemCmd(m.service, request, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp filesystem", remoteOperationLabel(request.Sandbox+"/fs", remote),
+		configureMCPFilesystemCmd(service, request, running))
 }
 
 func (m *sandboxTUIModel) removeSelectedMCPRemote() (tea.Model, tea.Cmd) {
@@ -345,13 +341,11 @@ func (m *sandboxTUIModel) removeSelectedMCPRemote() (tea.Model, tea.Cmd) {
 		m.closeDialog()
 		return m, nil
 	}
-	target := m.sandboxNamed(row.Sandbox)
+	target := m.sandboxAtSource(row.Sandbox, row.Remote)
 	running := target != nil && target.State == tuiRunning
 	copyRow := *row
-	m.closeDialog()
-	m.busyAction = "mcp remove"
-	m.busyName = row.Sandbox + "/" + row.Name
-	return m, tea.Batch(removeMCPRemoteCmd(m.service, copyRow, running), m.ensureAnimation())
+	return m.beginServiceAction("mcp remove", remoteOperationLabel(row.Sandbox+"/"+row.Name, row.Remote),
+		removeMCPRemoteCmd(m.serviceForRemote(row.Remote), copyRow, running))
 }
 
 func (m sandboxTUIModel) renderMCPRemoteDialog(theme tuiTheme, width int) string {
@@ -499,7 +493,7 @@ func (m sandboxTUIModel) renderMCPRemoveDialog(theme tuiTheme, width int) string
 	if row == nil || row.Type != "remote" {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No remote MCP server selected.")
 	}
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Name)
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Sandbox, row.Remote) + " / " + row.Name)
 	detail := lipgloss.NewStyle().Foreground(theme.secondary).Render(row.URL)
 	warning := lipgloss.NewStyle().Foreground(theme.warning).Render("The live MCP worker is immutable; restart a running sandbox to withdraw this server.")
 	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)

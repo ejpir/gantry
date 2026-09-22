@@ -222,7 +222,7 @@ func (m sandboxTUIModel) renderMenuBar(theme tuiTheme, width int) string {
 	}
 
 	summary := m.tabSummary(theme)
-	if m.refreshVisible {
+	if m.tuiRefreshState.Visible() {
 		summary = m.spinner.View() + lipgloss.NewStyle().Foreground(theme.muted).Render(" syncing")
 	}
 	right := summary
@@ -349,10 +349,12 @@ func (m sandboxTUIModel) tabRects(width int) []tuiTabRect {
 func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 	switch m.page {
 	case tuiOverviewPage:
-		running, configuredVCPUs := 0, 0
+		running, configuredVCPUs, remoteCount := 0, 0, 0
 		unknownConfig := false
 		for _, sandbox := range m.sandboxes {
-			if sandbox.ConfigError {
+			if sandbox.Remote != "" {
+				remoteCount++
+			} else if sandbox.ConfigError {
 				unknownConfig = true
 			} else {
 				configuredVCPUs += maxInt(1, sandbox.VCPUs)
@@ -366,7 +368,11 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 			configured += "+?"
 		}
 		hostVCPUs := maxInt(1, m.limits.MaxVCPUs)
-		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d running · %s vCPU configured · %d host", running, configured, hostVCPUs))
+		summary := fmt.Sprintf(" %d running · %s vCPU configured · %d host", running, configured, hostVCPUs)
+		if remoteCount > 0 {
+			summary += fmt.Sprintf(" · %d remote", remoteCount)
+		}
+		return lipgloss.NewStyle().Foreground(theme.success).Render("●") + lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
 	case tuiTrafficPage:
 		var tx, rx, blocked uint64
 		for _, sandbox := range m.sandboxes {
@@ -470,8 +476,11 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 		}
 		return lipgloss.NewStyle().Foreground(theme.secondary).Render(summary)
 	default:
-		running, starting := 0, 0
+		running, starting, remoteCount := 0, 0, 0
 		for _, sandbox := range m.sandboxes {
+			if sandbox.Remote != "" {
+				remoteCount++
+			}
 			switch sandbox.State {
 			case tuiRunning:
 				running++
@@ -484,6 +493,9 @@ func (m sandboxTUIModel) tabSummary(theme tuiTheme) string {
 		if starting > 0 {
 			right += "  " + lipgloss.NewStyle().Foreground(theme.warning).Render("◐") +
 				lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf(" %d starting", starting))
+		}
+		if remoteCount > 0 {
+			right += lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("  ·  %d remote", remoteCount))
 		}
 		return right
 	}
@@ -553,7 +565,7 @@ func (m sandboxTUIModel) renderSandboxCard(theme tuiTheme, layout tuiDashboardLa
 	if selected {
 		nameStyle = nameStyle.Foreground(theme.accent)
 	}
-	header := joinSides(nameStyle.Render(truncateText(sandbox.Name, maxInt(4, innerWidth-lipgloss.Width(state)-1))), state, innerWidth)
+	header := joinSides(nameStyle.Render(truncateText(sandboxDisplayName(sandbox), maxInt(4, innerWidth-lipgloss.Width(state)-1))), state, innerWidth)
 	separator := lipgloss.NewStyle().Foreground(theme.borderMuted).Render(strings.Repeat("─", innerWidth))
 
 	image := labeledValue(theme, "image", sandbox.Image, innerWidth)
@@ -629,8 +641,8 @@ func (m sandboxTUIModel) renderNewSandboxCard(theme tuiTheme, layout tuiDashboar
 }
 
 func (m sandboxTUIModel) renderSandboxState(theme tuiTheme, sandbox tuiSandbox) string {
-	if m.busyName == sandbox.Name {
-		return m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render(busyLabel(m.busyAction))
+	if m.tuiOperationState.Name() == sandboxOperationName(sandbox) {
+		return m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(theme.warning).Render(busyLabel(m.tuiOperationState.Action()))
 	}
 	switch sandbox.State {
 	case tuiRunning:
@@ -657,8 +669,8 @@ func sandboxCardActions(sandbox tuiSandbox) []tuiCardAction {
 }
 
 func (m sandboxTUIModel) renderCardActions(theme tuiTheme, sandbox tuiSandbox, selected bool, width int) string {
-	if m.busyName == sandbox.Name {
-		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.busyAction))+"…"), width)
+	if m.tuiOperationState.Name() == sandboxOperationName(sandbox) {
+		return truncateANSI(m.spinner.View()+" "+lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToLower(busyLabel(m.tuiOperationState.Action()))+"…"), width)
 	}
 	var rendered []string
 	for _, action := range sandboxCardActions(sandbox) {
@@ -693,11 +705,11 @@ func (m sandboxTUIModel) renderStatusBar(theme tuiTheme, width int) string {
 
 	var left string
 	budget := maxInt(1, innerWidth-lipgloss.Width(right)-1)
-	if m.busyAction != "" {
-		if m.busyProgress != "" {
-			left = truncateANSI(lipgloss.NewStyle().Foreground(theme.text).Render(m.busyProgress), budget)
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
+		if m.tuiOperationState.Progress() != "" {
+			left = truncateANSI(lipgloss.NewStyle().Foreground(theme.text).Render(m.tuiOperationState.Progress()), budget)
 		} else {
-			left = m.spinner.View() + " " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToLower(busyLabel(m.busyAction))+" "+m.busyName+"…")
+			left = m.spinner.View() + " " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToLower(busyLabel(m.tuiOperationState.Action()))+" "+m.tuiOperationState.Name()+"…")
 		}
 	} else {
 		separator := lipgloss.NewStyle().Foreground(theme.border).Render("  •  ")
@@ -745,6 +757,9 @@ func (m sandboxTUIModel) pageContextHints() [][2]string {
 		if len(m.sandboxes) == 0 {
 			return [][2]string{{"enter", "create"}, {"n", "new"}, {"r", "refresh"}, {"?", "help"}}
 		}
+		if selected := m.selected(); selected != nil && selected.Remote != "" {
+			return [][2]string{{"enter", "sandbox view"}, {"t", "traffic"}, {"e", "edit"}, {"i", "details"}, {"B", "remotes"}, {"?", "help"}}
+		}
 		return [][2]string{{"enter", "open"}, {"t", "traffic"}, {"n", "new"}, {"?", "help"}}
 	case tuiTrafficPage:
 		return [][2]string{{"↑/↓", "inspect"}, {"a", "allow/block"}, {"r", "remove rule"}, {"R", "refresh"}, {"tab", "next view"}, {"?", "help"}}
@@ -772,6 +787,12 @@ func (m sandboxTUIModel) pageContextHints() [][2]string {
 		return [][2]string{{"enter", "create"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	}
 	selected := m.selected()
+	if selected != nil && selected.Remote != "" {
+		if selected.State == tuiRunning {
+			return [][2]string{{"enter", "open"}, {"s", "stop"}, {"e", "edit"}, {"i", "details"}, {"d", "remove"}, {"B", "remotes"}, {"?", "help"}}
+		}
+		return [][2]string{{"enter", "start"}, {"s", "start"}, {"e", "edit"}, {"i", "details"}, {"d", "remove"}, {"B", "remotes"}, {"?", "help"}}
+	}
 	if selected != nil && selected.State == tuiRunning {
 		return [][2]string{{"enter", "open"}, {"s", "stop"}, {"e", "edit"}, {"i", "details"}, {"d", "remove"}, {"?", "help"}}
 	}
@@ -788,11 +809,11 @@ func (m sandboxTUIModel) pagePosition() string {
 	if m.page == tuiSandboxesPage {
 		return fmt.Sprintf("%d/%d", m.cursor+1, m.entryCount())
 	}
-	cursor, _, count := m.tableState()
-	if count == 0 || cursor == nil {
+	cursor, _, count, ok := m.tableState()
+	if count == 0 || !ok {
 		return "0/0"
 	}
-	return fmt.Sprintf("%d/%d", *cursor+1, count)
+	return fmt.Sprintf("%d/%d", cursor+1, count)
 }
 
 func (m sandboxTUIModel) renderCardScrollbar(theme tuiTheme, layout tuiDashboardLayout) string {
@@ -1064,18 +1085,23 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No sandbox selected.")
 	}
 	state := m.renderSandboxState(theme, *sandbox)
-	rows := [][2]string{
-		{"State", state},
-		{"Image", sandbox.Image},
-		{"Runtime", sandbox.Runtime},
-		{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
-		{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())},
-		{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
-		{"SSH", map[bool]string{true: "enabled", false: "disabled"}[sandbox.SSH]},
-		{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
-		{"Storage", sandboxStorageSummary(*sandbox, true)},
-		{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
+	source := "local"
+	if sandbox.Remote != "" {
+		source = "remote · " + sandbox.Remote
 	}
+	rows := [][2]string{{"State", state}}
+	rows = append(rows,
+		[2]string{"Source", source},
+		[2]string{"Image", sandbox.Image},
+		[2]string{"Runtime", sandbox.Runtime},
+		[2]string{"Kernel", pathBaseOr(sandbox.Kernel, "unknown")},
+		[2]string{"Compute", fmt.Sprintf("%d CPU · %d MiB RAM", maxInt(1, sandbox.DisplayCPUs()), sandbox.DisplayMemoryMiB())},
+		[2]string{"Isolation", defaultText(sandbox.ProcessIsolation, "auto")},
+		[2]string{"SSH", map[bool]string{true: "enabled", false: "disabled"}[sandbox.SSH]},
+		[2]string{"Dev Containers", map[bool]string{true: "enabled", false: "disabled"}[sandbox.DevContainers]},
+		[2]string{"Storage", sandboxStorageSummary(*sandbox, true)},
+		[2]string{"Network", map[bool]string{true: "enabled", false: "disabled"}[sandbox.Net]},
+	)
 	if sandbox.RestartRequired {
 		rows = append(rows, [2]string{"Next boot", fmt.Sprintf("%d CPU · %d MiB RAM (restart required)", sandbox.VCPUs, sandbox.MemMB)})
 	}
@@ -1124,10 +1150,14 @@ func (m sandboxTUIModel) renderInfoDialog(theme tuiTheme, width int) string {
 		}
 		paths = append(paths, lipgloss.NewStyle().Foreground(theme.muted).Render(label)+"\n"+lipgloss.Wrap(path, width, ""))
 	}
-	appendPath("Kernel asset", sandbox.Kernel)
-	appendPath("Disk image", sandbox.RWLayer)
-	appendPath("Policy file", sandbox.NetPolicy)
-	appendPath("Config", sandbox.ConfigPath)
+	pathOwner := ""
+	if sandbox.Remote != "" {
+		pathOwner = " (manager host)"
+	}
+	appendPath("Kernel asset"+pathOwner, sandbox.Kernel)
+	appendPath("Disk image"+pathOwner, sandbox.RWLayer)
+	appendPath("Policy file"+pathOwner, sandbox.NetPolicy)
+	appendPath("Config"+pathOwner, sandbox.ConfigPath)
 	footer := lipgloss.NewStyle().Foreground(theme.muted).Render("c copy all  •  i / esc close")
 	return header + "\n\n" + strings.Join(lines, "\n") + "\n\n" + strings.Join(paths, "\n\n") + "\n\n" + footer
 }
@@ -1175,7 +1205,7 @@ func (m sandboxTUIModel) renderRemoveDialog(theme tuiTheme, width int) string {
 	header := m.dialogHeader(theme, "Remove Sandbox", width)
 	name := ""
 	if selected := m.selected(); selected != nil {
-		name = selected.Name
+		name = sandboxDisplayName(*selected)
 	}
 	label := lipgloss.NewStyle().Foreground(theme.secondary).Render("Sandbox: ")
 	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(name)
@@ -1211,7 +1241,7 @@ func (m sandboxTUIModel) renderEditDialog(theme tuiTheme, width int) string {
 	if sandbox == nil {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No sandbox selected.")
 	}
-	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText("Change live capabilities and the next VM allocation for "+sandbox.Name+".", width))
+	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(truncateText("Change live capabilities and the next VM allocation for "+sandboxDisplayName(*sandbox)+".", width))
 	sshLabel := formLabel(theme, "SSH", m.editFocus == 0)
 	sshValue := renderFeatureToggle(theme, m.editSSH)
 	devLabel := formLabel(theme, "Dev Containers", m.editFocus == 1)
@@ -1256,10 +1286,10 @@ func (m sandboxTUIModel) renderShareRemoveDialog(theme tuiTheme, width int) stri
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No share selected.")
 	}
 	label := lipgloss.NewStyle().Foreground(theme.secondary).Render("Share: ")
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Tag)
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Sandbox, row.Remote) + " / " + row.Tag)
 	path := lipgloss.NewStyle().Foreground(theme.muted).Render(truncateText(row.Host, width))
 	warningText := "Existing processes using the share may lose access."
-	if sandbox := m.sandboxNamed(row.Sandbox); sandbox != nil && sandbox.State == tuiStopped {
+	if sandbox := m.sandboxAtSource(row.Sandbox, row.Remote); sandbox != nil && sandbox.State == tuiStopped {
 		warningText = "This share will no longer be attached on the next start."
 	}
 	warning := lipgloss.NewStyle().Foreground(theme.error).Render(warningText)
@@ -1277,7 +1307,11 @@ func (m sandboxTUIModel) renderShareAddDialog(theme tuiTheme, width int) string 
 	sandboxLabel := formLabel(theme, "Sandbox", m.shareFocus == 0)
 	sandboxField := m.shareSandbox.View(theme, width, m.shareFocus == 0)
 	tagLabel := formLabel(theme, "Tag", m.shareFocus == 1)
-	pathLabel := formLabel(theme, "Host path", m.shareFocus == 2)
+	hostLabel := "Host path"
+	if m.shareSandbox.Remote() != "" {
+		hostLabel = "Manager host path"
+	}
+	pathLabel := formLabel(theme, hostLabel, m.shareFocus == 2)
 	mountLabel := formLabel(theme, "Mount point", m.shareFocus == 3)
 	ownerLabel := formLabel(theme, "Guest owner", m.shareFocus == 4)
 	tagField := renderInputField(theme, m.shareTag.View(), width, m.shareFocus == 1)
@@ -1312,7 +1346,7 @@ func (m sandboxTUIModel) renderShareAddDialog(theme tuiTheme, width int) string 
 }
 
 func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
-	target := m.sandboxNamed(m.shareSandbox.Value())
+	target := m.sandboxAtSource(m.shareSandbox.Value(), m.shareSandbox.Remote())
 	running := target == nil || target.State == tuiRunning
 	live := running
 	title = "Add Live Share"
@@ -1328,7 +1362,7 @@ func (m sandboxTUIModel) shareDialogCopy() (title, description, button string) {
 	}
 	tag := strings.TrimSpace(m.shareTag.Value())
 	mountpoint := strings.TrimSpace(m.shareMount.Value())
-	customMount := mountpoint != "" && mountpoint != m.service.DefaultShareMount(tag)
+	customMount := mountpoint != "" && mountpoint != m.serviceForRemote(m.shareSandbox.Remote()).DefaultShareMount(tag)
 	if customMount && live {
 		title = "Add Share"
 		description = "Save this container mount point; restart the sandbox to apply it."
@@ -1359,7 +1393,7 @@ func (m sandboxTUIModel) renderPortUnpublishDialog(theme tuiTheme, width int) st
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No port selected.")
 	}
 	label := lipgloss.NewStyle().Foreground(theme.secondary).Render("Publish: ")
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("%s  %s → %d/%s", row.Sandbox, row.Bind, row.Guest, row.Proto))
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("%s  %s → %d/%s", sourceDisplayName(row.Sandbox, row.Remote), row.Bind, row.Guest, row.Proto))
 	warning := lipgloss.NewStyle().Foreground(theme.error).Render(row.Bind + " will stop forwarding into the sandbox.")
 	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(fmt.Sprintf("Unpublish %s?", row.Bind))
 	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
@@ -1372,6 +1406,9 @@ func (m sandboxTUIModel) renderPortUnpublishDialog(theme tuiTheme, width int) st
 func (m sandboxTUIModel) renderPortPublishDialog(theme tuiTheme, width int) string {
 	header := m.dialogHeader(theme, "Publish Port", width)
 	description := "Forward a guest port to a host listener, without a restart."
+	if m.portSandbox.Remote() != "" {
+		description = "Forward a guest port to a listener on the remote manager host."
+	}
 	sandboxLabel := formLabel(theme, "Sandbox", m.portFocus == 0)
 	sandboxField := m.portSandbox.View(theme, width, m.portFocus == 0)
 	bindLabel := formLabel(theme, "Host bind", m.portFocus == 1)
@@ -1414,7 +1451,11 @@ func (m sandboxTUIModel) renderNetworkPolicyDialog(theme tuiTheme, width int) st
 	description := lipgloss.NewStyle().Foreground(theme.secondary).Render("Replace the running sandbox's egress policy immediately.")
 	sandboxLabel := formLabel(theme, "Sandbox", m.policyFocus == 0)
 	sandboxField := m.policySandbox.View(theme, width, m.policyFocus == 0)
-	pathLabel := formLabel(theme, "Policy file", m.policyFocus == 1) +
+	policyFileLabel := "Policy file"
+	if m.policySandbox.Remote() != "" {
+		policyFileLabel = "Client policy file"
+	}
+	pathLabel := formLabel(theme, policyFileLabel, m.policyFocus == 1) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  blank = built-in default")
 	pathField := renderInputField(theme, m.policyPath.View(), width, m.policyFocus == 1)
 	localLabel := formLabel(theme, "Local network override", m.policyFocus == 2)
@@ -1443,7 +1484,7 @@ func (m sandboxTUIModel) renderNetworkPolicyDialog(theme tuiTheme, width int) st
 }
 
 func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
-	domainRule := m.ruleProtocol == "dns"
+	domainRule := m.ruleProtocol == ruleProtocolDNS
 	title := "Traffic Rule"
 	descriptionText := "Add a highest-priority rule for the selected observed connection."
 	if domainRule {
@@ -1452,9 +1493,9 @@ func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
 	}
 	header := m.dialogHeader(theme, title, width)
 	description := lipgloss.NewStyle().Foreground(theme.secondary).Render(descriptionText)
-	sandboxLabel := formLabel(theme, "Sandbox", m.ruleFocus == 0)
-	sandboxField := m.ruleSandbox.View(theme, width, m.ruleFocus == 0)
-	actionLabel := formLabel(theme, "Decision", m.ruleFocus == 1)
+	sandboxLabel := formLabel(theme, "Sandbox", m.ruleFocus == ruleSandboxFocus)
+	sandboxField := m.ruleSandbox.View(theme, width, m.ruleFocus == ruleSandboxFocus)
+	actionLabel := formLabel(theme, "Decision", m.ruleFocus == ruleActionFocus)
 	actionColor := theme.error
 	if m.ruleAction == "allow" {
 		actionColor = theme.success
@@ -1469,18 +1510,18 @@ func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
 	if domainRule {
 		targetName = "Domain"
 	}
-	targetLabel := formLabel(theme, targetName, m.ruleFocus == 2)
-	targetField := renderInputField(theme, m.ruleTarget.View(), width, m.ruleFocus == 2)
-	protoLabel := formLabel(theme, "Protocol", m.ruleFocus == 3)
+	targetLabel := formLabel(theme, targetName, m.ruleFocus == ruleTargetFocus)
+	targetField := renderInputField(theme, m.ruleTarget.View(), width, m.ruleFocus == ruleTargetFocus)
+	protoLabel := formLabel(theme, "Protocol", m.ruleFocus == ruleProtocolFocus)
 	protoHint := "  (space cycles any/TCP/UDP/ICMP)"
 	if domainRule {
 		protoHint = "  (queried hostname)"
 	}
 	proto := protoLabel + "  " + lipgloss.NewStyle().Foreground(theme.text).Render(strings.ToUpper(m.ruleProtocol)) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render(protoHint)
-	portsLabel := formLabel(theme, "Destination ports", m.ruleFocus == 4) +
+	portsLabel := formLabel(theme, "Destination ports", m.ruleFocus == rulePortsFocus) +
 		lipgloss.NewStyle().Foreground(theme.muted).Render("  TCP/UDP only")
-	portsField := renderInputField(theme, m.rulePorts.View(), width, m.ruleFocus == 4)
+	portsField := renderInputField(theme, m.rulePorts.View(), width, m.ruleFocus == rulePortsFocus)
 	if domainRule {
 		portsLabel = formLabel(theme, "Destination ports", false)
 		portsField = lipgloss.NewStyle().Foreground(theme.muted).Render("not used for DNS allowlists")
@@ -1489,7 +1530,7 @@ func (m sandboxTUIModel) renderRuleAddDialog(theme tuiTheme, width int) string {
 	if m.formError != "" {
 		errorLine = lipgloss.NewStyle().Foreground(theme.error).Render(truncateText(m.formError, width))
 	}
-	button := renderDialogButton(theme, m.ruleAddButtonLabel(), m.ruleFocus == 5, false)
+	button := renderDialogButton(theme, m.ruleAddButtonLabel(), m.ruleFocus == ruleSubmitFocus, false)
 	buttons := alignRight(button, width)
 	hintText := "tab next  •  space toggle  •  enter continue  •  esc cancel"
 	if domainRule {
@@ -1513,7 +1554,7 @@ func (m sandboxTUIModel) renderRuleRemoveDialog(theme tuiTheme, width int) strin
 	if row == nil {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No removable policy entry selected.")
 	}
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " · " + row.Source)
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Sandbox, row.Remote) + " · " + row.Source)
 	detail := lipgloss.NewStyle().Foreground(theme.secondary).Render(strings.ToUpper(row.Action) + " " + row.Target + " " + strings.ToUpper(row.Proto) + " " + defaultText(row.Ports, "any port"))
 	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Remove this policy entry?")
 	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)
@@ -1551,7 +1592,7 @@ func (m sandboxTUIModel) renderSecretRemoveDialog(theme tuiTheme, width int) str
 	if row == nil {
 		return header + "\n\n" + lipgloss.NewStyle().Foreground(theme.muted).Render("No secret selected.")
 	}
-	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Name)
+	value := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Sandbox, row.Remote) + " / " + row.Name)
 	warning := lipgloss.NewStyle().Foreground(theme.error).Render("Future sessions will no longer receive this secret.")
 	question := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render("Delete this secret?")
 	cancel := renderDialogButton(theme, "Cancel", !m.confirmRemove, false)

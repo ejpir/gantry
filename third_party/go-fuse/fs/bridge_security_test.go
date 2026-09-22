@@ -31,7 +31,7 @@ func TestSetattrRejectsFileHandleFromAnotherInode(t *testing.T) {
 
 	bridge.mu.Lock()
 	bridge.kernelNodeIds[child.nodeId] = child
-	foreign := bridge.registerFile(child, struct{}{}, 0)
+	foreign := bridge.registerFile(child, struct{}{}, 0, false)
 	bridge.mu.Unlock()
 
 	in := &fuse.SetAttrIn{}
@@ -53,7 +53,7 @@ func TestSetattrIgnoresUnflaggedFileHandle(t *testing.T) {
 
 	bridge.mu.Lock()
 	bridge.kernelNodeIds[child.nodeId] = child
-	foreign := bridge.registerFile(child, struct{}{}, 0)
+	foreign := bridge.registerFile(child, struct{}{}, 0, false)
 	bridge.mu.Unlock()
 
 	in := &fuse.SetAttrIn{}
@@ -104,7 +104,7 @@ func TestReleaseWaitsForInFlightFileOperation(t *testing.T) {
 		released:     make(chan struct{}),
 	}
 	bridge.mu.Lock()
-	entry := bridge.registerFile(bridge.root, file, 0)
+	entry := bridge.registerFile(bridge.root, file, 0, false)
 	bridge.mu.Unlock()
 
 	readDone := make(chan fuse.Status, 1)

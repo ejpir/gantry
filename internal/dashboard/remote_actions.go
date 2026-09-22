@@ -36,8 +36,11 @@ func (m *sandboxTUIModel) updateRemoteActionKey(key string) (tea.Cmd, bool) {
 		case "enter", "o":
 			return m.openCreateForm(row.target, ""), true
 		case "t":
-			m.busyAction, m.busyName = "remote test", row.target
-			return tea.Batch(testRemoteCmd(m.operations, row.target), m.ensureAnimation()), true
+			owner, ok := m.tuiOperationState.Begin("remote test", row.target, false)
+			if !ok {
+				return nil, true
+			}
+			return tea.Batch(ownTUIOperationCmd(owner, testRemoteCmd(m.operations, row.target)), m.ensureAnimation()), true
 		default:
 			m.onboardingDialog(tuiRemoteRemoveDialog)
 			m.onboardRemove, m.confirmRemove = row.target, false
@@ -103,44 +106,48 @@ func (m *sandboxTUIModel) submitRemoteCreate() (tea.Model, tea.Cmd) {
 		return m, m.focusCreate(focus)
 	}
 	if err := remote.ValidateSandboxName(name); err != nil {
-		return fail(err, 0)
+		return fail(err, createNameFocus)
 	}
 	if ref == "" {
-		return fail(fmt.Errorf("an OCI image reference is required for remote creation"), 1)
+		return fail(fmt.Errorf("an OCI image reference is required for remote creation"), createImageFocus)
 	}
 	if _, err := image.ParseRef(ref); err != nil {
-		return fail(err, 1)
+		return fail(err, createImageFocus)
 	}
-	if err := config.ValidateSandboxResources(uint(m.createMemory.Value), m.createCPUs.Value); err != nil {
-		return fail(err, 7)
+	if err := config.ValidateSandboxResourceBounds(uint(m.createMemory.Value), m.createCPUs.Value); err != nil {
+		return fail(err, createMemoryFocus)
 	}
 	if err := config.ValidateRWLayerSize(uint(m.createDisk.Value)); err != nil {
-		return fail(err, 8)
+		return fail(err, createDiskFocus)
 	}
 	if err := config.ValidateProcessIsolation(m.createIsolation); err != nil {
-		return fail(err, 9)
+		return fail(err, createIsolationFocus)
 	}
 	// Capture a concrete endpoint now. The command refuses a changed profile,
 	// rather than silently routing the form's name to a newly configured host.
 	profile, found, err := remote.Lookup(m.createRemote)
 	if err != nil {
-		return fail(err, 0)
+		return fail(err, createNameFocus)
 	}
 	if !found {
-		return fail(fmt.Errorf("remote %q is no longer configured", m.createRemote), 0)
+		return fail(fmt.Errorf("remote %q is no longer configured", m.createRemote), createNameFocus)
 	}
 	if m.createEndpoint != profile {
-		return fail(fmt.Errorf("remote profile changed; reopen Create Sandbox and select the remote again"), 0)
+		return fail(fmt.Errorf("remote profile changed; reopen Create Sandbox and select the remote again"), createNameFocus)
 	}
 	rw := true
 	request := managerapi.CreateSandboxRequest{Name: name, Image: ref, Runtime: m.createRuntime, RW: &rw,
 		MemoryMiB: uint(m.createMemory.Value), CPUs: m.createCPUs.Value, DiskSizeMiB: uint(m.createDisk.Value),
 		ProcessIsolation: m.createIsolation, SSH: m.createSSH, DevContainers: m.createDevContainers}
 	organization := m.createOrganization
+	owner, ok := m.tuiOperationState.Begin("remote create", name+"@"+profile.Name, false)
+	if !ok {
+		return m, nil
+	}
+	_ = m.tuiOperationState.SetProgress(owner, "Checking remote image cache")
 	m.closeDialog()
-	m.busyAction, m.busyName, m.busyProgress = "remote create", name+"@"+profile.Name, "Checking remote image cache"
 	m.setPage(tuiRemotesPage)
-	return m, tea.Batch(runRemoteCreateCmd(m.operations, profile, organization, request), m.ensureAnimation())
+	return m, tea.Batch(ownTUIOperationCmd(owner, runRemoteCreateCmd(m.operations, profile, organization, request)), m.ensureAnimation())
 }
 
 func runRemoteCreateCmd(group *dashboardOperations, expected remote.Profile, organization string, request managerapi.CreateSandboxRequest) tea.Cmd {
@@ -167,7 +174,7 @@ func runRemoteCreateCmd(group *dashboardOperations, expected remote.Profile, org
 			case <-group.ctx.Done():
 			}
 		}()
-		return receiveTUIProcessStream(stream)
+		return receiveTUIProcessStream(stream, tuiOperationOwner{})
 	}
 }
 

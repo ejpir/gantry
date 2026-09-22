@@ -8,6 +8,7 @@ import dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	for i := range snapshot.Sandboxes {
 		row := &snapshot.Sandboxes[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Name = safeUILine(row.Name)
 		row.State = dashboardapi.SandboxState(safeUILine(string(row.State)))
 		row.Image = safeUILine(row.Image)
@@ -26,6 +27,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Traffic {
 		row := &snapshot.Traffic[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Host = safeUILine(row.Host)
 		row.Address = safeUILine(row.Address)
@@ -33,6 +35,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Rules {
 		row := &snapshot.Rules[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Action = safeUILine(row.Action)
 		row.Target = safeUILine(row.Target)
@@ -43,6 +46,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Mounts {
 		row := &snapshot.Mounts[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Tag = safeUILine(row.Tag)
 		row.Host = safeUILine(row.Host)
@@ -53,6 +57,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Ports {
 		row := &snapshot.Ports[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Bind = safeUILine(row.Bind)
 		row.Proto = safeUILine(row.Proto)
@@ -61,12 +66,14 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Secrets {
 		row := &snapshot.Secrets[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Name = safeUILine(row.Name)
 		row.State = safeUILine(row.State)
 	}
 	for i := range snapshot.MCPServers {
 		row := &snapshot.MCPServers[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Name = safeUILine(row.Name)
 		row.Type = safeUILine(row.Type)
@@ -91,6 +98,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	snapshot.Audit = append([]dashboardapi.AuditEvent(nil), snapshot.Audit...)
 	for i := range snapshot.Audit {
 		row := &snapshot.Audit[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Sandbox = safeUILine(row.Sandbox)
 		row.Line = safeUILine(row.Line)
 		row.Error = safeUILine(row.Error)
@@ -113,6 +121,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Images {
 		row := &snapshot.Images[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Ref = safeUILine(row.Ref)
 		row.Digest = safeUILine(row.Digest)
 		row.Arch = safeUILine(row.Arch)
@@ -128,6 +137,7 @@ func sanitizeSnapshot(snapshot *dashboardapi.Snapshot) {
 	}
 	for i := range snapshot.Registries {
 		row := &snapshot.Registries[i]
+		row.Remote = safeUILine(row.Remote)
 		row.Registry = safeUILine(row.Registry)
 		row.Username = safeUILine(row.Username)
 		row.Source = safeUILine(row.Source)

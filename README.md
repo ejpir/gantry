@@ -11,7 +11,9 @@ Windows.
 > Gantry is experimental. Linux and Apple silicon macOS are supported. Windows
 > support is experimental.
 
-[![Gantry terminal dashboard demo](assets/gantry-tui.gif)](assets/gantry-tui.gif)
+[![Gantry terminal dashboard demo](assets/gantry-tui-v3.gif)](assets/gantry-tui-v3.gif)
+
+[Watch the HD video](assets/gantry-tui-v3.mp4) · 24-second demo recorded on Linux/KVM.
 
 ## Install
 
@@ -61,11 +63,31 @@ Create and reuse a named sandbox:
 ./gantry delete dev
 ```
 
+Or define and reconcile it with strict, versioned YAML:
+
+```sh
+gantry manifest validate gantry.yaml
+gantry apply --check -f gantry.yaml
+gantry apply -f gantry.yaml
+```
+
+See [Sandbox manifests](docs/gantry/manifests.md) for the schema and redacted
+export workflow.
+
 Open the terminal dashboard:
 
 ```sh
 ./gantry tui
 ```
+
+An experimental native desktop dashboard with read/write controls is also available from source:
+
+```sh
+cargo run --locked --manifest-path desktop/Cargo.toml -- --demo
+```
+
+See [Gantry Desktop](desktop/README.md) for prerequisites and connecting it to a
+local or remote manager. The desktop build is optional and separate from the Go CLI.
 
 ## Remote sandboxes and organization policy
 

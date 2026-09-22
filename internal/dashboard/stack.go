@@ -90,7 +90,7 @@ func renderStackStage(theme tuiTheme, width int, icon, title, subtitle string, r
 }
 
 func (m sandboxTUIModel) stackActions(theme tuiTheme, selected tuiSandbox, width, y int) (string, []tuiHitTarget) {
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		return lipgloss.NewStyle().Foreground(theme.muted).Render("Action in progress…"), nil
 	}
 	actions := [][2]string{}
@@ -105,6 +105,9 @@ func (m sandboxTUIModel) stackActions(theme tuiTheme, selected tuiSandbox, width
 		}
 	}
 	actions = append(actions, [2]string{"e", "Edit"}, [2]string{"i", "Details"})
+	if selected.Remote != "" {
+		actions = append(actions, [2]string{"B", "Remote"})
+	}
 	var parts []string
 	var hits []tuiHitTarget
 	x := 0
@@ -148,7 +151,7 @@ func (m sandboxTUIModel) renderSandboxStack(theme tuiTheme, width, height int) (
 	}
 	// Keep targets within the actual visible component even on tiny viewports.
 	var visible []tuiHitTarget
-	if m.busyAction == "" {
+	if m.tuiOperationState.Phase() == tuiOperationIdle {
 		for _, hit := range hits {
 			if rect, ok := intersectRect(hit.rect, tuiRect{w: width, h: height}); ok {
 				hit.rect = rect
@@ -167,8 +170,11 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 	accent := lipgloss.NewStyle().Foreground(theme.accent).Bold(true)
 	state := m.renderSandboxState(theme, selected)
 	nameWidth := maxInt(1, width-lipgloss.Width(state)-2)
-	lines := []string{lipgloss.NewStyle().Foreground(theme.text).Bold(true).Render(truncateText(selected.Name, nameWidth)) + "  " + state}
+	lines := []string{lipgloss.NewStyle().Foreground(theme.text).Bold(true).Render(truncateText(sandboxDisplayName(selected), nameWidth)) + "  " + state}
 	summary := fmt.Sprintf("microVM · %d vCPU · %s RAM · %s", selected.DisplayCPUs(), formatMiBHuman(selected.DisplayMemoryMiB()), defaultText(selected.Runtime, "runtime unavailable"))
+	if selected.Remote != "" {
+		summary += " · remote " + selected.Remote
+	}
 	if selected.ConfigError {
 		summary = "! Configuration unavailable · i opens details"
 	}
@@ -275,11 +281,21 @@ func (m sandboxTUIModel) buildSandboxStack(theme tuiTheme, selected tuiSandbox, 
 	lines = append(lines, strings.Split(renderStackStage(theme, width, tuiLogo, supervisorTitle, roles, icons), "\n")...)
 	lines = append(lines, connector)
 	backend, host := stackHostBackend(runtime.GOOS)
-	backendTitle := backend
-	if !icons {
-		backendTitle = "▣ " + backend + " · " + host + " host"
+	if selected.Remote != "" {
+		backend, host = "Remote manager", selected.Remote
 	}
-	lines = append(lines, strings.Split(renderStackStage(theme, width, tuiStackChip, backendTitle, host+" · "+runtime.GOARCH+" · host virtualization", icons), "\n")...)
+	backendTitle := backend
+	backendSubtitle := host + " · " + runtime.GOARCH + " · host virtualization"
+	if selected.Remote != "" {
+		backendSubtitle = "Authenticated inventory from " + selected.Remote
+	}
+	if !icons {
+		backendTitle = "▣ " + backend + " · " + host
+		if selected.Remote == "" {
+			backendTitle += " host"
+		}
+	}
+	lines = append(lines, strings.Split(renderStackStage(theme, width, tuiStackChip, backendTitle, backendSubtitle, icons), "\n")...)
 	if icons {
 		lines = append(lines, "")
 	}
@@ -319,6 +335,9 @@ func (m sandboxTUIModel) stackFacts(theme tuiTheme, selected tuiSandbox, width i
 		accessNote = "Dev Containers enabled"
 	}
 	configured := "Configured " + formatConfigTime(selected.Updated)
+	if selected.Remote != "" {
+		configured = "Remote " + selected.Remote + " · " + configured
+	}
 	if selected.ConfigError {
 		networkNote, accessNote, configured = "", "", "Configuration unavailable"
 	}

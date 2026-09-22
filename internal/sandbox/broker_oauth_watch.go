@@ -50,6 +50,6 @@ func (br *broker) runOAuthWatchSession(ctx context.Context, output io.Writer) (i
 	// Keep the root identity required to read the trusted helper and procfs;
 	// applySessionTarget only selects the workload root/mount chain.
 	options.ImgCfg = mcpLauncherImageConfig(target.imageConfig)
-	err := client.Session(br.rpc, options, strings.NewReader(""), output)
+	err := br.rpc.Session(options, strings.NewReader(""), output)
 	return status, err
 }

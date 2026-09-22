@@ -232,7 +232,7 @@ func TestRemoteCreationNeverCallsLocalService(t *testing.T) {
 	m.createImage.SetValue("alpine")
 	m.createSSH = true
 	_, cmd := m.submitCreate()
-	if m.busyAction != "remote create" || m.page != tuiRemotesPage || m.selectNext != "" {
+	if m.tuiOperationState.Action() != "remote create" || m.page != tuiRemotesPage || m.tuiOperationState.Selection() != "" {
 		t.Fatal("remote create selected a local row")
 	}
 	runCreateTestCommand(t, m, cmd)
@@ -301,7 +301,7 @@ func TestRemoteCreateRefusesProfileChangeAndExpiredOrganization(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.submitCreate()
-	if m.busyAction != "" || !strings.Contains(m.formError, "changed") || m.createRemote == "" {
+	if m.tuiOperationState.Action() != "" || !strings.Contains(m.formError, "changed") || m.createRemote == "" {
 		t.Fatal("changed profile fell through to local")
 	}
 	if err := createOnRemote(t.Context(), changed, "expired-org", managerapi.CreateSandboxRequest{Name: "dev", Image: "alpine"}, func(string) {}); err == nil {
@@ -315,11 +315,12 @@ func TestRemoteCreateRefusesProfileChangeAndExpiredOrganization(t *testing.T) {
 func TestRemoteInventoryRejectsStaleWatchMessages(t *testing.T) {
 	m, _ := onboardingModel(t)
 	m.sandboxes = []tuiSandbox{{Name: "same", State: tuiRunning}}
+	m.rememberViewSource()
 	old := remoteSectionMsg{snapshot: remote.WatchSnapshot{Remote: "team", Sandboxes: []managerapi.Sandbox{{Name: "same"}}}, generation: 1}
 	m.Update(old)
 	m.Update(remoteSectionMsg{snapshot: remote.WatchSnapshot{Remote: "team"}, generation: 2, removed: true})
 	m.Update(old)
-	if len(m.remotes) != 0 || len(m.sandboxes) != 1 {
+	if len(m.remotes) != 0 || len(m.sandboxes) != 1 || m.sandboxes[0].Remote != "" {
 		t.Fatal("removed source was resurrected or local inventory changed")
 	}
 }

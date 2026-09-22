@@ -48,7 +48,7 @@ func testTCPPacketRow(t *testing.T) tuiPacketRow {
 		t.Fatal(err)
 	}
 
-	return decodePacketRow("dev", packetcapture.Packet{
+	return decodePacketRow("dev", "", packetcapture.Packet{
 		Sequence: 7, Timestamp: time.Unix(123, 456), Direction: packetcapture.TX,
 		Allowed: false, Length: len(buffer.Bytes()), Data: buffer.Bytes(),
 	})

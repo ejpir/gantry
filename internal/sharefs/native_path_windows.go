@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"golang.org/x/sys/windows"
 )
@@ -94,7 +95,7 @@ func (b *winExportFS) resolve(rel string, access, disposition, options uint32) (
 	var empty winFileInfo
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	if b.root == 0 {
+	if b.lifecycle.Phase() != sharelifecycle.Active || b.root == 0 {
 		return 0, empty, linuxErrno(fuse.ESTALE)
 	}
 	if rel == "" || rel == "." {

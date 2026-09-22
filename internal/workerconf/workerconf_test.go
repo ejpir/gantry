@@ -167,7 +167,7 @@ func TestMCPSpecHasNoAmbientAuthority(t *testing.T) {
 	profile := buildSeatbeltProfile(s)
 	for _, forbidden := range []string{
 		"(allow network-bind", "(allow network-inbound", "(allow network-outbound",
-		"kern.hv_support", "process-exec", "process-fork",
+		"kern.hv_support", "hw.pagesize_compat", "process-exec", "process-fork",
 	} {
 		if strings.Contains(profile, forbidden) {
 			t.Fatalf("MCP Seatbelt profile contains forbidden authority %q:\n%s", forbidden, profile)
@@ -198,6 +198,8 @@ func TestBuildSeatbeltProfile(t *testing.T) {
 		"(deny default)",
 		"(allow signal (target self))",
 		"(allow sysctl-read\n",
+		`(sysctl-name "kern.hv_support")`,
+		`(sysctl-name "hw.pagesize_compat")`,
 		`(literal "/dev/null")`,
 		`(subpath "/Users/test/project")`,
 		`(subpath "/Users/test/shared refs")`,
@@ -271,6 +273,7 @@ func TestBuildNetworkSeatbeltProfile(t *testing.T) {
 	for _, forbidden := range []string{
 		"(allow network*)", "(allow network-inbound)", "(allow network-outbound)",
 		"(allow mach-lookup)", "system-socket", "file-write*\n", "process-fork", "process-exec",
+		"kern.hv_support", "hw.pagesize_compat",
 	} {
 		if strings.Contains(profile, forbidden) {
 			t.Fatalf("network profile contains forbidden authority %q:\n%s", forbidden, profile)

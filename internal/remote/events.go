@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 )
 
 // Events consumes one SSE connection. Readiness is reported only after the
@@ -84,6 +85,7 @@ func (c *Client) Events(ctx context.Context, ready func() error, event func(mana
 type WatchSnapshot struct {
 	Remote    string
 	Sandboxes []managerapi.Sandbox
+	Dashboard *dashboardapi.HostSnapshot
 	Error     string
 }
 
@@ -93,10 +95,22 @@ type WatchSnapshot struct {
 func (c *Client) WatchSandboxes(ctx context.Context, update func(WatchSnapshot)) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		streamCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		streamCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		resnapshot := func() error {
 			probe, done := context.WithTimeout(streamCtx, 10*time.Second)
 			defer done()
+			dashboard, err := c.DashboardSnapshot(probe)
+			if err == nil {
+				update(WatchSnapshot{Remote: c.profile.Name, Dashboard: &dashboard})
+				backoff = time.Second
+				return nil
+			}
+			var apiErr *Error
+			if !errors.As(err, &apiErr) || (apiErr.Status != http.StatusNotFound && apiErr.Status != http.StatusNotImplemented) {
+				return err
+			}
+			// Older managers still contribute lifecycle rows. Full dashboard
+			// parity becomes available as soon as that endpoint is upgraded.
 			rows, err := c.ListSandboxes(probe)
 			if err == nil {
 				update(WatchSnapshot{Remote: c.profile.Name, Sandboxes: rows})

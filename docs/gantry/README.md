@@ -36,6 +36,8 @@ filesystem by digest.
   and clean up.
 - [Usage](usage.md) — day-to-day lifecycle, resources, runtimes, the terminal
   dashboard, and persistence.
+- [Sandbox manifests](manifests.md) — versioned YAML definitions, validation,
+  reconciliation, and redacted export.
 - [Images](images.md) — supported image sources, caching, configuration, and
   registry credentials.
 - [Networking](networking.md) — egress policy, DNS allowlists, port

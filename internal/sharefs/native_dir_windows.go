@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"golang.org/x/sys/windows"
 )
@@ -62,12 +63,17 @@ type winShareDirStream struct {
 	next     fuse.DirEntry
 	nextErr  syscall.Errno
 	closeOne sync.Once
+	onClose  func(*winShareDirStream)
 }
 
 // readdir pins rel for the lifetime of a streaming DirStream. Per-entry mode
 // and file identity are present in FILE_ID_BOTH_DIR_INFORMATION, so no child
 // handle needs to be opened merely to list a name.
 func (b *winExportFS) readdir(rel string, export *Export) (*winShareDirStream, syscall.Errno) {
+	if !b.beginRequest() {
+		return nil, linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	dir, info, errno := b.resolveDir(rel)
 	if errno != 0 {
 		return nil, errno
@@ -76,10 +82,15 @@ func (b *winExportFS) readdir(rel string, export *Export) (*winShareDirStream, s
 	if buffer == nil {
 		buffer = new([winDirBufferSize]byte)
 	}
-	return &winShareDirStream{
+	stream := &winShareDirStream{
 		dir: dir, buffer: buffer, export: export, volume: b.volume, salt: b.salt,
 		rootID: info.attr.Ino, restart: 1,
-	}, 0
+	}
+	if !b.trackDir(stream) {
+		stream.Close()
+		return nil, linuxErrno(fuse.ESTALE)
+	}
+	return stream, 0
 }
 
 func (d *winShareDirStream) HasNext() bool {
@@ -258,9 +269,11 @@ func (d *winShareDirStream) Seekdir(_ context.Context, off uint64) syscall.Errno
 }
 
 func (d *winShareDirStream) Close() {
+	if d == nil {
+		return
+	}
 	d.closeOne.Do(func() {
 		d.mu.Lock()
-		defer d.mu.Unlock()
 		d.closed = true
 		if d.dir != 0 {
 			_ = windows.CloseHandle(d.dir)
@@ -270,13 +283,42 @@ func (d *winShareDirStream) Close() {
 			winDirBuffers.Put(d.buffer)
 			d.buffer = nil
 		}
+		d.mu.Unlock()
+		if d.onClose != nil {
+			d.onClose(d)
+		}
 	})
 }
 
+func (b *winExportFS) trackDir(dir *winShareDirStream) bool {
+	if b == nil || dir == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.lifecycle.Phase() != sharelifecycle.Active || b.root == 0 {
+		return false
+	}
+	if b.openDirs == nil {
+		b.openDirs = make(map[*winShareDirStream]struct{})
+	}
+	b.openDirs[dir] = struct{}{}
+	dir.onClose = func(closed *winShareDirStream) {
+		b.mu.Lock()
+		delete(b.openDirs, closed)
+		b.mu.Unlock()
+	}
+	return true
+}
+
 func (b *winExportFS) statfs(out *fuse.StatfsOut) syscall.Errno {
+	if !b.beginRequest() {
+		return linuxErrno(fuse.ESTALE)
+	}
+	defer b.endRequest()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	if b.root == 0 {
+	if b.lifecycle.Phase() != sharelifecycle.Active || b.root == 0 {
 		return linuxErrno(fuse.ESTALE)
 	}
 	rootPath, err := winPathForHandle(b.root)

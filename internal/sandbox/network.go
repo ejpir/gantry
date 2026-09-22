@@ -332,14 +332,9 @@ func validateStaticUDPPortPolicy(policy *netpol.Policy, specs []string) error {
 // vmmAttachment is the subset of a resolved network a split VMM worker is
 // entitled to: the guest data channel, and the policy and recorder it must
 // enforce when the netstack is not itself split out.
-func (n *Network) vmmAttachment() *vmmworker.NetAttachment {
+func (n *Network) vmmAttachment() vmmworker.NetAttachment {
 	if n == nil {
 		return nil
 	}
-	return &vmmworker.NetAttachment{
-		Conn:    n.Conn,
-		Split:   n.Split,
-		Policy:  n.Policy,
-		Traffic: n.Traffic,
-	}
+	return vmmworker.BorrowNetworkAttachment(n.Conn, n.Split, n.Policy, n.Traffic)
 }

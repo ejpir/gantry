@@ -156,6 +156,31 @@ func TestTrafficEpochMergesCumulativeSnapshots(t *testing.T) {
 	}
 }
 
+func TestTrafficEpochDuplicateKeysRemainMonotonic(t *testing.T) {
+	now := time.Now()
+	entry := TrafficEntry{
+		Host: "example.com", Address: "192.0.2.1", Protocol: "tcp", Port: 443,
+		Allowed: true, TXPackets: 4, FirstSeen: now, LastSeen: now,
+	}
+	later := entry
+	later.TXPackets = 9
+
+	recorder := NewTrafficRecorder("")
+	defer recorder.Close()
+	epoch := recorder.BeginEpoch()
+	snapshot := TrafficSnapshot{
+		Version: trafficSnapshotVersion,
+		Entries: []TrafficEntry{entry, later},
+	}
+	epoch.Merge(snapshot)
+	epoch.Merge(snapshot)
+
+	got := recorder.Snapshot()
+	if len(got.Entries) != 1 || got.Entries[0].TXPackets != 9 {
+		t.Fatalf("duplicate-key merge = %+v, want one monotonic 9-packet entry", got.Entries)
+	}
+}
+
 func TestTrafficEpochAccumulatesRestartsAndFinalSnapshots(t *testing.T) {
 	path := filepath.Join(t.TempDir(), TrafficFileName)
 	first := NewTrafficRecorder(path)

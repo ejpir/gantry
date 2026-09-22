@@ -21,6 +21,8 @@ func TestWriteMainHelpListsCommands(t *testing.T) {
 	got := output.String()
 	for _, want := range []string{
 		"gantry start <name>",
+		"gantry apply -f gantry.yaml",
+		"gantry manifest <verb>",
 		"gantry exec <name>",
 		"gantry tui",
 		"gantry serve",

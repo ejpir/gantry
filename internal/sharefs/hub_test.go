@@ -47,6 +47,35 @@ const (
 	linuxENOSYS     = 38
 )
 
+func TestFuseBackgroundLimits(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		value          string
+		wantMax        int
+		wantCongestion int
+		wantErr        bool
+	}{
+		{name: "default"},
+		{name: "minimum", value: "1", wantMax: 1},
+		{name: "trimmed", value: " 64 ", wantMax: 64, wantCongestion: 48},
+		{name: "maximum", value: "128", wantMax: 128, wantCongestion: 96},
+		{name: "zero", value: "0", wantErr: true},
+		{name: "too large", value: "129", wantErr: true},
+		{name: "not a number", value: "many", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			maxBackground, congestionThreshold, err := fuseBackgroundLimits(test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("fuseBackgroundLimits(%q) error = %v, wantErr %t", test.value, err, test.wantErr)
+			}
+			if maxBackground != test.wantMax || congestionThreshold != test.wantCongestion {
+				t.Fatalf("fuseBackgroundLimits(%q) = %d, %d; want %d, %d",
+					test.value, maxBackground, congestionThreshold, test.wantMax, test.wantCongestion)
+			}
+		})
+	}
+}
+
 func TestShareHubSyncfsFlushesExports(t *testing.T) {
 	hub, err := NewHub()
 	if err != nil {
@@ -603,6 +632,81 @@ func TestShareHubCachesOnlyExportDescendants(t *testing.T) {
 	}
 	if missing.EntryTimeout() != 0 {
 		t.Fatalf("negative entry cached for %s", missing.EntryTimeout())
+	}
+}
+
+func TestShareHubCachesNamespaceOnceNotificationsReady(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = hub.Close() }()
+	publishHubShare(t, hub, "workspace", dir, false)
+
+	// Before the reverse notification channel attaches, namespace entries
+	// must stay uncached so hot-add/remove remain visible without it.
+	var cold fuse.EntryOut
+	root, errno := hub.root.Lookup(context.Background(), "workspace", &cold)
+	if errno != 0 {
+		t.Fatalf("export lookup: %v", errno)
+	}
+	if cold.EntryTimeout() != 0 || cold.AttrTimeout() != 0 {
+		t.Fatalf("namespace entry cached without notifications: entry=%s attr=%s",
+			cold.EntryTimeout(), cold.AttrTimeout())
+	}
+	var rootAttr fuse.AttrOut
+	if errno := hub.root.Getattr(context.Background(), nil, &rootAttr); errno != 0 {
+		t.Fatalf("hub root getattr: %v", errno)
+	}
+	if rootAttr.Timeout() != 0 {
+		t.Fatalf("hub root attr cached without notifications: %s", rootAttr.Timeout())
+	}
+
+	hub.SetNotificationSink(func([]byte) fuse.Status { return fuse.OK })
+
+	var warm fuse.EntryOut
+	if _, errno := hub.root.Lookup(context.Background(), "workspace", &warm); errno != 0 {
+		t.Fatalf("export lookup with notifications: %v", errno)
+	}
+	if warm.EntryTimeout() != watchedMetadataTTL || warm.AttrTimeout() != watchedMetadataTTL {
+		t.Fatalf("namespace timeout = entry %s attr %s, want %s",
+			warm.EntryTimeout(), warm.AttrTimeout(), watchedMetadataTTL)
+	}
+	if errno := hub.root.Getattr(context.Background(), nil, &rootAttr); errno != 0 {
+		t.Fatalf("hub root getattr: %v", errno)
+	}
+	if rootAttr.Timeout() != watchedMetadataTTL {
+		t.Fatalf("hub root attr timeout = %s, want %s", rootAttr.Timeout(), watchedMetadataTTL)
+	}
+	var exportRootAttr fuse.AttrOut
+	if errno := root.Operations().(fs.NodeGetattrer).Getattr(context.Background(), nil, &exportRootAttr); errno != 0 {
+		t.Fatalf("export root getattr: %v", errno)
+	}
+	if exportRootAttr.Timeout() == 0 {
+		t.Fatal("export root attr stayed uncached with notifications ready")
+	}
+
+	// Negative entries must never cache, regardless of notification state.
+	var missing fuse.EntryOut
+	if _, errno := hub.root.Lookup(context.Background(), "missing", &missing); fuse.ToStatus(errno) != fuse.ENOENT {
+		t.Fatalf("missing lookup errno = %v, want ENOENT", errno)
+	}
+	if missing.EntryTimeout() != 0 {
+		t.Fatalf("negative namespace entry cached for %s", missing.EntryTimeout())
+	}
+
+	hub.SetNotificationSink(nil)
+	var detached fuse.EntryOut
+	if _, errno := hub.root.Lookup(context.Background(), "workspace", &detached); errno != 0 {
+		t.Fatalf("export lookup after detach: %v", errno)
+	}
+	if detached.EntryTimeout() != 0 || detached.AttrTimeout() != 0 {
+		t.Fatalf("namespace entry cached after notification detach: entry=%s attr=%s",
+			detached.EntryTimeout(), detached.AttrTimeout())
 	}
 }
 
@@ -1246,7 +1350,6 @@ func TestShareHubSwapRevokesReplacedExport(t *testing.T) {
 
 func TestExportStateCannotRegressAfterFinish(t *testing.T) {
 	export := &Export{}
-	export.state.Store(int32(ExportActive))
 	export.finish()
 
 	// Hub.Close can race an inode's OnForget. A late revoke must not move a
@@ -1587,11 +1690,45 @@ func assertCloseDrainsRequest(
 	}
 }
 
+func TestShareHubCloseReleasesRetainedProtocolHandles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "open.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishHubShare(t, hub, "code", root, false)
+	fuseInitHub(t, hub)
+	tagNode, errno := hubLookup(t, hub, 2, 1, "code")
+	if errno != 0 {
+		t.Fatalf("tag lookup errno %d", errno)
+	}
+	fileNode, errno := hubLookup(t, hub, 3, tagNode, "open.txt")
+	if errno != 0 {
+		t.Fatalf("file lookup errno %d", errno)
+	}
+	openIn := make([]byte, 8)
+	if _, errno, _ := hubReq(t, hub,
+		[][]byte{fuseInHeader(fuseOpen, 4, fileNode, len(openIn)), openIn}, 16, 16); errno != 0 {
+		t.Fatalf("open errno %d", errno)
+	}
+	if _, handles := hub.protocol.GantryResourceUsage(); handles != 1 {
+		t.Fatalf("retained handles before Close = %d, want 1", handles)
+	}
+	if err := hub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, handles := hub.protocol.GantryResourceUsage(); handles != 0 {
+		t.Fatalf("retained handles after Close = %d, want 0", handles)
+	}
+}
+
 func TestShareHubCloseDrainsRequestsBeforeRelease(t *testing.T) {
 	handler := newBlockingFuseHandler()
 	released := make(chan struct{})
 	export := &Export{release: func() { close(released) }}
-	export.state.Store(int32(ExportActive))
 	hub := &Hub{
 		handler: handler,
 		exports: map[string]*Export{"code": export},
@@ -1609,7 +1746,6 @@ func TestShareServerCloseDrainsRequestsBeforeRelease(t *testing.T) {
 	handler := newBlockingFuseHandler()
 	released := make(chan struct{})
 	export := &Export{release: func() { close(released) }}
-	export.state.Store(int32(ExportActive))
 	server := &Server{handler: handler, export: export}
 
 	assertCloseDrainsRequest(t, &server.request, handler,

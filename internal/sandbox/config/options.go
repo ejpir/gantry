@@ -4,7 +4,9 @@ package config
 import (
 	"os"
 
+	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/guestasset"
+	"github.com/ejpir/gantry/internal/oauthprovider"
 	"github.com/ejpir/gantry/internal/policy"
 )
 
@@ -22,6 +24,7 @@ type RunOptions struct {
 	Image                string
 	RWLayer              string
 	LayerSet             string
+	LayerSetConfig       *client.LayerSet
 	GVProxy              string
 	NetPol               string
 	OrgPolicy            string
@@ -51,8 +54,16 @@ type RunOptions struct {
 	SecretFiles          []string
 	Explicit             ExplicitOptions
 
-	// OAuthProviderFiles are snapshotted into public metadata during resolution.
+	// OAuth provider files and typed registrations are snapshotted into public
+	// metadata during resolution. Typed registrations are used by declarative
+	// manifests and contain no token or client-secret material.
 	OAuthProviderFiles []string
+	OAuthProviders     []oauthprovider.Spec
+
+	// Manifest identifies the declarative input that produced this launch. The
+	// persisted configuration store clears it after an imperative mutation so a
+	// later apply observes drift rather than trusting stale provenance.
+	Manifest *ManifestProvenance
 }
 
 type ExplicitOptions struct {

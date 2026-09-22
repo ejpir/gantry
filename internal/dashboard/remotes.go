@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/orgauth"
 	"github.com/ejpir/gantry/internal/remote"
 )
@@ -130,6 +131,134 @@ func watchRemoteProfile(ctx context.Context, profile remote.Profile, generation 
 		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+// remoteSandboxRows projects authenticated manager inventory into the same
+// presentation model used by local Overview and Sandboxes rows. The Remote
+// source is part of row identity, so equal sandbox names on different hosts
+// remain distinct and can never be mistaken for a local action target.
+func (m sandboxTUIModel) remoteDashboardSnapshot() dashboardapi.Snapshot {
+	names := make([]string, 0, len(m.remotes))
+	for name := range m.remotes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var merged dashboardapi.Snapshot
+	for _, name := range names {
+		section := m.remotes[name]
+		if section.Error != "" || section.Dashboard == nil {
+			continue
+		}
+		snapshot := section.Dashboard.Snapshot
+		snapshot.Sandboxes = append([]dashboardapi.Sandbox(nil), snapshot.Sandboxes...)
+		snapshot.Traffic = append([]dashboardapi.Traffic(nil), snapshot.Traffic...)
+		snapshot.Rules = append([]dashboardapi.Rule(nil), snapshot.Rules...)
+		snapshot.Mounts = append([]dashboardapi.Mount(nil), snapshot.Mounts...)
+		snapshot.Ports = append([]dashboardapi.Port(nil), snapshot.Ports...)
+		snapshot.Secrets = append([]dashboardapi.Secret(nil), snapshot.Secrets...)
+		snapshot.MCPServers = append([]dashboardapi.MCPServer(nil), snapshot.MCPServers...)
+		snapshot.Audit = append([]dashboardapi.AuditEvent(nil), snapshot.Audit...)
+		snapshot.Images = append([]dashboardapi.Image(nil), snapshot.Images...)
+		snapshot.Registries = append([]dashboardapi.RegistryAuth(nil), snapshot.Registries...)
+		// Detach nested slices before presentation sanitization so the watched
+		// source remains an immutable source of truth across filter rebuilds.
+		for index := range snapshot.MCPServers {
+			snapshot.MCPServers[index].Allow = append([]string(nil), snapshot.MCPServers[index].Allow...)
+			snapshot.MCPServers[index].Deny = append([]string(nil), snapshot.MCPServers[index].Deny...)
+			snapshot.MCPServers[index].Redact = append([]string(nil), snapshot.MCPServers[index].Redact...)
+		}
+		for index := range snapshot.Images {
+			snapshot.Images[index].Entrypoint = append([]string(nil), snapshot.Images[index].Entrypoint...)
+			snapshot.Images[index].Cmd = append([]string(nil), snapshot.Images[index].Cmd...)
+		}
+		for index := range snapshot.Sandboxes {
+			snapshot.Sandboxes[index].Remote = name
+		}
+		for index := range snapshot.Traffic {
+			snapshot.Traffic[index].Remote = name
+		}
+		for index := range snapshot.Rules {
+			snapshot.Rules[index].Remote = name
+		}
+		for index := range snapshot.Mounts {
+			snapshot.Mounts[index].Remote = name
+		}
+		for index := range snapshot.Ports {
+			snapshot.Ports[index].Remote = name
+		}
+		for index := range snapshot.Secrets {
+			snapshot.Secrets[index].Remote = name
+		}
+		for index := range snapshot.MCPServers {
+			snapshot.MCPServers[index].Remote = name
+		}
+		for index := range snapshot.Audit {
+			snapshot.Audit[index].Remote = name
+		}
+		for index := range snapshot.Images {
+			snapshot.Images[index].Remote = name
+		}
+		for index := range snapshot.Registries {
+			snapshot.Registries[index].Remote = name
+		}
+		sanitizeSnapshot(&snapshot)
+		merged.Sandboxes = append(merged.Sandboxes, snapshot.Sandboxes...)
+		merged.Traffic = append(merged.Traffic, snapshot.Traffic...)
+		merged.Rules = append(merged.Rules, snapshot.Rules...)
+		merged.Mounts = append(merged.Mounts, snapshot.Mounts...)
+		merged.Ports = append(merged.Ports, snapshot.Ports...)
+		merged.Secrets = append(merged.Secrets, snapshot.Secrets...)
+		merged.MCPServers = append(merged.MCPServers, snapshot.MCPServers...)
+		merged.Audit = append(merged.Audit, snapshot.Audit...)
+		merged.Images = append(merged.Images, snapshot.Images...)
+		merged.Registries = append(merged.Registries, snapshot.Registries...)
+	}
+	return merged
+}
+
+func (m sandboxTUIModel) remoteSandboxRows() []tuiSandbox {
+	dashboard := m.remoteDashboardSnapshot()
+	rows := dashboard.Sandboxes
+	// Preserve lifecycle inventory against older managers until both ends have
+	// been upgraded to the full dashboard endpoint.
+	for name, section := range m.remotes {
+		if section.Error != "" || section.Dashboard != nil {
+			continue
+		}
+		for _, sandbox := range section.Sandboxes {
+			image := sandbox.Image
+			if image == "" {
+				image = sandbox.ImageRef
+			}
+			if image == "" {
+				image = sandbox.ImageDigest
+			}
+			memory, cpus := sandbox.Desired.MemoryMiB, sandbox.Desired.CPUs
+			if memory == 0 {
+				memory = sandbox.MemoryMiB
+			}
+			if cpus == 0 {
+				cpus = sandbox.CPUs
+			}
+			row := tuiSandbox{
+				Remote: safeUILine(name), Name: safeUILine(sandbox.Name),
+				State: dashboardapi.SandboxState(safeUILine(sandbox.State)), PID: sandbox.PID,
+				Image: safeUILine(image), RW: sandbox.Writable,
+				MemMB: memory, VCPUs: cpus, RestartRequired: sandbox.RestartRequired,
+				ProcessIsolation: safeUILine(sandbox.Desired.ProcessIsolation),
+				DevContainers:    sandbox.Desired.DevContainers,
+				Proxy:            safeUILine(sandbox.Proxy), NoProxy: safeUILine(sandbox.NoProxy),
+				ProxyEnforce: sandbox.ProxyEnforce,
+			}
+			if sandbox.Active != nil {
+				row.ActiveAvailable = true
+				row.ActiveMemMB = sandbox.Active.MemoryMiB
+				row.ActiveVCPUs = sandbox.Active.CPUs
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows
 }
 
 type remoteRow struct {

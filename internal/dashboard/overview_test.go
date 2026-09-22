@@ -192,7 +192,7 @@ func TestOverviewInspectorBusyAndOverflowContent(t *testing.T) {
 	if !strings.Contains(plain, "more · see Mounts") || !strings.Contains(plain, "more · see Ports") {
 		t.Fatalf("inspector silently hid overflow:\n%s", plain)
 	}
-	m.busyAction, m.busyName = "stop", "codex-dev"
+	beginTestOperation(&m, "stop", "codex-dev", "", false)
 	text, actions = m.renderOverviewInspector(tuiThemeFor(m.dark), rect)
 	if len(actions) != 0 || !strings.Contains(ansi.Strip(text), "Action in progress") {
 		t.Fatal("busy inspector advertises actionable controls")

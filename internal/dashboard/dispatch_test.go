@@ -41,7 +41,7 @@ func TestClassifyFormKey(t *testing.T) {
 func TestBusyKeyDispatchOnlyAllowsNavigation(t *testing.T) {
 	m := newSandboxTUIModel(dashboardsvc.NewDashboardService())
 	m.loading = false
-	m.busyAction = "start"
+	beginTestOperation(&m, "start", "", "", false)
 
 	_, _ = m.updateKey(tea.KeyPressMsg{Code: '2'})
 	if m.page != tuiTrafficPage {
@@ -151,9 +151,9 @@ func TestConfirmationDialogMouseDispatch(t *testing.T) {
 				Button: tea.MouseLeft,
 			})
 			got := model.(*sandboxTUIModel)
-			if got.busyAction != test.wantAction || got.dialog != tuiNoDialog || cmd == nil {
+			if got.tuiOperationState.Action() != test.wantAction || got.dialog != tuiNoDialog || cmd == nil {
 				t.Fatalf("confirmation result: action=%q dialog=%d cmd=%v, want action=%q closed dialog and command",
-					got.busyAction, got.dialog, cmd, test.wantAction)
+					got.tuiOperationState.Action(), got.dialog, cmd, test.wantAction)
 			}
 		})
 	}

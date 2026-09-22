@@ -17,8 +17,9 @@ import (
 
 // Health is GET /v1/health.
 type Health struct {
-	OK      bool   `json:"ok"`
-	Version string `json:"version"`
+	OK           bool     `json:"ok"`
+	Version      string   `json:"version"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // ErrorResponse is the failure body for every endpoint.

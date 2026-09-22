@@ -15,11 +15,11 @@ import (
 // long-lived host enforcement point. Requests through credentials, MCP, and
 // shares fail closed while network, share access, persistence, and expiry are
 // moved to one generation.
-func (d *daemonRuntime) applyOrganizationPolicy(snapshot *policy.Config) error {
+func (d *daemonSupervisor) applyOrganizationPolicy(snapshot *policy.Config) error {
 	d.policyUpdateMu.Lock()
 	defer d.policyUpdateMu.Unlock()
 
-	cfg := d.store.Snapshot()
+	cfg := d.host.Config().Snapshot()
 	if sameLiveOrganizationPolicy(cfg.OrgPolicy, snapshot) {
 		return nil
 	}
@@ -39,38 +39,36 @@ func (d *daemonRuntime) applyOrganizationPolicy(snapshot *policy.Config) error {
 	// The controller barrier covers host-side credentials and MCP. The share
 	// barrier drains FUSE operations and covers existing handles separately.
 	d.governance.SetBlocked(true)
-	if d.mcpWorker != nil {
-		d.mcpWorker.CloseSessions()
-	}
-	if d.shares != nil {
-		d.shares.SetPolicyBlocked(true)
+	d.control.CloseMCPSessions()
+	if shares := d.host.Shares(); shares != nil {
+		shares.SetPolicyBlocked(true)
 	}
 	releaseBarriers := true
 	defer func() {
 		if !releaseBarriers {
 			return
 		}
-		if d.shares != nil {
-			d.shares.SetPolicyBlocked(false)
+		if shares := d.host.Shares(); shares != nil {
+			shares.SetPolicyBlocked(false)
 		}
 		d.governance.SetBlocked(false)
 	}()
 
-	if d.networkTransactions == nil {
-		d.networkTransactions = control.NewNetworkTransactionCoordinator()
+	if d.host.Transactions() == nil {
+		d.host.SetTransactions(control.NewNetworkTransactionCoordinator())
 	}
-	return d.networkTransactions.Run(func() error {
+	return d.host.Transactions().Run(func() error {
 		// Read both the persisted settings and effective network policy inside
 		// the network transaction. A concurrent local net-policy or port update
 		// therefore lands wholly before or after this organization generation.
-		cfg = d.store.Snapshot()
-		if d.broker == nil || d.broker.netPolicy == nil {
+		cfg = d.host.Config().Snapshot()
+		if d.control.Broker() == nil || d.control.Broker().netPolicy == nil {
 			return fmt.Errorf("live organization policy requires the daemon network policy controller")
 		}
-		if cfg.Net && (d.network == nil || d.network.Backend == nil) {
+		if cfg.Net && (d.host.Network() == nil || d.host.Network().Backend() == nil) {
 			return fmt.Errorf("live organization policy requires a running embedded netstack")
 		}
-		oldNetwork, err := d.broker.netPolicy.CurrentPolicy()
+		oldNetwork, err := d.control.Broker().netPolicy.CurrentPolicy()
 		if err != nil {
 			return fmt.Errorf("snapshot current network policy: %w", err)
 		}
@@ -87,12 +85,12 @@ func (d *daemonRuntime) applyOrganizationPolicy(snapshot *policy.Config) error {
 		}
 		rollback := func(cause error, restoreShares bool) error {
 			var rollbackErr error
-			if restoreShares && d.shares != nil {
-				if err := d.shares.ReconcileOrganizationPolicy(oldEngine); err != nil {
+			if shares := d.host.Shares(); restoreShares && shares != nil {
+				if err := shares.ReconcileOrganizationPolicy(oldEngine); err != nil {
 					rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore previous share policy: %w", err))
 				}
 			}
-			if err := d.broker.netPolicy.ReplaceEffectivePolicy(oldNetwork); err != nil {
+			if err := d.control.Broker().netPolicy.ReplaceEffectivePolicy(oldNetwork); err != nil {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore previous live network policy: %w", err))
 			}
 			if rollbackErr != nil {
@@ -102,22 +100,22 @@ func (d *daemonRuntime) applyOrganizationPolicy(snapshot *policy.Config) error {
 			}
 			return cause
 		}
-		barrier, err := d.broker.netPolicy.FailClosedPolicy()
+		barrier, err := d.control.Broker().netPolicy.FailClosedPolicy()
 		if err != nil {
 			return fmt.Errorf("prepare fail-closed network barrier: %w", err)
 		}
-		if err := d.broker.netPolicy.ReplaceEffectivePolicy(barrier); err != nil {
+		if err := d.control.Broker().netPolicy.ReplaceEffectivePolicy(barrier); err != nil {
 			return fmt.Errorf("enter fail-closed network barrier: %w", err)
 		}
-		if err := d.broker.netPolicy.ReplaceEffectivePolicy(nextNetwork); err != nil {
+		if err := d.control.Broker().netPolicy.ReplaceEffectivePolicy(nextNetwork); err != nil {
 			return rollback(fmt.Errorf("apply live organization network policy: %w", err), false)
 		}
-		if d.shares != nil {
-			if err := d.shares.ReconcileOrganizationPolicy(engine); err != nil {
+		if shares := d.host.Shares(); shares != nil {
+			if err := shares.ReconcileOrganizationPolicy(engine); err != nil {
 				// Manifest rollback is internal to ShareManager. Stop anyway if
 				// its own fail-closed path left the hub unavailable.
 				result := rollback(fmt.Errorf("apply live organization share policy: %w", err), false)
-				if d.shares.Failed() {
+				if shares.Failed() {
 					releaseBarriers = false
 					d.stopAfterPolicyReconciliationFailure()
 					result = errors.Join(result, errors.New("sandbox is stopping because organization-policy state is inconsistent"))
@@ -126,7 +124,7 @@ func (d *daemonRuntime) applyOrganizationPolicy(snapshot *policy.Config) error {
 			}
 		}
 
-		persistErr := d.store.SetOrganizationPolicy(snapshot)
+		persistErr := d.host.Config().SetOrganizationPolicy(snapshot)
 		if persistErr != nil && !atomicfile.Committed(persistErr) {
 			return rollback(persistErr, true)
 		}
@@ -136,19 +134,19 @@ func (d *daemonRuntime) applyOrganizationPolicy(snapshot *policy.Config) error {
 		case d.policyChanged <- struct{}{}:
 		default:
 		}
-		if persistErr != nil && d.audit != nil {
-			d.audit.logf(d.dir, "policy: snapshot applied but configuration durability is uncertain: %v", persistErr)
+		if persistErr != nil && d.host.Audit() != nil {
+			d.host.Audit().logf(d.dir, "policy: snapshot applied but configuration durability is uncertain: %v", persistErr)
 		}
 		return nil
 	})
 }
 
-func (d *daemonRuntime) stopAfterPolicyReconciliationFailure() {
-	if d.shutdown == nil {
+func (d *daemonSupervisor) stopAfterPolicyReconciliationFailure() {
+	if d.control.Shutdown() == nil {
 		return
 	}
 	select {
-	case d.shutdown <- struct{}{}:
+	case d.control.Shutdown() <- struct{}{}:
 	default:
 	}
 }

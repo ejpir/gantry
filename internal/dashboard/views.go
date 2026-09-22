@@ -122,20 +122,20 @@ func (m sandboxTUIModel) renderTrafficRow(theme tuiTheme, row tuiTrafficRow, wid
 	switch {
 	case width >= 100:
 		endpointWidth := maxInt(16, width-72)
-		return tableCell(statusIcon+" "+status, 9) + " " + tableCell(row.Sandbox, 13) + " " + tableCell(endpoint, endpointWidth) + " " +
+		return tableCell(statusIcon+" "+status, 9) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 13) + " " + tableCell(endpoint, endpointWidth) + " " +
 			tableCell(strings.ToUpper(row.Protocol), 7) + " " + tableCell(formatBytes(row.TXBytes), 9) + " " +
 			tableCell(formatBytes(row.RXBytes), 9) + " " + tableCell(fmt.Sprint(packets), 8) + " " + tableCell(formatTrafficClock(row.LastSeen), 9)
 	case width >= 86:
 		endpointWidth := maxInt(16, width-61)
-		return tableCell(statusIcon+" "+status, 9) + " " + tableCell(row.Sandbox, 13) + " " + tableCell(endpoint, endpointWidth) + " " +
+		return tableCell(statusIcon+" "+status, 9) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 13) + " " + tableCell(endpoint, endpointWidth) + " " +
 			tableCell(strings.ToUpper(row.Protocol), 7) + " " + tableCell(formatBytes(row.TXBytes), 9) + " " +
 			tableCell(formatBytes(row.RXBytes), 9) + " " + tableCell(fmt.Sprint(packets), 8)
 	case width >= 56:
 		endpointWidth := maxInt(12, width-43)
-		return tableCell(statusIcon, 2) + " " + tableCell(row.Sandbox, 11) + " " + tableCell(endpoint, endpointWidth) + " " +
+		return tableCell(statusIcon, 2) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 11) + " " + tableCell(endpoint, endpointWidth) + " " +
 			tableCell(formatBytes(row.TXBytes), 8) + " " + tableCell(formatBytes(row.RXBytes), 8)
 	default:
-		label := row.Sandbox + "  " + endpoint + "  ↑" + formatBytes(row.TXBytes) + " ↓" + formatBytes(row.RXBytes)
+		label := sourceDisplayName(row.Sandbox, row.Remote) + "  " + endpoint + "  ↑" + formatBytes(row.TXBytes) + " ↓" + formatBytes(row.RXBytes)
 		return tableCell(statusIcon, 2) + " " + tableCell(label, maxInt(1, width-3))
 	}
 }
@@ -160,7 +160,7 @@ func (m sandboxTUIModel) renderTrafficDetail(theme tuiTheme, width int) []string
 	return []string{
 		m.renderTableSeparator(theme, width),
 		title + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(endpoint),
-		lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Sandbox+"  •  ") + decision + "  •  " + strings.ToUpper(row.Protocol),
+		lipgloss.NewStyle().Foreground(theme.secondary).Render(sourceDisplayName(row.Sandbox, row.Remote)+"  •  ") + decision + "  •  " + strings.ToUpper(row.Protocol),
 		lipgloss.NewStyle().Foreground(theme.secondary).Render(fmt.Sprintf("↑ %s in %d packets   ↓ %s in %d packets", formatBytes(row.TXBytes), row.TXPackets, formatBytes(row.RXBytes), row.RXPackets)),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("first " + formatTrafficTime(row.FirstSeen) + "  •  last " + formatTrafficTime(row.LastSeen)),
 	}
@@ -190,7 +190,7 @@ func (m sandboxTUIModel) renderSecretRow(theme tuiTheme, row tuiSecretRow, width
 	}
 	nameWidth := maxInt(12, width-30)
 	state := lipgloss.NewStyle().Foreground(stateColor).Render(icon + " " + row.State)
-	return tableCell(row.Sandbox, 13) + " " + tableCell(row.Name, nameWidth) + " " + tableCell(state, 15)
+	return tableCell(sourceDisplayName(row.Sandbox, row.Remote), 13) + " " + tableCell(row.Name, nameWidth) + " " + tableCell(state, 15)
 }
 
 func (m sandboxTUIModel) renderSecretDetail(theme tuiTheme, width int) []string {
@@ -201,7 +201,7 @@ func (m sandboxTUIModel) renderSecretDetail(theme tuiTheme, width int) []string 
 	return []string{
 		m.renderTableSeparator(theme, width),
 		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Name),
-		lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Sandbox + "  •  " + row.State),
+		lipgloss.NewStyle().Foreground(theme.secondary).Render(sourceDisplayName(row.Sandbox, row.Remote) + "  •  " + row.State),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("Values are write-only, memory-only, and never shown in this table."),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("Export this name before restarting the sandbox."),
 	}
@@ -251,11 +251,11 @@ func (m sandboxTUIModel) renderMCPRow(theme tuiTheme, row tuiMCPRow, width int) 
 	if width >= 82 {
 		endpointWidth := maxInt(18, width-54)
 		return tableCell(lipgloss.NewStyle().Foreground(stateColor).Render(icon+" "+state), 9) + " " +
-			tableCell(row.Sandbox, 13) + " " + tableCell(row.Name, 12) + " " + tableCell(strings.ToUpper(row.Type), 7) + " " +
+			tableCell(sourceDisplayName(row.Sandbox, row.Remote), 13) + " " + tableCell(row.Name, 12) + " " + tableCell(strings.ToUpper(row.Type), 7) + " " +
 			tableCell(endpoint, endpointWidth) + " " + tableCell(auth, 9)
 	}
 	endpointWidth := maxInt(12, width-32)
-	return tableCell(lipgloss.NewStyle().Foreground(stateColor).Render(icon), 2) + " " + tableCell(row.Sandbox, 11) + " " +
+	return tableCell(lipgloss.NewStyle().Foreground(stateColor).Render(icon), 2) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 11) + " " +
 		tableCell(row.Name, 10) + " " + tableCell(endpoint, endpointWidth)
 }
 
@@ -264,7 +264,7 @@ func (m sandboxTUIModel) renderMCPDetail(theme tuiTheme, width int) []string {
 		return nil
 	}
 	row := m.mcpServers[m.mcpCursor]
-	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox + " / " + row.Name)
+	title := lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Sandbox, row.Remote) + " / " + row.Name)
 	if row.Error != "" {
 		return []string{m.renderTableSeparator(theme, width), title, lipgloss.NewStyle().Foreground(theme.error).Render(row.Error), "", ""}
 	}
@@ -321,11 +321,11 @@ func (m sandboxTUIModel) renderRuleRow(theme tuiTheme, row tuiRuleRow, width int
 	iconText := lipgloss.NewStyle().Foreground(actionColor).Render(icon)
 	if width >= 72 {
 		targetWidth := maxInt(16, width-53)
-		return tableCell(iconText+" "+action, 9) + " " + tableCell(row.Sandbox, 13) + " " + tableCell(row.Target, targetWidth) + " " +
+		return tableCell(iconText+" "+action, 9) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 13) + " " + tableCell(row.Target, targetWidth) + " " +
 			tableCell(strings.ToUpper(row.Proto), 8) + " " + tableCell(defaultText(row.Ports, "—"), 10)
 	}
 	targetWidth := maxInt(8, width-25)
-	return tableCell(iconText, 2) + " " + tableCell(row.Sandbox, 11) + " " + tableCell(row.Target, targetWidth) + " " + tableCell(strings.ToUpper(row.Proto), 8)
+	return tableCell(iconText, 2) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 11) + " " + tableCell(row.Target, targetWidth) + " " + tableCell(strings.ToUpper(row.Proto), 8)
 }
 
 func (m sandboxTUIModel) renderRuleDetail(theme tuiTheme, width int) []string {
@@ -342,7 +342,7 @@ func (m sandboxTUIModel) renderRuleDetail(theme tuiTheme, width int) []string {
 	return []string{
 		m.renderTableSeparator(theme, width),
 		title,
-		lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Sandbox + "  •  " + strings.ToUpper(row.Proto) + "  •  ports " + defaultText(row.Ports, "any")),
+		lipgloss.NewStyle().Foreground(theme.secondary).Render(sourceDisplayName(row.Sandbox, row.Remote) + "  •  " + strings.ToUpper(row.Proto) + "  •  ports " + defaultText(row.Ports, "any")),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("source " + row.Source),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("policy " + defaultText(row.Policy, "built-in")),
 	}
@@ -383,11 +383,11 @@ func (m sandboxTUIModel) renderPortRow(theme tuiTheme, row tuiPortRow, width int
 	guest := fmt.Sprintf("%d", row.Guest)
 	if width >= 72 {
 		bindWidth := maxInt(16, width-43)
-		return tableCell(stateText, 8) + " " + tableCell(row.Sandbox, 14) + " " + tableCell(bind, bindWidth) + " " +
+		return tableCell(stateText, 8) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 14) + " " + tableCell(bind, bindWidth) + " " +
 			tableCell(guest, 7) + " " + tableCell(row.Proto, 5)
 	}
 	bindWidth := maxInt(12, width-27)
-	return tableCell(lipgloss.NewStyle().Foreground(color).Render(icon), 2) + " " + tableCell(row.Sandbox, 12) + " " +
+	return tableCell(lipgloss.NewStyle().Foreground(color).Render(icon), 2) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 12) + " " +
 		tableCell(bind, bindWidth) + " " + tableCell(guest, 6)
 }
 
@@ -396,7 +396,7 @@ func (m sandboxTUIModel) renderPortDetail(theme tuiTheme, width int) []string {
 		return nil
 	}
 	row := m.ports[m.portCursor]
-	title := row.Sandbox + "  " + row.Bind + " \u2192 " + fmt.Sprintf("%d/%s", row.Guest, row.Proto)
+	title := sourceDisplayName(row.Sandbox, row.Remote) + "  " + row.Bind + " \u2192 " + fmt.Sprintf("%d/%s", row.Guest, row.Proto)
 	state := row.State
 	if row.Error != "" {
 		state = "error: " + row.Error
@@ -479,11 +479,11 @@ func (m sandboxTUIModel) renderMountRow(theme tuiTheme, row tuiMountRow, width i
 	if width >= 72 {
 		hostWidth := maxInt(14, (width-49)*3/5)
 		guestWidth := maxInt(10, width-49-hostWidth)
-		return tableCell(modeText, 6) + " " + tableCell(stateText, 9) + " " + tableCell(row.Sandbox, 12) + " " + tableCell(row.Tag, 10) + " " +
+		return tableCell(modeText, 6) + " " + tableCell(stateText, 9) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 12) + " " + tableCell(row.Tag, 10) + " " +
 			tableCell(host, hostWidth) + " " + tableCell(row.Guest, guestWidth)
 	}
 	pathWidth := maxInt(8, width-27)
-	return tableCell(lipgloss.NewStyle().Foreground(color).Render(icon), 2) + " " + tableCell(row.Sandbox, 11) + " " +
+	return tableCell(lipgloss.NewStyle().Foreground(color).Render(icon), 2) + " " + tableCell(sourceDisplayName(row.Sandbox, row.Remote), 11) + " " +
 		tableCell(row.Tag, 10) + " " + tableCell(host, pathWidth)
 }
 
@@ -506,7 +506,7 @@ func (m sandboxTUIModel) renderMountDetail(theme tuiTheme, width int) []string {
 	}
 	return []string{
 		m.renderTableSeparator(theme, width),
-		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(row.Sandbox+" / "+row.Tag) + "  " + lipgloss.NewStyle().Foreground(theme.info).Render(mode) + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(state),
+		lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(sourceDisplayName(row.Sandbox, row.Remote)+" / "+row.Tag) + "  " + lipgloss.NewStyle().Foreground(theme.info).Render(mode) + "  " + lipgloss.NewStyle().Foreground(theme.muted).Render(state),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("host       ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Host),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("VM         ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.VM),
 		lipgloss.NewStyle().Foreground(theme.muted).Render("container  ") + lipgloss.NewStyle().Foreground(theme.secondary).Render(row.Guest),
@@ -712,14 +712,14 @@ func (m sandboxTUIModel) renderActiveScrollbar(theme tuiTheme, layout tuiDashboa
 		}
 		return m.renderCardScrollbar(theme, layout)
 	}
-	_, scroll, count := m.tableState()
+	_, scroll, count, ok := m.tableState()
 	visible := m.tableVisibleRows()
-	if scroll == nil || count <= visible || layout.contentHeight < 2 {
+	if !ok || count <= visible || layout.contentHeight < 2 {
 		return ""
 	}
 	trackHeight := layout.contentHeight
 	thumbHeight := maxInt(1, trackHeight*visible/count)
-	thumbTop := (trackHeight - thumbHeight) * *scroll / maxInt(1, count-visible)
+	thumbTop := (trackHeight - thumbHeight) * scroll / maxInt(1, count-visible)
 	lines := make([]string, trackHeight)
 	for index := range lines {
 		glyph, color := "│", theme.borderMuted

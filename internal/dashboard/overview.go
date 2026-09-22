@@ -19,9 +19,13 @@ type overviewDeniedGroup struct {
 // Group only the overview's presentation. The traffic table keeps every flow,
 // including protocols, addresses, timestamps, and packet counters.
 func (m sandboxTUIModel) overviewDeniedGroups(sandbox string) []overviewDeniedGroup {
+	return m.overviewDeniedGroupsAt(sandbox, "")
+}
+
+func (m sandboxTUIModel) overviewDeniedGroupsAt(sandbox, remote string) []overviewDeniedGroup {
 	byHost := make(map[string]time.Time)
 	for _, row := range m.traffic {
-		if row.Sandbox != sandbox || row.Allowed {
+		if row.Sandbox != sandbox || row.Remote != remote || row.Allowed {
 			continue
 		}
 		host := defaultText(row.Host, row.Address)
@@ -65,10 +69,14 @@ func (m sandboxTUIModel) overviewDeniedGroups(sandbox string) []overviewDeniedGr
 }
 
 func (m sandboxTUIModel) recentDeniedHosts(theme tuiTheme, sandbox string, limit int) string {
+	return m.recentDeniedHostsAt(theme, sandbox, "", limit)
+}
+
+func (m sandboxTUIModel) recentDeniedHostsAt(theme tuiTheme, sandbox, remote string, limit int) string {
 	if limit <= 0 {
 		return ""
 	}
-	groups := m.overviewDeniedGroups(sandbox)
+	groups := m.overviewDeniedGroupsAt(sandbox, remote)
 	muted := lipgloss.NewStyle().Foreground(theme.muted)
 	if len(groups) == 0 {
 		return muted.Render("none recorded")
@@ -98,7 +106,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 		return append([]string{muted.Render(title)}, rows...)
 	}
 	lines := []string{
-		muted.Render("SELECTED / ") + accent.Render(selected.Name),
+		muted.Render("SELECTED / ") + accent.Render(sandboxDisplayName(*selected)),
 		muted.Render(strings.Repeat("─", inner)),
 		"",
 	}
@@ -115,7 +123,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 	}
 	lines = append(lines, section(networkTitle, m.overviewInspectorNetwork(theme, *selected))...)
 	lines = append(lines, "")
-	groups := m.overviewDeniedGroups(selected.Name)
+	groups := m.overviewDeniedGroupsAt(selected.Name, selected.Remote)
 	denied := []string{muted.Render("none recorded")}
 	if len(groups) > 0 {
 		denied = nil
@@ -124,7 +132,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 		}
 		if len(groups) > 2 {
 			denied = append(denied, muted.Render(fmt.Sprintf("+%d more · t opens traffic", len(groups)-2)))
-		} else if at := m.lastDeniedAt(selected.Name); !at.IsZero() {
+		} else if at := m.lastDeniedAtSource(selected.Name, selected.Remote); !at.IsZero() {
 			denied = append(denied, muted.Render("last "+formatOverviewDenyClock(at)))
 		}
 	}
@@ -136,7 +144,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 		{"e", "Edit configuration"},
 		{"i", "Full sandbox details"},
 	}
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		actions = nil
 	}
 	bodyHeight := rect.h - 2
@@ -158,7 +166,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 		})
 		lines = append(lines, text)
 	}
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		// Replace the action heading rather than advertising disabled controls.
 		lines[len(lines)-1] = muted.Render("Action in progress…")
 	}
@@ -174,7 +182,7 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 func (m sandboxTUIModel) overviewInspectorMounts(theme tuiTheme, selected tuiSandbox) []string {
 	var rows []string
 	for _, mount := range m.mounts {
-		if mount.Sandbox != selected.Name {
+		if mount.Sandbox != selected.Name || mount.Remote != selected.Remote {
 			continue
 		}
 		if mount.Error != "" {
@@ -218,7 +226,7 @@ func (m sandboxTUIModel) overviewInspectorNetwork(theme tuiTheme, selected tuiSa
 	}
 	var ports []string
 	for _, port := range m.ports {
-		if port.Sandbox != selected.Name {
+		if port.Sandbox != selected.Name || port.Remote != selected.Remote {
 			continue
 		}
 		endpoint := fmt.Sprintf("%s → %d/%s", port.Bind, port.Guest, defaultText(port.Proto, "tcp"))

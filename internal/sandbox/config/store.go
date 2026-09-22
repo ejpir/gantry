@@ -154,6 +154,15 @@ func (s *ConfigStore) Mutate(fn func(*RunConfig) error) error {
 		}
 		s.cfg.SettingsRevision = revision
 	}
+	// Mutation callbacks never own declarative provenance. Preserve it for an
+	// idempotent write, but clear it whenever persisted behavior actually
+	// changes so the next manifest apply detects imperative drift.
+	s.cfg.Manifest = cloneManifestProvenance(backup.Manifest)
+	beforeBehavior, afterBehavior := cloneRunConfig(backup), cloneRunConfig(s.cfg)
+	beforeBehavior.Manifest, afterBehavior.Manifest = nil, nil
+	if !reflect.DeepEqual(beforeBehavior, afterBehavior) {
+		s.cfg.Manifest = nil
+	}
 	if err := s.writeLocked(); err != nil {
 		if !atomicfile.Committed(err) {
 			s.cfg = backup
@@ -176,6 +185,7 @@ func (s *ConfigStore) SetOrganizationPolicy(snapshot *policy.Config) error {
 }
 
 func cloneRunConfig(cfg RunConfig) RunConfig {
+	cfg.Manifest = cloneManifestProvenance(cfg.Manifest)
 	cfg.OrgPolicy = policy.CloneConfig(cfg.OrgPolicy)
 	cfg.Shares = append([]string(nil), cfg.Shares...)
 	cfg.Ports = append([]string(nil), cfg.Ports...)
@@ -206,6 +216,14 @@ func cloneRunConfig(cfg RunConfig) RunConfig {
 		cfg.OAuthCustody = &enabled
 	}
 	return cfg
+}
+
+func cloneManifestProvenance(source *ManifestProvenance) *ManifestProvenance {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	return &cloned
 }
 
 func cloneImageConfig(source *image.Config) *image.Config {
@@ -513,6 +531,7 @@ func (tx *ConfigurationTransaction) Commit() error {
 		return err
 	}
 	tx.store.cfg.SettingsRevision = revision
+	tx.store.cfg.Manifest = nil
 	if err := validateSandboxSettings(tx.store.cfg); err != nil {
 		tx.store.cfg = backup
 		return err
@@ -870,6 +889,11 @@ func (s *ConfigStore) SetShareForRestart(spec string, replace bool) (shares.Spec
 	}
 
 	s.cfg.Shares = ShareSpecsReplacingTag(s.cfg.Shares, share.Tag, ShareConfigSpec(share))
+	beforeBehavior, afterBehavior := cloneRunConfig(backup), cloneRunConfig(s.cfg)
+	beforeBehavior.Manifest, afterBehavior.Manifest = nil, nil
+	if !reflect.DeepEqual(beforeBehavior, afterBehavior) {
+		s.cfg.Manifest = nil
+	}
 	if err := ValidateSecretSourceIsolation(s.cfg); err != nil {
 		s.cfg = backup
 		return shares.Spec{}, err

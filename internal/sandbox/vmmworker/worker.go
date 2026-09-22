@@ -156,7 +156,7 @@ func (w *vmmWorker) mergeFinalTraffic(snapshot *netpol.TrafficSnapshot) {
 // supervisor-owned hub. FUSE requests flow to the supervisor; watcher-driven
 // invalidations flow back over the same authenticated stream. The hub remains the sole owner of host paths,
 // pinned directory descriptors, and Windows directory handles.
-func (w *vmmWorker) startShareBroker(hub *sharefs.Hub) error {
+func (w *vmmWorker) startShareBroker(hub sharefs.BorrowedHub) error {
 	if w == nil || w.share == nil {
 		return fmt.Errorf("share relay unavailable")
 	}

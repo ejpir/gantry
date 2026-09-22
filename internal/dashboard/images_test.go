@@ -91,8 +91,8 @@ func TestSandboxTUIImagePullDialogAndArgv(t *testing.T) {
 
 	model, _ = m.submitImagePull()
 	m = *model.(*sandboxTUIModel)
-	if m.formError == "" || m.pullFocus != 0 || m.busyAction != "" {
-		t.Fatalf("empty submit: error=%q focus=%d busy=%q", m.formError, m.pullFocus, m.busyAction)
+	if m.formError == "" || m.pullFocus != 0 || m.tuiOperationState.Action() != "" {
+		t.Fatalf("empty submit: error=%q focus=%d busy=%q", m.formError, m.pullFocus, m.tuiOperationState.Action())
 	}
 
 	m.pullRef.SetValue("ghcr.io/org/app:latest")
@@ -110,8 +110,8 @@ func TestSandboxTUIImagePullDialogAndArgv(t *testing.T) {
 
 	model, cmd = m.submitImagePull()
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "image pull" || m.busyName != "ghcr.io/org/app:latest" || m.dialog != tuiNoDialog || cmd == nil {
-		t.Fatalf("pull submit: action=%q name=%q dialog=%d cmd=%v", m.busyAction, m.busyName, m.dialog, cmd)
+	if m.tuiOperationState.Action() != "image pull" || m.tuiOperationState.Name() != "ghcr.io/org/app:latest" || m.dialog != tuiNoDialog || cmd == nil {
+		t.Fatalf("pull submit: action=%q name=%q dialog=%d cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), m.dialog, cmd)
 	}
 }
 
@@ -129,8 +129,8 @@ func TestSandboxTUIImageRemovePruneAndLogout(t *testing.T) {
 	}
 	model, cmd := m.updateKey(tea.KeyPressMsg{Code: 'y'})
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "image remove" || m.busyName != "ghcr.io/org/app:latest" || m.dialog != tuiNoDialog || cmd == nil {
-		t.Fatalf("remove confirmation: action=%q name=%q dialog=%d cmd=%v", m.busyAction, m.busyName, m.dialog, cmd)
+	if m.tuiOperationState.Action() != "image remove" || m.tuiOperationState.Name() != "ghcr.io/org/app:latest" || m.dialog != tuiNoDialog || cmd == nil {
+		t.Fatalf("remove confirmation: action=%q name=%q dialog=%d cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), m.dialog, cmd)
 	}
 
 	m = imagesTestModel()
@@ -145,8 +145,8 @@ func TestSandboxTUIImageRemovePruneAndLogout(t *testing.T) {
 	}
 	model, cmd = m.updateKey(tea.KeyPressMsg{Code: 'y'})
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "image prune" || m.dialog != tuiNoDialog || cmd == nil {
-		t.Fatalf("prune confirmation: action=%q dialog=%d cmd=%v", m.busyAction, m.dialog, cmd)
+	if m.tuiOperationState.Action() != "image prune" || m.dialog != tuiNoDialog || cmd == nil {
+		t.Fatalf("prune confirmation: action=%q dialog=%d cmd=%v", m.tuiOperationState.Action(), m.dialog, cmd)
 	}
 
 	m = imagesTestModel()
@@ -173,8 +173,8 @@ func TestSandboxTUIImageRemovePruneAndLogout(t *testing.T) {
 	}
 	model, cmd = m.updateKey(tea.KeyPressMsg{Code: 'y'})
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "registry logout" || m.busyName != "ghcr.io" || m.dialog != tuiNoDialog || cmd == nil {
-		t.Fatalf("logout confirmation: action=%q name=%q dialog=%d cmd=%v", m.busyAction, m.busyName, m.dialog, cmd)
+	if m.tuiOperationState.Action() != "registry logout" || m.tuiOperationState.Name() != "ghcr.io" || m.dialog != tuiNoDialog || cmd == nil {
+		t.Fatalf("logout confirmation: action=%q name=%q dialog=%d cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), m.dialog, cmd)
 	}
 }
 
@@ -221,8 +221,8 @@ func TestSandboxTUIRegistryLoginIsWriteOnly(t *testing.T) {
 	m.loginPassword.SetValue("token")
 	model, cmd = m.submitRegistryLogin()
 	m = *model.(*sandboxTUIModel)
-	if m.busyAction != "registry login" || m.busyName != "quay.io" || m.dialog != tuiNoDialog || cmd == nil {
-		t.Fatalf("login submit: action=%q name=%q dialog=%d cmd=%v", m.busyAction, m.busyName, m.dialog, cmd)
+	if m.tuiOperationState.Action() != "registry login" || m.tuiOperationState.Name() != "quay.io" || m.dialog != tuiNoDialog || cmd == nil {
+		t.Fatalf("login submit: action=%q name=%q dialog=%d cmd=%v", m.tuiOperationState.Action(), m.tuiOperationState.Name(), m.dialog, cmd)
 	}
 	if m.loginPassword.Value() != "" {
 		t.Fatal("submitted login retained its password")
@@ -313,7 +313,7 @@ func TestSandboxTUIImagesSelectionSurvivesRefresh(t *testing.T) {
 	m := imagesTestModel()
 	m.imageCursor = 1
 	m.registryCursor = 1
-	model, _ := m.handleRefresh(tuiRefreshMsg{
+	model, _ := m.handleRefresh(tuiRefreshMsg{owner: m.tuiRefreshState.Current(),
 		images: []tuiImageRow{
 			{Ref: "ghcr.io/org/app:latest", Digest: "sha256:new", Arch: "arm64", InUse: true},
 			{Ref: "zzz:latest", Digest: "sha256:zzz", Arch: "arm64"},

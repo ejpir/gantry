@@ -7,10 +7,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 )
 
 const (
@@ -57,11 +57,15 @@ var (
 )
 
 type darwinShareWatcher struct {
-	root   string
-	stream uintptr
-	queue  uintptr
-	emit   func(shareWatchEvent)
-	closed atomic.Bool
+	root      string
+	stream    uintptr
+	queue     uintptr
+	emit      func(shareWatchEvent)
+	lifecycle sharelifecycle.Owner
+
+	callbackMu      sync.Mutex
+	callbacks       sync.WaitGroup
+	callbacksClosed bool
 }
 
 func loadDarwinFSEvents() (darwinFSEventAPI, error) {
@@ -154,15 +158,27 @@ func (w *darwinShareWatcher) ForgetDirectory(string)      {}
 func (w *darwinShareWatcher) Reset() error                { return nil }
 
 func (w *darwinShareWatcher) Close() error {
-	if w == nil || !w.closed.CompareAndSwap(false, true) {
+	if w == nil {
+		return nil
+	}
+	leader, done := w.lifecycle.BeginClose()
+	if !leader {
+		<-done
 		return nil
 	}
 	api, _ := loadDarwinFSEvents()
 	api.streamStop(w.stream)
 	api.streamInvalidate(w.stream)
 	darwinWatchers.Delete(w.stream)
+	// Close callback admission before Wait so no callback can retain the stream
+	// or dispatch queue after Close returns.
+	w.callbackMu.Lock()
+	w.callbacksClosed = true
+	w.callbackMu.Unlock()
+	w.callbacks.Wait()
 	api.streamRelease(w.stream)
 	api.dispatchRelease(w.queue)
+	w.lifecycle.FinishClose()
 	return nil
 }
 
@@ -172,9 +188,14 @@ func darwinFSEventCallback(stream, _ uintptr, count uintptr, eventPaths **byte, 
 		return
 	}
 	watcher := value.(*darwinShareWatcher)
-	if watcher.closed.Load() {
+	watcher.callbackMu.Lock()
+	if watcher.callbacksClosed || watcher.lifecycle.Phase() != sharelifecycle.Active {
+		watcher.callbackMu.Unlock()
 		return
 	}
+	watcher.callbacks.Add(1)
+	watcher.callbackMu.Unlock()
+	defer watcher.callbacks.Done()
 	paths := unsafe.Slice(eventPaths, int(count))
 	flags := unsafe.Slice(eventFlags, int(count))
 	for index, pathPointer := range paths {

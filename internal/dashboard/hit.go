@@ -38,7 +38,7 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 		targets = append(targets, tuiHitTarget{kind: "page", page: tab.page, rect: tuiRect{x: tab.x, y: tuiTopPadding, w: tab.w, h: 1}})
 	}
 
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		return targets
 	}
 	switch m.page {
@@ -89,11 +89,11 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 			}
 		}
 		rowY := layout.contentY + tuiTableHeaderHeight
-		_, scroll, count := m.tableState()
-		if scroll != nil {
-			for row := 0; row < m.tableVisibleRows() && *scroll+row < count; row++ {
+		_, scroll, count, ok := m.tableState()
+		if ok {
+			for row := 0; row < m.tableVisibleRows() && scroll+row < count; row++ {
 				targets = append(targets, tuiHitTarget{
-					kind: "table-row", index: *scroll + row,
+					kind: "table-row", index: scroll + row,
 					rect: tuiRect{x: layout.contentX, y: rowY + row, w: layout.width, h: 1},
 				})
 			}
@@ -103,7 +103,7 @@ func (m sandboxTUIModel) dashboardHitTargets(layout tuiDashboardLayout) []tuiHit
 }
 
 func (m sandboxTUIModel) statusBarHitTargets(layout tuiDashboardLayout) []tuiHitTarget {
-	if m.busyAction != "" {
+	if m.tuiOperationState.Phase() == tuiOperationRunning {
 		return nil
 	}
 	lines := strings.Split(ansi.Strip(m.renderStatusBar(tuiThemeFor(m.dark), layout.screenWidth)), "\n")
@@ -127,7 +127,7 @@ func (m sandboxTUIModel) statusBarHitTargets(layout tuiDashboardLayout) []tuiHit
 
 func clickableContextKey(key string) bool {
 	switch key {
-	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc", "/", "S":
+	case "enter", "s", "e", "i", "d", "n", "?", "r", "R", "a", "p", "u", "f", "c", "t", "space", "tab", "esc", "/", "S", "B":
 		return true
 	default:
 		return false
@@ -190,18 +190,15 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 	case "menu":
 		switch target.action {
 		case "new":
-			if m.busyAction != "" {
+			if m.tuiOperationState.Phase() == tuiOperationRunning {
 				return m, nil
 			}
 			return m, m.openCreateWizard()
 		case "help":
-			m.dialog = tuiHelpDialog
-			m.dialogScroll = 0
+			m.tuiDialogState.open(tuiHelpDialog)
 		case "update":
-			if m.busyAction == "" && m.updateStatus.Available {
-				m.dialog = tuiUpdateDialog
-				m.dialogScroll = 0
-				m.confirmRemove = false
+			if m.tuiOperationState.Phase() == tuiOperationIdle && m.updateStatus.Available {
+				m.tuiDialogState.openConfirmation(tuiUpdateDialog)
 			}
 		}
 		return m, nil
@@ -220,9 +217,9 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		}
 		return m, nil
 	case "table-row":
-		cursor, _, count := m.tableState()
-		if cursor != nil && target.index >= 0 && target.index < count {
-			*cursor = target.index
+		slot, count, ok := m.tableSelection()
+		if ok && target.index >= 0 && target.index < count {
+			m.tuiSelectionState.setTableCursor(slot, target.index, count)
 			m.ensureTableCursorVisible()
 		}
 		return m, nil
@@ -236,9 +233,7 @@ func (m *sandboxTUIModel) dispatchDashboardHit(target tuiHitTarget) (tea.Model, 
 		case "edit":
 			return m, m.openEditDialog()
 		case "delete":
-			m.dialog = tuiRemoveDialog
-			m.dialogScroll = 0
-			m.confirmRemove = false
+			m.tuiDialogState.openConfirmation(tuiRemoveDialog)
 		}
 		return m, nil
 	case "shortcut":

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/guestasset"
 )
 
@@ -365,6 +366,9 @@ func run(opts options) (runErr error) {
 		return err
 	}
 
+	if err := step("remote dashboard snapshot (empty host)", func() error { return testDashboardParity(ctx, client, "") }); err != nil {
+		return err
+	}
 	if opts.apiOnly {
 		fmt.Println("manager API E2E passed (API-only; real manager/helpers, no VM boot)")
 		return nil
@@ -411,6 +415,11 @@ func run(opts options) (runErr error) {
 		return err
 	}
 	if err := step("captured exec semantics", func() error { return testExec(ctx, client, opts.name) }); err != nil {
+		return err
+	}
+	if err := step("remote dashboard telemetry, configuration and packet capture", func() error {
+		return testDashboardParity(ctx, client, opts.name)
+	}); err != nil {
 		return err
 	}
 	if remoteClient != nil {
@@ -628,8 +637,8 @@ func testContract(ctx context.Context, client *apiClient) error {
 	if err != nil {
 		return err
 	}
-	if status != http.StatusOK || !bytes.Contains(body, []byte("/v1/sandboxes/{name}/exec:")) {
-		return fmt.Errorf("OpenAPI response status=%d does not contain exec contract", status)
+	if status != http.StatusOK || !bytes.Contains(body, []byte("/v1/sandboxes/{name}/exec:")) || !bytes.Contains(body, []byte("/v1/dashboard:")) {
+		return fmt.Errorf("OpenAPI response status=%d does not contain exec/dashboard contract", status)
 	}
 	return nil
 }
@@ -695,6 +704,62 @@ func testExec(ctx context.Context, client *apiClient, name string) error {
 	}
 	if err := expectStatus(status, body, http.StatusRequestTimeout); err != nil {
 		return fmt.Errorf("timeout: %w", err)
+	}
+	return nil
+}
+
+func testDashboardParity(ctx context.Context, client *apiClient, name string) error {
+	status, body, _, err := client.do(ctx, http.MethodGet, "/v1/dashboard", nil, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(status, body, http.StatusOK); err != nil {
+		return err
+	}
+	var host dashboardapi.HostSnapshot
+	if err := json.Unmarshal(body, &host); err != nil {
+		return fmt.Errorf("decode dashboard snapshot: %w", err)
+	}
+	if host.ResourceLimits.MaxVCPUs < 1 || host.ResourceLimits.MaxMemoryMB < host.ResourceLimits.MinMemoryMB {
+		return fmt.Errorf("invalid dashboard resource limits: %+v", host.ResourceLimits)
+	}
+	if name == "" {
+		if len(host.Snapshot.Sandboxes) != 0 {
+			return fmt.Errorf("empty dashboard contains sandboxes: %+v", host.Snapshot.Sandboxes)
+		}
+		return nil
+	}
+	var found *dashboardapi.Sandbox
+	for index := range host.Snapshot.Sandboxes {
+		if host.Snapshot.Sandboxes[index].Name == name {
+			found = &host.Snapshot.Sandboxes[index]
+			break
+		}
+	}
+	if found == nil || found.State != dashboardapi.Running || !found.Net || found.Runtime == "" {
+		return fmt.Errorf("dashboard omitted full running sandbox state: %+v", found)
+	}
+	configure := dashboardapi.SandboxConfigRequest{
+		Name: name, MemMB: found.MemMB, VCPUs: found.VCPUs,
+		ProcessIsolation: found.ProcessIsolation, SSH: found.SSH, DevContainers: found.DevContainers,
+	}
+	action, err := json.Marshal(dashboardapi.ActionRequest{Action: "configure-sandbox", SandboxConfig: &configure})
+	if err != nil {
+		return err
+	}
+	status, body, _, err = client.do(ctx, http.MethodPost, "/v1/dashboard/actions", action, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(status, body, http.StatusOK); err != nil {
+		return fmt.Errorf("dashboard configure: %w", err)
+	}
+	status, body, _, err = client.do(ctx, http.MethodPost, "/v1/dashboard/packets/"+name, []byte(`{"start":true,"max_packets":8,"max_bytes":8192}`), nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(status, body, http.StatusOK); err != nil {
+		return fmt.Errorf("dashboard packet capture: %w", err)
 	}
 	return nil
 }

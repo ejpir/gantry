@@ -42,6 +42,73 @@ func newTestConfigStore(t *testing.T, dir string, cfg RunConfig) *ConfigStore {
 	return store
 }
 
+func TestConfigStoreInvalidatesManifestProvenanceOnDrift(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{
+		Manifest: &ManifestProvenance{APIVersion: "gantry.dev/v1alpha1", Digest: "sha256:test"},
+		RW:       true, Ports: []string{"127.0.0.1:8080:80"},
+	})
+	if err := store.Mutate(func(cfg *RunConfig) error {
+		cfg.Ports = append(cfg.Ports, "127.0.0.1:9090:90")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().Manifest; got != nil {
+		t.Fatalf("provenance survived imperative drift: %+v", got)
+	}
+	persisted, err := ReadSandboxConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Manifest != nil {
+		t.Fatalf("persisted provenance survived imperative drift: %+v", persisted.Manifest)
+	}
+}
+
+func TestConfigurationTransactionInvalidatesManifestProvenance(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{
+		Manifest: &ManifestProvenance{APIVersion: "gantry.dev/v1alpha1", Digest: "sha256:test"},
+		RW:       true, MemMB: 512, VCPUs: 1,
+	})
+	enabled := true
+	if err := store.Configure(SandboxUpdate{SSH: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().Manifest; got != nil {
+		t.Fatalf("provenance survived configuration transaction: %+v", got)
+	}
+}
+
+func TestShareTransactionInvalidatesManifestProvenance(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{
+		Manifest: &ManifestProvenance{APIVersion: "gantry.dev/v1alpha1", Digest: "sha256:test"},
+		RW:       true, MemMB: 512, VCPUs: 1,
+	})
+	if _, err := store.SetShareForRestart("source="+t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().Manifest; got != nil {
+		t.Fatalf("provenance survived share transaction: %+v", got)
+	}
+}
+
+func TestConfigStorePreservesManifestProvenanceOnIdempotentMutation(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestConfigStore(t, dir, RunConfig{
+		Manifest: &ManifestProvenance{APIVersion: "gantry.dev/v1alpha1", Digest: "sha256:test"},
+		RW:       true, Ports: []string{"127.0.0.1:8080:80"},
+	})
+	if err := store.Mutate(func(cfg *RunConfig) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Snapshot().Manifest; got == nil || got.Digest != "sha256:test" {
+		t.Fatalf("idempotent mutation lost provenance: %+v", got)
+	}
+}
+
 func canonicalTestPath(t *testing.T, path string) string {
 	t.Helper()
 	resolved, err := filepath.EvalSymlinks(path)
@@ -214,7 +281,10 @@ func TestConfigurationTransactionSerializesSettingsAndPreservesUnrelatedMutation
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	// Serialization is proven by the negative window above; this bound only
+	// detects deadlock, so size it for race-instrumented Windows CI runners
+	// where one fsynced config rewrite can cost seconds under load.
+	case <-time.After(10 * time.Second):
 		t.Fatal("serialized resource update did not complete")
 	}
 

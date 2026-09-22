@@ -6,8 +6,8 @@ import "github.com/ejpir/gantry/internal/packetcapture"
 // traffic observer makes every network topology use the same packet tap:
 // monolithic virtio-net, the split VMM worker, and the split network worker.
 func (r *TrafficRecorder) Capture(request packetcapture.Request) (packetcapture.Snapshot, error) {
-	if r == nil || r.capture == nil {
+	if r == nil || r.observer == nil {
 		return packetcapture.Snapshot{}, nil
 	}
-	return r.capture.Apply(request), nil
+	return r.observer.applyCapture(request), nil
 }

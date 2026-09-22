@@ -24,6 +24,7 @@ import (
 
 	"github.com/ejpir/gantry/api/managerapi"
 	"github.com/ejpir/gantry/internal/atomicfile"
+	dashboardapi "github.com/ejpir/gantry/internal/dashboard/api"
 	"github.com/ejpir/gantry/internal/orgauth"
 	"github.com/ejpir/gantry/internal/orgauth/testidp"
 	"github.com/ejpir/gantry/internal/policy"
@@ -104,6 +105,10 @@ func (m *managerFixture) serve(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, managerapi.Sandbox{Name: req.Name, Image: req.Image, State: "running"})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"sandboxes": rows})
+	case "GET /v1/dashboard":
+		// Read-only dashboard parity feed polled by the TUI; an empty snapshot
+		// keeps profile management free of inventory side effects.
+		_ = json.NewEncoder(w).Encode(dashboardapi.HostSnapshot{})
 	case "POST /v1/sandboxes":
 		var req managerapi.CreateSandboxRequest
 		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req) != nil || req.Name == "" || req.Kernel != "" || r.Header.Get("Idempotency-Key") == "" {
@@ -121,6 +126,7 @@ func (m *managerFixture) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(managerapi.Operation{ID: "e2e-create-" + req.Name, Kind: "create", State: "succeeded"})
 	default:
 		m.state.Unexpected = append(m.state.Unexpected, r.Method+" "+r.URL.Path)
+		fmt.Fprintf(os.Stderr, "fixture: unexpected request: %s %s\n", r.Method, r.URL.Path)
 		http.Error(w, "unexpected fixture request", http.StatusNotFound)
 	}
 }

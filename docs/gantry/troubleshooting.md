@@ -170,6 +170,13 @@ Linux requires usable user namespaces, Landlock, and seccomp. Windows strict
 networking rejects host-loopback access and published ports. Use `auto` only if
 the reported weaker boundary is acceptable.
 
+On Apple M4/macOS 15, an older VMM Seatbelt profile can make
+`hv_gic_create` return `HV_BAD_ARGUMENT` even though `kern.hv_support=1` and the
+binary has the hypervisor entitlement. Hypervisor.framework reads
+`hw.pagesize_compat` while creating the GIC on that platform. Current builds
+allow that exact non-process-specific sysctl only in the VMM worker profile; no
+broad sysctl, Mach-service, or IOKit permission is required.
+
 ## Guest helper changes do not appear
 
 Source builds deliver `artifacts/gantry-guest-arm64` or
@@ -182,6 +189,64 @@ $ GOOS=linux GOARCH=arm64 go build \
 ```
 
 A hash mismatch appears in `daemon.log`.
+
+## A macOS sandbox lags under compilation load
+
+Resume with cumulative virtio-fs and Hypervisor.framework statistics enabled:
+
+```console
+$ GANTRY_VHOST_STATS=1 GANTRY_HVF_STATS=1 gantry resume dev
+$ tail -f "$HOME/.gantry/sandboxes/dev/daemon.log" \
+    "$HOME/.gantry/sandboxes/dev/worker-vmm.log"
+```
+
+`vhost-share-stats` reports FUSE operation count and latency.
+`vhost-fs-call-stats` reports completion-interrupt delivery. `hvf-stats` reports
+GIC call latency and assertion/deassertion counts per IRQ, production
+liveness-kicker calls and targets per vCPU, other cancellation kicks, canceled
+exits, and the current age of vCPUs inside `hv_vcpu_run`. These counters are
+cumulative and the HVF reporter does not force exits or log once per interrupt.
+
+For small probes, `GANTRY_VHOST_STATS_EVERY=N` (1..25000) lowers the
+`vhost-share-stats` cadence, and `GANTRY_VHOST_TRACE=1` additionally logs the
+first 600 LOOKUP/GETATTR/STATX requests with their on-wire entry/attribute
+timeouts. The trace answers "is the guest told it may cache this?" without a
+kernel build. A `sharefs-ttl` line per export records the chosen TTL plus
+notification-channel and watcher health; `vhost-share-notify` records reverse
+notification sink attach/detach.
+
+`GANTRY_FUSE_MAX_BACKGROUND=N` (1..128) overrides the FUSE background-request
+window advertised at INIT (default 12, congestion at 3/4). Measured on an
+M4 GoReleaser workload it made no difference — synchronous compiler I/O rarely
+exceeds 12 in flight — so keep the default unless a profile says otherwise.
+
+### Metadata caching on shared mounts
+
+The share server answers metadata with two TTLs: 100ms while coherence is
+weak, one hour once both the reverse notification virtqueue and the host file
+watcher are healthy. The hub root and export roots historically served TTL 0
+so share hot-add/remove appeared immediately; current builds cache them too
+once reverse notifications are live, because namespace changes already push
+dentry invalidations over that channel. On an M4 `task build` of a Go CLI this
+removed ~165k metadata round trips per build (275k to 110k requests) and cut
+the warm capped build from ~184s to ~157s. If a share ever looks stale, check
+for `sharefs-ttl` lines: `notifications=false` or `watcher-healthy=false`
+means the short TTL is deliberate and the long one is unsafe.
+
+To A/B repeated device assertions on macOS, add
+`GANTRY_HVF_IRQ_COALESCE=1`. It suppresses a repeated GIC line level until the
+guest's interrupt acknowledgement supplies the opposite transition;
+`hvf-stats` includes the suppressed total and renders each IRQ as
+`assertions/deassertions/suppressed`. This is a diagnostic switch, not a
+production default.
+
+If the reporter stops producing lines while the VM lags, a liveness kick may
+be blocked inside Hypervisor.framework while holding the vCPU registry lock.
+Newer `hvf-stats` lines show `in-flight=<age>` and `vcpu-lock=busy` without
+waiting for that lock. As a final A/B only, `GANTRY_HVF_NO_LIVENESS_KICK=1`
+disables the lost-vtimer backstop. Do not use that setting normally: a host
+with the original missed-vtimer failure can leave Linux CPUs without scheduler
+interrupts or RCU progress.
 
 ## Collect a useful report
 

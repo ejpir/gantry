@@ -1276,13 +1276,22 @@ func TestVMMWorkerReExec(t *testing.T) {
 	}
 }
 
-// TestVMMWorkerConfinementReport: the worker applies confinement after
-// the descriptor table is consumed, and the verified report rides the
-// boot ack to the supervisor.
+// TestVMMWorkerConfinementReport: the worker prepares supervisor-opened boot
+// assets before path confinement, then verifies confinement before the boot
+// acknowledgment allows guest execution.
 func TestVMMWorkerConfinementReport(t *testing.T) {
 	runtime, holder := newFakeRuntime()
+	boot := runtime.Boot
+	prepared := false
+	runtime.Boot = func(opts vmm.Opts) (vmmworkerapi.Runner, error) {
+		prepared = true
+		return boot(opts)
+	}
 	var sawSpec workerconf.Spec
 	runtime.ApplyConfinement = func(spec workerconf.Spec) (*workerconf.Report, error) {
+		if !prepared {
+			t.Error("confinement ran before inherited boot assets were prepared")
+		}
 		sawSpec = spec
 		rep := &workerconf.Report{Platform: "linux", Applied: true, Notes: []string{"fake tier"}}
 		return rep, nil

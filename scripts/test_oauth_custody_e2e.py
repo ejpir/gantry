@@ -453,7 +453,7 @@ class FixtureTests(unittest.TestCase):
         ).read_text()
         self.assertIn("windows.CreatePseudoConsole", conpty)
 
-    def test_linux_ci_runs_real_vm_manager_and_oauth_batteries(self):
+    def test_linux_ci_runs_full_local_kvm_batteries(self):
         workflow = Path(__file__).resolve().parent.parent.joinpath(
             ".github/workflows/ci.yml"
         ).read_text()
@@ -464,14 +464,21 @@ class FixtureTests(unittest.TestCase):
         self.assertNotIn("!startsWith(github.ref, 'refs/tags/v')", native)
         self.assertIn("scripts/aws-e2e-validation.sh linux", native)
         self.assertIn("GANTRY_TEST_WORKLOAD_IMAGE", native)
+        self.assertIn("GANTRY_TEST_RUNSC_KERNEL", native)
+        self.assertIn("GANTRY_TEST_RUNSC_ROOTFS", native)
+        self.assertIn("GANTRY_TEST_IDE_IMAGE", native)
         self.assertNotIn("-api-only", native)
         runner = Path(__file__).with_name("aws-e2e-validation.sh").read_text()
         start = runner.index("run_linux_validation()")
         end = runner.index('\ncase "$MODE"', start)
         linux = runner[start:end]
         self.assertIn("scripts/test-manager-api-e2e.sh", linux)
+        self.assertIn("scripts/aws-kvm/test-battery.sh", linux)
         self.assertIn("scripts/oauth-custody-e2e.py", linux)
         self.assertIn("./tests/e2e/oauthidp", linux)
+        self.assertIn("./tests/e2e/policy", linux)
+        self.assertIn("scripts/aws-kvm/ssh-devcontainers-validation.sh", linux)
+        self.assertIn("scripts/aws-kvm/directory-validation.sh", linux)
 
     def test_linux_runner_stages_current_idp_binary(self):
         runner = (

@@ -16,6 +16,7 @@ on:
       - 'guest/**'
       - 'patches/**'
       - 'api/**'
+      - 'desktop/**'
       - 'integrations/**/*.js'
       - 'integrations/**/*.sh'
       - 'integrations/**/*.ts'
@@ -35,6 +36,7 @@ on:
       - 'guest/**'
       - 'patches/**'
       - 'api/**'
+      - 'desktop/**'
       - 'integrations/**/*.js'
       - 'integrations/**/*.sh'
       - 'integrations/**/*.ts'
@@ -252,10 +254,10 @@ jobs:
       - name: gofmt
         shell: bash
         run: |
-          # Repository Go paths contain no whitespace; preserve Bash 3.2
-          # compatibility on macOS instead of relying on mapfile.
-          # shellcheck disable=SC2046
-          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v '^third_party/'))
+          # Repository Go paths contain no whitespace. Run bounded batches to
+          # stay below Windows' command-line limit while retaining Bash 3.2
+          # compatibility on macOS.
+          unformatted=$(git ls-files '*.go' | grep -v '^third_party/' | xargs -n 50 gofmt -l)
           if [ -n "$unformatted" ]; then
             echo "run gofmt -w:"
             echo "$unformatted"
@@ -374,13 +376,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # GitHub's Linux runner exposes KVM, so this job goes beyond boot smoke: it
-  # runs the full manager/SSH/policy-feed and public-client OAuth/MCP batteries
-  # against the exact host, kernel, rootfs, image, and guest-helper artifacts.
+  # GitHub's Linux runner exposes KVM, so this job runs the same maintained
+  # local batteries as macOS: manager/policy-feed, the shared functional
+  # surface, policy, SSH/Dev Containers, and large-directory coverage against
+  # the exact host, kernel, rootfs, workload, IDE, and guest-helper artifacts.
   native-smoke:
     name: native-smoke/${{ matrix.name }}
     needs: [build, guest-assets, kernels, guest-tools]
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -462,7 +465,7 @@ jobs:
             exit "$exec_rc"
           fi
           printf '%s\n' "$output" | tr -d '\r' | grep -Fqx 'hello world'
-      - name: manager, policy-feed, and public-client OAuth real-VM E2E
+      - name: full local Linux KVM E2E
         shell: bash
         env:
           GANTRY_ARTIFACTS: ${{ runner.temp }}/guest-tools
@@ -470,6 +473,9 @@ jobs:
           GANTRY_TEST_KERNEL: ${{ runner.temp }}/kernels/gantry-kernel-x86_64
           GANTRY_TEST_ROOTFS: ${{ runner.temp }}/guest-assets/nerdbox-rootfs.erofs
           GANTRY_TEST_WORKLOAD_IMAGE: ${{ runner.temp }}/guest-assets/alpine.erofs
+          GANTRY_TEST_RUNSC_KERNEL: ${{ runner.temp }}/kernels/gantry-kernel-x86_64
+          GANTRY_TEST_RUNSC_ROOTFS: ${{ runner.temp }}/guest-assets/nerdbox-rootfs-gvisor.erofs
+          GANTRY_TEST_IDE_IMAGE: ${{ runner.temp }}/guest-assets/ide.erofs
           GANTRY_E2E_WORK_DIR: ${{ runner.temp }}/native-e2e
         run: scripts/aws-e2e-validation.sh linux
       - name: upload VM logs on failure
@@ -583,10 +589,67 @@ jobs:
           path: ${{ runner.temp }}/guest-tools/
           if-no-files-found: error
 
+  # The native desktop client (desktop/, Rust + GPUI) builds natively per
+  # platform: GPUI links platform UI stacks, so cross-compiling is not
+  # practical. Artifact names deliberately match the release job's gantry-*
+  # download pattern.
+  desktop:
+    name: desktop/${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, runner: ubuntu-latest }
+          - { name: darwin-arm64, runner: macos-14 }
+          - { name: windows-amd64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install Linux UI build dependencies
+        if: ${{ matrix.name == 'linux-amd64' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libwayland-dev \
+            libasound2-dev libvulkan-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      # Headless tests are validated on Linux; the other platforms build the
+      # release binary (their UI test harness needs a windowing session).
+      - name: cargo test
+        if: ${{ matrix.name == 'linux-amd64' }}
+        working-directory: desktop
+        run: cargo test --locked --all-features
+      - name: cargo build
+        working-directory: desktop
+        run: cargo build --locked --release
+      - name: stage artifact (Windows)
+        if: ${{ matrix.name == 'windows-amd64' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path desktop/target/release/gantry-desktop.exe `
+            -DestinationPath "dist/gantry-desktop-${{ matrix.name }}.zip" -CompressionLevel Optimal
+      - name: stage artifact (Unix)
+        if: ${{ matrix.name != 'windows-amd64' }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/gantry-desktop-${{ matrix.name }}.tar.gz" -C desktop/target/release gantry-desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gantry-desktop-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
   release:
     name: release/${{ github.ref_name }}
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [build, kernels, guest-assets, guest-tools, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
+    needs: [build, kernels, guest-assets, guest-tools, desktop, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write

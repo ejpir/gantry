@@ -62,9 +62,9 @@ func TestMachineBootMilestones(t *testing.T) {
 
 	ram := make([]byte, 1<<20)
 	m := &Machine{
-		arch:       "arm64",
-		mem:        virtio.NewRAM(ram, boot.RAMBase),
-		bootTiming: timeline,
+		machineResources: machineResources{mem: virtio.NewRAM(ram, boot.RAMBase)},
+		arch:             "arm64",
+		bootTiming:       timeline,
 	}
 	m.uart = devices.NewPL011(func(int, bool) {}, func(byte) {})
 	root, err := m.addVirtio(virtio.NewRNG(), "blk")

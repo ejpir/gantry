@@ -183,7 +183,6 @@ func (b *policyMirrorBackend) SetPolicy(policy *netpol.Policy) error {
 // worker type only exists on unix).
 type VMMPolicyPusher interface {
 	SetPolicy(*netpol.Policy) error
-	Close() error
 }
 
 // vmmPolicyBackend fans live policy swaps out to a split _vmm-worker
@@ -195,19 +194,20 @@ type VMMPolicyPusher interface {
 type vmmPolicyBackend struct {
 	NetworkBackend
 	vw      VMMPolicyPusher
+	stopVMM func() error   // owner-supplied fail-closed transition; never a borrowed Close
 	current *netpol.Policy // immutable snapshot of the last common policy
 	mu      sync.Mutex
 }
 
-func NewVMMPolicyBackend(backend NetworkBackend, vw VMMPolicyPusher, current *netpol.Policy) (*vmmPolicyBackend, error) {
-	if backend == nil || vw == nil {
+func NewVMMPolicyBackend(backend NetworkBackend, vw VMMPolicyPusher, current *netpol.Policy, stopVMM func() error) (*vmmPolicyBackend, error) {
+	if backend == nil || vw == nil || stopVMM == nil {
 		return nil, fmt.Errorf("network policy fan-out backend is nil")
 	}
 	snapshot, err := ClonePolicy(current)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot current network policy: %w", err)
 	}
-	return &vmmPolicyBackend{NetworkBackend: backend, vw: vw, current: snapshot}, nil
+	return &vmmPolicyBackend{NetworkBackend: backend, vw: vw, stopVMM: stopVMM, current: snapshot}, nil
 }
 
 func (b *vmmPolicyBackend) SetPolicy(policy *netpol.Policy) error {
@@ -226,13 +226,13 @@ func (b *vmmPolicyBackend) SetPolicy(policy *netpol.Policy) error {
 		// The RPC may have applied in the worker and lost its response. With no
 		// VMM-side status protocol, continuing would make the enforcement state
 		// unknowable. Stop the worker so the sandbox fails closed.
-		return errors.Join(err, errors.New("VMM policy update unconfirmed; VMM stopped"), b.vw.Close())
+		return errors.Join(err, errors.New("VMM policy update unconfirmed; VMM stopped"), b.stopVMM())
 	}
 	if err := b.NetworkBackend.SetPolicy(next); err != nil {
 		rollbackErr := b.vw.SetPolicy(b.current)
 		if rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rollback VMM policy: %w", rollbackErr),
-				errors.New("VMM policy rollback unconfirmed; VMM stopped"), b.vw.Close())
+				errors.New("VMM policy rollback unconfirmed; VMM stopped"), b.stopVMM())
 		}
 		return err
 	}

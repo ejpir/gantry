@@ -87,7 +87,8 @@ func TestGatewayCancellationClosesAcceptedConnections(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go func() { _ = gateway.Serve(ctx, listener) }()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- gateway.Serve(ctx, listener) }()
 	raw, err := listener.Dial()
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +113,14 @@ func TestGatewayCancellationClosesAcceptedConnections(t *testing.T) {
 	if session, err := client.NewSession(); err == nil {
 		_ = session.Close()
 		t.Fatal("new SSH channel succeeded after gateway cancellation")
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("gateway Serve: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gateway Serve did not return after accepted connection handlers exited")
 	}
 }
 

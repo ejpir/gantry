@@ -7,12 +7,53 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
+	sharelifecycle "github.com/ejpir/gantry/internal/sharefs/lifecycle"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"golang.org/x/sys/unix"
 )
+
+func TestLinuxWatcherConcurrentCloseJoinsDescriptorRelease(t *testing.T) {
+	rootFD, err := unix.Open(t.TempDir(), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(rootFD) }()
+	watcherValue, err := newPlatformShareWatcher(&Export{watchRootFD: rootFD}, func(shareWatchEvent) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	watcher := watcherValue.(*linuxShareWatcher)
+	const callers = 16
+	var wait sync.WaitGroup
+	wait.Add(callers)
+	errors := make(chan error, callers)
+	for range callers {
+		go func() {
+			defer wait.Done()
+			errors <- watcher.Close()
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := watcher.lifecycle.Phase(); got != sharelifecycle.Closed {
+		t.Fatalf("watcher phase = %d, want closed", got)
+	}
+	if _, err := unix.FcntlInt(uintptr(watcher.fd), unix.F_GETFD, 0); err == nil {
+		t.Fatal("inotify descriptor remained open after Close returned")
+	}
+	if _, err := unix.FcntlInt(uintptr(watcher.wakeFD), unix.F_GETFD, 0); err == nil {
+		t.Fatal("wake descriptor remained open after Close returned")
+	}
+}
 
 func linuxInotifyRecord(wd int32, mask, cookie uint32, name string) []byte {
 	nameLen := (len(name) + 1 + 3) &^ 3

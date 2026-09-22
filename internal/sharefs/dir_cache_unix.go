@@ -67,37 +67,78 @@ type shareDirCacheStats struct {
 	openMisses      uint64
 }
 
-var shareDirCaches sync.Map // map[*Export]*shareDirCache
-
 func registerShareDirCache(export *Export) {
 	if export == nil {
 		return
 	}
-	shareDirCaches.Store(export, &shareDirCache{
+	cache := &shareDirCache{
 		entries:      make(map[uint64]cachedShareDir),
 		parents:      make(map[uint64]*cachedShareDirParent),
 		statsEnabled: os.Getenv("GANTRY_VHOST_STATS") == "1",
-	})
+	}
+	export.cacheMu.Lock()
+	previous := export.directoryCache
+	if previous == nil {
+		export.directoryCache = cache
+	}
+	export.cacheMu.Unlock()
+	if previous != nil {
+		// Construction should install exactly one cache. If a future backend
+		// retries installation, do not leak the unused owner.
+		cache.close()
+	}
 }
 
 func closeShareDirCache(export *Export) {
-	value, ok := shareDirCaches.LoadAndDelete(export)
-	if !ok {
+	if export == nil {
 		return
 	}
-	value.(*shareDirCache).close()
+	export.cacheMu.Lock()
+	cache := export.directoryCache
+	export.directoryCache = nil
+	export.cacheMu.Unlock()
+	if cache != nil {
+		cache.close()
+	}
 }
 
 func invalidateShareDirCache(export *Export) {
 	shareDirectoryCache(export).clear()
 }
 
-func shareDirectoryCache(export *Export) *shareDirCache {
-	value, ok := shareDirCaches.Load(export)
-	if !ok {
-		return nil
+type borrowedShareDirCache struct{ cache borrowedDirectoryCache }
+
+func (cache borrowedShareDirCache) prefetch(key, parentKey uint64, parentFD int, name string, expectedIno uint64) bool {
+	return cache.cache != nil && cache.cache.prefetch(key, parentKey, parentFD, name, expectedIno)
+}
+
+func (cache borrowedShareDirCache) open(key uint64) (int, bool) {
+	if cache.cache == nil {
+		return -1, false
 	}
-	return value.(*shareDirCache)
+	return cache.cache.open(key)
+}
+
+func (cache borrowedShareDirCache) forget(key uint64) {
+	if cache.cache != nil {
+		cache.cache.forget(key)
+	}
+}
+
+func (cache borrowedShareDirCache) clear() {
+	if cache.cache != nil {
+		cache.cache.clear()
+	}
+}
+
+func shareDirectoryCache(export *Export) borrowedDirectoryCache {
+	if export == nil {
+		return borrowedShareDirCache{}
+	}
+	export.cacheMu.RLock()
+	cache := export.directoryCache
+	export.cacheMu.RUnlock()
+	return borrowedShareDirCache{cache: cache}
 }
 
 // prefetch records how to open a child directory relative to the directory

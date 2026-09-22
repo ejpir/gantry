@@ -13,19 +13,37 @@ import (
 // Source snapshots are never sorted or filtered in place. Actions and details
 // consume the same projected rows as the screen; clearing a filter restores
 // hidden rows without waiting for a refresh. Image/registry data is host-wide.
+func localSandboxRows(rows []tuiSandbox) []tuiSandbox {
+	local := make([]tuiSandbox, 0, len(rows))
+	for _, row := range rows {
+		if row.Remote == "" {
+			local = append(local, row)
+		}
+	}
+	return local
+}
+
+func sandboxRowKey(row tuiSandbox) string { return row.Remote + "\x00" + row.Name }
+
 func (m *sandboxTUIModel) rememberViewSource() {
 	if m.viewSource != nil {
 		return
 	}
-	m.viewSource = &tuiRefreshMsg{sandboxes: m.sandboxes, traffic: m.traffic, rules: m.rules, mounts: m.mounts, ports: m.ports, secrets: m.secrets, mcp: m.mcpServers, audit: m.auditEvents, images: m.images, registries: m.registries}
+	m.viewSource = &tuiRefreshMsg{sandboxes: localSandboxRows(m.sandboxes), traffic: m.traffic, rules: m.rules, mounts: m.mounts, ports: m.ports, secrets: m.secrets, mcp: m.mcpServers, audit: m.auditEvents, images: m.images, registries: m.registries}
 	m.packetSource = slices.Clone(m.packets)
 }
 
+// allSandboxes returns unfiltered source rows for packet capture. Unlike the
+// card projection it is unaffected by the current query, and every remote row
+// retains its profile identity for source-routed capture calls.
 func (m sandboxTUIModel) allSandboxes() []tuiSandbox {
+	var rows []tuiSandbox
 	if m.viewSource != nil {
-		return m.viewSource.sandboxes
+		rows = slices.Clone(m.viewSource.sandboxes)
+	} else {
+		rows = localSandboxRows(m.sandboxes)
 	}
-	return m.sandboxes
+	return append(rows, m.remoteSandboxRows()...)
 }
 
 func filteredRows[T any](source []T, query string, sandbox func(T) string) []T {
@@ -45,16 +63,26 @@ func (m *sandboxTUIModel) rebuildRows() {
 	}
 	s := m.viewSource
 	q := m.sandboxFilter
-	m.sandboxes = filteredRows(s.sandboxes, q, func(r tuiSandbox) string { return r.Name })
-	m.traffic = filteredRows(s.traffic, q, func(r tuiTrafficRow) string { return r.Sandbox })
-	m.rules = filteredRows(s.rules, q, func(r tuiRuleRow) string { return r.Sandbox })
-	m.mounts = filteredRows(s.mounts, q, func(r tuiMountRow) string { return r.Sandbox })
-	m.ports = filteredRows(s.ports, q, func(r tuiPortRow) string { return r.Sandbox })
-	m.secrets = filteredRows(s.secrets, q, func(r tuiSecretRow) string { return r.Sandbox })
-	m.mcpServers = filteredRows(s.mcp, q, func(r tuiMCPRow) string { return r.Sandbox })
-	m.auditEvents = filteredRows(s.audit, q, func(r tuiAuditRow) string { return r.Sandbox })
-	m.packets = filteredRows(m.packetSource, q, func(r tuiPacketRow) string { return r.Sandbox })
-	m.images, m.registries = slices.Clone(s.images), slices.Clone(s.registries)
+	remoteRows := m.remoteDashboardSnapshot()
+	sandboxSource := append(slices.Clone(s.sandboxes), m.remoteSandboxRows()...)
+	trafficSource := append(slices.Clone(s.traffic), remoteRows.Traffic...)
+	ruleSource := append(slices.Clone(s.rules), remoteRows.Rules...)
+	mountSource := append(slices.Clone(s.mounts), remoteRows.Mounts...)
+	portSource := append(slices.Clone(s.ports), remoteRows.Ports...)
+	secretSource := append(slices.Clone(s.secrets), remoteRows.Secrets...)
+	mcpSource := append(slices.Clone(s.mcp), remoteRows.MCPServers...)
+	auditSource := append(slices.Clone(s.audit), remoteRows.Audit...)
+	m.sandboxes = filteredRows(sandboxSource, q, func(r tuiSandbox) string { return r.Name + " " + r.Remote })
+	m.traffic = filteredRows(trafficSource, q, func(r tuiTrafficRow) string { return r.Sandbox + " " + r.Remote })
+	m.rules = filteredRows(ruleSource, q, func(r tuiRuleRow) string { return r.Sandbox + " " + r.Remote })
+	m.mounts = filteredRows(mountSource, q, func(r tuiMountRow) string { return r.Sandbox + " " + r.Remote })
+	m.ports = filteredRows(portSource, q, func(r tuiPortRow) string { return r.Sandbox + " " + r.Remote })
+	m.secrets = filteredRows(secretSource, q, func(r tuiSecretRow) string { return r.Sandbox + " " + r.Remote })
+	m.mcpServers = filteredRows(mcpSource, q, func(r tuiMCPRow) string { return r.Sandbox + " " + r.Remote })
+	m.auditEvents = filteredRows(auditSource, q, func(r tuiAuditRow) string { return r.Sandbox + " " + r.Remote })
+	m.packets = filteredRows(m.packetSource, q, func(r tuiPacketRow) string { return r.Sandbox + " " + r.Remote })
+	m.images = append(slices.Clone(s.images), remoteRows.Images...)
+	m.registries = append(slices.Clone(s.registries), remoteRows.Registries...)
 	sandboxScope := tuiSandboxesPage
 	if m.page == tuiOverviewPage {
 		sandboxScope = tuiOverviewPage
@@ -79,25 +107,26 @@ func (m sandboxTUIModel) selectedPacketKey() string {
 	return packetRowKey(m.packets[m.packetCursor])
 }
 func packetRowKey(r tuiPacketRow) string {
-	return fmt.Sprintf("%s\x00%d\x00%s", r.Sandbox, r.Sequence, r.Timestamp.Format("2006-01-02T15:04:05.999999999Z07:00"))
+	return fmt.Sprintf("%s\x00%s\x00%d\x00%s", r.Remote, r.Sandbox, r.Sequence, r.Timestamp.Format("2006-01-02T15:04:05.999999999Z07:00"))
 }
 func (m *sandboxTUIModel) restorePacketSelection(key string) {
+	index := m.packetCursor
 	if key != "" {
-		m.packetCursor = 0
+		index = 0
 		for i, row := range m.packets {
 			if packetRowKey(row) == key {
-				m.packetCursor = i
+				index = i
 				break
 			}
 		}
 	}
-	m.packetCursor = clampTableCursor(m.packetCursor, len(m.packets))
+	m.tuiSelectionState.setTableCursor(tuiPacketSelection, index, len(m.packets))
 }
 
 func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
-	name := ""
+	selectedKey := ""
 	if selected := m.selected(); selected != nil {
-		name = selected.Name
+		selectedKey = sandboxRowKey(*selected)
 	}
 	newCard := m.page == tuiSandboxesPage && m.onNewCard()
 	t, r, mount, port, secret, mcp, image, registry := m.selectedTableKeys()
@@ -105,24 +134,26 @@ func (m *sandboxTUIModel) rebuildView(resetScroll bool) {
 	audit := m.selectedAuditKey()
 	m.rebuildRows()
 	if resetScroll {
-		m.cursor, m.scrollRow = 0, 0
-		m.trafficCursor, m.trafficScroll, m.rulesCursor, m.rulesScroll = 0, 0, 0, 0
-		m.mountCursor, m.mountScroll, m.portCursor, m.portScroll = 0, 0, 0, 0
-		m.secretCursor, m.secretScroll, m.mcpCursor, m.mcpScroll = 0, 0, 0, 0
-		m.packetCursor, m.packetScroll = 0, 0
-		m.auditCursor, m.auditScroll = 0, 0
+		m.tuiSelectionState.resetCards()
+		for _, slot := range []tuiSelectionSlot{
+			tuiTrafficSelection, tuiRulesSelection, tuiMountsSelection, tuiPortsSelection,
+			tuiSecretsSelection, tuiMCPSelection, tuiPacketSelection, tuiAuditSelection,
+		} {
+			m.tuiSelectionState.resetTable(slot)
+		}
 	}
+	cardIndex := 0
 	if newCard {
-		m.cursor = len(m.sandboxes)
+		cardIndex = len(m.sandboxes)
 	} else {
-		m.cursor = 0
 		for i, row := range m.sandboxes {
-			if row.Name == name {
-				m.cursor = i
+			if sandboxRowKey(row) == selectedKey {
+				cardIndex = i
 				break
 			}
 		}
 	}
+	m.tuiSelectionState.setCardCursor(cardIndex, m.entryCount())
 	m.restoreTableSelections(t, r, mount, port, secret, mcp, image, registry)
 	m.restorePacketSelection(packet)
 	m.restoreAuditSelection(audit)
@@ -144,7 +175,7 @@ func (m *sandboxTUIModel) openFilterDialog() tea.Cmd {
 	m.sandboxFilterInput.Placeholder = "All sandboxes"
 	m.sandboxFilterInput.CharLimit = 64
 	m.sandboxFilterInput.SetValue(m.sandboxFilter)
-	m.dialog, m.dialogScroll = tuiSandboxFilterDialog, 0
+	m.tuiDialogState.open(tuiSandboxFilterDialog)
 	m.applyInputTheme()
 	m.resizeInputs()
 	m.ensureDialogFocusVisible()
@@ -178,7 +209,8 @@ func (m sandboxTUIModel) renderFilterDialog(theme tuiTheme, width int) string {
 }
 
 func (m *sandboxTUIModel) openSortDialog() {
-	m.dialog, m.dialogScroll, m.sortCursor = tuiSortDialog, 0, 0
+	m.tuiDialogState.open(tuiSortDialog)
+	m.sortCursor = 0
 	for i, column := range m.sortColumns() {
 		if column.id == m.sorts[m.sortScope()].column {
 			m.sortCursor = i + 1
