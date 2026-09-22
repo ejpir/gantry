@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,17 @@ import (
 func ensureTestRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	if runtime.GOOS == "darwin" {
+		// macOS per-test TempDir paths include the full test name and already
+		// exceed the 104-byte unix socket sun_path limit before manager.sock is
+		// appended. Use a short, private root so SocketPath fits.
+		short, err := os.MkdirTemp("/tmp", "gm-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(short) })
+		root = short
+	}
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -179,44 +179,6 @@ func (m sandboxTUIModel) renderOverviewInspector(theme tuiTheme, rect tuiRect) (
 	return renderSurface(style, theme.text, theme.panel, strings.Join(lines, "\n")), targets
 }
 
-func (m sandboxTUIModel) renderRemoteOverviewInspector(theme tuiTheme, rect tuiRect, selected tuiSandbox) (string, []tuiHitTarget) {
-	inner := maxInt(1, rect.w-4)
-	muted := lipgloss.NewStyle().Foreground(theme.muted)
-	secondary := lipgloss.NewStyle().Foreground(theme.secondary)
-	accent := lipgloss.NewStyle().Bold(true).Foreground(theme.accent)
-	lines := []string{
-		muted.Render("SELECTED / ") + accent.Render(selected.Name),
-		muted.Render(strings.Repeat("─", inner)), "",
-		muted.Render("SOURCE"), secondary.Render("remote · " + selected.Remote), "",
-		muted.Render("IMAGE"), secondary.Render(defaultText(selected.Image, "not reported")), "",
-		muted.Render("COMPUTE"), secondary.Render(fmt.Sprintf("%d vCPU · %s", maxInt(1, selected.DisplayCPUs()), formatMiBHuman(selected.DisplayMemoryMiB()))),
-	}
-	actions := [][2]string{{"enter", "Open sandbox view"}, {"i", "Full sandbox details"}, {"B", "Open remote manager"}}
-	bodyHeight := rect.h - 2
-	actionStart := bodyHeight - len(actions) - 2
-	if len(lines) > actionStart {
-		lines = lines[:actionStart]
-	}
-	for len(lines) < actionStart {
-		lines = append(lines, "")
-	}
-	lines = append(lines, "", muted.Render("ACTIONS"))
-	var targets []tuiHitTarget
-	for _, action := range actions {
-		text := accent.Width(6).Render(action[0]) + secondary.Render(action[1])
-		text = truncateANSI(text, inner)
-		targets = append(targets, tuiHitTarget{kind: "shortcut", action: action[0], rect: tuiRect{x: rect.x + 2, y: rect.y + 1 + len(lines), w: lipgloss.Width(text), h: 1}})
-		lines = append(lines, text)
-	}
-	for i := range lines {
-		lines[i] = truncateANSI(lines[i], inner)
-	}
-	style := lipgloss.NewStyle().Foreground(theme.text).Background(theme.panel).
-		Border(lipgloss.RoundedBorder()).BorderForeground(theme.border).
-		Padding(0, 1).Width(rect.w).Height(rect.h).MaxHeight(rect.h)
-	return renderSurface(style, theme.text, theme.panel, strings.Join(lines, "\n")), targets
-}
-
 func (m sandboxTUIModel) overviewInspectorMounts(theme tuiTheme, selected tuiSandbox) []string {
 	var rows []string
 	for _, mount := range m.mounts {

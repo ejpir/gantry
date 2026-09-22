@@ -396,10 +396,6 @@ func (m sandboxTUIModel) overviewAccess(theme tuiTheme, sandbox tuiSandbox) (str
 	return lipgloss.NewStyle().Bold(true).Foreground(theme.text).Render(value), lipgloss.NewStyle().Foreground(noteColor).Render(note)
 }
 
-func (m sandboxTUIModel) lastDeniedAt(sandbox string) time.Time {
-	return m.lastDeniedAtSource(sandbox, "")
-}
-
 func (m sandboxTUIModel) lastDeniedAtSource(sandbox, remote string) time.Time {
 	var latest time.Time
 	for _, row := range m.traffic {

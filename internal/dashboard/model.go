@@ -1526,10 +1526,6 @@ func (m *sandboxTUIModel) prunableImageCount() int {
 	return count
 }
 
-func (m *sandboxTUIModel) sandboxNamed(name string) *tuiSandbox {
-	return m.sandboxAtSource(name, "")
-}
-
 func (m *sandboxTUIModel) sandboxAtSource(name, remote string) *tuiSandbox {
 	for i := range m.sandboxes {
 		if m.sandboxes[i].Remote == remote && m.sandboxes[i].Name == name {

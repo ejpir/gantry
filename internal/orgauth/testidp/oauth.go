@@ -306,6 +306,10 @@ func (provider *OAuthProvider) mcp(writer http.ResponseWriter, request *http.Req
 	accessToken, hasBearer := strings.CutPrefix(authorization, "Bearer ")
 	phase, issued := provider.accessTokens[accessToken]
 	if provider.revoked || !hasBearer || !issued {
+		// Consume the request body before rejecting: closing an HTTP
+		// connection with unread request bytes surfaces as ECONNRESET on
+		// Windows clients instead of the 400 they were sent.
+		_, _ = io.Copy(io.Discard, http.MaxBytesReader(writer, request.Body, maxOAuthRequestBytes))
 		provider.reject(writer, http.StatusBadRequest, "MCP credential binding")
 		return
 	}
