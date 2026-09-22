@@ -16,6 +16,7 @@ on:
       - 'guest/**'
       - 'patches/**'
       - 'api/**'
+      - 'desktop/**'
       - 'integrations/**/*.js'
       - 'integrations/**/*.sh'
       - 'integrations/**/*.ts'
@@ -35,6 +36,7 @@ on:
       - 'guest/**'
       - 'patches/**'
       - 'api/**'
+      - 'desktop/**'
       - 'integrations/**/*.js'
       - 'integrations/**/*.sh'
       - 'integrations/**/*.ts'
@@ -587,10 +589,63 @@ jobs:
           path: ${{ runner.temp }}/guest-tools/
           if-no-files-found: error
 
+  # The native desktop client (desktop/, Rust + GPUI) builds natively per
+  # platform: GPUI links platform UI stacks, so cross-compiling is not
+  # practical. Artifact names deliberately match the release job's gantry-*
+  # download pattern.
+  desktop:
+    name: desktop/${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, runner: ubuntu-latest }
+          - { name: darwin-arm64, runner: macos-14 }
+          - { name: windows-amd64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install Linux UI build dependencies
+        if: ${{ matrix.name == 'linux-amd64' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libxcb1-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libwayland-dev \
+            libasound2-dev libvulkan-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      # Headless tests are validated on Linux; the other platforms build the
+      # release binary (their UI test harness needs a windowing session).
+      - name: cargo test
+        if: ${{ matrix.name == 'linux-amd64' }}
+        working-directory: desktop
+        run: cargo test --locked --all-features
+      - name: cargo build
+        working-directory: desktop
+        run: cargo build --locked --release
+      - name: stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ '${{ matrix.name }}' == windows-* ]]; then
+            (cd desktop/target/release && zip -9 "$OLDPWD/dist/gantry-desktop-${{ matrix.name }}.zip" gantry-desktop.exe)
+          else
+            tar -czf "dist/gantry-desktop-${{ matrix.name }}.tar.gz" -C desktop/target/release gantry-desktop
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gantry-desktop-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
   release:
     name: release/${{ github.ref_name }}
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [build, kernels, guest-assets, guest-tools, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
+    needs: [build, kernels, guest-assets, guest-tools, desktop, lint, test, fuzz-virtqueue, fuzz-virtqueue-platforms, native-smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
