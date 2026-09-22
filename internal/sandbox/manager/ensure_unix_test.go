@@ -251,6 +251,27 @@ func TestEnsureRefusesSavedFeed(t *testing.T) {
 	}
 }
 
+func TestEnsureRefusesEmptySavedFeedDir(t *testing.T) {
+	root := ensureTestRoot(t)
+	// NewReceiver creates the policy-feeds directory as soon as a feed is
+	// configured, even when no generation was ever persisted (for example
+	// when initial synchronization never succeeded). The directory alone
+	// must refuse an ungoverned automatic replacement.
+	state := filepath.Join(root, "manager-state", "policy-feeds")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := ensureLocalManager(ctx, SocketPath(), ensureTestLauncher)
+	if err == nil || !strings.Contains(err.Error(), "policy-feed") {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := os.Stat(SocketPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("automatic manager published a socket: %v", err)
+	}
+}
+
 func TestEnsureRejectsRetargetingAndRemoteOptions(t *testing.T) {
 	ensureTestRoot(t)
 	if _, err := ensureDefaultManager(context.Background(), "/other/manager.sock"); err == nil {
