@@ -90,15 +90,15 @@ func newBlkFile(f *os.File, writable, prelocked bool) (*Blk, error) {
 		}
 		b.lock = lock
 	}
-	fi, err := f.Stat()
+	size, err := gutil.FileSize(f)
 	if err != nil {
 		if b.lock != nil {
 			_ = b.lock.Close()
 		}
-		return nil, err
+		return nil, fmt.Errorf("stat %s: %w", f.Name(), err)
 	}
 	b.file = f
-	b.size = uint64(fi.Size())
+	b.size = uint64(size)
 	b.writable = writable
 	return b, nil
 }

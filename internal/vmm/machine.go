@@ -103,11 +103,10 @@ func kernelArchHeader(path string, hdr []byte) (string, error) {
 //	0x38 u32 magic "ARM\x64"
 func loadKernel(f *os.File, ram []byte) (entry uint64, arch string, err error) {
 	path := f.Name()
-	fi, err := f.Stat()
+	size, err := gutil.FileSize(f)
 	if err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("stat %s: %w", path, err)
 	}
-	size := fi.Size()
 	if size < 0x40 {
 		return 0, "", fmt.Errorf("%s: kernel image is only %d bytes", path, size)
 	}
@@ -154,11 +153,10 @@ func loadKernel(f *os.File, ram []byte) (entry uint64, arch string, err error) {
 
 func loadInitrd(f *os.File, ram []byte) (start, end uint64, err error) {
 	path := f.Name()
-	fi, err := f.Stat()
+	size, err := gutil.FileSize(f)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("stat %s: %w", path, err)
 	}
-	size := fi.Size()
 	if size < 0 {
 		return 0, 0, fmt.Errorf("%s: negative initramfs size %d", path, size)
 	}
