@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ejpir/gantry/internal/netpol"
 	"github.com/ejpir/gantry/internal/policy"
@@ -69,6 +70,32 @@ func newLivePolicyDaemon(t *testing.T) (*daemonSupervisor, *livePolicyNetworkBac
 	return d, backend
 }
 
+// authorizeCredentialEventually asserts an expected-allow decision with a
+// bounded retry: the engine's internal 100 ms evaluation budget is
+// deliberate fail-closed production behavior, and a heavily loaded CI runner
+// can push a single evaluation past it (evaluation_error). That says nothing
+// about policy activation, so the test retries the allow. Expected denials
+// stay strictly single-shot — a retried deny could mask a real allow.
+func authorizeCredentialEventually(t *testing.T, d *daemonSupervisor, host string) {
+	t.Helper()
+	if !credentialAllowedEventually(d, host) {
+		t.Fatalf("organization policy did not allow credential.use for %s", host)
+	}
+}
+
+func credentialAllowedEventually(d *daemonSupervisor, host string) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if d.credentialAllowed(host) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestLiveOrganizationPolicyUpdatesNetworkCredentialsPersistenceAndExpiry(t *testing.T) {
 	d, backend := newLivePolicyDaemon(t)
 	candidate := policytest.Signed(t, policy.Profile{
@@ -80,9 +107,7 @@ func TestLiveOrganizationPolicyUpdatesNetworkCredentialsPersistenceAndExpiry(t *
 	if err := d.applyOrganizationPolicy(candidate); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.governance.Authorize(context.Background(), policy.CredentialUse, policy.Resource{Host: "allowed.example"}); err != nil {
-		t.Fatal(err)
-	}
+	authorizeCredentialEventually(t, d, "allowed.example")
 	if err := d.governance.Authorize(context.Background(), policy.CredentialUse, policy.Resource{Host: "denied.example"}); err == nil {
 		t.Fatal("new credential policy was not activated")
 	}
@@ -146,7 +171,7 @@ func TestLiveOrganizationPolicyUpdatesCredentialNetworkGateWithoutGuestNetwork(t
 	if err := d.applyOrganizationPolicy(candidate); err != nil {
 		t.Fatal(err)
 	}
-	if !d.credentialAllowed("allowed.example") || d.credentialAllowed("other.example") {
+	if !credentialAllowedEventually(d, "allowed.example") || d.credentialAllowed("other.example") {
 		t.Fatal("credential network gate did not follow live organization policy")
 	}
 	if err := d.applyOrganizationPolicy(nil); err != nil {

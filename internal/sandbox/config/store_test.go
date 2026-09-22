@@ -281,7 +281,10 @@ func TestConfigurationTransactionSerializesSettingsAndPreservesUnrelatedMutation
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
+	// Serialization is proven by the negative window above; this bound only
+	// detects deadlock, so size it for race-instrumented Windows CI runners
+	// where one fsynced config rewrite can cost seconds under load.
+	case <-time.After(10 * time.Second):
 		t.Fatal("serialized resource update did not complete")
 	}
 
