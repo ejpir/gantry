@@ -24,6 +24,11 @@ import (
 
 type managerLauncher func(log *os.File) (*exec.Cmd, error)
 
+const ensureTimeout = 8 * time.Second
+
+var errManagerAbsent = errors.New("local manager is not listening")
+var errManagerNotPrivate = errors.New("manager path must have owner-only permissions")
+
 // ensureDefaultManager is deliberately local-only. An explicit socket here is
 // a confirmation from the desktop, not permission to start at another target.
 func ensureDefaultManager(ctx context.Context, expected string) (ensureResult, error) {

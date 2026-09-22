@@ -5,13 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 )
-
-const ensureTimeout = 8 * time.Second
-
-var errManagerAbsent = errors.New("local manager is not listening")
-var errManagerNotPrivate = errors.New("manager path must have owner-only permissions")
 
 type ensureResult struct {
 	Socket  string `json:"socket"`

@@ -166,7 +166,10 @@ func TestHVFIRQCoalescingRearmsOnDeassert(t *testing.T) {
 	}
 
 	plain := &hvfBackend{}
-	if !plain.shouldDeliverIRQ(73, true) || !plain.shouldDeliverIRQ(73, true) {
+	if !plain.shouldDeliverIRQ(73, true) {
+		t.Fatal("coalescing disabled suppressed the first level")
+	}
+	if !plain.shouldDeliverIRQ(73, true) {
 		t.Fatal("coalescing disabled suppressed a repeated level")
 	}
 }
