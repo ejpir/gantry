@@ -627,15 +627,19 @@ jobs:
       - name: cargo build
         working-directory: desktop
         run: cargo build --locked --release
-      - name: stage artifact
+      - name: stage artifact (Windows)
+        if: ${{ matrix.name == 'windows-amd64' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path desktop/target/release/gantry-desktop.exe `
+            -DestinationPath "dist/gantry-desktop-${{ matrix.name }}.zip" -CompressionLevel Optimal
+      - name: stage artifact (Unix)
+        if: ${{ matrix.name != 'windows-amd64' }}
         shell: bash
         run: |
           mkdir -p dist
-          if [[ '${{ matrix.name }}' == windows-* ]]; then
-            (cd desktop/target/release && zip -9 "$OLDPWD/dist/gantry-desktop-${{ matrix.name }}.zip" gantry-desktop.exe)
-          else
-            tar -czf "dist/gantry-desktop-${{ matrix.name }}.tar.gz" -C desktop/target/release gantry-desktop
-          fi
+          tar -czf "dist/gantry-desktop-${{ matrix.name }}.tar.gz" -C desktop/target/release gantry-desktop
       - uses: actions/upload-artifact@v4
         with:
           name: gantry-desktop-${{ matrix.name }}
