@@ -233,6 +233,7 @@ impl Desktop {
                 "Connecting to the selected manager…",
                 cx,
             ),
+            Connection::Offline(message) if self.cli_missing => self.cli_missing_state(message, cx),
             Connection::Offline(message) => {
                 empty_state(IconName::CircleAlert, "Manager unavailable", message, cx).child(
                     div().mt_2().child(

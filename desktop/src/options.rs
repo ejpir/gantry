@@ -82,6 +82,8 @@ pub struct Options {
     pub appearance: Appearance,
     pub auto_start: bool,
     pub gantry: Option<PathBuf>,
+    /// Where the desktop installs the matching CLI when none is found.
+    pub managed_gantry: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -242,11 +244,20 @@ impl Options {
                 None => defaults.resolve()?,
             })
         };
+        let managed_gantry = if demo {
+            None
+        } else {
+            defaults
+                .base()
+                .ok()
+                .map(|base| crate::bootstrap::managed_path(&base))
+        };
         Ok(Some(Self {
             source,
             appearance,
             auto_start,
             gantry,
+            managed_gantry,
         }))
     }
 }
@@ -342,6 +353,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(options.gantry, Some("/opt/gantry".into()));
+        assert_eq!(
+            options.managed_gantry,
+            Some("/home/test/.gantry/bin/gantry".into())
+        );
         let custom = SocketDefaults {
             manager_socket: Some("/explicit.sock".into()),
             ..defaults()
@@ -382,6 +397,7 @@ mod tests {
             .unwrap();
         assert_eq!(options.source, Source::Demo);
         assert_eq!(options.appearance, Appearance::Dark);
+        assert_eq!(options.managed_gantry, None);
         assert!(parse(&["--demo", "--socket", "x"], SocketDefaults::default()).is_err());
     }
 

@@ -5,6 +5,7 @@ use gantry_desktop::{
     connector::{Connector, Target},
     dashboard_wire::{HostSnapshot, PacketSnapshot},
     inventory::{Filter, Inventory, demo_sandboxes},
+    launcher::CliMissing,
     options::{Appearance, Options, SocketDefaults, Source},
     profiles::RemoteProfile,
     workspace::{self, Page, Record},
@@ -83,6 +84,11 @@ pub(crate) struct Desktop {
     pub packet_sandbox: Option<String>,
     pub connector: Arc<Mutex<Connector>>,
     pub generation: u64,
+    /// The last local startup found no Gantry CLI at all (not a failing one).
+    pub cli_missing: bool,
+    pub installing: bool,
+    pub install_task: Option<Task<()>>,
+    pub install_progress_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _poll_task: Option<Task<()>>,
     _request_task: Option<Task<()>>,
@@ -239,6 +245,10 @@ impl Desktop {
             packets: PacketSnapshot::default(),
             packet_sandbox: None,
             generation: 0,
+            cli_missing: false,
+            installing: false,
+            install_task: None,
+            install_progress_task: None,
             _subscriptions: subscriptions,
             _poll_task: None,
             _request_task: None,
@@ -332,6 +342,7 @@ impl Desktop {
                 }
                 match result {
                     Ok(snapshot) => {
+                        this.cli_missing = false;
                         this.inventory.replace(snapshot.inventory.sandboxes);
                         this.connection = Connection::Connected(snapshot.inventory.version);
                         this.dashboard_available = snapshot.dashboard.is_some();
@@ -345,6 +356,7 @@ impl Desktop {
                         this.last_updated = Some(Instant::now());
                     }
                     Err(error) => {
+                        this.cli_missing = error.downcast_ref::<CliMissing>().is_some();
                         this.inventory.replace(vec![]);
                         this.host = HostSnapshot::default();
                         this.dashboard_available = false;
@@ -484,6 +496,7 @@ impl Desktop {
         self.dashboard_available = false;
         self.control_available = false;
         self.connection = Connection::Connecting;
+        self.cli_missing = false;
         self.last_updated = None;
         self.packets = PacketSnapshot::default();
         self.packet_sandbox = None;

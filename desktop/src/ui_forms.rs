@@ -211,6 +211,7 @@ impl Desktop {
         let connector = self.connector.clone();
         let base = self.config_dir.clone();
         let program_override = self.options.gantry.clone();
+        let managed = self.options.managed_gantry.clone();
         let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel::<String>(16);
         let progress_scope = scope.clone();
         self.progress_task = Some(cx.spawn(async move |this, cx| {
@@ -255,7 +256,8 @@ impl Desktop {
                         },
                     ),
                 intent => {
-                    let program = launcher::executable(program_override.as_deref());
+                    let program =
+                        launcher::executable(program_override.as_deref(), managed.as_deref())?;
                     let base = base
                         .ok_or_else(|| anyhow::anyhow!("Cannot locate the client profile store"))?;
                     let message = local_profiles::apply(&program, &base, &intent)?;

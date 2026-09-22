@@ -48,6 +48,23 @@ pub fn configuration(profile: &RemoteProfile) -> Result<ClientConfig> {
     }
 }
 
+/// Public endpoints (GitHub release downloads) use the system trust store with
+/// the same verification and protocol floor as an unpinned remote profile.
+pub fn public_configuration() -> Result<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    ensure!(
+        !roots.is_empty(),
+        "No system trust roots are available to verify the download"
+    );
+    Ok(
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()?
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
 #[derive(Debug)]
 struct PinnedVerifier {
     normal: Arc<WebPkiServerVerifier>,

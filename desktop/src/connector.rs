@@ -7,6 +7,7 @@ use crate::{
     profiles,
 };
 use anyhow::{Result, bail, ensure};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
@@ -47,12 +48,17 @@ fn resolve(source: &Source) -> Result<(ManagerClient, Target)> {
     ))
 }
 
+type Locate = fn(Option<&Path>, Option<&Path>) -> Option<PathBuf>;
+
 pub struct Connector {
     source: Source,
     auto_start: bool,
-    gantry: Option<std::path::PathBuf>,
+    gantry: Option<PathBuf>,
+    managed: Option<PathBuf>,
+    locate: Locate,
     start_attempted: bool,
     start_error: Option<String>,
+    cli_missing: bool,
 }
 
 impl Connector {
@@ -61,9 +67,19 @@ impl Connector {
             source: options.source.clone(),
             auto_start: options.auto_start,
             gantry: options.gantry.clone(),
+            managed: options.managed_gantry.clone(),
+            locate: launcher::locate,
             start_attempted: false,
             start_error: None,
+            cli_missing: false,
         }
+    }
+
+    fn missing(&self) -> anyhow::Error {
+        launcher::CliMissing {
+            managed: self.managed.clone(),
+        }
+        .into()
     }
 
     /// At most one automatic launch per window. Polling always reconnects, but
@@ -145,6 +161,7 @@ impl Connector {
         if retry_start {
             self.start_attempted = false;
             self.start_error = None;
+            self.cli_missing = false;
         }
         match resolve(&self.source).and_then(|(client, target)| read(client, target)) {
             Ok(value) => {
@@ -157,14 +174,26 @@ impl Connector {
                     && api::is_absent(&error) => {}
             Err(error) => return Err(error),
         }
-        if self.start_attempted {
+        // A CLI that appeared after a missing-CLI attempt (installed from the
+        // desktop or by the user) earns exactly one new automatic attempt.
+        let locate = self.locate;
+        let program = locate(self.gantry.as_deref(), self.managed.as_deref());
+        if self.start_attempted && !(self.cli_missing && program.is_some()) {
+            if self.cli_missing {
+                return Err(self.missing());
+            }
             bail!("{}",self.start_error.as_deref().unwrap_or("The local manager is unavailable. Press Refresh to retry startup, or run gantry serve explicitly."));
         }
         self.start_attempted = true;
         let Source::Local(socket) = &self.source else {
             unreachable!()
         };
-        let program = launcher::executable(self.gantry.as_deref());
+        self.cli_missing = program.is_none();
+        let Some(program) = program else {
+            let error = self.missing();
+            self.start_error = Some(error.to_string());
+            return Err(error);
+        };
         if let Err(error) = launcher::ensure_local(socket, &program) {
             self.start_error = Some(error.to_string());
             return Err(error);
@@ -201,6 +230,7 @@ mod tests {
             appearance: Appearance::Dark,
             auto_start: true,
             gantry: Some(program),
+            managed_gantry: None,
         };
         (dir, options, marker)
     }
@@ -219,6 +249,35 @@ mod tests {
         assert_eq!(std::fs::read(&marker).unwrap(), b"x");
         assert!(connector.snapshot(true).is_err());
         assert_eq!(std::fs::read(&marker).unwrap(), b"xx");
+    }
+
+    #[test]
+    fn a_missing_cli_latches_until_one_appears_then_launches_once() {
+        let (dir, mut options, marker) = setup();
+        let program = options.gantry.take().unwrap();
+        let managed = dir.path().join("bin").join("gantry");
+        options.managed_gantry = Some(managed.clone());
+        let mut connector = Connector::new(&options);
+        // Never consult the developer's own PATH or a real sibling CLI.
+        connector.locate = |_, managed| managed.filter(|path| path.is_file()).map(Path::to_owned);
+        for _ in 0..2 {
+            let error = connector.snapshot(false).unwrap_err();
+            assert!(
+                error.downcast_ref::<launcher::CliMissing>().is_some(),
+                "{error:#}"
+            );
+        }
+        std::fs::create_dir(managed.parent().unwrap()).unwrap();
+        std::fs::rename(&program, &managed).unwrap();
+        // The newly installed CLI is launched without a manual retry...
+        let error = connector.snapshot(false).unwrap_err();
+        assert!(
+            error.to_string().contains("test launcher refused"),
+            "{error:#}"
+        );
+        // ...once: its failure then latches like any other startup failure.
+        assert!(connector.snapshot(false).is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"x");
     }
 
     #[test]

@@ -367,6 +367,7 @@ fn replaced_remote_profile_invalidates_an_open_action_before_any_connection() {
         appearance: Appearance::System,
         auto_start: false,
         gantry: None,
+        managed_gantry: None,
     };
     let target = Target {
         source,

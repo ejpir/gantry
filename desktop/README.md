@@ -51,7 +51,8 @@ as imitations on Linux.
 ## Run locally — no separate serve command
 
 Install a current stable Rust toolchain and an up-to-date Gantry CLI supporting
-`gantry serve --ensure`. Commands below run from the repository root.
+`gantry serve --ensure` (release builds of the desktop can install the matching
+CLI for you; see below). Commands below run from the repository root.
 
 **Upgrading:** rebuild both the desktop and Go CLI, and restart any already-running
 manager. Writes require the manager's `dashboard-control-v1` health capability,
@@ -80,8 +81,39 @@ cargo run --locked --manifest-path desktop/Cargo.toml -- \
   --gantry ./artifacts/gantry-darwin-arm64
 ```
 
-Without `--gantry`, the launcher looks beside the desktop executable, then on
-`PATH`. It never invokes a shell or builds the Go executable automatically.
+Without `--gantry`, the launcher looks beside the desktop executable, then in
+absolute `PATH` entries, then at the desktop-managed `~/.gantry/bin/gantry`
+(under the parent of `GANTRY_HOME` when that is set). It never invokes a shell
+or builds the Go executable automatically.
+
+### Installing the matching CLI from the desktop
+
+If automatic local startup finds no Gantry CLI anywhere, the Sandboxes screen
+says so and, in tagged release builds on Linux and Apple silicon macOS, offers
+**Install Gantry CLI vX.Y.Z**. Nothing is downloaded until you click it. Then
+the desktop:
+
+- fetches `gantry-<os>-<arch>` and its `.sha256` sidecar from the GitHub
+  release with the **same tag as the desktop**, so the CLI and desktop always
+  match. HTTPS uses the system trust store, and only redirects to
+  `github.com` / `*.githubusercontent.com` are followed. `HTTPS_PROXY` is
+  honored, as it is for the CLI's own downloads;
+- writes to an exclusively created, owner-only (`0700`) staging file in the
+  private `~/.gantry/bin` directory, and refuses to use a Gantry root that
+  other users could write to;
+- checks the SHA-256, the executable format and CPU architecture, and on macOS
+  `codesign --verify --strict` plus the Hypervisor entitlement, as
+  `gantry update` does. A quarantine attribute is cleared only after all of
+  these checks pass;
+- atomically renames the verified file to `~/.gantry/bin/gantry`, then makes
+  one normal startup attempt.
+
+Any failure leaves nothing installed. A CLI you install yourself (beside the
+desktop or on `PATH`) always takes precedence over the managed copy. If you
+install one while the desktop is waiting, the next poll notices it and makes
+one startup attempt. `~/.gantry/bin/gantry update` updates the managed copy in
+place. Development builds are not stamped with a release, so they never offer
+a download; use `--gantry` or `PATH` instead.
 
 ### Local startup rules
 
@@ -101,7 +133,8 @@ Without `--gantry`, the launcher looks beside the desktop executable, then on
   running independently of the GUI; no sandbox is started by this operation.
 - Automatic launch is attempted once per window. Polling continues to reconnect,
   but does not repeatedly spawn failing helpers. **Refresh** explicitly retries
-  local startup.
+  local startup. The only automatic exception: when the earlier attempt found no
+  CLI at all, a CLI that appears later gets one attempt.
 
 Connect to a separately managed socket:
 
@@ -207,8 +240,8 @@ or app bundles yet. The first Rust build downloads and compiles GPUI dependencie
 `src/api.rs` is one typed manager client over both transports. `commands.rs`
 implements typed write intents and operation polling; `connector.rs` owns
 startup and verifies that action targets have not changed. `launcher.rs` invokes
-`gantry serve --ensure`; `local_profiles.rs` uses only the CLI's client-local
-profile workflow. Business operations never use shell commands or sandbox files.
+`gantry serve --ensure`; `bootstrap.rs` installs the matching CLI on request;
+`local_profiles.rs` uses only the CLI's client-local profile workflow. Business operations never use shell commands or sandbox files.
 
 `dashboard_wire.rs` and the dashboard sections of the
 [OpenAPI contract](../api/managerapi/openapi.yaml) are generated from the same

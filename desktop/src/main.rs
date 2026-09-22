@@ -1,6 +1,7 @@
 mod activity;
 mod app;
 mod chrome;
+mod cli_install;
 mod dashboard_table;
 mod form_controls;
 mod row_actions;

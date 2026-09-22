@@ -20,22 +20,106 @@ struct Ready {
     version: String,
 }
 
-pub fn executable(override_path: Option<&Path>) -> PathBuf {
-    if let Some(path) = override_path {
-        return path.to_owned();
-    }
-    if let Ok(current) = std::env::current_exe() {
-        let name = if cfg!(windows) {
-            "gantry.exe"
-        } else {
-            "gantry"
-        };
-        let sibling = current.with_file_name(name);
-        if sibling.is_file() {
-            return sibling;
+pub(crate) const EXECUTABLE: &str = if cfg!(windows) {
+    "gantry.exe"
+} else {
+    "gantry"
+};
+
+/// No Gantry CLI exists anywhere the launcher looks. Unlike a CLI that fails
+/// to start, this is the one condition where the desktop offers to install
+/// the CLI that matches its own release.
+#[derive(Debug)]
+pub struct CliMissing {
+    pub managed: Option<PathBuf>,
+}
+
+impl std::fmt::Display for CliMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "No Gantry CLI was found beside the desktop, on PATH")?;
+        if let Some(path) = &self.managed {
+            write!(f, ", or at {}", path.display())?;
         }
+        write!(f, ". Install the Gantry CLI, or pass --gantry PATH.")
     }
-    PathBuf::from("gantry")
+}
+
+impl std::error::Error for CliMissing {}
+
+/// An explicit --gantry path, then a CLI shipped beside the desktop, then
+/// PATH, then the desktop-managed install. The managed copy is only a
+/// fallback, so any CLI the user installed themselves always wins.
+pub fn executable(override_path: Option<&Path>, managed: Option<&Path>) -> Result<PathBuf> {
+    locate(override_path, managed).ok_or_else(|| {
+        CliMissing {
+            managed: managed.map(Path::to_owned),
+        }
+        .into()
+    })
+}
+
+pub fn locate(override_path: Option<&Path>, managed: Option<&Path>) -> Option<PathBuf> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .map(|current| current.with_file_name(EXECUTABLE));
+    locate_in(
+        override_path,
+        sibling.as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        managed,
+    )
+}
+
+fn locate_in(
+    override_path: Option<&Path>,
+    sibling: Option<&Path>,
+    search: Option<&std::ffi::OsStr>,
+    managed: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(path) = override_path {
+        return Some(path.to_owned());
+    }
+    sibling
+        .filter(|sibling| sibling.is_file())
+        .map(Path::to_owned)
+        .or_else(|| {
+            std::env::split_paths(search?)
+                // Relative entries would resolve against the working directory.
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join(EXECUTABLE))
+                .find(|candidate| runnable(candidate))
+        })
+        .or_else(|| {
+            managed
+                .filter(|path| managed_runnable(path))
+                .map(Path::to_owned)
+        })
+}
+
+#[cfg(unix)]
+fn runnable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn runnable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// The managed copy is only trusted inside the private directory the
+/// installer created; anything else is ignored rather than executed.
+#[cfg(unix)]
+fn managed_runnable(path: &Path) -> bool {
+    runnable(path)
+        && path
+            .parent()
+            .is_some_and(|dir| crate::security::private_directory(dir).is_ok())
+}
+
+#[cfg(not(unix))]
+fn managed_runnable(_: &Path) -> bool {
+    false
 }
 
 pub fn ensure_local(socket: &Path, program: &Path) -> Result<()> {
@@ -215,6 +299,57 @@ printf '{"socket":"%s","version":"v1"}\n' "$4""#,
                 .unwrap_err()
                 .to_string()
                 .contains("owns the state")
+        );
+    }
+
+    #[test]
+    fn user_installed_clis_win_over_the_desktop_managed_copy() {
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let bundled = dir.path().join("bundle");
+        let on_path = dir.path().join("path");
+        let managed = dir.path().join("bin");
+        for directory in [&bundled, &on_path, &managed] {
+            std::fs::create_dir(directory).unwrap();
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            helper(directory, "exit 0");
+        }
+        let sibling = bundled.join("gantry");
+        let managed = managed.join("gantry");
+        let search = std::env::join_paths([Path::new("relative"), &on_path]).unwrap();
+        let find = |sibling: &Path, search: &std::ffi::OsStr| {
+            locate_in(None, Some(sibling), Some(search), Some(&managed))
+        };
+        assert_eq!(
+            locate_in(Some(Path::new("/explicit")), Some(&sibling), None, None),
+            Some("/explicit".into())
+        );
+        assert_eq!(find(&sibling, &search), Some(sibling.clone()));
+        let missing = dir.path().join("missing");
+        assert_eq!(find(&missing, &search), Some(on_path.join("gantry")));
+        // Non-executable and relative PATH entries are not candidates.
+        std::fs::set_permissions(
+            on_path.join("gantry"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(find(&missing, &search), Some(managed.clone()));
+        // A managed copy outside a private directory is ignored, not run.
+        std::fs::set_permissions(
+            managed.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert_eq!(find(&missing, &search), None);
+        let message = CliMissing {
+            managed: Some(managed.clone()),
+        }
+        .to_string();
+        assert!(
+            message.contains(&managed.display().to_string()),
+            "{message}"
         );
     }
 }

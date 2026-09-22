@@ -9,7 +9,10 @@ use gpui_kit::component::{ActiveTheme, Root};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, Entity, TestAppContext, WindowHandle, px, size};
 
-use crate::{app::Desktop, bind_keys};
+use crate::{
+    app::{Connection, Desktop},
+    bind_keys,
+};
 
 pub(crate) fn desktop(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Desktop>) {
     desktop_at(cx, 1280., 800.)
@@ -33,6 +36,7 @@ pub(crate) fn desktop_at(
                     appearance: Appearance::Dark,
                     auto_start: false,
                     gantry: None,
+                    managed_gantry: None,
                 },
                 window,
                 cx,
@@ -148,6 +152,38 @@ fn minimum_window_size_keeps_the_inspector_visible(cx: &mut TestAppContext) {
         assert!(window.find("inspector-pane").bounds().right() <= px(1040.));
         assert!(window.find("inspector-pane").bounds().size.width >= px(280.));
         assert!(window.find("inventory-pane").bounds().size.width >= px(420.));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_missing_cli_explains_itself_and_offers_only_a_matching_install(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        desktop.update(cx, |this, cx| {
+            this.options.managed_gantry = Some("/home/test/.gantry/bin/gantry".into());
+            this.connection = Connection::Offline("No Gantry CLI was found.".into());
+            this.cli_missing = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("retry-connection").is_some());
+        // Untagged (development) test builds have no release to match. Never
+        // click it here: that would start a real download.
+        let offer = desktop.read(cx).cli_offer();
+        assert_eq!(window.try_find("install-cli").is_some(), offer.is_some());
+        if let Some(offer) = offer {
+            let install = window.find("install-cli");
+            let label = format!("Install Gantry CLI {}", offer.release);
+            assert_eq!(install.label(), Some(label.as_str()));
+        }
+        desktop.update(cx, |this, cx| {
+            this.cli_missing = false;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("install-cli").is_none());
+        assert!(window.try_find("retry-connection").is_some());
     })
     .unwrap();
 }

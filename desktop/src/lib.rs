@@ -1,6 +1,7 @@
 //! Read-only manager client and presentation state, independent of GPUI.
 
 pub mod api;
+pub mod bootstrap;
 pub mod commands;
 pub mod forms;
 pub mod wire;
