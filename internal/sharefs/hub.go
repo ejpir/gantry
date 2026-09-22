@@ -10,6 +10,8 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -64,6 +66,14 @@ type Hub struct {
 // their configured shares before vmm.Prepare and can add more while running.
 func NewHub() (*Hub, error) {
 	debug := os.Getenv("GANTRY_DEBUG_FS") != ""
+	maxBackground, congestionThreshold, err := fuseBackgroundLimits(os.Getenv("GANTRY_FUSE_MAX_BACKGROUND"))
+	if err != nil {
+		return nil, err
+	}
+	if maxBackground != 0 {
+		fmt.Fprintf(os.Stderr, "[diag] GANTRY_FUSE_MAX_BACKGROUND=%d: congestion threshold %d\n",
+			maxBackground, congestionThreshold)
+	}
 	zeroMessageOpenDir := runtime.GOOS != "windows"
 	capabilities := uint64(fuse.CAP_READDIRPLUS_AUTO | fuse.CAP_GANTRY_READDIR_EOF)
 	if zeroMessageOpenDir {
@@ -82,6 +92,8 @@ func NewHub() (*Hub, error) {
 			Debug:                debug,
 			FsName:               shares.HubTag,
 			Name:                 "virtiofs",
+			MaxBackground:        maxBackground,
+			CongestionThreshold:  congestionThreshold,
 			MaxWrite:             128 << 10,
 			ExtraCapabilities:    capabilities,
 			IgnoreSecurityLabels: true,
@@ -97,6 +109,8 @@ func NewHub() (*Hub, error) {
 		Debug:                debug,
 		FsName:               shares.HubTag,
 		Name:                 "virtiofs",
+		MaxBackground:        maxBackground,
+		CongestionThreshold:  congestionThreshold,
 		MaxWrite:             128 << 10,
 		ExtraCapabilities:    capabilities,
 		IgnoreSecurityLabels: true,
@@ -105,6 +119,18 @@ func NewHub() (*Hub, error) {
 	h.handler = h.protocol
 	h.guard.setReporter(h.handler)
 	return h, nil
+}
+
+func fuseBackgroundLimits(value string) (int, int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, 0, nil
+	}
+	maxBackground, err := strconv.Atoi(value)
+	if err != nil || maxBackground < 1 || maxBackground > 128 {
+		return 0, 0, fmt.Errorf("GANTRY_FUSE_MAX_BACKGROUND must be an integer from 1 through 128")
+	}
+	return maxBackground, maxBackground * 3 / 4, nil
 }
 
 // Prepare validates and pins a host directory without publishing it. The
@@ -431,6 +457,9 @@ func (h *Hub) SetNotificationSink(sink fusewire.NotificationSink) {
 		return sink(message)
 	})
 	h.notificationsReady.Store(true)
+	if h.debugFS {
+		fmt.Fprintln(os.Stderr, "sharefs: notification sink attached; long metadata TTL eligible")
+	}
 }
 
 // SetDeadline bounds the lifetime of every export, including already-open

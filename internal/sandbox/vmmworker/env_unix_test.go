@@ -10,7 +10,8 @@ import (
 func TestVMMWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 	for _, key := range []string{
 		"GANTRY_DEBUG_RTC", "GANTRY_PREFAULT_RAM", "GANTRY_BOOT_PROFILE",
-		"GANTRY_VHOST_STATS", "GANTRY_VIRTIO_MEM",
+		"GANTRY_VHOST_STATS", "GANTRY_HVF_STATS", "GANTRY_HVF_IRQ_COALESCE",
+		"GANTRY_HVF_NO_LIVENESS_KICK", "GANTRY_VIRTIO_MEM",
 	} {
 		t.Setenv(key, "")
 	}
@@ -22,11 +23,15 @@ func TestVMMWorkerEnvironmentDoesNotInheritHostAuthority(t *testing.T) {
 	t.Setenv("GANTRY_PREFAULT_RAM", "1")
 	t.Setenv("GANTRY_BOOT_PROFILE", "1")
 	t.Setenv("GANTRY_VHOST_STATS", "1")
+	t.Setenv("GANTRY_HVF_STATS", "1")
+	t.Setenv("GANTRY_HVF_IRQ_COALESCE", "1")
+	t.Setenv("GANTRY_HVF_NO_LIVENESS_KICK", "1")
 	t.Setenv("GANTRY_VIRTIO_MEM", "true")
 
 	want := []string{
 		"GANTRY_DEBUG_RTC=1", "GANTRY_PREFAULT_RAM=1", "GANTRY_BOOT_PROFILE=1",
-		"GANTRY_VHOST_STATS=1", "GANTRY_VIRTIO_MEM=1",
+		"GANTRY_VHOST_STATS=1", "GANTRY_HVF_STATS=1", "GANTRY_HVF_IRQ_COALESCE=1",
+		"GANTRY_HVF_NO_LIVENESS_KICK=1", "GANTRY_VIRTIO_MEM=1",
 	}
 	if got := vmmWorkerEnv(); !slices.Equal(got, want) {
 		t.Fatalf("VMM worker environment = %v, want %v", got, want)

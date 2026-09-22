@@ -407,7 +407,7 @@ func (n *shareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	errno := n.LoopbackNode.Getattr(ctx, f, out)
 	if errno == 0 {
 		mapGuestOwner(n.export, &out.Attr)
-		if !n.isExportRoot() {
+		if !n.isExportRoot() || n.export.rootCacheable() {
 			cacheAttr(n.export, out)
 		}
 	}
@@ -425,7 +425,7 @@ func (n *shareNode) Statx(ctx context.Context, f fs.FileHandle, flags uint32, ma
 	errno := statxer.Statx(ctx, f, flags, mask, out)
 	if errno == 0 {
 		mapGuestStatxOwner(n.export, &out.Statx)
-		if !n.isExportRoot() {
+		if !n.isExportRoot() || n.export.rootCacheable() {
 			cacheStatx(n.export, out)
 		}
 	}

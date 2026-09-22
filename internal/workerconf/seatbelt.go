@@ -74,9 +74,13 @@ func buildSeatbeltProfile(spec Spec) string {
 		b.WriteString("\t(sysctl-name \"" + name + "\")\n")
 	}
 	if spec.Profile == ProfileVMM {
-		// Hypervisor.framework uses this feature bit when selecting its VM
-		// creation path. It reveals no process-specific information.
+		// Hypervisor.framework uses these values when selecting and configuring
+		// its VM implementation. Apple M4 hosts running macOS 15 query
+		// hw.pagesize_compat while creating the in-kernel GIC; denying that
+		// query makes hv_gic_create return HV_BAD_ARGUMENT. Neither value
+		// reveals process-specific information.
 		b.WriteString("\t(sysctl-name \"kern.hv_support\")\n")
+		b.WriteString("\t(sysctl-name \"hw.pagesize_compat\")\n")
 	}
 	b.WriteString(")\n")
 	// Minimal runtime devices. Diagnostics are inherited pipes, never a path.

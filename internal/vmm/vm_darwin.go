@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -44,8 +46,11 @@ type hvfBackend struct {
 	vmCreated bool
 	mapped    bool
 
-	irqs     devices.SerializedIRQDelivery
-	shutdown *nativeThreadTeardown
+	irqs         devices.SerializedIRQDelivery
+	coalesceIRQs bool
+	irqLevels    [hvfTrackedGICIRQs]bool
+	runtimeStats *hvfRuntimeStats
+	shutdown     *nativeThreadTeardown
 
 	vcpuMu  sync.Mutex
 	vcpus   []*hvfVCPU
@@ -102,6 +107,8 @@ type hvfVCPU struct {
 	statMMIO       atomic.Uint64
 	statSysreg     atomic.Uint64
 	statOther      atomic.Uint64
+	statLiveness   atomic.Uint64
+	statCanceled   atomic.Uint64
 	idleWaits      atomic.Uint64
 	idleBlocked    atomic.Int64
 	idleCapped     atomic.Uint64
@@ -114,6 +121,60 @@ type hvfVCPU struct {
 	seenMMIO map[uint64]bool
 }
 
+// hvfRuntimeStats is intentionally limited to atomic counters on hot paths.
+// GANTRY_HVF_STATS is a diagnostic mode for sustained workloads, unlike the
+// boot profiler: it must not force exits, read vCPU registers, or print once
+// per interrupt and thereby create the behavior it is trying to measure.
+const hvfTrackedGICIRQs = 1024
+
+type hvfRuntimeStats struct {
+	gicAssertions      atomic.Uint64
+	gicDeassertions    atomic.Uint64
+	gicIRQAssertions   [hvfTrackedGICIRQs]atomic.Uint64
+	gicIRQDeassertions [hvfTrackedGICIRQs]atomic.Uint64
+	gicIRQSuppressed   [hvfTrackedGICIRQs]atomic.Uint64
+	gicSuppressed      atomic.Uint64
+	gicNanos           atomic.Int64
+	gicMaximum         atomic.Int64
+
+	livenessBatches  atomic.Uint64
+	livenessTargets  atomic.Uint64
+	livenessNanos    atomic.Int64
+	livenessMaximum  atomic.Int64
+	livenessInFlight atomic.Bool
+	livenessStarted  atomic.Int64
+
+	kickBatches atomic.Uint64
+	kickTargets atomic.Uint64
+}
+
+func observeHVFDuration(total, maximum *atomic.Int64, elapsed time.Duration) {
+	total.Add(int64(elapsed))
+	for previous := maximum.Load(); int64(elapsed) > previous; previous = maximum.Load() {
+		if maximum.CompareAndSwap(previous, int64(elapsed)) {
+			break
+		}
+	}
+}
+
+// shouldDeliverIRQ optionally coalesces repeated line levels. It is called
+// under SerializedIRQDelivery's lock, so irqLevels needs no second lock. A
+// guest InterruptACK supplies the false transition that rearms the next true.
+func (b *hvfBackend) shouldDeliverIRQ(irq int, level bool) bool {
+	if !b.coalesceIRQs || irq < 0 || irq >= len(b.irqLevels) {
+		return true
+	}
+	if b.irqLevels[irq] == level {
+		if b.runtimeStats != nil {
+			b.runtimeStats.gicSuppressed.Add(1)
+			b.runtimeStats.gicIRQSuppressed[irq].Add(1)
+		}
+		return false
+	}
+	b.irqLevels[irq] = level
+	return true
+}
+
 // deliverIRQ injects the VM-global GIC line change on the calling device thread.
 // hv_gic_set_spi is itself the guest wakeup for an SPI; deferring it until a
 // vCPU exits loses interrupts when hv_vcpus_exit lands between run calls.
@@ -121,11 +182,35 @@ func (b *hvfBackend) deliverIRQ(irq int, level bool) {
 	if b.lifecycle.isStopping() {
 		return
 	}
+	delivered := false
 	err := b.irqs.Inject(devices.IRQChange{IRQ: irq, Level: level}, func(irq int, level bool) error {
+		if !b.shouldDeliverIRQ(irq, level) {
+			return nil
+		}
+		delivered = true
 		if b.debug {
 			fmt.Printf("[gic] set_spi(%d, %v)\n", irq, level)
 		}
-		if ret := hvGicSetSpi(uint32(irq), level); ret != hvSuccess {
+		var started time.Time
+		if b.runtimeStats != nil {
+			started = time.Now()
+			if level {
+				b.runtimeStats.gicAssertions.Add(1)
+				if irq >= 0 && irq < hvfTrackedGICIRQs {
+					b.runtimeStats.gicIRQAssertions[irq].Add(1)
+				}
+			} else {
+				b.runtimeStats.gicDeassertions.Add(1)
+				if irq >= 0 && irq < hvfTrackedGICIRQs {
+					b.runtimeStats.gicIRQDeassertions[irq].Add(1)
+				}
+			}
+		}
+		ret := hvGicSetSpi(uint32(irq), level)
+		if b.runtimeStats != nil {
+			observeHVFDuration(&b.runtimeStats.gicNanos, &b.runtimeStats.gicMaximum, time.Since(started))
+		}
+		if ret != hvSuccess {
 			return fmt.Errorf("hv_gic_set_spi: %s", hvReturnString(ret))
 		}
 		return nil
@@ -140,7 +225,7 @@ func (b *hvfBackend) deliverIRQ(irq int, level bool) {
 	}
 	// Deasserting a line cannot make new guest work runnable. Waking on both
 	// assertion and acknowledgement doubled the interrupt wakeup rate.
-	if level {
+	if level && delivered {
 		b.wakeIRQTarget(irq)
 	}
 }
@@ -177,6 +262,10 @@ func (b *hvfBackend) kickVCPUs() error {
 	if len(handles) == 0 {
 		b.vcpuMu.Unlock()
 		return nil
+	}
+	if b.runtimeStats != nil {
+		b.runtimeStats.kickBatches.Add(1)
+		b.runtimeStats.kickTargets.Add(uint64(len(handles)))
 	}
 	ret := hvVcpusExit(&handles[0], uint32(len(handles)))
 	b.vcpuMu.Unlock()
@@ -391,13 +480,22 @@ const (
 	vcpuLivenessLimit    = 250 * time.Millisecond
 )
 
-func stalledVCPUHandles(vcpus []*hvfVCPU, now int64) []uint64 {
-	handles := make([]uint64, 0, len(vcpus))
+func stalledVCPUs(vcpus []*hvfVCPU, now int64) []*hvfVCPU {
+	stalled := make([]*hvfVCPU, 0, len(vcpus))
 	for _, vc := range vcpus {
 		lastEntry := vc.lastRunEntry.Load()
 		if vc.inHVF.Load() && lastEntry > 0 && time.Duration(now-lastEntry) >= vcpuLivenessLimit {
-			handles = append(handles, vc.vcpu)
+			stalled = append(stalled, vc)
 		}
+	}
+	return stalled
+}
+
+func stalledVCPUHandles(vcpus []*hvfVCPU, now int64) []uint64 {
+	stalled := stalledVCPUs(vcpus, now)
+	handles := make([]uint64, len(stalled))
+	for index, vc := range stalled {
+		handles[index] = vc.vcpu
 	}
 	return handles
 }
@@ -417,16 +515,136 @@ func (b *hvfBackend) livenessKicker(stop <-chan struct{}) error {
 			return nil
 		case now := <-ticker.C:
 			b.vcpuMu.Lock()
-			handles := stalledVCPUHandles(b.vcpus, now.UnixNano())
-			if len(handles) == 0 {
+			stalled := stalledVCPUs(b.vcpus, now.UnixNano())
+			if len(stalled) == 0 {
 				b.vcpuMu.Unlock()
 				continue
 			}
+			handles := make([]uint64, len(stalled))
+			for index, vc := range stalled {
+				handles[index] = vc.vcpu
+				if b.runtimeStats != nil {
+					vc.statLiveness.Add(1)
+				}
+			}
+			var started time.Time
+			if b.runtimeStats != nil {
+				b.runtimeStats.livenessBatches.Add(1)
+				b.runtimeStats.livenessTargets.Add(uint64(len(handles)))
+				started = time.Now()
+				b.runtimeStats.livenessStarted.Store(started.UnixNano())
+				b.runtimeStats.livenessInFlight.Store(true)
+			}
 			ret := hvVcpusExit(&handles[0], uint32(len(handles)))
+			if b.runtimeStats != nil {
+				b.runtimeStats.livenessInFlight.Store(false)
+				b.runtimeStats.livenessStarted.Store(0)
+				observeHVFDuration(&b.runtimeStats.livenessNanos, &b.runtimeStats.livenessMaximum, time.Since(started))
+			}
 			b.vcpuMu.Unlock()
 			if ret != hvSuccess {
 				return fmt.Errorf("hv_vcpus_exit stalled vCPUs: %s", hvReturnString(ret))
 			}
+		}
+	}
+}
+
+type hvfVCPUStatSnapshot struct {
+	id        int
+	liveness  uint64
+	canceled  uint64
+	inHVF     bool
+	lastEntry int64
+}
+
+func hvfAverageDuration(total int64, count uint64) time.Duration {
+	if count == 0 {
+		return 0
+	}
+	return time.Duration(total / int64(count))
+}
+
+// runtimeStatsLine takes a coherent-enough diagnostic snapshot without ever
+// stopping a vCPU. Counters are cumulative so a missing log interval does not
+// hide a burst; the per-vCPU labels make creation order irrelevant.
+func (b *hvfBackend) runtimeStatsLine(now time.Time) string {
+	stats := b.runtimeStats
+	if stats == nil {
+		return ""
+	}
+	vcpuLockBusy := !b.vcpuMu.TryLock()
+	var vcpus []hvfVCPUStatSnapshot
+	if !vcpuLockBusy {
+		vcpus = make([]hvfVCPUStatSnapshot, 0, len(b.vcpus))
+		for _, vc := range b.vcpus {
+			vcpus = append(vcpus, hvfVCPUStatSnapshot{
+				id: vc.id, liveness: vc.statLiveness.Load(), canceled: vc.statCanceled.Load(),
+				inHVF: vc.inHVF.Load(), lastEntry: vc.lastRunEntry.Load(),
+			})
+		}
+		b.vcpuMu.Unlock()
+		sort.Slice(vcpus, func(i, j int) bool { return vcpus[i].id < vcpus[j].id })
+	}
+
+	livenessCPU := make([]string, 0, len(vcpus))
+	canceledCPU := make([]string, 0, len(vcpus))
+	inHVF := make([]string, 0, len(vcpus))
+	for _, vc := range vcpus {
+		livenessCPU = append(livenessCPU, fmt.Sprintf("%d:%d", vc.id, vc.liveness))
+		canceledCPU = append(canceledCPU, fmt.Sprintf("%d:%d", vc.id, vc.canceled))
+		if vc.inHVF && vc.lastEntry > 0 && now.UnixNano() >= vc.lastEntry {
+			age := time.Duration(now.UnixNano() - vc.lastEntry).Round(time.Millisecond)
+			inHVF = append(inHVF, fmt.Sprintf("%d:%s", vc.id, age))
+		}
+	}
+
+	assertions := stats.gicAssertions.Load()
+	deassertions := stats.gicDeassertions.Load()
+	gicCalls := assertions + deassertions
+	gicIRQs := make([]string, 0, 16)
+	for irq := range hvfTrackedGICIRQs {
+		irqAssertions := stats.gicIRQAssertions[irq].Load()
+		irqDeassertions := stats.gicIRQDeassertions[irq].Load()
+		irqSuppressed := stats.gicIRQSuppressed[irq].Load()
+		if irqAssertions != 0 || irqDeassertions != 0 || irqSuppressed != 0 {
+			gicIRQs = append(gicIRQs, fmt.Sprintf("%d:%d/%d/%d", irq, irqAssertions, irqDeassertions, irqSuppressed))
+		}
+	}
+	livenessBatches := stats.livenessBatches.Load()
+	livenessInFlight := "no"
+	if stats.livenessInFlight.Load() {
+		livenessInFlight = "yes"
+		if started := stats.livenessStarted.Load(); started > 0 && now.UnixNano() >= started {
+			livenessInFlight += ":" + time.Duration(now.UnixNano()-started).Round(time.Millisecond).String()
+		}
+	}
+	vcpuLock := "available"
+	if vcpuLockBusy {
+		vcpuLock = "busy"
+	}
+	return fmt.Sprintf(
+		"hvf-stats: gic(assert=%d deassert=%d suppressed=%d avg=%s max=%s per-irq=[%s]) "+
+			"liveness(batches=%d targets=%d avg=%s max=%s in-flight=%s per-cpu=[%s]) "+
+			"other-kicks(batches=%d targets=%d) canceled=[%s] in-hvf=[%s] vcpu-lock=%s",
+		assertions, deassertions, stats.gicSuppressed.Load(),
+		hvfAverageDuration(stats.gicNanos.Load(), gicCalls).Round(time.Microsecond),
+		time.Duration(stats.gicMaximum.Load()).Round(time.Microsecond), strings.Join(gicIRQs, ","),
+		livenessBatches, stats.livenessTargets.Load(),
+		hvfAverageDuration(stats.livenessNanos.Load(), livenessBatches).Round(time.Microsecond),
+		time.Duration(stats.livenessMaximum.Load()).Round(time.Microsecond), livenessInFlight,
+		strings.Join(livenessCPU, ","), stats.kickBatches.Load(), stats.kickTargets.Load(),
+		strings.Join(canceledCPU, ","), strings.Join(inHVF, ","), vcpuLock)
+}
+
+func (b *hvfBackend) runtimeStatsReporter(stop <-chan struct{}) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return nil
+		case now := <-ticker.C:
+			fmt.Fprintln(os.Stderr, b.runtimeStatsLine(now))
 		}
 	}
 }
@@ -499,7 +717,16 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		return err
 	}
 	debug := os.Getenv("GANTRY_DEBUG") != ""
-	workerCount := m.vcpus + 1 // production vCPU liveness kicker
+	runtimeStatsEnabled := os.Getenv("GANTRY_HVF_STATS") == "1"
+	coalesceIRQs := os.Getenv("GANTRY_HVF_IRQ_COALESCE") == "1"
+	livenessEnabled := os.Getenv("GANTRY_HVF_NO_LIVENESS_KICK") != "1"
+	workerCount := m.vcpus
+	if livenessEnabled {
+		workerCount++ // production vCPU liveness kicker
+	}
+	if runtimeStatsEnabled {
+		workerCount++ // passive runtime statistics reporter
+	}
 	if debug {
 		workerCount += 2 // SIGINFO dumper and periodic kicker
 	}
@@ -507,12 +734,16 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		workerCount++ // perturbing boot PC sampler
 	}
 	b := &hvfBackend{
-		m:           m,
-		debug:       debug,
-		lifecycle:   newNativeBackendLifecycle(workerCount),
-		ramSize:     uint64(len(m.ram)),
-		running:     map[int]bool{},
-		secondaries: map[int]chan psciStart{},
+		m:            m,
+		debug:        debug,
+		lifecycle:    newNativeBackendLifecycle(workerCount),
+		coalesceIRQs: coalesceIRQs,
+		ramSize:      uint64(len(m.ram)),
+		running:      map[int]bool{},
+		secondaries:  map[int]chan psciStart{},
+	}
+	if runtimeStatsEnabled {
+		b.runtimeStats = new(hvfRuntimeStats)
 	}
 	m.bootTracer().setRunStats(b.runStats)
 	var vc0 *hvfVCPU
@@ -714,13 +945,26 @@ func (hvfPlatform) run(m *Machine) (resultErr error) {
 		go m.uart.StdinPump(m.stdinDone)
 		defer close(m.stdinDone)
 	}
-	go b.lifecycle.runWorker(func(stop <-chan struct{}) {
-		if err := b.livenessKicker(stop); err != nil && !b.lifecycle.isStopping() {
-			b.lifecycle.recordError(err)
-			b.lifecycle.stop()
-			b.lifecycle.recordError(b.kickVCPUs())
-		}
-	})
+	if livenessEnabled {
+		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
+			if err := b.livenessKicker(stop); err != nil && !b.lifecycle.isStopping() {
+				b.lifecycle.recordError(err)
+				b.lifecycle.stop()
+				b.lifecycle.recordError(b.kickVCPUs())
+			}
+		})
+	} else {
+		fmt.Println("[diag] GANTRY_HVF_NO_LIVENESS_KICK=1: lost-vtimer backstop disabled")
+	}
+	if runtimeStatsEnabled {
+		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
+			b.lifecycle.recordError(b.runtimeStatsReporter(stop))
+		})
+		fmt.Println("[stats] GANTRY_HVF_STATS=1: cumulative HVF/GIC summary every 1s")
+	}
+	if coalesceIRQs {
+		fmt.Println("[diag] GANTRY_HVF_IRQ_COALESCE=1: repeated GIC line levels suppressed")
+	}
 	if m.bootTracer().profiling() {
 		go b.lifecycle.runWorker(func(stop <-chan struct{}) {
 			b.lifecycle.recordError(b.bootProfiler(stop))
@@ -953,6 +1197,9 @@ func (vc *hvfVCPU) runLoop() error {
 		case hvExitReasonCanceled:
 			if vc.bootAccounting {
 				vc.statOther.Add(1)
+			}
+			if vc.b.runtimeStats != nil {
+				vc.statCanceled.Add(1)
 			}
 			if vc.b.lifecycle.isStopping() {
 				return nil

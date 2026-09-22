@@ -3,6 +3,7 @@
 package vmm
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,6 +138,86 @@ func TestHVFUnknownExitRetryIsBounded(t *testing.T) {
 		if delay, retry := hvfUnknownRetryDelay(attempt); retry || delay != 0 {
 			t.Fatalf("out-of-range attempt %d = delay %s retry %v", attempt, delay, retry)
 		}
+	}
+}
+
+func TestHVFIRQCoalescingRearmsOnDeassert(t *testing.T) {
+	stats := new(hvfRuntimeStats)
+	b := &hvfBackend{coalesceIRQs: true, runtimeStats: stats}
+	for index, test := range []struct {
+		level bool
+		want  bool
+	}{
+		{level: true, want: true},
+		{level: true, want: false},
+		{level: false, want: true},
+		{level: false, want: false},
+		{level: true, want: true},
+	} {
+		if got := b.shouldDeliverIRQ(73, test.level); got != test.want {
+			t.Errorf("transition %d level %t deliver = %t, want %t", index, test.level, got, test.want)
+		}
+	}
+	if got := stats.gicSuppressed.Load(); got != 2 {
+		t.Errorf("suppressed transitions = %d, want 2", got)
+	}
+	if got := stats.gicIRQSuppressed[73].Load(); got != 2 {
+		t.Errorf("IRQ 73 suppressed transitions = %d, want 2", got)
+	}
+
+	plain := &hvfBackend{}
+	if !plain.shouldDeliverIRQ(73, true) || !plain.shouldDeliverIRQ(73, true) {
+		t.Fatal("coalescing disabled suppressed a repeated level")
+	}
+}
+
+func TestHVFRuntimeStatsLineReportsWithoutKicking(t *testing.T) {
+	now := time.Now()
+	stats := new(hvfRuntimeStats)
+	stats.gicAssertions.Store(3)
+	stats.gicDeassertions.Store(1)
+	stats.gicIRQAssertions[73].Store(3)
+	stats.gicIRQDeassertions[73].Store(1)
+	stats.gicSuppressed.Store(2)
+	stats.gicIRQSuppressed[73].Store(2)
+	stats.gicNanos.Store(int64(16 * time.Microsecond))
+	stats.gicMaximum.Store(int64(7 * time.Microsecond))
+	stats.livenessBatches.Store(2)
+	stats.livenessTargets.Store(3)
+	stats.livenessNanos.Store(int64(10 * time.Microsecond))
+	stats.livenessMaximum.Store(int64(8 * time.Microsecond))
+	stats.livenessStarted.Store(now.Add(-250 * time.Millisecond).UnixNano())
+	stats.livenessInFlight.Store(true)
+	stats.kickBatches.Store(1)
+	stats.kickTargets.Store(4)
+
+	vc0 := &hvfVCPU{id: 0}
+	vc0.statLiveness.Store(2)
+	vc0.statCanceled.Store(2)
+	vc0.inHVF.Store(true)
+	vc0.lastRunEntry.Store(now.Add(-300 * time.Millisecond).UnixNano())
+	vc1 := &hvfVCPU{id: 1}
+	vc1.statLiveness.Store(1)
+	vc1.statCanceled.Store(1)
+	b := &hvfBackend{runtimeStats: stats, vcpus: []*hvfVCPU{vc1, vc0}}
+
+	line := b.runtimeStatsLine(now)
+	for _, want := range []string{
+		"gic(assert=3 deassert=1 suppressed=2 avg=4µs max=7µs per-irq=[73:3/1/2])",
+		"liveness(batches=2 targets=3 avg=5µs max=8µs in-flight=yes:250ms per-cpu=[0:2,1:1])",
+		"other-kicks(batches=1 targets=4)",
+		"canceled=[0:2,1:1]", "in-hvf=[0:300ms]", "vcpu-lock=available",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("runtime stats line %q does not contain %q", line, want)
+		}
+	}
+
+	b.vcpuMu.Lock()
+	busyLine := b.runtimeStatsLine(now)
+	b.vcpuMu.Unlock()
+	if !strings.Contains(busyLine, "vcpu-lock=busy") || !strings.Contains(busyLine, "per-cpu=[]") {
+		t.Errorf("busy runtime stats line did not remain nonblocking: %q", busyLine)
 	}
 }
 

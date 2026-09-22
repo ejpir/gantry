@@ -60,6 +60,9 @@ func (w *vmmWorker) startShareVhost(hub sharefs.BorrowedHub) error {
 			}
 			return n
 		}, debug, func(sink func([]byte) fuse.Status) {
+			if stats != nil {
+				fmt.Fprintf(os.Stderr, "vhost-share-notify: sink %s\n", map[bool]string{true: "detached", false: "attached"}[sink == nil])
+			}
 			if sink == nil {
 				hub.SetNotificationSink(nil)
 				return

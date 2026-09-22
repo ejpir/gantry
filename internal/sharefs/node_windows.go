@@ -113,7 +113,7 @@ func (n *winShareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 			info, errno := n.backend.infoForHandle(windows.Handle(file.wf.file.Fd()))
 			if errno == 0 {
 				out.Attr = info.attr
-				if !n.isExportRoot() {
+				if !n.isExportRoot() || n.export.rootCacheable() {
 					cacheAttr(n.export, out)
 				}
 			}
@@ -135,7 +135,7 @@ func (n *winShareNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.A
 	}
 	_ = windows.CloseHandle(h)
 	out.Attr = info.attr
-	if !n.isExportRoot() {
+	if !n.isExportRoot() || n.export.rootCacheable() {
 		cacheAttr(n.export, out)
 	}
 	return 0

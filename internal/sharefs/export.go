@@ -58,6 +58,7 @@ type Export struct {
 	watchRootFD     int     //nolint:unused // consumed by watcher_linux.go
 	watchRootHandle uintptr //nolint:unused // consumed by watcher_windows.go
 	coherence       *exportCoherence
+	ttlReported     atomic.Bool
 
 	cacheMu sync.RWMutex //nolint:unused // Unix-only descriptor-cache ownership.
 	//nolint:unused // Unix-only descriptor-cache ownership.
@@ -131,6 +132,15 @@ func (e *Export) mutable() syscall.Errno {
 func (e *Export) longCacheHealthy() bool {
 	return e != nil && e.hub != nil && e.hub.notificationsReady.Load() &&
 		e.coherence != nil && e.coherence.Healthy()
+}
+
+// rootCacheable reports whether the export root itself may serve cached
+// attributes. Namespace removal is announced through the reverse
+// notification channel (Hub.NotifyEntry on the hub root), so once that
+// channel is live the export root dentry no longer needs a zero TTL to make
+// removal visible. Without the channel the root stays uncached.
+func (e *Export) rootCacheable() bool {
+	return e != nil && e.hub != nil && e.hub.notificationsReady.Load()
 }
 
 // finish is the OnForget path. It revokes new operations immediately, then

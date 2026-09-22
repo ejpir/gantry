@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,8 @@ type vhostShareStats struct {
 	errors            uint64
 	handler           time.Duration
 	maximum           time.Duration
+	logEvery          uint64
+	trace             int
 	byOpcode          map[uint32]*vhostOpcodeStats
 	records           [64]vhostShareRecord
 }
@@ -51,10 +54,28 @@ func newVhostShareStats() *vhostShareStats {
 		return nil
 	}
 	started := time.Now()
+	trace := 0
+	if os.Getenv("GANTRY_VHOST_TRACE") == "1" {
+		trace = 600
+	}
 	return &vhostShareStats{
-		started: started, lastFinished: started,
+		started: started, lastFinished: started, logEvery: statsLogEvery(), trace: trace,
 		byOpcode: make(map[uint32]*vhostOpcodeStats),
 	}
+}
+
+// statsLogEvery keeps the default cadence at 25k requests while allowing
+// fine-grained request counting for small diagnostic probes.
+func statsLogEvery() uint64 {
+	value := os.Getenv("GANTRY_VHOST_STATS_EVERY")
+	if value == "" {
+		return 25000
+	}
+	every, err := strconv.ParseUint(strings.TrimSpace(value), 10, 20)
+	if err != nil || every == 0 || every > 25000 {
+		return 25000
+	}
+	return every
 }
 
 func (s *vhostShareStats) observe(in, out [][]byte, written int, status fuse.Status, elapsed time.Duration) {
@@ -87,6 +108,10 @@ func (s *vhostShareStats) observe(in, out [][]byte, written int, status fuse.Sta
 	}
 
 	s.mu.Lock()
+	if s.trace > 0 {
+		s.trace--
+		s.traceLocked(in, out, opcode, unique)
+	}
 	if started.After(s.lastFinished) {
 		gap := started.Sub(s.lastFinished)
 		if gap > s.maximumRequestGap {
@@ -124,10 +149,42 @@ func (s *vhostShareStats) observe(in, out [][]byte, written int, status fuse.Sta
 			s.dumpFlightLocked()
 		}
 	}
-	if s.requests%25000 == 0 {
+	if s.requests%s.logEvery == 0 {
 		s.logLocked()
 	}
 	s.mu.Unlock()
+}
+
+// traceLocked dumps the fields which decide guest cache behaviour for the
+// metadata-heavy opcodes. EntryOut/AttrOut validity windows are the only
+// mechanism by which the guest may skip a round trip; printing them on the
+// wire settles whether the server or the guest discards caching.
+func (s *vhostShareStats) traceLocked(in, out [][]byte, opcode uint32, unique uint64) {
+	if opcode != 1 && opcode != 3 && opcode != 52 { // lookup, getattr, statx
+		return
+	}
+	var nodeID uint64
+	if len(in) != 0 && len(in[0]) >= 24 {
+		nodeID = binary.LittleEndian.Uint64(in[0][16:24])
+	}
+	line := fmt.Sprintf("vhost-share-trace: request=%d unique=%d op=%s node=%d",
+		s.requests+1, unique, fuseOpcodeName(opcode), nodeID)
+	if len(out) >= 2 {
+		data := out[1]
+		switch opcode {
+		case 1: // EntryOut: nodeid, generation, entryValid, attrValid, entryValidNSec, attrValidNSec
+			if len(data) >= 40 {
+				line += fmt.Sprintf(" entry-valid=%ds attr-valid=%ds out-node=%d",
+					binary.LittleEndian.Uint64(data[16:24]), binary.LittleEndian.Uint64(data[24:32]),
+					binary.LittleEndian.Uint64(data[0:8]))
+			}
+		case 3, 52: // AttrOut/StatxOut: attrValid, attrValidNSec, ...
+			if len(data) >= 8 {
+				line += fmt.Sprintf(" attr-valid=%ds", binary.LittleEndian.Uint64(data[0:8]))
+			}
+		}
+	}
+	fmt.Fprintln(os.Stderr, line)
 }
 
 func (s *vhostShareStats) dumpFlightLocked() {
