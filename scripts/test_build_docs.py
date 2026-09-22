@@ -98,7 +98,14 @@ class DocsBuildTests(unittest.TestCase):
                     continue
                 destination = urlsplit(urljoin(source, href))
                 path = destination._replace(query="", fragment="").geturl()
-                self.assertIn(path, pages, f"{source} -> {href}")
+                if path not in pages:
+                    # The landing page also links downloadable demo media.
+                    # Those deploy as files under assets/, not as HTML
+                    # pages; require the exact staged target to exist.
+                    relative = path.removeprefix(base)
+                    staged = relative.startswith("assets/") and (build_docs.ROOT / relative).is_file()
+                    self.assertTrue(staged, f"{source} -> {href}")
+                    continue
                 if destination.fragment:
                     self.assertIn(
                         unquote(destination.fragment),

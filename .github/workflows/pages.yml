@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'index.html'
+      - 'assets/**'
       - 'docs/gantry/**'
       - 'scripts/build_docs.py'
       - 'scripts/test_build_docs.py'
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - 'index.html'
+      - 'assets/**'
       - 'docs/gantry/**'
       - 'scripts/build_docs.py'
       - 'scripts/test_build_docs.py'
@@ -56,6 +58,8 @@ jobs:
           mkdir -p "$site_dir/docs/gantry"
           cp index.html "$site_dir/index.html"
           cp docs/gantry/index.html "$site_dir/docs/gantry/index.html"
+          # The landing page embeds and links demo media from assets/.
+          cp -r assets "$site_dir/assets"
           touch "$site_dir/.nojekyll"
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
