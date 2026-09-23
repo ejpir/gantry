@@ -11,6 +11,7 @@ use gantry_desktop::{
     inventory::{Filter, Inventory, demo_sandboxes},
     launcher::CliMissing,
     options::{Appearance, Options, SocketDefaults, Source},
+    org::{self, OrgSnapshot},
     profiles::RemoteProfile,
     telemetry::Throughput,
     workspace::{self, Page, Record},
@@ -127,6 +128,16 @@ pub(crate) struct Desktop {
     pub context_menu: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
     pub context_position: gpui_kit::Point<gpui_kit::Pixels>,
     pub context_subscription: Option<Subscription>,
+    /// The selected connection is an organization's policy service. It stays
+    /// set while that connection is offline, so the workspace does not flip.
+    pub org_mode: bool,
+    /// The policy service's latest snapshot; cleared when a refresh fails.
+    pub organization: Option<OrgSnapshot>,
+    /// The profile shown on the Policy page.
+    pub org_profile: String,
+    /// The page changed without a window (a refresh entered or left an
+    /// organization); the next render updates the search field for it.
+    pub page_unsynced: bool,
 }
 impl Desktop {
     pub fn new(options: Options, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -312,6 +323,10 @@ impl Desktop {
             context_menu: None,
             context_position: Default::default(),
             context_subscription: None,
+            org_mode: false,
+            organization: None,
+            org_profile: String::new(),
+            page_unsynced: false,
         };
         if this.options.source == Source::Demo {
             this.inventory.replace(demo_sandboxes());
@@ -353,7 +368,7 @@ impl Desktop {
     pub fn can_write(&self) -> bool {
         self.options.source != Source::Demo
             && matches!(self.connection, Connection::Connected(_))
-            && self.dashboard_available
+            && (self.dashboard_available || self.org_mode && self.organization.is_some())
             && self.control_available
             && self
                 .target
@@ -409,11 +424,14 @@ impl Desktop {
                         this.inventory.replace(snapshot.inventory.sandboxes);
                         this.connection = Connection::Connected(snapshot.inventory.version);
                         this.dashboard_available = snapshot.dashboard.is_some();
-                        this.control_available = snapshot
-                            .inventory
-                            .capabilities
-                            .iter()
-                            .any(|c| c == "dashboard-control-v1");
+                        let organization = snapshot.organization.is_some();
+                        this.control_available = organization
+                            || snapshot
+                                .inventory
+                                .capabilities
+                                .iter()
+                                .any(|c| c == "dashboard-control-v1");
+                        this.set_organization(snapshot.organization, cx);
                         this.host = snapshot.dashboard.unwrap_or_default();
                         this.throughput
                             .record(Instant::now(), &this.host.snapshot.sandboxes);
@@ -432,6 +450,7 @@ impl Desktop {
                         this.last_updated = None;
                         this.packets = PacketSnapshot::default();
                         this.capture_rate.clear();
+                        this.organization = None;
                     }
                 }
                 this.sync_table(cx);
@@ -504,10 +523,11 @@ impl Desktop {
             }
             let registries = self.images_registries;
             let scale = TableScale::new(page, &self.host);
+            let all = self.page_rows(page);
             let state = &mut self.pages[page.index()];
             let query = state.query.to_lowercase();
             let segment = state.segment;
-            let rows = workspace::rows(page, &self.host, &self.profiles, &self.packets)
+            let rows = all
                 .into_iter()
                 .filter(|r| {
                     (page != Page::Images || matches!(&r.record, Record::Registry(_)) == registries)
@@ -519,7 +539,13 @@ impl Desktop {
             if (!state.selection_initialized || state.selected.is_some())
                 && !rows.iter().any(|r| Some(&r.key) == state.selected.as_ref())
             {
-                state.selected = rows.first().map(|r| r.key.clone());
+                // The draft's inspector with nothing selected is its publish
+                // panel, so the Policy page starts without a selection.
+                state.selected = if page == Page::OrgPolicy {
+                    None
+                } else {
+                    rows.first().map(|r| r.key.clone())
+                };
             }
             if !rows.is_empty() {
                 state.selection_initialized = true;
@@ -540,6 +566,76 @@ impl Desktop {
         }
         cx.notify();
     }
+    /// A page's records: the manager's dashboard, the client's profiles, or
+    /// the organization's policy service.
+    pub fn page_rows(&self, page: Page) -> Vec<workspace::Row> {
+        match (page, &self.organization) {
+            (Page::OrgHosts | Page::OrgRollouts, Some(o)) => org::host_rows(o, false),
+            (Page::OrgEnrollment, Some(o)) => org::host_rows(o, true),
+            (Page::OrgHistory, Some(o)) => org::generation_rows(o),
+            (Page::OrgPolicy, Some(o)) => org::policy_rows(o, &self.org_profile),
+            (page, _) if page.is_organization() => vec![],
+            (page, _) => workspace::rows(page, &self.host, &self.profiles, &self.packets),
+        }
+    }
+    /// Adopt a refreshed organization snapshot (or its absence) and keep the
+    /// page within the workspace the connection offers.
+    pub fn set_organization(&mut self, snapshot: Option<OrgSnapshot>, cx: &mut Context<Self>) {
+        let entering = snapshot.is_some() && !self.org_mode;
+        self.org_mode = snapshot.is_some();
+        if let Some(snapshot) = &snapshot {
+            let profiles = snapshot.profiles();
+            if !profiles.contains(&self.org_profile) {
+                self.org_profile = profiles
+                    .iter()
+                    .find(|p| p.as_str() == "developer")
+                    .or(profiles.first())
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+        self.organization = snapshot;
+        // Connections stay reachable from either workspace.
+        let foreign = if self.org_mode {
+            !self.page.is_organization() && self.page != Page::Remotes
+        } else {
+            self.page.is_organization()
+        };
+        if entering || foreign {
+            self.page = if self.org_mode {
+                Page::OrgHosts
+            } else {
+                Page::Sandboxes
+            };
+            self.inspector_settings = false;
+            self.page_unsynced = true;
+        }
+        cx.notify();
+    }
+    /// Demo mode's sample organization, beside its sample manager. It is
+    /// read-only like the rest of demo mode.
+    pub fn show_demo_organization(
+        &mut self,
+        show: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.options.source != Source::Demo || self.form.is_some() {
+            return;
+        }
+        self.set_organization(show.then(org::demo), cx);
+        self.sync_pages(cx);
+        self.switch_page(self.page, window, cx);
+    }
+    pub fn set_org_profile(&mut self, profile: String, cx: &mut Context<Self>) {
+        if self.org_profile != profile {
+            self.org_profile = profile;
+            let state = &mut self.pages[Page::OrgPolicy.index()];
+            state.selected = None;
+            state.selection_initialized = false;
+        }
+        self.sync_pages(cx);
+    }
     /// Switch the Images page between cached images and registry logins.
     /// The two lists have their own segments and selection.
     pub fn set_images_registries(&mut self, registries: bool, cx: &mut Context<Self>) {
@@ -558,6 +654,17 @@ impl Desktop {
         state.selected = Some(key);
         state.selection_initialized = true;
         self.sync_pages(cx);
+    }
+    /// Select a row, or clear the selection when it is already selected.
+    pub fn toggle_page_row(&mut self, key: String, cx: &mut Context<Self>) {
+        let state = &mut self.pages[self.page.index()];
+        if state.selected.as_deref() == Some(key.as_str()) {
+            state.selected = None;
+            state.selection_initialized = true;
+            self.sync_pages(cx);
+        } else {
+            self.select_page_row(key, cx);
+        }
     }
     pub fn set_segment(&mut self, segment: usize, cx: &mut Context<Self>) {
         let state = &mut self.pages[self.page.index()];
@@ -585,6 +692,7 @@ impl Desktop {
         self.context_menu = None;
         self.context_subscription = None;
         self.page = page;
+        self.page_unsynced = false;
         self.inspector_settings = false;
         let query = if page == Page::Sandboxes {
             self.inventory.query.clone()
@@ -629,6 +737,11 @@ impl Desktop {
         self.packets = PacketSnapshot::default();
         self.capture_rate.clear();
         self.packet_sandbox = None;
+        self.org_mode = false;
+        self.organization = None;
+        if self.page.is_organization() {
+            self.page = Page::Sandboxes;
+        }
         // Terminals belong to the connection they were opened on.
         self.terminals.clear();
         self.terminal_error = None;

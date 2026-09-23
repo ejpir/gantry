@@ -11,7 +11,8 @@ use gpui_kit::{AppContext, ClipboardItem, TestAppContext, px};
 #[gpui_kit::test]
 fn every_dashboard_page_renders_at_the_minimum_window_size(cx: &mut TestAppContext) {
     let (handle, desktop) = desktop_at(cx, 1040., 640.);
-    for page in Page::ALL {
+    // Organization pages belong to policy-service connections (org_ui_tests).
+    for page in Page::ALL.into_iter().filter(|page| !page.is_organization()) {
         cx.update_window(handle.into(), |_, window, cx| {
             window.render_frame(cx);
             if page == Page::Overview {

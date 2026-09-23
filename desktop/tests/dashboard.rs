@@ -2,6 +2,7 @@ use gantry_desktop::{
     commands::{Command, name_path},
     dashboard_wire::*,
     forms::{Intent, Kind, Spec, Values},
+    org,
     wire::SecretInput,
     workspace::{self, Page},
 };
@@ -29,12 +30,33 @@ fn dashboard_top_level_is_required_and_go_nil_slices_are_supported() {
 #[test]
 fn every_tui_page_has_a_native_projection_and_stable_row_ids() {
     let host = workspace::demo();
-    assert_eq!(Page::ALL.len(), 12);
+    assert_eq!(Page::ALL.len(), 17);
     for page in Page::ALL {
         let rows = workspace::rows(page, &host, &[], &PacketSnapshot::default());
+        assert!(!page.is_organization() || rows.is_empty());
         for row in rows {
             assert_eq!(row.cells.len(), page.columns().len());
             assert!(!row.key.is_empty());
+            assert!(!row.record.details().is_empty());
+        }
+    }
+    // Organization pages project the policy service's snapshot instead.
+    let organization = org::demo();
+    for (page, rows) in [
+        (Page::OrgHosts, org::host_rows(&organization, false)),
+        (Page::OrgRollouts, org::host_rows(&organization, false)),
+        (Page::OrgEnrollment, org::host_rows(&organization, true)),
+        (Page::OrgHistory, org::generation_rows(&organization)),
+        (
+            Page::OrgPolicy,
+            org::policy_rows(&organization, "developer"),
+        ),
+    ] {
+        assert!(!rows.is_empty(), "{page:?} has no demo rows");
+        let mut keys = std::collections::HashSet::new();
+        for row in rows {
+            assert_eq!(row.cells.len(), page.columns().len());
+            assert!(keys.insert(row.key.clone()), "duplicate key on {page:?}");
             assert!(!row.record.details().is_empty());
         }
     }

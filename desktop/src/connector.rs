@@ -25,6 +25,9 @@ impl Target {
 pub struct WorkspaceSnapshot {
     pub inventory: Snapshot,
     pub dashboard: Option<crate::dashboard_wire::HostSnapshot>,
+    /// Set when the connection is an organization's policy service rather
+    /// than a sandbox manager; the inventory is then empty.
+    pub organization: Option<crate::org::OrgSnapshot>,
     pub target: Target,
 }
 fn resolve(source: &Source) -> Result<(ManagerClient, Target)> {
@@ -101,6 +104,7 @@ impl Connector {
             return Ok(WorkspaceSnapshot {
                 inventory: self.snapshot(false)?,
                 dashboard: Some(crate::workspace::demo()),
+                organization: None,
                 target: Target {
                     source: Source::Demo,
                     profile: None,
@@ -108,7 +112,23 @@ impl Connector {
             });
         }
         self.read(retry_start, |client, target| {
-            let inventory = client.snapshot()?;
+            // One health read tells a policy service from a manager.
+            let (version, capabilities) = client.health()?;
+            if matches!(target.source, Source::Remote { .. })
+                && capabilities.iter().any(|c| c == crate::org::CAPABILITY)
+            {
+                return Ok(WorkspaceSnapshot {
+                    inventory: Snapshot {
+                        version,
+                        sandboxes: vec![],
+                        capabilities,
+                    },
+                    dashboard: None,
+                    organization: Some(client.organization()?),
+                    target,
+                });
+            }
+            let inventory = client.inventory(version, capabilities)?;
             let dashboard = match client.dashboard() {
                 Ok(snapshot) => Some(snapshot),
                 Err(error)
@@ -123,6 +143,7 @@ impl Connector {
             Ok(WorkspaceSnapshot {
                 inventory,
                 dashboard,
+                organization: None,
                 target,
             })
         })
