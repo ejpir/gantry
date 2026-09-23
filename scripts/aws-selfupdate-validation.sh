@@ -28,7 +28,43 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' HUP INT TERM
 
-LDFLAGS='-X github.com/ejpir/gantry/internal/guestasset.Version=v0.0.0'
+# GitHub's latest release is published before the tag's CI run has uploaded
+# its assets, so following it would race an in-flight release. Pin the
+# disposable binaries to the newest release whose update assets exist: the
+# latest one once complete, otherwise its predecessor.
+UPDATE_TAG=${GANTRY_TEST_UPDATE_TAG:-$(python3 - <<'PY'
+import json
+import re
+import urllib.request
+
+REQUIRED = {
+    "gantry-linux-amd64", "gantry-linux-amd64.sha256",
+    "gantry-windows-amd64.exe", "gantry-windows-amd64.exe.sha256",
+}
+request = urllib.request.Request(
+    "https://api.github.com/repos/ejpir/gantry/releases?per_page=20",
+    headers={"Accept": "application/vnd.github+json"})
+with urllib.request.urlopen(request, timeout=30) as response:
+    releases = json.load(response)
+complete = []
+for release in releases:
+    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", release.get("tag_name", ""))
+    if release.get("draft") or release.get("prerelease") or not match:
+        continue
+    if REQUIRED <= {asset["name"] for asset in release.get("assets", [])}:
+        complete.append((tuple(map(int, match.groups())), release["tag_name"]))
+if not complete:
+    raise SystemExit("no published Gantry release carries the self-update assets")
+print(max(complete)[1])
+PY
+)}
+case $UPDATE_TAG in
+v[0-9]*.[0-9]*.[0-9]*) ;;
+*) echo "invalid self-update target release: $UPDATE_TAG" >&2; exit 1 ;;
+esac
+echo "== self-update target release: $UPDATE_TAG =="
+
+LDFLAGS="-X github.com/ejpir/gantry/internal/guestasset.Version=v0.0.0 -X github.com/ejpir/gantry/internal/selfupdate.latestReleaseEndpoint=https://api.github.com/repos/ejpir/gantry/releases/tags/$UPDATE_TAG"
 echo "== build disposable v0.0.0 self-update binaries =="
 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o "$LINUX_BIN" ./cmd/gantry
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o "$WINDOWS_BIN" ./cmd/gantry
