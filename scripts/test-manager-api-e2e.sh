@@ -12,14 +12,20 @@ case "${1-}" in
 esac
 
 go test -count=1 ./cmd/gantry ./internal/runvm ./internal/remote ./internal/dashboard \
-  ./internal/policyfeed ./internal/sandbox/manager ./internal/sandbox/controlcmd \
+  ./internal/policy ./internal/policyfeed ./internal/policyservice \
+  ./internal/sandbox/manager ./internal/sandbox/controlcmd \
   ./internal/sandbox/sshgw ./tests/e2e/managerapi
 go test -count=1 ./internal/sandbox -run '^(TestManagerRun|TestConfigure)'
 
+# Both modes start the real `gantry policy-service`, enroll the manager with
+# `gantry policy feed-request`, and sign every generation with `gantry policy
+# sign`: publish, update, and roll back must each be acknowledged by the host
+# over the mTLS long-poll feed with a matching digest.
 # Default: TLS lifecycle + remote dashboard telemetry/actions/packet capture +
-# real VM/raw-run + SSH exec/SFTP, live mTLS
-# organization-wide policy updates, SSH channel-policy, live-disable and host-key rotation
+# real VM/raw-run + SSH exec/SFTP, live policy-service rollouts to two running
+# sandboxes, SSH channel-policy, live-disable and host-key rotation
 # checks (requires OpenSSH ssh and sftp).
-# -api-only explicitly selects the no-assets/no-hypervisor manager subset;
-# it does not claim guest SSH/SFTP validation.
+# -api-only explicitly selects the no-assets/no-hypervisor manager subset
+# (policy-service rollouts reach an empty host); it does not claim guest
+# SSH/SFTP validation.
 exec go run ./tests/e2e/managerapi "$@"

@@ -378,7 +378,12 @@ func (m *managerService) applyReceivedOrganizationPolicy(ctx context.Context, up
 		}
 		lock.Unlock()
 	}
-	return errors.Join(rolloutErrors...)
+	if len(rolloutErrors) == 0 {
+		return nil
+	}
+	// The receiver reports only these counts to the policy service; sandbox
+	// names and causes stay in this host's audit log.
+	return &policyfeed.RolloutError{Failed: len(rolloutErrors), Total: len(names), Err: errors.Join(rolloutErrors...)}
 }
 
 func organizationPolicySandboxNames() ([]string, error) {

@@ -431,6 +431,10 @@ func TestReceivedOrganizationPolicyStopsFailedTargetAndContinuesFanout(t *testin
 	if err == nil || !strings.Contains(err.Error(), "sandbox bad") {
 		t.Fatalf("aggregate rollout error = %v", err)
 	}
+	var rollout *policyfeed.RolloutError
+	if !errors.As(err, &rollout) || rollout.Failed != 1 || rollout.Total != 2 {
+		t.Fatalf("rollout counts = %#v, want 1 of 2 failed", rollout)
+	}
 	if backend.stopped != 1 {
 		t.Fatalf("fail-closed stops = %d, want 1", backend.stopped)
 	}

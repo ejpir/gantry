@@ -196,17 +196,17 @@ func run(opts options) (runErr error) {
 		env = environmentFrom(env, map[string]string{"GANTRY_IMAGES": opts.imageStore})
 	}
 
+	// Both modes run the real policy service; API-only rolls generations out
+	// to the empty host, the full battery to running sandboxes.
 	var policyFeed *policyFeedHarness
-	if !opts.apiOnly {
-		if err := step("prepare mTLS policy feed", func() error {
-			var err error
-			policyFeed, err = setupPolicyFeed(ctx, repo, env, gantry, work)
-			return err
-		}); err != nil {
-			return err
-		}
-		defer policyFeed.Close()
+	if err := step("start policy service and enroll the manager", func() error {
+		var err error
+		policyFeed, err = setupPolicyFeed(ctx, repo, env, gantry, work)
+		return err
+	}); err != nil {
+		return err
 	}
+	defer policyFeed.Close()
 
 	if !opts.apiOnly && opts.image == builtInImage {
 		if err := step("cache built-in image", func() error {
@@ -370,6 +370,11 @@ func run(opts options) (runErr error) {
 		return err
 	}
 	if opts.apiOnly {
+		if err := step("policy service: publish, update and roll back on an empty host", func() error {
+			return testPolicyServiceEmptyHost(ctx, policyFeed)
+		}); err != nil {
+			return err
+		}
 		fmt.Println("manager API E2E passed (API-only; real manager/helpers, no VM boot)")
 		return nil
 	}
@@ -456,7 +461,7 @@ func run(opts options) (runErr error) {
 		m2 = nil
 	}
 
-	if err := step("organization-wide mTLS policy feed live update", func() error {
+	if err := step("policy service: enroll, publish, update and roll back live", func() error {
 		return testPolicyFeedRollout(ctx, client, policyFeed, opts.name, createBody)
 	}); err != nil {
 		return err

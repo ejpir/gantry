@@ -21,7 +21,10 @@ usage: scripts/aws-e2e-validation.sh [aws|linux|macos]
   macos    validate the local Apple-silicon macOS HVF backend
 
 All modes include signed OPA policy validation with real VMs and loopback-only
-fixtures (no OPA/OpenSSL installation or public egress needed on test hosts).
+fixtures (no OPA/OpenSSL installation or public egress needed on test hosts),
+and run the organization policy service (gantry policy-service) against a
+live manager: host enrollment, signed publication, live rollout to running
+sandboxes, and rollback, each acknowledged over the mTLS long-poll feed.
 
 Linux overrides:
   GANTRY_ARTIFACTS               guest-helper directory (default: ./artifacts)
@@ -125,7 +128,7 @@ run_macos_validation() {
 	MAC_KERNEL=${GANTRY_TEST_KERNEL:-$MAC_ARTIFACTS/gantry-kernel-arm64}
 	MAC_ROOTFS=${GANTRY_TEST_ROOTFS:-$MAC_ARTIFACTS/nerdbox-rootfs-arm64.erofs}
 	MAC_WORKLOAD=${GANTRY_TEST_WORKLOAD_IMAGE:-builtin}
-	echo "===== macOS HVF: manager API, remote dashboard parity, and lifecycle battery ====="
+	echo "===== macOS HVF: manager API, remote dashboard parity, lifecycle, and policy-service battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" sh scripts/test-manager-api-e2e.sh \
 		-gantry "$MAC_GANTRY" \
 		-artifacts "$MAC_ARTIFACTS" \
@@ -356,7 +359,7 @@ run_linux_validation() {
 	fi
 	[ -x "$LINUX_OAUTH_IDP" ] || { echo "missing OAuth fixture: $LINUX_OAUTH_IDP" >&2; exit 1; }
 
-	echo "===== Linux KVM: manager API, remote dashboard parity, SSH, and organization policy-feed battery ====="
+	echo "===== Linux KVM: manager API, remote dashboard parity, SSH, and policy-service rollout battery ====="
 	rm -rf -- "$LINUX_WORK/manager"
 	GANTRY_ARTIFACTS="$LINUX_FIELD_ASSETS" scripts/test-manager-api-e2e.sh \
 		-gantry "$LINUX_GANTRY" -artifacts "$LINUX_FIELD_ASSETS" \
@@ -693,7 +696,7 @@ PY
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
 	-c "$WINDOWS_POLICY_COMMAND" 1200
 
-echo "===== Linux amd64 KVM: live manager API, remote dashboard parity, and policy-feed battery ====="
+echo "===== Linux amd64 KVM: live manager API, remote dashboard parity, and policy-service rollout battery ====="
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-amd64 /opt/gantry/manager-api-e2e 600
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
@@ -707,7 +710,7 @@ rm -rf /opt/gantry/manager-e2e-run
   -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
 ' 1800
 
-echo "===== Linux arm64 KVM: live manager API, remote dashboard parity, and policy-feed battery ====="
+echo "===== Linux arm64 KVM: live manager API, remote dashboard parity, and policy-service rollout battery ====="
 GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-arm64 /opt/gantry/manager-api-e2e 600
 GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
@@ -721,7 +724,7 @@ rm -rf /opt/gantry/manager-e2e-run
   -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
 ' 1800
 
-echo "===== Windows WHPX: live manager API, remote dashboard parity, and policy-feed battery ====="
+echo "===== Windows WHPX: live manager API, remote dashboard parity, and policy-service rollout battery ====="
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
 	--s3-download "$BUCKET" e2e/manager-api-windows-amd64.exe C:/gantry/manager-api-e2e.exe 600
 WINDOWS_MANAGER_COMMAND=$(python3 - \
