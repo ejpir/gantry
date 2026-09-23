@@ -99,9 +99,14 @@
     .command { color: #c2f36b; }
     .demo { margin-top: 43px; }
     .demo-frame { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #101210; }
-    .demo-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 18px; background: var(--surface); border-bottom: 1px solid var(--border); }
+    .demo-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 58px; padding: 0 18px; background: var(--surface); border-bottom: 1px solid var(--border); }
     .demo-label { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 18px; font-size: 13px; font-weight: 500; }
-    .demo-label code { color: var(--muted); font-size: 12px; font-weight: 400; }
+    .demo-label code, .demo-tab code { color: var(--muted); font-size: 12px; font-weight: 400; }
+    .demo-tabs { display: flex; align-self: stretch; gap: 26px; }
+    .demo-tab { display: inline-flex; align-items: center; gap: 10px; padding: 0; background: transparent; border: 0; border-block: 2px solid transparent; color: var(--muted); font-size: 13px; font-weight: 500; }
+    .demo-tab:hover, .demo-tab[aria-selected="true"] { color: var(--text); }
+    .demo-tab[aria-selected="true"] { border-bottom-color: var(--accent); }
+    .demo-tab:focus-visible { outline-offset: -2px; }
     .demo-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 4px 9px; background: transparent; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; white-space: nowrap; }
     .demo-toggle:hover { color: var(--accent); border-color: var(--muted); }
     .demo video { display: block; width: 100%; height: auto; color-scheme: dark; }
@@ -183,6 +188,7 @@
       .hero-description { max-width: 490px; }
       .hero-note { margin-top: 17px; }
       .demo { margin-top: 28px; }
+      .demo-tab { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; line-height: 1.4; }
       .capabilities { grid-template-columns: 1fr; gap: 28px; }
       .capabilities article { max-width: 550px; }
       .capabilities .text-link { padding-top: 10px; }
@@ -199,9 +205,15 @@
       .nav-links { gap: 12px; font-size: 12px; }
       .theme-toggle { width: 30px; height: 32px; }
       .nav-links .install-link { display: none; }
-      .demo-toolbar { padding: 11px 12px; gap: 10px; }
-      .demo-label { display: block; font-size: 12px; }
+      .demo-toolbar { padding: 0 12px; gap: 10px; }
+      .demo-label { display: block; padding-block: 11px; font-size: 12px; }
       .demo-label code { display: block; margin-top: 2px; font-size: 11px; }
+      .demo-tabs { gap: 18px; }
+      .demo-tab { font-size: 12px; }
+      .demo-tab code { font-size: 11px; }
+      /* The label stays available to assistive technology. */
+      .demo-toggle { padding-inline: 7px; }
+      .demo-toggle span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
       .workflow-code, .install-body { padding: 17px; }
       .worker-branches { grid-template-columns: 1fr; margin: 0 0 0 16px; padding: 16px 0 0 20px; }
       .worker-branches::before, .worker-branches::after { display: none; }
@@ -259,17 +271,38 @@
 <span class="command">gantry resume</span> dev</code></pre>
         </div>
       </div>
-      <figure class="demo" aria-labelledby="demo-title">
+      <figure class="demo" aria-label="Dashboard recordings">
         <div class="demo-frame">
-          <div class="demo-toolbar"><div class="demo-label"><span id="demo-title">The terminal dashboard</span><code>gantry tui</code></div><button class="demo-toggle" id="demo-toggle" type="button" aria-pressed="false" aria-controls="tui-demo" hidden><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>Play 24s HD demo</span></button></div>
-          <video id="tui-demo" width="2274" height="1344" poster="assets/gantry-tui-v3.png" preload="none" controls playsinline muted aria-label="Gantry terminal dashboard — 24-second silent demo" aria-describedby="demo-description">
-            <source src="assets/gantry-tui-v3.webm" type="video/webm">
-            <source src="assets/gantry-tui-v3.mp4" type="video/mp4">
-            <a href="assets/gantry-tui-v3.gif">View the dashboard recording as a GIF.</a>
-          </video>
+          <div class="demo-toolbar">
+            <div class="demo-label" id="demo-label"><span>The terminal dashboard</span><code>gantry tui</code></div>
+            <div class="demo-tabs" role="tablist" aria-label="Dashboard" hidden>
+              <button class="demo-tab" id="demo-tab-tui" type="button" role="tab" aria-selected="true" aria-controls="demo-panel-tui" tabindex="0" data-demo="tui">Terminal <code>gantry tui</code></button>
+              <button class="demo-tab" id="demo-tab-desktop" type="button" role="tab" aria-selected="false" aria-controls="demo-panel-desktop" tabindex="-1" data-demo="desktop">Desktop <code>gantry-desktop</code></button>
+            </div>
+            <button class="demo-toggle" id="demo-toggle" type="button" aria-pressed="false" aria-controls="tui-demo" hidden><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg><span>Play 24s HD demo</span></button>
+          </div>
+          <div class="demo-panel" id="demo-panel-tui">
+            <video id="tui-demo" width="2274" height="1344" poster="assets/gantry-tui-v3.png" preload="none" controls playsinline muted data-length="24s" aria-label="Gantry terminal dashboard — 24-second silent demo" aria-describedby="demo-description">
+              <source src="assets/gantry-tui-v3.webm" type="video/webm">
+              <source src="assets/gantry-tui-v3.mp4" type="video/mp4">
+              <a href="assets/gantry-tui-v3.gif">View the dashboard recording as a GIF.</a>
+            </video>
+          </div>
+          <div class="demo-panel" id="demo-panel-desktop" hidden>
+            <video id="desktop-demo" width="2274" height="1344" poster="assets/gantry-desktop.png" preload="none" controls playsinline muted data-length="33s" aria-label="Gantry desktop app — 33-second silent demo" aria-describedby="desktop-demo-description">
+              <source src="assets/gantry-desktop.webm" type="video/webm">
+              <source src="assets/gantry-desktop.mp4" type="video/mp4">
+              <a href="assets/gantry-desktop.gif">View the desktop recording as a GIF.</a>
+            </video>
+          </div>
         </div>
-        <figcaption><span>Recorded on Linux / KVM with two disposable sandboxes.</span><span class="demo-downloads"><a href="assets/gantry-tui-v3.mp4">HD video <span aria-hidden="true">↗</span></a><a href="assets/gantry-tui-v3.gif">GIF <span aria-hidden="true">↗</span></a></span></figcaption>
+        <figcaption>
+          <span data-demo-caption="tui">Recorded on Linux / KVM with two disposable sandboxes.</span><span class="demo-downloads" data-demo-caption="tui"><a href="assets/gantry-tui-v3.mp4">HD video <span aria-hidden="true">↗</span></a><a href="assets/gantry-tui-v3.gif">GIF <span aria-hidden="true">↗</span></a></span>
+          <span data-demo-caption="desktop" hidden>Desktop preview in demo mode, with its built-in sample data. Recorded on Linux.</span><span class="demo-downloads" data-demo-caption="desktop" hidden><a href="assets/gantry-desktop.mp4">HD video <span aria-hidden="true">↗</span></a><a href="assets/gantry-desktop.gif">GIF <span aria-hidden="true">↗</span></a></span>
+          <noscript><span class="demo-downloads">Desktop app: <a href="assets/gantry-desktop.mp4">HD video <span aria-hidden="true">↗</span></a><a href="assets/gantry-desktop.gif">GIF <span aria-hidden="true">↗</span></a></span></noscript>
+        </figcaption>
         <p class="sr-only" id="demo-description">The dashboard shows two running Alpine sandboxes: a workspace with SSH and a writable project share, and an agent with a read-only share and a default-deny network policy. The recording visits the overview, VM details, configuration, allowed and blocked traffic, network rules, mounted directories, and the agent’s read-only filesystem MCP gateway, then returns to the overview. No configuration changes are saved.</p>
+        <p class="sr-only" id="desktop-demo-description">The desktop app runs in demo mode with its built-in sample data: four sandboxes, two of them running. The recording selects the agent sandbox and opens its MCP servers, inspects a flow the network policy denied, then visits network rules, published ports, packet capture, mounts, secrets, MCP servers, the audit log, and local images, and returns to the sandbox list. Demo mode disables all writes.</p>
       </figure>
     </section>
     <section class="section" id="capabilities" aria-label="Capabilities">
@@ -372,19 +405,47 @@ chmod +x gantry</code></pre>
         toastTimer = setTimeout(() => { document.getElementById('toast').textContent = ''; }, 4000);
       }
 
-      // Keep the lossless HD video idle until requested. Native controls also
+      // Click selects a tab; arrow keys, Home and End move between tabs.
+      function bindTabs(tabs, select) {
+        tabs.forEach((tab, index) => {
+          tab.addEventListener('click', () => select(tab));
+          tab.addEventListener('keydown', event => {
+            let next;
+            if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+            if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
+            if (event.key === 'Home') next = 0;
+            if (event.key === 'End') next = tabs.length - 1;
+            if (next === undefined) return;
+            event.preventDefault();
+            select(tabs[next], true);
+          });
+        });
+      }
+
+      // Keep the lossless HD videos idle until requested. Native controls also
       // provide seeking and fullscreen playback, including without JavaScript.
       const demoButton = document.getElementById('demo-toggle');
-      const demo = document.getElementById('tui-demo');
+      const demoTabs = Array.from(document.querySelectorAll('.demo-tab'));
+      let demo = document.getElementById('tui-demo');
       function updateDemoButton() {
         const playing = !demo.paused && !demo.ended;
         demoButton.setAttribute('aria-pressed', String(playing));
         demoButton.querySelector('span').textContent = playing ? 'Pause demo'
-          : demo.ended ? 'Replay demo' : demo.currentTime > 0 ? 'Resume demo' : 'Play 24s HD demo';
+          : demo.ended ? 'Replay demo' : demo.currentTime > 0 ? 'Resume demo' : `Play ${demo.dataset.length} HD demo`;
         demoButton.querySelector('use').setAttribute('href', playing ? '#i-pause' : '#i-play');
       }
       demoButton.hidden = false;
-      ['play', 'pause', 'ended', 'emptied'].forEach(event => demo.addEventListener(event, updateDemoButton));
+      document.querySelectorAll('.demo video').forEach(video => {
+        ['play', 'pause', 'ended', 'emptied'].forEach(event => video.addEventListener(event, () => {
+          if (video === demo) updateDemoButton();
+        }));
+        video.addEventListener('error', () => {
+          video.pause();
+          if (video !== demo) return;
+          updateDemoButton();
+          notify('Video unavailable. Try the HD video or GIF link below.');
+        });
+      });
       demoButton.addEventListener('click', async () => {
         if (!demo.paused) return demo.pause();
         try {
@@ -395,14 +456,32 @@ chmod +x gantry</code></pre>
           updateDemoButton();
         }
       });
-      demo.addEventListener('error', () => {
-        demo.pause();
-        updateDemoButton();
-        notify('Video unavailable. Try the HD video or GIF link below.');
-      });
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) demo.pause();
       });
+      function selectDemo(tab, focus = false) {
+        demo.pause();
+        demo = document.getElementById(`${tab.dataset.demo}-demo`);
+        demoTabs.forEach(item => {
+          item.setAttribute('aria-selected', String(item === tab));
+          item.tabIndex = item === tab ? 0 : -1;
+          document.getElementById(item.getAttribute('aria-controls')).hidden = item !== tab;
+        });
+        document.querySelectorAll('[data-demo-caption]').forEach(item => {
+          item.hidden = item.dataset.demoCaption !== tab.dataset.demo;
+        });
+        demoButton.setAttribute('aria-controls', demo.id);
+        updateDemoButton();
+        if (focus) tab.focus();
+      }
+      bindTabs(demoTabs, selectDemo);
+      demoTabs.forEach(tab => {
+        const panel = document.getElementById(tab.getAttribute('aria-controls'));
+        panel.setAttribute('role', 'tabpanel');
+        panel.setAttribute('aria-labelledby', tab.id);
+      });
+      document.getElementById('demo-label').hidden = true;
+      document.querySelector('.demo-tabs').hidden = false;
 
       const releaseBase = 'https://github.com/ejpir/gantry/releases/latest/download/';
       const tabs = Array.from(document.querySelectorAll('.install-tab'));
@@ -445,19 +524,7 @@ chmod +x gantry</code></pre>
         renderInstall();
         if (focus) tab.focus();
       }
-      tabs.forEach((tab, index) => {
-        tab.addEventListener('click', () => selectTab(tab));
-        tab.addEventListener('keydown', event => {
-          let next;
-          if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
-          if (event.key === 'ArrowLeft') next = (index - 1 + tabs.length) % tabs.length;
-          if (event.key === 'Home') next = 0;
-          if (event.key === 'End') next = tabs.length - 1;
-          if (next === undefined) return;
-          event.preventDefault();
-          selectTab(tabs[next], true);
-        });
-      });
+      bindTabs(tabs, selectTab);
       panel.setAttribute('role', 'tabpanel');
       panel.removeAttribute('aria-label');
       document.querySelector('.install-tabs').hidden = false;

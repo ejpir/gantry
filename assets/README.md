@@ -1,6 +1,7 @@
 # Landing-page recordings
 
-`index3.html` uses:
+`index.html` shows the terminal dashboard and the desktop app in two tabs.
+The terminal dashboard uses:
 
 - `gantry-tui-v3.png` — native 2× still preview, shown by default.
 - `gantry-tui-v3.webm` — lossless RGB VP9, preferred for inline playback. No
@@ -67,8 +68,31 @@ node scripts/record-tui-demo.mjs \
 ```
 
 Use `--keep` to retain frames and isolated state for debugging. If you change
-terminal dimensions or recording length, update the video dimensions and play
-button label in `index3.html` as well.
+terminal dimensions or recording length, update the video dimensions and
+`data-length` in `index.html` as well.
+
+## Desktop app
+
+The **Desktop** tab uses `gantry-desktop.{png,webm,mp4,gif}`, encoded like the
+terminal recording: lossless RGB VP9 (keyframe every 10 s), H.264 (CRF 14), and a
+256-color GIF at 10 fps. The video runs for **33 seconds at 30 fps**, so pointer
+movement stays smooth, at the same **2274 × 1344** as the terminal recording.
+
+It is the real `gantry-desktop` release build from `d3d5626`, run with
+`--demo --theme dark`: the app's built-in, explicitly labeled sample data, with
+writes disabled. No manager, sandboxes or virtualization were involved. It was
+rendered on Linux arm64 under Xvfb, using Mesa's lavapipe software Vulkan driver
+(`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`) and
+`GPUI_X11_SCALE_FACTOR=1.5`, with the window sized to 1516 × 896 logical pixels.
+The pointer is the Adwaita cursor at 36 px (`xsetroot -cursor_name left_ptr`
+with `XCURSOR_THEME=Adwaita XCURSOR_SIZE=36`); GPUI does not set one on X11.
+
+xdotool drove the tour and ffmpeg's `x11grab` captured it: Sandboxes → select
+`agent` → its MCP tab → Traffic → the denied telemetry flow → Network Rules →
+Ports → Packet Capture → Mounts → Secrets → MCP → Audit → Local Images →
+Sandboxes. The poster is a pointer-free frame of the opening view. Navigate
+once before capturing: the inspector settles to its 328 px width after the
+first screen change.
 
 The original `gantry-tui.gif` and earlier landing pages are intentionally
 unchanged.
