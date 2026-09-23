@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
@@ -83,7 +84,10 @@ type broker struct {
 	mu         sync.Mutex
 	sessions   map[string]chan struct{}
 	sessionCtl map[string]net.Conn // parked control channels, session id -> conn
-	oauth      *oauthbridge.Bridge // OAuth loopback callback bridge (nil when disabled)
+	// resizes carries terminal size changes to running terminal sessions,
+	// by session id. Created on first use.
+	resizes map[string]chan client.WindowSize
+	oauth   *oauthbridge.Bridge // OAuth loopback callback bridge (nil when disabled)
 	// custodyRegistry holds the custody token sets (nil unless
 	// -oauth-custody); MCP remotes with auth=custody: read it per session.
 	custodyRegistry *oauthtokens.Registry
@@ -198,6 +202,8 @@ func (br *broker) handle(c net.Conn) {
 			return
 		}
 		_, _ = fmt.Fprintln(c, `{"ok":true}`)
+	case "resize":
+		br.resizeSession(c, req)
 	case "share.add", "share.remove", "share.list", "share.configure":
 		br.shareControl(c, req)
 	case "port.publish", "port.unpublish", "port.list":

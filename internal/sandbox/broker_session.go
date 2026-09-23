@@ -116,9 +116,22 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 		return
 	}
 	defer func() { _ = ctl.Close() }()
+	// A terminal session follows its client's window: "resize" ops land
+	// here and the guest applies the newest size.
+	var resize chan client.WindowSize
+	if req.Terminal {
+		resize = make(chan client.WindowSize, 1)
+		br.mu.Lock()
+		if br.resizes == nil {
+			br.resizes = map[string]chan client.WindowSize{}
+		}
+		br.resizes[req.ID] = resize
+		br.mu.Unlock()
+	}
 	defer func() {
 		br.mu.Lock()
 		delete(br.sessions, req.ID)
+		delete(br.resizes, req.ID)
 		br.mu.Unlock()
 	}()
 
@@ -148,6 +161,7 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 		Cols:           req.Cols,
 		Rows:           req.Rows,
 		Terminal:       req.Terminal,
+		Resize:         resize,
 		Quiet:          req.Quiet,
 		KillCh:         killCh,
 		ExitStatus:     &status,
@@ -171,4 +185,34 @@ func (br *broker) session(c net.Conn, stdin io.Reader, req controlproto.Request)
 	ev := newSessionExitEvent(status, err)
 	_ = ctl.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	_ = json.NewEncoder(ctl).Encode(&ev)
+}
+
+// resizeSession forwards a terminal size change to a running terminal
+// session. Only the newest size matters, so one the guest has not applied
+// yet is replaced rather than queued.
+func (br *broker) resizeSession(c net.Conn, req controlproto.Request) {
+	if req.Cols == 0 || req.Rows == 0 {
+		_, _ = fmt.Fprintln(c, `{"error":"cols and rows are required"}`)
+		return
+	}
+	br.mu.Lock()
+	resize, ok := br.resizes[req.ID]
+	br.mu.Unlock()
+	if !ok {
+		_, _ = fmt.Fprintln(c, `{"error":"no such terminal session"}`)
+		return
+	}
+	size := client.WindowSize{Cols: req.Cols, Rows: req.Rows}
+	for {
+		select {
+		case resize <- size:
+			_, _ = fmt.Fprintln(c, `{"ok":true}`)
+			return
+		default:
+		}
+		select {
+		case <-resize:
+		default:
+		}
+	}
 }
