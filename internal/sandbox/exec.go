@@ -281,6 +281,7 @@ func CmdSandboxExec(name string, argv []string) int {
 		if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 			defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
 		}
+		defer forwardResizes(func(cols, rows uint32) { sendSessionResize(dir, id, cols, rows) })()
 	}
 	// ctrl-C: ask the broker to kill the task, keep the session attached.
 	// Loop: every interrupt kills (a second ctrl-C is not swallowed).
@@ -328,6 +329,21 @@ func CmdSandboxExec(name string, argv []string) int {
 		fmt.Fprintf(os.Stderr, "\ngantry exec: session infrastructure failure: %s\n", ev.Error)
 	}
 	return sessionExitCode(ev)
+}
+
+// sendSessionResize asks the broker to resize a running terminal session.
+// It is best effort: a broker from before resizing answers "unknown op" and
+// the session keeps its first size.
+func sendSessionResize(dir, id string, cols, rows uint32) {
+	c, err := net.DialTimeout("unix", filepath.Join(dir, "ctl.sock"), controlproto.HandshakeTimeout)
+	if err != nil {
+		return
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(controlproto.HandshakeTimeout))
+	if json.NewEncoder(c).Encode(&controlproto.Request{Op: "resize", ID: id, Cols: cols, Rows: rows}) == nil {
+		_, _ = controlproto.ReadBoundedLine(bufio.NewReader(c), controlproto.MaxEventBytes)
+	}
 }
 
 func sessionExitCode(ev controlproto.SessionExitEvent) int {

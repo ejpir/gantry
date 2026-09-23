@@ -54,6 +54,10 @@ impl Server {
                 },
             );
         }
+        Self::exact(tls, calls)
+    }
+    /// Serve exactly these calls, with no leading health check.
+    fn exact(tls: bool, calls: Vec<Call>) -> Self {
         let dir = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -184,6 +188,46 @@ impl Server {
     }
     fn finish(self) {
         self.task.join().unwrap();
+    }
+}
+#[test]
+fn live_packet_reads_follow_the_cursor_without_a_control_check() {
+    use gantry_desktop::capture;
+    let packet = |sequence: u64| {
+        json!({"sequence":sequence,"timestamp":"2026-09-23T08:00:00Z","direction":"tx",
+               "allowed":true,"length":60,"data":"AAEC"})
+    };
+    for tls in [false, true] {
+        let server = Server::exact(
+            tls,
+            vec![
+                Call {
+                    method: "POST",
+                    path: "/v1/dashboard/packets/dev",
+                    body: json!({"max_packets":256,"max_bytes":262144}),
+                    status: 200,
+                    reply: Some(
+                        json!({"active":true,"packets":[packet(1),packet(2)],"next":2,"latest":3}),
+                    ),
+                },
+                Call {
+                    method: "POST",
+                    path: "/v1/dashboard/packets/dev",
+                    body: json!({"after":2,"max_packets":256,"max_bytes":262144}),
+                    status: 200,
+                    reply: Some(json!({"active":true,"packets":[packet(3)],"next":3,"latest":3})),
+                },
+            ],
+        );
+        let mut held = server.client.read_packets("dev", 0).unwrap();
+        assert!(capture::behind(&held));
+        let after = held.next;
+        let read = server.client.read_packets("dev", after).unwrap();
+        capture::merge(&mut held, read, after);
+        let sequences: Vec<u64> = held.packets.iter().map(|p| p.sequence).collect();
+        assert_eq!(sequences, [1, 2, 3]);
+        assert!(held.active && !capture::behind(&held));
+        server.finish();
     }
 }
 #[test]
@@ -367,6 +411,7 @@ fn replaced_remote_profile_invalidates_an_open_action_before_any_connection() {
         appearance: Appearance::System,
         auto_start: false,
         gantry: None,
+        managed_gantry: None,
     };
     let target = Target {
         source,

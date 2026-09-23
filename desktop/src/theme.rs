@@ -16,6 +16,50 @@ pub fn selected_control(cx: &App) -> Hsla {
     .into()
 }
 
+fn pick(cx: &App, dark: u32, light: u32) -> Hsla {
+    rgb(if cx.theme().is_dark() { dark } else { light }).into()
+}
+
+/// Chart series from desktop/design/desktop-detail-study.svg.
+pub fn download(cx: &App) -> Hsla {
+    pick(cx, 0x7aa7e0, 0x2f6db5)
+}
+
+pub fn upload(cx: &App) -> Hsla {
+    pick(cx, 0x6fc1c9, 0x1f8a93)
+}
+
+/// Bars and tracks on panel surfaces.
+pub fn bar(cx: &App) -> Hsla {
+    pick(cx, 0x5f8fc9, 0x4a7fc0)
+}
+
+pub fn track(cx: &App) -> Hsla {
+    pick(cx, 0x30333a, 0xe3e5ea)
+}
+
+/// Cards on the middle pane (tiles, grouped rows).
+pub fn card(cx: &App) -> Hsla {
+    pick(cx, 0x2a2c31, 0xf7f7f9)
+}
+
+pub fn card_border(cx: &App) -> Hsla {
+    pick(cx, 0x383b42, 0xdfe1e6)
+}
+
+/// A translucent pill behind a status label, readable on selected rows too.
+pub fn tint(color: Hsla, cx: &App) -> Hsla {
+    color.opacity(if cx.theme().is_dark() { 0.18 } else { 0.14 })
+}
+
+/// Distinguishes sandboxes in legends and shares, in a stable order.
+pub fn series(cx: &App, slot: usize) -> Hsla {
+    const DARK: [u32; 6] = [0x7aa7e0, 0x6fc1c9, 0x9a8fd6, 0xc9a86a, 0xd08bb0, 0x8fc48a];
+    const LIGHT: [u32; 6] = [0x2f6db5, 0x1f8a93, 0x6a5cc2, 0x9a7328, 0xb0457f, 0x3f7f3b];
+    let index = slot % DARK.len();
+    pick(cx, DARK[index], LIGHT[index])
+}
+
 /// The checked-in desktop/design/desktop-workspace.svg is the dark-mode spec.
 /// Keep custom chrome and toolkit components on the same semantic palette.
 pub fn apply(appearance: Appearance, window: &mut Window, cx: &mut App) {

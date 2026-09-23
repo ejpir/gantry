@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 )
 
 // auditRing is the daemon-wide security trail: policy decisions, credential
@@ -31,10 +34,15 @@ type auditRing struct {
 	writeMu sync.Mutex
 	mu      sync.Mutex
 	lines   []string
+	times   []time.Time // when each line was recorded, parallel to lines
 	bytes   int
 }
 
 func (r *auditRing) append(line string) {
+	r.appendAt(time.Now(), line)
+}
+
+func (r *auditRing) appendAt(at time.Time, line string) {
 	if r == nil {
 		return
 	}
@@ -45,18 +53,27 @@ func (r *auditRing) append(line string) {
 		r.bytes -= len(r.lines[0])
 		copy(r.lines, r.lines[1:])
 		r.lines = r.lines[:len(r.lines)-1]
+		copy(r.times, r.times[1:])
+		r.times = r.times[:len(r.times)-1]
 	}
 	r.lines = append(r.lines, line)
+	r.times = append(r.times, at.UTC())
 	r.bytes += len(line)
 }
 
 func (r *auditRing) tail() []string {
+	lines, _ := r.snapshot()
+	return lines
+}
+
+// snapshot returns the lines and their record times, oldest first.
+func (r *auditRing) snapshot() ([]string, []time.Time) {
 	if r == nil {
-		return nil
+		return nil, nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.lines...)
+	return append([]string(nil), r.lines...), append([]time.Time(nil), r.times...)
 }
 
 // logf is shared by early daemon events and the control broker. A writer
@@ -84,9 +101,11 @@ func (br *broker) auditf(format string, a ...any) {
 // writeAuditLine requires a sanitized line and the caller's sink lock,
 // including for rotation.
 func writeAuditLine(r *auditRing, dir, line string) {
-	r.append(line)
+	// Both sinks carry the same instant, so the live ring and audit.log agree.
+	at := time.Now()
+	r.appendAt(at, line)
 	fmt.Printf("daemon: %s\n", line)
-	persistAuditLine(dir, line)
+	persistAuditLine(dir, at, line)
 }
 
 // sanitizeAuditLine enforces the audit trail's line-oriented, bounded schema.
@@ -133,7 +152,7 @@ const auditLogCap = 1 << 20
 // the daemon stops. Never fails loudly: disk trouble must not break the
 // authorization or credential paths that audit. The caller holds the shared
 // sink lock across both rotation and append.
-func persistAuditLine(dir, line string) {
+func persistAuditLine(dir string, at time.Time, line string) {
 	if dir == "" {
 		return
 	}
@@ -173,5 +192,5 @@ func persistAuditLine(dir, line string) {
 	}
 	_ = f.Chmod(0o600)
 	defer func() { _ = f.Close() }()
-	_, _ = fmt.Fprintln(f, line)
+	_, _ = fmt.Fprintln(f, controlproto.FormatAuditRecord(at, line))
 }

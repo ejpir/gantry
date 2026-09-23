@@ -22,7 +22,8 @@ pub enum Kind {
     Mcp(Option<MCPRemoteRequest>),
     Filesystem,
     Pull,
-    Registry,
+    /// Prefilled from a registry row when logging in again.
+    Registry(Option<RegistryAuth>),
     NetworkPolicy,
     Capture,
     Confirm(Command),
@@ -35,6 +36,8 @@ pub enum FieldKind {
     Password,
     Bool,
     Choice(Vec<String>),
+    /// A dropdown, for lists too long for a row of buttons.
+    Select(Vec<String>),
     Resource(ResourceRange),
     Path(PathKind),
 }
@@ -116,6 +119,31 @@ fn choice(key: &'static str, label: &str, value: &str, choices: &[&str]) -> Fiel
         ..field(key, label, value)
     }
 }
+/// The sandbox a change targets, picked from the manager's sandboxes. A
+/// prefilled name the snapshot no longer lists stays selectable, so an edit
+/// never silently moves to another sandbox; Go still validates the name.
+fn sandbox_field(host: &HostSnapshot, value: &str) -> Field {
+    let mut names: Vec<String> = host
+        .snapshot
+        .sandboxes
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    if !value.is_empty() && !names.iter().any(|name| name == value) {
+        names.insert(0, value.to_owned());
+    }
+    let value = if value.is_empty() {
+        names.first().cloned().unwrap_or_default()
+    } else {
+        value.to_owned()
+    };
+    Field {
+        kind: FieldKind::Select(names),
+        ..field("sandbox", "Sandbox", value)
+    }
+}
 fn password(key: &'static str, label: &str) -> Field {
     Field {
         kind: FieldKind::Password,
@@ -140,7 +168,7 @@ impl Spec {
     pub fn new(kind: Kind, host: &HostSnapshot, sandbox: &str) -> Self {
         let mut fields = vec![];
         let mut help="Changes are validated and applied by the selected manager. They do not change which host is selected.".to_string();
-        let sb = || field("sandbox", "Sandbox", sandbox);
+        let sb = || sandbox_field(host, sandbox);
         let limits = &host.resource_limits;
         // Unknown limits get a convenience range, not an invented manager limit.
         // Numeric entry still permits other values; build() and Go validate them.
@@ -236,9 +264,8 @@ impl Spec {
             Kind::Rule(r) => {
                 let r = r.clone().unwrap_or_default();
                 fields = vec![
-                    field(
-                        "sandbox",
-                        "Sandbox",
+                    sandbox_field(
+                        host,
                         if r.sandbox.is_empty() {
                             sandbox
                         } else {
@@ -282,7 +309,7 @@ impl Spec {
                     ..Default::default()
                 });
                 fields = vec![
-                    field("sandbox", "Sandbox", r.sandbox),
+                    sandbox_field(host, &r.sandbox),
                     field("tag", "Tag", r.tag),
                     path(
                         "path",
@@ -315,9 +342,8 @@ impl Spec {
             Kind::Mcp(r) => {
                 let r = r.clone().unwrap_or_default();
                 fields = vec![
-                    field(
-                        "sandbox",
-                        "Sandbox",
+                    sandbox_field(
+                        host,
                         if r.sandbox.is_empty() {
                             sandbox
                         } else {
@@ -379,10 +405,19 @@ impl Spec {
                 help="Downloads into the selected manager's cache. The operation can continue after this window closes.".into();
                 "Pull image"
             }
-            Kind::Registry => {
+            Kind::Registry(r) => {
+                let r = r.clone().unwrap_or_default();
                 fields = vec![
-                    field("registry", "Registry host", ""),
-                    field("username", "Username", ""),
+                    field("registry", "Registry host", &r.registry),
+                    field(
+                        "username",
+                        "Username",
+                        if r.has_secret {
+                            r.username.as_str()
+                        } else {
+                            ""
+                        },
+                    ),
                     password("value", "Password / token — write only"),
                 ];
                 help="Stores a registry credential on the selected manager. It is never injected into a sandbox or returned in snapshots.".into();
@@ -630,7 +665,7 @@ impl Spec {
                 ..Default::default()
             }),
             Kind::Pull => Command::PullImage(required("image")?),
-            Kind::Registry => {
+            Kind::Registry(_) => {
                 ensure!(!get("value").is_empty(), "Registry credential is required");
                 action(ActionRequest {
                     action: "store-registry".into(),

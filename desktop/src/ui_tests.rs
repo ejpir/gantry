@@ -9,7 +9,10 @@ use gpui_kit::component::{ActiveTheme, Root};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{AppContext, Entity, TestAppContext, WindowHandle, px, size};
 
-use crate::{app::Desktop, bind_keys};
+use crate::{
+    app::{Connection, Desktop},
+    bind_keys,
+};
 
 pub(crate) fn desktop(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<Desktop>) {
     desktop_at(cx, 1280., 800.)
@@ -33,6 +36,7 @@ pub(crate) fn desktop_at(
                     appearance: Appearance::Dark,
                     auto_start: false,
                     gantry: None,
+                    managed_gantry: None,
                 },
                 window,
                 cx,
@@ -148,6 +152,98 @@ fn minimum_window_size_keeps_the_inspector_visible(cx: &mut TestAppContext) {
         assert!(window.find("inspector-pane").bounds().right() <= px(1040.));
         assert!(window.find("inspector-pane").bounds().size.width >= px(280.));
         assert!(window.find("inventory-pane").bounds().size.width >= px(420.));
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn a_missing_cli_explains_itself_and_offers_only_a_matching_install(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        desktop.update(cx, |this, cx| {
+            this.options.managed_gantry = Some("/home/test/.gantry/bin/gantry".into());
+            this.connection = Connection::Offline("No Gantry CLI was found.".into());
+            this.cli_missing = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("retry-connection").is_some());
+        // Untagged (development) test builds have no release to match. Never
+        // click it here: that would start a real download.
+        let offer = desktop.read(cx).cli_offer();
+        assert_eq!(window.try_find("install-cli").is_some(), offer.is_some());
+        if let Some(offer) = offer {
+            let install = window.find("install-cli");
+            let label = format!("Install Gantry CLI {}", offer.release);
+            assert_eq!(install.label(), Some(label.as_str()));
+        }
+        desktop.update(cx, |this, cx| {
+            this.cli_missing = false;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("install-cli").is_none());
+        assert!(window.try_find("retry-connection").is_some());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn sandbox_detail_follows_the_selection_and_its_tabs(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // The list is only as tall as its rows; the detail pane gets the rest.
+        let list = window.find("sandbox-list").bounds();
+        assert_eq!(list.size.height, px(28. + 34. * 4. + 2.));
+        let detail = window.find("sandbox-detail").bounds();
+        assert!(detail.top() >= list.bottom());
+        assert!(detail.size.height > list.size.height);
+        // Demo selects dev: live tiles and its six destinations, largest first.
+        assert!(window.try_find("detail-download").is_some());
+        assert!(window.try_find("detail-upload").is_some());
+        assert!(window.try_find(("destination", 5usize)).is_some());
+        assert!(window.try_find(("destination", 6usize)).is_none());
+        window.click(("detail-tab", 1usize), cx);
+    })
+    .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            desktop.read(cx).detail_tab,
+            gantry_desktop::detail::Tab::Ports
+        );
+        assert!(window.try_find("detail-download").is_none());
+        window.click(("detail-tab", 0usize), cx);
+        window.click(("row", 0usize), cx);
+    })
+    .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(desktop.read(cx).inventory.selected().unwrap().name, "agent");
+        // agent has one allowed and one denied destination.
+        assert!(window.try_find(("destination", 1usize)).is_some());
+        assert!(window.try_find(("destination", 2usize)).is_none());
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn collapsed_activity_still_shows_the_newest_entry(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("activity-latest").is_none());
+        desktop.update(cx, |this, cx| {
+            this.begin_activity(7, None, "Settings saved · dev".into());
+            this.activity_open = false;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("activity-latest").is_some());
+        window.click("activity-toggle", cx);
+        window.render_frame(cx);
+        assert!(window.try_find("activity-latest").is_none());
     })
     .unwrap();
 }

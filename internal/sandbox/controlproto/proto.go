@@ -8,6 +8,9 @@
 package controlproto
 
 import (
+	"strings"
+	"time"
+
 	"github.com/ejpir/gantry/internal/packetcapture"
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/control"
@@ -94,7 +97,28 @@ type MCPResponse struct {
 // source errors, custody events). Oldest first; at most 256 entries.
 type AuditResponse struct {
 	Lines []string `json:"lines,omitempty"`
-	Error string   `json:"error,omitempty"`
+	// Times records when each line was written, parallel to Lines. Older
+	// daemons omit it; readers treat a missing or zero time as unknown.
+	Times []time.Time `json:"times,omitempty"`
+	Error string      `json:"error,omitempty"`
+}
+
+// FormatAuditRecord is one audit.log line: an RFC 3339 UTC timestamp, a TAB,
+// and the sanitized event. Sanitization escapes TAB inside events, so the
+// first TAB always ends the timestamp.
+func FormatAuditRecord(at time.Time, line string) string {
+	return at.UTC().Format(time.RFC3339Nano) + "\t" + line
+}
+
+// ParseAuditRecord splits an audit.log line. Lines written before timestamps
+// were recorded are returned unchanged with a zero time.
+func ParseAuditRecord(record string) (time.Time, string) {
+	if stamp, line, ok := strings.Cut(record, "\t"); ok {
+		if at, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+			return at, line
+		}
+	}
+	return time.Time{}, record
 }
 
 type ShareRequest struct {

@@ -8,7 +8,9 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
 };
-use gpui_kit::{Context, Div, InteractiveElement, ParentElement, Styled, div, px};
+use gpui_kit::{
+    App, Context, Div, InteractiveElement, ParentElement, Styled, TestSupportExt, div, px,
+};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,36 @@ impl Desktop {
             .bg(cx.theme().sidebar)
             .child(Icon::new(IconName::Clock).size(px(15.)))
             .child("Activity")
+            .children(
+                // Collapsed, the drawer still shows the newest entry.
+                self.activity
+                    .iter()
+                    .rev()
+                    .find(|e| e.visible(&self.options.source, self.target.as_ref()))
+                    .filter(|_| !self.activity_open)
+                    .map(|entry| {
+                        let (icon, color) = phase_icon(entry.phase, cx);
+                        div()
+                            .id("activity-latest")
+                            .test_support()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .ml_3()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(10.))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(entry.timestamp.clone()),
+                            )
+                            .child(Icon::new(icon).size(px(14.)).text_color(color))
+                            .child(div().min_w_0().truncate().child(entry.title.clone()))
+                    }),
+            )
             .child(div().flex_1())
             .child(
                 div()
@@ -133,11 +165,7 @@ impl Desktop {
             let mut count = 0;
             for entry in entries {
                 count += 1;
-                let (icon, color) = match entry.phase {
-                    Phase::Working => (IconName::Loader, cx.theme().warning),
-                    Phase::Complete => (IconName::Check, cx.theme().success),
-                    Phase::Failed => (IconName::CircleAlert, cx.theme().danger),
-                };
+                let (icon, color) = phase_icon(entry.phase, cx);
                 content = content.child(
                     div()
                         .flex()
@@ -197,5 +225,13 @@ impl Desktop {
                 )
             })
             .unwrap_or_else(|| "Awaiting manager snapshot".into())
+    }
+}
+
+fn phase_icon(phase: Phase, cx: &App) -> (IconName, gpui_kit::Hsla) {
+    match phase {
+        Phase::Working => (IconName::Loader, cx.theme().warning),
+        Phase::Complete => (IconName::Check, cx.theme().success),
+        Phase::Failed => (IconName::CircleAlert, cx.theme().danger),
     }
 }

@@ -1,12 +1,18 @@
 use crate::{
-    dashboard_table::DashboardTable, sandbox_table::SandboxTable, theme, ui_forms::NativeForm,
+    dashboard_table::{DashboardTable, TableScale},
+    sandbox_table::{RowExtras, SandboxTable, TrafficTrend},
+    theme,
+    ui_forms::NativeForm,
 };
 use gantry_desktop::{
     connector::{Connector, Target},
     dashboard_wire::{HostSnapshot, PacketSnapshot},
+    detail,
     inventory::{Filter, Inventory, demo_sandboxes},
+    launcher::CliMissing,
     options::{Appearance, Options, SocketDefaults, Source},
     profiles::RemoteProfile,
+    telemetry::Throughput,
     workspace::{self, Page, Record},
 };
 use gpui_kit::component::{
@@ -15,6 +21,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{AppContext, Context, Entity, FocusHandle, Focusable, Subscription, Task, Window};
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -56,6 +63,8 @@ pub struct PageView {
     pub query: String,
     pub selected: Option<String>,
     pub selection_initialized: bool,
+    /// Index into `Page::segments()`; 0 shows every row.
+    pub segment: usize,
 }
 pub(crate) struct Desktop {
     pub options: Options,
@@ -81,10 +90,31 @@ pub(crate) struct Desktop {
     pub notice: Option<String>,
     pub packets: PacketSnapshot,
     pub packet_sandbox: Option<String>,
+    /// Live capture reads are paused, to hold the list still.
+    pub packets_paused: bool,
+    /// Open sandbox terminals by sandbox name, for the selected connection.
+    pub terminals: HashMap<String, Entity<crate::terminal_view::TerminalView>>,
+    /// Why the last attempt to open a sandbox's terminal failed, shown in
+    /// that sandbox's Terminal tab: (sandbox, message).
+    pub terminal_error: Option<(String, String)>,
+    pub packets_reading: bool,
+    pub packet_error: Option<String>,
+    /// Packets per second since capture started, for the chart.
+    pub capture_rate: gantry_desktop::capture::CaptureRate,
+    pub(crate) packet_task: Option<Task<()>>,
     pub connector: Arc<Mutex<Connector>>,
     pub generation: u64,
+    /// Rates derived from successive dashboard snapshots, for this window only.
+    pub throughput: Throughput,
+    pub detail_tab: detail::Tab,
+    /// The last local startup found no Gantry CLI at all (not a failing one).
+    pub cli_missing: bool,
+    pub installing: bool,
+    pub install_task: Option<Task<()>>,
+    pub install_progress_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     _poll_task: Option<Task<()>>,
+    _packet_poll_task: Option<Task<()>>,
     _request_task: Option<Task<()>>,
     pub action_task: Option<Task<()>>,
     pub progress_task: Option<Task<()>>,
@@ -134,7 +164,7 @@ impl Desktop {
                     _ => {}
                 },
             ),
-            cx.subscribe(&table, |this, table, event, cx| {
+            cx.subscribe_in(&table, window, |this, table, event, window, cx| {
                 if this.page != Page::Sandboxes {
                     return;
                 }
@@ -145,6 +175,20 @@ impl Desktop {
                         }
                     }
                     TableEvent::ClearSelection => this.inventory.clear_selection(),
+                    // Double-clicking a sandbox opens its shell.
+                    TableEvent::DoubleClickedRow(index) => {
+                        let Some(name) = table
+                            .read(cx)
+                            .delegate()
+                            .rows
+                            .get(*index)
+                            .map(|row| row.name.clone())
+                        else {
+                            return;
+                        };
+                        this.inventory.select(&name);
+                        this.open_terminal(&name, window, cx);
+                    }
                     _ => return,
                 }
                 cx.notify();
@@ -190,6 +234,7 @@ impl Desktop {
                     query: String::new(),
                     selected: None,
                     selection_initialized: false,
+                    segment: 0,
                 }
             })
             .collect();
@@ -238,14 +283,28 @@ impl Desktop {
             notice: None,
             packets: PacketSnapshot::default(),
             packet_sandbox: None,
+            packets_paused: false,
+            terminals: HashMap::new(),
+            terminal_error: None,
+            packets_reading: false,
+            packet_error: None,
+            capture_rate: Default::default(),
+            packet_task: None,
             generation: 0,
+            throughput: Throughput::default(),
+            detail_tab: detail::Tab::default(),
+            cli_missing: false,
+            installing: false,
+            install_task: None,
+            install_progress_task: None,
             _subscriptions: subscriptions,
             _poll_task: None,
+            _packet_poll_task: None,
             _request_task: None,
             action_task: None,
             progress_task: None,
             activity: Vec::new(),
-            activity_open: true,
+            activity_open: false,
             inspector_open: true,
             inspector_width: gpui_kit::px(theme::INSPECTOR_WIDTH),
             inspector_settings: false,
@@ -258,6 +317,11 @@ impl Desktop {
             this.inventory.replace(demo_sandboxes());
             this.inventory.select("dev");
             this.host = workspace::demo();
+            this.throughput = Throughput::demo(&this.host.snapshot.sandboxes);
+            this.packets = workspace::demo_packets();
+            this.capture_rate
+                .record(&this.packets.packets, gantry_desktop::clock::now_millis());
+            this.packet_sandbox = Some("dev".into());
             this.dashboard_available = true;
             this.control_available = true;
             this.connection = Connection::Demo;
@@ -269,6 +333,15 @@ impl Desktop {
                 loop {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
                     if this.update(cx, |this, cx| this.fetch(false, cx)).is_err() {
+                        break;
+                    }
+                }
+            }));
+            // Packet Capture reads new frames while it is on screen.
+            this._packet_poll_task = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this.update(cx, |this, cx| this.read_packets(cx)).is_err() {
                         break;
                     }
                 }
@@ -332,6 +405,7 @@ impl Desktop {
                 }
                 match result {
                     Ok(snapshot) => {
+                        this.cli_missing = false;
                         this.inventory.replace(snapshot.inventory.sandboxes);
                         this.connection = Connection::Connected(snapshot.inventory.version);
                         this.dashboard_available = snapshot.dashboard.is_some();
@@ -341,18 +415,23 @@ impl Desktop {
                             .iter()
                             .any(|c| c == "dashboard-control-v1");
                         this.host = snapshot.dashboard.unwrap_or_default();
+                        this.throughput
+                            .record(Instant::now(), &this.host.snapshot.sandboxes);
                         this.target = Some(snapshot.target);
                         this.last_updated = Some(Instant::now());
                     }
                     Err(error) => {
+                        this.cli_missing = error.downcast_ref::<CliMissing>().is_some();
                         this.inventory.replace(vec![]);
                         this.host = HostSnapshot::default();
+                        this.throughput.clear();
                         this.dashboard_available = false;
                         this.control_available = false;
                         this.target = None;
                         this.connection = Connection::Offline(error.to_string());
                         this.last_updated = None;
                         this.packets = PacketSnapshot::default();
+                        this.capture_rate.clear();
                     }
                 }
                 this.sync_table(cx);
@@ -371,8 +450,10 @@ impl Desktop {
         let selected = self.inventory.selected().map(|r| r.name.as_str());
         let index = rows.iter().position(|r| Some(r.name.as_str()) == selected);
         let target = self.target.clone();
+        let extras = self.row_extras();
         self.table.update(cx, |table, cx| {
             table.delegate_mut().target = target;
+            table.delegate_mut().extras = extras;
             let old = table
                 .selected_row()
                 .and_then(|i| table.delegate().rows.get(i))
@@ -389,18 +470,48 @@ impl Desktop {
         });
         cx.notify();
     }
+    /// Features and traffic trend per sandbox, joined by name from the
+    /// dashboard snapshot. Managers without the dashboard API contribute none.
+    fn row_extras(&self) -> HashMap<String, RowExtras> {
+        self.host
+            .snapshot
+            .sandboxes
+            .iter()
+            .map(|s| {
+                let traffic = if s.state != "running" {
+                    TrafficTrend::Idle
+                } else if s.traffic_available {
+                    TrafficTrend::Tracked {
+                        rates: self.throughput.rates(&s.name).to_vec(),
+                    }
+                } else {
+                    TrafficTrend::Unreported
+                };
+                (
+                    s.name.clone(),
+                    RowExtras {
+                        features: detail::features(s),
+                        traffic,
+                    },
+                )
+            })
+            .collect()
+    }
     pub fn sync_pages(&mut self, cx: &mut Context<Self>) {
         for page in Page::ALL {
             if page == Page::Sandboxes {
                 continue;
             }
             let registries = self.images_registries;
+            let scale = TableScale::new(page, &self.host);
             let state = &mut self.pages[page.index()];
             let query = state.query.to_lowercase();
+            let segment = state.segment;
             let rows = workspace::rows(page, &self.host, &self.profiles, &self.packets)
                 .into_iter()
                 .filter(|r| {
                     (page != Page::Images || matches!(&r.record, Record::Registry(_)) == registries)
+                        && workspace::segment_matches(page, segment, &r.record)
                         && (query.is_empty()
                             || r.cells.iter().any(|s| s.to_lowercase().contains(&query)))
                 })
@@ -418,6 +529,7 @@ impl Desktop {
                 .position(|r| Some(&r.key) == state.selected.as_ref());
             state.table.update(cx, |table, cx| {
                 table.delegate_mut().rows = rows;
+                table.delegate_mut().scale = scale;
                 match index {
                     Some(i) if table.selected_row() != Some(i) => table.set_selected_row(i, cx),
                     None if table.selected_row().is_some() => table.clear_selection(cx),
@@ -427,6 +539,33 @@ impl Desktop {
             });
         }
         cx.notify();
+    }
+    /// Switch the Images page between cached images and registry logins.
+    /// The two lists have their own segments and selection.
+    pub fn set_images_registries(&mut self, registries: bool, cx: &mut Context<Self>) {
+        if self.images_registries != registries {
+            self.images_registries = registries;
+            let state = &mut self.pages[Page::Images.index()];
+            state.segment = 0;
+            state.selected = None;
+            state.selection_initialized = false;
+        }
+        self.sync_pages(cx);
+    }
+    /// Select a record by key on the current page (for drawn, non-table lists).
+    pub fn select_page_row(&mut self, key: String, cx: &mut Context<Self>) {
+        let state = &mut self.pages[self.page.index()];
+        state.selected = Some(key);
+        state.selection_initialized = true;
+        self.sync_pages(cx);
+    }
+    pub fn set_segment(&mut self, segment: usize, cx: &mut Context<Self>) {
+        let state = &mut self.pages[self.page.index()];
+        if state.segment != segment {
+            state.segment = segment;
+            state.selection_initialized = false;
+            self.sync_pages(cx);
+        }
     }
     pub fn selected_record(&self, cx: &Context<Self>) -> Option<Record> {
         let state = &self.pages[self.page.index()];
@@ -480,13 +619,19 @@ impl Desktop {
         self.connector = Arc::new(Mutex::new(Connector::new(&self.options)));
         self.inventory.replace(vec![]);
         self.host = HostSnapshot::default();
+        self.throughput.clear();
         self.target = None;
         self.dashboard_available = false;
         self.control_available = false;
         self.connection = Connection::Connecting;
+        self.cli_missing = false;
         self.last_updated = None;
         self.packets = PacketSnapshot::default();
+        self.capture_rate.clear();
         self.packet_sandbox = None;
+        // Terminals belong to the connection they were opened on.
+        self.terminals.clear();
+        self.terminal_error = None;
         self.notice = None;
         for state in &mut self.pages {
             state.selected = None;

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ejpir/gantry/internal/client"
 	"github.com/ejpir/gantry/internal/sandbox/config"
 	"github.com/ejpir/gantry/internal/sandbox/control"
 	"github.com/ejpir/gantry/internal/sandbox/controlproto"
@@ -160,6 +161,31 @@ func TestBrokerKillExistingSession(t *testing.T) {
 	}
 	if _, ok := br.sessions["s1"]; ok {
 		t.Fatal("session not removed from map")
+	}
+}
+
+func TestBrokerResizeReachesOnlyTerminalSessionsAndKeepsTheNewestSize(t *testing.T) {
+	resize := make(chan client.WindowSize, 1)
+	br := &broker{sessions: map[string]chan struct{}{}, resizes: map[string]chan client.WindowSize{"s1": resize}}
+	if got := brokerPipe(t, br, `{"op":"resize","id":"nope","cols":80,"rows":24}`+"\n"); !strings.Contains(got, "no such terminal session") {
+		t.Fatalf("resp = %s", got)
+	}
+	if got := brokerPipe(t, br, `{"op":"resize","id":"s1","cols":80}`+"\n"); !strings.Contains(got, "cols and rows are required") {
+		t.Fatalf("resp = %s", got)
+	}
+	for _, size := range []string{`"cols":80,"rows":24`, `"cols":132,"rows":40`} {
+		if got := brokerPipe(t, br, `{"op":"resize","id":"s1",`+size+`}`+"\n"); !strings.Contains(got, `"ok":true`) {
+			t.Fatalf("resp = %s", got)
+		}
+	}
+	// The guest had not applied 80x24 yet; only the newest size is pending.
+	if got := <-resize; got != (client.WindowSize{Cols: 132, Rows: 40}) {
+		t.Fatalf("size = %+v", got)
+	}
+	select {
+	case stale := <-resize:
+		t.Fatalf("stale size queued: %+v", stale)
+	default:
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/sandbox/config"
+	"github.com/ejpir/gantry/internal/sandbox/controlproto"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper"
 	"github.com/ejpir/gantry/internal/sandbox/credhelper/credproto"
 	"github.com/ejpir/gantry/internal/secret"
@@ -68,8 +69,31 @@ func TestAuditSinksUseIdenticalBoundedSanitizedLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(raw) != lines[0]+"\n" {
+	at, line := controlproto.ParseAuditRecord(strings.TrimSuffix(string(raw), "\n"))
+	if line != lines[0] || !strings.HasSuffix(string(raw), "\n") || strings.Count(string(raw), "\n") != 1 {
 		t.Fatal("disk and live audit sanitization differ")
+	}
+	_, times := r.snapshot()
+	if at.IsZero() || len(times) != 1 || !at.Equal(times[0]) {
+		t.Fatalf("disk time %v and live time %v differ", at, times)
+	}
+}
+
+func TestAuditRingKeepsTimesAlignedThroughEviction(t *testing.T) {
+	r := &auditRing{}
+	start := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	for i := range auditRingCapacity + 10 {
+		r.appendAt(start.Add(time.Duration(i)*time.Second), fmt.Sprintf("event-%d", i))
+	}
+	lines, times := r.snapshot()
+	if len(lines) != auditRingCapacity || len(times) != len(lines) {
+		t.Fatalf("lines=%d times=%d", len(lines), len(times))
+	}
+	for i, line := range lines {
+		var n int
+		if _, err := fmt.Sscanf(line, "event-%d", &n); err != nil || !times[i].Equal(start.Add(time.Duration(n)*time.Second)) {
+			t.Fatalf("entry %d: %q at %v", i, line, times[i])
+		}
 	}
 }
 

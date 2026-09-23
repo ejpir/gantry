@@ -8,7 +8,7 @@ description = "Native, read-only desktop client for the Gantry manager"
 
 [features]
 default = ["ui"]
-ui = ["dep:gpui-kit"]
+ui = ["dep:alacritty_terminal", "dep:async-channel", "dep:gpui-kit", "dep:rustix-openpty", "dep:image", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 ui-tests = ["ui", "gpui-kit/test-support"]
 
 [[bin]]
@@ -17,7 +17,10 @@ path = "src/main.rs"
 required-features = ["ui"]
 
 [dependencies]
+# The integrated terminal: a VT emulator, its screen grid and a PTY.
+alacritty_terminal = { version = "0.26", optional = true, default-features = false }
 anyhow = "1"
+async-channel = { version = "2", optional = true }
 gpui-kit = { version = "=0.6.4", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-manual-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -30,6 +33,21 @@ zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Opens the integrated terminal's PTY (src/terminal.rs).
+rustix-openpty = { version = "0.2", optional = true }
+
+# The app icon (src/app_icon.rs): AppKit for the macOS Dock, PNG decoding for
+# the X11 window icon. Windows embeds it at build time (build.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSData"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+[build-dependencies]
+embed-resource = "3"
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
@@ -37,6 +55,12 @@ tempfile = "3"
 
 [profile.dev]
 debug = "limited"
+
+# GPUI, its renderer, and path tessellation are unusably slow unoptimized.
+# Optimize every dependency in dev/test builds; this crate stays at opt-level 0
+# so it remains debuggable. The first build after this change is slower.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.test]
 debug = "limited"

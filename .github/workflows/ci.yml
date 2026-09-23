@@ -601,13 +601,16 @@ jobs:
       matrix:
         include:
           - { name: linux-amd64, runner: ubuntu-latest }
+          # The desktop offers to install the linux-arm64 CLI, so it ships
+          # for that platform too.
+          - { name: linux-arm64, runner: ubuntu-24.04-arm }
           - { name: darwin-arm64, runner: macos-14 }
           - { name: windows-amd64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: install Linux UI build dependencies
-        if: ${{ matrix.name == 'linux-amd64' }}
+        if: ${{ startsWith(matrix.name, 'linux-') }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -624,8 +627,20 @@ jobs:
         if: ${{ matrix.name == 'linux-amd64' }}
         working-directory: desktop
         run: cargo test --locked --all-features
+      - name: validate release tag
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9._-]+)?$ ]]
       - name: cargo build
         working-directory: desktop
+        env:
+          # Tag builds may offer to install the gantry CLI from their own
+          # release (desktop/src/bootstrap.rs re-validates the tag). Branch
+          # builds stay untagged and never offer a download.
+          GANTRY_DESKTOP_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: cargo build --locked --release
       - name: stage artifact (Windows)
         if: ${{ matrix.name == 'windows-amd64' }}

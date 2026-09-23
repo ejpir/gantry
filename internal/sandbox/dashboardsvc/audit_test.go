@@ -20,7 +20,7 @@ const auditTestDecision = `policy: {"effect":"deny","action":"mcp.tools.call","r
 
 func TestDashboardAuditRows(t *testing.T) {
 	lines := []string{"credential withheld: TOKEN", auditTestDecision, auditTestDecision, "policy: {truncated", " ", `policy: {"effect":"unknown","action":"mount.read"}`}
-	rows := dashboardAuditRows("dev", lines)
+	rows := dashboardAuditRows("dev", lines, nil)
 	if len(rows) != 5 || rows[0].Line != lines[5] || rows[1].Line != lines[3] || rows[4].Line != lines[0] {
 		t.Fatalf("newest-first rows = %+v", rows)
 	}
@@ -34,7 +34,7 @@ func TestDashboardAuditRows(t *testing.T) {
 	if d == nil || d.Effect != "deny" || d.Action != "mcp.tools.call" || d.Reason != "no_match" || d.Organization != "org" || d.Revision != "rev-1" || d.Profile != "dev" || len(d.Rules) != 1 || d.Rules[0] != "blocked-tool" {
 		t.Fatalf("decision provenance = %+v", d)
 	}
-	allowed := dashboardAuditRows("dev", []string{strings.Replace(auditTestDecision, `"deny"`, `"allow"`, 1)})
+	allowed := dashboardAuditRows("dev", []string{strings.Replace(auditTestDecision, `"deny"`, `"allow"`, 1)}, nil)
 	if allowed[0].Decision == nil || allowed[0].Decision.Effect != "allow" {
 		t.Fatal("allow decision was not recognized")
 	}
@@ -45,16 +45,32 @@ func TestDashboardAuditRows(t *testing.T) {
 	}
 }
 
+func TestDashboardAuditRowsKeepEachEventsTime(t *testing.T) {
+	start := time.Date(2026, 9, 22, 9, 0, 0, 0, time.UTC)
+	lines := []string{"first", "second", " ", "third"}
+	times := []time.Time{start, start.Add(time.Second), start.Add(2 * time.Second), start.Add(3 * time.Second)}
+	rows := dashboardAuditRows("dev", lines, times)
+	if len(rows) != 3 || rows[0].Line != "third" || !rows[0].Time.Equal(times[3]) || !rows[2].Time.Equal(times[0]) {
+		t.Fatalf("rows = %+v", rows)
+	}
+	// A mismatched times slice is ignored rather than misattributed.
+	for _, row := range dashboardAuditRows("dev", lines, times[:2]) {
+		if !row.Time.IsZero() {
+			t.Fatalf("misattributed time: %+v", row)
+		}
+	}
+}
+
 func TestDashboardAuditBounds(t *testing.T) {
 	var lines []string
 	for i := range 300 {
 		lines = append(lines, fmt.Sprintf("event %d", i))
 	}
-	rows := dashboardAuditRows("dev", lines)
+	rows := dashboardAuditRows("dev", lines, nil)
 	if len(rows) != 256 || rows[0].Line != "event 299" || rows[255].Line != "event 44" {
 		t.Fatal("tail count/order not bounded")
 	}
-	rows = dashboardAuditRows("dev", []string{"policy: " + strings.Repeat("x", 1<<20)})
+	rows = dashboardAuditRows("dev", []string{"policy: " + strings.Repeat("x", 1<<20)}, nil)
 	if len(rows[0].Line) > 4200 || !strings.HasSuffix(rows[0].Line, "[audit line truncated]") || rows[0].Decision != nil {
 		t.Fatal("oversized line not bounded or assigned a policy effect")
 	}

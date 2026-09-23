@@ -138,6 +138,25 @@ impl Command {
 }
 
 impl ManagerClient {
+    /// Read captured packets after a cursor, as the live Packet Capture view
+    /// does every second. Reads never change capture state, so unlike
+    /// [`Self::execute`] this skips the control-capability round trip.
+    pub fn read_packets(&self, name: &str, after: u64) -> Result<PacketSnapshot> {
+        name_path(name)?;
+        let request = PacketRequest {
+            after,
+            max_packets: 256,
+            max_bytes: 262_144,
+            ..Default::default()
+        };
+        self.request(
+            "POST",
+            &format!("/v1/dashboard/packets/{name}"),
+            Some(&request),
+            Duration::from_secs(15),
+            &[],
+        )
+    }
     pub fn execute(&self, command: &Command) -> Result<Outcome> {
         self.execute_with_progress(command, |_| {})
     }

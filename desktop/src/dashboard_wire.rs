@@ -91,6 +91,8 @@ pub struct AuditEvent {
     pub decision: Option<AuditDecision>,
     #[serde(rename = "Error")]
     pub error: String,
+    #[serde(rename = "Time")]
+    pub time: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -145,6 +147,8 @@ pub struct Image {
     pub size: i64,
     #[serde(rename = "InUse")]
     pub in_use: bool,
+    #[serde(rename = "UsedBy", default, deserialize_with = "crate::wire::null_vec")]
+    pub used_by: Vec<String>,
     #[serde(rename = "User")]
     pub user: String,
     #[serde(rename = "WorkingDir")]

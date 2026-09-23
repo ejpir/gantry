@@ -11,6 +11,7 @@ use gpui_kit::{ClipboardItem, Context, Focusable, IntoElement, ParentElement, We
 
 #[derive(Clone, Copy)]
 pub enum RowAction {
+    Terminal,
     Start,
     Stop,
     Edit,
@@ -124,6 +125,13 @@ impl Desktop {
                 cx.write_to_clipboard(ClipboardItem::new_string(row.image_label().into()));
                 return;
             }
+            // A shell reads and writes only inside the sandbox; it needs no
+            // manager write access.
+            RowAction::Terminal => {
+                let name = row.name.clone();
+                self.open_terminal(&name, window, cx);
+                return;
+            }
             _ => {}
         }
         if !self.can_write() {
@@ -168,6 +176,12 @@ pub fn sandbox_menu(
         .label(format!("{} · {scope}", row.name))
         .separator();
     for (label, icon, action, disabled) in [
+        (
+            "Open Terminal",
+            IconName::SquareTerminal,
+            RowAction::Terminal,
+            row.state != "running",
+        ),
         (
             "Start",
             IconName::Play,

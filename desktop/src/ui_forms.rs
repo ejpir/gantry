@@ -108,7 +108,15 @@ impl Desktop {
             .collect::<Vec<_>>();
         let (sliders, subscriptions) = self.resource_sliders(&spec, &inputs, window, cx);
         let focus = cx.focus_handle();
-        if let Some(input) = inputs.first() {
+        // Buttons, switches and dropdowns keep their value in a hidden input;
+        // focus the first field that is typed into.
+        let typed = spec.fields.iter().position(|f| {
+            !matches!(
+                f.kind,
+                FieldKind::Bool | FieldKind::Choice(_) | FieldKind::Select(_)
+            )
+        });
+        if let Some(input) = typed.and_then(|index| inputs.get(index)) {
             input.focus_handle(cx).focus(window, cx);
         } else {
             focus.focus(window, cx);
@@ -211,6 +219,7 @@ impl Desktop {
         let connector = self.connector.clone();
         let base = self.config_dir.clone();
         let program_override = self.options.gantry.clone();
+        let managed = self.options.managed_gantry.clone();
         let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel::<String>(16);
         let progress_scope = scope.clone();
         self.progress_task = Some(cx.spawn(async move |this, cx| {
@@ -255,7 +264,8 @@ impl Desktop {
                         },
                     ),
                 intent => {
-                    let program = launcher::executable(program_override.as_deref());
+                    let program =
+                        launcher::executable(program_override.as_deref(), managed.as_deref())?;
                     let base = base
                         .ok_or_else(|| anyhow::anyhow!("Cannot locate the client profile store"))?;
                     let message = local_profiles::apply(&program, &base, &intent)?;
@@ -287,7 +297,12 @@ impl Desktop {
                             Some(format!("{scope} · {}", workspace::text(&outcome.message)));
                         if let Some((sandbox, packets)) = outcome.packets {
                             this.packet_sandbox = Some(sandbox);
+                            // Start, clear and stop begin the count again.
+                            this.capture_rate.clear();
+                            this.capture_rate
+                                .record(&packets.packets, gantry_desktop::clock::now_millis());
                             this.packets = packets;
+                            this.packet_error = None;
                         }
                     }
                     Err(error) => {
@@ -456,6 +471,9 @@ impl Desktop {
                                                 }
                                             })),
                                     )
+                                }
+                                FieldKind::Select(options) => {
+                                    self.select_control(index, field, options, enabled, cx)
                                 }
                                 FieldKind::Choice(choices) => {
                                     div().flex().flex_wrap().gap_1().children(

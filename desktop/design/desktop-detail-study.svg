@@ -1,0 +1,369 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1440" height="1040" viewBox="0 0 1440 1040">
+<title>Gantry desktop workspace — middle-pane detail study, not implemented</title>
+<desc>Follow-up to desktop-workspace.svg. The sandbox list carries state pills, allocation with a restart flag, a traffic trend and feature icons; below it, the selected sandbox shows network throughput and destinations. All names, rates and records are sample data.</desc>
+<defs>
+  <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%"><feGaussianBlur stdDeviation="15"/></filter>
+  <filter id="menuShadow" x="-30%" y="-30%" width="160%" height="170%"><feGaussianBlur stdDeviation="10"/></filter>
+  <clipPath id="windowClip"><rect x="48" y="130" width="1344" height="740" rx="12"/></clipPath>
+  <g id="computer"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></g>
+  <g id="server"><rect x="3" y="2" width="18" height="8" rx="2"/><rect x="3" y="14" width="18" height="8" rx="2"/><path d="M7 6h.1M7 18h.1M12 6h5M12 18h5"/></g>
+  <g id="cube"><path d="M12 2 22 7v10l-10 5L2 17V7Z M2 7l10 5 10-5M12 12v10M7 4.5l10 5"/></g>
+  <g id="traffic"><path d="M3 8h17m-5-5 5 5-5 5M21 16H4m5-5-5 5 5 5"/></g>
+  <g id="shield"><path d="M12 2 21 6v6c0 5-5 9-9 10-4-1-9-5-9-10V6Z M8 12l3 3 5-6"/></g>
+  <g id="ports"><path d="M2 12h20M6 8l-4 4 4 4M18 8l4 4-4 4"/><rect x="9" y="4" width="6" height="16" rx="2"/></g>
+  <g id="packets"><path d="M2 12h4l3-8 5 16 3-8h5"/></g>
+  <g id="folder"><path d="M2 7V5a2 2 0 0 1 2-2h5l3 4h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z"/></g>
+  <g id="key"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-4-4 3-3m-7-1 3-3"/></g>
+  <g id="mcp"><path d="m8 3 13 13-5 5L3 8ZM8 15l-4 4m11-11 4-4"/></g>
+  <g id="audit"><rect x="5" y="3" width="15" height="19" rx="2"/><path d="M9 8h7M9 12h7M9 16h4"/></g>
+  <g id="images"><path d="m12 2 10 5-10 5L2 7ZM2 12l10 5 10-5M2 17l10 5 10-5"/></g>
+  <g id="registry"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 9v12M7 6h.1M11 6h.1"/></g>
+  <g id="search"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></g>
+  <g id="plus"><path d="M12 4v16M4 12h16"/></g>
+  <g id="chevron"><path d="m7 9 5 5 5-5"/></g>
+  <g id="play"><path d="m7 4 13 8-13 8Z"/></g>
+  <g id="stop"><rect x="5" y="5" width="14" height="14" rx="2"/></g>
+  <g id="more"><circle cx="4" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="20" cy="12" r="1"/></g>
+  <g id="refresh"><path d="M20 10a8 8 0 1 0-1 7M20 3v7h-7"/></g>
+  <g id="inspector"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M15 3v18"/></g>
+  <g id="check"><path d="m5 12 4 4L19 6"/></g>
+  <g id="clock"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/></g>
+  <g id="copy"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></g>
+  <g id="edit"><path d="m4 16-1 5 5-1L21 7l-4-4ZM14 6l4 4"/></g>
+  <g id="trash"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></g>
+  <g id="warning"><path d="m12 3 10 18H2Z M12 9v5M12 17h.1"/></g>
+  <g id="terminal"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m6 10 3 2-3 2M12 15h6"/></g>
+  <g id="devc"><path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2"/></g>
+  <g id="nonet"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20M4 4l16 16"/></g>
+  <linearGradient id="downFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7aa7e0" stop-opacity="0.34"/><stop offset="1" stop-color="#7aa7e0" stop-opacity="0"/></linearGradient>
+  <linearGradient id="upFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6fc1c9" stop-opacity="0.30"/><stop offset="1" stop-color="#6fc1c9" stop-opacity="0"/></linearGradient>
+</defs>
+<rect x="0" y="0" width="1440" height="1040" rx="0" fill="#f1f2ee" />
+<text x="48" y="35" fill="#667065" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="600" text-anchor="start" letter-spacing="1.7">GANTRY  /  DESIGN STUDY  02</text>
+<text x="48" y="75" fill="#202720" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="30" font-weight="600" text-anchor="start" >Put the middle pane to work.</text>
+<text x="48" y="103" fill="#687068" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="400" text-anchor="start" >Rows carry live signal. The space under the list shows what the selected sandbox is doing.</text>
+<text x="1392" y="74" fill="#6e766e" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="end" letter-spacing="0.7">VISUAL PROPOSAL · SAMPLE DATA</text>
+<rect x="57" y="149" width="1326" height="731" rx="13" fill="#151b18" filter="url(#shadow)" opacity="0.23"/>
+<g clip-path="url(#windowClip)">
+<rect x="48" y="130" width="1344" height="740" rx="0" fill="#25272b" />
+<rect x="48" y="130" width="1344" height="52" rx="0" fill="#33353a" />
+<rect x="48" y="182" width="208" height="664" rx="0" fill="#2e3035" />
+<rect x="256" y="182" width="808" height="664" rx="0" fill="#222429" />
+<rect x="1064" y="182" width="328" height="664" rx="0" fill="#2b2d32" />
+<rect x="48" y="846" width="1344" height="24" rx="0" fill="#2d2f34" />
+<path d="M48 181.5H1392" stroke="#181a1e" stroke-width="1"/>
+<path d="M256 182L256 846" stroke="#17191d" stroke-width="1"/>
+<path d="M1064 182L1064 846" stroke="#17191d" stroke-width="1"/>
+<path d="M48 846H1392" stroke="#17191d" stroke-width="1"/>
+<circle cx="70" cy="156" r="6" fill="#ff6058"/>
+<circle cx="90" cy="156" r="6" fill="#febc2e"/>
+<circle cx="110" cy="156" r="6" fill="#29c841"/>
+<path d="M144 165V147h18v18M150 165v-12h6v12" fill="none" stroke="#bde878" stroke-width="2"/>
+<text x="172" y="161" fill="#ebedef" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start" >Gantry</text>
+<g transform="translate(278 145) scale(0.875)" fill="none" stroke="#c2c7cf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="309" y="161" fill="#f1f2f4" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="14" font-weight="600" text-anchor="start" >Sandboxes</text>
+<path d="M421 145L421 168" stroke="#53565c" stroke-width="1"/>
+<rect x="439" y="143" width="66" height="27" rx="6" fill="#3e4146" stroke="#55585f" />
+<g transform="translate(447 149) scale(0.625)" fill="none" stroke="#e3e5e8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#plus"/></g>
+<text x="469" y="161" fill="#e3e5e8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >New</text>
+<g transform="translate(527 146) scale(0.8333333333333334)" fill="none" stroke="#767b84" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#play"/></g>
+<g transform="translate(566 146) scale(0.8333333333333334)" fill="none" stroke="#e0e3e8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#stop"/></g>
+<g transform="translate(605 146) scale(0.8333333333333334)" fill="none" stroke="#d4d8df" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#more"/></g>
+<path d="M645 145L645 168" stroke="#53565c" stroke-width="1"/>
+<g transform="translate(665 146) scale(0.7916666666666666)" fill="none" stroke="#b1b7c0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#refresh"/></g>
+<rect x="780" y="142" width="268" height="28" rx="6" fill="#282a2f" stroke="#4a4d53" />
+<g transform="translate(790 149) scale(0.625)" fill="none" stroke="#969da7" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#search"/></g>
+<text x="813" y="161" fill="#969da7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Search sandboxes</text>
+<text x="1036" y="160" fill="#858c96" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >⌘ F</text>
+<text x="1084" y="161" fill="#c7ccd3" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start" >Inspector</text>
+<g transform="translate(1355 146) scale(0.7916666666666666)" fill="none" stroke="#d3d7dd" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#inspector"/></g>
+<text x="65" y="211" fill="#969da8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">CONNECTIONS</text>
+<rect x="58" y="221" width="188" height="31" rx="6" fill="#41444b" />
+<g transform="translate(68 229) scale(0.7083333333333334)" fill="none" stroke="#d0d6df" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#computer"/></g>
+<text x="96" y="242" fill="#f1f3f5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start" >This Mac</text>
+<circle cx="231" cy="237" r="3" fill="#90c47c"/>
+<g transform="translate(68 265) scale(0.7083333333333334)" fill="none" stroke="#b1b7c0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#server"/></g>
+<text x="96" y="278" fill="#c4cad3" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Build host</text>
+<circle cx="231" cy="272" r="3" fill="#858b96"/>
+<g transform="translate(68 298) scale(0.6666666666666666)" fill="none" stroke="#a0a8b3" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#plus"/></g>
+<text x="96" y="311" fill="#b1b9c5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Add Connection…</text>
+<text x="65" y="349" fill="#969da8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">WORKSPACE</text>
+<rect x="58" y="355" width="188" height="29" rx="6" fill="#454951" />
+<g transform="translate(68 361) scale(0.7083333333333334)" fill="none" stroke="#d8dde4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="96" y="374" fill="#f0f2f5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start" >Sandboxes</text>
+<text x="230" y="374" fill="#b9c2cd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >7</text>
+<g transform="translate(68 391) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#traffic"/></g>
+<text x="96" y="404" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Traffic</text>
+<g transform="translate(68 421) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#shield"/></g>
+<text x="96" y="434" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Network Rules</text>
+<g transform="translate(68 451) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#ports"/></g>
+<text x="96" y="464" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Ports</text>
+<g transform="translate(68 481) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#packets"/></g>
+<text x="96" y="494" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Packet Capture</text>
+<g transform="translate(68 511) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#folder"/></g>
+<text x="96" y="524" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Mounts</text>
+<g transform="translate(68 541) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="96" y="554" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Secrets</text>
+<g transform="translate(68 571) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#mcp"/></g>
+<text x="96" y="584" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >MCP</text>
+<g transform="translate(68 601) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#audit"/></g>
+<text x="96" y="614" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Audit</text>
+<text x="65" y="665" fill="#969da8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">IMAGES</text>
+<g transform="translate(68 680) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#images"/></g>
+<text x="96" y="693" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Local Images</text>
+<g transform="translate(68 710) scale(0.7083333333333334)" fill="none" stroke="#aab2bf" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#registry"/></g>
+<text x="96" y="723" fill="#c4cbd5" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >Registries</text>
+<path d="M65 799H239" stroke="#44474e" stroke-width="1"/>
+<text x="68" y="824" fill="#aeb7c4" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Manage Connections…</text>
+<rect x="256" y="182" width="808" height="43" rx="0" fill="#292b30" />
+<rect x="276" y="192" width="268" height="25" rx="5" fill="#202226" stroke="#42464d"/>
+<rect x="278" y="194" width="70" height="21" rx="4" fill="#51565e" />
+<text x="313" y="209" fill="#f1f3f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="middle" >All  7</text>
+<text x="399" y="209" fill="#bac2ce" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Running  4</text>
+<text x="492" y="209" fill="#bac2ce" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Stopped  3</text>
+<text x="1042" y="209" fill="#9ca5b2" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >7 sandboxes · 4 running</text>
+<rect x="256" y="225" width="808" height="28" rx="0" fill="#2b2d32" />
+<text x="280" y="243" fill="#a9b1bd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="start" >Name</text>
+<text x="424" y="243" fill="#a9b1bd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="start" >State</text>
+<text x="516" y="243" fill="#a9b1bd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="start" >Allocation</text>
+<text x="650" y="243" fill="#a9b1bd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="start" >Network</text>
+<text x="792" y="243" fill="#a9b1bd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="start" >Features</text>
+<text x="900" y="243" fill="#a9b1bd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="start" >Image</text>
+<path d="m326 239 4-4 4 4" fill="none" stroke="#a8b1bf" stroke-width="1.2"/>
+<path d="M256 252H1064" stroke="#16191d" stroke-width="1" />
+<rect x="256" y="253" width="808" height="34" rx="0" fill="#315b89" />
+<g transform="translate(280 262) scale(0.6666666666666666)" fill="none" stroke="#e4edf8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="275" fill="#ffffff" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="500" text-anchor="start" >api-dev</text>
+<rect x="424" y="261" width="72" height="18" rx="9" fill="#4371a3" />
+<circle cx="435" cy="270" r="3" fill="#b4e3b0"/>
+<text x="444" y="274" fill="#eef5fd" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Running</text>
+<text x="516" y="275" fill="#edf3fb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >2 vCPU · 2 GiB</text>
+<g transform="translate(612 264) scale(0.5)" fill="none" stroke="#f0d493" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#warning"/></g>
+<polyline points="650.0,266.9 654.3,269.7 658.5,272.1 662.8,270.1 667.1,270.8 671.3,271.7 675.6,272.4 679.9,277.3 684.1,277.4 688.4,276.5 692.7,275.6 696.9,271.6 701.2,265.9 705.5,269.0 709.7,271.2 714.0,269.8" fill="none" stroke="#e3eefb" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="772" y="274" fill="#dbe7f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >1.2 MB/s</text>
+<g transform="translate(792 264) scale(0.5)" fill="none" stroke="#dce8f6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<g transform="translate(811 264) scale(0.5)" fill="none" stroke="#dce8f6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#devc"/></g>
+<g transform="translate(830 264) scale(0.5)" fill="none" stroke="#dce8f6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#ports"/></g>
+<text x="845" y="274" fill="#dce8f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >2</text>
+<g transform="translate(858 264) scale(0.5)" fill="none" stroke="#dce8f6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="873" y="274" fill="#dce8f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >3</text>
+<text x="900" y="275" fill="#e6effa" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" ><tspan fill="#a9c1dd">ghcr.io/acme/</tspan>api:1.8</text>
+<rect x="256" y="287" width="808" height="34" rx="0" fill="#30333a" />
+<g transform="translate(280 296) scale(0.6666666666666666)" fill="none" stroke="#a9c9a4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="309" fill="#e0e4eb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >web</text>
+<rect x="424" y="295" width="72" height="18" rx="9" fill="#2c3f30" />
+<circle cx="435" cy="304" r="3" fill="#8fc48a"/>
+<text x="444" y="308" fill="#b6dcb1" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Running</text>
+<text x="516" y="309" fill="#bfc7d2" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >2 vCPU · 1 GiB</text>
+<polyline points="650.0,308.4 654.3,311.4 658.5,311.4 662.8,310.9 667.1,308.2 671.3,303.4 675.6,304.0 679.9,304.7 684.1,303.7 688.4,304.7 692.7,301.0 696.9,296.0 701.2,302.2 705.5,306.6 709.7,309.3 714.0,311.4" fill="none" stroke="#8fb6e6" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="772" y="308" fill="#9aa6b6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >86 kB/s</text>
+<g transform="translate(792 298) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#ports"/></g>
+<text x="807" y="308" fill="#9aa7b8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >1</text>
+<g transform="translate(820 298) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#shield"/></g>
+<text x="900" y="309" fill="#b3bfcf" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >node:22</text>
+<rect x="972" y="293" width="76" height="22" rx="5" fill="#3a3d44" stroke="#4d515a"/>
+<g transform="translate(979 298) scale(0.5)" fill="none" stroke="#6f7680" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#play"/></g>
+<g transform="translate(1003 298) scale(0.5)" fill="none" stroke="#dfe3e9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#stop"/></g>
+<g transform="translate(1027 298) scale(0.5)" fill="none" stroke="#dfe3e9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#more"/></g>
+<rect x="256" y="321" width="808" height="34" rx="0" fill="#24262b" />
+<g transform="translate(280 330) scale(0.6666666666666666)" fill="none" stroke="#a9c9a4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="343" fill="#e0e4eb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >worker</text>
+<rect x="424" y="329" width="72" height="18" rx="9" fill="#2c3f30" />
+<circle cx="435" cy="338" r="3" fill="#8fc48a"/>
+<text x="444" y="342" fill="#b6dcb1" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Running</text>
+<text x="516" y="343" fill="#bfc7d2" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >4 vCPU · 4 GiB</text>
+<polyline points="650.0,338.9 654.3,340.3 658.5,339.5 662.8,340.3 667.1,345.2 671.3,345.4 675.6,345.3 679.9,344.3 684.1,339.6 688.4,338.2 692.7,339.8 696.9,337.0 701.2,333.1 705.5,335.4 709.7,334.0 714.0,336.0" fill="none" stroke="#8fb6e6" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="772" y="342" fill="#9aa6b6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >412 kB/s</text>
+<g transform="translate(792 332) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="807" y="342" fill="#9aa7b8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >1</text>
+<g transform="translate(820 332) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#folder"/></g>
+<text x="835" y="342" fill="#9aa7b8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >2</text>
+<text x="900" y="343" fill="#b3bfcf" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >debian:12</text>
+<rect x="256" y="355" width="808" height="34" rx="0" fill="#292b30" />
+<g transform="translate(280 364) scale(0.6666666666666666)" fill="none" stroke="#7d8591" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="377" fill="#e0e4eb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >db</text>
+<rect x="424" y="363" width="72" height="18" rx="9" fill="#33363c" />
+<circle cx="435" cy="372" r="3" fill="#858b96"/>
+<text x="444" y="376" fill="#aab3bf" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Stopped</text>
+<text x="516" y="377" fill="#8a93a0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >—</text>
+<path d="M650 376H714" stroke="#5d636c" stroke-width="1.3" stroke-dasharray="1 4" stroke-linecap="round"/>
+<g transform="translate(792 366) scale(0.5)" fill="none" stroke="#6f7782" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#folder"/></g>
+<text x="807" y="376" fill="#6f7782" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >1</text>
+<g transform="translate(820 366) scale(0.5)" fill="none" stroke="#6f7782" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#ports"/></g>
+<text x="835" y="376" fill="#6f7782" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >1</text>
+<text x="900" y="377" fill="#b3bfcf" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >postgres:17</text>
+<rect x="256" y="389" width="808" height="34" rx="0" fill="#24262b" />
+<g transform="translate(280 398) scale(0.6666666666666666)" fill="none" stroke="#7d8591" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="411" fill="#e0e4eb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >scratch</text>
+<rect x="424" y="397" width="72" height="18" rx="9" fill="#33363c" />
+<circle cx="435" cy="406" r="3" fill="#858b96"/>
+<text x="444" y="410" fill="#aab3bf" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Stopped</text>
+<text x="516" y="411" fill="#8a93a0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >—</text>
+<path d="M650 410H714" stroke="#5d636c" stroke-width="1.3" stroke-dasharray="1 4" stroke-linecap="round"/>
+<g transform="translate(792 400) scale(0.5)" fill="none" stroke="#6f7782" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#nonet"/></g>
+<text x="900" y="411" fill="#b3bfcf" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >alpine:3.21</text>
+<rect x="256" y="423" width="808" height="34" rx="0" fill="#292b30" />
+<g transform="translate(280 432) scale(0.6666666666666666)" fill="none" stroke="#a9c9a4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="445" fill="#e0e4eb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >agent-lab</text>
+<rect x="424" y="431" width="72" height="18" rx="9" fill="#2c3f30" />
+<circle cx="435" cy="440" r="3" fill="#8fc48a"/>
+<text x="444" y="444" fill="#b6dcb1" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Running</text>
+<text x="516" y="445" fill="#bfc7d2" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >2 vCPU · 2 GiB</text>
+<polyline points="650.0,446.6 654.3,442.3 658.5,438.4 662.8,439.7 667.1,439.5 671.3,439.9 675.6,441.2 679.9,438.2 684.1,438.1 688.4,441.6 692.7,442.4 696.9,441.9 701.2,445.5 705.5,444.9 709.7,444.4 714.0,444.0" fill="none" stroke="#8fb6e6" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="772" y="444" fill="#9aa6b6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >3 kB/s</text>
+<g transform="translate(792 434) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#terminal"/></g>
+<g transform="translate(811 434) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#shield"/></g>
+<g transform="translate(830 434) scale(0.5)" fill="none" stroke="#9aa7b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#key"/></g>
+<text x="845" y="444" fill="#9aa7b8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >2</text>
+<text x="900" y="445" fill="#b3bfcf" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >ubuntu:24.04</text>
+<rect x="256" y="457" width="808" height="34" rx="0" fill="#24262b" />
+<g transform="translate(280 466) scale(0.6666666666666666)" fill="none" stroke="#7d8591" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="305" y="479" fill="#e0e4eb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="start" >ci-runner</text>
+<rect x="424" y="465" width="72" height="18" rx="9" fill="#33363c" />
+<circle cx="435" cy="474" r="3" fill="#858b96"/>
+<text x="444" y="478" fill="#aab3bf" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Stopped</text>
+<text x="516" y="479" fill="#8a93a0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >—</text>
+<path d="M650 478H714" stroke="#5d636c" stroke-width="1.3" stroke-dasharray="1 4" stroke-linecap="round"/>
+<g transform="translate(792 468) scale(0.5)" fill="none" stroke="#6f7782" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#devc"/></g>
+<g transform="translate(811 468) scale(0.5)" fill="none" stroke="#6f7782" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#folder"/></g>
+<text x="826" y="478" fill="#6f7782" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >1</text>
+<text x="900" y="479" fill="#b3bfcf" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" ><tspan fill="#737d8b">ghcr.io/acme/</tspan>ci:latest</text>
+<path d="M256 491H1064" stroke="#32353b" stroke-width="1" />
+<rect x="256" y="491" width="808" height="43" rx="0" fill="#2a2c31" />
+<path d="M256 491.5H1064" stroke="#3d414a" stroke-width="1" />
+<path d="M256 533.5H1064" stroke="#1b1d21" stroke-width="1" />
+<g transform="translate(276 504) scale(0.6666666666666666)" fill="none" stroke="#c9d6e6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="300" y="517" fill="#f1f3f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="600" text-anchor="start" >api-dev</text>
+<rect x="366" y="499" width="452" height="26" rx="6" fill="#202226" stroke="#42464d"/>
+<rect x="368" y="501" width="78" height="22" rx="4" fill="#51565e" />
+<text x="407" y="516" fill="#f3f5f8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="middle" >Network</text>
+<text x="481" y="516" fill="#b6bfcc" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Ports  2</text>
+<text x="556" y="516" fill="#b6bfcc" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Mounts  1</text>
+<text x="638" y="516" fill="#b6bfcc" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Secrets  3</text>
+<text x="713" y="516" fill="#b6bfcc" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >MCP  1</text>
+<text x="781" y="516" fill="#b6bfcc" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Audit</text>
+<text x="1044" y="516" fill="#8f9aab" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >3 s samples · this window</text>
+<rect x="276" y="546" width="312" height="92" rx="8" fill="#2a2c31" stroke="#383b42"/>
+<text x="292" y="566" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">DOWNLOAD</text>
+<text x="572" y="566" fill="#8f9aab" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >peak 2.1 MB/s</text>
+<text x="292" y="592" fill="#f1f3f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="18" font-weight="600" text-anchor="start" >1.24 MB/s</text>
+<path d="M292.0 628 L292.0 610.2 L299.2 610.9 L306.4 613.0 L313.5 615.6 L320.7 617.6 L327.9 618.3 L335.1 617.5 L342.3 616.1 L349.4 615.0 L356.6 614.9 L363.8 615.8 L371.0 616.9 L378.2 617.6 L385.3 617.6 L392.5 617.4 L399.7 617.9 L406.9 619.6 L414.1 622.5 L421.2 625.8 L428.4 626.9 L435.6 626.9 L442.8 626.9 L449.9 626.9 L457.1 625.6 L464.3 624.8 L471.5 624.4 L478.7 623.8 L485.8 622.3 L493.0 619.6 L500.2 615.9 L507.4 611.7 L514.6 608.2 L521.7 607.1 L528.9 609.4 L536.1 613.5 L543.3 616.5 L550.5 617.1 L557.6 616.2 L564.8 615.1 L572.0 614.7 L572.0 628Z" fill="url(#downFill)"/>
+<polyline points="292.0,610.2 299.2,610.9 306.4,613.0 313.5,615.6 320.7,617.6 327.9,618.3 335.1,617.5 342.3,616.1 349.4,615.0 356.6,614.9 363.8,615.8 371.0,616.9 378.2,617.6 385.3,617.6 392.5,617.4 399.7,617.9 406.9,619.6 414.1,622.5 421.2,625.8 428.4,626.9 435.6,626.9 442.8,626.9 449.9,626.9 457.1,625.6 464.3,624.8 471.5,624.4 478.7,623.8 485.8,622.3 493.0,619.6 500.2,615.9 507.4,611.7 514.6,608.2 521.7,607.1 528.9,609.4 536.1,613.5 543.3,616.5 550.5,617.1 557.6,616.2 564.8,615.1 572.0,614.7" fill="none" stroke="#7aa7e0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="572.0" cy="614.7" r="2.6" fill="#7aa7e0"/>
+<rect x="600" y="546" width="312" height="92" rx="8" fill="#2a2c31" stroke="#383b42"/>
+<text x="616" y="566" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">UPLOAD</text>
+<text x="896" y="566" fill="#8f9aab" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >peak 190 kB/s</text>
+<text x="616" y="592" fill="#f1f3f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="18" font-weight="600" text-anchor="start" >84 kB/s</text>
+<path d="M616.0 628 L616.0 619.2 L623.2 621.8 L630.4 624.3 L637.5 625.8 L644.7 626.2 L651.9 626.1 L659.1 626.2 L666.3 626.9 L673.4 626.9 L680.6 626.9 L687.8 626.4 L695.0 623.6 L702.2 620.1 L709.3 617.1 L716.5 615.4 L723.7 615.2 L730.9 615.7 L738.1 616.2 L745.2 616.0 L752.4 615.2 L759.6 614.5 L766.8 614.5 L773.9 615.4 L781.1 616.7 L788.3 617.2 L795.5 616.1 L802.7 612.7 L809.8 607.5 L817.0 602.4 L824.2 600.2 L831.4 602.4 L838.6 607.3 L845.7 611.8 L852.9 614.4 L860.1 615.7 L867.3 616.8 L874.5 618.8 L881.6 621.7 L888.8 624.8 L896.0 626.9 L896.0 628Z" fill="url(#upFill)"/>
+<polyline points="616.0,619.2 623.2,621.8 630.4,624.3 637.5,625.8 644.7,626.2 651.9,626.1 659.1,626.2 666.3,626.9 673.4,626.9 680.6,626.9 687.8,626.4 695.0,623.6 702.2,620.1 709.3,617.1 716.5,615.4 723.7,615.2 730.9,615.7 738.1,616.2 745.2,616.0 752.4,615.2 759.6,614.5 766.8,614.5 773.9,615.4 781.1,616.7 788.3,617.2 795.5,616.1 802.7,612.7 809.8,607.5 817.0,602.4 824.2,600.2 831.4,602.4 838.6,607.3 845.7,611.8 852.9,614.4 860.1,615.7 867.3,616.8 874.5,618.8 881.6,621.7 888.8,624.8 896.0,626.9" fill="none" stroke="#6fc1c9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="896.0" cy="626.9" r="2.6" fill="#6fc1c9"/>
+<rect x="924" y="546" width="120" height="92" rx="8" fill="#2a2c31" stroke="#383b42"/>
+<text x="940" y="566" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">DROPPED</text>
+<text x="940" y="592" fill="#f1f3f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="18" font-weight="600" text-anchor="start" >0</text>
+<text x="940" y="612" fill="#8f9aab" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >packets</text>
+<g transform="translate(940 618) scale(0.5)" fill="none" stroke="#8fc48a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="956" y="628" fill="#9fbf9a" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >none blocked</text>
+<text x="276" y="664" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.8">DESTINATIONS</text>
+<text x="1044" y="664" fill="#8f9aab" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >5 hosts · by bytes · allowed and denied</text>
+<text x="276" y="691" fill="#d3dbe6" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >github.com:443</text>
+<rect x="516" y="684" width="330" height="6" rx="3" fill="#30333a" />
+<rect x="516" y="684" width="330" height="6" rx="3" fill="#5f8fc9" />
+<text x="930" y="691" fill="#c4ccd8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >18.2 MB</text>
+<circle cx="954" cy="687" r="3" fill="#8fc48a"/>
+<text x="963" y="691" fill="#aebcb0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >allowed</text>
+<rect x="266" y="700" width="788" height="26" rx="4" fill="#26282d" />
+<text x="276" y="717" fill="#d3dbe6" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >registry.npmjs.org:443</text>
+<rect x="516" y="710" width="330" height="6" rx="3" fill="#30333a" />
+<rect x="516" y="710" width="129" height="6" rx="3" fill="#5f8fc9" />
+<text x="930" y="717" fill="#c4ccd8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >7.1 MB</text>
+<circle cx="954" cy="713" r="3" fill="#8fc48a"/>
+<text x="963" y="717" fill="#aebcb0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >allowed</text>
+<text x="276" y="743" fill="#d3dbe6" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >objects.githubusercontent.com:443</text>
+<rect x="516" y="736" width="330" height="6" rx="3" fill="#30333a" />
+<rect x="516" y="736" width="62" height="6" rx="3" fill="#5f8fc9" />
+<text x="930" y="743" fill="#c4ccd8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >3.4 MB</text>
+<circle cx="954" cy="739" r="3" fill="#8fc48a"/>
+<text x="963" y="743" fill="#aebcb0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >allowed</text>
+<rect x="266" y="752" width="788" height="26" rx="4" fill="#26282d" />
+<text x="276" y="769" fill="#d3dbe6" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >pypi.org:443</text>
+<rect x="516" y="762" width="330" height="6" rx="3" fill="#30333a" />
+<rect x="516" y="762" width="18" height="6" rx="3" fill="#5f8fc9" />
+<text x="930" y="769" fill="#c4ccd8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >986 kB</text>
+<circle cx="954" cy="765" r="3" fill="#8fc48a"/>
+<text x="963" y="769" fill="#aebcb0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >allowed</text>
+<text x="276" y="795" fill="#efb3b3" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="11" font-weight="400" text-anchor="start" >169.254.169.254:80</text>
+<rect x="516" y="788" width="330" height="6" rx="3" fill="#30333a" />
+<rect x="516" y="788" width="3" height="6" rx="3" fill="#d97a7a" />
+<text x="930" y="795" fill="#c4ccd8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >0 B</text>
+<rect x="946" y="783" width="64" height="16" rx="8" fill="#4a2f31" />
+<text x="978" y="795" fill="#f0b0b0" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="500" text-anchor="middle" >denied</text>
+<rect x="256" y="814" width="808" height="32" rx="0" fill="#2e3036" />
+<path d="M256 814H1064" stroke="#565c65" stroke-width="1" />
+<g transform="translate(278 822) scale(0.625)" fill="none" stroke="#b8c3d1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#clock"/></g>
+<text x="302" y="835" fill="#dce3ed" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="500" text-anchor="start" >Activity</text>
+<text x="372" y="834" fill="#96a3b4" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="10" font-weight="400" text-anchor="start" >09:42:18</text>
+<g transform="translate(428 823) scale(0.5833333333333334)" fill="none" stroke="#98c58d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#check"/></g>
+<text x="448" y="835" fill="#d4dde9" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Settings saved · api-dev</text>
+<rect x="604" y="823" width="96" height="18" rx="4" fill="#39362f" />
+<text x="652" y="836" fill="#d2bc90" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="middle" >Restart needed</text>
+<text x="1024" y="835" fill="#aab5c4" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >3 entries</text>
+<path d="m1036 833 5-5 5 5" fill="none" stroke="#b1b7c0" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+<g transform="translate(1085 204) scale(1.0)" fill="none" stroke="#bcc9db" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#cube"/></g>
+<text x="1120" y="224" fill="#f3f5f8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="20" font-weight="600" text-anchor="start" >api-dev</text>
+<circle cx="1090" cy="244" r="3" fill="#90c78d"/>
+<text x="1102" y="249" fill="#c0cacb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Running</text>
+<text x="1372" y="249" fill="#9ca8b7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >This Mac</text>
+<rect x="1084" y="267" width="288" height="26" rx="5" fill="#202226" stroke="#42464d" />
+<rect x="1086" y="269" width="142" height="22" rx="4" fill="#50555d" />
+<text x="1157" y="284" fill="#f3f5f8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="500" text-anchor="middle" >Overview</text>
+<text x="1300" y="284" fill="#b6bfcc" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="middle" >Settings</text>
+<text x="1084" y="327" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.9">RUNNING NOW</text>
+<text x="1084" y="355" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >CPU</text>
+<text x="1372" y="355" fill="#edf1f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="end" >2 vCPU</text>
+<text x="1084" y="384" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Memory</text>
+<text x="1372" y="384" fill="#edf1f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="end" >2 GiB</text>
+<path d="M1084 407H1372" stroke="#42454a" stroke-width="1"/>
+<text x="1084" y="434" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.9">NEXT BOOT</text>
+<text x="1372" y="434" fill="#a7c8f4" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="end" >Edit…</text>
+<text x="1084" y="463" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >CPU</text>
+<text x="1372" y="463" fill="#edf1f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="end" >4 vCPU</text>
+<text x="1084" y="492" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Memory</text>
+<text x="1372" y="492" fill="#edf1f6" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="13" font-weight="400" text-anchor="end" >4 GiB</text>
+<g transform="translate(1083 515) scale(0.625)" fill="none" stroke="#d2b77c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#warning"/></g>
+<text x="1106" y="527" fill="#ddc58f" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Restart required</text>
+<text x="1084" y="549" fill="#a5aebb" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >Running allocation is unchanged.</text>
+<path d="M1084 573H1372" stroke="#42454a" stroke-width="1"/>
+<text x="1084" y="600" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.9">IMAGE</text>
+<text x="1084" y="630" fill="#d7e0ed" font-family="Adwaita Mono, DejaVu Sans Mono, monospace" font-size="13" font-weight="400" text-anchor="start" >ghcr.io/acme/api:1.8</text>
+<g transform="translate(1356 616) scale(0.6666666666666666)" fill="none" stroke="#a1aec0" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><use xlink:href="#copy"/></g>
+<path d="M1084 652H1372" stroke="#42454a" stroke-width="1"/>
+<text x="1084" y="678" fill="#9faaba" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="start" letter-spacing="0.9">SAVED CONFIGURATION</text>
+<text x="1084" y="706" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Writable layer</text>
+<text x="1372" y="706" fill="#e1e7ef" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="end" >On</text>
+<text x="1084" y="733" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Process isolation</text>
+<text x="1372" y="733" fill="#e1e7ef" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="end" >Auto</text>
+<text x="1084" y="760" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >SSH</text>
+<text x="1372" y="760" fill="#e1e7ef" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="end" >Enabled</text>
+<text x="1084" y="787" fill="#aeb8c7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Dev Containers</text>
+<text x="1372" y="787" fill="#e1e7ef" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="end" >Off</text>
+<text x="1084" y="827" fill="#949fae" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >Inspecting api-dev on This Mac</text>
+<circle cx="65" cy="858" r="2.5" fill="#8dc27d"/>
+<text x="75" y="862" fill="#b0bac8" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >Connected to This Mac</text>
+<text x="217" y="862" fill="#8895a7" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="start" >·  Manager API v1</text>
+<text x="1374" y="862" fill="#a7b3c4" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="400" text-anchor="end" >7 sandboxes · 4 running</text>
+</g>
+<rect x="48" y="130" width="1344" height="740" rx="12" fill="none" stroke="#555960" />
+<circle cx="61" cy="925" r="13" fill="#e0e5da"/>
+<text x="61" y="929" fill="#56634e" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="middle" >01</text>
+<text x="84" y="931" fill="#293029" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="15" font-weight="600" text-anchor="start" >Rows that carry signal</text>
+<text x="48" y="959" fill="#677167" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >State pills, restart flags, traffic trends, and feature icons.</text>
+<circle cx="525" cy="925" r="13" fill="#e0e5da"/>
+<text x="525" y="929" fill="#56634e" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="middle" >02</text>
+<text x="548" y="931" fill="#293029" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="15" font-weight="600" text-anchor="start" >The selection, in place</text>
+<text x="512" y="959" fill="#677167" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Network, Ports, Mounts, Secrets, MCP, and Audit for one sandbox.</text>
+<circle cx="989" cy="925" r="13" fill="#e0e5da"/>
+<text x="989" y="929" fill="#56634e" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="10" font-weight="600" text-anchor="middle" >03</text>
+<text x="1012" y="931" fill="#293029" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="15" font-weight="600" text-anchor="start" >Only data the manager has</text>
+<text x="976" y="959" fill="#677167" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="12" font-weight="400" text-anchor="start" >Rates are deltas of byte counters every 3 s. No usage gauges.</text>
+<text x="48" y="1006" fill="#778174" font-family="Adwaita Sans, Helvetica Neue, sans-serif" font-size="11" font-weight="400" text-anchor="start" >LAYOUT STUDY ONLY — follows desktop-workspace.svg. Throughput history is session-only, like Activity, and resets on reconnect.</text>
+</svg>
