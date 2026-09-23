@@ -1,14 +1,29 @@
 mod activity;
 mod app;
+mod app_icon;
+mod audit_view;
+mod charts;
 mod chrome;
 mod cli_install;
 mod dashboard_table;
 mod form_controls;
+mod images_view;
+mod mcp_view;
+mod mounts_view;
+mod packets_view;
+mod ports_view;
+mod registries_view;
 mod row_actions;
+mod rules_view;
+mod sandbox_detail;
 mod sandbox_table;
+mod screens;
+mod secrets_view;
 mod theme;
+mod traffic_view;
 mod ui_forms;
 mod views;
+mod widgets;
 mod workbench;
 
 #[cfg(all(test, feature = "ui-tests"))]
@@ -43,6 +58,7 @@ fn main() -> anyhow::Result<()> {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
+            app_icon::install();
             gpui_kit::init(cx);
             bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
@@ -107,6 +123,8 @@ fn main() -> anyhow::Result<()> {
                             traffic_light_position: Some(point(px(16.), px(19.))),
                         }),
                         app_id: Some("com.gantry.desktop".into()),
+                        #[cfg(target_os = "linux")]
+                        icon: app_icon::window_icon(),
                         ..TitleBar::window_options()
                     },
                     |window, cx| {

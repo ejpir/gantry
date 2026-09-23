@@ -34,8 +34,10 @@ fn design_dimensions_palette_and_pane_toggles(cx: &mut TestAppContext) {
         assert_eq!(list.top(), px(52.));
         assert_eq!(list.left(), px(208.));
         assert_eq!(inspector.size.width, px(328.));
-        window.click("activity-toggle", cx);
+        // Collapsed by default so the selected sandbox's detail has room.
         assert!(!desktop.read(cx).activity_open);
+        window.click("activity-toggle", cx);
+        assert!(desktop.read(cx).activity_open);
         window.click("inspector-toggle", cx);
         assert!(!desktop.read(cx).inspector_open);
         window.render_frame(cx);

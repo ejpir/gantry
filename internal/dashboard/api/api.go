@@ -159,13 +159,16 @@ type SecretRequest struct {
 // Image is one cached OCI image in the local image store. Entrypoint, Cmd,
 // and EnvCount describe the image config captured at build time.
 type Image struct {
-	Remote     string
-	Ref        string
-	Digest     string
-	Arch       string
-	Created    string
-	Size       int64
-	InUse      bool // a sandbox config references this digest
+	Remote  string
+	Ref     string
+	Digest  string
+	Arch    string
+	Created string
+	Size    int64
+	InUse   bool // a sandbox config references this digest
+	// UsedBy names the sandboxes whose saved configuration references this
+	// digest, in name order. Empty exactly when InUse is false.
+	UsedBy     []string
 	User       string
 	WorkingDir string
 	Entrypoint []string
@@ -241,6 +244,9 @@ type AuditEvent struct {
 	Occurrence int
 	Decision   *AuditDecision
 	Error      string
+	// Time is when the daemon recorded the event; zero when unknown (events
+	// written before the trail carried timestamps).
+	Time time.Time
 }
 
 // AuditDecision contains only the provenance recorded by the policy engine.

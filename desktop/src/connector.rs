@@ -153,6 +153,19 @@ impl Connector {
         client.execute_with_progress(command, progress)
     }
 
+    /// Live packet reads for the verified target; see
+    /// [`ManagerClient::read_packets`].
+    pub fn read_packets(
+        &self,
+        target: &Target,
+        name: &str,
+        after: u64,
+    ) -> Result<crate::dashboard_wire::PacketSnapshot> {
+        let (client, current) = resolve(&self.source)?;
+        ensure!(&current == target, "The selected connection changed");
+        client.read_packets(name, after)
+    }
+
     fn read<T>(
         &mut self,
         retry_start: bool,

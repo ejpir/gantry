@@ -46,6 +46,13 @@ impl Desktop {
             Source::Remote { name, .. } => workspace::text(name),
         }
     }
+    /// The page's icon; Registries share the Images page.
+    pub fn page_icon(&self) -> IconName {
+        match self.page {
+            Page::Images if self.images_registries => IconName::PanelsTopLeft,
+            page => page_icon(page),
+        }
+    }
     pub fn page_name(&self) -> &'static str {
         match self.page {
             Page::Rules => "Network Rules",
@@ -69,7 +76,7 @@ impl Desktop {
             .px_4()
             .gap_2()
             .child(
-                Icon::new(page_icon(self.page))
+                Icon::new(self.page_icon())
                     .size(px(21.))
                     .text_color(cx.theme().muted_foreground),
             )
@@ -242,24 +249,19 @@ impl Desktop {
                     .items_center()
                     .justify_between()
                     .flex_shrink_0()
-                    .w(
-                        if self.page == Page::Sandboxes && self.inspector_open && !small {
-                            self.inspector_width
-                        } else {
-                            px(44.)
-                        },
-                    )
+                    .w(if self.inspector_open && !small {
+                        self.inspector_width
+                    } else {
+                        px(44.)
+                    })
                     .px_3()
-                    .when(
-                        self.page == Page::Sandboxes && self.inspector_open && !small,
-                        |d| {
-                            d.child(
-                                div()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Inspector"),
-                            )
-                        },
-                    )
+                    .when(self.inspector_open && !small, |d| {
+                        d.child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Inspector"),
+                        )
+                    })
                     .child(
                         Button::new("inspector-toggle")
                             .ghost()
@@ -267,7 +269,7 @@ impl Desktop {
                             .icon(IconName::PanelRight)
                             .accessibility_label("Toggle inspector")
                             .tooltip("Toggle inspector")
-                            .disabled(self.page != Page::Sandboxes || self.form.is_some())
+                            .disabled(self.form.is_some())
                             .selected(self.inspector_open)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.inspector_open = !this.inspector_open;
@@ -323,8 +325,7 @@ impl Desktop {
             .disabled(self.form.is_some())
             .on_click(cx.listener(move |this, _, window, cx| {
                 if page == Page::Images {
-                    this.images_registries = false;
-                    this.sync_pages(cx);
+                    this.set_images_registries(false, cx);
                 }
                 this.switch_page(page, window, cx);
             }))
@@ -517,9 +518,7 @@ impl Desktop {
                             .child("Registries"),
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.images_registries = true;
-                        this.pages[Page::Images.index()].selected = None;
-                        this.sync_pages(cx);
+                        this.set_images_registries(true, cx);
                         this.switch_page(Page::Images, window, cx);
                     })),
             );

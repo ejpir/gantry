@@ -625,6 +625,10 @@ func TestDashboardListsImagesAndRegistryCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeDashboardTestConfig(t, "dev", config.RunConfig{ImageDigest: "sha256:aaa111", MemMB: 512, VCPUs: 1})
+	if err := os.MkdirAll(layout.Dir("api"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDashboardTestConfig(t, "api", config.RunConfig{ImageDigest: "sha256:aaa111", MemMB: 512, VCPUs: 1})
 
 	// A stored credential for quay.io joins the defaults and the ghcr.io
 	// registry referenced by the cached image.
@@ -642,12 +646,15 @@ func TestDashboardListsImagesAndRegistryCredentials(t *testing.T) {
 		t.Fatalf("images = %#v", snapshot.Images)
 	}
 	first := snapshot.Images[0]
-	if first.Ref != "debian:bookworm-slim" || first.InUse {
+	if first.Ref != "debian:bookworm-slim" || first.InUse || len(first.UsedBy) != 0 {
 		t.Fatalf("first image row = %#v", first)
 	}
 	second := snapshot.Images[1]
 	if second.Ref != "ghcr.io/org/app:latest" || !second.InUse || second.Size != 4096 {
 		t.Fatalf("second image row = %#v", second)
+	}
+	if strings.Join(second.UsedBy, ",") != "api,dev" {
+		t.Fatalf("image users = %v, want both sandboxes in name order", second.UsedBy)
 	}
 	if second.User != "1000" || second.WorkingDir != "/app" || second.EnvCount != 2 || len(second.Entrypoint) != 1 {
 		t.Fatalf("image config row = %#v", second)

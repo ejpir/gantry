@@ -420,10 +420,10 @@ func (dashboardService) RemoveImage(refOrDigest string) error {
 
 func (dashboardService) PruneImages() (int, error) {
 	store := image.DefaultStore()
-	used := dashboardImageDigestsInUse()
+	used := dashboardImageUsers()
 	pruned := 0
 	for _, meta := range store.List() {
-		if used[meta.Digest] {
+		if len(used[meta.Digest]) > 0 {
 			continue
 		}
 		if err := store.Remove(meta.Digest); err != nil {
@@ -466,11 +466,11 @@ func (dashboardService) RemoveRegistryLogin(registry string) error {
 	return auth.Resolve().Erase(registry)
 }
 
-// dashboardImageDigestsInUse scans sandbox configs for referenced image
-// digests, mirroring `gantry image prune` semantics.
-func dashboardImageDigestsInUse() map[string]bool {
-	used := map[string]bool{}
-	entries, err := os.ReadDir(layout.Root())
+// dashboardImageUsers maps each image digest referenced by a sandbox config
+// to those sandboxes' names, mirroring `gantry image prune` semantics.
+func dashboardImageUsers() map[string][]string {
+	used := map[string][]string{}
+	entries, err := os.ReadDir(layout.Root()) // sorted by name
 	if err != nil {
 		return used
 	}
@@ -484,7 +484,7 @@ func dashboardImageDigestsInUse() map[string]bool {
 		}
 		var cfg config.RunConfig
 		if json.Unmarshal(raw, &cfg) == nil && cfg.ImageDigest != "" {
-			used[cfg.ImageDigest] = true
+			used[cfg.ImageDigest] = append(used[cfg.ImageDigest], entry.Name())
 		}
 	}
 	return used
@@ -886,12 +886,14 @@ func loadDashboardImages() ([]dashboardapi.Image, []dashboardapi.RegistryAuth) {
 		}
 		return metas[i].Ref < metas[j].Ref
 	})
-	used := dashboardImageDigestsInUse()
+	used := dashboardImageUsers()
 	images := make([]dashboardapi.Image, 0, len(metas))
 	for _, meta := range metas {
+		users := used[meta.Digest]
 		row := dashboardapi.Image{
 			Ref: meta.Ref, Digest: meta.Digest, Arch: meta.Arch,
-			Created: meta.Created, Size: meta.Size, InUse: used[meta.Digest],
+			Created: meta.Created, Size: meta.Size, InUse: len(users) > 0,
+			UsedBy: append([]string(nil), users...),
 		}
 		if meta.Config != nil {
 			row.User = meta.Config.User

@@ -430,3 +430,26 @@ async fn desktop_ca_picker_works_while_a_remote_manager_is_selected(cx: &mut Tes
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn sandbox_fields_are_dropdowns_of_the_manager_sandboxes(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        desktop.update(cx, |this, cx| {
+            connected(this, local(), cx);
+            this.open_form(Kind::Secret, window, cx);
+        });
+        window.render_frame(cx);
+        // A dropdown, not a text box; typing goes to the first typed field.
+        assert!(window.try_find(("form-select", 0usize)).is_some());
+        assert!(window.try_find(("form-input", 0usize)).is_none());
+        desktop.update(cx, |this, cx| {
+            let form = this.form.as_ref().unwrap();
+            assert!(form.inputs[1].focus_handle(cx).is_focused(window));
+            this.choose_form_value(0, "build", window, cx);
+            let form = this.form.as_ref().unwrap();
+            assert_eq!(form.inputs[0].value(cx).as_ref(), "build");
+        });
+    })
+    .unwrap();
+}

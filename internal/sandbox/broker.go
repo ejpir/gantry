@@ -215,7 +215,8 @@ func (br *broker) handle(c net.Conn) {
 	case "mcp.remote.set", "mcp.remote.remove", "mcp.filesystem.set":
 		br.mcpControl(c, req)
 	case "audit.tail":
-		_ = json.NewEncoder(c).Encode(&controlproto.AuditResponse{Lines: br.audit.tail()})
+		lines, times := br.audit.snapshot()
+		_ = json.NewEncoder(c).Encode(&controlproto.AuditResponse{Lines: lines, Times: times})
 	case "capture.read":
 		br.captureControl(c, req)
 	case "session":

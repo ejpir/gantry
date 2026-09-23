@@ -60,13 +60,16 @@ impl Page {
             Self::Traffic => &[
                 "Sandbox",
                 "Destination",
-                "Protocol / port",
+                "Port",
+                "Transfer",
+                "Bytes",
+                "Packets",
+                "Seen",
                 "Decision",
-                "TX / RX bytes",
             ],
             Self::Rules => &["Sandbox", "Action", "Target", "Protocol / ports", "Source"],
             Self::Ports => &["Sandbox", "Host bind", "Guest port", "Protocol", "State"],
-            Self::Packets => &["Sequence", "Time", "Direction", "Decision", "Bytes"],
+            Self::Packets => &["#", "Time", "Direction", "Decision", "Length", "Payload"],
             Self::Mounts => &[
                 "Sandbox",
                 "Tag",
@@ -258,9 +261,17 @@ pub fn rows(
                     } else {
                         r.host.clone()
                     },
-                    format!("{} / {}", r.protocol, r.port),
+                    format!("{} {}", r.protocol, r.port),
+                    // The transfer bar is drawn; its text is the direction split.
+                    format!(
+                        "↓ {} ↑ {}",
+                        crate::telemetry::bytes_label(r.rx_bytes),
+                        crate::telemetry::bytes_label(r.tx_bytes)
+                    ),
+                    crate::telemetry::bytes_label(r.tx_bytes.saturating_add(r.rx_bytes)),
+                    r.tx_packets.saturating_add(r.rx_packets).to_string(),
+                    r.last_seen.clone(),
                     decision(r.allowed),
-                    format!("{} / {}", r.tx_bytes, r.rx_bytes),
                 ],
                 record: Record::Traffic(r.clone()),
             })
@@ -424,15 +435,69 @@ pub fn rows(
                 key: key(&[&r.sequence.to_string()]),
                 cells: vec![
                     r.sequence.to_string(),
-                    r.timestamp.clone(),
-                    r.direction.clone(),
+                    crate::clock::parse_millis(&r.timestamp)
+                        .map(crate::clock::clock_millis)
+                        .unwrap_or_else(|| r.timestamp.clone()),
+                    // The recorder's direction is from the sandbox: tx leaves it.
+                    if r.direction == "tx" { "out" } else { "in" }.into(),
                     decision(r.allowed),
-                    r.length.to_string(),
+                    format!(
+                        "{} B",
+                        crate::telemetry::count_label(r.length.max(0) as u64)
+                    ),
+                    // The preview shows 12 bytes and marks longer frames; 20
+                    // base64 characters decode 15. Live capture rebuilds these
+                    // rows every second.
+                    crate::capture::decode_base64(&r.data[..r.data.len().min(20)])
+                        .map(|bytes| crate::capture::hex_preview(&bytes, 12))
+                        .unwrap_or_default(),
                 ],
                 record: Record::Packet(r.clone()),
             })
             .collect(),
     };
+    if page == Page::Audit {
+        // One timeline across sandboxes, newest first. Events recorded before
+        // the trail carried timestamps keep the manager's order at the end.
+        let time = |row: &Row| match &row.record {
+            Record::Audit(r) => crate::clock::parse(&r.time),
+            _ => None,
+        };
+        result.sort_by_key(|row| std::cmp::Reverse(time(row)));
+    }
+    if page == Page::Packets {
+        // Newest frame first, as a live recorder reads.
+        result.sort_by(|a, b| match (&a.record, &b.record) {
+            (Record::Packet(a), Record::Packet(b)) => b.sequence.cmp(&a.sequence),
+            _ => std::cmp::Ordering::Equal,
+        });
+    }
+    if matches!(page, Page::Rules | Page::Mounts | Page::Secrets) {
+        // Grouped by sandbox; within a sandbox, the manager's order.
+        let sandbox = |row: &Row| match &row.record {
+            Record::Rule(r) => r.sandbox.clone(),
+            Record::Mount(r) => r.sandbox.clone(),
+            Record::Secret(r) => r.sandbox.clone(),
+            _ => String::new(),
+        };
+        result.sort_by_key(sandbox);
+    }
+    if page == Page::Images {
+        // Registries with a login first, then by host; images keep the
+        // manager's order.
+        result.sort_by_key(|row| match &row.record {
+            Record::Registry(r) => (1, !r.has_secret, r.registry.clone()),
+            _ => (0, false, String::new()),
+        });
+    }
+    if page == Page::Traffic {
+        // Largest flows first, as the Traffic screen reads top-down by volume.
+        let bytes = |row: &Row| match &row.record {
+            Record::Traffic(r) => r.tx_bytes.saturating_add(r.rx_bytes),
+            _ => 0,
+        };
+        result.sort_by(|a, b| bytes(b).cmp(&bytes(a)).then_with(|| a.key.cmp(&b.key)));
+    }
     for row in &mut result {
         for cell in &mut row.cells {
             *cell = text(cell);
@@ -441,7 +506,57 @@ pub fn rows(
     result
 }
 
-pub fn demo() -> HostSnapshot {
+impl Page {
+    /// Segmented filter above a page's table; index 0 always shows everything.
+    pub fn segments(self) -> &'static [&'static str] {
+        match self {
+            Self::Traffic => &["All", "Allowed", "Denied"],
+            Self::Rules => &["All", "Allow", "Deny"],
+            Self::Ports => &["All", "Bound", "Not bound"],
+            Self::Mounts => &["All", "Read-only", "Read-write"],
+            Self::Secrets => &["All", "Loaded", "Next start"],
+            Self::Mcp => &["All", "Active", "Not active"],
+            Self::Audit => &["All", "Allowed", "Denied"],
+            Self::Images => &["All", "In use", "Unused"],
+            _ => &[],
+        }
+    }
+}
+
+/// Registries share the Images page, with their own segments.
+pub const REGISTRY_SEGMENTS: &[&str] = &["All", "Logged in", "Anonymous"];
+
+/// Whether a record belongs to the page's selected segment.
+pub fn segment_matches(page: Page, segment: usize, record: &Record) -> bool {
+    match (page, segment, record) {
+        (_, 0, _) => true,
+        (Page::Traffic, 1, Record::Traffic(r)) => r.allowed,
+        (Page::Traffic, 2, Record::Traffic(r)) => !r.allowed,
+        (Page::Rules, 1, Record::Rule(r)) => r.action == "allow",
+        (Page::Rules, 2, Record::Rule(r)) => r.action == "deny",
+        (Page::Ports, 1, Record::Port(r)) => r.state == "bound",
+        (Page::Ports, 2, Record::Port(r)) => r.state != "bound",
+        (Page::Mounts, 1, Record::Mount(r)) => r.read_only,
+        (Page::Mounts, 2, Record::Mount(r)) => !r.read_only,
+        (Page::Secrets, 1, Record::Secret(r)) => r.state == "loaded",
+        (Page::Secrets, 2, Record::Secret(r)) => r.state != "loaded",
+        (Page::Mcp, 1, Record::Mcp(r)) => r.state == "active" && r.error.is_empty(),
+        (Page::Mcp, 2, Record::Mcp(r)) => r.state != "active" || !r.error.is_empty(),
+        (Page::Audit, 1, Record::Audit(r)) => {
+            r.decision.as_ref().is_some_and(|d| d.effect == "allow")
+        }
+        (Page::Audit, 2, Record::Audit(r)) => {
+            r.decision.as_ref().is_some_and(|d| d.effect == "deny")
+        }
+        (Page::Images, 1, Record::Image(r)) => r.in_use,
+        (Page::Images, 2, Record::Image(r)) => !r.in_use,
+        (Page::Images, 1, Record::Registry(r)) => r.has_secret,
+        (Page::Images, 2, Record::Registry(r)) => !r.has_secret,
+        _ => true,
+    }
+}
+
+fn demo_base() -> HostSnapshot {
     let sandboxes = crate::inventory::demo_sandboxes()
         .into_iter()
         .map(|s| Sandbox {
@@ -478,9 +593,9 @@ pub fn demo() -> HostSnapshot {
                 sandbox: "dev".into(),
                 action: "allow".into(),
                 target: "registry.example.test".into(),
-                proto: "tcp".into(),
-                ports: "443".into(),
-                source: "sandbox".into(),
+                proto: "dns".into(),
+                source: "domain".into(),
+                policy: "/demo/policies/dev.json".into(),
                 ..Default::default()
             }],
             ports: vec![Port {
@@ -488,7 +603,7 @@ pub fn demo() -> HostSnapshot {
                 bind: "127.0.0.1:8080".into(),
                 guest: 80,
                 proto: "tcp".into(),
-                state: "active".into(),
+                state: "bound".into(),
                 ..Default::default()
             }],
             mounts: vec![Mount {
@@ -503,7 +618,7 @@ pub fn demo() -> HostSnapshot {
             secrets: vec![Secret {
                 sandbox: "dev".into(),
                 name: "API_TOKEN@api.example.test".into(),
-                state: "live".into(),
+                state: "loaded".into(),
                 ..Default::default()
             }],
             mcp_servers: vec![MCPServer {
@@ -511,7 +626,7 @@ pub fn demo() -> HostSnapshot {
                 name: "docs".into(),
                 r#type: "remote".into(),
                 url: "https://docs.example.test/mcp".into(),
-                state: "saved".into(),
+                state: "active".into(),
                 ..Default::default()
             }],
             audit: vec![AuditEvent {
@@ -536,5 +651,618 @@ pub fn demo() -> HostSnapshot {
             ..Default::default()
         },
         kernel_choices: vec![],
+    }
+}
+
+/// Sample data for demo mode, which is labeled as such everywhere and never
+/// used as a fallback. The first record of each list is kept stable for tests.
+pub fn demo() -> HostSnapshot {
+    let mut host = demo_base();
+    let data = &mut host.snapshot;
+    for sandbox in &mut data.sandboxes {
+        let running = sandbox.state == "running";
+        sandbox.traffic_available = running;
+        match sandbox.name.as_str() {
+            "dev" => {
+                sandbox.dev_containers = true;
+                sandbox.ports = 2;
+                sandbox.secret_count = 2;
+                sandbox.shares = 2;
+                sandbox.tx_bytes = 1_620_000;
+                sandbox.rx_bytes = 29_780_000;
+            }
+            "agent" => {
+                sandbox.ports = 1;
+                sandbox.secret_count = 2;
+                sandbox.proxy_enforce = true;
+                sandbox.tx_bytes = 38_000;
+                sandbox.rx_bytes = 121_000;
+            }
+            "build" => {
+                sandbox.shares = 1;
+                sandbox.secret_count = 1;
+            }
+            "scratch" => {
+                sandbox.net = false;
+                sandbox.ssh = false;
+            }
+            _ => {}
+        }
+    }
+    let flow = |sandbox: &str, host: &str, address: &str, port: u16, allowed, tx, rx| Traffic {
+        sandbox: sandbox.into(),
+        host: host.into(),
+        address: address.into(),
+        protocol: "tcp".into(),
+        port,
+        allowed,
+        tx_bytes: tx,
+        rx_bytes: rx,
+        tx_packets: tx / 900 + 1,
+        rx_packets: rx / 1200 + 1,
+        ..Default::default()
+    };
+    data.traffic.extend([
+        flow(
+            "dev",
+            "github.com",
+            "192.0.2.10",
+            443,
+            true,
+            310_000,
+            17_900_000,
+        ),
+        flow(
+            "dev",
+            "registry.npmjs.org",
+            "192.0.2.11",
+            443,
+            true,
+            120_000,
+            6_980_000,
+        ),
+        flow(
+            "dev",
+            "objects.githubusercontent.com",
+            "192.0.2.12",
+            443,
+            true,
+            60_000,
+            3_340_000,
+        ),
+        flow("dev", "pypi.org", "192.0.2.13", 443, true, 40_000, 946_000),
+        flow("dev", "", "169.254.169.254", 80, false, 0, 0),
+        flow(
+            "agent",
+            "api.anthropic.com",
+            "192.0.2.20",
+            443,
+            true,
+            31_000,
+            90_000,
+        ),
+        flow(
+            "agent",
+            "telemetry.example.net",
+            "203.0.113.24",
+            443,
+            false,
+            0,
+            0,
+        ),
+    ]);
+    // Rules as the manager derives them from each sandbox's policy.
+    let rule =
+        |sandbox: &str, action: &str, target: &str, proto: &str, ports: &str, source: &str| Rule {
+            sandbox: sandbox.into(),
+            action: action.into(),
+            target: target.into(),
+            proto: proto.into(),
+            ports: ports.into(),
+            source: source.into(),
+            policy: match sandbox {
+                "dev" => "/demo/policies/dev.json",
+                "build" => "/demo/policies/build.json",
+                _ => "built-in default",
+            }
+            .into(),
+            ..Default::default()
+        };
+    data.rules.extend([
+        rule("dev", "allow", "github.com", "dns", "", "domain"),
+        rule("dev", "allow", "registry.npmjs.org", "dns", "", "domain"),
+        rule("dev", "allow", "192.0.2.0/24", "tcp", "443", "rule 1"),
+        rule(
+            "dev",
+            "deny",
+            "IPv6 and non-IPv4 traffic",
+            "ether",
+            "",
+            "built-in",
+        ),
+        rule("dev", "deny", "local networks", "any", "", "built-in"),
+        rule("dev", "deny", "public internet", "any", "", "default"),
+        rule(
+            "dev",
+            "deny",
+            "169.254.0.0/16",
+            "any",
+            "",
+            "org:acme:deny-metadata",
+        ),
+        rule(
+            "dev",
+            "deny",
+            "unmatched organization egress",
+            "any",
+            "",
+            "org:acme",
+        ),
+        rule(
+            "agent",
+            "allow",
+            "proxy.example.test",
+            "tcp",
+            "3128",
+            "proxy endpoint",
+        ),
+        rule(
+            "agent",
+            "deny",
+            "all destinations",
+            "tcp",
+            "80,443",
+            "proxy enforcement",
+        ),
+        rule(
+            "agent",
+            "resolve",
+            "api.anthropic.com",
+            "dns",
+            "",
+            "org:acme",
+        ),
+        rule("agent", "deny", "local networks", "any", "", "built-in"),
+        rule("agent", "deny", "public internet", "any", "", "default"),
+        rule("build", "allow", "proxy.golang.org", "dns", "", "domain"),
+        rule("build", "deny", "local networks", "any", "", "built-in"),
+        rule("build", "allow", "public internet", "any", "", "default"),
+        rule("scratch", "off", "network disabled", "—", "", "config"),
+    ]);
+    // Relative to now, so ages read like a live session.
+    let now = crate::clock::now();
+    for (index, flow) in data.traffic.iter_mut().enumerate() {
+        let seen = [4, 2, 31, 120, 5, 420, 12, 7][index % 8];
+        flow.last_seen = crate::clock::format(now - seen);
+        flow.first_seen = crate::clock::format(now - 740 - 30 * index as i64);
+    }
+    data.ports.extend([
+        Port {
+            sandbox: "dev".into(),
+            bind: "127.0.0.1:2222".into(),
+            guest: 22,
+            proto: "tcp".into(),
+            state: "bound".into(),
+            ..Default::default()
+        },
+        Port {
+            sandbox: "agent".into(),
+            bind: "0.0.0.0:5173".into(),
+            guest: 5173,
+            proto: "tcp".into(),
+            state: "bound".into(),
+            ..Default::default()
+        },
+        Port {
+            sandbox: "build".into(),
+            bind: "127.0.0.1:6060".into(),
+            guest: 6060,
+            proto: "tcp".into(),
+            state: "saved".into(),
+            ..Default::default()
+        },
+    ]);
+    data.mounts.extend([
+        Mount {
+            sandbox: "dev".into(),
+            tag: "datasets".into(),
+            host: "/demo/datasets".into(),
+            vm: "/mnt/shares/datasets".into(),
+            guest: "/data".into(),
+            read_only: true,
+            state: "active".into(),
+            ..Default::default()
+        },
+        Mount {
+            sandbox: "agent".into(),
+            tag: "notes".into(),
+            host: "/demo/agents/notes".into(),
+            vm: "/mnt/shares/notes".into(),
+            guest: "/notes".into(),
+            read_only: false,
+            uid: Some(1000),
+            gid: Some(1000),
+            state: "active".into(),
+            ..Default::default()
+        },
+        Mount {
+            sandbox: "agent".into(),
+            tag: "cache".into(),
+            host: "/demo/cache/pip".into(),
+            vm: "/mnt/shares/cache".into(),
+            guest: "/home/agent/.cache/pip".into(),
+            read_only: false,
+            state: "restart".into(),
+            ..Default::default()
+        },
+        Mount {
+            sandbox: "build".into(),
+            tag: "go".into(),
+            host: "/demo/go/pkg".into(),
+            vm: "/mnt/shares/go".into(),
+            guest: "/root/go/pkg".into(),
+            read_only: false,
+            state: "saved".into(),
+            ..Default::default()
+        },
+    ]);
+    data.mcp_servers.extend([
+        MCPServer {
+            sandbox: "dev".into(),
+            name: "fs".into(),
+            r#type: "local".into(),
+            root: "/workspace".into(),
+            user: "dev".into(),
+            state: "active".into(),
+            ..Default::default()
+        },
+        MCPServer {
+            sandbox: "agent".into(),
+            name: "linear".into(),
+            r#type: "remote".into(),
+            url: "https://mcp.linear.app/sse".into(),
+            auth_kind: "bearer".into(),
+            auth_ref: "LINEAR_TOKEN".into(),
+            allow: vec![
+                "list_issues".into(),
+                "get_issue".into(),
+                "create_comment".into(),
+            ],
+            deny: vec!["delete_issue".into()],
+            redact: vec!["LINEAR_TOKEN".into()],
+            state: "active".into(),
+            ..Default::default()
+        },
+        MCPServer {
+            sandbox: "agent".into(),
+            name: "github".into(),
+            r#type: "remote".into(),
+            url: "https://api.githubcopilot.com/mcp/".into(),
+            auth_kind: "custody".into(),
+            auth_ref: "github".into(),
+            allow: vec!["get_pull_request".into(), "list_commits".into()],
+            state: "restart".into(),
+            error: "upstream returned 401 Unauthorized".into(),
+            ..Default::default()
+        },
+    ]);
+    let secret = |sandbox: &str, name: &str, state: &str| Secret {
+        sandbox: sandbox.into(),
+        name: name.into(),
+        state: state.into(),
+        ..Default::default()
+    };
+    data.secrets.extend([
+        secret("dev", "NPM_TOKEN", "loaded"),
+        secret("agent", "ANTHROPIC_API_KEY", "loaded"),
+        secret("agent", "GITHUB_TOKEN@api.github.com", "loaded"),
+        secret(
+            "build",
+            "GOPROXY_TOKEN@proxy.golang.org",
+            "required next start",
+        ),
+    ]);
+    // Cached images, as `gantry image ls` would list them.
+    let image = |reference: &str, digest: &str, size: i64, days: i64, users: &[&str]| Image {
+        r#ref: reference.into(),
+        digest: digest.into(),
+        arch: "arm64".into(),
+        created: crate::clock::format(now - days * 86_400),
+        size,
+        in_use: !users.is_empty(),
+        used_by: users.iter().map(|u| (*u).into()).collect(),
+        user: "root".into(),
+        working_dir: "/".into(),
+        cmd: vec!["/bin/sh".into()],
+        env_count: 1,
+        ..Default::default()
+    };
+    data.images = vec![
+        Image {
+            user: "dev".into(),
+            working_dir: "/workspace".into(),
+            entrypoint: vec!["tini".into(), "--".into()],
+            cmd: vec!["node".into(), "server.js".into()],
+            env_count: 7,
+            ..image(
+                "ghcr.io/acme/api:1.8",
+                "sha256:9f2c1e07a41b",
+                612_000_000,
+                3,
+                &[],
+            )
+        },
+        image(
+            "alpine:latest",
+            "sha256:1f4e9b3c0c2d",
+            9_000_000,
+            60,
+            &["agent"],
+        ),
+        image(
+            "debian:bookworm-slim",
+            "sha256:98f471fd796a",
+            348_000_000,
+            30,
+            &["dev"],
+        ),
+        image(
+            "golang:1.26",
+            "sha256:8b1c2f603d94",
+            830_000_000,
+            90,
+            &["build"],
+        ),
+        image("python:3.12", "sha256:5d6a7c91e8b0", 1_020_000_000, 65, &[]),
+        image(
+            "ubuntu:24.04",
+            "sha256:e3b8a1d277f1",
+            412_000_000,
+            32,
+            &["scratch"],
+        ),
+    ];
+    // Registry credential resolution, as `gantry image credentials` reports
+    // it: the default registries, then any with a stored login.
+    let login = |registry: &str, username: &str, source: &str| RegistryAuth {
+        registry: registry.into(),
+        username: username.into(),
+        source: source.into(),
+        has_secret: source != "-",
+        ..Default::default()
+    };
+    data.registries = vec![
+        login(
+            "docker.io",
+            "build-bot",
+            "docker config credsStore (docker-credential-osxkeychain)",
+        ),
+        login(
+            "ghcr.io",
+            "acme-bot",
+            "gantry credentials.json auths (base64)",
+        ),
+        login("quay.io", "(anonymous)", "-"),
+        login("gcr.io", "(anonymous)", "-"),
+        login(
+            "registry.gitlab.com",
+            "deploy-token-12",
+            "podman auth.json #1 auths (base64)",
+        ),
+    ];
+    // Policy decisions as the daemon records them, newest first, with the
+    // decision the manager parses out of each `policy:` line.
+    let decision =
+        |effect: &str, action: &str, reason: &str, rules: &[&str], org: bool| AuditDecision {
+            effect: effect.into(),
+            action: action.into(),
+            reason: reason.into(),
+            rules: rules.iter().map(|r| (*r).into()).collect(),
+            organization: if org { "acme" } else { "" }.into(),
+            revision: if org { "r42" } else { "" }.into(),
+            profile: if org { "dev" } else { "" }.into(),
+        };
+    let events = [
+        (
+            7,
+            "agent",
+            Some(decision("deny", "network.connect", "no_match", &[], true)),
+            "telemetry.example.net:443",
+            0,
+        ),
+        (
+            12,
+            "dev",
+            Some(decision(
+                "allow",
+                "credential.use",
+                "rule_match",
+                &["github-credentials"],
+                true,
+            )),
+            "github.com",
+            0,
+        ),
+        (
+            19,
+            "agent",
+            Some(decision(
+                "deny",
+                "network.connect",
+                "rule_match",
+                &["deny-metadata"],
+                true,
+            )),
+            "169.254.169.254:80",
+            0,
+        ),
+        (
+            33,
+            "dev",
+            Some(decision(
+                "allow",
+                "mcp.tools.call",
+                "rule_match",
+                &["linear-read"],
+                true,
+            )),
+            "linear.create_comment",
+            0,
+        ),
+        (
+            61,
+            "dev",
+            Some(decision(
+                "deny",
+                "mcp.tools.call",
+                "rule_match",
+                &["blocked-tool"],
+                true,
+            )),
+            "linear.delete_issue",
+            0,
+        ),
+        (
+            95,
+            "agent",
+            Some(decision(
+                "deny",
+                "network.connect",
+                "rule_match",
+                &["deny-metadata"],
+                true,
+            )),
+            "169.254.169.254:80",
+            1,
+        ),
+        (
+            140,
+            "agent",
+            None,
+            "credential withheld: GITHUB_TOKEN for gist.github.com (no binding)",
+            0,
+        ),
+        (
+            205,
+            "dev",
+            Some(decision(
+                "allow",
+                "mount.read",
+                "rule_match",
+                &["workspace-read"],
+                true,
+            )),
+            "/demo/workspace",
+            0,
+        ),
+        (
+            260,
+            "agent",
+            Some(decision(
+                "deny",
+                "network.connect",
+                "rule_match",
+                &["deny-metadata"],
+                true,
+            )),
+            "169.254.169.254:80",
+            2,
+        ),
+        (330, "dev", None, "mcp: session open linear", 0),
+        (
+            410,
+            "build",
+            Some(decision(
+                "allow",
+                "network.resolve",
+                "unmanaged",
+                &[],
+                false,
+            )),
+            "proxy.golang.org",
+            0,
+        ),
+    ];
+    data.audit = events
+        .into_iter()
+        .map(|(age, sandbox, decision, subject, occurrence)| AuditEvent {
+            sandbox: sandbox.into(),
+            line: match &decision {
+                Some(d) => format!(
+                    "policy: {{\"effect\":\"{}\",\"action\":\"{}\",\"reason\":\"{}\",\"subject\":\"{subject}\"}}",
+                    d.effect, d.action, d.reason
+                ),
+                None => subject.into(),
+            },
+            occurrence,
+            decision,
+            time: crate::clock::format(now - age),
+            ..Default::default()
+        })
+        .collect();
+    host
+}
+
+/// A recorded capture for demo mode: about a minute of one sandbox's frames,
+/// ending now, with a few denied bursts.
+pub fn demo_packets() -> PacketSnapshot {
+    let now = crate::clock::now() * 1000;
+    let count = 180_u64;
+    let first = 1105_u64;
+    let packets = (0..count)
+        .map(|i| {
+            let outbound = !matches!(i % 5, 1 | 3);
+            let denied = matches!(i, 22..=25 | 61..=63 | 142..=147 | 171);
+            let length = match i % 7 {
+                0 => 1514,
+                1 | 4 => 66,
+                2 => 583,
+                3 => 1460,
+                5 => 74,
+                _ => 54,
+            };
+            let mut frame = vec![
+                0x45,
+                0x00,
+                0x00,
+                0x4a,
+                (i & 0xff) as u8,
+                0x46,
+                0x40,
+                0x00,
+                0x40,
+                0x06,
+                0x5b,
+                0x1e,
+                0x0a,
+                0x00,
+                0x02,
+                0x0f,
+            ];
+            frame.extend(if denied {
+                [169, 254, 169, 254, 0xd4, 0x1e, 0x00, 0x50]
+            } else {
+                [192, 0, 2, 10, 0xd4, 0x1e, 0x01, 0xbb]
+            });
+            frame.extend(b"\x8eK*q\0\0\0\0\xa0\x02\xfa\xf0<\x11\0\0\x02\x04\x05\xb4");
+            // Spread over 60 s with a busier stretch near the end.
+            let offset = (count - i) as i64 * 330 + ((i * 37) % 250) as i64;
+            Packet {
+                sequence: first + i,
+                timestamp: crate::clock::format_millis(now - offset),
+                direction: if outbound { "tx" } else { "rx" }.into(),
+                allowed: !denied,
+                length,
+                data: crate::capture::encode_base64(&frame),
+            }
+        })
+        .collect();
+    PacketSnapshot {
+        active: true,
+        packets,
+        next: first + count - 1,
+        latest: first + count - 1,
+        oldest: first,
+        evicted: 0,
     }
 }

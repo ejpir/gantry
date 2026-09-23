@@ -1,11 +1,13 @@
-//! Stateful sliders and asynchronous native path prompts. These only edit the
-//! current draft; Save/Confirm and the existing target checks own all writes.
+//! Stateful sliders, dropdowns and asynchronous native path prompts. These
+//! only edit the current draft; Save/Confirm and the existing target checks
+//! own all writes.
 use crate::{app::Desktop, ui_forms::FormInput};
-use gantry_desktop::forms::{FieldKind, PathKind, ResourceRange, Spec};
+use gantry_desktop::forms::{Field, FieldKind, PathKind, ResourceRange, Spec};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Sizable,
     button::Button,
     input::{Input, InputEvent},
+    menu::{DropdownMenu, PopupMenuItem},
     slider::{Slider, SliderEvent, SliderState},
 };
 use gpui_kit::{
@@ -183,6 +185,65 @@ impl Desktop {
                         "Manager bounds unavailable; enter an exact value".into()
                     }),
             )
+    }
+
+    pub(crate) fn select_control(
+        &self,
+        index: usize,
+        field: &Field,
+        options: &[String],
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let form = self.form.as_ref().unwrap();
+        let value = form.inputs[index].value(cx).to_string();
+        let owner = cx.weak_entity();
+        let options = options.to_vec();
+        let empty = options.is_empty();
+        div().flex().child(
+            Button::new(("form-select", index))
+                .outline()
+                .small()
+                .min_w(px(220.))
+                .dropdown_caret(true)
+                .accessibility_label(field.label.clone())
+                .label(if empty {
+                    "No sandboxes on this manager".to_owned()
+                } else {
+                    value.clone()
+                })
+                .disabled(!enabled || empty)
+                .dropdown_menu(move |mut menu, _, _| {
+                    for option in &options {
+                        let owner = owner.clone();
+                        let chosen = option.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(option.clone())
+                                .checked(*option == value)
+                                .on_click(move |_, window, cx| {
+                                    let _ = owner.update(cx, |this, cx| {
+                                        this.choose_form_value(index, &chosen, window, cx)
+                                    });
+                                }),
+                        );
+                    }
+                    menu.min_w(px(220.)).max_h(px(320.)).scrollable(true)
+                }),
+        )
+    }
+
+    /// Set a dropdown or choice field of the open form.
+    pub(crate) fn choose_form_value(
+        &mut self,
+        index: usize,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(input) = self.form.as_ref().and_then(|form| form.inputs.get(index)) {
+            input.set_value(value.to_owned(), window, cx);
+            cx.notify();
+        }
     }
 
     pub(crate) fn path_control(

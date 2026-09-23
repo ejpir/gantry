@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Gantry app icon: the title-bar mark on a dark tile, on Apple's icon
+       grid (an 824 px tile inset 100 px). Render with
+       desktop/assets/render-app-icon.sh after editing. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f353c"/>
+      <stop offset="1" stop-color="#1a1d21"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#cdf28f"/>
+      <stop offset="1" stop-color="#a6d95f"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none"
+        stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+  <path transform="translate(512 512) scale(17) translate(-16 -16)"
+        d="M5 27V5h22v22M12 27V12h8v15" fill="none" stroke="url(#mark)"
+        stroke-width="3"/>
+</svg>

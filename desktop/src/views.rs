@@ -14,7 +14,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, ClipboardItem, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, Styled, TestSupportExt, Window, div, prelude::FluentBuilder, px,
+    Render, Styled, TestSupportExt, Window, div, prelude::FluentBuilder, px, relative,
 };
 
 impl Render for Desktop {
@@ -150,6 +150,42 @@ impl Render for Desktop {
                         } else {
                             div().flex_1().min_w_0().h_full().child(inventory)
                         }
+                    } else if self.inspector_open {
+                        // Every screen shares the Sandboxes layout: list and
+                        // selection-aware inspector, with the same width.
+                        div().flex_1().min_w_0().h_full().child(
+                            h_resizable("page-workspace")
+                                .on_resize(cx.listener(
+                                    |this,
+                                     state: &gpui_kit::Entity<
+                                        gpui_kit::component::resizable::ResizableState,
+                                    >,
+                                     _,
+                                     cx| {
+                                        if let Some(width) = state.read(cx).sizes().last() {
+                                            this.inspector_width = *width;
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
+                                .child(
+                                    resizable_panel()
+                                        .size_range(px(420.)..px(2400.))
+                                        .child(self.workbench(cx)),
+                                )
+                                .child(
+                                    resizable_panel()
+                                        .size(self.inspector_width)
+                                        .size_range(px(280.)..px(520.))
+                                        .child(
+                                            div()
+                                                .id("inspector-pane")
+                                                .test_support()
+                                                .size_full()
+                                                .child(self.page_inspector(cx)),
+                                        ),
+                                ),
+                        )
                     } else {
                         div().flex_1().min_w_0().h_full().child(self.workbench(cx))
                     }),
@@ -257,17 +293,30 @@ impl Desktop {
                 "Try another name or image, or change the status filter.",
                 cx,
             ),
+            // The list takes only the height its rows need (up to half the
+            // pane); the selected sandbox's detail fills the rest.
             _ => div()
+                .flex()
+                .flex_col()
                 .size_full()
-                .capture_any_mouse_down(
-                    cx.listener(|this, event, window, cx| this.open_row_menu(event, window, cx)),
-                )
                 .child(
-                    DataTable::new(&self.table)
-                        .bordered(false)
-                        .stripe(false)
-                        .with_size(px(34.)),
-                ),
+                    div()
+                        .id("sandbox-list")
+                        .test_support()
+                        .flex_shrink_0()
+                        .h(px(28. + 34. * visible as f32 + 2.))
+                        .max_h(relative(0.5))
+                        .capture_any_mouse_down(cx.listener(|this, event, window, cx| {
+                            this.open_row_menu(event, window, cx)
+                        }))
+                        .child(
+                            DataTable::new(&self.table)
+                                .bordered(false)
+                                .stripe(false)
+                                .with_size(px(34.)),
+                        ),
+                )
+                .child(self.sandbox_detail(cx)),
         };
         div()
             .flex()
@@ -553,7 +602,7 @@ pub fn eyebrow(label: &str, cx: &App) -> Div {
         .text_color(cx.theme().muted_foreground)
         .child(label.to_owned())
 }
-fn separator(cx: &App) -> Div {
+pub fn separator(cx: &App) -> Div {
     div().h(px(1.)).w_full().bg(cx.theme().border)
 }
 pub fn empty_state(icon: IconName, title: &str, description: &str, cx: &App) -> Div {

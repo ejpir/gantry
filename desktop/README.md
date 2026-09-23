@@ -188,7 +188,10 @@ without a display.
 
 ## Included
 
-- Gantry branding, semantic light/dark themes, and bundled icons.
+- Gantry branding, semantic light/dark themes, and bundled icons. The app icon
+  in the Dock, taskbar and window switcher is `assets/app-icon.svg`; after
+  editing it, run `assets/render-app-icon.sh` to refresh the PNG and ICO the
+  executable embeds.
 - Overview, Sandboxes, Traffic, Rules, Ports, Packets, Mounts, Secrets, MCP,
   Audit, Images, and Remotes screens, with retained per-page search and selection.
 - Virtualized tables, resource inspection, and source-bound action dialogs.
