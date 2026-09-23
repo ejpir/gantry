@@ -322,6 +322,33 @@ run_linux_validation() {
 	trap cleanup_linux EXIT
 	trap 'exit 130' HUP INT TERM
 
+	# Batteries also start sandboxes without -kernel/-rootfs. Those resolve
+	# Gantry's defaults by canonical release basename below GANTRY_ARTIFACTS
+	# and download any missing asset from the GitHub release, so caller
+	# overrides with other names (as in CI) would silently exercise the
+	# published release instead, and fail while a new release is still being
+	# built. Stage the selected assets under their canonical names in the
+	# private test tree and point every battery at it.
+	LINUX_FIELD_ASSETS=$LINUX_WORK/field-assets
+	mkdir -p "$LINUX_FIELD_ASSETS"
+	stage_linux_asset() {
+		source_path=$1
+		destination_path=$2
+		rm -f -- "$destination_path"
+		ln "$source_path" "$destination_path" 2>/dev/null || cp "$source_path" "$destination_path"
+	}
+	stage_linux_asset "$LINUX_GUEST" "$LINUX_FIELD_ASSETS/gantry-guest-$LINUX_ASSET_ARCH"
+	stage_linux_asset "$LINUX_KERNEL" "$LINUX_FIELD_ASSETS/gantry-kernel-$LINUX_ASSET_ARCH"
+	stage_linux_asset "$LINUX_ROOTFS" "$LINUX_FIELD_ASSETS/nerdbox-rootfs-$LINUX_ASSET_ARCH.erofs"
+	stage_linux_asset "$LINUX_IMAGE" "$LINUX_FIELD_ASSETS/gantry-default-image-$LINUX_ASSET_ARCH.erofs"
+	if [ -n "$LINUX_RUNSC_KERNEL" ]; then
+		# gVisor needs 4K pages: arm64 uses a separate -4k kernel, while
+		# x86_64 boots the regular kernel staged above.
+		[ "$LINUX_ASSET_ARCH" != arm64 ] ||
+			stage_linux_asset "$LINUX_RUNSC_KERNEL" "$LINUX_FIELD_ASSETS/gantry-kernel-arm64-4k"
+		stage_linux_asset "$LINUX_RUNSC_ROOTFS" "$LINUX_FIELD_ASSETS/nerdbox-rootfs-gvisor-$LINUX_ASSET_ARCH.erofs"
+	fi
+
 	LINUX_OAUTH_IDP=$(linux_absolute "${GANTRY_TEST_OAUTH_IDP:-$LINUX_WORK/gantry-oauth-idp}")
 	if [ -z "${GANTRY_TEST_OAUTH_IDP:-}" ]; then
 		echo "===== Linux KVM: build disposable OAuth authorization server ====="
@@ -331,14 +358,14 @@ run_linux_validation() {
 
 	echo "===== Linux KVM: manager API, remote dashboard parity, SSH, and organization policy-feed battery ====="
 	rm -rf -- "$LINUX_WORK/manager"
-	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" scripts/test-manager-api-e2e.sh \
-		-gantry "$LINUX_GANTRY" -artifacts "$LINUX_ARTIFACTS" \
+	GANTRY_ARTIFACTS="$LINUX_FIELD_ASSETS" scripts/test-manager-api-e2e.sh \
+		-gantry "$LINUX_GANTRY" -artifacts "$LINUX_FIELD_ASSETS" \
 		-kernel "$LINUX_KERNEL" -rootfs "$LINUX_ROOTFS" -image "$LINUX_IMAGE" \
 		-image-store "$LINUX_WORK/manager-images" -pull=false \
 		-work-dir "$LINUX_WORK/manager" -timeout 12m
 
 	echo "===== Linux KVM: core CLI, networking, credentials, OAuth custody, and MCP battery ====="
-	GANTRY_ARTIFACTS="$LINUX_ARTIFACTS" \
+	GANTRY_ARTIFACTS="$LINUX_FIELD_ASSETS" \
 		GANTRY_TEST_PUBLIC_EGRESS="$LINUX_PUBLIC_EGRESS" \
 		GANTRY_TEST_ROOT="$ROOT" \
 		GANTRY_TEST_OAUTH_E2E="$ROOT/scripts/oauth-custody-e2e.py" \
@@ -359,7 +386,7 @@ run_linux_validation() {
 	CGO_ENABLED=0 go build -o "$LINUX_WORK/policy-e2e" ./tests/e2e/policy
 	"$LINUX_WORK/policy-e2e" \
 		-gantry "$LINUX_GANTRY" -kernel "$LINUX_KERNEL" -rootfs "$LINUX_ROOTFS" \
-		-image "$LINUX_IMAGE" -artifacts "$LINUX_ARTIFACTS"
+		-image "$LINUX_IMAGE" -artifacts "$LINUX_FIELD_ASSETS"
 
 	if [ "${GANTRY_SKIP_DEVCONTAINERS:-0}" = 1 ]; then
 		echo "===== Linux KVM: SSH/Dev Containers and directory batteries skipped ====="
@@ -383,16 +410,7 @@ run_linux_validation() {
 		fi
 		[ -s "$LINUX_IDE_IMAGE" ] || { echo "curated IDE image missing: $LINUX_IDE_IMAGE" >&2; exit 1; }
 
-		LINUX_FIELD_ASSETS=$LINUX_WORK/field-assets
-		mkdir -p "$LINUX_FIELD_ASSETS"
-		stage_linux_asset() {
-			source_path=$1
-			destination_path=$2
-			rm -f -- "$destination_path"
-			ln "$source_path" "$destination_path" 2>/dev/null || cp "$source_path" "$destination_path"
-		}
 		stage_linux_asset "$LINUX_IDE_IMAGE" "$LINUX_FIELD_ASSETS/gantry-ide-image-$LINUX_ASSET_ARCH.erofs"
-		stage_linux_asset "$LINUX_GUEST" "$LINUX_FIELD_ASSETS/gantry-guest-$LINUX_ASSET_ARCH"
 		LINUX_IDE_IMAGE=$LINUX_FIELD_ASSETS/gantry-ide-image-$LINUX_ASSET_ARCH.erofs
 
 		echo "===== Linux KVM: SSH/Dev Containers battery ====="
