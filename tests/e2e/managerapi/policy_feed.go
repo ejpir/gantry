@@ -47,6 +47,15 @@ type policyFeedHarness struct {
 
 func setupPolicyFeed(ctx context.Context, repo string, env []string, gantry, work string) (*policyFeedHarness, error) {
 	harness := &policyFeedHarness{repo: repo, env: env, gantry: gantry, work: work, logPath: filepath.Join(work, "policy-service.log")}
+	// A prebuilt -gantry (for example artifacts/gantry) can predate this
+	// checkout; say so instead of failing on the first missing command.
+	for _, probe := range [][]string{{"policy-service", "help"}, {"policy", "keygen", "-h"}, {"policy", "feed-request", "-h"}} {
+		command := exec.CommandContext(ctx, gantry, probe...)
+		command.Env = env
+		if err := command.Run(); err != nil {
+			return nil, fmt.Errorf("%s has no `gantry %s`: it predates this checkout; rebuild it (scripts/build.sh) or pass -gantry", gantry, strings.Join(probe[:len(probe)-1], " "))
+		}
+	}
 	policyDir := filepath.Join(work, "policy-feed-policy")
 	if err := runCommand(ctx, repo, env, gantry, "policy", "generate", "-out", policyDir,
 		"-organization", policyFeedOrganization, "-profile", "developer", "-ttl", "1h"); err != nil {
