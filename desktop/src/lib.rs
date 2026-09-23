@@ -21,4 +21,6 @@ pub mod profiles;
 mod security;
 pub mod summary;
 pub mod telemetry;
+#[cfg(feature = "ui")]
+pub mod terminal;
 mod tls;

@@ -131,16 +131,19 @@ pub enum Tab {
     Secrets,
     Mcp,
     Audit,
+    /// A shell in the sandbox, opened by double-clicking its row.
+    Terminal,
 }
 
 impl Tab {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Network,
         Self::Ports,
         Self::Mounts,
         Self::Secrets,
         Self::Mcp,
         Self::Audit,
+        Self::Terminal,
     ];
 
     pub fn label(self) -> &'static str {
@@ -151,6 +154,7 @@ impl Tab {
             Self::Secrets => "Secrets",
             Self::Mcp => "MCP",
             Self::Audit => "Audit",
+            Self::Terminal => "Terminal",
         }
     }
 
@@ -158,7 +162,7 @@ impl Tab {
     pub fn count(self, host: &HostSnapshot, sandbox: &str) -> Option<usize> {
         let data = &host.snapshot;
         let count = match self {
-            Self::Network => return None,
+            Self::Network | Self::Terminal => return None,
             Self::Ports => data.ports.iter().filter(|r| r.sandbox == sandbox).count(),
             Self::Mounts => data.mounts.iter().filter(|r| r.sandbox == sandbox).count(),
             Self::Secrets => data.secrets.iter().filter(|r| r.sandbox == sandbox).count(),

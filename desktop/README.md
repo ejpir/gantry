@@ -6,8 +6,8 @@ HTTP/JSON manager API over a local Unix socket or remote HTTPS. Local mode start
 its manager on demand; closing the window does not stop the manager or any sandbox.
 
 This is a **working preview**, not yet complete TUI parity: it selects one host
-at a time. Interactive terminals, organization-login/catalog flows, SSE updates,
-and persistent preferences remain follow-up work. Demo mode never permits writes.
+at a time. Organization-login/catalog flows, SSE updates, and persistent
+preferences remain follow-up work. Demo mode never permits writes.
 
 ![Native desktop workspace in dark mode, showing explicitly labeled demo data](assets/workspace-dark.png)
 
@@ -207,6 +207,26 @@ without a display.
 - Resizable, scrollable inspector separating active allocation from saved
   next-boot settings, including restart-required notices.
 - Loading, empty, no-match, and unavailable states; automatic reconnection.
+- An integrated terminal per sandbox: double-click a running sandbox (or choose
+  **Open Terminal** from its **…** menu) for a shell in its Terminal tab.
+
+### Integrated terminal
+
+The terminal runs the Gantry CLI in a local pseudo-terminal, as the TUI's open
+action does: `gantry exec NAME` for the local manager's sandboxes, and
+`gantry ssh NAME -remote PROFILE` through a remote manager, which needs SSH
+enabled in the sandbox and uses this desktop's profile store. Keystrokes,
+paste, and window resizes go to the shell; nothing is logged or kept after the
+tab is closed. Full-screen programs (top, vim, less) work, and the scrollback
+holds 10,000 lines.
+
+Inside the terminal, the keys a shell needs are the shell's: Ctrl+C interrupts,
+Escape and Tab reach the program, and on Linux and Windows the Ctrl shortcuts in
+the table below stay with the shell (Ctrl+R is reverse search). Copy and paste
+are ⌘C / ⌘V on macOS and Ctrl+Shift+C / Ctrl+Shift+V elsewhere; drag to select,
+double-click a word, triple-click a line. When the shell exits, Enter starts a
+new one. Resizing follows the pane with a CLI and sandbox from this release;
+older ones keep the size a session started with. Demo mode has no shell.
 
 | Shortcut | Action |
 | --- | --- |

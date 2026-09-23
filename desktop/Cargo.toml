@@ -8,7 +8,7 @@ description = "Native, read-only desktop client for the Gantry manager"
 
 [features]
 default = ["ui"]
-ui = ["dep:gpui-kit", "dep:image", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+ui = ["dep:alacritty_terminal", "dep:async-channel", "dep:gpui-kit", "dep:rustix-openpty", "dep:image", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 ui-tests = ["ui", "gpui-kit/test-support"]
 
 [[bin]]
@@ -17,7 +17,10 @@ path = "src/main.rs"
 required-features = ["ui"]
 
 [dependencies]
+# The integrated terminal: a VT emulator, its screen grid and a PTY.
+alacritty_terminal = { version = "0.26", optional = true, default-features = false }
 anyhow = "1"
+async-channel = { version = "2", optional = true }
 gpui-kit = { version = "=0.6.4", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-manual-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -30,6 +33,8 @@ zeroize = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Opens the integrated terminal's PTY (src/terminal.rs).
+rustix-openpty = { version = "0.2", optional = true }
 
 # The app icon (src/app_icon.rs): AppKit for the macOS Dock, PNG decoding for
 # the X11 window icon. Windows embeds it at build time (build.rs).

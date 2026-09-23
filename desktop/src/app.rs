@@ -92,6 +92,11 @@ pub(crate) struct Desktop {
     pub packet_sandbox: Option<String>,
     /// Live capture reads are paused, to hold the list still.
     pub packets_paused: bool,
+    /// Open sandbox terminals by sandbox name, for the selected connection.
+    pub terminals: HashMap<String, Entity<crate::terminal_view::TerminalView>>,
+    /// Why the last attempt to open a sandbox's terminal failed, shown in
+    /// that sandbox's Terminal tab: (sandbox, message).
+    pub terminal_error: Option<(String, String)>,
     pub packets_reading: bool,
     pub packet_error: Option<String>,
     /// Packets per second since capture started, for the chart.
@@ -159,7 +164,7 @@ impl Desktop {
                     _ => {}
                 },
             ),
-            cx.subscribe(&table, |this, table, event, cx| {
+            cx.subscribe_in(&table, window, |this, table, event, window, cx| {
                 if this.page != Page::Sandboxes {
                     return;
                 }
@@ -170,6 +175,20 @@ impl Desktop {
                         }
                     }
                     TableEvent::ClearSelection => this.inventory.clear_selection(),
+                    // Double-clicking a sandbox opens its shell.
+                    TableEvent::DoubleClickedRow(index) => {
+                        let Some(name) = table
+                            .read(cx)
+                            .delegate()
+                            .rows
+                            .get(*index)
+                            .map(|row| row.name.clone())
+                        else {
+                            return;
+                        };
+                        this.inventory.select(&name);
+                        this.open_terminal(&name, window, cx);
+                    }
                     _ => return,
                 }
                 cx.notify();
@@ -265,6 +284,8 @@ impl Desktop {
             packets: PacketSnapshot::default(),
             packet_sandbox: None,
             packets_paused: false,
+            terminals: HashMap::new(),
+            terminal_error: None,
             packets_reading: false,
             packet_error: None,
             capture_rate: Default::default(),
@@ -608,6 +629,9 @@ impl Desktop {
         self.packets = PacketSnapshot::default();
         self.capture_rate.clear();
         self.packet_sandbox = None;
+        // Terminals belong to the connection they were opened on.
+        self.terminals.clear();
+        self.terminal_error = None;
         self.notice = None;
         for state in &mut self.pages {
             state.selected = None;

@@ -112,14 +112,15 @@ async fn right_click_opens_a_scoped_menu_and_edits_that_row(cx: &mut TestAppCont
     .await;
     cx.update_window(handle.into(), |_, window, cx| {
         assert_eq!(
-            window.within("popup-menu").find(5usize).label(),
+            // After the name label, a separator, Open Terminal, Start and Stop.
+            window.within("popup-menu").find(6usize).label(),
             Some("Edit Settings…")
         );
         desktop.update(cx, |this, cx| {
             this.inventory.select("agent");
             this.sync_table(cx);
         });
-        window.within("popup-menu").click(5usize, cx);
+        window.within("popup-menu").click(6usize, cx);
     })
     .unwrap();
     cx.wait_for(handle.into(), Duration::from_secs(1), |_, cx| {

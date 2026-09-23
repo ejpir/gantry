@@ -19,6 +19,7 @@ mod sandbox_detail;
 mod sandbox_table;
 mod screens;
 mod secrets_view;
+mod terminal_view;
 mod theme;
 mod traffic_view;
 mod ui_forms;
@@ -32,6 +33,8 @@ mod activity_tests;
 mod dashboard_ui_tests;
 #[cfg(all(test, feature = "ui-tests"))]
 mod form_controls_tests;
+#[cfg(all(test, feature = "ui-tests", unix))]
+mod terminal_tests;
 #[cfg(all(test, feature = "ui-tests"))]
 mod ui_tests;
 #[cfg(all(test, feature = "ui-tests"))]
@@ -178,4 +181,27 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("/", FocusSearch, Some("DataTable")),
         KeyBinding::new("escape", CloseForm, Some("GantryDesktop")),
     ]);
+    // Keys a shell needs reach the terminal instead of the app: Escape, Tab,
+    // Ctrl+C, and on Linux and Windows the Ctrl shortcuts above (Ctrl+R is
+    // reverse search, Ctrl+N the next command). macOS app shortcuts use
+    // Command and keep working, except Command+C, which copies the
+    // terminal's selection.
+    let mut shell_keys = vec![
+        "escape".to_owned(),
+        "tab".into(),
+        "shift-tab".into(),
+        "ctrl-c".into(),
+    ];
+    if cfg!(target_os = "macos") {
+        shell_keys.push("cmd-c".into());
+    } else {
+        shell_keys.extend(
+            ["q", "r", "f", "1", "n", "i", "shift-i", "j", "m"].map(|key| format!("ctrl-{key}")),
+        );
+    }
+    cx.bind_keys(
+        shell_keys
+            .iter()
+            .map(|key| KeyBinding::new(key, gpui_kit::NoAction, Some("Terminal"))),
+    );
 }

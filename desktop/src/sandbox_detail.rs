@@ -81,6 +81,17 @@ impl Desktop {
                         "3 s samples · this window"
                     }),
             );
+        // The terminal fills the pane edge to edge and scrolls itself.
+        if self.detail_tab == Tab::Terminal {
+            return div().flex().flex_col().flex_1().min_h(px(0.)).child(
+                pane.child(header).child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .child(self.terminal_tab(&name, cx)),
+                ),
+            );
+        }
         let body = match self.detail_tab {
             Tab::Network => self.network_tab(&name, sandbox, cx),
             Tab::Ports => self.ports_tab(&name, cx),
@@ -88,6 +99,7 @@ impl Desktop {
             Tab::Secrets => self.secrets_tab(&name, cx),
             Tab::Mcp => self.mcp_tab(&name, cx),
             Tab::Audit => self.audit_tab(&name, cx),
+            Tab::Terminal => unreachable!("drawn above"),
         };
         div().flex().flex_col().flex_1().min_h(px(0.)).child(
             pane.child(header).child(
