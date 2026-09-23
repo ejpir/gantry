@@ -601,13 +601,16 @@ jobs:
       matrix:
         include:
           - { name: linux-amd64, runner: ubuntu-latest }
+          # The desktop offers to install the linux-arm64 CLI, so it ships
+          # for that platform too.
+          - { name: linux-arm64, runner: ubuntu-24.04-arm }
           - { name: darwin-arm64, runner: macos-14 }
           - { name: windows-amd64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: install Linux UI build dependencies
-        if: ${{ matrix.name == 'linux-amd64' }}
+        if: ${{ startsWith(matrix.name, 'linux-') }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
