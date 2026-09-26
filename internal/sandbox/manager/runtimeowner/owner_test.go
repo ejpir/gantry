@@ -160,6 +160,43 @@ func TestOwnerClosesResourcesAfterJoiningBorrowers(t *testing.T) {
 	}
 }
 
+func TestOwnerAttachesLiveReceiverAndClosesItAfterBackground(t *testing.T) {
+	order := &testOrder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	var background TaskGroup
+	owner := New(Hooks{
+		StopAdmission:  func() { background.StopAdmission(); cancel() },
+		JoinBackground: background.Wait,
+	}, time.Second)
+	if err := owner.SetLock(testCloser{name: "lock", order: order}); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.AddServer(&http.Server{}, newTestListener(order), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.FeedsReady(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.StartServers(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.AttachReceiver(testReceiver{name: "live receiver", order: order}); err != nil {
+		t.Fatal(err)
+	}
+	if !background.Start(func() { <-ctx.Done(); order.add("background") }) {
+		t.Fatal("background borrower refused")
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := order.snapshot(), []string{"listener", "background", "live receiver", "lock"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("close order = %v, want %v", got, want)
+	}
+	if err := owner.AttachReceiver(testReceiver{name: "late", order: order}); err == nil {
+		t.Fatal("receiver attached after shutdown")
+	}
+}
+
 func TestOwnerConcurrentCloseIsIdempotent(t *testing.T) {
 	owner := New(Hooks{}, time.Second)
 	lock := &countCloser{}

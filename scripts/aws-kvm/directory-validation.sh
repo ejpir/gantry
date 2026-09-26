@@ -88,6 +88,11 @@ root, small, large = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 for label, count in (("small", small), ("large", large)):
     directory = os.path.join(root, label)
     os.makedirs(directory, exist_ok=True)
+    # The guest has a different UID from the host user. Preserve private
+    # file contents but allow it to traverse and stat the test directories
+    # even when the runner was launched with umask 077.
+    os.chmod(root, 0o755)
+    os.chmod(directory, 0o755)
     for index in range(count):
         path = os.path.join(directory, f"file-{index:06d}")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

@@ -333,3 +333,37 @@ func TestPolicyOutputConcurrentWritersDoNotMix(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicyKeygenCreatesAStableSigningKeyOnce(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "acme-key")
+	if code := CmdPolicy([]string{"keygen", "-out", dir, "-bits", "2048"}); code != 0 {
+		t.Fatalf("keygen exit = %d", code)
+	}
+	info, err := os.Stat(filepath.Join(dir, "signing-key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("signing key mode = %v", info.Mode().Perm())
+	}
+	key, err := policy.ReadSigningKey(filepath.Join(dir, "signing-key.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := policy.Document{Version: 1, Organization: "acme", Revision: "r1", ExpiresAt: time.Now().Add(time.Hour),
+		Profiles: map[string]policy.Profile{"developer": {}}}
+	signed, err := policy.SignDocument(document, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := os.ReadFile(filepath.Join(dir, "public.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policy.VerifyBundle(signed.Bundle, string(public)); err != nil {
+		t.Fatalf("bundle signed with the generated key does not verify with its public key: %v", err)
+	}
+	if code := CmdPolicy([]string{"keygen", "-out", dir}); code == 0 {
+		t.Fatal("keygen overwrote an existing directory")
+	}
+}

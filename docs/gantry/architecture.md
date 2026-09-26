@@ -80,6 +80,9 @@ The ordinary command paths are:
 - `serve` provides the HTTP/JSON manager API on a Unix socket by default, or
   on explicitly configured TLS listeners with bearer authentication. It
   delegates lifecycle work to the same implementation.
+- `policy-service` runs an organization's policy feed and administrator API
+  (see [Organization policy service](#organization-policy-service)). It is a
+  separate process with its own state; it never drives sandbox lifecycle.
 
 Manager operation state has one owner. `manager/operationstate.Store` advances the typed
 `running → succeeded|failed` machine, owns idempotency routing and event
@@ -928,18 +931,58 @@ verification key, TLS CA, and mTLS client certificate/key. Paths are resolved
 and read once at manager startup. Files must be regular and symlink-free; the
 client key also requires owner-only Unix permissions or a protected Windows
 DACL. Feed credentials never enter a guest, manager API response, or sandbox
-configuration.
+configuration. Service enrollment returns a `feed.json` like this; for a
+custom feed, paths are relative to the configuration file:
+
+```json
+{
+  "version": 1,
+  "organization": "acme",
+  "profile": "developer",
+  "url": "https://policy.acme.dev:8443/v1/feed",
+  "public_key": "org-public.pem",
+  "ca_file": "ca.pem",
+  "client_certificate": "host.pem",
+  "client_key": "host-key.pem",
+  "poll_interval_seconds": 30
+}
+```
 
 The endpoint is polled immediately and then every 5–3600 seconds (30 seconds by
 default). Requests refuse redirects, require normal hostname verification plus
 the configured client certificate, use bounded headers and deadlines, and send
-`If-None-Match` with the last ETag. The last successfully applied generation and
-digest are returned in bounded request headers so the service can observe
-rollout progress. `Prefer: wait=30` lets a service implement a long poll without
-requiring a distinct streaming protocol. Responses are strict, bounded JSON
-containing version 1, the exact organization, a nonzero
-monotonic generation and one base64-encoded signed bundle. Profile and public
-key come only from local configuration.
+`If-None-Match` with the ETag of the newest generation the host holds (pending,
+otherwise applied). `Prefer: wait=30` lets a service implement a long poll
+without requiring a distinct streaming protocol. The poll interval is measured
+from the start of an exchange, so a service that holds the request is asked
+again immediately; a newly applied or newly staged generation is also reported
+at once, while transport and HTTP failures back off a full interval. Responses
+are strict, bounded JSON containing version 1, the exact organization, a nonzero
+monotonic generation and one base64-encoded signed bundle:
+
+```json
+{"version":1,"organization":"acme","generation":42,"bundle":"H4sI..."}
+```
+
+Profile and public key come only from local configuration.
+
+Every request reports the host's position in bounded headers containing only
+numbers and fixed words:
+
+| Header | Content |
+|---|---|
+| `X-Gantry-Policy-Generation`, `-Digest` | Last generation applied to every saved sandbox and its digest |
+| `X-Gantry-Policy-Pending-Generation` | A staged generation not yet applied everywhere |
+| `X-Gantry-Policy-Pending-Attempts`, `-Failed` | Fan-out attempts so far; sandboxes that refused the last attempt, or `unknown` when none were reached |
+| `X-Gantry-Policy-Rejected-Generation`, `-Reason` | The last refused response: `verification`, `organization`, `rollback`, `changed`, or `invalid` |
+| `X-Gantry-Policy-Profile`, `User-Agent` | The locally pinned profile and `gantry/<version>` |
+
+The digest is SHA-256 over the profile name, a NUL byte, the bundle bytes and the
+pinned public-key PEM, so a service that knows a host's enrolled profile can
+verify which snapshot and trust the host actually applied. Sandbox names and
+failure causes are never reported; they stay in that host's audit log. The
+manager's fan-out returns a typed rollout error carrying only the failed and
+total target counts for these headers.
 
 The receiver verifies the bundle through the normal policy engine before
 lifecycle mutation. Feed state stores the endpoint identity, applied and
@@ -995,10 +1038,237 @@ to the remaining targets. The receiver records and reports its aggregate cursor
 only after every saved sandbox succeeds, so a partial rollout is retried. A
 stopped sandbox is updated without being started.
 
+A pending generation that cannot reach every sandbox is retried at the start
+of each poll, but the poll still happens: the host keeps reporting the pending
+generation and failure count instead of going silent. Admission already
+enforces the pending snapshot, so continuing to poll grants nothing. A strictly
+newer generation from the service replaces the stuck pending one (it is staged
+durably and fanned out in its place), so an administrator can fix forward
+without host access. A response older than the pending generation, or the same
+number with different content, is refused as a rollback or content change.
+
 `restart: true` and `--restart` retain the controlled rollout path. A private
 marker records intent before stopping; retries resume an already-saved
 snapshot, while failures remain stopped and recoverable. This fallback is also
 useful for topology changes which cannot support a live organization policy.
+
+### Organization policy service
+
+For commands, see [Run a policy service](organization-policy.md#run-a-policy-service).
+`gantry policy-service` implements the feed above for one organization and adds
+an administrator API. It is a separate process with its own state directory.
+It never manages sandboxes, and it never holds the policy signing key.
+
+```text
+ administrator machine            policy service                  host managers
+┌───────────────────────┐       ┌───────────────────────┐       ┌────────────────────────────┐
+│ desktop or HTTPS      │ TLS + │ /v1/admin/*  bearer   │ mTLS  │ gantry serve               │
+│ client                ├──────▶│ /v1/feed     client   │◀──────┤   -policy-feed feed.json   │
+│ gantry policy sign    │bearer │              cert     │ long  │ host-key.pem (never leaves)│
+│ signing-key.pem       │       │ host CA · generations │ poll  └─────────────┬──────────────┘
+└───────────────────────┘       │ rings · host reports  │                     │ fan-out
+                                └───────────────────────┘                     ▼
+                                                                      every saved sandbox
+```
+
+**Trust.** Three independent keys separate provenance from transport:
+
+- **Organization signing key.** Only administrators hold it. Hosts and the
+  service pin its public key; it alone establishes what a policy says.
+- **Host CA.** The service creates it at `init` (ECDSA P-256, ten years). It
+  issues the service's TLS certificate (server authentication, two years) and
+  every host's client certificate (client authentication only, one year,
+  capped by the CA). It decides which service may assign generations and
+  which host is asking.
+- **Host key.** Each host creates its own and sends only a certificate request.
+
+**Managed enrollment.** From a verified policy-service workspace, desktop
+opens a second, separately authenticated manager profile. A manager advertising
+`policy-feed-enroll-v1` accepts `POST /v1/policy-feed/enrollment` with the host,
+organization, profile, feed URL, and service CA/signing-key fingerprints. It
+creates the host key inside its private `manager-state/feed-enrollment`
+directory and returns only a stable CSR and request ID. Matching retries reuse
+that CSR; another identity or a configured feed is refused. Desktop posts the
+CSR to the existing `/v1/admin/hosts` service route, then returns its four
+public files via `POST /v1/policy-feed/enrollment/install`. The manager verifies
+the pinned CA and signing key, certificate subject, CA signature, client-key
+match, exact feed URL/profile, and fixed local filenames before marking it
+staged. `GET /v1/policy-feed/enrollment` reports state without the private key.
+A failed service write is never replayed blindly; an enrolled-but-not-installed
+host must be inspected and either completed or explicitly revoked.
+
+Enrollment does **not** start a receiver. Once installation verifies the
+feed, a persistent `policy-feeds` marker prevents an ungoverned restart, and a
+staged identity refuses a different feed path. `restart-required` never means
+an organization policy has been applied.
+
+**Live activation** is a separate authenticated
+`POST /v1/policy-feed/enrollment/activate` action. It rereads the host's
+pinned enrollment, obtains a published signed generation over mTLS, and uses
+the manager-wide admission barrier to apply it to every saved sandbox. If the
+service is unreachable or has nothing published, the action fails and leaves
+the enrollment staged. If some sandboxes refuse the verified generation, the
+manager attempts a fail-closed stop; mandatory admission remains in place and
+the receiver retries the pending rollout (`activating`, not an aggregate
+acknowledgement). Inspect any stop failure before claiming enforcement. The
+receiver is attached to runtime ownership only after the attempted fan-out;
+shutdown joins its background task before releasing the transport and state
+lock. The response's `appliedGeneration` is nonzero only after complete
+fan-out; `configured` alone is not proof of an applied generation.
+
+After verified application, `activated.json` makes activation durable. A
+subsequent start with the original listener and token flags restores only this
+validated, pinned feed and its signed state before opening manager listeners.
+A merely staged enrollment still requires an explicit `-policy-feed` restart.
+No self-restart or manager-service credential handoff occurs.
+
+Control of the service, or of an administrator token, cannot forge policy
+content. It can withhold or delay generations, and it can republish any
+earlier, still-unexpired signed bundle under a new number, which reverts hosts
+to it. Signed expiry is the backstop for both; keep generation lifetimes short
+accordingly.
+
+**Listener and authentication.** One TLS listener serves both surfaces. Client
+certificates are verified against the host CA when presented. `/v1/feed`
+requires one and identifies the host by the SHA-256 fingerprint of its leaf
+certificate; unknown and revoked certificates receive 403. Every other route,
+including `/v1/health`, requires an administrator bearer token. Tokens are
+64 random hex characters, named, stored only as SHA-256 hashes in
+`admins.json`, compared in constant time, and reread when the file changes.
+Health has the manager's shape, plus the capability `policy-service-admin-v1`,
+so a remote profile can register the service. Manager routes answer 404 with
+an explanation. Mutating administrator requests are audited by name.
+
+**State.** `init` writes a private directory, never over existing content.
+`service.json` fixes the organization, the base URL and 1–8 ordered rings
+(default `canary`, `early`, `everyone`). All files are owner-only and written
+atomically:
+- `state.json` holds generation records, ring positions, the current rollout,
+  enrolled hosts with their latest reports, and the shared draft;
+- `generations/<n>.tar.gz` keeps each published bundle's exact bytes,
+  rechecked against its recorded hash on every read;
+- `generations/<n>.json` keeps the document as verified at publication, so
+  history stays readable after expiry.
+
+Report changes that only move a timestamp are flushed every minute and at
+shutdown.
+
+**Generations and rings.** Publishing checks that a bundle:
+- verifies with the pinned key through the normal verifier, including expiry;
+- is for the service's organization;
+- contains every profile used by a non-revoked enrolled host;
+- differs from the newest generation.
+
+Only then does it receive the next number; numbers are never reused. Rings up to
+the chosen first ring receive it at once, and promotion extends it to later
+rings in order. Republishing serves generation *n*'s exact signed bytes under
+the next number. It is verified again, so an expired bundle cannot be revived,
+and its expiry is unchanged. A host's target is its ring's generation, but never
+lower than a generation already served to it, so moving a host to an earlier
+ring cannot trigger a rollback refusal.
+
+The feed answers 304 while the host already holds its target, identified by
+the ETag `"g<N>"`, or while nothing is published. It holds such a request for
+the shorter of the host's `Prefer: wait` and 30 s, and wakes it on publish,
+promotion, ring moves and revocation. Otherwise it returns the target and
+records it as served, resetting the host's acknowledgement time and poll count.
+
+**Reports and status.** Each request's report headers are parsed strictly, and
+invalid values are dropped. The service checks the reported digest against the
+one expected for the host's enrolled profile and the pinned key. It then
+classifies the host as:
+
+| Status | Meaning |
+|---|---|
+| `current` | Applied its target with the expected digest |
+| `waiting` | Its target moved and it has not polled since |
+| `offered` | Served its target; no report of it yet |
+| `pending` | Applying its target |
+| `stalled` | Its target failed on some sandboxes; retrying |
+| `rejected` | Refused its target (see the reported reason) |
+| `mismatch` | Applied its target with a different profile or key than enrolled |
+| `silent` / `never` | No poll for 10 minutes / never polled |
+| `idle` / `revoked` | Nothing served yet / identity revoked |
+
+Reports are advisory: they never change what a host is served. The host owner
+is trusted in V1 and could misreport.
+
+**Drafts and changes.** One shared draft holds the next document, last write
+wins. Saving parses it exactly as activation does, including expiry, requires
+the service's organization, and stores canonical `data.json`. Without a saved
+draft, reads return the newest document, or a default-deny template before
+anything is published. Changes between two documents are listed per profile,
+network rule, DNS name and authorization rule, matched by ID or name:
+- **Loosens access:** adding an allow, removing a deny, adding a DNS name, or
+  flipping deny to allow.
+- **Tightens access:** the reverse, plus removing a profile or shortening expiry.
+
+Every generation records its changes from the previous one. Publishing a
+document identical to the draft clears the draft.
+
+**Enrollment.** `gantry policy feed-request` creates an owner-only ECDSA P-256
+key and a certificate request on the host. An administrator enrolls the request
+with a name, profile and ring:
+- the request's signature must verify, with an ECDSA P-256/P-384, Ed25519, or
+  RSA key of at least 2048 bits;
+- the subject is replaced with the enrolled name and organization;
+- the name must be unused by any active host;
+- once anything is published, the profile must exist in the newest generation.
+
+The service returns `feed.json` (organization, profile, feed URL and relative
+file names) with `host.pem`, `ca.pem` and `org-public.pem`. The host places
+them beside its key. Revocation is a state change: the service is the only
+party that trusts these certificates, so no revocation list exists. A revoked
+host keeps enforcing its last applied generation until that generation
+expires.
+
+**Reachability.** The base URL is fixed at `init`. It is embedded in the
+service certificate, whose subject alternative names are the URL's host plus
+any repeated `-name`, and in every issued `feed.json`. Remote hosts must be
+able to resolve and reach it; a loopback URL only serves hosts on the same
+machine. Moving the service to another name means a new `init` and
+re-enrolling hosts. `serve` listens on all addresses at the URL's port unless
+`-listen` narrows it.
+
+**Enrolling a remote manager.** A manager on another machine joins the same
+way as a local one. Only the host can create its key, and only the host owner
+can change its `gantry serve` flags.
+
+1. On the host: `gantry policy feed-request -out DIR -host NAME`, then send
+   `DIR/host.csr` to an administrator.
+2. The administrator enrolls it (desktop **Enrollment**, or
+   `POST /v1/admin/hosts`) and returns the four files.
+3. On the host: place them in `DIR`. Restart the manager with its existing
+   listener, TLS and token flags plus `-policy-feed DIR/feed.json`; feed
+   configuration is read only at startup.
+4. The first poll reports the host, and it follows its ring from then on.
+
+The manager then enforces the organization's policy on every sandbox it
+manages. It refuses per-sandbox policy replacement through its API, and it
+refuses unmanaged low-level runs. Its saved feed state also prevents automatic
+local startup until the feed is deliberately retired.
+
+**Administrator clients.** The Gantry desktop opens a remote profile whose
+health reports the capability as an Organization workspace (see the desktop
+README). It publishes in five steps:
+1. It saves the draft, so the service validates it.
+2. It runs `gantry policy sign -signing-key` on the administrator's machine, in
+   a private temporary directory.
+3. It checks that the signer's public-key fingerprint equals the one the
+   service pins.
+4. It uploads the bundle only if the two match.
+5. Nothing else leaves the machine; the private key is read only by the CLI.
+
+Any HTTPS client can use the same API; its wire types are in
+`api/policyservice`.
+
+**Limits.** A service is:
+- one process and one state directory for one organization, with no
+  replication or high availability;
+- administered with bearer tokens that are neither OIDC-backed nor scoped per
+  profile, where every administrator can do everything except sign;
+- fixed to the rings set at `init`, which are promoted only by hand;
+- not a server for the [remote catalog](#dynamic-remote-catalog).
 
 ### Native network restrictions
 
@@ -1051,7 +1321,8 @@ compliance storage. No MCP arguments/results, tokens or resource contents are
 logged. Packets retain bounded traffic summaries, not per-packet Rego decisions.
 
 V1 excludes arbitrary bundle Rego, argument-based MCP rules, interactive
-approvals, mandatory host enrollment, continuous SSO checks and multi-org
+approvals, mandatory host enrollment (policy-service enrollment is opt-in by the
+host owner, who can still remove the feed), continuous SSO checks and multi-org
 composition. Policy feeds prevent generation rollback locally but
 do not turn free-form bundle revisions into a globally ordered revision scheme.
 OAuth custody is rejected until host-side refresh/delivery is governed. Host
@@ -1128,6 +1399,13 @@ Unix mode bits or a protected Windows DACL. Registration verifies TLS,
 authentication, and health before saving either. The token grants the same host
 control as the manager API and is not scoped by organization identity.
 
+A profile may instead point at an organization
+[policy service](#organization-policy-service), which reports the capability
+`policy-service-admin-v1` in the same health response. Its token is an
+administrator token for that service, not a manager token, and grants no
+sandbox or host-shell access. Lifecycle verbs against it fail with an
+explanatory 404 and never fall back.
+
 The optional policy feed is an outbound mTLS connection owned by the manager
 and uses a separate client identity. It does not expose or reuse the manager
 bearer token. Feed-triggered fan-out shares bounded lifecycle admission and the
@@ -1193,6 +1471,34 @@ The default layout is:
     ├── mcp-restart-required    # saved MCP config differs from the live worker
     ├── policy-rollout.json     # only while a controlled restart is incomplete
     └── runtime locks, sockets, and readiness files
+```
+
+A host enrolled in a policy service keeps its feed identity wherever its owner
+chose, outside guest shares:
+
+```text
+<feed dir>/                     # from gantry policy feed-request, then enrollment
+├── host-key.pem                # owner-only; created here, never sent anywhere
+├── host.csr                    # the request sent to an administrator
+├── feed.json                   # returned by enrollment; passed to -policy-feed
+├── host.pem                    # client certificate issued by the host CA
+├── ca.pem                      # the host CA, which also verifies the service
+└── org-public.pem              # the organization key every bundle must verify with
+```
+
+A policy service's directory is private to the account that runs it:
+
+```text
+<service dir>/
+├── service.json                # organization, base URL, rings
+├── state.json                  # generations, rings, rollout, hosts and reports, draft
+├── admins.json                 # administrator names and token SHA-256 hashes
+├── ca.pem, ca-key.pem          # host CA
+├── server.pem, server-key.pem  # TLS certificate for the base URL's names
+├── org-public.pem              # pinned organization verification key
+└── generations/
+    ├── <n>.tar.gz              # exact signed bundle as served
+    └── <n>.json                # its document as verified at publication
 ```
 
 Ordinary workload secret values do not appear in this layout. OAuth custody

@@ -29,6 +29,60 @@ pub enum Kind {
     Confirm(Command),
     RemoteAdd,
     RemoteRemove(String),
+    /// Organization forms carry what they were opened from; the policy
+    /// service validates every write again.
+    OrgEnroll {
+        profiles: Vec<String>,
+        rings: Vec<String>,
+    },
+    OrgManagedEnroll {
+        profiles: Vec<String>,
+        rings: Vec<String>,
+        remotes: Vec<crate::profiles::RemoteProfile>,
+        config_dir: std::path::PathBuf,
+    },
+    OrgActivateFeed {
+        remotes: Vec<crate::profiles::RemoteProfile>,
+        config_dir: std::path::PathBuf,
+    },
+    OrgRule(Box<OrgRuleForm>),
+    OrgDns(Box<OrgDraft>),
+    OrgPublish(Box<OrgPublishForm>),
+    OrgMoveHost {
+        name: String,
+        ring: String,
+        rings: Vec<String>,
+    },
+    OrgDownload(u64),
+}
+
+/// The draft a form edits: the document and the generation it is based on.
+#[derive(Clone)]
+pub struct OrgDraft {
+    pub base: u64,
+    pub document: crate::org::Document,
+    pub profile: String,
+}
+
+#[derive(Clone)]
+pub struct OrgRuleForm {
+    pub draft: OrgDraft,
+    /// A network (CIDR) rule rather than a mount, MCP or credential rule.
+    pub network: bool,
+    pub existing: Option<crate::org::PolicyItem>,
+}
+
+#[derive(Clone)]
+pub struct OrgPublishForm {
+    pub draft: OrgDraft,
+    pub rings: Vec<String>,
+    pub key_fingerprint: String,
+    pub revision: String,
+    pub changes: usize,
+    pub loosens: usize,
+    pub hosts: usize,
+    pub gantry: Option<std::path::PathBuf>,
+    pub managed: Option<std::path::PathBuf>,
 }
 #[derive(Clone)]
 pub enum FieldKind {
@@ -58,6 +112,8 @@ impl ResourceRange {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathKind {
     DesktopFile,
+    /// A folder on this desktop machine, such as where to save files.
+    DesktopDirectory,
     ManagerFile,
     ManagerDirectory,
     GuestDirectory,
@@ -65,13 +121,16 @@ pub enum PathKind {
 impl PathKind {
     pub fn can_browse(self, source: &Source) -> bool {
         match self {
-            Self::DesktopFile => !matches!(source, Source::Demo),
+            Self::DesktopFile | Self::DesktopDirectory => !matches!(source, Source::Demo),
             Self::ManagerFile | Self::ManagerDirectory => matches!(source, Source::Local(_)),
             Self::GuestDirectory => false,
         }
     }
     pub fn directories(self) -> bool {
-        matches!(self, Self::ManagerDirectory | Self::GuestDirectory)
+        matches!(
+            self,
+            Self::ManagerDirectory | Self::GuestDirectory | Self::DesktopDirectory
+        )
     }
 }
 #[derive(Clone)]
@@ -437,6 +496,15 @@ impl Spec {
                 help="Explicitly enable bounded packet capture for this sandbox. Packets can contain sensitive data. Stop capture to disable recording and clear retained payloads.".into();
                 "Start packet capture"
             }
+            Kind::Confirm(Command::Org(command)) => {
+                help = format!(
+                    "{} · {}. {} No request is sent until you confirm.",
+                    command.label(),
+                    crate::workspace::text(&command.subject()),
+                    command.consequence()
+                );
+                "Confirm action"
+            }
             Kind::Confirm(command) => {
                 help = format!(
                     "Confirm {} for {} on the host shown above. This may interrupt workloads or permanently remove data. No request is sent until you confirm.",
@@ -444,6 +512,208 @@ impl Spec {
                     crate::workspace::text(&command.subject())
                 );
                 "Confirm action"
+            }
+            Kind::OrgManagedEnroll {
+                profiles,
+                rings,
+                remotes,
+                ..
+            } => {
+                let select = |key, label: &str, options: Vec<String>| Field {
+                    kind: FieldKind::Select(options.clone()),
+                    ..field(key, label, options.first().cloned().unwrap_or_default())
+                };
+                fields = vec![
+                    select(
+                        "remote",
+                        "Managed remote",
+                        remotes.iter().map(|r| r.name.clone()).collect(),
+                    ),
+                    field("name", "Host name (defaults to remote name)", ""),
+                    select("profile", "Policy profile", profiles.clone()),
+                    select("ring", "Rollout ring", rings.clone()),
+                ];
+                help = "Enroll a registered remote manager. Its private key stays on that host; no files are copied through this desktop. Enrollment alone does not enforce policy. Publish a signed generation, then use Activate feed… to apply it without restarting. Do not select a different organization service as the remote.".into();
+                "Enroll managed remote"
+            }
+            Kind::OrgActivateFeed { remotes, .. } => {
+                let names: Vec<String> = remotes.iter().map(|r| r.name.clone()).collect();
+                fields = vec![Field {
+                    kind: FieldKind::Select(names.clone()),
+                    ..field(
+                        "remote",
+                        "Staged remote manager",
+                        names.first().cloned().unwrap_or_default(),
+                    )
+                }];
+                help = "Explicitly activate an enrolled remote without restarting it. Requires a reachable feed with a published, signed generation. The manager applies it to every sandbox before confirming. A partial rollout remains pending with mandatory admission and retries; inspect any failed targets rather than claiming enforcement. If no generation is available, it remains staged and no activation is claimed.".into();
+                "Activate feed"
+            }
+            Kind::OrgEnroll { profiles, rings } => {
+                let select = |key, label: &str, options: &[String]| Field {
+                    kind: FieldKind::Select(options.to_vec()),
+                    ..field(key, label, options.first().cloned().unwrap_or_default())
+                };
+                fields = vec![
+                    field("name", "Host name", ""),
+                    select("profile", "Profile", profiles),
+                    select("ring", "Ring", rings),
+                    path(
+                        "request",
+                        "Certificate request (host.csr)",
+                        "",
+                        PathKind::DesktopFile,
+                    ),
+                    path(
+                        "save",
+                        "Save the host's files to a new folder",
+                        "",
+                        PathKind::DesktopDirectory,
+                    ),
+                ];
+                help = "On the host, gantry policy feed-request -out DIR -host NAME makes a key that never leaves it and host.csr. The service signs only that request. Its answer (feed.json, host.pem, ca.pem, org-public.pem) is saved here to hand back; the host then runs gantry serve -policy-feed DIR/feed.json.".into();
+                "Enroll host"
+            }
+            Kind::OrgRule(form) => {
+                let existing = form.existing.as_ref();
+                let effect = existing.map(|i| i.effect.as_str()).unwrap_or("allow");
+                if form.network {
+                    let rule = existing.and_then(|i| i.network.clone()).unwrap_or_default();
+                    fields = vec![
+                        field("id", "Rule ID", &rule.id),
+                        choice("effect", "Effect", effect, &["allow", "deny"]),
+                        field(
+                            "cidr",
+                            "CIDR",
+                            if rule.cidr.is_empty() {
+                                "0.0.0.0/0"
+                            } else {
+                                &rule.cidr
+                            },
+                        ),
+                        choice(
+                            "protocol",
+                            "Protocol",
+                            if rule.protocol.is_empty() {
+                                "tcp"
+                            } else {
+                                &rule.protocol
+                            },
+                            &["tcp", "udp", "icmp", "any"],
+                        ),
+                        field(
+                            "ports",
+                            "Ports (tcp/udp; empty for all)",
+                            rule.ports
+                                .iter()
+                                .map(u16::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ];
+                } else {
+                    let rule =
+                        existing
+                            .and_then(|i| i.rule.clone())
+                            .unwrap_or_else(|| crate::org::Rule {
+                                action: "mount.read".into(),
+                                ..Default::default()
+                            });
+                    let target = match rule.action.as_str() {
+                        "mount.read" | "mount.write" => rule.path.clone(),
+                        "credential.use" => rule.host.clone(),
+                        _ => rule.server.clone(),
+                    };
+                    fields = vec![
+                        field("id", "Rule ID", &rule.id),
+                        choice("effect", "Effect", effect, &["allow", "deny"]),
+                        Field {
+                            kind: FieldKind::Select(
+                                crate::org::RULE_ACTIONS
+                                    .iter()
+                                    .map(|a| a.to_string())
+                                    .collect(),
+                            ),
+                            ..field("action", "Action", &rule.action)
+                        },
+                        field("target", "Path, MCP server, or credential host", target),
+                        field(
+                            "tool",
+                            "MCP tool (tool actions only; * for all)",
+                            &rule.tool,
+                        ),
+                    ];
+                }
+                help = format!(
+                    "Changes the {} draft only. Hosts are unaffected until the draft is signed and published. Deny wins over allow; anything not allowed is denied.",
+                    form.draft.profile
+                );
+                match (form.network, existing.is_some()) {
+                    (true, false) => "Add network rule",
+                    (true, true) => "Edit network rule",
+                    (false, false) => "Add access rule",
+                    (false, true) => "Edit access rule",
+                }
+            }
+            Kind::OrgDns(draft) => {
+                fields = vec![field("name", "DNS name (*.example.com for subdomains)", "")];
+                help = format!(
+                    "Allow {} sandboxes to resolve this name. Changes the draft only.",
+                    draft.profile
+                );
+                "Allow DNS name"
+            }
+            Kind::OrgPublish(form) => {
+                fields = vec![
+                    field("revision", "Revision", &form.revision),
+                    field("days", "Expires in (days)", "30"),
+                    path(
+                        "key",
+                        "Organization signing key (private PEM)",
+                        "",
+                        PathKind::DesktopFile,
+                    ),
+                    Field {
+                        kind: FieldKind::Select(form.rings.clone()),
+                        ..field(
+                            "ring",
+                            "Offer first to",
+                            form.rings.first().cloned().unwrap_or_default(),
+                        )
+                    },
+                ];
+                help = format!(
+                    "{} change{} ({} loosening access) for up to {} host{}. The Gantry CLI signs on this machine; only the signed bundle is uploaded, and it must verify with the key hosts pin ({}). Hosts in later rings wait until you promote.",
+                    form.changes,
+                    if form.changes == 1 { "" } else { "s" },
+                    form.loosens,
+                    form.hosts,
+                    if form.hosts == 1 { "" } else { "s" },
+                    crate::org::short_fingerprint(&form.key_fingerprint)
+                );
+                "Sign and publish"
+            }
+            Kind::OrgMoveHost { name, ring, rings } => {
+                fields = vec![Field {
+                    kind: FieldKind::Select(rings.clone()),
+                    ..field("ring", "Ring", ring)
+                }];
+                help = format!(
+                    "{name} follows its new ring from its next poll. A host is never offered an older generation than it already has."
+                );
+                "Move host"
+            }
+            Kind::OrgDownload(generation) => {
+                fields = vec![path(
+                    "save",
+                    "Save to folder",
+                    "",
+                    PathKind::DesktopDirectory,
+                )];
+                help = format!(
+                    "Saves generation {generation}'s signed bundle exactly as hosts receive it."
+                );
+                "Download bundle"
             }
             Kind::RemoteAdd => {
                 fields = vec![
@@ -699,6 +969,149 @@ impl Spec {
                 },
             ),
             Kind::Confirm(command) => command.clone(),
+            Kind::OrgManagedEnroll {
+                remotes,
+                config_dir,
+                ..
+            } => {
+                let remote_name = required("remote")?;
+                let remote = remotes
+                    .iter()
+                    .find(|r| r.name == remote_name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("The selected remote is no longer in this form")
+                    })?;
+                let name = if get("name").trim().is_empty() {
+                    remote_name.clone()
+                } else {
+                    required("name")?
+                };
+                crate::org::validate_name(&name)?;
+                Command::Org(crate::org::OrgCommand::EnrollManaged {
+                    name,
+                    profile: required("profile")?,
+                    ring: required("ring")?,
+                    remote: remote.clone(),
+                    config_dir: config_dir.clone(),
+                })
+            }
+            Kind::OrgActivateFeed {
+                remotes,
+                config_dir,
+            } => {
+                let remote_name = required("remote")?;
+                let remote = remotes
+                    .iter()
+                    .find(|r| r.name == remote_name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("The selected remote is no longer in this form")
+                    })?;
+                Command::Org(crate::org::OrgCommand::ActivateManaged {
+                    remote: remote.clone(),
+                    config_dir: config_dir.clone(),
+                })
+            }
+            Kind::OrgEnroll { .. } => {
+                let name = required("name")?;
+                crate::org::validate_name(&name)?;
+                Command::Org(crate::org::OrgCommand::Enroll {
+                    name,
+                    profile: required("profile")?,
+                    ring: required("ring")?,
+                    request: required("request")?.into(),
+                    save_to: required("save")?.into(),
+                })
+            }
+            Kind::OrgRule(form) => {
+                use crate::org::{Edit, NetworkRule, Rule, apply_edit, parse_ports};
+                let replacing = form.existing.as_ref().map(|i| i.id.clone());
+                let edit = if form.network {
+                    let protocol = required("protocol")?;
+                    let ports = parse_ports(get("ports"))?;
+                    ensure!(
+                        ports.is_empty() || matches!(protocol.as_str(), "tcp" | "udp"),
+                        "Ports require tcp or udp"
+                    );
+                    Edit::Network {
+                        rule: NetworkRule {
+                            id: required("id")?,
+                            effect: required("effect")?,
+                            cidr: required("cidr")?,
+                            protocol,
+                            ports,
+                        },
+                        replacing,
+                    }
+                } else {
+                    let action = required("action")?;
+                    let target = get("target").trim().to_owned();
+                    let mut rule = Rule {
+                        id: required("id")?,
+                        effect: required("effect")?,
+                        action: action.clone(),
+                        ..Default::default()
+                    };
+                    match action.as_str() {
+                        "mount.read" | "mount.write" => rule.path = target,
+                        "credential.use" => rule.host = target,
+                        "mcp.connect" => rule.server = target,
+                        _ => {
+                            rule.server = target;
+                            rule.tool = required("tool")?;
+                        }
+                    }
+                    Edit::Rule { rule, replacing }
+                };
+                let draft = &form.draft;
+                Command::Org(crate::org::OrgCommand::SaveDraft {
+                    base: draft.base,
+                    document: apply_edit(&draft.document, &draft.profile, &edit)?,
+                    summary: edit.summary(&draft.profile),
+                })
+            }
+            Kind::OrgDns(draft) => {
+                let edit = crate::org::Edit::AddDns(required("name")?);
+                Command::Org(crate::org::OrgCommand::SaveDraft {
+                    base: draft.base,
+                    document: crate::org::apply_edit(&draft.document, &draft.profile, &edit)?,
+                    summary: edit.summary(&draft.profile),
+                })
+            }
+            Kind::OrgPublish(form) => {
+                let revision = required("revision")?;
+                ensure!(
+                    revision.len() <= 128
+                        && revision
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)),
+                    "Revision uses letters, digits, '.', '_', ':' or '-'"
+                );
+                let days = number("days")?;
+                ensure!((1..=365).contains(&days), "Expiry must be 1 to 365 days");
+                let mut document = form.draft.document.clone();
+                document.revision = revision;
+                document.expires_at =
+                    crate::clock::format(crate::clock::now() + days as i64 * 86_400);
+                Command::Org(crate::org::OrgCommand::Publish(Box::new(
+                    crate::org::Publish {
+                        base: form.draft.base,
+                        document,
+                        signing_key: required("key")?.into(),
+                        first_ring: required("ring")?,
+                        key_fingerprint: form.key_fingerprint.clone(),
+                        gantry: form.gantry.clone(),
+                        managed: form.managed.clone(),
+                    },
+                )))
+            }
+            Kind::OrgMoveHost { name, .. } => Command::Org(crate::org::OrgCommand::MoveHost {
+                name: name.clone(),
+                ring: required("ring")?,
+            }),
+            Kind::OrgDownload(generation) => Command::Org(crate::org::OrgCommand::Download {
+                generation: *generation,
+                save_to: required("save")?.into(),
+            }),
             Kind::RemoteAdd => {
                 let name = required("name")?;
                 let url = required("url")?;

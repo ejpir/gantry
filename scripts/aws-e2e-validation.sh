@@ -21,11 +21,15 @@ usage: scripts/aws-e2e-validation.sh [aws|linux|macos]
   macos    validate the local Apple-silicon macOS HVF backend
 
 All modes include signed OPA policy validation with real VMs and loopback-only
-fixtures (no OPA/OpenSSL installation or public egress needed on test hosts).
+fixtures (no OPA/OpenSSL installation or public egress needed on test hosts),
+and run the organization policy service (gantry policy-service) against a
+live manager: host enrollment (including the manager API's host-only key and
+staged restart guard), signed publication, live rollout to running sandboxes,
+and rollback, each acknowledged over the mTLS long-poll feed.
 
 Linux overrides:
   GANTRY_ARTIFACTS               guest-helper directory (default: ./artifacts)
-  GANTRY_TEST_EXE                native Gantry executable
+  GANTRY_TEST_EXE                override host executable (default: build this checkout)
   GANTRY_TEST_KERNEL             guest kernel for the host architecture
   GANTRY_TEST_ROOTFS             matching Nerdbox rootfs
   GANTRY_TEST_WORKLOAD_IMAGE     local workload EROFS image
@@ -125,7 +129,7 @@ run_macos_validation() {
 	MAC_KERNEL=${GANTRY_TEST_KERNEL:-$MAC_ARTIFACTS/gantry-kernel-arm64}
 	MAC_ROOTFS=${GANTRY_TEST_ROOTFS:-$MAC_ARTIFACTS/nerdbox-rootfs-arm64.erofs}
 	MAC_WORKLOAD=${GANTRY_TEST_WORKLOAD_IMAGE:-builtin}
-	echo "===== macOS HVF: manager API, remote dashboard parity, and lifecycle battery ====="
+	echo "===== macOS HVF: manager API, remote dashboard parity, lifecycle, and policy-service battery ====="
 	GANTRY_ARTIFACTS="$MAC_ARTIFACTS" sh scripts/test-manager-api-e2e.sh \
 		-gantry "$MAC_GANTRY" \
 		-artifacts "$MAC_ARTIFACTS" \
@@ -203,8 +207,15 @@ run_macos_validation() {
 			[ -s "$required_path" ] || { echo "required guest asset missing: $required_path" >&2; exit 1; }
 		done
 
+		# Keep field-host SSH files (including root-owned EC2 .ssh trees) untouched.
+		# OpenSSH on macOS does not use HOME for its default config lookup, so
+		# the SSH battery also receives the explicit path to this private config.
+		MAC_SSH_HOME=$MAC_TMP/ssh-home
+		mkdir -m 700 "$MAC_SSH_HOME"
 		echo "===== macOS HVF: SSH/Dev Containers battery ====="
-		GANTRY_TEST_ROOT="$MAC_FIELD_ASSETS" \
+		HOME="$MAC_SSH_HOME" \
+			GANTRY_TEST_SSH_CONFIG="$MAC_SSH_HOME/.ssh/config" \
+			GANTRY_TEST_ROOT="$MAC_FIELD_ASSETS" \
 			GANTRY_TEST_EXE="$MAC_GANTRY" \
 			GANTRY_TEST_KERNEL="$MAC_KERNEL" \
 			GANTRY_TEST_ROOTFS="$MAC_ROOTFS" \
@@ -265,7 +276,8 @@ run_linux_validation() {
 		esac
 	}
 	LINUX_ARTIFACTS=$(linux_absolute "${GANTRY_ARTIFACTS:-artifacts}")
-	LINUX_GANTRY=$(linux_absolute "${GANTRY_TEST_EXE:-$LINUX_ARTIFACTS/gantry}")
+	LINUX_GANTRY=
+	[ -z "${GANTRY_TEST_EXE:-}" ] || LINUX_GANTRY=$(linux_absolute "$GANTRY_TEST_EXE")
 	LINUX_GUEST=$LINUX_ARTIFACTS/gantry-guest-$LINUX_ASSET_ARCH
 	LINUX_KERNEL=$(linux_absolute "${GANTRY_TEST_KERNEL:-$LINUX_ARTIFACTS/gantry-kernel-$LINUX_ASSET_ARCH}")
 	LINUX_ROOTFS=$(linux_absolute "${GANTRY_TEST_ROOTFS:-$LINUX_ARTIFACTS/nerdbox-rootfs-$LINUX_ASSET_ARCH.erofs}")
@@ -279,9 +291,10 @@ run_linux_validation() {
 		echo "GANTRY_TEST_RUNSC_KERNEL and GANTRY_TEST_RUNSC_ROOTFS must be set together" >&2
 		exit 1
 	fi
-	for executable in "$LINUX_GANTRY" "$LINUX_GUEST"; do
-		[ -x "$executable" ] || { echo "missing executable: $executable" >&2; exit 1; }
-	done
+	[ -x "$LINUX_GUEST" ] || { echo "missing executable: $LINUX_GUEST" >&2; exit 1; }
+	if [ -n "$LINUX_GANTRY" ]; then
+		[ -x "$LINUX_GANTRY" ] || { echo "missing executable: $LINUX_GANTRY" >&2; exit 1; }
+	fi
 	set -- "$LINUX_KERNEL" "$LINUX_ROOTFS" "$LINUX_IMAGE"
 	[ -z "$LINUX_RUNSC_KERNEL" ] || set -- "$@" "$LINUX_RUNSC_KERNEL" "$LINUX_RUNSC_ROOTFS"
 	for asset in "$@"; do
@@ -322,6 +335,14 @@ run_linux_validation() {
 	trap cleanup_linux EXIT
 	trap 'exit 130' HUP INT TERM
 
+	if [ -z "$LINUX_GANTRY" ]; then
+		# Never reuse or overwrite an artifact that may predate this checkout.
+		# The E2E driver and the default host executable must test the same API.
+		LINUX_GANTRY=$LINUX_WORK/gantry-current
+		echo "===== Linux KVM: build current Gantry host executable ====="
+		go build -o "$LINUX_GANTRY" ./cmd/gantry
+	fi
+
 	# Batteries also start sandboxes without -kernel/-rootfs. Those resolve
 	# Gantry's defaults by canonical release basename below GANTRY_ARTIFACTS
 	# and download any missing asset from the GitHub release, so caller
@@ -356,7 +377,7 @@ run_linux_validation() {
 	fi
 	[ -x "$LINUX_OAUTH_IDP" ] || { echo "missing OAuth fixture: $LINUX_OAUTH_IDP" >&2; exit 1; }
 
-	echo "===== Linux KVM: manager API, remote dashboard parity, SSH, and organization policy-feed battery ====="
+	echo "===== Linux KVM: manager API, remote dashboard parity, SSH, and policy-service rollout battery ====="
 	rm -rf -- "$LINUX_WORK/manager"
 	GANTRY_ARTIFACTS="$LINUX_FIELD_ASSETS" scripts/test-manager-api-e2e.sh \
 		-gantry "$LINUX_GANTRY" -artifacts "$LINUX_FIELD_ASSETS" \
@@ -693,7 +714,7 @@ PY
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
 	-c "$WINDOWS_POLICY_COMMAND" 1200
 
-echo "===== Linux amd64 KVM: live manager API, remote dashboard parity, and policy-feed battery ====="
+echo "===== Linux amd64 KVM: live manager API, remote dashboard parity, and policy-service rollout battery ====="
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-amd64 /opt/gantry/manager-api-e2e 600
 GANTRY_TEST_IID=$LINUX_IID GANTRY_TEST_REGION=$REGION \
@@ -707,7 +728,7 @@ rm -rf /opt/gantry/manager-e2e-run
   -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
 ' 1800
 
-echo "===== Linux arm64 KVM: live manager API, remote dashboard parity, and policy-feed battery ====="
+echo "===== Linux arm64 KVM: live manager API, remote dashboard parity, and policy-service rollout battery ====="
 GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
 	python3 scripts/aws-kvm/ssm.py --s3-download "$BUCKET" e2e/manager-api-linux-arm64 /opt/gantry/manager-api-e2e 600
 GANTRY_TEST_IID=$ARM_IID GANTRY_TEST_REGION=$REGION \
@@ -721,7 +742,7 @@ rm -rf /opt/gantry/manager-e2e-run
   -pull=false -work-dir /opt/gantry/manager-e2e-run -timeout 15m
 ' 1800
 
-echo "===== Windows WHPX: live manager API, remote dashboard parity, and policy-feed battery ====="
+echo "===== Windows WHPX: live manager API, remote dashboard parity, and policy-service rollout battery ====="
 GANTRY_TEST_REGION=$REGION python3 scripts/aws-whpx/ssm.py "$WINDOWS_IID" \
 	--s3-download "$BUCKET" e2e/manager-api-windows-amd64.exe C:/gantry/manager-api-e2e.exe 600
 WINDOWS_MANAGER_COMMAND=$(python3 - \

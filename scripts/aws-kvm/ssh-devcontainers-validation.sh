@@ -83,13 +83,20 @@ grep -q GANTRY-DIRECT-SSH <<<"$direct" || fail "direct gantry ssh command failed
 pass "direct gantry ssh command"
 
 run "$G" ssh setup
-managed=$(ssh -o BatchMode=yes "$SANDBOX.gantry" /bin/echo GANTRY-MANAGED-SSH 2>&1)
+# macOS OpenSSH resolves its default config against the account's real home,
+# not HOME. The macOS runner uses a private test HOME to avoid changing a
+# field host's existing SSH files; explicitly select that config there.
+ssh_config_args=()
+if [ -n "${GANTRY_TEST_SSH_CONFIG:-}" ]; then
+  ssh_config_args=(-F "$GANTRY_TEST_SSH_CONFIG")
+fi
+managed=$(ssh "${ssh_config_args[@]}" -o BatchMode=yes "$SANDBOX.gantry" /bin/echo GANTRY-MANAGED-SSH 2>&1)
 printf '%s\n' "$managed"
 grep -q GANTRY-MANAGED-SSH <<<"$managed" || fail "managed *.gantry SSH command failed"
 pass "managed *.gantry OpenSSH connection"
 
-run ssh -o BatchMode=yes "$SANDBOX.gantry" 'printf GANTRY-SFTP > "$HOME/gantry-sftp-field.txt"'
-printf 'get /home/gantry/gantry-sftp-field.txt %s\n' "$SFTP_OUT" | sftp -q -b - "$SANDBOX.gantry"
+run ssh "${ssh_config_args[@]}" -o BatchMode=yes "$SANDBOX.gantry" 'printf GANTRY-SFTP > "$HOME/gantry-sftp-field.txt"'
+printf 'get /home/gantry/gantry-sftp-field.txt %s\n' "$SFTP_OUT" | sftp "${ssh_config_args[@]}" -q -b - "$SANDBOX.gantry"
 grep -qx GANTRY-SFTP "$SFTP_OUT" || fail "SFTP round trip returned the wrong content"
 pass "SFTP subsystem round trip"
 

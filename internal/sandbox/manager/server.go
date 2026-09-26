@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/ejpir/gantry/internal/policyfeed"
 	"github.com/ejpir/gantry/internal/sandbox/manager/runtimeowner"
@@ -25,8 +26,7 @@ func serveManager(socketPath string, lifecycle Lifecycle) error {
 type serveOptions struct {
 	plan        servePlan
 	policyFeeds []*policyfeed.Config
-	// localAutostart must not bypass a previously configured policy feed.
-	localAutostart bool
+	feedPath    string
 	// audit receives authentication, mutation, and policy-feed records;
 	// nil defaults to stderr.
 	audit *log.Logger
@@ -63,10 +63,37 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	if err != nil {
 		return err
 	}
-	if options.localAutostart {
-		if err := allowAutomaticManager(stateDir); err != nil {
+	service.feedEnrollmentDir = filepath.Join(stateDir, "feed-enrollment")
+	// A successful explicit live activation is durable. On the next start,
+	// reload only its pinned enrollment rather than silently losing governance
+	// or requiring an external service manager to rewrite its original flags.
+	if len(options.policyFeeds) == 0 {
+		activated, err := activatedEnrollmentConfig(service.feedEnrollmentDir)
+		if err != nil {
 			return err
 		}
+		if activated != nil {
+			options.policyFeeds = []*policyfeed.Config{activated}
+			options.feedPath = filepath.Join(service.feedEnrollmentDir, "feed.json")
+		} else if err := allowAutomaticManager(stateDir); err != nil {
+			return err
+		}
+	} else if _, err := os.Lstat(filepath.Join(service.feedEnrollmentDir, "installed.json")); err == nil {
+		// An explicit -policy-feed path cannot bypass the trust pins chosen
+		// during managed enrollment merely by replacing public files in place.
+		pinned, _, err := installedEnrollmentConfig(service.feedEnrollmentDir)
+		if err != nil {
+			return fmt.Errorf("load staged organization feed: %w", err)
+		}
+		options.policyFeeds[0] = pinned
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect staged organization feed: %w", err)
+	}
+	service.feedConfigured = len(options.policyFeeds) != 0
+	service.feedOwner = owner
+	service.feedAudit = audit
+	if err := checkStagedFeedPath(service.feedEnrollmentDir, options.feedPath); err != nil {
+		return err
 	}
 	if err := addManagerListeners(service, owner, options.plan, security, audit); err != nil {
 		return err
@@ -84,6 +111,19 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	case serveErr = <-owner.ServeErrors():
 	}
 	return errors.Join(serveErr, owner.Close())
+}
+
+func checkStagedFeedPath(dir, feedPath string) error {
+	if _, err := os.Lstat(filepath.Join(dir, "installed.json")); err == nil {
+		want := filepath.Join(dir, "feed.json")
+		got, absErr := filepath.Abs(feedPath)
+		if absErr != nil || got != want {
+			return fmt.Errorf("staged organization feed requires -policy-feed %s; refusing a different feed", want)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect staged organization feed: %w", err)
+	}
+	return nil
 }
 
 func loadManagerTransportSecurity(plan servePlan, audit *log.Logger) (managerTransportSecurity, error) {

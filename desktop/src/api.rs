@@ -198,6 +198,59 @@ impl ManagerClient {
         })
     }
 
+    /// The endpoint's API version and capabilities. A policy service answers
+    /// with the manager's shape and its own capability.
+    pub fn health(&self) -> Result<(String, Vec<String>)> {
+        let health: Health = get_json(self, "/v1/health")?;
+        anyhow::ensure!(health.ok, "The endpoint reports that it is not ready");
+        anyhow::ensure!(
+            health.version == "v1",
+            "Unsupported API version; the endpoint was not replaced"
+        );
+        Ok((health.version, health.capabilities))
+    }
+
+    /// A bounded non-JSON response, such as a signed bundle.
+    pub(crate) fn get_bytes(&self, route: &str, limit: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let response = self
+            .http
+            .get(format!("{}{route}", self.base))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .map_err(|_| anyhow::anyhow!("Cannot read the selected service"))?;
+        let status = response.status();
+        let mut bytes = Vec::new();
+        response
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| anyhow::anyhow!("Response incomplete"))?;
+        anyhow::ensure!(
+            bytes.len() <= limit,
+            "Response exceeds {} KiB",
+            limit / 1024
+        );
+        if !status.is_success() {
+            let detail = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|body| {
+                    body.get("error")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_default();
+            return Err(ManagerError {
+                status: status.as_u16(),
+                message: format!(
+                    "Service returned HTTP {status}. {}",
+                    self.safe_message(&detail, &[])
+                ),
+            }
+            .into());
+        }
+        Ok(bytes)
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
         let health: Health = get_json(self, "/v1/health")?;
         anyhow::ensure!(health.ok, "The manager reports that it is not ready");
@@ -205,11 +258,16 @@ impl ManagerClient {
             health.version == "v1",
             "Unsupported manager API version; the endpoint was not replaced"
         );
+        self.inventory(health.version, health.capabilities)
+    }
+
+    /// The sandbox list, completing a snapshot whose health was just read.
+    pub fn inventory(&self, version: String, capabilities: Vec<String>) -> Result<Snapshot> {
         let list: SandboxList = get_json(self, "/v1/sandboxes")?;
         Ok(Snapshot {
-            version: health.version,
+            version,
             sandboxes: list.sandboxes,
-            capabilities: health.capabilities,
+            capabilities,
         })
     }
 }

@@ -43,6 +43,7 @@ impl Desktop {
                 Source::Remote { .. } => "Host ports on the remote manager".into(),
                 _ => format!("Host ports on {}", self.source_name()),
             }),
+            page if page.is_organization() => self.org_status(page),
             _ => None,
         }
     }
@@ -59,6 +60,7 @@ impl Desktop {
             Page::Audit => Some(self.audit_summary(cx)),
             Page::Images if self.images_registries => Some(self.registries_summary(cx)),
             Page::Images => Some(self.images_summary(cx)),
+            page if page.is_organization() => self.org_summary(page, cx),
             _ => None,
         }
     }
@@ -73,6 +75,7 @@ impl Desktop {
             Page::Audit => Some(self.audit_list(cx)),
             Page::Images if self.images_registries => Some(self.registries_list(cx)),
             Page::Images => Some(self.images_list(cx)),
+            page if page.is_organization() => self.org_list(page, cx),
             _ => None,
         }
     }
@@ -88,6 +91,16 @@ impl Desktop {
             .border_l_1()
             .border_color(cx.theme().border);
         let Some(record) = self.selected_record(cx) else {
+            if let Some(view) = self.org_empty_inspector(page, cx) {
+                return panel.child(view.header).child(
+                    div()
+                        .id("page-inspector-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .child(div().px(px(20.)).py(px(8.)).child(view.body)),
+                );
+            }
             return panel.child(empty_state(
                 self.page_icon(),
                 page.label(),
@@ -106,6 +119,7 @@ impl Desktop {
             Record::Audit(event) => self.audit_inspector(event, cx),
             Record::Image(image) => self.image_inspector(image, cx),
             Record::Registry(registry) => self.registry_inspector(registry, cx),
+            Record::Org(record) => self.org_inspector(record, cx),
             record => self.generic_inspector(record, cx),
         };
         panel

@@ -1,4 +1,4 @@
-use crate::{app::*, row_actions, theme};
+use crate::{app::*, row_actions, theme, widgets};
 use gantry_desktop::{
     forms::Kind,
     options::{Appearance, Source},
@@ -31,6 +31,11 @@ pub fn page_icon(page: Page) -> IconName {
         Page::Audit => IconName::ClipboardList,
         Page::Images => IconName::Layers,
         Page::Remotes => IconName::Server,
+        Page::OrgHosts => IconName::Server,
+        Page::OrgPolicy => IconName::FileText,
+        Page::OrgRollouts => IconName::RadioTower,
+        Page::OrgHistory => IconName::ScrollText,
+        Page::OrgEnrollment => IconName::IdCard,
     }
 }
 impl Desktop {
@@ -60,6 +65,9 @@ impl Desktop {
             Page::Images if self.images_registries => "Registries",
             Page::Images => "Local Images",
             Page::Remotes => "Connections",
+            Page::OrgPolicy if self.organization.as_ref().is_some_and(|o| o.draft.saved) => {
+                "Policy · Draft"
+            }
             _ => self.page.label(),
         }
     }
@@ -298,18 +306,36 @@ impl Desktop {
                     .text_color(cx.theme().muted_foreground),
             )
             .child(div().flex_1().min_w_0().truncate().child(label.to_owned()));
-        if page == Page::Sandboxes {
+        let badge = if page == Page::Sandboxes {
+            Some(
+                if matches!(self.connection, Connection::Connected(_) | Connection::Demo) {
+                    self.inventory.rows().len().to_string()
+                } else {
+                    "—".into()
+                },
+            )
+        } else {
+            // Organization pages count what needs attention there.
+            self.organization.as_ref().and_then(|o| match page {
+                Page::OrgHosts => Some(o.active_hosts().count().to_string()),
+                Page::OrgPolicy => {
+                    (!o.draft.changes.is_empty()).then(|| o.draft.changes.len().to_string())
+                }
+                Page::OrgRollouts => o
+                    .overview
+                    .rollout
+                    .as_ref()
+                    .filter(|r| !r.complete)
+                    .map(|r| format!("g{}", r.generation)),
+                _ => None,
+            })
+        };
+        if let Some(badge) = badge {
             content = content.child(
                 div()
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(
-                        if matches!(self.connection, Connection::Connected(_) | Connection::Demo) {
-                            self.inventory.rows().len().to_string()
-                        } else {
-                            "—".into()
-                        },
-                    ),
+                    .child(badge),
             );
         }
         Button::new(("page-nav", page.index()))
@@ -332,7 +358,9 @@ impl Desktop {
     }
     pub fn sidebar(&self, cx: &mut Context<Self>) -> Div {
         let connected = matches!(self.connection, Connection::Connected(_));
-        let local_selected = matches!(self.options.source, Source::Local(_) | Source::Demo);
+        let demo = self.options.source == Source::Demo;
+        let local_selected = matches!(self.options.source, Source::Local(_) | Source::Demo)
+            && !(demo && self.org_mode);
         let mut connections =
             div()
                 .flex()
@@ -376,12 +404,42 @@ impl Desktop {
                                 )),
                         )
                         .on_click(cx.listener(|this, _, window, cx| {
-                            if let Some(mut options) = this.local_options.clone() {
+                            if this.options.source == Source::Demo {
+                                this.show_demo_organization(false, window, cx);
+                            } else if let Some(mut options) = this.local_options.clone() {
                                 options.appearance = this.options.appearance;
                                 this.switch_source(options, window, cx);
                             }
                         })),
                 );
+        if demo {
+            connections = connections.child(
+                Button::new("connection-demo-organization")
+                    .ghost()
+                    .small()
+                    .w_full()
+                    .h(px(31.))
+                    .px_2()
+                    .selected(self.org_mode)
+                    .when(self.org_mode, |b| b.bg(cx.theme().sidebar_accent))
+                    .disabled(self.form.is_some())
+                    .accessibility_label("Demo organization")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .w(px(168.))
+                            .text_size(px(13.))
+                            .child(Icon::new(IconName::Building2).size(px(17.)))
+                            .child(div().flex_1().child("Demo · acme"))
+                            .child(widgets::chip("admin", cx.theme().warning, cx)),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_demo_organization(true, window, cx)
+                    })),
+            );
+        }
         for (index, profile) in self.profiles.iter().enumerate() {
             let name = profile.name.clone();
             let selected = matches!(&self.options.source,Source::Remote{name:n,..} if n==&name);
@@ -404,7 +462,14 @@ impl Desktop {
                             .gap_3()
                             .w(px(168.))
                             .text_size(px(13.))
-                            .child(Icon::new(IconName::Server).size(px(17.)))
+                            .child(
+                                Icon::new(if selected && self.org_mode {
+                                    IconName::Building2
+                                } else {
+                                    IconName::Server
+                                })
+                                .size(px(17.)),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -412,6 +477,9 @@ impl Desktop {
                                     .truncate()
                                     .child(workspace::text(&name)),
                             )
+                            .when(selected && self.org_mode, |d| {
+                                d.child(widgets::chip("admin", cx.theme().warning, cx))
+                            })
                             .child(div().size(px(6.)).rounded_full().bg(
                                 if selected && connected {
                                     cx.theme().success
@@ -455,7 +523,108 @@ impl Desktop {
                     cx.listener(|this, _, window, cx| this.open_form(Kind::RemoteAdd, window, cx)),
                 ),
         );
-        let navigation = div()
+        let navigation = if self.org_mode {
+            self.organization_navigation(cx)
+        } else {
+            self.workspace_navigation(cx)
+        };
+        div()
+            .w(px(theme::SIDEBAR_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().sidebar)
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .id("sidebar-region")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id("sidebar-scroll")
+                            .size_full()
+                            .overflow_y_scrollbar()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .px(px(10.))
+                                    .py_3()
+                                    .child(connections)
+                                    .child(navigation),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mx_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(self.nav_button(
+                        Page::Remotes,
+                        "Manage Connections…",
+                        IconName::Settings,
+                        self.page == Page::Remotes,
+                        cx,
+                    ))
+                    .child(
+                        div().flex().justify_end().child(
+                            Button::new("appearance")
+                                .ghost()
+                                .xsmall()
+                                .icon(match self.options.appearance {
+                                    Appearance::Dark => IconName::Moon,
+                                    Appearance::Light => IconName::Sun,
+                                    Appearance::System => IconName::Monitor,
+                                })
+                                .tooltip("Cycle system, dark, light appearance")
+                                .accessibility_label("Appearance")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.cycle_theme(window, cx)),
+                                ),
+                        ),
+                    ),
+            )
+    }
+    /// The policy service's pages, with what needs attention on each.
+    fn organization_navigation(&self, cx: &mut Context<Self>) -> Div {
+        let organization = self.organization.as_ref();
+        let name = organization
+            .map(|o| o.overview.organization.to_uppercase())
+            .unwrap_or_else(|| "ORGANIZATION".into());
+        div()
+            .flex()
+            .flex_col()
+            .gap_0()
+            .child(section(&name, cx).mt_3())
+            .children(Page::ORGANIZATION.into_iter().map(|page| {
+                self.nav_button(page, page.label(), page_icon(page), self.page == page, cx)
+            }))
+            .when_some(organization, |d, o| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .pt_4()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(Icon::new(IconName::KeyRound).size(px(13.)))
+                        .child(div().truncate().child(format!(
+                            "{} · administrator",
+                            workspace::text(&o.overview.admin)
+                        ))),
+                )
+            })
+    }
+    fn workspace_navigation(&self, cx: &mut Context<Self>) -> Div {
+        div()
             .flex()
             .flex_col()
             .gap_0()
@@ -521,71 +690,12 @@ impl Desktop {
                         this.set_images_registries(true, cx);
                         this.switch_page(Page::Images, window, cx);
                     })),
-            );
-        div()
-            .w(px(theme::SIDEBAR_WIDTH))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(cx.theme().sidebar)
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .id("sidebar-region")
-                    .test_support()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        div()
-                            .id("sidebar-scroll")
-                            .size_full()
-                            .overflow_y_scrollbar()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .px(px(10.))
-                                    .py_3()
-                                    .child(connections)
-                                    .child(navigation),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .mx_3()
-                    .py_2()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(self.nav_button(
-                        Page::Remotes,
-                        "Manage Connections…",
-                        IconName::Settings,
-                        self.page == Page::Remotes,
-                        cx,
-                    ))
-                    .child(
-                        div().flex().justify_end().child(
-                            Button::new("appearance")
-                                .ghost()
-                                .xsmall()
-                                .icon(match self.options.appearance {
-                                    Appearance::Dark => IconName::Moon,
-                                    Appearance::Light => IconName::Sun,
-                                    Appearance::System => IconName::Monitor,
-                                })
-                                .tooltip("Cycle system, dark, light appearance")
-                                .accessibility_label("Appearance")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.cycle_theme(window, cx)),
-                                ),
-                        ),
-                    ),
             )
     }
     pub fn footer(&self, cx: &App) -> Div {
+        if self.org_mode {
+            return self.organization_footer(cx);
+        }
         let (color, label) = match &self.connection {
             Connection::Connecting => (
                 cx.theme().warning,
@@ -642,6 +752,68 @@ impl Desktop {
                     "Inventory unavailable".into()
                 },
             )
+    }
+}
+impl Desktop {
+    fn organization_footer(&self, cx: &App) -> Div {
+        let (color, label) = match (&self.connection, &self.organization) {
+            (Connection::Offline(_), _) => (
+                cx.theme().danger,
+                format!("{} unavailable · retrying", self.source_name()),
+            ),
+            (_, Some(o)) => (
+                if self.options.source == Source::Demo {
+                    cx.theme().warning
+                } else {
+                    cx.theme().success
+                },
+                format!(
+                    "{} {}  ·  policy service {}  ·  {}",
+                    if self.options.source == Source::Demo {
+                        "Demo organization"
+                    } else {
+                        "Connected to"
+                    },
+                    workspace::text(&o.overview.organization),
+                    workspace::text(o.overview.feed_url.trim_end_matches("/v1/feed")),
+                    workspace::text(&o.overview.admin)
+                ),
+            ),
+            _ => (
+                cx.theme().warning,
+                format!("Connecting to {}…", self.source_name()),
+            ),
+        };
+        let right = self
+            .organization
+            .as_ref()
+            .map(|o| {
+                let count = o.active_hosts().count();
+                let hosts = format!("{count} host{}", if count == 1 { "" } else { "s" });
+                match &o.overview.rollout {
+                    Some(r) if !r.complete => format!("{hosts} · g{} rolling out", r.generation),
+                    _ if o.overview.latest > 0 => {
+                        format!("{hosts} · g{} current", o.overview.latest)
+                    }
+                    _ => format!("{hosts} · nothing published"),
+                }
+            })
+            .unwrap_or_else(|| "Organization unavailable".into());
+        div()
+            .flex()
+            .items_center()
+            .h(px(theme::STATUS_HEIGHT))
+            .flex_shrink_0()
+            .px_4()
+            .gap_2()
+            .bg(cx.theme().status_bar)
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .text_size(px(10.))
+            .text_color(cx.theme().muted_foreground)
+            .child(div().size(px(5.)).rounded_full().bg(color))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(right)
     }
 }
 fn section(label: &str, cx: &App) -> Div {

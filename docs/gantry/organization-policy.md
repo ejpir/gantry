@@ -1,12 +1,12 @@
 # Organization policy
 
-Organization policy adds rules for network access, shared directories, MCP
-tools and brokered credentials. It is optional and never relaxes Gantry's
-existing safety checks.
+Organization policy can restrict a sandbox's network, host shares, MCP tools,
+and brokered credentials. It is optional. Local settings cannot override an
+organization denial.
 
-## Start with your organization's policy
+## Apply and inspect a policy
 
-Ask your administrator for a signed bundle, its trusted public key and a
+Ask your administrator for a signed bundle, its trusted public key, and your
 profile name:
 
 ```sh
@@ -15,111 +15,138 @@ gantry start dev -image alpine:latest \
   -policy-profile developer
 ```
 
-You can also select a policy through [Organization login](organization-login.md).
-Do not enable `-oauth-custody` on a governed sandbox.
-
-## Inspect and troubleshoot
+You can also choose a policy through [Organization login](organization-login.md).
+Governed sandboxes cannot use `-oauth-custody`.
 
 ```sh
-gantry policy show dev       # saved organization policy
+gantry policy show dev       # saved policy
 gantry net-policy show dev   # effective network rules
-gantry audit dev            # recent authorization decisions
+gantry audit dev            # recent decisions
 ```
 
-In `gantry tui`, press **A** for Audit, then **Enter** to inspect an event.
-A denied operation needs an appropriate policy grant; local settings cannot
-override an organization denial.
+In `gantry tui`, press **A** to view audit events. Ask your administrator to
+review a denied operation; changing local settings cannot grant it.
 
 ## Update or remove a policy
 
-Changes apply live to a running sandbox and are saved for its next start:
+A running sandbox updates live; a stopped sandbox uses the change on its next
+start:
 
 ```sh
 gantry policy set dev -bundle updated.tar.gz -key public.pem -profile developer
+gantry policy clear dev
 ```
 
-Use `--restart` to explicitly request stop/update/resume instead:
-
-```sh
-gantry policy set dev -bundle updated.tar.gz -key public.pem \
-  -profile developer --restart
-```
-
-`gantry policy clear dev` also applies live. Add `--restart` if you want a
-controlled restart. Editing the original bundle file does not update a sandbox
-automatically.
-
-Policies expire. An expired policy denies further access and triggers sandbox
-shutdown; obtain an updated bundle before resuming.
+Add `--restart` to either command if you want a controlled stop/update/resume.
+Editing the original bundle file does not update a sandbox. An expired policy
+denies access and stops the sandbox; obtain a renewed bundle before resuming.
 
 ## Receive policy updates
 
-A long-running manager can poll one organization-wide policy feed over
-mutually authenticated HTTPS. The local configuration pins the organization,
-profile, signing key, and client identity:
-
-```json
-{
-  "version": 1,
-  "organization": "example-company",
-  "profile": "developer",
-  "url": "https://policy.example.com/v1/gantry",
-  "public_key": "org-public.pem",
-  "ca_file": "policy-service-ca.pem",
-  "client_certificate": "gantry-host.pem",
-  "client_key": "gantry-host-key.pem",
-  "poll_interval_seconds": 30
-}
-```
-
-Paths are relative to the feed configuration. The client key must have
-owner-only permissions or a protected Windows ACL. Start the receiver with:
+An organization can send signed generations to a long-running manager. For
+a manually enrolled host, place its `feed.json` and certificates beside its
+private key, then start (or restart) the manager with its existing listener and
+authentication flags plus:
 
 ```sh
-gantry serve -policy-feed organization-feed.json
+gantry serve -policy-feed /secure/host/feed.json
 ```
 
-Only one feed may be configured for a manager. The endpoint returns the
-current organization generation and signed bundle; `bundle` is base64-encoded:
+The host keeps its private key; the feed uses mutual TLS rather than your
+[organization login](organization-login.md). One feed governs **all** saved
+sandboxes on that manager, including future ones. Running sandboxes update
+live; stopped ones stay stopped. A sandbox that cannot accept a generation is
+stopped while the manager retries and keeps reporting the failure. While the
+feed is active, individual policies cannot be replaced through the manager.
 
-```json
-{
-  "version": 1,
-  "organization": "example-company",
-  "generation": 42,
-  "bundle": "H4sI..."
-}
+The service's enrollment flow below creates `feed.json`. For manually hosted
+feeds, the [configuration and protocol](architecture.md#policy-distribution-and-live-rollout)
+are in Architecture.
+
+## Run a policy service
+
+`gantry policy-service` distributes signed policy to one organization. It uses
+a separate signing key, administrator token, and host certificates. Run it at
+a URL enrolled hosts can reach:
+
+```sh
+gantry policy keygen -out ~/secure/acme-key
+gantry policy-service init -dir /srv/acme-policy -organization acme \
+  -url https://policy.acme.dev:8443 -public-key ~/secure/acme-key/public.pem
+gantry policy-service admin add -dir /srv/acme-policy -name ops-admin
+gantry policy-service serve -dir /srv/acme-policy
 ```
 
-Generation numbers must increase and cannot change content after use. Gantry
-uses conditional requests and reports the last completely applied generation
-and digest in `X-Gantry-Policy-Generation` and `X-Gantry-Policy-Digest` request
-headers. Protected manager state stages a received generation before fan-out
-and caches the signed current or pending bundle. After a crash, the manager
-restores mandatory admission and attempts the pending fan-out before serving
-lifecycle requests; failed targets remain stopped and the newer cursor remains
-unreported until retry succeeds. It never copies the mTLS client key into
-cursor state.
+`admin add` prints the token once. Keep the signing key on an administrator's
+machine, **not** on the service or in a guest share. The service's `ca.pem`
+verifies its TLS certificate; copy it to each administrator who connects.
+Rings default to `canary`, `early`, and `everyone` (override at `init` with
+repeated `-ring`).
 
-When a new generation arrives, the manager fans it out to every saved sandbox.
-Running sandboxes update without replacing their VM or daemon; stopped
-sandboxes save it for their next start. Sandboxes created later through that
-manager inherit the current snapshot. While the feed is active, manager API
-clients cannot replace or clear its policy, and low-level unmanaged VM runs are
-refused.
+Register the service as an administration workspace in Gantry desktop:
 
-Each sandbox moves network, shares, MCP, brokered credentials, persistence, and
-expiry as one fail-closed transaction. Existing shares denied by the new policy
-become inaccessible; a later generation can restore them. Active MCP sessions
-close and may reconnect under the new policy. A target that cannot reconcile is
-stopped, cannot be resumed through that manager until it accepts the current
-snapshot, and does not prevent processing other targets. The aggregate
-generation is not acknowledged until all targets succeed; the receiver retries
-it.
+```sh
+gantry remote add acme https://policy.acme.dev:8443 --ca ca.pem --token-stdin
+```
 
-Manual per-sandbox policy remains available when no organization-wide feed is
-active. The manager API and remote CLI accept `restart: true` / `--restart` to
-explicitly select controlled stop/update/resume for those manual changes.
+Supply an administrator token on stdin. This token administers the service,
+not a sandbox manager. The desktop offers **Hosts, Policy, Rollouts, History,
+and Enrollment** for this workspace.
+
+### Enroll a host manager
+
+For a manager you already registered as a remote, open the policy service's
+desktop **Enrollment** page and choose **Enroll managed remote…**. Select the
+manager, policy profile, and ring, then confirm. Desktop transfers only the
+CSR and public enrollment files between the two separately authenticated
+connections; the private key is created on the manager host and never leaves
+it. The result is **staged, not enforcing**. Publish a signed generation for
+its ring, then choose **Activate feed…** and select the remote. The manager
+verifies the pinned identity, fetches the signed generation, and applies it to
+every saved sandbox before reporting success; it does not restart. If the
+service is unreachable or has nothing published, activation is refused and
+enrollment remains staged. Failed sandbox targets are subject to a
+fail-closed stop and retried under mandatory policy; inspect any stop failure.
+Do not mistake `activating` or `configured` without an applied generation for
+enforcement.
+
+Successful activation is durable: later starts with the manager's existing
+flags reload **only** that activated, pinned feed. A staged but inactive
+manager still refuses restart without `-policy-feed`; an explicit restart with
+the displayed path remains the fallback. The enrolled host appears as `never`
+in the service until it polls. The feed URL must be reachable **from the
+manager host**, not just through an SSH forward on the desktop.
+
+To enroll a host that is *not* a registered remote, on the **host** create its
+private key and certificate request manually:
+
+```sh
+gantry policy feed-request -out ~/.gantry/acme-feed -host dev-mac-031
+```
+
+Send only `host.csr` to an administrator. In desktop **Enrollment**, enroll it
+with a profile and ring; return `feed.json`, `host.pem`, `ca.pem`, and
+`org-public.pem` to the host. Place them beside `host-key.pem`, then restart
+its existing manager with `-policy-feed ~/.gantry/acme-feed/feed.json`.
+Never send the host's private key. This manual flow is still available from
+**Enroll host…** in desktop.
+
+### Publish and monitor
+
+In desktop **Policy**, edit the draft and review its changes, then choose a
+local signing key and **Sign & Publish**. The service verifies the signature,
+organization, and enrolled profiles before making the new generation available
+to the first ring. Use **Rollouts** to promote it to later rings and **Hosts**
+to spot stalled or mismatched hosts. **Enrollment** can revoke a host.
+
+For an API client, sign locally with `gantry policy sign -signing-key`, then
+publish through the [administrator API](architecture.md#organization-policy-service).
+**History → Republish** rolls back to an earlier signed bundle under a new
+generation number; it does **not** extend that bundle's expiry.
+
+Enrollment is opt-in by each host owner; the service is not mandatory
+host-wide enforcement. See [Architecture](architecture.md#organization-policy-service)
+for transport, reporting, persistence, and security limits.
 
 ## Try a local test policy
 
@@ -131,25 +158,11 @@ gantry policy verify -bundle local-policy/bundle.tar.gz \
   -key local-policy/public.pem -profile developer
 ```
 
-Use a new output directory. The policy allows read-only access to the directory
-passed with `-mount` and denies other governed access, including network, MCP
-and credentials. Its temporary signing key is not saved and is **for testing only**.
-Use the generated bundle and public key with the launch flags above; add
-`-net=false -share "code=$PWD,ro"` for a simple offline example.
+Use a new output directory. This test policy allows read-only access to the
+chosen directory and denies other governed access, including network, MCP,
+and credentials. Its temporary signing key is **not saved**; use a stable
+signing key for real policies. To customize the example, edit
+`local-policy/source/data.json` and sign it into a *new* directory.
 
-To customize it, edit `local-policy/source/data.json`, then re-sign into a new
-directory:
-
-```sh
-gantry policy sign -data local-policy/source/data.json \
-  -out local-policy-v2 -ephemeral
-```
-
-Re-signing does not extend expiry or change an existing sandbox. Keep real
-signing keys outside the repository and guest shares. “Manager-wide” covers
-sandboxes controlled through that `gantry serve` process and its shared state;
-the trusted host owner can still stop the manager or invoke local tooling. This
-is not OS-enforced mandatory organization enrollment.
-
-For policy fields, stable signing keys, network semantics and security limits,
-see [Architecture](architecture.md#organization-policy-engine).
+For policy fields and enforcement details, see
+[Architecture](architecture.md#organization-policy-engine).
