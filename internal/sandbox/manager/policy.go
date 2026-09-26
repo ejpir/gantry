@@ -379,6 +379,7 @@ func (m *managerService) applyReceivedOrganizationPolicy(ctx context.Context, up
 		lock.Unlock()
 	}
 	if len(rolloutErrors) == 0 {
+		m.feedAppliedGen.Store(update.Generation)
 		return nil
 	}
 	// The receiver reports only these counts to the policy service; sandbox

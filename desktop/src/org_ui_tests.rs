@@ -216,7 +216,7 @@ fn managed_remote_enrollment_selects_a_registered_manager(cx: &mut TestAppContex
         assert_eq!(remotes[0].name, "managed-host");
         assert!(
             spec.help
-                .contains("Until then, no organization policy is enforced")
+                .contains("Enrollment alone does not enforce policy")
         );
         let values: Values = spec
             .fields
@@ -233,6 +233,50 @@ fn managed_remote_enrollment_selects_a_registered_manager(cx: &mut TestAppContex
             (name.as_str(), remote.name.as_str(), ring.as_str()),
             ("managed-host", "managed-host", "canary")
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn managed_activation_selects_a_registered_manager(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        desktop.update(cx, |this, cx| {
+            organization(this, cx);
+            this.config_dir = Some("/private/client".into());
+            this.profiles = vec![gantry_desktop::profiles::RemoteProfile {
+                name: "managed-host".into(),
+                url: "https://managed.example.test:8443".into(),
+                ca_cert: String::new(),
+                fingerprint: String::new(),
+            }];
+        });
+        window.render_frame(cx);
+        window.click("org-activate-feed", cx);
+        window.render_frame(cx);
+        let form = desktop.read(cx);
+        let spec = &form.form.as_ref().expect("activate feed form").spec;
+        let Kind::OrgActivateFeed { remotes, .. } = &spec.kind else {
+            panic!("wrong form")
+        };
+        assert_eq!(remotes[0].name, "managed-host");
+        assert!(spec.help.contains("published, signed generation"));
+        let values: Values = spec
+            .fields
+            .iter()
+            .map(|field| {
+                (
+                    field.key.to_owned(),
+                    zeroize::Zeroizing::new(field.value.clone()),
+                )
+            })
+            .collect();
+        let Intent::Manager(Command::Org(OrgCommand::ActivateManaged { remote, .. })) =
+            spec.build(&values, &form.host).expect("activation intent")
+        else {
+            panic!("wrong activation intent")
+        };
+        assert_eq!(remote.name, "managed-host");
     })
     .unwrap();
 }

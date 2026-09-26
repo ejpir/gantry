@@ -343,7 +343,7 @@ fn desktop_administers_a_real_policy_service() {
             name: "managed".into(),
             profile: "developer".into(),
             ring: "canary".into(),
-            remote,
+            remote: remote.clone(),
             config_dir: base.clone(),
         },
     )
@@ -429,6 +429,72 @@ fn desktop_administers_a_real_policy_service() {
     assert_eq!(published.overview.rings[0].generation, 1);
     assert_eq!(published.overview.rings[2].generation, 0);
 
+    let activation = run(
+        &connector,
+        OrgCommand::ActivateManaged {
+            remote: remote.clone(),
+            config_dir: base.clone(),
+        },
+    )
+    .unwrap();
+    assert!(activation.contains("signed g1 applied"), "{activation}");
+    assert!(staged.join("activated.json").is_file());
+    let again = run(
+        &connector,
+        OrgCommand::ActivateManaged {
+            remote: remote.clone(),
+            config_dir: base.clone(),
+        },
+    )
+    .unwrap();
+    assert!(
+        again.contains("already has a signed generation applied"),
+        "{again}"
+    );
+
+    // The process is still launched with its original flags. The durable
+    // activation marker restores the pinned feed and signed generation before
+    // the new manager starts serving, without a self-restart or flag rewrite.
+    drop(_manager);
+    let _restarted_manager = Service(
+        Process::new(&program)
+            .args([
+                "serve",
+                "-listen",
+                &format!("tls://127.0.0.1:{manager_port}"),
+                "--self-signed",
+                "--token-file",
+                &text(&manager_token),
+            ])
+            .env("GANTRY_HOME", base.join("sandboxes"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match run(
+            &connector,
+            OrgCommand::ActivateManaged {
+                remote: remote.clone(),
+                config_dir: base.clone(),
+            },
+        ) {
+            Ok(message) => {
+                assert!(
+                    message.contains("already has a signed generation applied"),
+                    "{message}"
+                );
+                break;
+            }
+            Err(error) => {
+                assert!(Instant::now() < deadline, "restored manager: {error}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
     // Once published, drafts are compared rule by rule with their base.
     let tightened = org::apply_edit(
         &edited,
@@ -449,12 +515,17 @@ fn desktop_administers_a_real_policy_service() {
     )
     .unwrap();
     let changes = snapshot(&mut connector).draft.changes;
-    assert_eq!(changes.len(), 1, "{changes:?}");
+    // A second crossing while the service runs can add an expiry change too.
+    let network_changes: Vec<_> = changes
+        .iter()
+        .filter(|change| change.kind == "network")
+        .collect();
+    assert_eq!(network_changes.len(), 1, "{changes:?}");
     assert_eq!(
         (
-            changes[0].kind.as_str(),
-            changes[0].change.as_str(),
-            changes[0].effect.as_str()
+            network_changes[0].kind.as_str(),
+            network_changes[0].change.as_str(),
+            network_changes[0].effect.as_str()
         ),
         ("network", "removed", "tightens")
     );

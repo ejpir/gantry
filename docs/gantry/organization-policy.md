@@ -43,9 +43,9 @@ denies access and stops the sandbox; obtain a renewed bundle before resuming.
 
 ## Receive policy updates
 
-An organization can send signed generations to a long-running manager. Ask
-for an enrolled host's `feed.json` and its accompanying certificates and
-public key, then start (or restart) the manager with its existing listener and
+An organization can send signed generations to a long-running manager. For
+a manually enrolled host, place its `feed.json` and certificates beside its
+private key, then start (or restart) the manager with its existing listener and
 authentication flags plus:
 
 ```sh
@@ -100,11 +100,22 @@ desktop **Enrollment** page and choose **Enroll managed remote…**. Select the
 manager, policy profile, and ring, then confirm. Desktop transfers only the
 CSR and public enrollment files between the two separately authenticated
 connections; the private key is created on the manager host and never leaves
-it. The result is **staged, not enforcing**. Restart that manager with its
-existing `gantry serve` flags plus the `-policy-feed` path displayed by desktop.
-A restart without that staged feed is refused; the manager cannot restart
-silently without the intended governance. The enrolled host appears as `never`
-in the service until it polls.
+it. The result is **staged, not enforcing**. Publish a signed generation for
+its ring, then choose **Activate feed…** and select the remote. The manager
+verifies the pinned identity, fetches the signed generation, and applies it to
+every saved sandbox before reporting success; it does not restart. If the
+service is unreachable or has nothing published, activation is refused and
+enrollment remains staged. Failed sandbox targets are subject to a
+fail-closed stop and retried under mandatory policy; inspect any stop failure.
+Do not mistake `activating` or `configured` without an applied generation for
+enforcement.
+
+Successful activation is durable: later starts with the manager's existing
+flags reload **only** that activated, pinned feed. A staged but inactive
+manager still refuses restart without `-policy-feed`; an explicit restart with
+the displayed path remains the fallback. The enrolled host appears as `never`
+in the service until it polls. The feed URL must be reachable **from the
+manager host**, not just through an SSH forward on the desktop.
 
 To enroll a host that is *not* a registered remote, on the **host** create its
 private key and certificate request manually:

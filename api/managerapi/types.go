@@ -52,11 +52,12 @@ type PolicyFeedInstallRequest struct {
 
 // PolicyFeedStatus never exposes the host's private key or certificate request.
 type PolicyFeedStatus struct {
-	EnrollmentState string `json:"state"`
-	Host            string `json:"host,omitempty"`
-	Organization    string `json:"organization,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	ConfigPath      string `json:"configPath,omitempty"`
+	EnrollmentState   string `json:"state"`
+	Host              string `json:"host,omitempty"`
+	Organization      string `json:"organization,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	ConfigPath        string `json:"configPath,omitempty"`
+	AppliedGeneration uint64 `json:"appliedGeneration,omitempty"`
 }
 
 // Sandbox is the reported state of one sandbox.

@@ -41,6 +41,10 @@ pub enum Kind {
         remotes: Vec<crate::profiles::RemoteProfile>,
         config_dir: std::path::PathBuf,
     },
+    OrgActivateFeed {
+        remotes: Vec<crate::profiles::RemoteProfile>,
+        config_dir: std::path::PathBuf,
+    },
     OrgRule(Box<OrgRuleForm>),
     OrgDns(Box<OrgDraft>),
     OrgPublish(Box<OrgPublishForm>),
@@ -529,8 +533,21 @@ impl Spec {
                     select("profile", "Policy profile", profiles.clone()),
                     select("ring", "Rollout ring", rings.clone()),
                 ];
-                help = "Enroll a registered remote manager. Its private key stays on that host; no files are copied through this desktop. Enrollment affects every sandbox on that manager once you explicitly restart it with the staged -policy-feed config. Until then, no organization policy is enforced. Do not select a different organization service as the remote.".into();
+                help = "Enroll a registered remote manager. Its private key stays on that host; no files are copied through this desktop. Enrollment alone does not enforce policy. Publish a signed generation, then use Activate feed… to apply it without restarting. Do not select a different organization service as the remote.".into();
                 "Enroll managed remote"
+            }
+            Kind::OrgActivateFeed { remotes, .. } => {
+                let names: Vec<String> = remotes.iter().map(|r| r.name.clone()).collect();
+                fields = vec![Field {
+                    kind: FieldKind::Select(names.clone()),
+                    ..field(
+                        "remote",
+                        "Staged remote manager",
+                        names.first().cloned().unwrap_or_default(),
+                    )
+                }];
+                help = "Explicitly activate an enrolled remote without restarting it. Requires a reachable feed with a published, signed generation. The manager applies it to every sandbox before confirming. A partial rollout remains pending with mandatory admission and retries; inspect any failed targets rather than claiming enforcement. If no generation is available, it remains staged and no activation is claimed.".into();
+                "Activate feed"
             }
             Kind::OrgEnroll { profiles, rings } => {
                 let select = |key, label: &str, options: &[String]| Field {
@@ -974,6 +991,22 @@ impl Spec {
                     name,
                     profile: required("profile")?,
                     ring: required("ring")?,
+                    remote: remote.clone(),
+                    config_dir: config_dir.clone(),
+                })
+            }
+            Kind::OrgActivateFeed {
+                remotes,
+                config_dir,
+            } => {
+                let remote_name = required("remote")?;
+                let remote = remotes
+                    .iter()
+                    .find(|r| r.name == remote_name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("The selected remote is no longer in this form")
+                    })?;
+                Command::Org(crate::org::OrgCommand::ActivateManaged {
                     remote: remote.clone(),
                     config_dir: config_dir.clone(),
                 })

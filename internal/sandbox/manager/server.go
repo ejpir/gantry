@@ -63,15 +63,35 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	if err != nil {
 		return err
 	}
-	// A staged enrollment is an explicit governance intent too. No kind of
-	// restart may silently replace a feed-enabled manager with an ungoverned one.
+	service.feedEnrollmentDir = filepath.Join(stateDir, "feed-enrollment")
+	// A successful explicit live activation is durable. On the next start,
+	// reload only its pinned enrollment rather than silently losing governance
+	// or requiring an external service manager to rewrite its original flags.
 	if len(options.policyFeeds) == 0 {
-		if err := allowAutomaticManager(stateDir); err != nil {
+		activated, err := activatedEnrollmentConfig(service.feedEnrollmentDir)
+		if err != nil {
 			return err
 		}
+		if activated != nil {
+			options.policyFeeds = []*policyfeed.Config{activated}
+			options.feedPath = filepath.Join(service.feedEnrollmentDir, "feed.json")
+		} else if err := allowAutomaticManager(stateDir); err != nil {
+			return err
+		}
+	} else if _, err := os.Lstat(filepath.Join(service.feedEnrollmentDir, "installed.json")); err == nil {
+		// An explicit -policy-feed path cannot bypass the trust pins chosen
+		// during managed enrollment merely by replacing public files in place.
+		pinned, _, err := installedEnrollmentConfig(service.feedEnrollmentDir)
+		if err != nil {
+			return fmt.Errorf("load staged organization feed: %w", err)
+		}
+		options.policyFeeds[0] = pinned
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect staged organization feed: %w", err)
 	}
-	service.feedEnrollmentDir = filepath.Join(stateDir, "feed-enrollment")
 	service.feedConfigured = len(options.policyFeeds) != 0
+	service.feedOwner = owner
+	service.feedAudit = audit
 	if err := checkStagedFeedPath(service.feedEnrollmentDir, options.feedPath); err != nil {
 		return err
 	}

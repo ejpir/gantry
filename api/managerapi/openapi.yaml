@@ -63,7 +63,7 @@ paths:
   /v1/policy-feed/enrollment/install:
     post:
       operationId: installPolicyFeedEnrollment
-      description: Pins the returned public files to the prepared CSR and stages a feed for an explicit restart.
+      description: Pins the returned public files to the prepared CSR and stages a feed for explicit activation or restart.
       requestBody:
         required: true
         content:
@@ -72,6 +72,21 @@ paths:
       responses:
         "200":
           description: Staged, not yet enforced
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
+  /v1/policy-feed/enrollment/activate:
+    post:
+      operationId: activatePolicyFeedEnrollment
+      description: Applies an available signed generation before attaching the receiver without restarting. Fails if no generation is available; partial fan-out remains governed and retries.
+      responses:
+        "200":
+          description: Live receiver with a generation applied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
+        "202":
+          description: A verified generation is pending on failed targets; retrying fail closed
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
@@ -572,11 +587,12 @@ components:
       type: object
       required: [state]
       properties:
-        state: { type: string, enum: [none, awaiting-enrollment, restart-required, configured] }
+        state: { type: string, enum: [none, awaiting-enrollment, restart-required, activating, configured] }
         host: { type: string }
         organization: { type: string }
         profile: { type: string }
         configPath: { type: string }
+        appliedGeneration: { type: integer, format: uint64 }
     DashboardSnapshot:
       $ref: "#/components/schemas/WireHostSnapshot"
     DashboardActionRequest:

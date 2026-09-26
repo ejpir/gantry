@@ -76,6 +76,11 @@ func newEnrollmentAuthority(t *testing.T) enrollmentAuthority {
 
 func (a enrollmentAuthority) files(t *testing.T, csrPEM string) map[string]string {
 	t.Helper()
+	return a.filesFor(t, csrPEM, "acme", "developer", "https://policy.example.test/v1/feed")
+}
+
+func (a enrollmentAuthority) filesFor(t *testing.T, csrPEM, organization, profile, feedURL string) map[string]string {
+	t.Helper()
 	csrBlock, _ := pem.Decode([]byte(csrPEM))
 	if csrBlock == nil {
 		t.Fatal("missing CSR")
@@ -88,14 +93,17 @@ func (a enrollmentAuthority) files(t *testing.T, csrPEM string) map[string]strin
 		t.Fatal(err)
 	}
 	now := time.Now()
-	clientTemplate := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: csr.Subject.CommonName, Organization: []string{"acme"}}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+	clientTemplate := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: csr.Subject.CommonName, Organization: []string{organization}}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 	certDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, a.ca, csr.PublicKey, a.caKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := `{"version":1,"organization":"acme","profile":"developer","url":"https://policy.example.test/v1/feed","public_key":"org-public.pem","ca_file":"ca.pem","client_certificate":"host.pem","client_key":"host-key.pem"}`
+	config, err := json.Marshal(policyfeed.Config{Version: 1, Organization: organization, Profile: profile, URL: feedURL, PublicKeyFile: api.PublicKeyFile, CAFile: api.CAFile, ClientCertificate: api.HostCertFile, ClientKey: api.HostKeyFile})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return map[string]string{
-		api.FeedConfigFile: config,
+		api.FeedConfigFile: string(config),
 		api.HostCertFile:   string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})),
 		api.CAFile:         string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: a.caDER})),
 		api.PublicKeyFile:  string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: a.orgDER})),

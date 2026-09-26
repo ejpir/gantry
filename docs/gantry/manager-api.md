@@ -48,10 +48,12 @@ cannot retarget startup. `GANTRY_MANAGER_SOCKET` overrides are connect-only.
 TLS, token, listener, and policy-feed flags cannot accompany `--ensure`.
 
 An existing manager holding the state lock is never displaced, including a
-TLS-only manager. Saved organization policy-feed state also blocks automatic
-startup: restart that manager explicitly with its correct `-policy-feed`
-configuration. The desktop uses this command only for its default local
-connection; remote failures never cause local startup.
+TLS-only manager. A staged but inactive policy feed blocks automatic startup;
+restart explicitly with its correct `-policy-feed` configuration or activate
+a published signed generation through the enrollment API. A successfully
+activated feed is restored from its validated pinned identity on later starts.
+The desktop uses `--ensure` only for its default local connection; remote
+failures never cause local startup.
 
 The sandbox-specific `ctl.sock` remains an internal broker protocol. Clients
 should use the manager API, not substitute that socket for `manager.sock`.
@@ -193,8 +195,14 @@ feed snapshot.
 `GET/POST /v1/policy-feed/enrollment` and
 `POST /v1/policy-feed/enrollment/install` stage an enrolled manager's identity
 without exporting its private key. They require manager authentication and are
-advertised by `policy-feed-enroll-v1`. Staging does not activate the feed:
-restart with the returned config path. See
+advertised by `policy-feed-enroll-v1`. Staging does not activate the feed.
+The separate `policy-feed-activate-v1` capability advertises
+`POST /v1/policy-feed/enrollment/activate`, which requires an available signed
+generation and applies it to every sandbox before attaching a live receiver,
+without restarting. `appliedGeneration` on the enrollment status distinguishes
+successful fan-out from a still-pending activation. Only a successfully
+activated pinned feed is restored automatically on later manager starts.
+See
 [Organization policy](organization-policy.md#enroll-a-host-manager).
 
 Low-level run accepts manager-host asset paths and bounded input, output, and

@@ -1097,14 +1097,30 @@ staged. `GET /v1/policy-feed/enrollment` reports state without the private key.
 A failed service write is never replayed blindly; an enrolled-but-not-installed
 host must be inspected and either completed or explicitly revoked.
 
-Enrollment does **not** start a receiver. The staged `feed.json` must be
-supplied in an explicit manager restart with the original listener and token
-flags. Once installation verifies the feed, the persistent `policy-feeds` marker
-prevents an ungoverned restart (including explicit `serve` without a feed), and a staged identity refuses a
-different feed path. Until restart, the desktop displays `restart-required`,
-not `active`; a configured receiver may still be waiting for its first valid
-signed generation. Live feed activation would require a separate fail-closed
-admission and runtime-ownership design.
+Enrollment does **not** start a receiver. Once installation verifies the
+feed, a persistent `policy-feeds` marker prevents an ungoverned restart, and a
+staged identity refuses a different feed path. `restart-required` never means
+an organization policy has been applied.
+
+**Live activation** is a separate authenticated
+`POST /v1/policy-feed/enrollment/activate` action. It rereads the host's
+pinned enrollment, obtains a published signed generation over mTLS, and uses
+the manager-wide admission barrier to apply it to every saved sandbox. If the
+service is unreachable or has nothing published, the action fails and leaves
+the enrollment staged. If some sandboxes refuse the verified generation, the
+manager attempts a fail-closed stop; mandatory admission remains in place and
+the receiver retries the pending rollout (`activating`, not an aggregate
+acknowledgement). Inspect any stop failure before claiming enforcement. The
+receiver is attached to runtime ownership only after the attempted fan-out;
+shutdown joins its background task before releasing the transport and state
+lock. The response's `appliedGeneration` is nonzero only after complete
+fan-out; `configured` alone is not proof of an applied generation.
+
+After verified application, `activated.json` makes activation durable. A
+subsequent start with the original listener and token flags restores only this
+validated, pinned feed and its signed state before opening manager listeners.
+A merely staged enrollment still requires an explicit `-policy-feed` restart.
+No self-restart or manager-service credential handoff occurs.
 
 Control of the service, or of an administrator token, cannot forge policy
 content. It can withhold or delay generations, and it can republish any

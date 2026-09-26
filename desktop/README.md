@@ -205,8 +205,12 @@ workspace pages for the organization's:
 - **Enrollment:** what hosts pin, and the certificates issued so far.
   - **Enroll managed remote…** selects an existing remote manager profile,
     creates its private key on that host, and stages its feed configuration
-    without copying files. Restart the manager with the displayed
-    `-policy-feed` path to begin enforcement; enrollment alone does not.
+    without copying files. Enrollment alone does not enforce policy.
+  - After publishing a signed generation, **Activate feed…** verifies and
+    applies it on the selected remote without restarting. The service must be
+    reachable from that host; failed targets are stopped where possible and
+    retried under mandatory admission. Activation
+    survives subsequent restarts using the manager's existing serve flags.
   - **Enroll host…** takes the `host.csr` from `gantry policy feed-request`
     and saves the host's `feed.json` and certificates to a new folder.
   - **Revoke…** makes the feed refuse a host.

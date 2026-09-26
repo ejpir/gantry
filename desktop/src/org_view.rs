@@ -214,6 +214,15 @@ impl Desktop {
                         Some(Kind::OrgManagedEnroll {
                             profiles: o.profiles(),
                             rings: o.rings(),
+                            remotes: remotes.clone(),
+                            config_dir: config_dir.clone(),
+                        }),
+                        cx,
+                    ));
+                    toolbar = toolbar.child(self.org_button(
+                        "org-activate-feed",
+                        "Activate feed…",
+                        Some(Kind::OrgActivateFeed {
                             remotes,
                             config_dir: config_dir.clone(),
                         }),

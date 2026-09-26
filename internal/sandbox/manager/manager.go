@@ -1,13 +1,16 @@
 package manager
 
 import (
+	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/manager/operationstate"
+	"github.com/ejpir/gantry/internal/sandbox/manager/runtimeowner"
 )
 
 const (
@@ -46,6 +49,9 @@ type managerService struct {
 	feedMu            sync.Mutex
 	feedEnrollmentDir string
 	feedConfigured    bool
+	feedOwner         *runtimeowner.Owner
+	feedAudit         *log.Logger
+	feedAppliedGen    atomic.Uint64
 
 	// organizationPolicyMu is the manager-wide admission barrier. Lifecycle
 	// operations and new exec/SSH sessions hold it for reading before taking a
@@ -72,6 +78,7 @@ func (m *managerService) handler() http.Handler {
 	mux.HandleFunc("GET /v1/policy-feed/enrollment", m.handleFeedEnrollmentStatus)
 	mux.HandleFunc("POST /v1/policy-feed/enrollment", m.handlePrepareFeedEnrollment)
 	mux.HandleFunc("POST /v1/policy-feed/enrollment/install", m.handleInstallFeedEnrollment)
+	mux.HandleFunc("POST /v1/policy-feed/enrollment/activate", m.handleActivateFeedEnrollment)
 	mux.HandleFunc("GET /v1/openapi.yaml", m.handleOpenAPI)
 	mux.HandleFunc("GET /v1/sandboxes", m.handleListSandboxes)
 	mux.HandleFunc("POST /v1/sandboxes", m.handleCreateSandbox)
@@ -109,7 +116,7 @@ func (m *managerService) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		health.Capabilities = []string{"dashboard-control-v1"}
 	}
 	if m.feedEnrollmentDir != "" {
-		health.Capabilities = append(health.Capabilities, "policy-feed-enroll-v1")
+		health.Capabilities = append(health.Capabilities, "policy-feed-enroll-v1", "policy-feed-activate-v1")
 	}
 	writeManagerJSON(w, http.StatusOK, health)
 }

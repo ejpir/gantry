@@ -854,9 +854,9 @@ gantry<span class="w"> </span>policy<span class="w"> </span>clear<span class="w"
 Editing the original bundle file does not update a sandbox. An expired policy
 denies access and stops the sandbox; obtain a renewed bundle before resuming.</p>
 <h2 id="organization-policy/receive-policy-updates" tabindex="-1">Receive policy updates</h2>
-<p>An organization can send signed generations to a long-running manager. Ask
-for an enrolled host's <code>feed.json</code> and its accompanying certificates and
-public key, then start (or restart) the manager with its existing listener and
+<p>An organization can send signed generations to a long-running manager. For
+a manually enrolled host, place its <code>feed.json</code> and certificates beside its
+private key, then start (or restart) the manager with its existing listener and
 authentication flags plus:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> sh</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="sh example"><code>gantry<span class="w"> </span>serve<span class="w"> </span>-policy-feed<span class="w"> </span>/secure/host/feed.json
 </code></pre></div>
@@ -896,11 +896,21 @@ desktop <strong>Enrollment</strong> page and choose <strong>Enroll managed remot
 manager, policy profile, and ring, then confirm. Desktop transfers only the
 CSR and public enrollment files between the two separately authenticated
 connections; the private key is created on the manager host and never leaves
-it. The result is <strong>staged, not enforcing</strong>. Restart that manager with its
-existing <code>gantry serve</code> flags plus the <code>-policy-feed</code> path displayed by desktop.
-A restart without that staged feed is refused; the manager cannot restart
-silently without the intended governance. The enrolled host appears as <code>never</code>
-in the service until it polls.</p>
+it. The result is <strong>staged, not enforcing</strong>. Publish a signed generation for
+its ring, then choose <strong>Activate feed…</strong> and select the remote. The manager
+verifies the pinned identity, fetches the signed generation, and applies it to
+every saved sandbox before reporting success; it does not restart. If the
+service is unreachable or has nothing published, activation is refused and
+enrollment remains staged. Failed sandbox targets are subject to a
+fail-closed stop and retried under mandatory policy; inspect any stop failure.
+Do not mistake <code>activating</code> or <code>configured</code> without an applied generation for
+enforcement.</p>
+<p>Successful activation is durable: later starts with the manager's existing
+flags reload <strong>only</strong> that activated, pinned feed. A staged but inactive
+manager still refuses restart without <code>-policy-feed</code>; an explicit restart with
+the displayed path remains the fallback. The enrolled host appears as <code>never</code>
+in the service until it polls. The feed URL must be reachable <strong>from the
+manager host</strong>, not just through an SSH forward on the desktop.</p>
 <p>To enroll a host that is <em>not</em> a registered remote, on the <strong>host</strong> create its
 private key and certificate request manually:</p>
 <div class="code-block"><div class="code-toolbar"><span><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> sh</span><button type="button" class="copy-code" hidden data-enhance aria-label="Copy example"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button></div><pre tabindex="0" aria-label="sh example"><code>gantry<span class="w"> </span>policy<span class="w"> </span>feed-request<span class="w"> </span>-out<span class="w"> </span>~/.gantry/acme-feed<span class="w"> </span>-host<span class="w"> </span>dev-mac-031
@@ -1714,10 +1724,12 @@ replaced. A <code>-socket</code> argument to <code>--ensure</code> can confirm t
 cannot retarget startup. <code>GANTRY_MANAGER_SOCKET</code> overrides are connect-only.
 TLS, token, listener, and policy-feed flags cannot accompany <code>--ensure</code>.</p>
 <p>An existing manager holding the state lock is never displaced, including a
-TLS-only manager. Saved organization policy-feed state also blocks automatic
-startup: restart that manager explicitly with its correct <code>-policy-feed</code>
-configuration. The desktop uses this command only for its default local
-connection; remote failures never cause local startup.</p>
+TLS-only manager. A staged but inactive policy feed blocks automatic startup;
+restart explicitly with its correct <code>-policy-feed</code> configuration or activate
+a published signed generation through the enrollment API. A successfully
+activated feed is restored from its validated pinned identity on later starts.
+The desktop uses <code>--ensure</code> only for its default local connection; remote
+failures never cause local startup.</p>
 <p>The sandbox-specific <code>ctl.sock</code> remains an internal broker protocol. Clients
 should use the manager API, not substitute that socket for <code>manager.sock</code>.</p>
 <h2 id="manager-api/serve-over-tls" tabindex="-1">Serve over TLS</h2>
@@ -1830,8 +1842,14 @@ feed snapshot.</p>
 <p><code>GET/POST /v1/policy-feed/enrollment</code> and
 <code>POST /v1/policy-feed/enrollment/install</code> stage an enrolled manager's identity
 without exporting its private key. They require manager authentication and are
-advertised by <code>policy-feed-enroll-v1</code>. Staging does not activate the feed:
-restart with the returned config path. See
+advertised by <code>policy-feed-enroll-v1</code>. Staging does not activate the feed.
+The separate <code>policy-feed-activate-v1</code> capability advertises
+<code>POST /v1/policy-feed/enrollment/activate</code>, which requires an available signed
+generation and applies it to every sandbox before attaching a live receiver,
+without restarting. <code>appliedGeneration</code> on the enrollment status distinguishes
+successful fan-out from a still-pending activation. Only a successfully
+activated pinned feed is restored automatically on later manager starts.
+See
 <a href="#organization-policy/enroll-a-host-manager">Organization policy</a>.</p>
 <p>Low-level run accepts manager-host asset paths and bounded input, output, and
 timeouts. It is not named-sandbox creation and is disabled while an
@@ -3177,14 +3195,28 @@ match, exact feed URL/profile, and fixed local filenames before marking it
 staged. <code>GET /v1/policy-feed/enrollment</code> reports state without the private key.
 A failed service write is never replayed blindly; an enrolled-but-not-installed
 host must be inspected and either completed or explicitly revoked.</p>
-<p>Enrollment does <strong>not</strong> start a receiver. The staged <code>feed.json</code> must be
-supplied in an explicit manager restart with the original listener and token
-flags. Once installation verifies the feed, the persistent <code>policy-feeds</code> marker
-prevents an ungoverned restart (including explicit <code>serve</code> without a feed), and a staged identity refuses a
-different feed path. Until restart, the desktop displays <code>restart-required</code>,
-not <code>active</code>; a configured receiver may still be waiting for its first valid
-signed generation. Live feed activation would require a separate fail-closed
-admission and runtime-ownership design.</p>
+<p>Enrollment does <strong>not</strong> start a receiver. Once installation verifies the
+feed, a persistent <code>policy-feeds</code> marker prevents an ungoverned restart, and a
+staged identity refuses a different feed path. <code>restart-required</code> never means
+an organization policy has been applied.</p>
+<p><strong>Live activation</strong> is a separate authenticated
+<code>POST /v1/policy-feed/enrollment/activate</code> action. It rereads the host's
+pinned enrollment, obtains a published signed generation over mTLS, and uses
+the manager-wide admission barrier to apply it to every saved sandbox. If the
+service is unreachable or has nothing published, the action fails and leaves
+the enrollment staged. If some sandboxes refuse the verified generation, the
+manager attempts a fail-closed stop; mandatory admission remains in place and
+the receiver retries the pending rollout (<code>activating</code>, not an aggregate
+acknowledgement). Inspect any stop failure before claiming enforcement. The
+receiver is attached to runtime ownership only after the attempted fan-out;
+shutdown joins its background task before releasing the transport and state
+lock. The response's <code>appliedGeneration</code> is nonzero only after complete
+fan-out; <code>configured</code> alone is not proof of an applied generation.</p>
+<p>After verified application, <code>activated.json</code> makes activation durable. A
+subsequent start with the original listener and token flags restores only this
+validated, pinned feed and its signed state before opening manager listeners.
+A merely staged enrollment still requires an explicit <code>-policy-feed</code> restart.
+No self-restart or manager-service credential handoff occurs.</p>
 <p>Control of the service, or of an administrator token, cannot forge policy
 content. It can withhold or delay generations, and it can republish any
 earlier, still-unexpired signed bundle under a new number, which reverts hosts

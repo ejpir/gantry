@@ -127,12 +127,16 @@ func testManagedFeedEnrollment(ctx context.Context, harness *policyFeedHarness, 
 	if err != nil || status != http.StatusForbidden {
 		return fmt.Errorf("feed enrollment route bypassed manager authentication: %d %v %s", status, err, body)
 	}
+	status, body, _, err = unauthorized.do(ctx, http.MethodPost, route+"/activate", nil, nil)
+	if err != nil || status != http.StatusForbidden {
+		return fmt.Errorf("feed activation route bypassed manager authentication: %d %v %s", status, err, body)
+	}
 	var health managerapi.Health
 	if _, err := call(http.MethodGet, "/v1/health", nil, http.StatusOK, &health); err != nil {
 		return err
 	}
-	if !slicesContains(health.Capabilities, "policy-feed-enroll-v1") {
-		return fmt.Errorf("manager executable %q does not advertise policy-feed-enroll-v1 (capabilities: %v); use a Gantry binary built from this checkout", gantry, health.Capabilities)
+	if !slicesContains(health.Capabilities, "policy-feed-enroll-v1") || !slicesContains(health.Capabilities, "policy-feed-activate-v1") {
+		return fmt.Errorf("manager executable %q does not advertise managed feed enrollment and activation (capabilities: %v); use a Gantry binary built from this checkout", gantry, health.Capabilities)
 	}
 	// Neither the service's administrator token nor the manager bearer token
 	// is sent to the other endpoint.
@@ -208,6 +212,18 @@ func testManagedFeedEnrollment(ctx context.Context, harness *policyFeedHarness, 
 	}
 	if _, err := call(http.MethodPost, route+"/install", install, http.StatusOK, &staged); err != nil {
 		return err
+	}
+	// The policy service has not published any signed generation. Activation
+	// must leave this host staged, not accept lifecycle writes as governed.
+	if _, err := call(http.MethodPost, route+"/activate", nil, http.StatusConflict, nil); err != nil {
+		return err
+	}
+	var stillStaged managerapi.PolicyFeedStatus
+	if _, err := call(http.MethodGet, route, nil, http.StatusOK, &stillStaged); err != nil {
+		return err
+	}
+	if stillStaged.EnrollmentState != "restart-required" || stillStaged.AppliedGeneration != 0 {
+		return fmt.Errorf("unpublished feed was activated: %+v", stillStaged)
 	}
 	stop()
 	// A cold manager must refuse to start ungoverned even when the caller

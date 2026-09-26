@@ -200,7 +200,11 @@ struct ManagedFeedRequest {
 struct ManagedFeedStatus {
     state: String,
     #[serde(default)]
+    organization: String,
+    #[serde(default)]
     config_path: String,
+    #[serde(default)]
+    applied_generation: u64,
 }
 
 // ---------------------------------------------------------------- document
@@ -442,6 +446,10 @@ pub enum OrgCommand {
         remote: crate::profiles::RemoteProfile,
         config_dir: PathBuf,
     },
+    ActivateManaged {
+        remote: crate::profiles::RemoteProfile,
+        config_dir: PathBuf,
+    },
     MoveHost {
         name: String,
         ring: String,
@@ -478,6 +486,7 @@ impl OrgCommand {
             Self::Republish { .. } => "Roll back",
             Self::Enroll { .. } => "Enroll host",
             Self::EnrollManaged { .. } => "Enroll managed remote",
+            Self::ActivateManaged { .. } => "Activate feed",
             Self::MoveHost { .. } => "Move host",
             Self::Revoke { .. } => "Revoke host",
             Self::Download { .. } => "Download bundle",
@@ -494,6 +503,7 @@ impl OrgCommand {
             | Self::EnrollManaged { name, .. }
             | Self::MoveHost { name, .. }
             | Self::Revoke { name } => name.clone(),
+            Self::ActivateManaged { remote, .. } => remote.name.clone(),
             Self::Download { generation, .. } => format!("g{generation}"),
         }
     }
@@ -513,6 +523,7 @@ impl OrgCommand {
             Self::Revoke { name } => format!(
                 "The feed refuses {name}'s certificate from its next poll. The host keeps enforcing the last generation it applied until that expires. This cannot be undone; enroll it again with a new request."
             ),
+            Self::ActivateManaged { .. } => "The host verifies and applies a published signed generation before confirming activation. Sandboxes that cannot accept it are subject to a fail-closed stop while the host retries; inspect any stop failure. An unreachable feed or an unpublished policy leaves enrollment staged.".into(),
             _ => String::new(),
         }
     }
@@ -694,9 +705,83 @@ impl ManagerClient {
                     "Manager did not confirm a staged enrollment; inspect its status before restarting"
                 );
                 format!(
-                    "Enrolled {name} on {}. NOT ENFORCING YET: restart that manager with -policy-feed {} (keeping its other serve flags).",
+                    "Enrolled {name} on {}. NOT ENFORCING YET: publish a signed generation, then choose Activate feed…; or restart that manager with -policy-feed {} (keeping its other serve flags).",
                     remote.name, installed.config_path
                 )
+            }
+            OrgCommand::ActivateManaged { remote, config_dir } => {
+                progress("Verifying the staged host and service identity");
+                let (current, token) = crate::profiles::load(config_dir, &remote.name)?;
+                ensure!(
+                    current == *remote,
+                    "The remote profile changed; reopen activation."
+                );
+                let manager = ManagerClient::remote(&current, token.expose())?;
+                let (_, capabilities) = manager.health()?;
+                ensure!(
+                    capabilities.iter().any(|c| c == "policy-feed-activate-v1"),
+                    "The remote manager does not support live feed activation; update it or use an explicit -policy-feed restart."
+                );
+                ensure!(
+                    !capabilities.iter().any(|c| c == CAPABILITY),
+                    "The selected remote is another policy service, not a sandbox manager."
+                );
+                let overview: Overview = self.request(
+                    "GET",
+                    "/v1/admin/overview",
+                    None::<&()>,
+                    Duration::from_secs(15),
+                    &[],
+                )?;
+                let staged: ManagedFeedStatus = manager.request(
+                    "GET",
+                    "/v1/policy-feed/enrollment",
+                    None::<&()>,
+                    Duration::from_secs(15),
+                    &[],
+                )?;
+                ensure!(
+                    staged.organization == overview.organization,
+                    "The manager is not enrolled in this organization; choose its policy service."
+                );
+                ensure!(
+                    matches!(
+                        staged.state.as_str(),
+                        "restart-required" | "activating" | "configured"
+                    ),
+                    "No installed feed is ready on {} ({}). Enroll it first.",
+                    remote.name,
+                    staged.state
+                );
+                if staged.state == "configured" {
+                    if staged.applied_generation == 0 {
+                        format!(
+                            "{} is already polling but has no signed generation applied. Publish a policy and check feed connectivity from that host; no restart is needed.",
+                            remote.name
+                        )
+                    } else {
+                        format!(
+                            "{} already has a signed generation applied (g{})",
+                            remote.name, staged.applied_generation
+                        )
+                    }
+                } else {
+                    progress("Applying the signed feed before live activation");
+                    let status: ManagedFeedStatus = manager.request(
+                        "POST", "/v1/policy-feed/enrollment/activate", None::<&()>, Duration::from_secs(15), &[],
+                    ).context("Activation outcome unknown. Check that manager's enrollment status before retrying; no request is automatically replayed.")?;
+                    if status.applied_generation != 0 {
+                        format!(
+                            "Activated {} without restarting · signed g{} applied to every saved sandbox",
+                            remote.name, status.applied_generation
+                        )
+                    } else {
+                        format!(
+                            "Activation pending on {}: a signed generation is being retried under mandatory admission. Inspect failed sandboxes and host status before claiming enforcement.",
+                            remote.name
+                        )
+                    }
+                }
             }
             OrgCommand::MoveHost { name, ring } => {
                 validate_name(name)?;
