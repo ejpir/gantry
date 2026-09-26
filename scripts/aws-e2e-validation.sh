@@ -206,8 +206,15 @@ run_macos_validation() {
 			[ -s "$required_path" ] || { echo "required guest asset missing: $required_path" >&2; exit 1; }
 		done
 
+		# Keep field-host SSH files (including root-owned EC2 .ssh trees) untouched.
+		# OpenSSH on macOS does not use HOME for its default config lookup, so
+		# the SSH battery also receives the explicit path to this private config.
+		MAC_SSH_HOME=$MAC_TMP/ssh-home
+		mkdir -m 700 "$MAC_SSH_HOME"
 		echo "===== macOS HVF: SSH/Dev Containers battery ====="
-		GANTRY_TEST_ROOT="$MAC_FIELD_ASSETS" \
+		HOME="$MAC_SSH_HOME" \
+			GANTRY_TEST_SSH_CONFIG="$MAC_SSH_HOME/.ssh/config" \
+			GANTRY_TEST_ROOT="$MAC_FIELD_ASSETS" \
 			GANTRY_TEST_EXE="$MAC_GANTRY" \
 			GANTRY_TEST_KERNEL="$MAC_KERNEL" \
 			GANTRY_TEST_ROOTFS="$MAC_ROOTFS" \
