@@ -132,7 +132,7 @@ func testManagedFeedEnrollment(ctx context.Context, harness *policyFeedHarness, 
 		return err
 	}
 	if !slicesContains(health.Capabilities, "policy-feed-enroll-v1") {
-		return errors.New("managed manager has no enrollment capability")
+		return fmt.Errorf("manager executable %q does not advertise policy-feed-enroll-v1 (capabilities: %v); use a Gantry binary built from this checkout", gantry, health.Capabilities)
 	}
 	// Neither the service's administrator token nor the manager bearer token
 	// is sent to the other endpoint.

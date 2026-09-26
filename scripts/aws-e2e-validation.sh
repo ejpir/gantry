@@ -29,7 +29,7 @@ and rollback, each acknowledged over the mTLS long-poll feed.
 
 Linux overrides:
   GANTRY_ARTIFACTS               guest-helper directory (default: ./artifacts)
-  GANTRY_TEST_EXE                native Gantry executable
+  GANTRY_TEST_EXE                override host executable (default: build this checkout)
   GANTRY_TEST_KERNEL             guest kernel for the host architecture
   GANTRY_TEST_ROOTFS             matching Nerdbox rootfs
   GANTRY_TEST_WORKLOAD_IMAGE     local workload EROFS image
@@ -276,7 +276,8 @@ run_linux_validation() {
 		esac
 	}
 	LINUX_ARTIFACTS=$(linux_absolute "${GANTRY_ARTIFACTS:-artifacts}")
-	LINUX_GANTRY=$(linux_absolute "${GANTRY_TEST_EXE:-$LINUX_ARTIFACTS/gantry}")
+	LINUX_GANTRY=
+	[ -z "${GANTRY_TEST_EXE:-}" ] || LINUX_GANTRY=$(linux_absolute "$GANTRY_TEST_EXE")
 	LINUX_GUEST=$LINUX_ARTIFACTS/gantry-guest-$LINUX_ASSET_ARCH
 	LINUX_KERNEL=$(linux_absolute "${GANTRY_TEST_KERNEL:-$LINUX_ARTIFACTS/gantry-kernel-$LINUX_ASSET_ARCH}")
 	LINUX_ROOTFS=$(linux_absolute "${GANTRY_TEST_ROOTFS:-$LINUX_ARTIFACTS/nerdbox-rootfs-$LINUX_ASSET_ARCH.erofs}")
@@ -290,9 +291,10 @@ run_linux_validation() {
 		echo "GANTRY_TEST_RUNSC_KERNEL and GANTRY_TEST_RUNSC_ROOTFS must be set together" >&2
 		exit 1
 	fi
-	for executable in "$LINUX_GANTRY" "$LINUX_GUEST"; do
-		[ -x "$executable" ] || { echo "missing executable: $executable" >&2; exit 1; }
-	done
+	[ -x "$LINUX_GUEST" ] || { echo "missing executable: $LINUX_GUEST" >&2; exit 1; }
+	if [ -n "$LINUX_GANTRY" ]; then
+		[ -x "$LINUX_GANTRY" ] || { echo "missing executable: $LINUX_GANTRY" >&2; exit 1; }
+	fi
 	set -- "$LINUX_KERNEL" "$LINUX_ROOTFS" "$LINUX_IMAGE"
 	[ -z "$LINUX_RUNSC_KERNEL" ] || set -- "$@" "$LINUX_RUNSC_KERNEL" "$LINUX_RUNSC_ROOTFS"
 	for asset in "$@"; do
@@ -332,6 +334,14 @@ run_linux_validation() {
 	}
 	trap cleanup_linux EXIT
 	trap 'exit 130' HUP INT TERM
+
+	if [ -z "$LINUX_GANTRY" ]; then
+		# Never reuse or overwrite an artifact that may predate this checkout.
+		# The E2E driver and the default host executable must test the same API.
+		LINUX_GANTRY=$LINUX_WORK/gantry-current
+		echo "===== Linux KVM: build current Gantry host executable ====="
+		go build -o "$LINUX_GANTRY" ./cmd/gantry
+	fi
 
 	# Batteries also start sandboxes without -kernel/-rootfs. Those resolve
 	# Gantry's defaults by canonical release basename below GANTRY_ARTIFACTS
