@@ -203,6 +203,10 @@ workspace pages for the organization's:
 - **History:** every generation, what it changed, and how many hosts run it.
   **Republish** rolls back by serving an old signed bundle under a new number.
 - **Enrollment:** what hosts pin, and the certificates issued so far.
+  - **Enroll managed remote…** selects an existing remote manager profile,
+    creates its private key on that host, and stages its feed configuration
+    without copying files. Restart the manager with the displayed
+    `-policy-feed` path to begin enforcement; enrollment alone does not.
   - **Enroll host…** takes the `host.csr` from `gantry policy feed-request`
     and saves the host's `feed.json` and certificates to a new folder.
   - **Revoke…** makes the feed refuse a host.

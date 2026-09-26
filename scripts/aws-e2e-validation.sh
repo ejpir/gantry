@@ -23,8 +23,9 @@ usage: scripts/aws-e2e-validation.sh [aws|linux|macos]
 All modes include signed OPA policy validation with real VMs and loopback-only
 fixtures (no OPA/OpenSSL installation or public egress needed on test hosts),
 and run the organization policy service (gantry policy-service) against a
-live manager: host enrollment, signed publication, live rollout to running
-sandboxes, and rollback, each acknowledged over the mTLS long-poll feed.
+live manager: host enrollment (including the manager API's host-only key and
+staged restart guard), signed publication, live rollout to running sandboxes,
+and rollback, each acknowledged over the mTLS long-poll feed.
 
 Linux overrides:
   GANTRY_ARTIFACTS               guest-helper directory (default: ./artifacts)

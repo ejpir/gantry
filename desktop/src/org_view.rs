@@ -196,6 +196,30 @@ impl Desktop {
         };
         match page {
             Page::OrgHosts | Page::OrgEnrollment => {
+                let remotes: Vec<_> = self
+                    .profiles
+                    .iter()
+                    .filter(|p| {
+                        self.target
+                            .as_ref()
+                            .and_then(|t| t.profile.as_ref())
+                            .is_none_or(|selected| selected.name != p.name)
+                    })
+                    .cloned()
+                    .collect();
+                if let Some(config_dir) = self.config_dir.as_ref().filter(|_| !remotes.is_empty()) {
+                    toolbar = toolbar.child(self.org_button(
+                        "org-enroll-managed",
+                        "Enroll managed remote…",
+                        Some(Kind::OrgManagedEnroll {
+                            profiles: o.profiles(),
+                            rings: o.rings(),
+                            remotes,
+                            config_dir: config_dir.clone(),
+                        }),
+                        cx,
+                    ));
+                }
                 toolbar = toolbar.child(self.org_button(
                     "org-enroll",
                     "Enroll host…",

@@ -13,6 +13,7 @@ use gantry_desktop::{
     connector::Connector,
     options::{Appearance, Options, Source},
     org::{self, Edit, NetworkRule, OrgCommand, OrgSnapshot, Publish},
+    profiles,
 };
 use std::{
     io::Write,
@@ -265,6 +266,99 @@ fn desktop_administers_a_real_policy_service() {
         .contains("not empty")
     );
 
+    // A registered sandbox manager can be enrolled without a local CSR or
+    // hand-carried files. Its private key is created by the manager API.
+    let manager_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let manager_url = format!("https://127.0.0.1:{manager_port}");
+    let manager_token = path("manager.token");
+    std::fs::write(
+        &manager_token,
+        gantry(&program, &base, &["serve", "--mint-token"]),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &manager_token,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let _manager = Service(
+        Process::new(&program)
+            .args([
+                "serve",
+                "-listen",
+                &format!("tls://127.0.0.1:{manager_port}"),
+                "--self-signed",
+                "--token-file",
+                &text(&manager_token),
+            ])
+            .env("GANTRY_HOME", base.join("sandboxes"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let mut add = Process::new(&program)
+            .args([
+                "remote",
+                "add",
+                "managed",
+                &manager_url,
+                "--ca",
+                &text(&base.join("serve/ca.crt")),
+                "--token-stdin",
+            ])
+            .env("GANTRY_HOME", base.join("sandboxes"))
+            .env("GANTRY_REMOTE", "")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        add.stdin
+            .take()
+            .unwrap()
+            .write_all(&std::fs::read(&manager_token).unwrap())
+            .unwrap();
+        let output = add.wait_with_output().unwrap();
+        if output.status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "manager registration: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let remote = profiles::load(&base, "managed").unwrap().0;
+    let message = run(
+        &connector,
+        OrgCommand::EnrollManaged {
+            name: "managed".into(),
+            profile: "developer".into(),
+            ring: "canary".into(),
+            remote,
+            config_dir: base.clone(),
+        },
+    )
+    .unwrap();
+    assert!(message.contains("NOT ENFORCING YET"), "{message}");
+    let staged = base.join("manager-state/feed-enrollment");
+    assert!(staged.join("host-key.pem").is_file());
+    assert!(staged.join("feed.json").is_file());
+    assert!(
+        snapshot(&mut connector)
+            .hosts
+            .iter()
+            .any(|host| host.name == "managed")
+    );
+
     // Edit the draft; the service validates it and reports the change.
     let document = first.document.clone().unwrap();
     let edit = Edit::Network {
@@ -432,11 +526,15 @@ fn desktop_administers_a_real_policy_service() {
     )
     .unwrap();
     let hosts = snapshot(&mut connector).hosts;
+    let revoked = hosts
+        .iter()
+        .find(|host| host.name == "dev-mac-031")
+        .unwrap();
     assert_eq!(
         (
-            hosts[0].ring.as_str(),
-            hosts[0].revoked,
-            hosts[0].status.as_str()
+            revoked.ring.as_str(),
+            revoked.revoked,
+            revoked.status.as_str()
         ),
         ("early", true, "revoked")
     );

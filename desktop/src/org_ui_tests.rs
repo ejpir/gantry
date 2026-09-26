@@ -3,10 +3,11 @@ use crate::{
     ui_tests::{desktop, desktop_at},
 };
 use gantry_desktop::{
+    commands::Command,
     connector::Target,
-    forms::Kind,
+    forms::{Intent, Kind, Values},
     options::Source,
-    org::{self, OrgRecord},
+    org::{self, OrgCommand, OrgRecord},
     workspace::{Page, Record},
 };
 use gpui_kit::test::TestWindowExt;
@@ -186,6 +187,52 @@ fn a_live_organization_opens_forms_scoped_to_its_draft_and_rings(cx: &mut TestAp
             .expect("promote confirmation")
             .spec;
         assert!(spec.help.contains("everyone"), "{}", spec.help);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn managed_remote_enrollment_selects_a_registered_manager(cx: &mut TestAppContext) {
+    let (handle, desktop) = desktop(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        desktop.update(cx, |this, cx| {
+            organization(this, cx);
+            this.config_dir = Some("/private/client".into());
+            this.profiles = vec![gantry_desktop::profiles::RemoteProfile {
+                name: "managed-host".into(),
+                url: "https://managed.example.test:8443".into(),
+                ca_cert: String::new(),
+                fingerprint: String::new(),
+            }];
+        });
+        window.render_frame(cx);
+        window.click("org-enroll-managed", cx);
+        window.render_frame(cx);
+        let form = desktop.read(cx);
+        let spec = &form.form.as_ref().expect("managed enrollment form").spec;
+        let Kind::OrgManagedEnroll { remotes, .. } = &spec.kind else {
+            panic!("wrong form")
+        };
+        assert_eq!(remotes[0].name, "managed-host");
+        assert!(
+            spec.help
+                .contains("Until then, no organization policy is enforced")
+        );
+        let values: Values = spec
+            .fields
+            .iter()
+            .map(|f| (f.key.to_owned(), zeroize::Zeroizing::new(f.value.clone())))
+            .collect();
+        let Intent::Manager(Command::Org(OrgCommand::EnrollManaged {
+            name, remote, ring, ..
+        })) = spec.build(&values, &form.host).expect("managed intent")
+        else {
+            panic!("wrong enrollment intent")
+        };
+        assert_eq!(
+            (name.as_str(), remote.name.as_str(), ring.as_str()),
+            ("managed-host", "managed-host", "canary")
+        );
     })
     .unwrap();
 }

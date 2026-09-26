@@ -207,6 +207,13 @@ func run(opts options) (runErr error) {
 		return err
 	}
 	defer policyFeed.Close()
+	if opts.tls {
+		if err := step("managed remote enrollment: host key, trust pins, staging and guarded restart", func() error {
+			return testManagedFeedEnrollment(ctx, policyFeed, gantry, repo, work, env)
+		}); err != nil {
+			return err
+		}
+	}
 
 	if !opts.apiOnly && opts.image == builtInImage {
 		if err := step("cache built-in image", func() error {

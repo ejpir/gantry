@@ -37,12 +37,15 @@ type managerService struct {
 	lifecycle Lifecycle
 	runtime   *managerRuntime
 
-	operationState *operationstate.Store
-	lifecycleSlots chan struct{}
-	execSlots      chan struct{}
-	sshSlots       chan struct{}
-	sandboxLocks   [64]sync.RWMutex
-	rawRunLock     sync.RWMutex
+	operationState    *operationstate.Store
+	lifecycleSlots    chan struct{}
+	execSlots         chan struct{}
+	sshSlots          chan struct{}
+	sandboxLocks      [64]sync.RWMutex
+	rawRunLock        sync.RWMutex
+	feedMu            sync.Mutex
+	feedEnrollmentDir string
+	feedConfigured    bool
 
 	// organizationPolicyMu is the manager-wide admission barrier. Lifecycle
 	// operations and new exec/SSH sessions hold it for reading before taking a
@@ -66,6 +69,9 @@ func newManagerService(lifecycle Lifecycle) *managerService {
 func (m *managerService) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", m.handleHealth)
+	mux.HandleFunc("GET /v1/policy-feed/enrollment", m.handleFeedEnrollmentStatus)
+	mux.HandleFunc("POST /v1/policy-feed/enrollment", m.handlePrepareFeedEnrollment)
+	mux.HandleFunc("POST /v1/policy-feed/enrollment/install", m.handleInstallFeedEnrollment)
 	mux.HandleFunc("GET /v1/openapi.yaml", m.handleOpenAPI)
 	mux.HandleFunc("GET /v1/sandboxes", m.handleListSandboxes)
 	mux.HandleFunc("POST /v1/sandboxes", m.handleCreateSandbox)
@@ -101,6 +107,9 @@ func (m *managerService) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	health := managerapi.Health{OK: true, Version: managerAPIVersion}
 	if provider, ok := m.lifecycle.(dashboardServiceProvider); ok && provider.DashboardService() != nil {
 		health.Capabilities = []string{"dashboard-control-v1"}
+	}
+	if m.feedEnrollmentDir != "" {
+		health.Capabilities = append(health.Capabilities, "policy-feed-enroll-v1")
 	}
 	writeManagerJSON(w, http.StatusOK, health)
 }

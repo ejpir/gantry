@@ -18,8 +18,12 @@ trail (remote address and token fingerprint logged, never the token value).
 The same battery validates the full remote-dashboard snapshot, source-routed
 configuration action, and bounded packet-capture endpoint in empty-host and
 real-VM states. The full lifecycle and SSE checks then use authenticated TLS.
-It also starts a
-separate local mTLS policy service, creates two running sandboxes, publishes a
+It also starts a separate local mTLS policy service and a second real manager
+to test **managed-remote enrollment** in both modes: the manager makes a
+host-only key and stable CSR, rejects altered trust material, stages the
+service's signed certificate without claiming enforcement, refuses an
+ungoverned restart, and then starts with the pinned feed. No VM is required
+for this step. The full mode creates two running sandboxes and publishes a
 newly signed organization generation, waits for the aggregate acknowledgement,
 and verifies both sandboxes change without replacing either process. It also
 checks that the active feed policy cannot be cleared per sandbox or bypassed

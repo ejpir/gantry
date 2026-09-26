@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/ejpir/gantry/internal/policyfeed"
 	"github.com/ejpir/gantry/internal/sandbox/manager/runtimeowner"
@@ -25,8 +26,7 @@ func serveManager(socketPath string, lifecycle Lifecycle) error {
 type serveOptions struct {
 	plan        servePlan
 	policyFeeds []*policyfeed.Config
-	// localAutostart must not bypass a previously configured policy feed.
-	localAutostart bool
+	feedPath    string
 	// audit receives authentication, mutation, and policy-feed records;
 	// nil defaults to stderr.
 	audit *log.Logger
@@ -63,10 +63,17 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	if err != nil {
 		return err
 	}
-	if options.localAutostart {
+	// A staged enrollment is an explicit governance intent too. No kind of
+	// restart may silently replace a feed-enabled manager with an ungoverned one.
+	if len(options.policyFeeds) == 0 {
 		if err := allowAutomaticManager(stateDir); err != nil {
 			return err
 		}
+	}
+	service.feedEnrollmentDir = filepath.Join(stateDir, "feed-enrollment")
+	service.feedConfigured = len(options.policyFeeds) != 0
+	if err := checkStagedFeedPath(service.feedEnrollmentDir, options.feedPath); err != nil {
+		return err
 	}
 	if err := addManagerListeners(service, owner, options.plan, security, audit); err != nil {
 		return err
@@ -84,6 +91,19 @@ func serveWithOptions(ctx context.Context, options serveOptions, lifecycle Lifec
 	case serveErr = <-owner.ServeErrors():
 	}
 	return errors.Join(serveErr, owner.Close())
+}
+
+func checkStagedFeedPath(dir, feedPath string) error {
+	if _, err := os.Lstat(filepath.Join(dir, "installed.json")); err == nil {
+		want := filepath.Join(dir, "feed.json")
+		got, absErr := filepath.Abs(feedPath)
+		if absErr != nil || got != want {
+			return fmt.Errorf("staged organization feed requires -policy-feed %s; refusing a different feed", want)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect staged organization feed: %w", err)
+	}
+	return nil
 }
 
 func loadManagerTransportSecurity(plan servePlan, audit *log.Logger) (managerTransportSecurity, error) {

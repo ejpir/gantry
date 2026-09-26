@@ -42,8 +42,8 @@ filesystem by digest.
   registry credentials.
 - [Networking](networking.md) — egress policy, DNS allowlists, port
   publishing, proxies, and traffic inspection.
-- [Organization policy](organization-policy.md) — apply, inspect, update,
-  and try a policy locally.
+- [Organization policy](organization-policy.md) — apply policies, receive
+  updates, or administer a policy service.
 - [Organization login](organization-login.md) — sign in, discover team
   remotes, and apply your organization's policy.
 - [Host shares and secrets](shares-secrets.md) — expose selected directories,

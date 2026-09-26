@@ -189,6 +189,20 @@ struct Enrollment {
     files: BTreeMap<String, String>,
 }
 
+#[derive(Deserialize)]
+struct ManagedFeedRequest {
+    id: String,
+    csr: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedFeedStatus {
+    state: String,
+    #[serde(default)]
+    config_path: String,
+}
+
 // ---------------------------------------------------------------- document
 
 /// Root data.json. Field names and omissions match Go's strict decoder, so a
@@ -421,6 +435,13 @@ pub enum OrgCommand {
         request: PathBuf,
         save_to: PathBuf,
     },
+    EnrollManaged {
+        name: String,
+        profile: String,
+        ring: String,
+        remote: crate::profiles::RemoteProfile,
+        config_dir: PathBuf,
+    },
     MoveHost {
         name: String,
         ring: String,
@@ -456,6 +477,7 @@ impl OrgCommand {
             Self::Promote { .. } => "Promote rollout",
             Self::Republish { .. } => "Roll back",
             Self::Enroll { .. } => "Enroll host",
+            Self::EnrollManaged { .. } => "Enroll managed remote",
             Self::MoveHost { .. } => "Move host",
             Self::Revoke { .. } => "Revoke host",
             Self::Download { .. } => "Download bundle",
@@ -468,9 +490,10 @@ impl OrgCommand {
             Self::Publish(p) => format!("revision {}", p.document.revision),
             Self::Promote { generation, ring } => format!("g{generation} through {ring}"),
             Self::Republish { generation, .. } => format!("g{generation} as a new generation"),
-            Self::Enroll { name, .. } | Self::MoveHost { name, .. } | Self::Revoke { name } => {
-                name.clone()
-            }
+            Self::Enroll { name, .. }
+            | Self::EnrollManaged { name, .. }
+            | Self::MoveHost { name, .. }
+            | Self::Revoke { name } => name.clone(),
             Self::Download { generation, .. } => format!("g{generation}"),
         }
     }
@@ -582,6 +605,97 @@ impl ManagerClient {
                     enrollment.host.profile,
                     enrollment.host.ring,
                     save_to.display()
+                )
+            }
+            OrgCommand::EnrollManaged {
+                name,
+                profile,
+                ring,
+                remote,
+                config_dir,
+            } => {
+                validate_name(name)?;
+                progress("Verifying both registered connections");
+                let (current, token) = crate::profiles::load(config_dir, &remote.name)?;
+                ensure!(
+                    current == *remote,
+                    "The remote profile changed; reopen enrollment. No request was sent."
+                );
+                let manager = ManagerClient::remote(&current, token.expose())?;
+                let (_, capabilities) = manager.health()?;
+                ensure!(
+                    capabilities.iter().any(|c| c == "policy-feed-enroll-v1"),
+                    "This remote manager does not support host-side feed enrollment. Upgrade and restart it; no request was sent."
+                );
+                ensure!(
+                    !capabilities.iter().any(|c| c == CAPABILITY),
+                    "The selected remote is another policy service, not a sandbox manager."
+                );
+                let overview: Overview = self.request(
+                    "GET",
+                    "/v1/admin/overview",
+                    None::<&()>,
+                    Duration::from_secs(15),
+                    &[],
+                )?;
+                ensure!(
+                    overview.rings.iter().any(|r| r.name == *ring),
+                    "Rollout ring changed; reopen enrollment."
+                );
+                let status: ManagedFeedStatus = manager.request(
+                    "GET",
+                    "/v1/policy-feed/enrollment",
+                    None::<&()>,
+                    Duration::from_secs(15),
+                    &[],
+                )?;
+                ensure!(
+                    status.state == "none" || status.state == "awaiting-enrollment",
+                    "The manager already has a feed staged or configured: {}",
+                    status.state
+                );
+                progress("Generating the host key and request on the selected remote");
+                let prepared: ManagedFeedRequest = manager.request(
+                    "POST",
+                    "/v1/policy-feed/enrollment",
+                    Some(&serde_json::json!({
+                        "host": name, "organization": overview.organization,
+                        "profile": profile, "url": overview.feed_url,
+                        "publicKeyFingerprint": overview.public_key_fingerprint,
+                        "caFingerprint": overview.ca_fingerprint,
+                    })),
+                    Duration::from_secs(30),
+                    &[],
+                )?;
+                ensure!(
+                    prepared.csr.contains("BEGIN CERTIFICATE REQUEST"),
+                    "Manager did not return a CSR"
+                );
+                progress("Enrolling the request with the policy service");
+                let enrollment: Enrollment = serde_json::from_value(write(
+                    "POST",
+                    "/v1/admin/hosts",
+                    &serde_json::json!({ "name": name, "profile": profile, "ring": ring, "csr": prepared.csr }),
+                )?)?;
+                ensure!(
+                    enrollment.host.name == *name
+                        && enrollment.host.profile == *profile
+                        && enrollment.host.ring == *ring,
+                    "Service returned an enrollment for another host. Check manager staging and revoke the unexpected host."
+                );
+                progress("Installing the public enrollment files on the selected remote");
+                let installed: ManagedFeedStatus = manager.request(
+                    "POST", "/v1/policy-feed/enrollment/install",
+                    Some(&serde_json::json!({ "id": prepared.id, "files": enrollment.files })),
+                    Duration::from_secs(30), &[],
+                ).context("Host was enrolled by the service, but manager installation was not confirmed. Check both hosts' status; do not repeat enrollment blindly or restart the manager until installed.")?;
+                ensure!(
+                    installed.state == "restart-required" && !installed.config_path.is_empty(),
+                    "Manager did not confirm a staged enrollment; inspect its status before restarting"
+                );
+                format!(
+                    "Enrolled {name} on {}. NOT ENFORCING YET: restart that manager with -policy-feed {} (keeping its other serve flags).",
+                    remote.name, installed.config_path
                 )
             }
             OrgCommand::MoveHost { name, ring } => {

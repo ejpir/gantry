@@ -190,6 +190,13 @@ manager. After an organization-wide feed generation is active, per-sandbox
 replacement and clearing are refused; new manager-created sandboxes inherit the
 feed snapshot.
 
+`GET/POST /v1/policy-feed/enrollment` and
+`POST /v1/policy-feed/enrollment/install` stage an enrolled manager's identity
+without exporting its private key. They require manager authentication and are
+advertised by `policy-feed-enroll-v1`. Staging does not activate the feed:
+restart with the returned config path. See
+[Organization policy](organization-policy.md#enroll-a-host-manager).
+
 Low-level run accepts manager-host asset paths and bounded input, output, and
 timeouts. It is not named-sandbox creation and is disabled while an
 organization-wide feed policy is active. See

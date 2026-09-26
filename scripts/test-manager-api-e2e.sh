@@ -17,10 +17,11 @@ go test -count=1 ./cmd/gantry ./internal/runvm ./internal/remote ./internal/dash
   ./internal/sandbox/sshgw ./tests/e2e/managerapi
 go test -count=1 ./internal/sandbox -run '^(TestManagerRun|TestConfigure)'
 
-# Both modes start the real `gantry policy-service`, enroll the manager with
-# `gantry policy feed-request`, and sign every generation with `gantry policy
-# sign`: publish, update, and roll back must each be acknowledged by the host
-# over the mTLS long-poll feed with a matching digest.
+# Both modes start the real `gantry policy-service`. Alongside the original
+# CLI enrollment, a second real manager exercises desktop-style API enrollment:
+# host-only key/CSR, signed certificate and trust-pin checks, staged (not
+# active) installation, and restart refusal without its feed configuration.
+# Signed publish, update, and rollback must each be acknowledged over mTLS.
 # Default: TLS lifecycle + remote dashboard telemetry/actions/packet capture +
 # real VM/raw-run + SSH exec/SFTP, live policy-service rollouts to two running
 # sandboxes, SSH channel-policy, live-disable and host-key rotation

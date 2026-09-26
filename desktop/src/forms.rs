@@ -35,6 +35,12 @@ pub enum Kind {
         profiles: Vec<String>,
         rings: Vec<String>,
     },
+    OrgManagedEnroll {
+        profiles: Vec<String>,
+        rings: Vec<String>,
+        remotes: Vec<crate::profiles::RemoteProfile>,
+        config_dir: std::path::PathBuf,
+    },
     OrgRule(Box<OrgRuleForm>),
     OrgDns(Box<OrgDraft>),
     OrgPublish(Box<OrgPublishForm>),
@@ -503,6 +509,29 @@ impl Spec {
                 );
                 "Confirm action"
             }
+            Kind::OrgManagedEnroll {
+                profiles,
+                rings,
+                remotes,
+                ..
+            } => {
+                let select = |key, label: &str, options: Vec<String>| Field {
+                    kind: FieldKind::Select(options.clone()),
+                    ..field(key, label, options.first().cloned().unwrap_or_default())
+                };
+                fields = vec![
+                    select(
+                        "remote",
+                        "Managed remote",
+                        remotes.iter().map(|r| r.name.clone()).collect(),
+                    ),
+                    field("name", "Host name (defaults to remote name)", ""),
+                    select("profile", "Policy profile", profiles.clone()),
+                    select("ring", "Rollout ring", rings.clone()),
+                ];
+                help = "Enroll a registered remote manager. Its private key stays on that host; no files are copied through this desktop. Enrollment affects every sandbox on that manager once you explicitly restart it with the staged -policy-feed config. Until then, no organization policy is enforced. Do not select a different organization service as the remote.".into();
+                "Enroll managed remote"
+            }
             Kind::OrgEnroll { profiles, rings } => {
                 let select = |key, label: &str, options: &[String]| Field {
                     kind: FieldKind::Select(options.to_vec()),
@@ -923,6 +952,32 @@ impl Spec {
                 },
             ),
             Kind::Confirm(command) => command.clone(),
+            Kind::OrgManagedEnroll {
+                remotes,
+                config_dir,
+                ..
+            } => {
+                let remote_name = required("remote")?;
+                let remote = remotes
+                    .iter()
+                    .find(|r| r.name == remote_name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("The selected remote is no longer in this form")
+                    })?;
+                let name = if get("name").trim().is_empty() {
+                    remote_name.clone()
+                } else {
+                    required("name")?
+                };
+                crate::org::validate_name(&name)?;
+                Command::Org(crate::org::OrgCommand::EnrollManaged {
+                    name,
+                    profile: required("profile")?,
+                    ring: required("ring")?,
+                    remote: remote.clone(),
+                    config_dir: config_dir.clone(),
+                })
+            }
             Kind::OrgEnroll { .. } => {
                 let name = required("name")?;
                 crate::org::validate_name(&name)?;

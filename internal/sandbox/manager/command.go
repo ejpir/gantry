@@ -113,7 +113,11 @@ func Cmd(argv []string, lifecycle Lifecycle) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := serveWithOptions(ctx, serveOptions{plan: plan, policyFeeds: feeds, localAutostart: *localBackground}, lifecycle); err != nil {
+	feedPath := ""
+	if len(feedPaths) == 1 {
+		feedPath = feedPaths[0]
+	}
+	if err := serveWithOptions(ctx, serveOptions{plan: plan, policyFeeds: feeds, feedPath: feedPath}, lifecycle); err != nil {
 		fmt.Fprintln(os.Stderr, "gantry serve:", err)
 		return 1
 	}
