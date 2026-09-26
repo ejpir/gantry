@@ -113,6 +113,10 @@ func TestManagerManagedFeedEnrollment(t *testing.T) {
 	if prepared.ID == "" || !strings.Contains(prepared.CSR, "BEGIN CERTIFICATE REQUEST") {
 		t.Fatalf("invalid preparation: %+v", prepared)
 	}
+	keyPath := filepath.Join(m.feedEnrollmentDir, api.HostKeyFile)
+	if err := checkPrivateEnrollmentKey(keyPath); err != nil {
+		t.Fatalf("host key not private: %v", err)
+	}
 	if err := allowAutomaticManager(dir); err != nil {
 		t.Fatal("pending CSR blocked a restart before enrollment:", err)
 	}
@@ -156,16 +160,12 @@ func TestManagerManagedFeedEnrollment(t *testing.T) {
 	if status.EnrollmentState != "restart-required" {
 		t.Fatalf("retry unstaged feed: %+v", status)
 	}
-	keyPath := filepath.Join(m.feedEnrollmentDir, api.HostKeyFile)
 	key, err := os.ReadFile(keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains([]byte(status.ConfigPath), key) || bytes.Contains([]byte(prepared.CSR), key) {
 		t.Fatal("private key was exposed")
-	}
-	if info, err := os.Stat(keyPath); err != nil || info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("host key not private: %v %v", info, err)
 	}
 	if err := allowAutomaticManager(dir); err == nil {
 		t.Fatal("staged feed allowed ungoverned automatic restart")
