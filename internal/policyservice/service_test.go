@@ -167,7 +167,8 @@ func (h *harness) enroll(name, profile, ring string) *testHost {
 			h.t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, api.HostKeyFile), keyPEM, 0o600); err != nil {
+	// os.WriteFile mode bits do not protect Windows files from inherited ACLs.
+	if err := writePrivate(filepath.Join(dir, api.HostKeyFile), keyPEM); err != nil {
 		h.t.Fatal(err)
 	}
 	config, err := policyfeed.LoadConfig(filepath.Join(dir, api.FeedConfigFile))
@@ -218,9 +219,12 @@ func (h *harness) hosts() map[string]api.Host {
 	return byName
 }
 
+// A mount path must be absolute and clean on the platform signing the bundle.
+var testSourcePath = filepath.Join(os.TempDir(), "gantry-policyservice", "src")
+
 func developer(dns ...string) map[string]policy.Profile {
 	return map[string]policy.Profile{"developer": {
-		Rules:   []policy.Rule{{ID: "src-read", Effect: "allow", Action: policy.MountRead, Path: "/srv/src"}},
+		Rules:   []policy.Rule{{ID: "src-read", Effect: "allow", Action: policy.MountRead, Path: testSourcePath}},
 		Network: policy.Network{Rules: []netpol.GuardRule{{ID: "https", Effect: "allow", CIDR: "0.0.0.0/0", Protocol: "tcp", Ports: []uint16{443}}}, DNS: dns},
 	}}
 }
@@ -521,7 +525,7 @@ func TestDiffClassifiesChanges(t *testing.T) {
 			Rules: []policy.Rule{
 				{ID: "linear-delete", Effect: "allow", Action: policy.MCPCall, Server: "linear", Tool: "delete_issue"},
 				{ID: "block-paste", Effect: "deny", Action: policy.CredentialUse, Host: "pastebin.com"},
-				{ID: "src", Effect: "allow", Action: policy.MountRead, Path: "/srv/src"},
+				{ID: "src", Effect: "allow", Action: policy.MountRead, Path: testSourcePath},
 			},
 			Network: policy.Network{DNS: []string{"github.com", "old.example"}},
 		},
@@ -529,7 +533,7 @@ func TestDiffClassifiesChanges(t *testing.T) {
 	}}
 	after := policy.Document{ExpiresAt: time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), Profiles: map[string]policy.Profile{
 		"developer": {
-			Rules: []policy.Rule{{ID: "src", Effect: "deny", Action: policy.MountRead, Path: "/srv/src"}},
+			Rules: []policy.Rule{{ID: "src", Effect: "deny", Action: policy.MountRead, Path: testSourcePath}},
 			Network: policy.Network{
 				Rules: []netpol.GuardRule{{ID: "staging-db", Effect: "allow", CIDR: "10.20.0.0/16", Protocol: "tcp", Ports: []uint16{5432}}},
 				DNS:   []string{"github.com", "registry.npmjs.org"},

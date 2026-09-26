@@ -14,7 +14,6 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -670,5 +669,3 @@ func readPrivate(path string) ([]byte, error) {
 	}
 	return readFile(path)
 }
-
-var errNotFound = errors.New("not found")
