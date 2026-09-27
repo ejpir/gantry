@@ -189,8 +189,13 @@ func TestOwnerAttachesLiveReceiverAndClosesItAfterBackground(t *testing.T) {
 	if err := owner.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := order.snapshot(), []string{"listener", "background", "live receiver", "lock"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("close order = %v, want %v", got, want)
+	// Cancellation may finish the background task before listener shutdown.
+	// Both must finish before the receiver and state lock are released.
+	got := order.snapshot()
+	listenerFirst := []string{"listener", "background", "live receiver", "lock"}
+	backgroundFirst := []string{"background", "listener", "live receiver", "lock"}
+	if !reflect.DeepEqual(got, listenerFirst) && !reflect.DeepEqual(got, backgroundFirst) {
+		t.Fatalf("close order = %v, want %v or %v", got, listenerFirst, backgroundFirst)
 	}
 	if err := owner.AttachReceiver(testReceiver{name: "late", order: order}); err == nil {
 		t.Fatal("receiver attached after shutdown")
