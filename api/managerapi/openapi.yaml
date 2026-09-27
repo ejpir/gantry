@@ -31,6 +31,65 @@ paths:
             application/yaml:
               schema:
                 type: string
+  /v1/policy-feed/enrollment:
+    get:
+      operationId: getPolicyFeedEnrollment
+      description: Reports staging or configuration, never private identity material.
+      responses:
+        "200":
+          description: Feed enrollment status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
+    post:
+      operationId: preparePolicyFeedEnrollment
+      description: Creates a private host key and returns only its CSR. Matching retries reuse the request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyFeedPrepareRequest" }
+      responses:
+        "201":
+          description: Host CSR, with key retained on this manager
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedPrepareResponse" }
+        "200":
+          description: Existing matching host CSR
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedPrepareResponse" }
+  /v1/policy-feed/enrollment/install:
+    post:
+      operationId: installPolicyFeedEnrollment
+      description: Pins the returned public files to the prepared CSR and stages a feed for explicit activation or restart.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyFeedInstallRequest" }
+      responses:
+        "200":
+          description: Staged, not yet enforced
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
+  /v1/policy-feed/enrollment/activate:
+    post:
+      operationId: activatePolicyFeedEnrollment
+      description: Applies an available signed generation before attaching the receiver without restarting. Fails if no generation is available; partial fan-out remains governed and retries.
+      responses:
+        "200":
+          description: Live receiver with a generation applied
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
+        "202":
+          description: A verified generation is pending on failed targets; retrying fail closed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyFeedStatus" }
   /v1/sandboxes:
     get:
       operationId: listSandboxes
@@ -500,6 +559,40 @@ components:
           type: array
           description: Additive features; dashboard-control-v1 includes strict action payloads and stale ordinal-rule checks.
           items: { type: string }
+    PolicyFeedPrepareRequest:
+      type: object
+      required: [host, organization, profile, url, publicKeyFingerprint, caFingerprint]
+      properties:
+        host: { type: string }
+        organization: { type: string }
+        profile: { type: string }
+        url: { type: string }
+        publicKeyFingerprint: { type: string }
+        caFingerprint: { type: string }
+    PolicyFeedPrepareResponse:
+      type: object
+      required: [id, csr]
+      properties:
+        id: { type: string }
+        csr: { type: string }
+    PolicyFeedInstallRequest:
+      type: object
+      required: [id, files]
+      properties:
+        id: { type: string }
+        files:
+          type: object
+          additionalProperties: { type: string }
+    PolicyFeedStatus:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string, enum: [none, awaiting-enrollment, restart-required, activating, configured] }
+        host: { type: string }
+        organization: { type: string }
+        profile: { type: string }
+        configPath: { type: string }
+        appliedGeneration: { type: integer, format: uint64 }
     DashboardSnapshot:
       $ref: "#/components/schemas/WireHostSnapshot"
     DashboardActionRequest:

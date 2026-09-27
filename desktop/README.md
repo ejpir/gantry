@@ -173,6 +173,52 @@ Revocation, token rotation, and CA changes do not require restarting the GUI.
 The selected host remains visible in the header and footer, including offline.
 `GANTRY_REMOTE` is not an implicit desktop selector; choose `--remote` explicitly.
 
+## Organization administration
+
+A remote profile can point at an organization's
+[policy service](../docs/gantry/organization-policy.md#run-a-policy-service)
+instead of a sandbox manager. Register it the same way:
+
+```sh
+gantry remote add acme https://policy.acme.dev:8443 --ca ca.pem --token-stdin
+```
+
+When its health reports `policy-service-admin-v1`, the sidebar swaps the
+workspace pages for the organization's:
+
+- **Hosts:** every enrolled host manager, grouped by ring, with the generation
+  it last reported. Stalled, rejected, mismatched and silent hosts are called
+  out, with what each status means.
+- **Policy:** the draft of the next generation, one profile at a time.
+  - Network rules, DNS names, mount, MCP and credential rules are edited in
+    place, and changes since the base generation are marked.
+  - The **Changes** segment reviews each change as loosening or tightening
+    access.
+  - **Sign & Publish…** saves the draft, and the service validates it. The
+    **Gantry CLI on this machine** then signs it (`gantry policy sign
+    -signing-key`). The desktop checks the key matches the one every host
+    pins, and only then uploads the bundle.
+- **Rollouts:** the newest generation ring by ring, each host's offered and
+  acknowledged times, **Promote to <ring>…**, and **Roll back…**.
+- **History:** every generation, what it changed, and how many hosts run it.
+  **Republish** rolls back by serving an old signed bundle under a new number.
+- **Enrollment:** what hosts pin, and the certificates issued so far.
+  - **Enroll managed remote…** selects an existing remote manager profile,
+    creates its private key on that host, and stages its feed configuration
+    without copying files. Enrollment alone does not enforce policy.
+  - After publishing a signed generation, **Activate feed…** verifies and
+    applies it on the selected remote without restarting. The service must be
+    reachable from that host; failed targets are stopped where possible and
+    retried under mandatory admission. Activation
+    survives subsequent restarts using the manager's existing serve flags.
+  - **Enroll host…** takes the `host.csr` from `gantry policy feed-request`
+    and saves the host's `feed.json` and certificates to a new folder.
+  - **Revoke…** makes the feed refuse a host.
+
+These screens show only what hosts report on their own polls. Every write
+goes to the policy service, which validates it again. The signing key is never
+sent anywhere.
+
 ## Demo and appearance
 
 Preview without a manager, CLI, or virtualization access:
@@ -182,6 +228,7 @@ cargo run --locked --manifest-path desktop/Cargo.toml -- --demo --theme dark
 ```
 
 Demo data is explicitly labeled and never used as a failure fallback.
+**Demo · acme** in the sidebar opens a sample organization, also read-only.
 `--theme system|dark|light` selects the initial appearance; the header control
 cycles through all three. Theme and panel sizes are session-only. `--help` works
 without a display.
@@ -194,6 +241,8 @@ without a display.
   executable embeds.
 - Overview, Sandboxes, Traffic, Rules, Ports, Packets, Mounts, Secrets, MCP,
   Audit, Images, and Remotes screens, with retained per-page search and selection.
+- Organization administration of a policy service: Hosts, Policy (draft,
+  review, sign and publish), Rollouts, History, and Enrollment.
 - Virtualized tables, resource inspection, and source-bound action dialogs.
 - Sandbox create, saved-settings edit, start, stop, and confirmed deletion.
 - Network rules/policy, port publishing, mounts, live secrets, MCP configuration,

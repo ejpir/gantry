@@ -28,6 +28,38 @@ type ErrorResponse struct {
 	OperationID string `json:"operationId,omitempty"`
 }
 
+// PolicyFeedPrepareRequest binds a host-generated CSR to the service trust
+// selected by the administrator. None of these fields are private keys.
+type PolicyFeedPrepareRequest struct {
+	Host                 string `json:"host"`
+	Organization         string `json:"organization"`
+	Profile              string `json:"profile"`
+	URL                  string `json:"url"`
+	PublicKeyFingerprint string `json:"publicKeyFingerprint"`
+	CAFingerprint        string `json:"caFingerprint"`
+}
+
+type PolicyFeedPrepareResponse struct {
+	ID  string `json:"id"`
+	CSR string `json:"csr"`
+}
+
+// PolicyFeedInstallRequest contains only the four public enrollment files.
+type PolicyFeedInstallRequest struct {
+	ID    string            `json:"id"`
+	Files map[string]string `json:"files"`
+}
+
+// PolicyFeedStatus never exposes the host's private key or certificate request.
+type PolicyFeedStatus struct {
+	EnrollmentState   string `json:"state"`
+	Host              string `json:"host,omitempty"`
+	Organization      string `json:"organization,omitempty"`
+	Profile           string `json:"profile,omitempty"`
+	ConfigPath        string `json:"configPath,omitempty"`
+	AppliedGeneration uint64 `json:"appliedGeneration,omitempty"`
+}
+
 // Sandbox is the reported state of one sandbox.
 type Sandbox struct {
 	Desired         inspection.BootSettings  `json:"desired"`

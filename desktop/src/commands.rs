@@ -41,6 +41,8 @@ pub enum Command {
         default: bool,
         allow_local: bool,
     },
+    /// A write to an organization's policy service.
+    Org(crate::org::OrgCommand),
 }
 #[derive(Debug, Default)]
 pub struct Outcome {
@@ -93,6 +95,7 @@ impl Command {
             Self::Packets(..) => "Packet capture",
             Self::NetworkPolicy { .. } => "Set network policy",
             Self::Dashboard(_) => "Apply configuration",
+            Self::Org(command) => command.label(),
         }
     }
     pub fn subject(&self) -> String {
@@ -105,6 +108,7 @@ impl Command {
             Self::Share(r) => format!("{} / {}", r.sandbox, r.tag),
             Self::Port(name, _) | Self::Packets(name, _) => name.clone(),
             Self::NetworkPolicy { sandbox, .. } => sandbox.clone(),
+            Self::Org(command) => command.subject(),
             Self::Dashboard(r) => {
                 let target = if let Some(v) = &r.rule {
                     format!("{} / {} / {}", v.sandbox, v.source, v.target)
@@ -165,6 +169,21 @@ impl ManagerClient {
         command: &Command,
         progress: impl Fn(&str),
     ) -> Result<Outcome> {
+        if let Command::Org(command) = command {
+            // Recheck what the endpoint is: an organization write never goes
+            // to a manager, and a manager write never to a policy service.
+            let (_, capabilities) = self.health()?;
+            ensure!(
+                capabilities.iter().any(|c| c == crate::org::CAPABILITY),
+                "The selected connection is no longer an organization policy service; no write was sent."
+            );
+            progress(&format!(
+                "Submitting {} · {}",
+                command.label(),
+                command.subject()
+            ));
+            return self.org_execute(command, progress);
+        }
         self.require_control()?;
         progress(&format!(
             "Submitting {} · {}",
@@ -309,6 +328,7 @@ impl ManagerClient {
                     &secrets,
                 )?)
             }
+            Command::Org(_) => unreachable!("organization writes return above"),
         };
         if let Some(mut operation) = operation {
             let deadline = Instant::now() + Duration::from_secs(120);

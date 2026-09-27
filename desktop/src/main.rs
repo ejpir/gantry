@@ -10,6 +10,7 @@ mod form_controls;
 mod images_view;
 mod mcp_view;
 mod mounts_view;
+mod org_view;
 mod packets_view;
 mod ports_view;
 mod registries_view;
@@ -33,6 +34,8 @@ mod activity_tests;
 mod dashboard_ui_tests;
 #[cfg(all(test, feature = "ui-tests"))]
 mod form_controls_tests;
+#[cfg(all(test, feature = "ui-tests"))]
+mod org_ui_tests;
 #[cfg(all(test, feature = "ui-tests", unix))]
 mod terminal_tests;
 #[cfg(all(test, feature = "ui-tests"))]

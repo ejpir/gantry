@@ -164,11 +164,19 @@ gantry policy check -bundle BUNDLE -key PUBLIC_KEY -profile PROFILE -action ACTI
 gantry policy set NAME -bundle BUNDLE -key PUBLIC_KEY -profile PROFILE [--restart]
 gantry policy show NAME
 gantry policy clear NAME [--restart]
+gantry policy keygen -out DIR [-bits 3072]
+gantry policy feed-request -out DIR -host NAME
+gantry policy-service init -dir DIR -organization ORG -url https://HOST:PORT -public-key KEY
+                           [-ring NAME ...] [-name TLS_NAME ...]
+gantry policy-service serve -dir DIR [-listen ADDR:PORT]
+gantry policy-service admin add|rm -dir DIR -name NAME
 ```
 
 `set` and `clear` apply live to running sandboxes. `--restart` explicitly
-requests controlled stop/update/resume instead. See
-[Organization policy](organization-policy.md).
+requests controlled stop/update/resume instead. `feed-request` creates a
+host's policy-feed key and certificate request; `policy-service` runs the
+organization's feed and administrator API. See
+[Organization policy](organization-policy.md#run-a-policy-service).
 
 ## Organization login
 

@@ -218,6 +218,19 @@ func (runtime *Owner) FeedsReady(receivers []Receiver) error {
 	return runtime.lifecycle.transition(FeedsReadyPhase)
 }
 
+// AttachReceiver transfers a verified live feed to runtime ownership while
+// the servers are running. Close serializes with this handoff and releases it
+// only after all background tasks have joined.
+func (runtime *Owner) AttachReceiver(receiver Receiver) error {
+	runtime.admissionMu.Lock()
+	defer runtime.admissionMu.Unlock()
+	if receiver == nil || runtime.lifecycle.Current() != Serving {
+		return fmt.Errorf("attach policy receiver in phase %s", runtime.lifecycle.Current())
+	}
+	runtime.receivers = append(runtime.receivers, receiver)
+	return nil
+}
+
 func (runtime *Owner) StartServers() error {
 	runtime.admissionMu.Lock()
 	defer runtime.admissionMu.Unlock()

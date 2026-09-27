@@ -45,6 +45,8 @@ func TestManagerOpenAPIContract(t *testing.T) {
 		"ExecResult":   managerapi.ExecResult{}, "Error": managerapi.ErrorResponse{},
 		"Operation": managerapi.Operation{}, "Event": managerapi.Event{},
 		"Health": managerapi.Health{}, "Image": managerapi.Image{}, "ImageList": managerapi.ImageList{},
+		"PolicyFeedPrepareRequest": managerapi.PolicyFeedPrepareRequest{}, "PolicyFeedPrepareResponse": managerapi.PolicyFeedPrepareResponse{},
+		"PolicyFeedInstallRequest": managerapi.PolicyFeedInstallRequest{}, "PolicyFeedStatus": managerapi.PolicyFeedStatus{},
 		"ImagePullRequest": managerapi.ImagePullRequest{}, "ImageDeleteRequest": managerapi.ImageDeleteRequest{},
 		"SSHHostKey": managerapi.SSHHostKey{}, "NetworkPolicy": managerapi.NetworkPolicy{},
 		"NetworkPolicyRequest": managerapi.NetworkPolicyRequest{}, "NetworkRuleSummary": netpol.RuleSummary{},

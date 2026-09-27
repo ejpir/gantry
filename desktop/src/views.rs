@@ -19,6 +19,14 @@ use gpui_kit::{
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.page_unsynced {
+            self.page_unsynced = false;
+            cx.defer_in(window, |this, window, cx| {
+                if this.form.is_none() {
+                    this.switch_page(this.page, window, cx)
+                }
+            });
+        }
         div()
             .id("gantry-desktop")
             .relative()

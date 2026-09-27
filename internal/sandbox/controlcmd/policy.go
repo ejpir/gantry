@@ -28,11 +28,13 @@ func CmdPolicyWithRollout(argv []string, rollout PolicyRollout) int {
 		fmt.Fprintln(os.Stderr, `usage:
   gantry policy generate -out DIR [-mount PATH ...] [-ttl 30d] [-profile developer]
   gantry policy sign -data data.json -out DIR (-signing-key private.pem | -ephemeral)
+  gantry policy keygen -out DIR [-bits 3072]
   gantry policy verify -bundle bundle.tar.gz -key public.pem -profile NAME
   gantry policy check -bundle bundle.tar.gz -key public.pem -profile NAME -action ACTION -resource JSON
   gantry policy set NAME -bundle bundle.tar.gz -key public.pem -profile PROFILE [--restart]
   gantry policy clear NAME [--restart]
   gantry policy show NAME
+  gantry policy feed-request -out DIR -host NAME
 
 generate/sign create source/data.json, bundle.tar.gz and public.pem in a NEW
 output directory. generate is default-deny except for explicit read-only mounts;
@@ -40,7 +42,12 @@ it uses an ephemeral test key. Neither command saves a private key.
 set/clear apply live when the sandbox is running; --restart explicitly requests
 stop/update/resume. This is optional, host-owned policy; there is no mandatory
 device enrollment. check evaluates the organization layer only; local
-network/tool rules and built-in safety checks still apply.`)
+network/tool rules and built-in safety checks still apply.
+keygen creates a stable organization signing key (signing-key.pem, owner-only)
+and the public.pem hosts and the policy service pin.
+feed-request creates this host's policy-feed key and a certificate request
+(host.csr) in a NEW directory; an administrator enrolls the request and returns
+feed.json and the certificates to place beside the key.`)
 	}
 	if len(argv) == 0 || argv[0] == "-h" || argv[0] == "--help" {
 		usage()
@@ -54,6 +61,10 @@ network/tool rules and built-in safety checks still apply.`)
 		return cmdPolicyGenerate(args)
 	case "sign":
 		return cmdPolicySign(args)
+	case "feed-request":
+		return cmdPolicyFeedRequest(args)
+	case "keygen":
+		return cmdPolicyKeygen(args)
 	case "set", "clear", "show":
 		if len(args) == 0 {
 			usage()

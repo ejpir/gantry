@@ -13,6 +13,7 @@ import (
 	"github.com/ejpir/gantry/internal/dashboard"
 	"github.com/ejpir/gantry/internal/mcpworker"
 	"github.com/ejpir/gantry/internal/networkworker"
+	"github.com/ejpir/gantry/internal/policyservice"
 	"github.com/ejpir/gantry/internal/remote"
 	"github.com/ejpir/gantry/internal/runvm"
 	"github.com/ejpir/gantry/internal/sandbox"
@@ -53,7 +54,8 @@ usage:
   gantry share <verb>               # live host shares: add|remove|ls
   gantry ports <verb>               # host->guest port forwards: ls|publish|unpublish
   gantry net-policy <verb>          # live egress policy: set|default|show
-  gantry policy <verb>              # signed org policy: generate|sign|verify|check|set|clear|show
+  gantry policy <verb>              # signed org policy: generate|sign|verify|check|set|clear|show|feed-request
+  gantry policy-service <verb>      # organization policy feed and admin API: init|serve|admin
   gantry org <verb>                 # host OIDC membership: login|status|logout|apply
   gantry import [<name>]            # adopt a reference-stack sandbox (list with no name)
   gantry export [options] <name>    # package a stopped sandbox as a portable OCI archive
@@ -288,6 +290,8 @@ func runSimpleCommand(command string, argv []string) (int, bool) {
 		return controlcmd.CmdPolicyWithRollout(argv, sandbox.RolloutOrganizationPolicy), true
 	case "org":
 		return controlcmd.CmdOrg(argv), true
+	case "policy-service":
+		return policyservice.Cmd(argv), true
 	case "import":
 		return sandbox.CmdImport(argv), true
 	case "export":

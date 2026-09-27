@@ -16,6 +16,7 @@ pub mod inventory;
 pub mod launcher;
 pub mod local_profiles;
 pub mod options;
+pub mod org;
 mod profile_lock;
 pub mod profiles;
 mod security;

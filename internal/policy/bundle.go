@@ -132,47 +132,10 @@ func verify(config *Config) (Document, Profile, error) {
 	if config == nil {
 		return document, Profile{}, fmt.Errorf("organization policy is not configured")
 	}
-	if len(config.Bundle) == 0 || len(config.Bundle) > MaxBundleBytes || len(config.PublicKey) > maxKeyBytes || !validID(config.Profile) {
+	if !validID(config.Profile) {
 		return document, Profile{}, fmt.Errorf("invalid organization policy configuration")
 	}
-	block, rest := pem.Decode([]byte(config.PublicKey))
-	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
-		return document, Profile{}, fmt.Errorf("policy key must be one PEM RSA public key")
-	}
-	var key any
-	var err error
-	switch block.Type {
-	case "PUBLIC KEY":
-		key, err = x509.ParsePKIXPublicKey(block.Bytes)
-	case "RSA PUBLIC KEY":
-		key, err = x509.ParsePKCS1PublicKey(block.Bytes)
-	default:
-		err = fmt.Errorf("only public keys are accepted")
-	}
-	rsaKey, ok := key.(*rsa.PublicKey)
-	if err != nil || !ok || rsaKey.N.BitLen() < 2048 {
-		return document, Profile{}, fmt.Errorf("policy verification requires an RSA public key of at least 2048 bits")
-	}
-	if err := preflightArchive(config.Bundle); err != nil {
-		return document, Profile{}, err
-	}
-	verification := bundle.NewVerificationConfig(map[string]*bundle.KeyConfig{
-		"gantry": {Key: config.PublicKey, Algorithm: "RS256"},
-	}, "gantry", "", nil)
-	verified, err := bundle.NewReader(bytes.NewReader(config.Bundle)).
-		WithSizeLimitBytes(maxExpandedBytes).
-		WithBundleVerificationConfig(verification).Read()
-	if err != nil {
-		return document, Profile{}, fmt.Errorf("verify organization bundle: %w", err)
-	}
-	if len(verified.Modules) != 0 || len(verified.WasmModules) != 0 || len(verified.PlanModules) != 0 {
-		return document, Profile{}, fmt.Errorf("v1 organization bundles must contain data only")
-	}
-	raw, err := json.Marshal(verified.Data)
-	if err != nil {
-		return document, Profile{}, err
-	}
-	document, err = parseDocument(raw)
+	document, err := verifyDocument(config.Bundle, config.PublicKey)
 	if err != nil {
 		return document, Profile{}, err
 	}
@@ -196,6 +159,64 @@ func verify(config *Config) (Document, Profile, error) {
 		}
 	}
 	return document, profile, nil
+}
+
+// VerifyBundle checks a signed bundle against publicKey and returns its
+// validated document without selecting a profile. A policy service holds one
+// bundle for every profile; hosts still verify their own profile on receipt.
+func VerifyBundle(bundleBytes []byte, publicKey string) (Document, error) {
+	return verifyDocument(bundleBytes, publicKey)
+}
+
+// ParseDocument validates root data.json exactly as activation does,
+// including expiry. It establishes no trust in the data.
+func ParseDocument(raw []byte) (Document, error) {
+	return parseDocument(raw)
+}
+
+func verifyDocument(bundleBytes []byte, publicKey string) (Document, error) {
+	var document Document
+	if len(bundleBytes) == 0 || len(bundleBytes) > MaxBundleBytes || len(publicKey) > maxKeyBytes {
+		return document, fmt.Errorf("invalid organization policy configuration")
+	}
+	block, rest := pem.Decode([]byte(publicKey))
+	if block == nil || len(bytes.TrimSpace(rest)) != 0 {
+		return document, fmt.Errorf("policy key must be one PEM RSA public key")
+	}
+	var key any
+	var err error
+	switch block.Type {
+	case "PUBLIC KEY":
+		key, err = x509.ParsePKIXPublicKey(block.Bytes)
+	case "RSA PUBLIC KEY":
+		key, err = x509.ParsePKCS1PublicKey(block.Bytes)
+	default:
+		err = fmt.Errorf("only public keys are accepted")
+	}
+	rsaKey, ok := key.(*rsa.PublicKey)
+	if err != nil || !ok || rsaKey.N.BitLen() < 2048 {
+		return document, fmt.Errorf("policy verification requires an RSA public key of at least 2048 bits")
+	}
+	if err := preflightArchive(bundleBytes); err != nil {
+		return document, err
+	}
+	verification := bundle.NewVerificationConfig(map[string]*bundle.KeyConfig{
+		"gantry": {Key: publicKey, Algorithm: "RS256"},
+	}, "gantry", "", nil)
+	verified, err := bundle.NewReader(bytes.NewReader(bundleBytes)).
+		WithSizeLimitBytes(maxExpandedBytes).
+		WithBundleVerificationConfig(verification).Read()
+	if err != nil {
+		return document, fmt.Errorf("verify organization bundle: %w", err)
+	}
+	if len(verified.Modules) != 0 || len(verified.WasmModules) != 0 || len(verified.PlanModules) != 0 {
+		return document, fmt.Errorf("v1 organization bundles must contain data only")
+	}
+	raw, err := json.Marshal(verified.Data)
+	if err != nil {
+		return document, err
+	}
+	return parseDocument(raw)
 }
 
 // Bound total decompression, count, types and names before OPA parses anything.

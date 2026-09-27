@@ -1,214 +1,343 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
-	"math/big"
-	"net"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ejpir/gantry/api/managerapi"
-	"github.com/ejpir/gantry/internal/sandbox/localsec"
+	policyapi "github.com/ejpir/gantry/api/policyservice"
 )
 
-const policyFeedGeneration = 1
+const (
+	policyFeedOrganization = "manager-e2e"
+	policyFeedHost         = "e2e-manager"
+)
 
+// policyFeedHarness runs the real `gantry policy-service` binary: the
+// manager under test is enrolled like any host (its own key and certificate
+// request) and every generation is signed with `gantry policy sign`, then
+// published and rolled out through the administrator API.
 type policyFeedHarness struct {
-	server     *httptest.Server
 	configPath string
-	bundle     []byte
-
-	mu      sync.RWMutex
-	enabled bool
-	applied chan struct{}
-	once    sync.Once
+	repo       string
+	env        []string
+	gantry     string
+	work       string
+	dataPath   string
+	keyPath    string
+	url        string
+	token      string
+	client     *http.Client
+	service    *exec.Cmd
+	exited     chan struct{}
+	logPath    string
+	signed     int
 }
 
 func setupPolicyFeed(ctx context.Context, repo string, env []string, gantry, work string) (*policyFeedHarness, error) {
+	harness := &policyFeedHarness{repo: repo, env: env, gantry: gantry, work: work, logPath: filepath.Join(work, "policy-service.log")}
+	// A prebuilt -gantry (for example artifacts/gantry) can predate this
+	// checkout; say so instead of failing on the first missing command.
+	for _, probe := range [][]string{{"policy-service", "help"}, {"policy", "keygen", "-h"}, {"policy", "feed-request", "-h"}} {
+		command := exec.CommandContext(ctx, gantry, probe...)
+		command.Env = env
+		if err := command.Run(); err != nil {
+			return nil, fmt.Errorf("%s has no `gantry %s`: it predates this checkout; rebuild it (scripts/build.sh) or pass -gantry", gantry, strings.Join(probe[:len(probe)-1], " "))
+		}
+	}
 	policyDir := filepath.Join(work, "policy-feed-policy")
 	if err := runCommand(ctx, repo, env, gantry, "policy", "generate", "-out", policyDir,
-		"-organization", "manager-e2e", "-profile", "developer", "-ttl", "1h"); err != nil {
+		"-organization", policyFeedOrganization, "-profile", "developer", "-ttl", "1h"); err != nil {
 		return nil, fmt.Errorf("generate feed policy: %w", err)
 	}
-	bundle, err := os.ReadFile(filepath.Join(policyDir, "bundle.tar.gz"))
-	if err != nil {
-		return nil, err
-	}
+	harness.dataPath = filepath.Join(policyDir, "source", "data.json")
 
-	caCert, caKey, caPEM, err := newPolicyFeedCA()
-	if err != nil {
-		return nil, err
+	// A stable signing key, as an organization would keep, outside every
+	// directory the service or the host reads.
+	keyDir := filepath.Join(work, "policy-key")
+	if err := runCommand(ctx, repo, env, gantry, "policy", "keygen", "-out", keyDir); err != nil {
+		return nil, fmt.Errorf("generate organization signing key: %w", err)
 	}
-	serverCert, _, err := issuePolicyFeedCertificate(caCert, caKey, "policy-feed-server", true)
-	if err != nil {
-		return nil, err
-	}
-	clientCert, clientKey, err := issuePolicyFeedCertificate(caCert, caKey, "gantry-manager", false)
-	if err != nil {
-		return nil, err
-	}
-	clientRoots := x509.NewCertPool()
-	if !clientRoots.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("construct policy-feed client CA pool")
-	}
-	harness := &policyFeedHarness{bundle: bundle, applied: make(chan struct{})}
-	harness.server = httptest.NewUnstartedServer(http.HandlerFunc(harness.handle))
-	harness.server.TLS = &tls.Config{
-		MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{serverCert},
-		ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: clientRoots,
-	}
-	harness.server.StartTLS()
+	harness.keyPath = filepath.Join(keyDir, "signing-key.pem")
+	publicPath := filepath.Join(keyDir, "public.pem")
 
-	feedDir := filepath.Join(work, "policy-feed")
-	if err := os.MkdirAll(feedDir, 0o700); err != nil {
+	port, err := freeLoopbackPort()
+	if err != nil {
+		return nil, err
+	}
+	address := fmt.Sprintf("127.0.0.1:%d", port)
+	harness.url = "https://" + address
+	serviceDir := filepath.Join(work, "policy-service")
+	if err := runCommand(ctx, repo, env, gantry, "policy-service", "init", "-dir", serviceDir,
+		"-organization", policyFeedOrganization, "-url", harness.url, "-public-key", publicPath); err != nil {
+		return nil, fmt.Errorf("initialize policy service: %w", err)
+	}
+	if harness.token, err = runCommandOutput(ctx, repo, env, gantry, "policy-service", "admin", "add", "-dir", serviceDir, "-name", "e2e-admin"); err != nil {
+		return nil, fmt.Errorf("create policy-service administrator: %w", err)
+	}
+	caPEM, err := os.ReadFile(filepath.Join(serviceDir, policyapi.CAFile))
+	if err != nil {
+		return nil, err
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("policy-service CA contains no certificates")
+	}
+	harness.client = &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{
+		Proxy: nil, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+	}}
+
+	logFile, err := os.OpenFile(harness.logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	harness.service = exec.Command(gantry, "policy-service", "serve", "-dir", serviceDir, "-listen", address)
+	harness.service.Dir = repo
+	harness.service.Env = env
+	harness.service.Stdout = logFile
+	harness.service.Stderr = logFile
+	if err := harness.service.Start(); err != nil {
+		_ = logFile.Close()
+		return nil, fmt.Errorf("start policy service: %w", err)
+	}
+	harness.exited = make(chan struct{})
+	go func() {
+		_ = harness.service.Wait()
+		_ = logFile.Close()
+		close(harness.exited)
+	}()
+	if err := harness.waitHealthy(ctx); err != nil {
 		harness.Close()
 		return nil, err
 	}
-	files := map[string]struct {
-		data []byte
-		mode os.FileMode
-	}{
-		"ca.pem":         {caPEM, 0o644},
-		"client.pem":     {pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientCert.Certificate[0]}), 0o644},
-		"client-key.pem": {clientKey, 0o600},
+
+	// Enroll the manager under test exactly as a real host would.
+	feedDir := filepath.Join(work, "policy-feed")
+	if err := runCommand(ctx, repo, env, gantry, "policy", "feed-request", "-out", feedDir, "-host", policyFeedHost); err != nil {
+		harness.Close()
+		return nil, fmt.Errorf("create host request: %w", err)
 	}
-	for name, file := range files {
-		path := filepath.Join(feedDir, name)
-		if err := os.WriteFile(path, file.data, file.mode); err != nil {
+	csr, err := os.ReadFile(filepath.Join(feedDir, policyapi.HostRequestFile))
+	if err != nil {
+		harness.Close()
+		return nil, err
+	}
+	var enrollment policyapi.Enrollment
+	if err := harness.admin(ctx, http.MethodPost, "/v1/admin/hosts", policyapi.EnrollRequest{
+		Name: policyFeedHost, Profile: "developer", Ring: "canary", CSR: string(csr),
+	}, http.StatusCreated, &enrollment); err != nil {
+		harness.Close()
+		return nil, fmt.Errorf("enroll host: %w", err)
+	}
+	for _, name := range []string{policyapi.FeedConfigFile, policyapi.HostCertFile, policyapi.CAFile, policyapi.PublicKeyFile} {
+		content, ok := enrollment.Files[name]
+		if !ok {
+			harness.Close()
+			return nil, fmt.Errorf("enrollment is missing %s", name)
+		}
+		if err := os.WriteFile(filepath.Join(feedDir, name), []byte(content), 0o600); err != nil {
 			harness.Close()
 			return nil, err
 		}
-		if name == "client-key.pem" {
-			if err := localsec.SecureRegularFile(path); err != nil {
-				harness.Close()
-				return nil, err
-			}
-		}
 	}
-	config := map[string]any{
-		"version": 1, "organization": "manager-e2e",
-		"profile": "developer", "url": harness.server.URL,
-		"public_key": filepath.Join(policyDir, "public.pem"), "ca_file": "ca.pem",
-		"client_certificate": "client.pem", "client_key": "client-key.pem",
-		"poll_interval_seconds": 5,
-	}
-	raw, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		harness.Close()
-		return nil, err
-	}
-	harness.configPath = filepath.Join(feedDir, "feed.json")
-	if err := os.WriteFile(harness.configPath, append(raw, '\n'), 0o600); err != nil {
-		harness.Close()
-		return nil, err
-	}
+	harness.configPath = filepath.Join(feedDir, policyapi.FeedConfigFile)
 	return harness, nil
 }
 
-func (harness *policyFeedHarness) handle(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		http.Error(w, "client certificate required", http.StatusForbidden)
-		return
+func (harness *policyFeedHarness) waitHealthy(ctx context.Context) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var health policyapi.Health
+		err := harness.admin(ctx, http.MethodGet, "/v1/health", nil, http.StatusOK, &health)
+		if err == nil {
+			if !health.OK || len(health.Capabilities) == 0 || health.Capabilities[0] != policyapi.CapabilityAdmin {
+				return fmt.Errorf("unexpected policy-service health: %+v", health)
+			}
+			return nil
+		}
+		select {
+		case <-harness.exited:
+			printLogTail(harness.logPath, 40)
+			return fmt.Errorf("policy service exited during startup")
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("policy service did not become healthy: %w", err)
+		}
 	}
-	if r.Header.Get("X-Gantry-Policy-Generation") == strconv.Itoa(policyFeedGeneration) && len(r.Header.Get("X-Gantry-Policy-Digest")) == 64 {
-		harness.once.Do(func() { close(harness.applied) })
-	}
-	harness.mu.RLock()
-	enabled := harness.enabled
-	harness.mu.RUnlock()
-	if !enabled || r.Header.Get("If-None-Match") == `"generation-1"` {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("ETag", `"generation-1"`)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"version": 1, "organization": "manager-e2e",
-		"generation": policyFeedGeneration, "bundle": harness.bundle,
-	})
 }
 
-func (harness *policyFeedHarness) Publish() {
-	harness.mu.Lock()
-	harness.enabled = true
-	harness.mu.Unlock()
+func (harness *policyFeedHarness) admin(ctx context.Context, method, route string, body any, want int, out any) error {
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(raw)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, harness.url+route, reader)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+harness.token)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := harness.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != want {
+		return statusError(response.StatusCode, raw, want)
+	}
+	if out != nil {
+		return json.Unmarshal(raw, out)
+	}
+	return nil
 }
 
-func (harness *policyFeedHarness) WaitApplied(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-harness.applied:
-		return nil
+// Publish signs the generated policy under revision with the stable key and
+// publishes it; the host's ring (canary) receives it at once.
+func (harness *policyFeedHarness) Publish(ctx context.Context, revision string) (uint64, error) {
+	raw, err := os.ReadFile(harness.dataPath)
+	if err != nil {
+		return 0, err
+	}
+	var data map[string]map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return 0, err
+	}
+	data["gantry"]["revision"] = revision
+	harness.signed++
+	source := filepath.Join(harness.work, fmt.Sprintf("policy-source-%d.json", harness.signed))
+	raw, err = json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(source, raw, 0o600); err != nil {
+		return 0, err
+	}
+	out := filepath.Join(harness.work, fmt.Sprintf("policy-signed-%d", harness.signed))
+	if err := runCommand(ctx, harness.repo, harness.env, harness.gantry, "policy", "sign", "-data", source, "-signing-key", harness.keyPath, "-out", out); err != nil {
+		return 0, fmt.Errorf("sign policy: %w", err)
+	}
+	bundle, err := os.ReadFile(filepath.Join(out, "bundle.tar.gz"))
+	if err != nil {
+		return 0, err
+	}
+	var generation policyapi.Generation
+	if err := harness.admin(ctx, http.MethodPost, "/v1/admin/generations", policyapi.PublishRequest{Bundle: bundle}, http.StatusCreated, &generation); err != nil {
+		return 0, fmt.Errorf("publish policy: %w", err)
+	}
+	if generation.Revision != revision || generation.PublishedBy != "e2e-admin" {
+		return 0, fmt.Errorf("unexpected published generation: %+v", generation)
+	}
+	return generation.Number, nil
+}
+
+// Republish rolls back by serving generation's signed bundle as a new one.
+func (harness *policyFeedHarness) Republish(ctx context.Context, generation uint64) (uint64, error) {
+	var republished policyapi.Generation
+	if err := harness.admin(ctx, http.MethodPost, fmt.Sprintf("/v1/admin/generations/%d/republish", generation), policyapi.RepublishRequest{}, http.StatusCreated, &republished); err != nil {
+		return 0, fmt.Errorf("republish generation %d: %w", generation, err)
+	}
+	if republished.RepublishOf != generation {
+		return 0, fmt.Errorf("unexpected republished generation: %+v", republished)
+	}
+	return republished.Number, nil
+}
+
+// WaitApplied waits until the host reports generation as fully applied, with
+// the digest the service expects for its profile and the pinned key.
+func (harness *policyFeedHarness) WaitApplied(ctx context.Context, generation uint64) (policyapi.Host, error) {
+	for {
+		var hosts []policyapi.Host
+		if err := harness.admin(ctx, http.MethodGet, "/v1/admin/hosts", nil, http.StatusOK, &hosts); err != nil {
+			return policyapi.Host{}, err
+		}
+		for _, host := range hosts {
+			if host.Name == policyFeedHost && host.Status == policyapi.HostCurrent && host.Report != nil &&
+				host.Report.Applied == generation && host.Report.DigestMatches {
+				return host, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return policyapi.Host{}, fmt.Errorf("host never reported generation %d: %w (last: %+v)", generation, ctx.Err(), hosts)
+		case <-harness.exited:
+			return policyapi.Host{}, fmt.Errorf("policy service exited")
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 }
 
 func (harness *policyFeedHarness) Close() {
-	if harness != nil && harness.server != nil {
-		harness.server.Close()
+	if harness == nil || harness.service == nil || harness.service.Process == nil {
+		return
+	}
+	_ = harness.service.Process.Signal(os.Interrupt)
+	select {
+	case <-harness.exited:
+	case <-time.After(10 * time.Second):
+		_ = harness.service.Process.Kill()
+		<-harness.exited
 	}
 }
 
-func newPolicyFeedCA() (*x509.Certificate, *rsa.PrivateKey, []byte, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+// testPolicyServiceEmptyHost rolls generations out to a manager without
+// sandboxes: the aggregate fan-out is empty, but enrollment, signing,
+// long-poll delivery, host reports, and rollback are all real.
+func testPolicyServiceEmptyHost(ctx context.Context, harness *policyFeedHarness) error {
+	first, err := harness.Publish(ctx, "e2e-r1")
 	if err != nil {
-		return nil, nil, nil, err
+		return err
 	}
-	certificate := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "manager-e2e-policy-feed-ca"},
-		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true, IsCA: true,
+	for _, next := range []func() (uint64, error){
+		func() (uint64, error) { return first, nil },
+		func() (uint64, error) { return harness.Publish(ctx, "e2e-r2") },
+		func() (uint64, error) { return harness.Republish(ctx, first) },
+	} {
+		generation, err := next()
+		if err != nil {
+			return err
+		}
+		started := time.Now()
+		host, err := harness.WaitApplied(ctx, generation)
+		if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(host.Report.Agent, "gantry/") || host.Report.Profile != "developer" {
+			return fmt.Errorf("unexpected host report: %+v", host.Report)
+		}
+		fmt.Printf("  generation %d acknowledged in %s\n", generation, time.Since(started).Round(time.Millisecond))
 	}
-	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
-	if err != nil {
-		return nil, nil, nil, err
+	var generations []policyapi.Generation
+	if err := harness.admin(ctx, http.MethodGet, "/v1/admin/generations", nil, http.StatusOK, &generations); err != nil {
+		return err
 	}
-	return certificate, key, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
-}
-
-func issuePolicyFeedCertificate(ca *x509.Certificate, caKey *rsa.PrivateKey, commonName string, server bool) (tls.Certificate, []byte, error) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return tls.Certificate{}, nil, err
+	if len(generations) != 3 || generations[0].RepublishOf != first || generations[0].Hosts != 1 {
+		return fmt.Errorf("unexpected generation history: %+v", generations)
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	certificate := &x509.Certificate{
-		SerialNumber: serial, Subject: pkix.Name{CommonName: commonName},
-		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature,
-	}
-	if server {
-		certificate.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-		certificate.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
-	} else {
-		certificate.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
-	}
-	der, err := x509.CreateCertificate(rand.Reader, certificate, ca, &key.PublicKey, caKey)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	pair, err := tls.X509KeyPair(certificatePEM, keyPEM)
-	return pair, keyPEM, err
+	return nil
 }
 
 func testPolicyFeedRollout(ctx context.Context, client *apiClient, harness *policyFeedHarness, sandboxName string, createBody []byte) error {
@@ -258,42 +387,81 @@ func testPolicyFeedRollout(ctx context.Context, client *apiClient, harness *poli
 		before[name] = current
 	}
 
-	harness.Publish()
-	if err := harness.WaitApplied(ctx); err != nil {
-		return fmt.Errorf("wait for aggregate feed acknowledgement: %w", err)
+	// Every generation must reach both sandboxes live: same VM processes,
+	// working exec, and the published revision.
+	expectLive := func(revision string) error {
+		for _, name := range []string{sandboxName, peerName} {
+			status, body, _, err := client.do(ctx, http.MethodGet, "/v1/sandboxes/"+name+"/policy", nil, nil)
+			if err != nil {
+				return err
+			}
+			if err := expectStatus(status, body, http.StatusOK); err != nil {
+				return err
+			}
+			var current managerapi.OrganizationPolicy
+			if err := json.Unmarshal(body, &current); err != nil {
+				return err
+			}
+			if !current.Managed || current.Info == nil || current.Info.Organization != policyFeedOrganization || current.Info.Profile != "developer" || current.Info.Revision != revision {
+				return fmt.Errorf("unexpected feed policy for %s (want revision %s): %+v", name, revision, current.Info)
+			}
+			status, body, _, err = client.do(ctx, http.MethodGet, "/v1/sandboxes/"+name, nil, nil)
+			if err != nil {
+				return err
+			}
+			if err := expectStatus(status, body, http.StatusOK); err != nil {
+				return err
+			}
+			var after managerapi.Sandbox
+			if err := json.Unmarshal(body, &after); err != nil {
+				return err
+			}
+			if after.State != "running" || after.PID == 0 || after.PID != before[name].PID {
+				return fmt.Errorf("organization-wide policy feed changed %s during live update: before=%+v after=%+v", name, before[name], after)
+			}
+			if err := expectExec(ctx, client, name, []byte(`{"argv":["/bin/sh","-c","printf policy-feed"]}`), 0, "policy-feed"); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	for _, name := range []string{sandboxName, peerName} {
-		status, body, _, err = client.do(ctx, http.MethodGet, "/v1/sandboxes/"+name+"/policy", nil, nil)
+	rollout := func(label string, publish func() (uint64, error), revision string) error {
+		generation, err := publish()
 		if err != nil {
 			return err
 		}
-		if err := expectStatus(status, body, http.StatusOK); err != nil {
-			return err
-		}
-		var current managerapi.OrganizationPolicy
-		if err := json.Unmarshal(body, &current); err != nil {
-			return err
-		}
-		if !current.Managed || current.Info == nil || current.Info.Organization != "manager-e2e" || current.Info.Profile != "developer" {
-			return fmt.Errorf("unexpected feed policy for %s: %+v", name, current)
-		}
-		status, body, _, err = client.do(ctx, http.MethodGet, "/v1/sandboxes/"+name, nil, nil)
+		host, err := harness.WaitApplied(ctx, generation)
 		if err != nil {
-			return err
+			return fmt.Errorf("%s: wait for aggregate feed acknowledgement: %w", label, err)
 		}
-		if err := expectStatus(status, body, http.StatusOK); err != nil {
-			return err
+		if !strings.HasPrefix(host.Report.Agent, "gantry/") || host.Report.Profile != "developer" || host.AcknowledgedAt == nil {
+			return fmt.Errorf("%s: unexpected host report: %+v / %+v", label, host, host.Report)
 		}
-		var after managerapi.Sandbox
-		if err := json.Unmarshal(body, &after); err != nil {
-			return err
+		if err := expectLive(revision); err != nil {
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		if after.State != "running" || after.PID == 0 || after.PID != before[name].PID {
-			return fmt.Errorf("organization-wide policy feed changed %s during live update: before=%+v after=%+v", name, before[name], after)
-		}
-		if err := expectExec(ctx, client, name, []byte(`{"argv":["/bin/sh","-c","printf policy-feed"]}`), 0, "policy-feed"); err != nil {
-			return err
-		}
+		return nil
+	}
+	var first uint64
+	if err := rollout("first generation", func() (uint64, error) {
+		var err error
+		first, err = harness.Publish(ctx, "e2e-r1")
+		return first, err
+	}, "e2e-r1"); err != nil {
+		return err
+	}
+	if err := rollout("updated generation", func() (uint64, error) { return harness.Publish(ctx, "e2e-r2") }, "e2e-r2"); err != nil {
+		return err
+	}
+	if err := rollout("rollback", func() (uint64, error) { return harness.Republish(ctx, first) }, "e2e-r1"); err != nil {
+		return err
+	}
+	var overview policyapi.Overview
+	if err := harness.admin(ctx, http.MethodGet, "/v1/admin/overview", nil, http.StatusOK, &overview); err != nil {
+		return err
+	}
+	if overview.Latest != 3 || overview.Rollout == nil || overview.Rollout.Rings[0].Acknowledged != 1 || overview.Hosts.Current != 1 {
+		return fmt.Errorf("unexpected policy-service overview after rollback: %+v rollout %+v", overview, overview.Rollout)
 	}
 
 	clear, _ := json.Marshal(managerapi.OrganizationPolicyRequest{Clear: true})

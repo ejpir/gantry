@@ -621,11 +621,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop
+      # The desktop's organization client is tested against a real
+      # gantry policy-service built from this checkout (tests/org_service.rs).
+      - uses: actions/setup-go@v5
+        if: ${{ matrix.name == 'linux-amd64' }}
+        with:
+          go-version: "1.26.6"
+      - name: build gantry for the desktop contract test
+        if: ${{ matrix.name == 'linux-amd64' }}
+        run: go build -o "$RUNNER_TEMP/gantry" ./cmd/gantry
       # Headless tests are validated on Linux; the other platforms build the
       # release binary (their UI test harness needs a windowing session).
       - name: cargo test
         if: ${{ matrix.name == 'linux-amd64' }}
         working-directory: desktop
+        env:
+          GANTRY_TEST_GANTRY: ${{ runner.temp }}/gantry
         run: cargo test --locked --all-features
       - name: validate release tag
         if: ${{ startsWith(github.ref, 'refs/tags/v') }}

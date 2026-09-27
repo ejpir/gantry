@@ -77,7 +77,7 @@ impl Desktop {
             .disabled(!self.can_write() || (dns && action == "deny"))
     }
     fn segment_control(&self, page: Page, cx: &mut Context<Self>) -> Div {
-        let rows = workspace::rows(page, &self.host, &self.profiles, &self.packets);
+        let rows = self.page_rows(page);
         let selected = self.pages[page.index()].segment;
         let registries = page == Page::Images && self.images_registries;
         let labels = if registries {
@@ -286,6 +286,7 @@ impl Desktop {
                         ));
                 }
             }
+            page if page.is_organization() => toolbar = self.org_toolbar(page, toolbar, cx),
             Page::Remotes => {
                 toolbar = toolbar.child(self.form_button(
                     "remote-add",
@@ -424,6 +425,18 @@ impl Desktop {
         }
         let unavailable = if page == Page::Remotes {
             self.profiles_error.clone()
+        } else if page.is_organization() {
+            match &self.connection {
+                Connection::Offline(error) => Some(error.clone()),
+                Connection::Connecting => Some("Connecting to the policy service…".into()),
+                _ => self
+                    .organization
+                    .as_ref()
+                    .filter(|o| o.document.is_none() && page == Page::OrgPolicy)
+                    .map(|_| {
+                        "This desktop cannot read the service's draft; editing is disabled.".into()
+                    }),
+            }
         } else {
             match &self.connection {
             Connection::Offline(error)=>Some(error.clone()),Connection::Connecting=>Some("Connecting to the selected manager…".into()),

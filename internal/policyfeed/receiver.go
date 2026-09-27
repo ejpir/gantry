@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ejpir/gantry/internal/atomicfile"
+	"github.com/ejpir/gantry/internal/guestasset"
 	"github.com/ejpir/gantry/internal/policy"
 	"github.com/ejpir/gantry/internal/sandbox/localsec"
 )
@@ -38,6 +39,42 @@ type Update struct {
 	Snapshot   *policy.Config
 	Info       policy.SnapshotInfo
 }
+
+// RolloutError reports an incomplete fan-out: the coordinator could not move
+// Failed of the Total saved sandboxes to the generation and stopped them.
+type RolloutError struct {
+	Failed int
+	Total  int
+	Err    error
+}
+
+func (e *RolloutError) Error() string { return e.Err.Error() }
+func (e *RolloutError) Unwrap() error { return e.Err }
+
+// Rejection reasons reported to the policy service. They describe the
+// service's own response, so they reveal nothing about the host.
+const (
+	RejectInvalid      = "invalid"
+	RejectVerification = "verification"
+	RejectOrganization = "organization"
+	RejectRollback     = "rollback"
+	RejectChanged      = "changed"
+)
+
+// pendingStatus describes the last attempt to fan out the pending generation.
+type pendingStatus struct {
+	attempts int
+	// failed counts sandboxes that could not accept it; -1 when the attempt
+	// failed before reaching any sandbox (for example, a busy manager).
+	failed int
+}
+
+// incompleteError marks a Sync whose exchange with the service succeeded
+// while the pending generation still could not be applied everywhere.
+type incompleteError struct{ err error }
+
+func (e incompleteError) Error() string { return e.err.Error() }
+func (e incompleteError) Unwrap() error { return e.err }
 
 type feedResponse struct {
 	Version      int    `json:"version"`
@@ -75,6 +112,11 @@ type Receiver struct {
 	logger         *log.Logger
 	apply          func(context.Context, Update) error
 	ownsClient     bool
+	// Reported to the service on every poll; memory-only, rebuilt by the next
+	// attempt after a restart.
+	pendingStatus      pendingStatus
+	rejectedGeneration uint64
+	rejectedReason     string
 }
 
 // NewReceiver initializes persistent anti-rollback state and an mTLS client.
@@ -170,6 +212,14 @@ func (receiver *Receiver) Restore(ctx context.Context) error {
 		return fmt.Errorf("restore policy state has no snapshot")
 	}
 	if err := receiver.apply(ctx, *update); err != nil {
+		if promote {
+			receiver.pendingStatus.attempts++
+			receiver.pendingStatus.failed = -1
+			var rollout *RolloutError
+			if errors.As(err, &rollout) {
+				receiver.pendingStatus.failed = rollout.Failed
+			}
+		}
 		return fmt.Errorf("restore generation %d: %w", update.Generation, err)
 	}
 	if promote {
@@ -188,6 +238,7 @@ func (receiver *Receiver) Restore(ctx context.Context) error {
 		receiver.state = next
 		receiver.latest = update
 		receiver.pending = nil
+		receiver.pendingStatus = pendingStatus{}
 	}
 	receiver.restorePending = false
 	return nil
@@ -204,13 +255,22 @@ func (receiver *Receiver) Run(ctx context.Context) {
 	}
 	for {
 		started := time.Now()
+		applied, pending := receiver.state.Generation, receiver.state.PendingGeneration
 		err := receiver.Sync(ctx)
 		if err != nil && ctx.Err() == nil && receiver.logger != nil {
 			receiver.logger.Printf("policy feed %s: %v", receiver.config.Organization, err)
 		}
+		// A completed exchange paces from its start, so a service that holds
+		// the request (long poll) is asked again at once; failures back off.
+		// A newly applied or staged generation is reported right away rather
+		// than a poll interval later.
 		delay := receiver.config.poll
-		if err == nil {
+		var incomplete incompleteError
+		if err == nil || errors.As(err, &incomplete) {
 			delay = max(0, receiver.config.poll-time.Since(started))
+			if receiver.state.Generation != applied || receiver.state.PendingGeneration != pending {
+				delay = 0
+			}
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -224,68 +284,81 @@ func (receiver *Receiver) Run(ctx context.Context) {
 	}
 }
 
-// Sync fetches and, when newer, applies one desired generation.
+// Sync fetches and, when newer, applies one desired generation. A pending
+// generation that still cannot reach every sandbox is retried first, but the
+// poll still happens: the service learns about the failure, and a newer
+// generation can replace the stuck one.
 func (receiver *Receiver) Sync(ctx context.Context) error {
-	if err := receiver.Restore(ctx); err != nil {
-		return err
+	restoreErr := receiver.Restore(ctx)
+	if restoreErr != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	incomplete := func() error {
+		if restoreErr == nil {
+			return nil
+		}
+		return incompleteError{restoreErr}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, receiver.config.URL, nil)
 	if err != nil {
 		return fmt.Errorf("construct policy request")
 	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Cache-Control", "no-cache")
-	request.Header.Set("Prefer", "wait=30")
-	if receiver.state.ETag != "" {
-		request.Header.Set("If-None-Match", receiver.state.ETag)
-	}
-	if receiver.state.Generation != 0 {
-		request.Header.Set("X-Gantry-Policy-Generation", fmt.Sprint(receiver.state.Generation))
-		request.Header.Set("X-Gantry-Policy-Digest", receiver.state.Digest)
-	}
+	receiver.reportHeaders(request.Header)
 	response, err := receiver.client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("policy channel request failed (check connectivity, mTLS and server trust)")
+		return errors.Join(restoreErr, fmt.Errorf("policy channel request failed (check connectivity, mTLS and server trust)"))
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode == http.StatusNotModified {
-		return nil
+		return incomplete()
 	}
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("policy channel returned HTTP %d", response.StatusCode)
+		return errors.Join(restoreErr, fmt.Errorf("policy channel returned HTTP %d", response.StatusCode))
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		return fmt.Errorf("policy channel response must be application/json")
+		return receiver.reject(0, RejectInvalid, fmt.Errorf("policy channel response must be application/json"))
 	}
 	if response.ContentLength > maxFeedResponseSize {
-		return fmt.Errorf("policy channel response exceeds %d bytes", maxFeedResponseSize)
+		return receiver.reject(0, RejectInvalid, fmt.Errorf("policy channel response exceeds %d bytes", maxFeedResponseSize))
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxFeedResponseSize+1))
 	if err != nil || len(raw) > maxFeedResponseSize {
-		return fmt.Errorf("policy channel response read failed or exceeds %d bytes", maxFeedResponseSize)
+		return errors.Join(restoreErr, fmt.Errorf("policy channel response read failed or exceeds %d bytes", maxFeedResponseSize))
 	}
 	var desired feedResponse
-	if err := strictJSON(raw, &desired); err != nil || desired.Version != feedVersion || desired.Organization != receiver.config.Organization || desired.Generation == 0 || len(desired.Bundle) == 0 || len(desired.Bundle) > policy.MaxBundleBytes {
-		return fmt.Errorf("policy channel response is invalid")
+	if err := strictJSON(raw, &desired); err != nil || desired.Version != feedVersion || desired.Generation == 0 || len(desired.Bundle) == 0 || len(desired.Bundle) > policy.MaxBundleBytes {
+		return receiver.reject(0, RejectInvalid, fmt.Errorf("policy channel response is invalid"))
+	}
+	if desired.Organization != receiver.config.Organization {
+		return receiver.reject(desired.Generation, RejectOrganization, fmt.Errorf("policy channel response is for another organization"))
+	}
+	etag := response.Header.Get("ETag")
+	if !validETag(etag) {
+		return receiver.reject(desired.Generation, RejectInvalid, fmt.Errorf("policy channel returned an invalid ETag"))
 	}
 	update, err := receiver.update(desired.Generation, desired.Bundle, "")
 	if err != nil {
-		return err
+		reason := RejectVerification
+		if errors.Is(err, errOtherOrganization) {
+			reason = RejectOrganization
+		}
+		return receiver.reject(desired.Generation, reason, err)
 	}
 	digest := update.Digest
-	etag := response.Header.Get("ETag")
-	if !validETag(etag) {
-		return fmt.Errorf("policy channel returned an invalid ETag")
-	}
 	switch {
-	case desired.Generation < receiver.state.Generation:
-		return fmt.Errorf("policy generation rollback refused: received %d after %d", desired.Generation, receiver.state.Generation)
-	case desired.Generation == receiver.state.Generation && digest != receiver.state.Digest:
-		return fmt.Errorf("policy generation %d changed content", desired.Generation)
+	case desired.Generation < receiver.state.Generation, receiver.state.PendingGeneration != 0 && desired.Generation < receiver.state.PendingGeneration:
+		newest := max(receiver.state.Generation, receiver.state.PendingGeneration)
+		return receiver.reject(desired.Generation, RejectRollback, fmt.Errorf("policy generation rollback refused: received %d after %d", desired.Generation, newest))
+	case desired.Generation == receiver.state.Generation && digest != receiver.state.Digest,
+		desired.Generation == receiver.state.PendingGeneration && digest != receiver.state.PendingDigest:
+		return receiver.reject(desired.Generation, RejectChanged, fmt.Errorf("policy generation %d changed content", desired.Generation))
+	case desired.Generation == receiver.state.PendingGeneration:
+		// Still the generation being retried; Restore reported its outcome.
+		return incomplete()
 	case desired.Generation == receiver.state.Generation:
 		if etag != receiver.state.ETag {
 			next := receiver.state
@@ -295,12 +368,13 @@ func (receiver *Receiver) Sync(ctx context.Context) error {
 			}
 			receiver.state = next
 		}
-		return nil
+		return incomplete()
 	}
 	// Persist desired state before touching sandboxes. If the manager crashes
 	// during fan-out, startup restores this pending generation before serving
 	// lifecycle requests, while request headers still report only the older
-	// completely applied cursor.
+	// completely applied cursor. A newer generation replaces a pending one
+	// that never completed, so a fix can reach a host stuck on a bad rollout.
 	staged := receiver.state
 	staged.PendingGeneration = desired.Generation
 	staged.PendingDigest = digest
@@ -312,14 +386,71 @@ func (receiver *Receiver) Sync(ctx context.Context) error {
 	receiver.state = staged
 	receiver.pending = update
 	receiver.restorePending = true
+	receiver.pendingStatus = pendingStatus{}
+	receiver.rejectedGeneration, receiver.rejectedReason = 0, ""
 	if err := receiver.Restore(ctx); err != nil {
-		return fmt.Errorf("apply generation %d: %w", desired.Generation, err)
+		return incompleteError{fmt.Errorf("apply generation %d: %w", desired.Generation, err)}
 	}
 	if receiver.logger != nil {
 		receiver.logger.Printf("policy feed %s: applied generation %d revision %s to all sandboxes", receiver.config.Organization, desired.Generation, update.Info.Revision)
 	}
 	return nil
 }
+
+// reportHeaders describes this host's position to the service: the fully
+// applied cursor, a pending generation and how its last fan-out went, and the
+// last response it refused. Values are numbers and fixed words only.
+func (receiver *Receiver) reportHeaders(header http.Header) {
+	header.Set("Accept", "application/json")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("Prefer", "wait=30")
+	header.Set("User-Agent", "gantry/"+userAgentVersion())
+	header.Set("X-Gantry-Policy-Profile", receiver.config.Profile)
+	// Ask about the newest generation this host holds, so an unchanged answer
+	// can wait for news instead of returning the same pending bundle again.
+	if receiver.state.PendingGeneration != 0 {
+		if receiver.state.PendingETag != "" {
+			header.Set("If-None-Match", receiver.state.PendingETag)
+		}
+		header.Set("X-Gantry-Policy-Pending-Generation", fmt.Sprint(receiver.state.PendingGeneration))
+		if receiver.pendingStatus.attempts > 0 {
+			header.Set("X-Gantry-Policy-Pending-Attempts", fmt.Sprint(receiver.pendingStatus.attempts))
+			if receiver.pendingStatus.failed >= 0 {
+				header.Set("X-Gantry-Policy-Pending-Failed", fmt.Sprint(receiver.pendingStatus.failed))
+			} else {
+				header.Set("X-Gantry-Policy-Pending-Failed", "unknown")
+			}
+		}
+	} else if receiver.state.ETag != "" {
+		header.Set("If-None-Match", receiver.state.ETag)
+	}
+	if receiver.state.Generation != 0 {
+		header.Set("X-Gantry-Policy-Generation", fmt.Sprint(receiver.state.Generation))
+		header.Set("X-Gantry-Policy-Digest", receiver.state.Digest)
+	}
+	if receiver.rejectedReason != "" {
+		header.Set("X-Gantry-Policy-Rejected-Reason", receiver.rejectedReason)
+		if receiver.rejectedGeneration != 0 {
+			header.Set("X-Gantry-Policy-Rejected-Generation", fmt.Sprint(receiver.rejectedGeneration))
+		}
+	}
+}
+
+// reject remembers a refused response for the next report and returns err.
+func (receiver *Receiver) reject(generation uint64, reason string, err error) error {
+	receiver.rejectedGeneration, receiver.rejectedReason = generation, reason
+	return err
+}
+
+func userAgentVersion() string {
+	version := guestasset.Version
+	if version == "" || len(version) > 64 || strings.ContainsFunc(version, func(r rune) bool { return r <= 0x20 || r > 0x7e }) {
+		return "dev"
+	}
+	return version
+}
+
+var errOtherOrganization = errors.New("policy channel bundle belongs to another organization")
 
 func (receiver *Receiver) update(generation uint64, bundle []byte, expectedDigest string) (*Update, error) {
 	if generation == 0 || len(bundle) == 0 || len(bundle) > policy.MaxBundleBytes {
@@ -332,7 +463,7 @@ func (receiver *Receiver) update(generation uint64, bundle []byte, expectedDiges
 	}
 	info := engine.Info()
 	if info.Organization != receiver.config.Organization {
-		return nil, fmt.Errorf("policy channel bundle belongs to another organization")
+		return nil, errOtherOrganization
 	}
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(receiver.config.Profile))

@@ -292,12 +292,20 @@ R=$("$G" image ls 2>&1);                         chk "image: ls shows cached ref
 # Keep one exec session alive as a guest HTTP service while publishing and
 # withdrawing a live host port. Alpine's minimal BusyBox does not include the
 # httpd applet, so use netcat with a tiny HTTP handler. BusyBox's `nc -lk -e`
-# intermittently reuses a closing handler and returns headers without the
-# body; restarting a one-shot listener after each request is deterministic.
+# intermittently reuses a closing handler; use a one-shot listener instead.
+# Read the complete request before exiting: closing a Linux socket with unread
+# input sends a TCP reset, which can discard response data even after a write.
 # The chosen loopback port is intentionally ephemeral so local developer runs
 # do not need a reserved port.
 PORT_FIXTURE=$(cat <<'GUEST_HTTP'
-printf '%s\n' '#!/bin/sh' 'printf "HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK"' > /tmp/gantry-http-handler
+cat > /tmp/gantry-http-handler <<'HTTP_HANDLER'
+#!/bin/sh
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  [ "$line" = "$(printf '\r')" ] && break
+done
+printf 'HTTP/1.0 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nGANTRY-PORT-OK'
+HTTP_HANDLER
 chmod 700 /tmp/gantry-http-handler
 while :; do
   busybox nc -l -p 18080 -e /tmp/gantry-http-handler

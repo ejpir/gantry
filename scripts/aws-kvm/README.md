@@ -59,6 +59,11 @@ GANTRY_TEST_RUNSC_ROOTFS=artifacts/nerdbox-rootfs-gvisor-x86_64.erofs \
   sh scripts/aws-e2e-validation.sh linux
 ```
 
+Linux mode builds the current host executable in its disposable workspace by
+default; it does not reuse or overwrite an older `artifacts/gantry`. Set
+`GANTRY_TEST_EXE` to test a specific binary (as CI does), but it must support
+the manager API exercised by this checkout's E2E driver.
+
 On Apple-silicon macOS, the same entry point can run the local HVF manager and
 a broad functional battery without loading AWS credentials or touching EC2. It
 covers crun/runsc, lifecycle and revisioned resource configuration, OCI

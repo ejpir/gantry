@@ -17,9 +17,15 @@ pub enum Page {
     Audit,
     Images,
     Remotes,
+    // An organization's policy service, when the connection is one.
+    OrgHosts,
+    OrgPolicy,
+    OrgRollouts,
+    OrgHistory,
+    OrgEnrollment,
 }
 impl Page {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 17] = [
         Self::Overview,
         Self::Sandboxes,
         Self::Traffic,
@@ -32,7 +38,23 @@ impl Page {
         Self::Audit,
         Self::Images,
         Self::Remotes,
+        Self::OrgHosts,
+        Self::OrgPolicy,
+        Self::OrgRollouts,
+        Self::OrgHistory,
+        Self::OrgEnrollment,
     ];
+    /// The pages of an organization connection, in sidebar order.
+    pub const ORGANIZATION: [Self; 5] = [
+        Self::OrgHosts,
+        Self::OrgPolicy,
+        Self::OrgRollouts,
+        Self::OrgHistory,
+        Self::OrgEnrollment,
+    ];
+    pub fn is_organization(self) -> bool {
+        Self::ORGANIZATION.contains(&self)
+    }
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|p| *p == self).unwrap()
     }
@@ -50,6 +72,11 @@ impl Page {
             Self::Audit => "Audit",
             Self::Images => "Images",
             Self::Remotes => "Remotes",
+            Self::OrgHosts => "Hosts",
+            Self::OrgPolicy => "Policy",
+            Self::OrgRollouts => "Rollouts",
+            Self::OrgHistory => "History",
+            Self::OrgEnrollment => "Enrollment",
         }
     }
     pub fn columns(self) -> &'static [&'static str] {
@@ -88,6 +115,11 @@ impl Page {
                 "State / source",
             ],
             Self::Remotes => &["Profile", "HTTPS origin", "CA trust", "Leaf pin", "Scope"],
+            Self::OrgHosts | Self::OrgRollouts | Self::OrgEnrollment => {
+                &["Host", "Profile", "Ring", "Status", "Certificate"]
+            }
+            Self::OrgPolicy => &["Effect", "Target", "Detail", "ID", "Change"],
+            Self::OrgHistory => &["Generation", "Revision", "Published by", "Changes", "Hosts"],
         }
     }
     pub fn help(self) -> &'static str {
@@ -126,6 +158,17 @@ impl Page {
                 "Capture is opt-in and bounded. Packets may contain sensitive payloads. Stop clears retained manager payloads."
             }
             Self::Sandboxes => "Your containers. Their own kernel.",
+            Self::OrgHosts => {
+                "Enrolled host managers and the generation each last reported. Hosts pull; nothing is pushed into them."
+            }
+            Self::OrgPolicy => {
+                "The draft of the next generation. Signing happens on this machine; the service only verifies."
+            }
+            Self::OrgRollouts => "The newest generation, ring by ring, as hosts acknowledge it.",
+            Self::OrgHistory => "Every published generation. Numbers are never reused.",
+            Self::OrgEnrollment => {
+                "Host identities issued by this service, and what every host pins."
+            }
         }
     }
 }
@@ -144,6 +187,7 @@ pub enum Record {
     Registry(RegistryAuth),
     Remote(RemoteProfile),
     Packet(Packet),
+    Org(crate::org::OrgRecord),
 }
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -151,7 +195,7 @@ pub struct Row {
     pub cells: Vec<String>,
     pub record: Record,
 }
-fn key(parts: &[&str]) -> String {
+pub(crate) fn key(parts: &[&str]) -> String {
     serde_json::to_string(parts).expect("string key")
 }
 fn yes(value: bool) -> String {
@@ -183,6 +227,18 @@ impl Record {
             Self::Image(v) => serde_json::to_value(v),
             Self::Registry(v) => serde_json::to_value(v),
             Self::Packet(v) => serde_json::to_value(v),
+            Self::Org(crate::org::OrgRecord::Host(v)) => serde_json::to_value(v),
+            Self::Org(crate::org::OrgRecord::Generation(v)) => serde_json::to_value(v),
+            Self::Org(crate::org::OrgRecord::Change(v)) => serde_json::to_value(v),
+            Self::Org(crate::org::OrgRecord::Item(v)) => {
+                return vec![
+                    ("Profile".into(), v.profile.clone()),
+                    ("ID".into(), v.id.clone()),
+                    ("Effect".into(), v.effect.clone()),
+                    ("Target".into(), v.selector.clone()),
+                    ("Detail".into(), v.detail.clone()),
+                ];
+            }
             Self::Remote(v) => {
                 return vec![
                     ("Profile".into(), v.name.clone()),
@@ -428,6 +484,12 @@ pub fn rows(
                 record: Record::Remote(r.clone()),
             })
             .collect(),
+        // Organization pages read the policy service snapshot (org::*_rows).
+        Page::OrgHosts
+        | Page::OrgPolicy
+        | Page::OrgRollouts
+        | Page::OrgHistory
+        | Page::OrgEnrollment => vec![],
         Page::Packets => packets
             .packets
             .iter()
@@ -518,6 +580,11 @@ impl Page {
             Self::Mcp => &["All", "Active", "Not active"],
             Self::Audit => &["All", "Allowed", "Denied"],
             Self::Images => &["All", "In use", "Unused"],
+            Self::OrgHosts => &["All", "Current", "Behind", "Attention", "Silent"],
+            Self::OrgPolicy => &["Rules", "Changes"],
+            Self::OrgRollouts => &["All", "Acknowledged", "In progress", "Attention", "Held"],
+            Self::OrgHistory => &["All", "Rollbacks"],
+            Self::OrgEnrollment => &["All", "Active", "Expiring", "Revoked"],
             _ => &[],
         }
     }
@@ -528,8 +595,28 @@ pub const REGISTRY_SEGMENTS: &[&str] = &["All", "Logged in", "Anonymous"];
 
 /// Whether a record belongs to the page's selected segment.
 pub fn segment_matches(page: Page, segment: usize, record: &Record) -> bool {
+    use crate::org::{self, OrgRecord};
     match (page, segment, record) {
+        // The Policy page's first segment lists rules; its second, changes.
+        (Page::OrgPolicy, 0, Record::Org(r)) => matches!(r, OrgRecord::Item(_)),
+        (Page::OrgPolicy, 1, Record::Org(r)) => matches!(r, OrgRecord::Change(_)),
         (_, 0, _) => true,
+        (Page::OrgHosts, 1, Record::Org(OrgRecord::Host(h))) => h.status == "current",
+        (Page::OrgHosts, 2, Record::Org(OrgRecord::Host(h))) => org::behind(h),
+        (Page::OrgHosts, 3, Record::Org(OrgRecord::Host(h))) => org::needs_attention(h),
+        (Page::OrgHosts, 4, Record::Org(OrgRecord::Host(h))) => org::silent(h),
+        (Page::OrgRollouts, 1, Record::Org(OrgRecord::Host(h))) => !h.held && h.status == "current",
+        (Page::OrgRollouts, 2, Record::Org(OrgRecord::Host(h))) => org::behind(h),
+        (Page::OrgRollouts, 3, Record::Org(OrgRecord::Host(h))) => org::needs_attention(h),
+        (Page::OrgRollouts, 4, Record::Org(OrgRecord::Host(h))) => h.held,
+        (Page::OrgHistory, 1, Record::Org(OrgRecord::Generation(g))) => g.republish_of != 0,
+        (Page::OrgEnrollment, 1, Record::Org(OrgRecord::Host(h))) => !h.revoked,
+        (Page::OrgEnrollment, 2, Record::Org(OrgRecord::Host(h))) => {
+            !h.revoked
+                && org::days_until(&h.certificate.not_after, crate::clock::now())
+                    .is_some_and(|days| days <= 30)
+        }
+        (Page::OrgEnrollment, 3, Record::Org(OrgRecord::Host(h))) => h.revoked,
         (Page::Traffic, 1, Record::Traffic(r)) => r.allowed,
         (Page::Traffic, 2, Record::Traffic(r)) => !r.allowed,
         (Page::Rules, 1, Record::Rule(r)) => r.action == "allow",
